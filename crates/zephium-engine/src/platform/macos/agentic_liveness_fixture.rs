@@ -11,6 +11,7 @@ use std::{
 
 const HTML: &str = r#"<!doctype html><title>Animation gated load</title>
 <img src="/pending.svg" alt="Fixture">
+<button style="font:24px system-ui;padding:20px" type="button" onclick="location.assign('/verified')">Verify local handoff</button>
 <script>requestAnimationFrame(() => fetch('/release'));</script>"#;
 
 pub(super) struct Fixture {

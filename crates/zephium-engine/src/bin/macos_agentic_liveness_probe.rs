@@ -3,8 +3,10 @@ fn main() -> std::process::ExitCode {
     use zephium_engine::{LivenessSite, LivenessStage};
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     #[cfg(feature = "native-agentic-semantic-probe")]
-    if args.as_slice() == ["--human-takeover-fixture"] {
-        return match zephium_engine::run_human_takeover_probe() {
+    if args.as_slice() == ["--human-takeover-fixture"]
+        || args.as_slice() == ["--human-input-fixture"]
+    {
+        return match zephium_engine::run_human_takeover_probe(args[0] == "--human-input-fixture") {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(reason) => {
                 eprintln!("human_probe failure={reason}");

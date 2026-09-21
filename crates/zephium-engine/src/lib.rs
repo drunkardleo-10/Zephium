@@ -310,6 +310,14 @@ pub fn run_macos_agentic_work_application_probe(
     platform::macos::run_agentic_work_application_probe(profile, start)
 }
 
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[derive(Clone, Copy)]
+#[doc(hidden)]
+pub enum MacosWorkProbeInput {
+    LifecycleOnly,
+    Human,
+}
+
 /// Full application qualification: forwards actual Engine events to the Shell
 /// and lets ordinary profile-policy compilation perform native admission.
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
@@ -320,7 +328,25 @@ pub fn run_macos_work_application_with_events_probe(
     events: impl Fn(EngineEvent) + Send + Sync + 'static,
     start: impl FnOnce(std::sync::Arc<WebviewEngine>) -> Result<MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
-    platform::macos::run_work_application_with_events_probe(profile, timeout, events, start)
+    run_macos_work_application_with_input_probe(
+        profile,
+        MacosWorkProbeInput::LifecycleOnly,
+        timeout,
+        events,
+        start,
+    )
+}
+
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_macos_work_application_with_input_probe(
+    profile: zephium_core::ids::ProfileId,
+    input: MacosWorkProbeInput,
+    timeout: std::time::Duration,
+    events: impl Fn(EngineEvent) + Send + Sync + 'static,
+    start: impl FnOnce(std::sync::Arc<WebviewEngine>) -> Result<MacosAgentWorkProbePoll, &'static str>,
+) -> Result<(), &'static str> {
+    platform::macos::run_work_application_with_events_probe(profile, input, timeout, events, start)
 }
 
 /// Hosts one bounded variable-length public workflow through the production native adapter.

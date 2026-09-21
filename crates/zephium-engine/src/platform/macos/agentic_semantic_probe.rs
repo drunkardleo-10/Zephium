@@ -3304,6 +3304,7 @@ pub(crate) fn run_work_actor(
     run_work_host(
         profile,
         WorkProbeTeardown::Host,
+        crate::MacosWorkProbeInput::LifecycleOnly,
         None,
         Duration::from_secs(180),
         move |engine| {
@@ -3322,9 +3323,21 @@ pub(crate) fn run_construction_host(
         Arc<dyn zephium_agentic::AgentBrowserPort>,
     ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
+    run_construction_host_with_input(profile, crate::MacosWorkProbeInput::LifecycleOnly, start)
+}
+
+#[cfg(feature = "agentic-browser-qa")]
+pub(crate) fn run_construction_host_with_input(
+    profile: ProfileId,
+    input: crate::MacosWorkProbeInput,
+    start: impl FnOnce(
+        Arc<dyn zephium_agentic::AgentBrowserPort>,
+    ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
+) -> Result<(), &'static str> {
     run_work_host(
         profile,
         WorkProbeTeardown::ForegroundHost,
+        input,
         None,
         Duration::from_secs(45),
         move |engine| {
@@ -3348,6 +3361,7 @@ pub(crate) fn run_work_application(
     run_work_host(
         profile,
         WorkProbeTeardown::Application,
+        crate::MacosWorkProbeInput::LifecycleOnly,
         None,
         Duration::from_secs(180),
         start,
@@ -3356,6 +3370,7 @@ pub(crate) fn run_work_application(
 
 pub(crate) fn run_work_application_with_events(
     profile: ProfileId,
+    input: crate::MacosWorkProbeInput,
     timeout: Duration,
     events: impl Fn(crate::EngineEvent) + Send + Sync + 'static,
     start: impl FnOnce(
@@ -3365,6 +3380,7 @@ pub(crate) fn run_work_application_with_events(
     run_work_host(
         profile,
         WorkProbeTeardown::Application,
+        input,
         Some(Arc::new(events)),
         timeout,
         start,
@@ -3397,6 +3413,7 @@ fn work_probe_teardown_keeps_exactly_one_success_owner_and_failure_cleanup() {
 fn run_work_host(
     profile: ProfileId,
     teardown: WorkProbeTeardown,
+    input: crate::MacosWorkProbeInput,
     events: Option<Arc<dyn Fn(crate::EngineEvent) + Send + Sync>>,
     timeout: Duration,
     start: impl FnOnce(
@@ -3419,7 +3436,7 @@ fn run_work_host(
     } else {
         NSApplicationActivationPolicy::Accessory
     };
-    if !app.setActivationPolicy(activation) {
+    if app.activationPolicy() != activation && !app.setActivationPolicy(activation) {
         return Err("actor_activation_policy");
     }
     app.finishLaunching();
@@ -3451,7 +3468,7 @@ fn run_work_host(
             && Instant::now() < until
         {
             pump_once(&NSRunLoop::currentRunLoop(), None);
-            pump_work_application_event(&app, &mut application_events)?;
+            pump_work_application_event(&app, &mut application_events, input)?;
         }
         window
     } else {
@@ -3548,7 +3565,7 @@ fn run_work_host(
         let deadline = Instant::now() + timeout;
         loop {
             if foreground {
-                pump_work_application_event(&app, &mut application_events)?;
+                pump_work_application_event(&app, &mut application_events, input)?;
             }
             for _ in 0..256 {
                 let Ok(operation) = receiver.try_recv() else {
@@ -3594,7 +3611,7 @@ fn run_work_host(
     let deadline = Instant::now() + TEARDOWN_TIMEOUT;
     while shutdown.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
         if foreground {
-            let _ = pump_work_application_event(&app, &mut application_events);
+            let _ = pump_work_application_event(&app, &mut application_events, input);
         }
         for _ in 0..256 {
             let Ok(operation) = receiver.try_recv() else {
@@ -3612,16 +3629,19 @@ fn run_work_host(
     Ok(())
 }
 
-fn pump_work_application_event(app: &NSApplication, count: &mut u32) -> Result<(), &'static str> {
+fn pump_work_application_event(
+    app: &NSApplication,
+    count: &mut u32,
+    input: crate::MacosWorkProbeInput,
+) -> Result<(), &'static str> {
     // NSRunLoop does not deliver NSApplication's queued lifecycle events.
-    // Service one existing AppKit event per slice, as the normal application
-    // event loop does. Never synthesize or dequeue keyboard/mouse input.
+    // Only the explicit human qualifier delivers queued physical input.
     if *count >= 8192 {
         return Err("actor_application_event_capacity");
     }
     objc2::rc::autoreleasepool(|_| {
         if let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
-            objc2_app_kit::NSEventMask::AppKitDefined,
+            work_probe_event_mask(input),
             None,
             objc2_foundation::ns_string!("NSDefaultRunLoopMode"),
             true,
@@ -3631,6 +3651,30 @@ fn pump_work_application_event(app: &NSApplication, count: &mut u32) -> Result<(
         }
     });
     Ok(())
+}
+
+fn work_probe_event_mask(input: crate::MacosWorkProbeInput) -> objc2_app_kit::NSEventMask {
+    match input {
+        crate::MacosWorkProbeInput::LifecycleOnly => objc2_app_kit::NSEventMask::AppKitDefined,
+        crate::MacosWorkProbeInput::Human => objc2_app_kit::NSEventMask::Any,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn only_explicit_human_probe_delivers_physical_input() {
+    use objc2_app_kit::NSEventMask;
+    let lifecycle = work_probe_event_mask(crate::MacosWorkProbeInput::LifecycleOnly);
+    let human = work_probe_event_mask(crate::MacosWorkProbeInput::Human);
+    for mask in [
+        NSEventMask::LeftMouseDown,
+        NSEventMask::LeftMouseUp,
+        NSEventMask::KeyDown,
+        NSEventMask::KeyUp,
+    ] {
+        assert!(!lifecycle.contains(mask));
+        assert!(human.contains(mask));
+    }
 }
 
 fn run_work_operation(operation: Box<dyn FnOnce() + Send>) {
