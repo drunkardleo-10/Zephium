@@ -33,6 +33,14 @@ impl EngineHost {
         {
             return false;
         }
+        if !resource
+            .human_presentation
+            .as_ref()
+            .is_some_and(|presentation| presentation.qualify_geometry_invalidation())
+        {
+            return false;
+        }
+        eprintln!("human_probe changed_parent_geometry_refused=true");
         view.view()
             .evaluate_script("location.assign('/verified')")
             .is_ok()

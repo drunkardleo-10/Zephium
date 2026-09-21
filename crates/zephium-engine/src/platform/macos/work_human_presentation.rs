@@ -13,6 +13,7 @@ pub(crate) struct WorkHumanPresentation {
     window: Retained<NSWindow>,
     original: NSRect,
     region: NSRect,
+    parent_geometry: HumanParentGeometry,
     deadline: Instant,
     presented: bool,
     retired: bool,
@@ -35,20 +36,8 @@ impl WorkHumanPresentation {
         {
             return None;
         }
-        let [x, y, width, height] = region.components().map(f64::from);
-        let bounds = parent.bounds();
-        if x + width > bounds.size.width || y + height > bounds.size.height {
-            return None;
-        }
-        let y = if parent.isFlipped() {
-            y
-        } else {
-            bounds.size.height - y - height
-        };
-        let region = NSRect::new(
-            NSPoint::new(bounds.origin.x + x, bounds.origin.y + y),
-            NSSize::new(width, height),
-        );
+        let parent_geometry = HumanParentGeometry::capture(&parent);
+        let region = parent_geometry.region(region)?;
         let original = page.frame();
         Some(Self {
             page,
@@ -56,13 +45,18 @@ impl WorkHumanPresentation {
             window,
             original,
             region,
+            parent_geometry,
             deadline,
             presented: false,
             retired: false,
         })
     }
     pub(crate) fn present(&mut self) -> bool {
-        if self.presented || self.retired || Instant::now() >= self.deadline {
+        if self.presented
+            || self.retired
+            || Instant::now() >= self.deadline
+            || self.parent_geometry != HumanParentGeometry::capture(&self.parent)
+        {
             return false;
         }
         self.parent
@@ -79,12 +73,33 @@ impl WorkHumanPresentation {
         self.presented && !self.retired && Instant::now() < self.deadline
             && self.window.isVisible() && !self.window.isMiniaturized()
             && !self.page.isHidden() && self.page.frame() == self.region
+            && self.parent_geometry == HumanParentGeometry::capture(&self.parent)
             && self.page.window().is_some_and(|window| std::ptr::eq(&*window, &*self.window))
             // SAFETY: retained native identities on the main thread.
             && unsafe { self.page.superview() }.is_some_and(|parent| std::ptr::eq(&*parent, &*self.parent))
     }
     pub(crate) fn visible_for_audit(&self) -> bool {
         !self.page.isHidden()
+    }
+    #[cfg(all(
+        feature = "agentic-browser-qa",
+        feature = "native-agentic-semantic-probe"
+    ))]
+    pub(crate) fn qualify_geometry_invalidation(&self) -> bool {
+        if !self.current() {
+            return false;
+        }
+        let bounds = self.parent.bounds();
+        let mut resized = bounds;
+        resized.size.width += 1.0;
+        self.parent.setBounds(resized);
+        let refused_resize = !self.current();
+        let mut shifted = bounds;
+        shifted.origin.y += 1.0;
+        self.parent.setBounds(shifted);
+        let refused_shift = !self.current();
+        self.parent.setBounds(bounds);
+        refused_resize && refused_shift && self.current()
     }
     pub(crate) fn retire(&mut self) -> bool {
         if self.retired {
@@ -110,6 +125,85 @@ impl WorkHumanPresentation {
             && self.page.isHidden()
             && self.page.frame() == self.original;
         self.retired
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct HumanParentGeometry {
+    bounds: NSRect,
+    flipped: bool,
+}
+impl HumanParentGeometry {
+    fn capture(parent: &NSView) -> Self {
+        Self {
+            bounds: parent.bounds(),
+            flipped: parent.isFlipped(),
+        }
+    }
+    fn region(self, region: WorkBrowserHumanRegion) -> Option<NSRect> {
+        let bounds = self.bounds;
+        let [x, y, width, height] = region.components().map(f64::from);
+        if ![
+            bounds.origin.x,
+            bounds.origin.y,
+            bounds.size.width,
+            bounds.size.height,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+            || x + width > bounds.size.width
+            || y + height > bounds.size.height
+        {
+            return None;
+        }
+        let y = if self.flipped {
+            y
+        } else {
+            bounds.size.height - y - height
+        };
+        Some(NSRect::new(
+            NSPoint::new(bounds.origin.x + x, bounds.origin.y + y),
+            NSSize::new(width, height),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_region_uses_parent_coordinates_and_rejects_invalid_bounds() {
+        let region = WorkBrowserHumanRegion::try_new(20, 30, 600, 400).unwrap();
+        let geometry = HumanParentGeometry {
+            bounds: NSRect::new(NSPoint::new(7.0, 11.0), NSSize::new(800.0, 700.0)),
+            flipped: true,
+        };
+        assert_eq!(
+            geometry.region(region),
+            Some(NSRect::new(
+                NSPoint::new(27.0, 41.0),
+                NSSize::new(600.0, 400.0)
+            ))
+        );
+        assert_eq!(
+            HumanParentGeometry {
+                flipped: false,
+                ..geometry
+            }
+            .region(region),
+            Some(NSRect::new(
+                NSPoint::new(27.0, 281.0),
+                NSSize::new(600.0, 400.0)
+            ))
+        );
+        for width in [619.0, 0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let changed = HumanParentGeometry {
+                bounds: NSRect::new(geometry.bounds.origin, NSSize::new(width, 700.0)),
+                ..geometry
+            };
+            assert!(changed.region(region).is_none());
+        }
     }
 }
 impl Drop for WorkHumanPresentation {
