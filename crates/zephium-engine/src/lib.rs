@@ -18,8 +18,16 @@ compile_error!("agent browser QA is forbidden in optimized builds");
 
 #[cfg(all(target_os = "macos", feature = "agentic-browser-qa"))]
 pub use platform::macos::agentic_liveness_probe::{
-    run_interactive_government_probe, run_liveness_probe, LivenessSite, LivenessStage,
+    run_interactive_government_probe, run_interactive_liveness_probe, run_liveness_probe,
+    LivenessSite, LivenessStage,
 };
+
+#[cfg(all(
+    target_os = "macos",
+    feature = "agentic-browser-qa",
+    feature = "native-agentic-semantic-probe"
+))]
+pub use platform::macos::agentic_liveness_probe::run_construction_liveness_probe;
 
 #[cfg(all(
     feature = "native-agentic-work-lifetime-diagnostic",

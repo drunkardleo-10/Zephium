@@ -28,16 +28,29 @@ const OBSERVATION_WINDOW: Duration = Duration::from_secs(30);
 const SAMPLE_DEADLINE: Duration = Duration::from_secs(5);
 const INTERACTIVE_OBSERVATION_WINDOW: Duration = Duration::from_secs(120);
 
-#[derive(Clone, Copy, Debug)]
+#[path = "agentic_liveness_fixture.rs"]
+mod fixture;
+
+#[cfg(feature = "native-agentic-semantic-probe")]
+#[path = "agentic_construction_probe.rs"]
+mod construction;
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub use construction::run_construction_liveness_probe;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LivenessSite {
     Government,
+    GovernmentCanonical,
     Cloudflare,
+    AnimationFixture,
 }
 impl LivenessSite {
     fn url(self) -> &'static str {
         match self {
             Self::Government => "https://travel.state.gov/",
+            Self::GovernmentCanonical => "https://travel.state.gov/en.html",
             Self::Cloudflare => "https://www.cloudflare.com/",
+            Self::AnimationFixture => "about:blank",
         }
     }
 }
@@ -134,11 +147,14 @@ pub fn run_liveness_probe(site: LivenessSite, stage: LivenessStage) -> Result<()
 }
 
 pub fn run_interactive_government_probe() -> Result<(), &'static str> {
-    run(
-        LivenessSite::Government,
-        LivenessStage::Bare,
-        INTERACTIVE_OBSERVATION_WINDOW,
-    )
+    run_interactive_liveness_probe(LivenessSite::Government, LivenessStage::Bare)
+}
+
+pub fn run_interactive_liveness_probe(
+    site: LivenessSite,
+    stage: LivenessStage,
+) -> Result<(), &'static str> {
+    run(site, stage, INTERACTIVE_OBSERVATION_WINDOW)
 }
 
 fn run(
@@ -146,6 +162,12 @@ fn run(
     stage: LivenessStage,
     observation_window: Duration,
 ) -> Result<(), &'static str> {
+    let fixture = (site == LivenessSite::AnimationFixture)
+        .then(fixture::Fixture::start)
+        .transpose()?;
+    let target = fixture
+        .as_ref()
+        .map_or_else(|| site.url(), fixture::Fixture::url);
     let mtm = MainThreadMarker::new().ok_or("main_thread")?;
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -154,7 +176,7 @@ fn run(
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
-            NSRect::new(NSPoint::new(80.0, 80.0), NSSize::new(1200.0, 800.0)),
+            NSRect::new(NSPoint::new(80.0, 80.0), NSSize::new(1280.0, 800.0)),
             NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
             NSBackingStoreType::Buffered,
             false,
@@ -183,7 +205,11 @@ fn run(
     let policy_gate = gate.clone();
     let event_gate = gate.clone();
     let mut builder = WebViewBuilder::new()
-        .with_url(if gate.is_some() { "about:blank" } else { site.url() }).with_incognito(true).with_visible(!hidden).with_focused(!hidden)
+        .with_bounds(wry::Rect {
+            position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+            size: wry::dpi::LogicalSize::new(1280.0, 800.0).into(),
+        })
+        .with_url(if gate.is_some() { "about:blank" } else { target }).with_incognito(true).with_visible(!hidden).with_focused(!hidden)
         .with_devtools(true)
         .with_apple_navigation_action_handler(move |target, action| {
             let allowed = policy_gate.as_ref().is_none_or(|gate| gate.allows_apple_action(&target, action));
@@ -227,21 +253,21 @@ fn run(
         owned
             .prepare_semantic_document_load()
             .map_err(|_| "semantic_load")?;
-        arm(&navigation, site)?;
-        owned
-            .view()
-            .load_url(site.url())
-            .map_err(|_| "owned_load")?;
+        arm(&navigation, site, target)?;
+        owned.view().load_url(target).map_err(|_| "owned_load")?;
         ProbePage::Owned(owned)
     } else {
         let view = builder.build_as_child(&host).map_err(|_| "construction")?;
         if let Some(gate) = &gate {
             bootstrap(gate)?;
-            arm(gate, site)?;
-            view.load_url(site.url()).map_err(|_| "load")?;
+            arm(gate, site, target)?;
+            view.load_url(target).map_err(|_| "load")?;
         }
         ProbePage::Raw(view)
     };
+    if super::native_webview(view.view()).frame().size != NSSize::new(1280.0, 800.0) {
+        return Err("viewport");
+    }
     if owned_stage {
         let page = super::native_webview(view.view());
         if matches!(
@@ -302,6 +328,12 @@ fn run(
         ProbePage::Raw(_) => gate.as_ref().is_some_and(|gate| gate.failed()),
     };
     eprintln!("liveness_probe site={site:?} stage={stage:?} gate_failed={gate_failed}");
+    if let Some(fixture) = &fixture {
+        eprintln!(
+            "liveness_probe site={site:?} stage={stage:?} animation_released={}",
+            fixture.released()
+        );
+    }
     let page = super::native_webview(view.view());
     let cookies = Rc::new(RefCell::new(None));
     let cookie_result = cookies.clone();
@@ -419,10 +451,15 @@ fn bootstrap(
 fn arm(
     gate: &crate::platform::work_document_navigation::WorkDocumentNavigation,
     site: LivenessSite,
+    target: &str,
 ) -> Result<(), &'static str> {
     gate.arm_with_policy(
-        zephium_agentic::ContextNavigationTarget::parse(site.url()).map_err(|_| "target")?,
-        zephium_agentic::WorkBrowserDocumentPolicy::PublicSameDocumentQuery,
+        zephium_agentic::ContextNavigationTarget::parse(target).map_err(|_| "target")?,
+        if site == LivenessSite::AnimationFixture {
+            zephium_agentic::WorkBrowserDocumentPolicy::Exact
+        } else {
+            zephium_agentic::WorkBrowserDocumentPolicy::PublicSameDocumentQuery
+        },
     )
     .map_err(|_| "arm")
 }

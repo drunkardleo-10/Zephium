@@ -22,6 +22,7 @@ pub enum WorkResourceFailureCause {
     SemanticNativeInvariant,
     LifecycleDeadline(WorkResourceDeadlineStage),
     ObservationPresentation(WorkObservationPresentationFailure),
+    ConstructionPresentation(WorkObservationPresentationFailure),
     NativeAdmission(ContextPortFailure),
     /// Exact compiled call site of an otherwise unclassified native failure.
     /// Source is a closed code-owner tag; line is a source-code line, never a

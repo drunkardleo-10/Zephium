@@ -3315,6 +3315,28 @@ pub(crate) fn run_work_actor(
     )
 }
 
+#[cfg(feature = "agentic-browser-qa")]
+pub(crate) fn run_construction_host(
+    profile: ProfileId,
+    start: impl FnOnce(
+        Arc<dyn zephium_agentic::AgentBrowserPort>,
+    ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
+) -> Result<(), &'static str> {
+    run_work_host(
+        profile,
+        WorkProbeTeardown::ForegroundHost,
+        None,
+        Duration::from_secs(45),
+        move |engine| {
+            start(
+                engine
+                    .take_agent_browser_port(|_| {})
+                    .ok_or("construction_port")?,
+            )
+        },
+    )
+}
+
 /// Excluded native host for the real application composition. It hands over
 /// the actual engine owner without consuming its one-shot agent port.
 pub(crate) fn run_work_application(
@@ -3353,11 +3375,13 @@ pub(crate) fn run_work_application_with_events(
 enum WorkProbeTeardown {
     Host,
     Application,
+    #[cfg(feature = "agentic-browser-qa")]
+    ForegroundHost,
 }
 
 impl WorkProbeTeardown {
     fn host_required(self, application_succeeded: bool) -> bool {
-        self == Self::Host || !application_succeeded
+        self != Self::Application || !application_succeeded
     }
 }
 
@@ -3384,9 +3408,13 @@ fn run_work_host(
         return Err("actor_host_timeout");
     }
     let application_policy = events.is_some();
+    #[cfg(feature = "agentic-browser-qa")]
+    let foreground = application_policy || teardown == WorkProbeTeardown::ForegroundHost;
+    #[cfg(not(feature = "agentic-browser-qa"))]
+    let foreground = application_policy;
     let mtm = MainThreadMarker::new().ok_or("actor_main_thread")?;
     let app = NSApplication::sharedApplication(mtm);
-    let activation = if application_policy {
+    let activation = if foreground {
         NSApplicationActivationPolicy::Regular
     } else {
         NSApplicationActivationPolicy::Accessory
@@ -3396,7 +3424,7 @@ fn run_work_host(
     }
     app.finishLaunching();
     let mut application_events = 0_u32;
-    let window = if application_policy {
+    let window = if foreground {
         // This explicit live product qualifier supplies the normal foreground
         // host required by shipping observation presentation. Legacy hidden
         // port probes keep their original focus-isolation contract.
@@ -3519,7 +3547,7 @@ fn run_work_host(
         let mut poll = start(engine.clone())?;
         let deadline = Instant::now() + timeout;
         loop {
-            if application_policy {
+            if foreground {
                 pump_work_application_event(&app, &mut application_events)?;
             }
             for _ in 0..256 {
@@ -3535,7 +3563,7 @@ fn run_work_host(
                 // Hidden port probes must never acquire foreground. The full
                 // application host permits normal focus changes; each shipping
                 // observation independently enforces exact foreground ownership.
-                (!application_policy
+                (!foreground
                     && (window.isVisible()
                         || window.isKeyWindow()
                         || window.isMainWindow() != main
@@ -3565,7 +3593,7 @@ fn run_work_host(
     }));
     let deadline = Instant::now() + TEARDOWN_TIMEOUT;
     while shutdown.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
-        if application_policy {
+        if foreground {
             let _ = pump_work_application_event(&app, &mut application_events);
         }
         for _ in 0..256 {

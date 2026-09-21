@@ -2,9 +2,25 @@
 fn main() -> std::process::ExitCode {
     use zephium_engine::{LivenessSite, LivenessStage};
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    if args.as_slice() == ["--construction-fixture"]
+        || args.as_slice() == ["--construction-timeout-fixture"]
+    {
+        return match zephium_engine::run_construction_liveness_probe(
+            args[0] == "--construction-timeout-fixture",
+        ) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(reason) => {
+                eprintln!("construction_probe failure={reason}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     let site = match args.first().map(String::as_str) {
         Some("government") => LivenessSite::Government,
+        Some("government-canonical") => LivenessSite::GovernmentCanonical,
         Some("cloudflare") => LivenessSite::Cloudflare,
+        Some("animation-fixture") => LivenessSite::AnimationFixture,
         _ => return std::process::ExitCode::from(2),
     };
     let stage = match args.get(1).map(String::as_str) {

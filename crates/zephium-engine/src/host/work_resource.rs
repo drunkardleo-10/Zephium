@@ -123,6 +123,7 @@ impl EngineHost {
 pub(super) struct WorkNativeResource {
     pub(super) guard: Arc<WorkResourceGuard>,
     construction: Option<WorkLifecycleTask>,
+    construction_presentation: Option<crate::platform::imp::WorkObservationPresentation>,
     revocation: Option<WorkLifecycleTask>,
     destruction: Option<WorkLifecycleTask>,
     watchdog: Option<crate::platform::imp::ContentPolicyTimeout>,
@@ -205,6 +206,7 @@ impl WorkNativeResource {
         Self {
             guard,
             construction: None,
+            construction_presentation: None,
             revocation: None,
             destruction: None,
             watchdog: None,
@@ -358,9 +360,66 @@ impl WorkNativeResource {
             }
     }
     fn retire_construction(&mut self) {
+        self.retire_construction_presentation();
+        if self
+            .lifecycle_deadline
+            .is_some_and(|(_, operation)| operation == Operation::Construct)
+        {
+            self.watchdog = None;
+            self.lifecycle_deadline = None;
+        }
         if let Some(task) = self.construction.take() {
             task.complete(Outcome::Refused);
         }
+    }
+    fn present_construction(&mut self) -> bool {
+        use crate::platform::imp::{PresentationState, WorkObservationPresentation};
+        let Some((deadline, Operation::Construct)) = self.lifecycle_deadline else {
+            return false;
+        };
+        let Some(view) = &self.view else {
+            return false;
+        };
+        if self.construction_presentation.is_some() {
+            return false;
+        }
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        let prepared = {
+            let guard = self.guard.clone();
+            WorkObservationPresentation::prepare(view.view(), deadline, move |failure| {
+                guard.record_failure_cause(ResourceFailureCause::ConstructionPresentation(failure));
+            })
+        };
+        #[cfg(not(feature = "native-agentic-work-lifetime-diagnostic"))]
+        let prepared = WorkObservationPresentation::prepare(view.view(), deadline);
+        let Ok(presentation) = prepared else {
+            return false;
+        };
+        // Retain the native owner before exposing the loading page beneath chrome.
+        self.construction_presentation = Some(presentation);
+        self.construction_presentation
+            .as_mut()
+            .is_some_and(|presentation| {
+                matches!(
+                    presentation.present(),
+                    PresentationState::Ready | PresentationState::Acquiring
+                )
+            })
+    }
+    fn retire_construction_presentation(&mut self) -> bool {
+        let retired = self
+            .construction_presentation
+            .as_mut()
+            .is_none_or(|presentation| {
+                presentation.retire() == crate::platform::imp::PresentationState::Retired
+            });
+        if retired {
+            self.construction_presentation = None;
+        } else {
+            self.retirement_clean = false;
+            self.guard.fail();
+        }
+        retired
     }
     fn prepare_destruction(&mut self) -> bool {
         // Settle terminals this host still owns before waiting for their
@@ -478,7 +537,8 @@ impl WorkNativeResource {
     fn retire_page(&mut self) -> bool {
         self.watchdog = None;
         super::work_frames::clear(self.guard.resource().identity().context());
-        if !self.retire_reading_presentation()
+        if !self.retire_construction_presentation()
+            || !self.retire_reading_presentation()
             || !self.retire_observation_presentation()
             || !self.retire_action_presentation()
         {
@@ -878,6 +938,7 @@ impl EngineHost {
         let mut resource = WorkNativeResource {
             guard: guard.clone(),
             construction: None,
+            construction_presentation: None,
             revocation: None,
             destruction: None,
             watchdog: None,
@@ -1029,6 +1090,19 @@ impl EngineHost {
         resource.progress_navigation(self.erasure_tombstones.contains(&resource.profile()));
         resource.progress_history_back(self.erasure_tombstones.contains(&resource.profile()));
         if resource
+            .construction_presentation
+            .as_mut()
+            .is_some_and(|presentation| {
+                !matches!(
+                    presentation.poll(),
+                    crate::platform::imp::PresentationState::Ready
+                        | crate::platform::imp::PresentationState::Acquiring
+                )
+            })
+        {
+            guard.fail();
+        }
+        if resource
             .view
             .as_ref()
             .and_then(|view| view.work_navigation())
@@ -1043,6 +1117,7 @@ impl EngineHost {
             guard.fail();
         }
         if !guard.is_healthy() {
+            resource.retire_construction_presentation();
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             guard.record_failure_cause(ResourceFailureCause::UnattributedResourceFailure);
             #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -1063,6 +1138,7 @@ impl EngineHost {
         }
         if resource.construction.is_some() {
             if !guard.construction_current() {
+                resource.retire_construction_presentation();
                 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                 guard.record_failure_cause(ResourceFailureCause::UnattributedResourceFailure);
                 #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -1076,7 +1152,7 @@ impl EngineHost {
                 return;
             }
             if !resource.document_started {
-                let Some(view) = resource.view.as_mut() else {
+                let Some(view) = resource.view.as_ref() else {
                     guard.fail();
                     return;
                 };
@@ -1088,6 +1164,16 @@ impl EngineHost {
                     return;
                 }
                 if let Some(document) = guard.document() {
+                    if !resource.present_construction() {
+                        guard.fail();
+                        resource.retire_construction();
+                        return;
+                    }
+                    let Some(view) = resource.view.as_mut() else {
+                        guard.fail();
+                        resource.retire_construction();
+                        return;
+                    };
                     resource.document_started = true;
                     if view.prepare_semantic_document_load().is_err()
                         || gate
@@ -1102,6 +1188,7 @@ impl EngineHost {
                         #[cfg(feature = "native-agentic-work-resource-probe")]
                         resource.record_construction_failure("document_dispatch");
                         guard.fail();
+                        resource.retire_construction();
                     }
                     return;
                 }
@@ -1126,10 +1213,15 @@ impl EngineHost {
                         DocumentFinalizationProgress::Ready(effective)
                             if guard.construction_current() =>
                         {
+                            let retired = resource.retire_construction_presentation();
                             resource.watchdog = None;
                             resource.lifecycle_deadline = None;
                             if let Some(task) = resource.construction.take() {
-                                task.complete_document(effective);
+                                if retired {
+                                    task.complete_document(effective);
+                                } else {
+                                    task.complete(Outcome::Refused);
+                                }
                             }
                         }
                         DocumentFinalizationProgress::Ready(_)
@@ -1160,6 +1252,7 @@ impl EngineHost {
                                 }
                             });
                             guard.fail();
+                            resource.retire_construction_presentation();
                             resource.watchdog = None;
                             resource.document_finalization_wake = None;
                             resource.document_finalization_ready = None;
@@ -1178,10 +1271,15 @@ impl EngineHost {
                     .as_ref()
                     .is_some_and(|view| view.semantic_pending_for_audit() == Some(false))
             {
+                let retired = resource.retire_construction_presentation();
                 resource.watchdog = None;
                 resource.lifecycle_deadline = None;
                 if let Some(task) = resource.construction.take() {
-                    task.complete(Outcome::Constructed);
+                    task.complete(if retired {
+                        Outcome::Constructed
+                    } else {
+                        Outcome::Refused
+                    });
                 }
             }
             return;

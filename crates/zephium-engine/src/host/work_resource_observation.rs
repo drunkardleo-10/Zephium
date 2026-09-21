@@ -182,9 +182,13 @@ impl WorkNativeResource {
     }
 
     pub(in crate::host) fn observation_visible(&self) -> bool {
-        self.reading_presentation
+        self.construction_presentation
             .as_ref()
             .is_some_and(WorkObservationPresentation::visible_for_audit)
+            || self
+                .reading_presentation
+                .as_ref()
+                .is_some_and(WorkObservationPresentation::visible_for_audit)
             || self.action_visible()
             || self
                 .observation
