@@ -319,7 +319,10 @@ impl SemanticActionRuntimeInvocation {
             let fault = SemanticActionRuntimeFault::parse(code)
                 .ok_or(SemanticActionRuntimeResultError::InvalidFault)?;
             #[cfg(feature = "probe-harness")]
-            eprintln!("native-action-runtime: fault={fault:?}; code={code}; content=redacted");
+            {
+                use std::io::Write as _;
+                let _ = writeln!(std::io::stderr(), "native-action-runtime: fault={fault:?}");
+            }
             return Err(SemanticActionRuntimeResultError::Runtime(fault));
         }
         let wire: SemanticActionRuntimeEvidenceWire = serde_json::from_str(value)
@@ -668,11 +671,15 @@ pub fn encode_semantic_action_runtime_invocation(
         (_, Some(_)) => return Err(SemanticActionRuntimeInvocationError::Recipe),
     };
     #[cfg(feature = "probe-harness")]
-    eprintln!(
-        "native-action-runtime: dispatch={:?}; scroll={:?}; content=redacted",
-        request.kind(),
-        request.scroll_recipe()
-    );
+    {
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr(),
+            "native-action-runtime: dispatch={:?}; scroll={:?}",
+            request.kind(),
+            request.scroll_recipe()
+        );
+    }
     let wire = SemanticActionRuntimeInvocationWire {
         version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
         operation: "action_execute",
