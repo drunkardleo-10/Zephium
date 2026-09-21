@@ -33,6 +33,7 @@ const AGENT_COLLECTION_OBJECTIVE: &str = "Read https://www.lego.com/en-us/themes
 const AGENT_DETAILS_OBJECTIVE: &str = "Open https://www.lego.com/en-us/themes/architecture, choose three distinct Architecture sets, and visit each of their observed product links. On each product page inspect the displayed price and product specifications, especially piece count and dimensions when shown. Return a cited structured comparison with product links, images and distinguishing details. The catalog alone is insufficient: inspect all three product pages. Do not buy, sign in, change locale, or use search snippets as a substitute. Leave unsupported details unknown.";
 const AGENT_MONEY_OBJECTIVE: &str = "Read https://demo.vercel.store/product/acme-geometric-circles-t-shirt in the browser and collect the Acme Circles T-Shirt with its explicitly displayed price, currency code and product image. Return only the target product with its observed amount and currency. Use one responsibility with one source-mapped output. Do not buy, sign in or change the cart. Do not substitute search snippets for the page.";
 const AGENT_READ_OBJECTIVE: &str = "From SQLite's official WAL documentation page, list every situation in which WAL mode does not work or has drawbacks, as cited findings with the page itself as the source. Read the actual page rather than relying on search snippets; use only sqlite.org.";
+const AGENT_GOVERNMENT_OBJECTIVE: &str = "Read https://travel.state.gov/ in the browser and report the passport and travel advisory services shown there, citing the actual page. Use one page read. Do not substitute search results, another page or prior knowledge. If verification prevents reading, report that honestly and stop; do not interact with verification controls, sign in or submit forms.";
 const AGENT_OBJECTIVE: &str = "Compare Svelte Flow and React Flow as the canvas library for a desktop app: bundle size, license, and how actively each is maintained in 2026. Place the two libraries as subjects with cited findings, and finish with a short comparison.";
 
 struct WorkflowResult {
@@ -50,6 +51,7 @@ enum Mode {
     Agent,
     /// The same loop on an objective that needs a native page read.
     AgentRead,
+    AgentGovernment,
     /// The loop on a granted folder: a file read cited as a source and an
     /// edit applied after the person's approval.
     AgentFiles,
@@ -109,6 +111,10 @@ pub(super) fn run_agent_read() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::AgentRead)
 }
 
+pub(super) fn run_agent_government() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentGovernment)
+}
+
 pub(super) fn run_agent_files() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::AgentFiles)
 }
@@ -165,6 +171,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         mode,
         Mode::Agent
             | Mode::AgentRead
+            | Mode::AgentGovernment
             | Mode::AgentScroll
             | Mode::AgentDisclosure
             | Mode::AgentCollection
@@ -185,6 +192,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     let execution_timeout = Duration::from_secs(match mode {
         Mode::Agent
         | Mode::AgentRead
+        | Mode::AgentGovernment
         | Mode::AgentScroll
         | Mode::AgentDisclosure
         | Mode::AgentCollection
@@ -404,6 +412,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         mode,
         Mode::Agent
             | Mode::AgentRead
+            | Mode::AgentGovernment
             | Mode::AgentScroll
             | Mode::AgentDisclosure
             | Mode::AgentCollection
@@ -529,6 +538,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             "agent-disclosure-run.json"
         } else if mode == Mode::AgentScroll {
             "agent-scroll-run.json"
+        } else if mode == Mode::AgentGovernment {
+            "agent-government-run.json"
         } else if mode == Mode::AgentRead {
             "agent-read-run.json"
         } else if mode == Mode::Agent {
@@ -602,6 +613,7 @@ async fn workflow(
         mode,
         Mode::Agent
             | Mode::AgentRead
+            | Mode::AgentGovernment
             | Mode::AgentScroll
             | Mode::AgentDisclosure
             | Mode::AgentCollection
@@ -1180,6 +1192,7 @@ async fn agent_workflow(
         Mode::AgentDetails => AGENT_DETAILS_OBJECTIVE,
         Mode::AgentMoney => AGENT_MONEY_OBJECTIVE,
         Mode::AgentRead => AGENT_READ_OBJECTIVE,
+        Mode::AgentGovernment => AGENT_GOVERNMENT_OBJECTIVE,
         Mode::AgentDisclosure => "Read https://www.lego.com/en-us/product/tower-bridge-21067 in one browser assignment. Find the Specifications disclosure, bring it into view if needed, expand it, and inspect its revealed content. Return the product name, displayed price, piece count and exact dimensions with citations from this page. Do not follow links, buy, sign in, change locale, or substitute public search. Leave unsupported details unknown. Use one browser read assignment and a source-backed note.",
         Mode::AgentScroll => "Read https://www.lego.com/en-us/product/tower-bridge-21067 in one browser assignment. Dismiss entry and privacy notices if needed. Before extracting, scroll the document down by one page, inspect the new viewport, then scroll the document down by another page and inspect again. Report the product name and any details visible after scrolling, with cited evidence. The two actual scrolls are required: snapshots alone do not satisfy this task. Do not buy, sign in, change locale, or follow links. Use one read responsibility and a source-backed note.",
         _ => AGENT_OBJECTIVE,

@@ -92,6 +92,9 @@ fn main() {
         [argument] if argument == "--live-agent-work" => work_durable::run_agent(),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-read-work" => work_durable::run_agent_read(),
+        [argument] if argument == "--live-agent-government-work" => {
+            work_durable::run_agent_government()
+        }
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-files-work" => work_durable::run_agent_files(),
         #[cfg(feature = "durable-runtime")]
