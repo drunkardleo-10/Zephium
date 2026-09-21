@@ -31,6 +31,11 @@ fn main() {
 
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let result = match arguments.as_slice() {
+        [argument] if argument == "--check-provider-keychain" => {
+            zephium_agentic::load_macos_probe_openai_credential()
+                .map(|_| ())
+                .map_err(|_| ProbeFailure::Keychain)
+        }
         [argument] if argument == "--live-fixed-click" => run_fixed_click(),
         [argument] if argument == "--live-public-wikipedia-fill" => run_public_wikipedia_fill(),
         [argument] if argument == "--live-two-action" => run_two_action(

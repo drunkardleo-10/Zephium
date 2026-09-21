@@ -266,53 +266,11 @@ pub fn load_macos_development_openai_credential(
     )
 }
 
-/// Loads the development OpenAI key through Apple's fixed `security` tool.
-///
-/// This release-forbidden probe path is useful for repeatedly rebuilt Cargo
-/// binaries: the Keychain item was created by `/usr/bin/security`, so access is
-/// evaluated against that stable Apple-signed executable instead of each new
-/// ad-hoc probe binary. Standard input and stderr are closed, the environment
-/// is cleared, the secret is accepted only from the child's private stdout
-/// pipe, and those bytes enter zeroizing storage before validation.
+/// Uses the signed probe's own Keychain identity, just like the development app.
 #[cfg(all(target_os = "macos", feature = "probe-harness"))]
 pub fn load_macos_probe_openai_credential(
 ) -> Result<AgentProviderCredential, MacosAgentProviderCredentialError> {
-    use std::process::{Command, Stdio};
-
-    let output = Command::new("/usr/bin/security")
-        .args([
-            "find-generic-password",
-            "-s",
-            MACOS_OPENAI_KEYCHAIN_SERVICE,
-            "-a",
-            MACOS_OPENAI_KEYCHAIN_ACCOUNT,
-            "-w",
-        ])
-        .env_clear()
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|_| MacosAgentProviderCredentialError::Inaccessible)?;
-    if !output.status.success() {
-        return Err(if output.status.code() == Some(44) {
-            MacosAgentProviderCredentialError::Missing
-        } else {
-            MacosAgentProviderCredentialError::Inaccessible
-        });
-    }
-    let mut secret = Zeroizing::new(output.stdout);
-    if secret.last() == Some(&b'\n') {
-        secret.pop();
-        if secret.last() == Some(&b'\r') {
-            secret.pop();
-        }
-    }
-    AgentProviderCredential::try_from_zeroizing(AgentProviderKind::OpenAiResponses, secret).map_err(
-        |error| match error {
-            AgentProviderCredentialError::Content => MacosAgentProviderCredentialError::Invalid,
-            AgentProviderCredentialError::Capacity => MacosAgentProviderCredentialError::Capacity,
-        },
-    )
+    load_macos_development_openai_credential()
 }
 
 impl fmt::Debug for AgentProviderCredential {
