@@ -54,7 +54,7 @@ pub fn run_human_takeover_probe(physical_input: bool) -> Result<(), &'static str
                 let Some(now) = crate::work_browser_monotonic_now() else {
                     return Some(Err("clock"));
                 };
-                if phase == 7 {
+                if phase == 7 || phase == 9 {
                     let completion = match read_rx.try_recv() {
                         Ok(completion) => completion,
                         Err(mpsc::TryRecvError::Empty) => return None,
@@ -68,7 +68,8 @@ pub fn run_human_takeover_probe(physical_input: bool) -> Result<(), &'static str
                         return Some(Err("empty_observation"));
                     }
                     eprintln!(
-                        "human_probe fresh_observation=true nodes={} elapsed_ms={}",
+                        "human_probe observation_after_human={} nodes={} elapsed_ms={}",
+                        phase == 7,
                         snapshot.nodes().len(),
                         start.elapsed().as_millis()
                     );
@@ -81,7 +82,7 @@ pub fn run_human_takeover_probe(physical_input: bool) -> Result<(), &'static str
                     if !dispatch(request, tx.clone()) {
                         return Some(Err("revoke_dispatch"));
                     }
-                    phase = 5;
+                    phase = if phase == 9 { 10 } else { 5 };
                 }
                 if phase == 2
                     && progress
@@ -110,6 +111,15 @@ pub fn run_human_takeover_probe(physical_input: bool) -> Result<(), &'static str
                 };
                 let next = match (phase, event) {
                     (0, WorkBrowserResourceEvent::Retained(_)) => {
+                        phase = 8;
+                        rows.acquire(
+                            &resource,
+                            ContextRunId::generate(),
+                            now,
+                            AgentPolicyInstant::from_millis(now.millis() + 10_000),
+                        )
+                    }
+                    (10, WorkBrowserResourceEvent::LeaseEnded(_)) => {
                         let region = WorkBrowserHumanRegion::try_new(0, 0, 600, 400).unwrap();
                         let request = rows.present_human(
                             &resource,
@@ -150,17 +160,20 @@ pub fn run_human_takeover_probe(physical_input: bool) -> Result<(), &'static str
                             AgentPolicyInstant::from_millis(now.millis() + 10_000),
                         )
                     }
-                    (4, WorkBrowserResourceEvent::Acquired(current)) => {
+                    (4 | 8, WorkBrowserResourceEvent::Acquired(current)) => {
                         let binding = match rows.read_binding(&current, now) {
                             Ok(binding) => binding,
                             Err(_) => return Some(Err("fresh_binding")),
                         };
-                        if binding.frame().context().navigation_epoch().get() != 2
-                            || binding.document().as_url().path() != "/verified"
+                        if phase == 4
+                            && (binding.frame().context().navigation_epoch().get() != 2
+                                || binding.document().as_url().path() != "/verified")
                         {
                             return Some(Err("document_binding"));
                         }
-                        eprintln!("human_probe presented=true document_changed=true session_cookie=true continued=true generation=2 elapsed_ms={}", start.elapsed().as_millis());
+                        if phase == 4 {
+                            eprintln!("human_probe presented=true document_changed=true session_cookie=true continued=true generation=2 elapsed_ms={}", start.elapsed().as_millis());
+                        }
                         let Ok(request) = rows.observe_initial(&current, now) else {
                             return Some(Err("read_request"));
                         };
@@ -177,7 +190,7 @@ pub fn run_human_takeover_probe(physical_input: bool) -> Result<(), &'static str
                             return Some(Err("read_dispatch"));
                         }
                         read_lease = Some(current);
-                        phase = 7;
+                        phase = if phase == 8 { 9 } else { 7 };
                         return None;
                     }
                     (5, WorkBrowserResourceEvent::LeaseEnded(_)) => {

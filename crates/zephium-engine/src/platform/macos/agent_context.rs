@@ -587,7 +587,19 @@ where
                 || navigation_policy.allows(&target),
                 |gate| gate.allows_apple_action(&target, action),
             );
+            #[cfg(feature = "agentic-browser-qa")]
+            if action.target_is_main_frame != Some(false) {
+                use std::io::Write as _;
+                let _ = writeln!(std::io::stderr(),
+                    "agent_view frame=main requested=true allowed={allowed} human_prepare={prepare_human} cause={:?} get={}",
+                    action.navigation_type, action.is_get);
+            }
             if allowed && prepare_human && !human_semantic_prepare() {
+                #[cfg(feature = "agentic-browser-qa")]
+                {
+                    use std::io::Write as _;
+                    let _ = writeln!(std::io::stderr(), "agent_view human_prepare_failed=true");
+                }
                 if let Some(gate) = &work_policy {
                     gate.retire();
                 }

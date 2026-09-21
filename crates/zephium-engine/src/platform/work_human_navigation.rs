@@ -33,9 +33,6 @@ impl HumanNavigation {
         if self.loading.is_some() {
             return !self.committed;
         }
-        if self.requested {
-            return false;
-        }
         self.requested = true;
         self.finished = false;
         true
@@ -224,6 +221,33 @@ mod tests {
         assert!(gate.ready(Some(current)));
         assert!(!gate.allows_apple_action(current, apple_action(T::Reload, true)));
         assert!(gate.finish_human(current, revision).is_err());
+    }
+
+    #[test]
+    fn human_form_followup_before_start_keeps_one_navigation_episode() {
+        let gate = ready_gate();
+        let source = ContextNavigationTarget::parse(URL).unwrap();
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30))
+            .unwrap();
+        assert!(gate.allows_apple_action(URL, apple_action(T::FormSubmitted, false)));
+        assert!(gate.allows_apple_action(URL, apple_action(T::FormSubmitted, true)));
+        assert!(!gate.allows_apple_action(
+            "https://attacker.test/",
+            apple_action(T::FormSubmitted, true)
+        ));
+        assert!(!gate.human_ready());
+        assert!(!gate.ready(Some(URL)));
+        assert!(!gate.human_load_preparation_needed(Some(true)));
+        assert!(gate.finish_human(URL, 0).is_err());
+        gate.observe(event(2, E::Started, URL)).unwrap();
+        gate.observe(event(2, E::Committed, URL)).unwrap();
+        assert!(gate.finish_human(URL, 1).is_err());
+        gate.observe(event(2, E::Finished, URL)).unwrap();
+        assert!(gate.human_ready());
+        assert_eq!(gate.human_revision(), Some(1));
+        gate.finish_human(URL, 1).unwrap();
+        assert!(gate.ready(Some(URL)));
+        assert!(!gate.allows_apple_action(URL, apple_action(T::FormSubmitted, true)));
     }
 
     #[test]

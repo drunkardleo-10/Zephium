@@ -71,6 +71,8 @@ impl WorkHumanPresentation {
         super::passive_page::unregister(&self.page);
         self.page.setHidden(false);
         self.presented = true;
+        #[cfg(feature = "agentic-browser-qa")]
+        record_cookie_facts(&self.page, "Presented");
         self.current()
     }
     pub(crate) fn current(&self) -> bool {
@@ -87,6 +89,10 @@ impl WorkHumanPresentation {
     pub(crate) fn retire(&mut self) -> bool {
         if self.retired {
             return self.page.isHidden();
+        }
+        #[cfg(feature = "agentic-browser-qa")]
+        if self.presented {
+            record_cookie_facts(&self.page, "Retiring");
         }
         let fenced = super::passive_page::register(&self.page);
         self.page.setHidden(true);
@@ -110,5 +116,31 @@ impl Drop for WorkHumanPresentation {
     fn drop(&mut self) {
         self.retire();
         super::passive_page::unregister(&self.page);
+    }
+}
+
+#[cfg(feature = "agentic-browser-qa")]
+fn record_cookie_facts(page: &WKWebView, phase: &'static str) {
+    use objc2_foundation::{NSArray, NSHTTPCookie};
+    use std::{io::Write, ptr::NonNull};
+    let callback = block2::RcBlock::new(move |values: NonNull<NSArray<NSHTTPCookie>>| {
+        // SAFETY: WebKit owns the cookie array for the duration of its callback.
+        let values = unsafe { values.as_ref() };
+        let mut clearance = false;
+        let mut bot_management = false;
+        for cookie in values.iter().take(4096) {
+            let name = cookie.name();
+            clearance |= name.isEqualToString(objc2_foundation::ns_string!("cf_clearance"));
+            bot_management |= name.isEqualToString(objc2_foundation::ns_string!("__cf_bm"));
+        }
+        let _ = writeln!(std::io::stderr(),
+            "agent_view human_phase={phase} cookies={} clearance={clearance} bot_management={bot_management}", values.len());
+    });
+    // SAFETY: the retained page is on the AppKit thread; WebKit copies the callback.
+    unsafe {
+        page.configuration()
+            .websiteDataStore()
+            .httpCookieStore()
+            .getAllCookies(&callback);
     }
 }

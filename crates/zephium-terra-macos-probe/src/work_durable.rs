@@ -1651,6 +1651,7 @@ async fn human_government_input(
     let continued = Arc::new(AtomicBool::new(false));
     let mut presented = None;
     let mut reader_started = false;
+    let mut previous = None;
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let pages = composition
@@ -1664,6 +1665,21 @@ async fn human_government_input(
             return Err("human_wait_released");
         }
         if let Some(page) = pages.first() {
+            let facts = (
+                page.phase,
+                page.document_revision.clone(),
+                page.can_continue,
+            );
+            if previous.as_ref() != Some(&facts) {
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "agent-work: human_state={:?} document_revision={} can_continue={}",
+                    facts.0,
+                    facts.1,
+                    facts.2
+                );
+                previous = Some(facts);
+            }
             if page.phase == WorkHumanPhaseV1::WaitingForHuman && presented.is_none() {
                 composition
                     .present_human_page(
