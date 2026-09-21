@@ -50,6 +50,11 @@ pub enum LivenessStage {
     DocumentGate,
     Hidden,
     OwnedWork,
+    OwnedUnthrottled,
+    OwnedOffscreenWindow,
+    OwnedOffscreenChild,
+    OwnedPresented,
+    OwnedHosted,
 }
 
 enum ProbePage {
@@ -159,7 +164,19 @@ fn run(
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str("Zephium Liveness Probe"));
     let host = Host(window.contentView().ok_or("content_view")?);
-    let hidden = matches!(stage, LivenessStage::Hidden | LivenessStage::OwnedWork);
+    let owned_stage = matches!(
+        stage,
+        LivenessStage::OwnedWork
+            | LivenessStage::OwnedUnthrottled
+            | LivenessStage::OwnedOffscreenWindow
+            | LivenessStage::OwnedOffscreenChild
+            | LivenessStage::OwnedPresented
+            | LivenessStage::OwnedHosted
+    );
+    let hidden = matches!(
+        stage,
+        LivenessStage::Hidden | LivenessStage::OwnedWork | LivenessStage::OwnedUnthrottled
+    );
     let started = Instant::now();
     let gate = (stage == LivenessStage::DocumentGate)
         .then(crate::platform::work_document_navigation::WorkDocumentNavigation::default);
@@ -193,7 +210,7 @@ fn run(
             builder = builder.with_initialization_script_for_main_only(source, !all_frames);
         }
     }
-    let view = if stage == LivenessStage::OwnedWork {
+    let view = if owned_stage {
         use super::agent_context::{build_owned_work_view, AgentOwnedViewCallbacks};
         let store = super::new_ephemeral_data_store().map_err(|_| "store")?;
         let mut owned = build_owned_work_view(
@@ -225,10 +242,60 @@ fn run(
         }
         ProbePage::Raw(view)
     };
-    window.makeKeyAndOrderFront(None);
-    app.activate();
+    if owned_stage {
+        let page = super::native_webview(view.view());
+        if matches!(
+            stage,
+            LivenessStage::OwnedUnthrottled
+                | LivenessStage::OwnedOffscreenWindow
+                | LivenessStage::OwnedOffscreenChild
+        ) {
+            // SAFETY: this release-excluded comparison owns the retained view on main.
+            unsafe {
+                page.configuration()
+                    .preferences()
+                    .setInactiveSchedulingPolicy(objc2_web_kit::WKInactiveSchedulingPolicy::None);
+            }
+        }
+        if !hidden && stage != LivenessStage::OwnedHosted {
+            view.view().set_visible(true).map_err(|_| "presentation")?;
+        }
+        if stage == LivenessStage::OwnedOffscreenWindow {
+            window.setFrameOrigin(NSPoint::new(-8000.0, -8000.0));
+            window.setIgnoresMouseEvents(true);
+        }
+        if stage == LivenessStage::OwnedOffscreenChild {
+            let native: &NSView = &page;
+            native.setFrameOrigin(NSPoint::new(-8000.0, -8000.0));
+        }
+    }
+    if stage == LivenessStage::OwnedOffscreenWindow {
+        window.orderFront(None);
+    } else {
+        window.makeKeyAndOrderFront(None);
+        app.activate();
+    }
+    let mut presentation = if stage == LivenessStage::OwnedHosted {
+        window.setIgnoresMouseEvents(true);
+        let mut presentation = super::WorkObservationPresentation::prepare(
+            view.view(),
+            started + observation_window + SAMPLE_DEADLINE * 2,
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            |_| {},
+        )
+        .map_err(|_| "hosted_prepare")?;
+        let state = presentation.present();
+        eprintln!("liveness_probe site={site:?} stage={stage:?} presentation={state:?}");
+        Some(presentation)
+    } else {
+        None
+    };
     while started.elapsed() < observation_window {
         pump();
+    }
+    if let Some(presentation) = &mut presentation {
+        let state = presentation.poll();
+        eprintln!("liveness_probe site={site:?} stage={stage:?} presentation={state:?}");
     }
     let gate_failed = match &view {
         ProbePage::Owned(owned) => owned.work_navigation().is_some_and(|gate| gate.failed()),
@@ -298,6 +365,7 @@ fn run(
     while result.borrow().is_none() && sample_start.elapsed() < SAMPLE_DEADLINE {
         pump();
     }
+    drop(presentation);
     window.orderOut(None);
     let raw = result
         .borrow_mut()

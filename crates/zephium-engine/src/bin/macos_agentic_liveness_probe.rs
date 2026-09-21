@@ -14,6 +14,11 @@ fn main() -> std::process::ExitCode {
         Some("gate") => LivenessStage::DocumentGate,
         Some("hidden") => LivenessStage::Hidden,
         Some("owned") => LivenessStage::OwnedWork,
+        Some("unthrottled") => LivenessStage::OwnedUnthrottled,
+        Some("offscreen-window") => LivenessStage::OwnedOffscreenWindow,
+        Some("offscreen-child") => LivenessStage::OwnedOffscreenChild,
+        Some("presented") => LivenessStage::OwnedPresented,
+        Some("hosted") => LivenessStage::OwnedHosted,
         _ => return std::process::ExitCode::from(2),
     };
     if args.len() != 2 {
