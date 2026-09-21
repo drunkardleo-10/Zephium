@@ -5,7 +5,7 @@
   "build": { "devUrl": null },
   "bundle": {
     "targets": ["app"],
-    "macOS": { "signingIdentity": "Zephium Dev" }
+    "macOS": { "signingIdentity": "Developer ID Application: Edgar Injighulyan (4FLB46KK27)" }
   },
   "app": {
     "windows": [{

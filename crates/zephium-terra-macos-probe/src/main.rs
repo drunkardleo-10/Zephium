@@ -32,9 +32,17 @@ fn main() {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let result = match arguments.as_slice() {
         [argument] if argument == "--check-provider-keychain" => {
-            zephium_agentic::load_macos_probe_openai_credential()
+            let started = std::time::Instant::now();
+            let result = zephium_agentic::load_macos_probe_openai_credential()
                 .map(|_| ())
-                .map_err(|_| ProbeFailure::Keychain)
+                .map_err(|_| ProbeFailure::Keychain);
+            let _ = writeln!(
+                std::io::stderr(),
+                "keychain_check available={} elapsed_ms={}",
+                result.is_ok(),
+                started.elapsed().as_millis()
+            );
+            result
         }
         [argument] if argument == "--live-fixed-click" => run_fixed_click(),
         [argument] if argument == "--live-public-wikipedia-fill" => run_public_wikipedia_fill(),

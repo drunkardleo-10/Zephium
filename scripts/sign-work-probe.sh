@@ -10,6 +10,6 @@ if [ "$(uname -s)" != Darwin ] || [ ! -f "$probe" ] || [ -L "$probe" ]; then
     exit 1
 fi
 
-/usr/bin/codesign --force --sign 'Zephium Dev' --keychain "$keychain" \
+/usr/bin/codesign --force --sign 'Developer ID Application: Edgar Injighulyan (4FLB46KK27)' --keychain "$keychain" \
     --identifier app.zephium.work-integration.probe --timestamp=none "$probe"
 /usr/bin/codesign --verify --strict "$probe"
