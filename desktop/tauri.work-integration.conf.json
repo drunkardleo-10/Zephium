@@ -3,7 +3,10 @@
   "productName": "Zephium Work Integration",
   "identifier": "app.zephium.work-integration",
   "build": { "devUrl": null },
-  "bundle": { "targets": ["app"] },
+  "bundle": {
+    "targets": ["app"],
+    "macOS": { "signingIdentity": "Zephium Dev" }
+  },
   "app": {
     "windows": [{
       "label": "main",
