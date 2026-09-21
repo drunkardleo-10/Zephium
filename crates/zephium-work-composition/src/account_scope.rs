@@ -20,8 +20,8 @@ const EXTRACTION_FIELD: &str = "output_0";
 
 /// The user's approval named this account for this profile and origin. Each
 /// sample is minted at request time in the Work clock domain.
-struct UserAttestedAccount {
-    account: AgentAccountId,
+pub(crate) struct UserAttestedAccount {
+    pub(crate) account: AgentAccountId,
 }
 impl AgentWorkAccountSource for UserAttestedAccount {
     fn sample(&self, context: ContextJoin) -> Result<AgentContextAccountBinding, AgentWorkFailure> {

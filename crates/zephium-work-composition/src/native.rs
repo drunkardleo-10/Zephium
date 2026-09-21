@@ -81,6 +81,8 @@ impl std::fmt::Debug for TrustedWorkRequest {
 /// Dormant, move-only desktop owners. Construction neither claims persistence
 /// nor takes native authority. The shell checks both exact Arc identities.
 pub struct MacosWorkComposition {
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) human_pages: crate::human::HumanPages,
     engine: Arc<WebviewEngine>,
     store: Arc<SqliteStore>,
     native: Arc<Mutex<NativeLifetimeOwner>>,
@@ -148,6 +150,8 @@ impl MacosWorkComposition {
             engine,
             store,
             native: Arc::new(Mutex::new(NativeLifetimeOwner::Dormant)),
+            #[cfg(feature = "durable-runtime")]
+            human_pages: crate::human::HumanPages::default(),
         }
     }
 

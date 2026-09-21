@@ -86,3 +86,6 @@ pub mod navigation_qualification;
 #[cfg(feature = "retained-qualification")]
 #[doc(hidden)]
 pub mod retained_qualification;
+
+#[cfg(feature = "durable-runtime")]
+mod human;

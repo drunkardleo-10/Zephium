@@ -208,8 +208,20 @@ impl PublicLocalActionWorkInvocation {
         self,
         profile: AgentWorkProfileBinding,
     ) -> Result<TrustedWorkRequest, AgentWorkFailure> {
+        self.into_retained_request(profile, ContextId::generate(), None)
+    }
+
+    pub(crate) fn into_retained_request(
+        mut self,
+        profile: AgentWorkProfileBinding,
+        context: ContextId,
+        remaining_actions: Option<u64>,
+    ) -> Result<TrustedWorkRequest, AgentWorkFailure> {
+        if let Some(remaining) = remaining_actions {
+            self.actions.max_actions = self.actions.max_actions.min(remaining);
+        }
         let identity = ContextIdentity::new(
-            ContextId::generate(),
+            context,
             ContextRunId::generate(),
             profile.profile(),
             ContextKind::Owned,
@@ -219,7 +231,7 @@ impl PublicLocalActionWorkInvocation {
             profile.storage_class(),
             self.read.objective,
             self.read.settings,
-            Some(self.actions),
+            (self.actions.max_actions > 0).then_some(self.actions),
         )?;
         if self.read.persist_result {
             input = input.persist_extraction_result()?;

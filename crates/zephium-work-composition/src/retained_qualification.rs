@@ -271,6 +271,8 @@ fn lifecycle_trace(
     let (terminal, failure, admission_failure) = match event {
         WorkBrowserResourceEvent::Retained(_) => ("retained", None, None),
         WorkBrowserResourceEvent::Acquired(_) => ("acquired", None, None),
+        WorkBrowserResourceEvent::HumanPresented(_) => ("human_presented", None, None),
+        WorkBrowserResourceEvent::HumanContinued(_) => ("human_continued", None, None),
         WorkBrowserResourceEvent::RevocationRequired(_) => ("revocation_required", None, None),
         WorkBrowserResourceEvent::LeaseEnded(_) => ("lease_ended", None, None),
         WorkBrowserResourceEvent::Quarantined(failure) => ("quarantined", Some(*failure), None),

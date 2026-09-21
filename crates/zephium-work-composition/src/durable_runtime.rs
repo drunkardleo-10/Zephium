@@ -149,6 +149,7 @@ impl MacosWorkComposition {
                 collection.as_ref(),
                 None,
                 diagnostics,
+                None,
             )
             .await?;
         attempt
@@ -251,7 +252,14 @@ impl MacosWorkComposition {
                 _ => String::new(),
             },
         );
-        let invocation = compile_step(probe, request, settings, collection.as_ref())?;
+        let resume_plan = ResumePlan {
+            request: request.clone(),
+            profile: settings.profile,
+            model: settings.model,
+            config: settings.config.clone(),
+            deadline: probe.deadline().min(Instant::now() + MAX_STEP_DURATION),
+        };
+        let invocation = compile_step(probe, request, settings, collection.as_ref(), None)?;
         let mut run = self
             .run_retained(
                 shell,
@@ -263,6 +271,7 @@ impl MacosWorkComposition {
                 collection.as_ref(),
                 Some(page),
                 diagnostics,
+                Some(resume_plan),
             )
             .await?;
         if let Some(host) = host.filter(|_| collection.is_none()) {
@@ -297,6 +306,7 @@ impl MacosWorkComposition {
         collection: Option<&WorkBrowseCollectionSchema>,
         page: Option<(WorkStepId, String)>,
         diagnostics: Diagnostics,
+        resume_plan: Option<ResumePlan>,
     ) -> Result<BrowserRun, WorkError> {
         #[cfg(feature = "public-qualification")]
         let diagnostic = diagnostics.diagnostic;
@@ -308,11 +318,31 @@ impl MacosWorkComposition {
         let stage_diagnostic = diagnostics.stage;
         #[cfg(not(feature = "public-qualification"))]
         let _ = diagnostics;
+        let original_spec = invocation
+            .input
+            .retained_resource_spec()
+            .map_err(|_| WorkError::Invalid)?;
+        let original_deadline = original_spec.deadline;
         let view = self
             .launch_retained(shell, invocation)
             .map_err(|_| WorkError::Unavailable)?
             .ok_or(WorkError::Unavailable)?;
         let guard = NativeGuard(view);
+        let registration = page
+            .as_ref()
+            .filter(|_| resume_plan.is_some())
+            .map(|(step, _)| {
+                self.human_pages.register(
+                    (attempt.profile(), attempt.work(), attempt.attempt(), *step),
+                    guard.0.clone(),
+                )
+            })
+            .transpose()?;
+        let mut prior_usage = WorkUsage::default();
+        let mut charged_record = None;
+        let mut prior_calls = 0u32;
+        let mut prior_actions = 0u32;
+        let mut resumed_generation = 0u32;
         let mut intervention: Option<WorkInterventionV1> = None;
         let mut archived = None;
         let mut requested_read = false;
@@ -510,6 +540,84 @@ impl MacosWorkComposition {
                 }
                 return Err(WorkError::OutcomeUnknown);
             }
+            if let Some(registration) = &registration {
+                registration.update();
+            }
+            if !requested_close {
+                if let Some(resume) = guard
+                    .0
+                    .human_resume()
+                    .filter(|resume| resume.generation > resumed_generation)
+                {
+                    resumed_generation = resume.generation;
+                    let result = async {
+                        let plan = resume_plan.as_ref().ok_or(WorkError::Invalid)?;
+                        let account = registration
+                            .as_ref()
+                            .ok_or(WorkError::Invalid)?
+                            .account(resume.generation)?;
+                        let total =
+                            add_usage(prior_usage, resume.usage).ok_or(WorkError::Capacity)?;
+                        let calls = prior_calls
+                            .checked_add(resume.model_calls)
+                            .ok_or(WorkError::Capacity)?;
+                        let actions = prior_actions
+                            .checked_add(resume.actions)
+                            .ok_or(WorkError::Capacity)?;
+                        let remaining = remaining_read(limits, total, calls, actions)?;
+                        let credential = load_resume_credential().await?;
+                        let mut request = plan.request.clone();
+                        request.limits = remaining.0;
+                        request.step = WorkStepKindV1::Read {
+                            url: resume.document.as_url().to_string(),
+                            collection: None,
+                        };
+                        let settings = WorkBrowserAdapterSettings::new(
+                            plan.profile,
+                            plan.model,
+                            plan.config.clone(),
+                            credential,
+                        );
+                        let invocation = compile_step(
+                            attempt,
+                            request,
+                            settings,
+                            collection,
+                            Some(ResumeCompile {
+                                context: resume.context,
+                                document_policy: original_spec.document_policy,
+                                deadline: original_deadline.min(plan.deadline),
+                                max_model_calls: remaining.1,
+                                max_actions: remaining.2,
+                                account,
+                            }),
+                        )?;
+                        let prepared = zephium_app::PreparedRetainedContinuation::try_new(
+                            resume.generation,
+                            invocation.input,
+                            invocation.config,
+                            invocation.credential,
+                            invocation.task,
+                        )
+                        .map_err(|_| WorkError::Invalid)?;
+                        if !guard.0.resume_after_human(prepared) {
+                            return Err(WorkError::Unavailable);
+                        }
+                        charged_record = guard.0.snapshot().record;
+                        prior_usage = total;
+                        prior_calls = calls;
+                        prior_actions = actions;
+                        disposition = None;
+                        intervention = None;
+                        mapping_artifact = false;
+                        Ok::<(), WorkError>(())
+                    }
+                    .await;
+                    if result.is_err() {
+                        requested_close = true;
+                    }
+                }
+            }
             let snapshot = guard.0.snapshot();
             if last_phase != Some(snapshot.phase) {
                 last_phase = Some(snapshot.phase);
@@ -623,6 +731,12 @@ impl MacosWorkComposition {
                         requested_read = snapshot
                             .record
                             .is_some_and(|record| guard.0.read_artifact(record));
+                    } else if disposition == Some(AgentWorkDisposition::WaitingForHuman)
+                        && registration.is_some()
+                        && !guard.0.is_closed()
+                        && !requested_close
+                    {
+                        attempt.record_activity(zephium_ipc::work::WorkActivityV1::WaitingForHuman);
                     } else if disposition != Some(AgentWorkDisposition::Succeeded) {
                         trace(&format!("close:terminal:{disposition:?}"));
                         requested_close = true;
@@ -661,12 +775,22 @@ impl MacosWorkComposition {
                 let snapshot = guard.0.snapshot();
                 // Closed usage comes from the original policy/drain/resource and
                 // terminal ACK join, never the lossy public progress stream.
-                let usage = Some(snapshot.usage.unwrap_or(WorkUsage {
-                    model_tokens: limits.model_tokens,
-                    cost_micro_usd: limits.cost_micro_usd,
-                    operations: limits.operations,
-                    accounting: WorkUsageAccounting::ConservativeReservation,
-                }));
+                let usage = Some(
+                    if charged_record.is_some() && snapshot.record == charged_record {
+                        Some(prior_usage)
+                    } else {
+                        snapshot
+                            .usage
+                            .and_then(|usage| add_usage(prior_usage, usage))
+                    }
+                    .filter(|usage| usage.within(limits))
+                    .unwrap_or(WorkUsage {
+                        model_tokens: limits.model_tokens,
+                        cost_micro_usd: limits.cost_micro_usd,
+                        operations: limits.operations,
+                        accounting: WorkUsageAccounting::ConservativeReservation,
+                    }),
+                );
                 let result = match (disposition, archived) {
                     (Some(AgentWorkDisposition::Succeeded), Some(archive)) => match collection {
                         Some(schema) => outputs
@@ -912,6 +1036,71 @@ impl From<&WorkBrowserAdapterSettings> for Diagnostics {
     }
 }
 
+struct ResumePlan {
+    request: WorkAgentBrowseRequest,
+    profile: AgentWorkProfileBinding,
+    model: AgentBrowserModel,
+    config: AgentWorkApplicationConfig,
+    deadline: Instant,
+}
+struct ResumeCompile {
+    context: ContextId,
+    document_policy: WorkBrowserDocumentPolicy,
+    deadline: Instant,
+    max_model_calls: u8,
+    max_actions: u64,
+    account: PublicReadWorkAccount,
+}
+async fn load_resume_credential() -> Result<AgentProviderCredential, WorkError> {
+    #[cfg(target_os = "macos")]
+    {
+        tokio::task::spawn_blocking(zephium_agentic::load_macos_development_openai_credential)
+            .await
+            .map_err(|_| WorkError::Unavailable)?
+            .map_err(|_| WorkError::Unavailable)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(WorkError::Unavailable)
+    }
+}
+fn add_usage(a: WorkUsage, b: WorkUsage) -> Option<WorkUsage> {
+    Some(WorkUsage {
+        model_tokens: a.model_tokens.checked_add(b.model_tokens)?,
+        cost_micro_usd: a.cost_micro_usd.checked_add(b.cost_micro_usd)?,
+        operations: a.operations.checked_add(b.operations)?,
+        accounting: if a.accounting == WorkUsageAccounting::Exact
+            && b.accounting == WorkUsageAccounting::Exact
+        {
+            WorkUsageAccounting::Exact
+        } else {
+            WorkUsageAccounting::ConservativeReservation
+        },
+    })
+}
+fn remaining_read(
+    limits: WorkExecutionLimits,
+    usage: WorkUsage,
+    calls: u32,
+    actions: u32,
+) -> Result<(WorkExecutionLimits, u8, u64), WorkError> {
+    if usage.accounting != WorkUsageAccounting::Exact
+        || !usage.within(limits)
+        || calls >= 16
+        || actions > 8
+    {
+        return Err(WorkError::Capacity);
+    }
+    let remaining = WorkExecutionLimits {
+        model_tokens: limits.model_tokens - usage.model_tokens,
+        cost_micro_usd: limits.cost_micro_usd - usage.cost_micro_usd,
+        operations: limits.operations - usage.operations,
+        ..limits
+    };
+    remaining.validate()?;
+    Ok((remaining, (16 - calls) as u8, u64::from(8 - actions)))
+}
+
 /// A step reads one shown source or starts one anonymous discovery; both are
 /// read-only, anonymous, and bounded by the loop's remaining limits.
 fn compile_step(
@@ -919,6 +1108,7 @@ fn compile_step(
     request: WorkAgentBrowseRequest,
     settings: WorkBrowserAdapterSettings,
     collection: Option<&WorkBrowseCollectionSchema>,
+    resume: Option<ResumeCompile>,
 ) -> Result<crate::TrustedWorkRequest, WorkError> {
     if settings.profile.profile() != probe.profile() {
         return Err(refused(&settings, "profile", WorkError::ProfileUnavailable));
@@ -959,7 +1149,13 @@ fn compile_step(
         ),
         _ => return Err(WorkError::Invalid),
     };
-    let navigation = if matches!(request.step, WorkStepKindV1::Read { .. }) {
+    let navigation = if let Some(resume) = &resume {
+        AgentNavigationDiscovery::try_new_account_page(
+            navigation.departure().clone(),
+            resume.document_policy,
+        )
+        .map_err(|_| WorkError::Invalid)?
+    } else if matches!(request.step, WorkStepKindV1::Read { .. }) {
         navigation
             .with_same_document_query_updates()
             .map_err(|_| refused(&settings, "navigation", WorkError::Invalid))?
@@ -989,6 +1185,23 @@ fn compile_step(
             .map_err(|error| refused(&settings, "extraction", error))?,
         None => findings::field_schema().map_err(|error| refused(&settings, "findings", error))?,
     }];
+    let continuing = resume.is_some();
+    let (context, max_actions, account, max_model_calls, deadline) = match resume {
+        Some(resume) => (
+            resume.context,
+            Some(resume.max_actions),
+            resume.account,
+            resume.max_model_calls,
+            resume.deadline,
+        ),
+        None => (
+            ContextId::generate(),
+            None,
+            PublicReadWorkAccount::Anonymous,
+            16,
+            probe.deadline().min(Instant::now() + MAX_STEP_DURATION),
+        ),
+    };
     let invocation = PublicReadWorkInvocation::new(
         PublicReadWorkObjective {
             objective,
@@ -996,11 +1209,11 @@ fn compile_step(
             output_fields,
         },
         PublicReadWorkSettings {
-            account: PublicReadWorkAccount::Anonymous,
+            account,
             model: settings.model,
             budget,
-            max_model_calls: 16,
-            deadline: probe.deadline().min(Instant::now() + MAX_STEP_DURATION),
+            max_model_calls,
+            deadline,
         },
         settings.config,
         settings.credential,
@@ -1015,8 +1228,8 @@ fn compile_step(
     };
     #[cfg(feature = "public-qualification")]
     let diagnostic = settings.stage_diagnostic;
-    let request = invocation
-        .into_request(settings.profile)
+    let mut request = invocation
+        .into_retained_request(settings.profile, context, max_actions)
         .map_err(|failure| {
             #[cfg(feature = "public-qualification")]
             if let Some(diagnostic) = diagnostic {
@@ -1031,6 +1244,9 @@ fn compile_step(
             let _ = &failure;
             WorkError::Unavailable
         })?;
+    if continuing {
+        request.input = request.input.with_isolated_website_data();
+    }
     Ok(request
         .with_work_identity(probe.work())
         .with_anonymous_session(probe.browser_session().clone()))
@@ -1295,4 +1511,73 @@ fn map_archive(
         });
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod human_budget_tests {
+    use super::*;
+    #[test]
+    fn continuation_deducts_every_previous_episode_and_never_renews_limits() {
+        let limits = WorkExecutionLimits {
+            model_tokens: 1000,
+            cost_micro_usd: 100,
+            operations: 20,
+            timeout_seconds: 60,
+            max_workers: 1,
+        };
+        let first = WorkUsage {
+            model_tokens: 300,
+            cost_micro_usd: 20,
+            operations: 4,
+            accounting: WorkUsageAccounting::Exact,
+        };
+        let second = WorkUsage {
+            model_tokens: 200,
+            cost_micro_usd: 30,
+            operations: 3,
+            accounting: WorkUsageAccounting::Exact,
+        };
+        let (remaining, calls, actions) =
+            remaining_read(limits, add_usage(first, second).unwrap(), 7, 8).unwrap();
+        assert_eq!(
+            (
+                remaining.model_tokens,
+                remaining.cost_micro_usd,
+                remaining.operations
+            ),
+            (500, 50, 13)
+        );
+        assert_eq!((calls, actions), (9, 0));
+        assert_eq!(remaining.timeout_seconds, limits.timeout_seconds);
+        assert!(remaining_read(limits, first, 16, 0).is_err());
+        assert!(remaining_read(limits, first, 0, 9).is_err());
+        assert!(remaining_read(
+            limits,
+            WorkUsage {
+                model_tokens: 1000,
+                ..first
+            },
+            1,
+            0
+        )
+        .is_err());
+        assert!(remaining_read(
+            limits,
+            WorkUsage {
+                accounting: WorkUsageAccounting::ConservativeReservation,
+                ..first
+            },
+            1,
+            0
+        )
+        .is_err());
+        assert!(add_usage(
+            first,
+            WorkUsage {
+                model_tokens: u32::MAX,
+                ..second
+            }
+        )
+        .is_none());
+    }
 }

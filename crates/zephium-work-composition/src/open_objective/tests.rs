@@ -623,3 +623,40 @@ fn reading_dismissal_requires_complete_nontransactional_dialog_context() {
         );
     }
 }
+
+#[cfg(feature = "durable-runtime")]
+#[test]
+fn human_account_attestation_keeps_isolated_storage_and_single_page_scope() {
+    let account = AgentAccountId::generate();
+    let identity = identity();
+    let mut definition = objective();
+    definition.navigation = AgentNavigationDiscovery::try_new_account_page(
+        ContextNavigationTarget::parse("https://example.com/verified").unwrap(),
+        WorkBrowserDocumentPolicy::PublicSameDocumentQuery,
+    )
+    .unwrap();
+    let expected = definition.navigation.clone();
+    let (input, task) = assemble(
+        identity,
+        ContextProfileStorageClass::Durable,
+        definition,
+        settings(PublicReadWorkAccount::Identified {
+            account,
+            source: Box::new(crate::account_scope::UserAttestedAccount { account }),
+        }),
+    )
+    .unwrap();
+    let isolated = input.with_isolated_website_data();
+    let spec = isolated.retained_resource_spec().unwrap();
+    assert!(spec.isolated_public);
+    assert_eq!(spec.identity, identity);
+    assert_eq!(task.navigation_discovery(), Some(&expected));
+    assert_eq!(expected.max_hops(), 0);
+    assert!(!expected.is_public_web());
+    assert_eq!(
+        task.attest_account(join(identity), spec.clock.now().unwrap())
+            .unwrap()
+            .account(),
+        AgentAccountScope::Authenticated(account)
+    );
+}

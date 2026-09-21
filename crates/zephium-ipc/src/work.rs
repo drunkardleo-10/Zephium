@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use zephium_core::work::{runtime::*, *};
 
+#[path = "work_human.rs"]
+mod human;
+pub use human::*;
+
 pub type WorkProjectionV1 = WorkRuntimeProjection;
 
 /// Invalidation only. Consumers read current facts; delivery grants no authority
