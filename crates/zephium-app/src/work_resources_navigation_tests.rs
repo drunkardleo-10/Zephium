@@ -297,7 +297,9 @@ fn retained_surrounding_inspection_is_citable_only_after_fresh_delivery() {
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(|item| item["output"].as_str())
+        .filter(|item| item["role"] == "user")
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter_map(|item| item["text"].as_str())
         .find(|text| text.starts_with("ZEXTRACT"))
         .unwrap();
     assert!(evidence.contains("refs=historical_read_only provenance=cohorts_v1"));
@@ -668,10 +670,16 @@ fn retained_dense_region_reaches_counted_mapping_with_exact_sources_and_cleanup(
         .as_array()
         .unwrap()
         .iter()
-        .filter_map(|item| item["output"].as_str())
+        .filter(|item| item["role"] == "user")
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter_map(|item| item["text"].as_str())
         .find(|text| text.starts_with("ZEXTRACT"))
         .unwrap();
-    assert!(evidence.len() <= 16 * 1024);
+    assert!(
+        evidence.len()
+            <= SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE.max_bytes()
+                as usize
+    );
     assert!(evidence.contains("ZREAD3 content=untrusted"));
     assert_eq!(
         evidence
@@ -697,7 +705,7 @@ fn retained_dense_region_reaches_counted_mapping_with_exact_sources_and_cleanup(
     assert!(evidence.contains("R @r117 @a118 text paragraph"));
     // Both five-row run-enrolled page cohorts remain historical, read-only
     // evidence beside the 117 expanded-region sources. Ambient history is
-    // never enrolled, and the combined inventory stays under the 16 KiB cap.
+    // never enrolled, and the combined inventory stays within the production encoding budget.
     assert!(
         evidence.contains("R @r118 @a1 text landmark \"Fixture result document_marker_1\" p=p2\n")
     );
