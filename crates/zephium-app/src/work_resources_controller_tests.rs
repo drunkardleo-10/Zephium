@@ -48,6 +48,13 @@ impl AgentAuditPort for Audit {
 }
 #[derive(Default)]
 struct Native {
+    hold_human: AtomicBool,
+    human: Mutex<
+        Option<(
+            WorkBrowserResourceRequest,
+            WorkBrowserResourceCompletionCallback,
+        )>,
+    >,
     hold_construct: AtomicBool,
     construction: Mutex<
         Option<(
@@ -194,6 +201,23 @@ impl AgentBrowserPort for Native {
         mut request: WorkBrowserResourceRequest,
         callback: WorkBrowserResourceCompletionCallback,
     ) -> WorkBrowserResourceDispatch {
+        if matches!(
+            request.operation(),
+            WorkBrowserResourceOperation::PresentHuman
+                | WorkBrowserResourceOperation::ContinueAfterHuman
+        ) {
+            if self.hold_human.load(Ordering::Acquire) {
+                assert!(self
+                    .human
+                    .lock()
+                    .unwrap()
+                    .replace((request, callback))
+                    .is_none());
+            } else {
+                finish_human_fixture(request, callback);
+            }
+            return WorkBrowserResourceDispatch::Scheduled;
+        }
         if request.operation() == WorkBrowserResourceOperation::Construct
             && self.hold_construct.load(Ordering::Acquire)
         {
@@ -218,6 +242,8 @@ impl AgentBrowserPort for Native {
             };
         }
         let outcome = match request.operation() {
+            WorkBrowserResourceOperation::PresentHuman
+            | WorkBrowserResourceOperation::ContinueAfterHuman => unreachable!("handled above"),
             WorkBrowserResourceOperation::Construct => {
                 let reporter = request.take_resource_health_reporter().unwrap();
                 assert!(reporter.install(request.resource()));
@@ -2307,4 +2333,22 @@ fn scoped_worker_drain_is_not_held_native_notification_or_successor_or_destroy_p
     // never invents successful cleanup after a terminal failed destroy attempt.
     assert!(!owner.locally_retired());
     assert_eq!(server.join().unwrap(), 2);
+}
+
+fn finish_human_fixture(
+    request: WorkBrowserResourceRequest,
+    callback: WorkBrowserResourceCompletionCallback,
+) {
+    let completion = match request.operation() {
+        WorkBrowserResourceOperation::PresentHuman => {
+            request.human_progress().unwrap().record_ready(true);
+            request.complete(WorkBrowserResourceNativeOutcome::HumanPresented)
+        }
+        WorkBrowserResourceOperation::ContinueAfterHuman => {
+            let document = request.human_source().unwrap().clone();
+            request.complete_human_document(document)
+        }
+        _ => panic!("human fixture operation"),
+    };
+    callback(completion);
 }

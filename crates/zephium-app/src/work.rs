@@ -61,6 +61,7 @@ impl AgentWorkApplicationPorts {
 }
 
 /// Existing runtime and provider settings, with no parallel model semantics.
+#[derive(Clone)]
 pub struct AgentWorkApplicationConfig {
     runtime: AgentRuntimeConfig,
     provider: AgentProviderTransportConfig,

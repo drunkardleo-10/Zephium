@@ -30,7 +30,10 @@ impl PreparedRetainedWork {
         let actor = ActorRequest {
             run: spec.identity.owner(),
             deadline: spec.expires_at,
-            prepare: Box::new(move |browser, audit| {
+            prepare: Box::new(move |browser, audit, waiting| {
+                if waiting.is_some() {
+                    return Err(AgentWorkFailure::Contract);
+                }
                 StagedActor::for_public_qualification(
                     input, browser, runtime, provider, credential, audit, task,
                 )

@@ -13,6 +13,10 @@ use zephium_agent_controller::*;
 use zephium_agent_provider_transport::{AgentProviderCredential, AgentProviderTransportConfig};
 use zephium_agent_runtime::*;
 
+#[path = "work_resources_human.rs"]
+mod human;
+pub use human::{RetainedHumanPhase, RetainedHumanResume, RetainedHumanSnapshot};
+
 #[cfg(feature = "work-execution-probe")]
 #[path = "work_resources_public_actor.rs"]
 mod public_qualification;
@@ -23,6 +27,7 @@ pub(super) type PrepareActor = Box<
     dyn FnOnce(
             Box<dyn AgentWorkRetainedBrowser>,
             Arc<dyn AgentAuditPort>,
+            Option<AgentWorkWaitingForHuman>,
         ) -> Result<StagedActor, AgentWorkFailure>
         + Send,
 >;
@@ -52,15 +57,39 @@ impl StagedActor {
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<Self, AgentWorkFailure> {
+        Self::for_probe_human(input, browser, transport, credential, audit, task, None)
+    }
+    #[cfg(all(test, feature = "work-execution-probe"))]
+    pub(super) fn for_probe_human(
+        input: AgentWorkRunInput,
+        browser: Box<dyn AgentWorkRetainedBrowser>,
+        transport: zephium_agent_provider_transport::AgentProviderTransport,
+        credential: AgentProviderCredential,
+        audit: Arc<dyn AgentAuditPort>,
+        task: Box<dyn AgentWorkTask>,
+        waiting: Option<AgentWorkWaitingForHuman>,
+    ) -> Result<Self, AgentWorkFailure> {
         let lease = browser.binding().lease().clone();
-        let (controller, handle, scope) = AgentWorkRetainedController::try_new_for_probe(
-            input,
-            browser,
-            transport,
-            credential,
-            audit.clone(),
-            task,
-        )?;
+        let (controller, handle, scope) = if let Some(waiting) = waiting {
+            AgentWorkRetainedController::try_new_after_human_for_probe(
+                waiting,
+                input,
+                browser,
+                transport,
+                credential,
+                audit.clone(),
+                task,
+            )
+        } else {
+            AgentWorkRetainedController::try_new_for_probe(
+                input,
+                browser,
+                transport,
+                credential,
+                audit.clone(),
+                task,
+            )
+        }?;
         let deadline = controller.deadline()?;
         Ok(Self {
             controller: Box::new(controller),
@@ -81,16 +110,29 @@ impl StagedActor {
         credential: AgentProviderCredential,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
+        waiting: Option<AgentWorkWaitingForHuman>,
     ) -> Result<Self, AgentWorkFailure> {
         let lease = browser.binding().lease().clone();
-        let (controller, handle, scope) = AgentWorkRetainedController::try_new(
-            input,
-            browser,
-            provider,
-            credential,
-            audit.clone(),
-            task,
-        )?;
+        let (controller, handle, scope) = if let Some(waiting) = waiting {
+            AgentWorkRetainedController::try_new_after_human(
+                waiting,
+                input,
+                browser,
+                provider,
+                credential,
+                audit.clone(),
+                task,
+            )
+        } else {
+            AgentWorkRetainedController::try_new(
+                input,
+                browser,
+                provider,
+                credential,
+                audit.clone(),
+                task,
+            )
+        }?;
         let deadline = controller.deadline()?;
         Ok(Self {
             controller: Box::new(controller),
@@ -154,6 +196,9 @@ enum DurableReply {
 }
 
 pub(super) struct RetainedWork {
+    human: Option<human::HumanHandoff>,
+    prior_human: Option<AgentWorkWaitingForHuman>,
+    human_generation: u32,
     owner: WorkResourceOwner,
     resource: WorkBrowserResourceJoin,
     journal: Arc<dyn AgentWorkJournalPort>,
@@ -237,6 +282,9 @@ impl RetainedWork {
         waker: Waker,
     ) -> Self {
         Self {
+            human: None,
+            prior_human: None,
+            human_generation: 0,
             owner,
             resource,
             journal,
@@ -301,7 +349,11 @@ impl RetainedWork {
     }
 
     pub(super) fn ready(&self) -> bool {
-        if self.stopping
+        if self
+            .human
+            .as_ref()
+            .is_some_and(|human| human.phase != RetainedHumanPhase::ReadyToResume)
+            || self.stopping
             || self.failure.is_some()
             || self.persistence_failure.is_some()
             || self.flight.is_some()
@@ -357,6 +409,20 @@ impl RetainedWork {
                 Err(_) => return Err(request),
             };
         // Only this exact durable/scoped join retires the previous actor owner.
+        if self
+            .human
+            .as_ref()
+            .is_some_and(|human| human.phase == RetainedHumanPhase::ReadyToResume)
+        {
+            self.prior_human =
+                self.active
+                    .as_mut()
+                    .and_then(|active| match active.outcome.take() {
+                        Some(AgentWorkRetainedOutcome::WaitingForHuman(waiting)) => Some(waiting),
+                        _ => None,
+                    });
+            self.human = None;
+        }
         self.active.take();
         self.record = None;
         self.terminal_usage = None;
@@ -622,6 +688,7 @@ impl RetainedWork {
 
     fn poll_before(&mut self, now: AgentPolicyInstant, deadline: Option<Instant>) {
         self.rearm();
+        self.poll_human(now);
         if let Some(mut construction) = self.construction.take() {
             match construction.poll(now) {
                 Ok(None) => self.construction = Some(construction),
@@ -735,7 +802,11 @@ impl RetainedWork {
                             .retained_browser(lease.clone(), now)
                             .map_err(|_| AgentWorkFailure::ContextLost)
                             .and_then(|browser| {
-                                (request.prepare)(Box::new(browser), self.audit.clone())
+                                (request.prepare)(
+                                    Box::new(browser),
+                                    self.audit.clone(),
+                                    self.prior_human.take(),
+                                )
                             });
                         match prepared {
                             Ok(staged)

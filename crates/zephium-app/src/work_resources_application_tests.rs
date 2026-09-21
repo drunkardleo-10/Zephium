@@ -491,7 +491,10 @@ fn worker_exit_wake(blocking_shutdown: bool, post_completion: bool) {
     let request = ActorRequest {
         run: ContextRunId::generate(),
         deadline: AgentPolicyInstant::from_millis(600_002),
-        prepare: Box::new(move |browser, audit| {
+        prepare: Box::new(move |browser, audit, waiting| {
+            if waiting.is_some() {
+                return Err(AgentWorkFailure::Contract);
+            }
             let input = input(browser.binding(), Arc::new(Clock(AtomicU64::new(2))));
             let (transport, server) =
                 fixture_provider_responses(vec![response_stream(1), response_stream(2)]);
@@ -727,7 +730,10 @@ fn request_with_result(
     ActorRequest {
         run,
         deadline: AgentPolicyInstant::from_millis(600_002),
-        prepare: Box::new(move |browser, audit| {
+        prepare: Box::new(move |browser, audit, waiting| {
+            if waiting.is_some() {
+                return Err(AgentWorkFailure::Contract);
+            }
             let input = input(browser.binding(), Arc::new(Clock(AtomicU64::new(2))));
             let input = if persist {
                 input.persist_extraction_result().unwrap()
@@ -1783,7 +1789,10 @@ fn pre_dispatch_failure_releases_unused_budget_only_after_exact_terminal_ack() {
     let request = ActorRequest {
         run: ContextRunId::generate(),
         deadline: AgentPolicyInstant::from_millis(600_002),
-        prepare: Box::new(move |browser, audit| {
+        prepare: Box::new(move |browser, audit, waiting| {
+            if waiting.is_some() {
+                return Err(AgentWorkFailure::Contract);
+            }
             let input = input_with_budget(
                 browser.binding(),
                 Arc::new(Clock(AtomicU64::new(2))),
@@ -1831,5 +1840,190 @@ fn pre_dispatch_failure_releases_unused_budget_only_after_exact_terminal_ack() {
     assert_eq!(work.usage(), Some(usage));
     for server in completed_servers.lock().unwrap().drain(..) {
         assert_eq!(server.join().unwrap(), 0);
+    }
+}
+
+#[test]
+fn human_handoff_waits_for_terminal_ack() {
+    if child("human_handoff_waits_for_terminal_ack") {
+        return;
+    }
+    human_handoff_contract(false);
+}
+#[test]
+fn human_handoff_drains_cancelled_presentation() {
+    if child("human_handoff_drains_cancelled_presentation") {
+        return;
+    }
+    human_handoff_contract(true);
+}
+fn human_handoff_contract(cancel: bool) {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut work, native, store) = coordinator(directory.path());
+        wait_until(|| {
+            work.poll(now());
+            drain_events(&mut work);
+            work.ready()
+        });
+        store.hold.store(
+            AgentWorkDisposition::WaitingForHuman as u8,
+            Ordering::Release,
+        );
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let actor = ActorRequest {
+            run: ContextRunId::generate(),
+            deadline: AgentPolicyInstant::from_millis(600_002),
+            prepare: Box::new(move |browser, audit, waiting| {
+                assert!(waiting.is_none());
+                let input = input(browser.binding(), Arc::new(Clock(AtomicU64::new(2))));
+                let response = response_stream(1)
+                    .replace("\"name\":\"extract\"", "\"name\":\"show_for_human\"")
+                    .replace(
+                        r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+                        r#"{\"reason\":\"sign_in\"}"#,
+                    );
+                let (transport, server) = fixture_provider_responses(vec![response]);
+                sender.send(server).unwrap();
+                StagedActor::for_probe(
+                    input,
+                    browser,
+                    transport,
+                    AgentProviderCredential::try_new(
+                        AgentProviderKind::OpenAiResponses,
+                        "fixture-not-a-secret".into(),
+                    )
+                    .unwrap(),
+                    audit,
+                    Box::new(HumanRequestTask(task())),
+                )
+            }),
+        };
+        assert!(work.submit(actor, now()).is_ok());
+        wait_until(|| {
+            work.poll(now());
+            drain_events(&mut work);
+            assert!(
+                work.failures() == (None, None),
+                "fixture failure: {:?} {:?}",
+                work.phase(),
+                work.failures()
+            );
+            store.pending.lock().unwrap().is_some()
+        });
+        let deadline = Instant::now() + Duration::from_secs(120);
+        work.start_human_wait(deadline, now());
+        assert!(
+            work.human_snapshot().is_none(),
+            "unacknowledged durable handoff is not presentation authority"
+        );
+        store.release(0);
+        wait_until(|| {
+            work.poll(now());
+            drain_events(&mut work);
+            work.ready()
+        });
+        work.start_human_wait(deadline, now());
+        let human = work.human_snapshot().unwrap();
+        assert_eq!(human.phase, RetainedHumanPhase::WaitingForHuman);
+        assert_eq!(human.deadline, deadline);
+        assert!(!work.ready());
+        let region = WorkBrowserHumanRegion::try_new(0, 0, 800, 600).unwrap();
+        assert!(!work.present_human(human.generation + 1, region, now()));
+        native.hold_human.store(true, Ordering::Release);
+        assert!(work.present_human(human.generation, region, now()));
+        assert!(!work.continue_human(human.generation, now()));
+        if cancel {
+            work.begin_shutdown();
+        }
+        let (request, callback) = native.human.lock().unwrap().take().unwrap();
+        finish_human_fixture(request, callback);
+        work.poll(now());
+        assert_eq!(
+            work.human_snapshot().unwrap().phase,
+            if cancel {
+                RetainedHumanPhase::Released
+            } else {
+                RetainedHumanPhase::Presented
+            }
+        );
+        if !cancel {
+            assert!(work.human_snapshot().unwrap().can_continue);
+            assert_eq!(native.acquisitions.load(Ordering::Acquire), 1);
+            native.hold_human.store(false, Ordering::Release);
+            assert!(work.continue_human(human.generation, now()));
+            work.poll(now());
+            assert!(work.ready());
+            let resumed = work.human_resume().unwrap();
+            assert_eq!(resumed.model_calls, 1);
+            assert_eq!(resumed.actions, 0);
+            assert!(
+                !work.continue_human(human.generation, now()),
+                "continuation is consumed once"
+            );
+        }
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .join()
+                .unwrap(),
+            1
+        );
+        native.join();
+        if !cancel {
+            let servers: Servers = Arc::new(Mutex::new(Vec::new()));
+            let recorders = servers.clone();
+            let successor = ActorRequest {
+                run: ContextRunId::generate(),
+                deadline: AgentPolicyInstant::from_millis(600_002),
+                prepare: Box::new(move |browser, audit, waiting| {
+                    assert!(waiting.is_some());
+                    let input = input(browser.binding(), Arc::new(Clock(AtomicU64::new(2))));
+                    let (transport, server) =
+                        fixture_provider_responses(vec![response_stream(1), response_stream(2)]);
+                    recorders.lock().unwrap().push(server);
+                    StagedActor::for_probe_human(
+                        input,
+                        browser,
+                        transport,
+                        AgentProviderCredential::try_new(
+                            AgentProviderKind::OpenAiResponses,
+                            "fixture-not-a-secret".into(),
+                        )
+                        .unwrap(),
+                        audit,
+                        Box::new(task()),
+                        waiting,
+                    )
+                }),
+            };
+            assert!(work.submit(successor, now()).is_ok());
+            wait_until(|| {
+                work.poll(now());
+                drain_events(&mut work);
+                work.phase() == AdmissionPhase::Terminal
+            });
+            assert_eq!(
+                work.record().unwrap().disposition(),
+                AgentWorkDisposition::Succeeded
+            );
+            assert!(work.take_extraction().is_some());
+            assert!(work.human_snapshot().is_none());
+            assert_eq!(native.acquisitions.load(Ordering::Acquire), 2);
+            assert_eq!(native.reads.load(Ordering::Acquire), 2);
+            for server in servers.lock().unwrap().drain(..) {
+                assert_eq!(server.join().unwrap(), 2);
+            }
+            native.join();
+        }
+        assert!(work.shutdown_until(
+            &Clock(AtomicU64::new(2)),
+            Instant::now() + Duration::from_secs(2)
+        ));
+        assert_eq!(native.destructions.load(Ordering::Acquire), 1);
     }
 }

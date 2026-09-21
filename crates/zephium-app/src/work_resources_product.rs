@@ -1,11 +1,58 @@
 //! Shipping single-page retained Work attachment. No UI or native authority in handles.
 use super::application::{ActorRequest, AdmissionPhase, RetainedWork, StagedActor};
+pub use super::application::{RetainedHumanPhase, RetainedHumanResume, RetainedHumanSnapshot};
 use super::*;
 use crate::{AgentWorkProfileBinding, AgentWorkProfileReadiness, CallbackHandle, Command};
 use std::collections::VecDeque;
 use std::time::Instant;
 use zephium_agent_controller::*;
 use zephium_agent_provider_transport::AgentProviderCredential;
+
+/// Fresh trusted successor; contains no retained native owner or old model session.
+pub struct PreparedRetainedContinuation {
+    generation: u32,
+    spec: AgentWorkRetainedResourceSpec,
+    actor: ActorRequest,
+}
+impl PreparedRetainedContinuation {
+    pub fn try_new(
+        generation: u32,
+        input: AgentWorkRunInput,
+        config: crate::AgentWorkApplicationConfig,
+        credential: AgentProviderCredential,
+        task: Box<dyn AgentWorkTask>,
+    ) -> Result<Self, AgentWorkFailure> {
+        let spec = input.retained_resource_spec()?;
+        let (runtime, provider) = config.into_parts();
+        let actor = ActorRequest {
+            run: spec.identity.owner(),
+            deadline: spec.expires_at,
+            prepare: Box::new(move |browser, audit, waiting| {
+                let waiting = waiting.ok_or(AgentWorkFailure::Contract)?;
+                StagedActor::try_new(
+                    input,
+                    browser,
+                    runtime,
+                    provider,
+                    credential,
+                    audit,
+                    task,
+                    Some(waiting),
+                )
+            }),
+        };
+        Ok(Self {
+            generation,
+            spec,
+            actor,
+        })
+    }
+}
+
+enum HumanCommand {
+    Present(u32, WorkBrowserHumanRegion),
+    Continue(u32),
+}
 
 #[cfg(feature = "work-execution-probe")]
 #[path = "work_resources_public_product.rs"]
@@ -90,8 +137,10 @@ impl PreparedRetainedWork {
         let actor = ActorRequest {
             run: spec.identity.owner(),
             deadline: spec.expires_at,
-            prepare: Box::new(move |browser, audit| {
-                StagedActor::try_new(input, browser, runtime, provider, credential, audit, task)
+            prepare: Box::new(move |browser, audit, waiting| {
+                StagedActor::try_new(
+                    input, browser, runtime, provider, credential, audit, task, waiting,
+                )
             }),
         };
         Self::from_actor(
@@ -187,6 +236,10 @@ pub struct RetainedWorkSnapshot {
     pub last_review: Option<Result<AgentWorkRecord, AgentWorkJournalError>>,
 }
 struct Projection {
+    human: Option<RetainedHumanSnapshot>,
+    human_resume: Option<RetainedHumanResume>,
+    human_command: Option<HumanCommand>,
+    continuation: Option<PreparedRetainedContinuation>,
     #[cfg(feature = "work-execution-probe")]
     construction_resource: Option<WorkBrowserResourceJoin>,
     frame: Option<Arc<zephium_agentic::WorkBrowserFrame>>,
@@ -216,6 +269,73 @@ pub struct RetainedWorkHandle {
     callback: CallbackHandle,
 }
 impl RetainedWorkHandle {
+    pub fn human_snapshot(&self) -> Option<RetainedHumanSnapshot> {
+        self.signal.projection.lock().ok()?.human
+    }
+    pub fn human_resume(&self) -> Option<RetainedHumanResume> {
+        self.signal.projection.lock().ok()?.human_resume.clone()
+    }
+    /// Queue one explicit presentation of this exact page. Acceptance is not completion.
+    pub fn present_human(&self, generation: u32, region: WorkBrowserHumanRegion) -> bool {
+        self.human_command(
+            generation,
+            RetainedHumanPhase::WaitingForHuman,
+            HumanCommand::Present(generation, region),
+        )
+    }
+    /// Retire human input and freeze the page; fresh trusted admission remains separate.
+    pub fn continue_human(&self, generation: u32) -> bool {
+        self.human_command(
+            generation,
+            RetainedHumanPhase::Presented,
+            HumanCommand::Continue(generation),
+        )
+    }
+    fn human_command(
+        &self,
+        generation: u32,
+        phase: RetainedHumanPhase,
+        command: HumanCommand,
+    ) -> bool {
+        if self.signal.close.load(Ordering::Acquire) || self.signal.stop.load(Ordering::Acquire) {
+            return false;
+        }
+        let Ok(mut projection) = self.signal.projection.lock() else {
+            return false;
+        };
+        if projection.human_command.is_some()
+            || projection.human.is_none_or(|human| {
+                human.generation != generation
+                    || human.phase != phase
+                    || Instant::now() >= human.deadline
+            })
+        {
+            return false;
+        }
+        projection.human_command = Some(command);
+        drop(projection);
+        self.callback.dispatch(Command::WorkWake)
+    }
+    pub fn resume_after_human(&self, prepared: PreparedRetainedContinuation) -> bool {
+        if self.signal.close.load(Ordering::Acquire) || self.signal.stop.load(Ordering::Acquire) {
+            return false;
+        }
+        let Ok(mut projection) = self.signal.projection.lock() else {
+            return false;
+        };
+        if projection.continuation.is_some()
+            || projection.human.is_none_or(|human| {
+                human.generation != prepared.generation
+                    || human.phase != RetainedHumanPhase::ReadyToResume
+                    || Instant::now() >= human.deadline
+            })
+        {
+            return false;
+        }
+        projection.continuation = Some(prepared);
+        drop(projection);
+        self.callback.dispatch(Command::WorkWake)
+    }
     /// Request destruction of this exact owned resource after scoped drain.
     /// Queue acceptance is not a cleanup acknowledgement.
     pub fn close(&self) -> bool {
@@ -344,6 +464,10 @@ impl CallbackHandle {
             close: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             projection: Mutex::new(Projection {
+                human: None,
+                human_resume: None,
+                human_command: None,
+                continuation: None,
                 #[cfg(feature = "work-execution-probe")]
                 construction_resource: None,
                 frame: None,
@@ -530,12 +654,59 @@ impl ProductWork {
             self.deadline_expired = true;
             self.signal.stop.store(true, Ordering::Release);
         }
+        if work
+            .human_deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+            || work
+                .human_snapshot()
+                .is_some_and(|human| human.phase == RetainedHumanPhase::Released)
+        {
+            self.signal.close.store(true, Ordering::Release);
+        }
         if self.signal.stop.load(Ordering::Acquire) {
             self.request.take();
             work.cancel();
         }
         if self.signal.reconcile.swap(false, Ordering::AcqRel) {
             work.reconcile();
+        }
+        let (human_command, continuation) = match self.signal.projection.lock() {
+            Ok(mut projection) => (
+                projection.human_command.take(),
+                projection.continuation.take(),
+            ),
+            Err(_) => return,
+        };
+        if !self.signal.close.load(Ordering::Acquire) && !self.signal.stop.load(Ordering::Acquire) {
+            if let Some(command) = human_command {
+                let accepted = match command {
+                    HumanCommand::Present(generation, region) => {
+                        work.present_human(generation, region, now)
+                    }
+                    HumanCommand::Continue(generation) => work.continue_human(generation, now),
+                };
+                if !accepted {
+                    self.signal.close.store(true, Ordering::Release);
+                }
+            }
+            if let Some(continuation) = continuation {
+                let valid = self.request.is_none()
+                    && work.human_resume().is_some_and(|resume| {
+                        resume.generation == continuation.generation
+                            && resume.context == continuation.spec.identity.id()
+                            && resume.document == continuation.spec.target
+                    })
+                    && continuation.spec.deadline <= self.deadline
+                    && continuation.spec.deadline > Instant::now();
+                if valid {
+                    if let Ok(mut projection) = self.signal.projection.lock() {
+                        projection.snapshot.run = continuation.actor.run;
+                    }
+                    self.request = Some(continuation.actor);
+                } else {
+                    self.signal.close.store(true, Ordering::Release);
+                }
+            }
         }
         let closed = if self.signal.close.load(Ordering::Acquire) {
             work.begin_shutdown();
@@ -572,6 +743,9 @@ impl ProductWork {
             };
             projection.events.push_back(event);
         }
+        work.start_human_wait(self.deadline, now);
+        projection.human = work.human_snapshot();
+        projection.human_resume = work.human_resume();
         projection.frame = work.latest_frame();
         #[cfg(feature = "work-execution-probe")]
         if work.phase() == AdmissionPhase::Terminal
@@ -629,6 +803,11 @@ impl ProductWork {
             .as_ref()
             .and_then(RetainedWork::next_deadline)
             .into_iter()
+            .chain(
+                self.coordinator
+                    .as_ref()
+                    .and_then(RetainedWork::human_deadline),
+            )
             .chain(
                 (!self.deadline_expired
                     && self

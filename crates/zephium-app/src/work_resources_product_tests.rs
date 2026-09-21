@@ -136,7 +136,10 @@ fn prepared_until_with_document_policy<S: AgentWorkJournalPort + AgentAuditPort 
     let actor = ActorRequest {
         run: identity.owner(),
         deadline: spec.expires_at,
-        prepare: Box::new(move |browser, audit| {
+        prepare: Box::new(move |browser, audit, waiting| {
+            if waiting.is_some() {
+                return Err(AgentWorkFailure::Contract);
+            }
             let responses = if form_action {
                 vec![action_tests::act_stream("fixture value")]
             } else {

@@ -458,12 +458,44 @@ impl WorkResourceOwner {
             || !resource.current()
             || !matches!(
                 self.shared.lock_rows()?.phase(join)?,
-                WorkBrowserResourcePhase::Retained | WorkBrowserResourcePhase::Destroyed
+                WorkBrowserResourcePhase::Retained
+                    | WorkBrowserResourcePhase::Destroyed
+                    | WorkBrowserResourcePhase::PresentingHuman
+                    | WorkBrowserResourcePhase::PresentedHuman
+                    | WorkBrowserResourcePhase::ContinuingAfterHuman
             )
         {
             self.shared.lock_rows()?.quarantine(join)?;
         }
         let request = self.shared.lock_rows()?.destroy(join)?;
+        PendingLifecycle::dispatch(self.shared.clone(), resource, request, None, None)
+    }
+
+    fn human_lifecycle(
+        &self,
+        join: &WorkBrowserResourceJoin,
+        region: Option<WorkBrowserHumanRegion>,
+        now: AgentPolicyInstant,
+        deadline: AgentPolicyInstant,
+    ) -> Result<PendingLifecycle, Refusal> {
+        let resource = self.shared.resource(join)?;
+        self.shared.current(&resource)?;
+        if resource.flights.load(Ordering::Acquire) != 0
+            || resource.orphaned_actions.load(Ordering::Acquire) != 0
+        {
+            return Err(Refusal::Busy);
+        }
+        let request = if let Some(region) = region {
+            if !resource.reusable.load(Ordering::Acquire) {
+                return Err(Refusal::Busy);
+            }
+            self.shared
+                .lock_rows()?
+                .present_human(join, region, now, deadline)?
+        } else {
+            self.shared.lock_rows()?.continue_after_human(join, now)?
+        };
+        resource.reusable.store(false, Ordering::Release);
         PendingLifecycle::dispatch(self.shared.clone(), resource, request, None, None)
     }
 
