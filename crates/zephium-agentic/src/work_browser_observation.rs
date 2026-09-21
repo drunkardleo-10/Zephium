@@ -64,9 +64,15 @@ pub struct WorkBrowserReadBinding {
     document_policy: crate::WorkBrowserDocumentPolicy,
     storage: ContextProfileStorageClass,
     isolated_public: bool,
+    at_admission_document: bool,
 }
 
 impl WorkBrowserReadBinding {
+    /// Construction or a completed human handoff established this admission epoch.
+    pub const fn is_admission_document(&self) -> bool {
+        self.at_admission_document
+    }
+
     /// Exact process-local resource incarnation and execution lease.
     pub const fn lease(&self) -> &WorkBrowserExecutionLease {
         &self.lease
@@ -236,6 +242,7 @@ impl WorkBrowserResources {
             document_policy: row.document_policy,
             storage: row.storage,
             isolated_public: row.isolated_public,
+            at_admission_document: row.navigation_epoch == row.admission_epoch,
         })
     }
 

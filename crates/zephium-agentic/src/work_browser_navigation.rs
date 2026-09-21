@@ -449,6 +449,7 @@ mod tests {
         assert!(event.is_current());
         assert_eq!(event.terminal().operation().context(), successor);
         let binding = rows.read_binding(&lease, now(6)).unwrap();
+        assert!(!binding.is_admission_document());
         assert_eq!(binding.document(), &target("next"));
         assert_eq!(binding.requested_document(), &target("source"));
         assert_eq!(binding.lease(), &lease);

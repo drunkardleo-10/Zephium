@@ -325,7 +325,7 @@ impl AgentRunPolicy {
             || self.navigation_attempts != 0
             || self.initial_navigation_document.is_some()
             || binding.frame().context().identity().owner() != self.manifest.run()
-            || binding.frame().context().navigation_epoch().get() != 1
+            || !binding.is_admission_document()
             || !binding
                 .document_policy()
                 .admits_final_document(binding.requested_document(), binding.document())

@@ -666,7 +666,7 @@ fn structured_product_window_reaches_third_provider_request_with_original_policy
 #[test]
 fn initial_effective_metadata_requires_original_retained_binding_before_model_calls() {
     use crate::*;
-    for fault in 0..4 {
+    for fault in 0..5 {
         let (f, _, _) = navigation_fixture(5, 10_000, vec![target(), final_target()], true);
         let mut policy = if fault == 3 {
             f.policy
@@ -686,7 +686,7 @@ fn initial_effective_metadata_requires_original_retained_binding_before_model_ca
             "https://source.example.test/start"
         })
         .unwrap();
-        let effective =
+        let mut effective =
             ContextNavigationTarget::parse(&format!("{}?opaque=initial", requested.as_url()))
                 .unwrap();
         let mut rows = WorkBrowserResources::new(WorkId::generate(), profile(902));
@@ -707,6 +707,30 @@ fn initial_effective_metadata_requires_original_retained_binding_before_model_ca
                 AgentPolicyInstant::from_millis(0),
             )
             .unwrap();
+        if fault == 4 {
+            let present = rows
+                .present_human(
+                    &resource,
+                    WorkBrowserHumanRegion::try_new(0, 0, 800, 600).unwrap(),
+                    AgentPolicyInstant::from_millis(0),
+                    AgentPolicyInstant::from_millis(500),
+                )
+                .unwrap();
+            rows.settle_at(
+                present.complete(WorkBrowserResourceNativeOutcome::HumanPresented),
+                AgentPolicyInstant::from_millis(0),
+            )
+            .unwrap();
+            let resume = rows
+                .continue_after_human(&resource, AgentPolicyInstant::from_millis(0))
+                .unwrap();
+            effective = requested.clone();
+            rows.settle_at(
+                resume.complete_human_document(effective.clone()),
+                AgentPolicyInstant::from_millis(0),
+            )
+            .unwrap();
+        }
         let acquire = rows
             .acquire(
                 &resource,
@@ -726,8 +750,12 @@ fn initial_effective_metadata_requires_original_retained_binding_before_model_ca
             .read_binding(&lease, AgentPolicyInstant::from_millis(2))
             .unwrap();
         let result = policy.bind_retained_initial_document(&binding);
-        assert_eq!(result.is_ok(), fault == 0, "fault {fault}");
-        if fault == 0 {
+        assert_eq!(result.is_ok(), matches!(fault, 0 | 4), "fault {fault}");
+        if matches!(fault, 0 | 4) {
+            assert_eq!(
+                binding.frame().context().navigation_epoch().get(),
+                if fault == 4 { 2 } else { 1 }
+            );
             let context = binding.frame().context();
             let observed = discovery_observation(context, 1);
             let request = call_request(1, f.lease, account(context, NOW), 0, 0, 0, NOW);

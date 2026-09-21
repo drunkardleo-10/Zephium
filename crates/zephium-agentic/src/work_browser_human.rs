@@ -259,6 +259,7 @@ pub(super) fn settle(
                     row.admission_document = Some(effective.clone());
                     row.effective_document = Some(effective);
                     row.navigation_epoch = epoch;
+                    row.admission_epoch = epoch;
                     row.frame_generation = generation;
                     row.document_available = true;
                     row.observed = false;
@@ -416,6 +417,7 @@ mod tests {
             .unwrap();
         let binding = rows.read_binding(&fresh, now(18)).unwrap();
         assert_eq!(binding.requested_document(), &target);
+        assert!(binding.is_admission_document());
         assert_eq!(binding.frame().context().navigation_epoch().get(), 2);
         assert!(!rows
             .automation_state(&fresh, now(19))

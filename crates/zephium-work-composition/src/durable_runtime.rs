@@ -607,13 +607,19 @@ impl MacosWorkComposition {
                         prior_usage = total;
                         prior_calls = calls;
                         prior_actions = actions;
+                        #[cfg(feature = "public-qualification")]
+                        {
+                            diagnostic_sent = false;
+                        }
+                        trace("human:successor_queued");
                         disposition = None;
                         intervention = None;
                         mapping_artifact = false;
                         Ok::<(), WorkError>(())
                     }
                     .await;
-                    if result.is_err() {
+                    if let Err(error) = result {
+                        trace(&format!("human:resume_refused:{error:?}"));
                         requested_close = true;
                     }
                 }
@@ -622,6 +628,9 @@ impl MacosWorkComposition {
             if last_phase != Some(snapshot.phase) {
                 last_phase = Some(snapshot.phase);
                 trace(&format!("phase:{:?}", snapshot.phase));
+                if let Some(failure) = snapshot.failure {
+                    trace(&format!("failure:{failure:?}"));
+                }
             }
             if matches!(
                 snapshot.phase,
