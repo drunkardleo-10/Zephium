@@ -3480,3 +3480,30 @@ fn completed_unverified_read_scroll_closes_without_replay_or_native_debt() {
     let _guard = lock(&SERIAL);
     provider_fixture(ProviderFault::Native(Fault::ScrollVerification));
 }
+
+#[test]
+fn isolated_storage_requirement_preserves_the_approved_scope_and_deadline() {
+    let input = input();
+    let original = input.retained_resource_spec().unwrap();
+    let manifest = (
+        input.manifest.id(),
+        input.manifest.budget(),
+        input.manifest.scope().max_sensitivity(),
+        input.manifest.scope().accounts().to_vec(),
+    );
+    let isolated = input.with_isolated_website_data();
+    let spec = isolated.retained_resource_spec().unwrap();
+    assert!(spec.isolated_public);
+    assert_eq!(spec.identity, original.identity);
+    assert_eq!(spec.target, original.target);
+    assert_eq!(spec.deadline, original.deadline);
+    assert_eq!(
+        (
+            isolated.manifest.id(),
+            isolated.manifest.budget(),
+            isolated.manifest.scope().max_sensitivity(),
+            isolated.manifest.scope().accounts().to_vec()
+        ),
+        manifest
+    );
+}

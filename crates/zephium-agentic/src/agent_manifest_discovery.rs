@@ -89,6 +89,31 @@ pub struct AgentNavigationDiscovery {
 }
 
 impl AgentNavigationDiscovery {
+    /// One explicitly scoped account page, with no successor navigation authority.
+    pub fn try_new_account_page(
+        departure: crate::ContextNavigationTarget,
+        document_policy: crate::WorkBrowserDocumentPolicy,
+    ) -> Result<Self, AgentManifestContractError> {
+        if !document_policy.admits_request(&departure) {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        let origin = SemanticOrigin::parse(departure.as_url().as_str())
+            .map_err(|_| AgentManifestContractError::NavigationRoute)?;
+        let mut scope = Self::try_new_production(
+            departure,
+            vec![AgentNavigationOriginRule::try_new(
+                origin,
+                "/".into(),
+                true,
+                false,
+            )?],
+            1,
+            1,
+        )?;
+        scope.max_hops = 0;
+        scope.document_policy = document_policy;
+        Ok(scope)
+    }
     /// Anonymous reading of one page, with no successor navigation authority.
     pub fn try_new_public_page(
         departure: crate::ContextNavigationTarget,
@@ -590,5 +615,27 @@ mod tests {
         .unwrap()
         .with_same_document_query_updates()
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod account_page_tests {
+    use super::*;
+    #[test]
+    fn approved_account_page_has_no_navigation_or_anonymous_authority() {
+        let target =
+            crate::ContextNavigationTarget::parse("https://accounts.example.com/home").unwrap();
+        let scope = AgentNavigationDiscovery::try_new_account_page(
+            target.clone(),
+            crate::WorkBrowserDocumentPolicy::PublicSameDocumentQuery,
+        )
+        .unwrap();
+        assert_eq!(scope.departure(), &target);
+        assert_eq!(scope.max_hops(), 0);
+        assert!(!scope.is_public_web());
+        assert_eq!(scope.origins().count(), 1);
+        assert!(!scope.admits(
+            &crate::ContextNavigationTarget::parse("https://other.example.com/home").unwrap()
+        ));
     }
 }

@@ -403,9 +403,15 @@ pub struct AgentWorkRunInput {
     objective: Option<AgentProviderObjective>,
     settings: AgentWorkRunSettings,
     durable_result: bool,
+    isolated_store: bool,
 }
 
 impl AgentWorkRunInput {
+    /// Requires isolated native storage without changing account or disclosure scope.
+    pub fn with_isolated_website_data(mut self) -> Self {
+        self.isolated_store = true;
+        self
+    }
     /// Descriptive original resource construction operands for the trusted
     /// application. These do not mint a browser, account or execution lease.
     pub fn retained_resource_spec(
@@ -414,13 +420,14 @@ impl AgentWorkRunInput {
         Ok(AgentWorkRetainedResourceSpec {
             identity: self.context.identity,
             storage: self.context.storage,
-            isolated_public: self
-                .manifest
-                .plan_node(self.lease.node())
-                .is_some_and(|node| {
-                    node.navigation_discovery()
-                        .is_some_and(|scope| scope.is_public_web())
-                }),
+            isolated_public: self.isolated_store
+                || self
+                    .manifest
+                    .plan_node(self.lease.node())
+                    .is_some_and(|node| {
+                        node.navigation_discovery()
+                            .is_some_and(|scope| scope.is_public_web())
+                    }),
             target: self.context.target.clone(),
             document_policy: self.context.document_policy,
             clock: self.settings.clock.clone(),
@@ -512,6 +519,7 @@ impl AgentWorkRunInput {
             objective: Some(objective),
             settings,
             durable_result: false,
+            isolated_store: false,
         })
     }
     /// Explicitly opts a trusted extraction task into profile-owned result
@@ -2105,7 +2113,8 @@ impl AgentWorkController {
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
             }
             state.refresh_account(worker, browser)?;
-            observation = Self::fit_model_observation(Self::observe(state, worker, browser).await?)?;
+            observation =
+                Self::fit_model_observation(Self::observe(state, worker, browser).await?)?;
             if !looks_like_human_challenge(&observation) {
                 return Ok((observation, false));
             }

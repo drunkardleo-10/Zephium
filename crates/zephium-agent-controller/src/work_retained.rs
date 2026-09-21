@@ -398,6 +398,37 @@ impl AgentWorkRetainedController {
         ),
         AgentWorkFailure,
     > {
+        Self::validate_human_successor(waiting, browser.as_ref())?;
+        Self::try_new(input, browser, transport, credential, audit, task)
+    }
+
+    #[cfg(feature = "probe-harness")]
+    #[allow(clippy::too_many_arguments)]
+    /// Release-excluded successor adapter with the same one-use handoff checks.
+    pub fn try_new_after_human_for_probe(
+        waiting: AgentWorkWaitingForHuman,
+        input: AgentWorkRunInput,
+        browser: Box<dyn AgentWorkRetainedBrowser>,
+        transport: AgentProviderTransport,
+        credential: AgentProviderCredential,
+        audit: Arc<dyn AgentAuditPort>,
+        task: Box<dyn AgentWorkTask>,
+    ) -> Result<
+        (
+            Self,
+            AgentWorkRetainedHandle,
+            zephium_agent_runtime::AgentRuntimeScopedBinding,
+        ),
+        AgentWorkFailure,
+    > {
+        Self::validate_human_successor(waiting, browser.as_ref())?;
+        Self::try_new_for_probe(input, browser, transport, credential, audit, task)
+    }
+
+    fn validate_human_successor(
+        waiting: AgentWorkWaitingForHuman,
+        browser: &dyn AgentWorkRetainedBrowser,
+    ) -> Result<(), AgentWorkFailure> {
         let prior = waiting.request();
         let expected_resource = prior
             .retained_resource()
@@ -409,7 +440,7 @@ impl AgentWorkRetainedController {
         {
             return Err(AgentWorkFailure::Contract);
         }
-        Self::try_new(input, browser, transport, credential, audit, task)
+        Ok(())
     }
 
     /// Original dormant hard deadline, including the retained lease intersection.
