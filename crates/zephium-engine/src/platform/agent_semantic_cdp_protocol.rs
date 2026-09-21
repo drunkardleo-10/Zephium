@@ -351,7 +351,7 @@ pub(crate) enum SemanticCdpInvocationError {
 pub(crate) fn install_runtime_in_context_command(
     context: &SemanticExecutionContext,
 ) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
-    let source = SEMANTIC_RUNTIME_PROGRAM.source();
+    let source = SEMANTIC_RUNTIME_PROGRAM.cdp_source();
     if source.len() > MAX_SEMANTIC_RUNTIME_SOURCE_BYTES || !source.is_ascii() {
         return Err(SemanticCdpProtocolError::Limit);
     }
@@ -653,7 +653,7 @@ mod tests {
         assert!(declaration.ends_with(INSTALL_FUNCTION_SUFFIX));
         assert_eq!(
             declaration
-                .matches(SEMANTIC_RUNTIME_PROGRAM.source())
+                .matches(SEMANTIC_RUNTIME_PROGRAM.cdp_source())
                 .count(),
             1
         );

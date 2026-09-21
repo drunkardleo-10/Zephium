@@ -106,6 +106,12 @@ impl SemanticRuntimeProgram {
         SEMANTIC_RUNTIME_SOURCE
     }
 
+    /// Precompacted identical program for the fixed Windows CDP wire ceiling.
+    /// Regenerate with scripts/compact-semantic-runtime.mjs; no runtime rewriting.
+    pub const fn cdp_source(self) -> &'static str {
+        include_str!("../assets/semantic-runtime-cdp-v1.js")
+    }
+
     /// Pinned SHA-256 digest of the exact reviewed source bytes.
     pub const fn sha256(self) -> [u8; 32] {
         SEMANTIC_RUNTIME_SOURCE_SHA256
@@ -1683,6 +1689,21 @@ mod tests {
         let debug = format!("{SEMANTIC_RUNTIME_PROGRAM:?}");
         assert!(debug.contains("[redacted]"));
         assert!(!debug.contains("WeakMap"));
+    }
+
+    #[test]
+    fn compact_program_is_bound_to_the_reviewed_source_and_exact_output() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../assets/semantic-runtime-cdp-v1.json"
+        ))
+        .expect("manifest");
+        for (key, source) in [
+            ("source", SEMANTIC_RUNTIME_PROGRAM.source()),
+            ("compact", SEMANTIC_RUNTIME_PROGRAM.cdp_source()),
+        ] {
+            assert!(source.is_ascii());
+            assert_eq!(manifest[key], format!("{:x}", Sha256::digest(source.as_bytes())));
+        }
     }
 
     #[test]
