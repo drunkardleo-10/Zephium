@@ -2,6 +2,8 @@
 mod agent_context;
 #[cfg(feature = "agentic-browser")]
 mod agent_history;
+#[cfg(feature = "agentic-browser-qa")]
+pub(crate) mod agentic_liveness_probe;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use agent_history::AgentHistoryBackTicket;
 #[cfg(feature = "native-agentic-foreground-probe")]

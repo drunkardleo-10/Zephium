@@ -74,6 +74,12 @@ native-agentic-work-lifetime-diagnostic = ["agentic-browser"]
 # Compiles the production, zero-idle agent-browser native port. The feature is
 # intentionally separate from the release-excluded probe vocabulary.
 agentic-browser = ["dep:zephium-agentic", "dep:zeroize"]
+agentic-browser-qa = ["agentic-browser", "objc2-web-kit/WKHTTPCookieStore"]
+
+[[bin]]
+name = "macos-agentic-liveness-probe"
+path = "src/bin/macos_agentic_liveness_probe.rs"
+required-features = ["agentic-browser-qa"]
 
 [[bin]]
 name = "macos-principal-isolation-probe"

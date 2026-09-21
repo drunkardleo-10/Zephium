@@ -13,6 +13,14 @@ mod navigation_epoch;
 mod pane_geometry;
 mod platform;
 
+#[cfg(all(feature = "agentic-browser-qa", not(debug_assertions)))]
+compile_error!("agent browser QA is forbidden in optimized builds");
+
+#[cfg(all(target_os = "macos", feature = "agentic-browser-qa"))]
+pub use platform::macos::agentic_liveness_probe::{
+    run_interactive_government_probe, run_liveness_probe, LivenessSite, LivenessStage,
+};
+
 #[cfg(all(
     feature = "native-agentic-work-lifetime-diagnostic",
     not(debug_assertions)

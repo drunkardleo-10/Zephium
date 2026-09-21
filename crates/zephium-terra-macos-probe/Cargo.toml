@@ -14,6 +14,7 @@ live-probe = [
     "zephium-agent-controller/probe-harness",
     "zephium-agent-provider-transport/probe-harness",
     "zephium-engine/native-agentic-semantic-probe",
+    "zephium-engine/agentic-browser-qa",
     "zephium-work-composition/public-qualification",
     "zephium-work-composition/navigation-qualification",
 ]

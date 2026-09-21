@@ -60,7 +60,13 @@ pub(crate) use extension_action::ExtensionActionInvocationOutcome;
 pub(crate) use profiles::release_linux_erasure_obligations;
 #[cfg(target_os = "macos")]
 pub(crate) use profiles::release_macos_erasure_obligation;
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[cfg(all(
+    target_os = "macos",
+    any(
+        feature = "native-web-extension-probes",
+        feature = "agentic-browser-qa"
+    )
+))]
 pub(crate) use scripts::protected_script_specs_for_native_probe;
 
 #[cfg(target_os = "windows")]

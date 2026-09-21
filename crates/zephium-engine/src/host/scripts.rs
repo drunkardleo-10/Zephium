@@ -590,7 +590,13 @@ const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec; 3] = [
 /// registry makes a future protected-script addition fail the installed-state
 /// gate unless its real source and frame scope survive native extension
 /// load/unload as well.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[cfg(all(
+    target_os = "macos",
+    any(
+        feature = "native-web-extension-probes",
+        feature = "agentic-browser-qa"
+    )
+))]
 pub(crate) fn protected_script_specs_for_native_probe(
 ) -> [(&'static str, bool); PROTECTED_SCRIPT_SPECS.len()] {
     PROTECTED_SCRIPT_SPECS.map(|spec| (spec.source, spec.all_frames))

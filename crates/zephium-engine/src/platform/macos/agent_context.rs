@@ -573,18 +573,39 @@ where
         })
         .with_visible(false)
         .with_focused(false)
-        .with_devtools(false)
+        .with_devtools(owned_agent_view_inspectable())
         .with_autoplay(false)
         .with_fullscreen_enabled(false)
         .with_picture_in_picture_enabled(false)
         .with_general_autofill_enabled(false)
         .with_apple_navigation_action_handler(move |target, action| {
-            work_policy.as_ref().map_or_else(
+            let allowed = work_policy.as_ref().map_or_else(
                 || navigation_policy.allows(&target),
                 |gate| gate.allows_apple_action(&target, action),
-            )
+            );
+            #[cfg(feature = "agentic-browser-qa")]
+            if url::Url::parse(&target)
+                .is_ok_and(|url| url.host_str() == Some("challenges.cloudflare.com"))
+            {
+                use std::io::Write as _;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "agent_view frame=challenge requested=true allowed={allowed} main={:?}",
+                    action.target_is_main_frame
+                );
+            }
+            allowed
         })
         .with_navigation_event_handler(move |event| {
+            #[cfg(feature = "agentic-browser-qa")]
+            {
+                use std::io::Write as _;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "agent_view frame=main phase={:?}",
+                    event.phase
+                );
+            }
             if let Some(gate) = &work_events {
                 match gate.observe(event) {
                     Ok((committed, notify)) => {
@@ -754,6 +775,10 @@ where
     })
 }
 
+const fn owned_agent_view_inspectable() -> bool {
+    cfg!(all(debug_assertions, feature = "agentic-browser-qa"))
+}
+
 fn harden_owned_agent_view(view: &WebView) -> Result<(), AgentOwnedViewConstructionError> {
     use objc2_app_kit::{NSAutoresizingMaskOptions as Mask, NSView};
     use objc2_foundation::MainThreadMarker;
@@ -762,7 +787,7 @@ fn harden_owned_agent_view(view: &WebView) -> Result<(), AgentOwnedViewConstruct
     let page = super::native_webview(view);
     // SAFETY: the marker above proves main-thread access and `page` is the
     // retained WKWebView owned by the live Wry handle for this call.
-    unsafe { page.setInspectable(false) };
+    unsafe { page.setInspectable(owned_agent_view_inspectable()) };
     let native_view: &NSView = &page;
     native_view.setTranslatesAutoresizingMaskIntoConstraints(true);
     native_view.setAutoresizingMask(Mask::ViewNotSizable);
@@ -832,7 +857,7 @@ pub(crate) fn attest_owned_agent_view(
     let native_view: &NSView = &page;
     let frame = native_view.frame();
     // SAFETY: main-thread access and the live retained page were proven above.
-    if unsafe { page.isInspectable() }
+    if unsafe { page.isInspectable() } != owned_agent_view_inspectable()
         || native_view.autoresizingMask() != Mask::ViewNotSizable
         || frame.size.width != f64::from(viewport.width())
         || frame.size.height != f64::from(viewport.height())
@@ -853,6 +878,21 @@ mod tests {
         ContextRunId,
     };
     use zephium_core::ids::ProfileId;
+
+    #[cfg(not(feature = "agentic-browser-qa"))]
+    #[test]
+    fn ordinary_agent_views_never_enable_inspection() {
+        assert!(!super::owned_agent_view_inspectable());
+    }
+
+    #[cfg(feature = "agentic-browser-qa")]
+    #[test]
+    fn qa_agent_views_enable_inspection_only_in_debug_builds() {
+        assert_eq!(
+            super::owned_agent_view_inspectable(),
+            cfg!(debug_assertions)
+        );
+    }
 
     #[test]
     fn refused_url_closes_semantic_authority_before_notifying_any_observer() {

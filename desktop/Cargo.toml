@@ -21,7 +21,7 @@ work-product = [
 ]
 # Explicit inspectable public development runs through the ordinary Work UI.
 # The dependency feature rejects optimized builds.
-work-integration-qa = ["work-development-traces", "tauri/custom-protocol"]
+work-integration-qa = ["work-development-traces", "tauri/custom-protocol", "zephium-engine/agentic-browser-qa"]
 work-development-traces = ["work-product", "zephium-work-composition/public-qualification", "zephium-work-composition/retained-lifetime-diagnostic", "zephium-agentic/probe-harness"]
 # Frozen one-hop witness through ordinary trusted Work admission, never retained.
 macos-work-navigation-probe = ["macos-work", "zephium-work-composition/navigation-qualification", "tauri/custom-protocol"]
