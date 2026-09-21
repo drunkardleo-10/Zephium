@@ -52,6 +52,7 @@ enum Mode {
     /// The same loop on an objective that needs a native page read.
     AgentRead,
     AgentGovernment,
+    AgentHumanGovernment,
     /// The loop on a granted folder: a file read cited as a source and an
     /// edit applied after the person's approval.
     AgentFiles,
@@ -115,6 +116,10 @@ pub(super) fn run_agent_government() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::AgentGovernment)
 }
 
+pub(super) fn run_agent_human_government() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentHumanGovernment)
+}
+
 pub(super) fn run_agent_files() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::AgentFiles)
 }
@@ -172,6 +177,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         Mode::Agent
             | Mode::AgentRead
             | Mode::AgentGovernment
+            | Mode::AgentHumanGovernment
             | Mode::AgentScroll
             | Mode::AgentDisclosure
             | Mode::AgentCollection
@@ -193,6 +199,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         Mode::Agent
         | Mode::AgentRead
         | Mode::AgentGovernment
+        | Mode::AgentHumanGovernment
         | Mode::AgentScroll
         | Mode::AgentDisclosure
         | Mode::AgentCollection
@@ -201,8 +208,13 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         Mode::Public => 160,
         _ => 240,
     });
-    let run = zephium_engine::run_macos_work_application_with_events_probe(
+    let run = zephium_engine::run_macos_work_application_with_input_probe(
         profile,
+        if matches!(mode, Mode::AgentHumanGovernment) {
+            zephium_engine::MacosWorkProbeInput::Human
+        } else {
+            zephium_engine::MacosWorkProbeInput::LifecycleOnly
+        },
         execution_timeout + Duration::from_secs(30),
         move |event| {
             if let Ok(relay) = events.lock() {
@@ -413,6 +425,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         Mode::Agent
             | Mode::AgentRead
             | Mode::AgentGovernment
+            | Mode::AgentHumanGovernment
             | Mode::AgentScroll
             | Mode::AgentDisclosure
             | Mode::AgentCollection
@@ -538,7 +551,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             "agent-disclosure-run.json"
         } else if mode == Mode::AgentScroll {
             "agent-scroll-run.json"
-        } else if mode == Mode::AgentGovernment {
+        } else if matches!(mode, Mode::AgentGovernment | Mode::AgentHumanGovernment) {
             "agent-government-run.json"
         } else if mode == Mode::AgentRead {
             "agent-read-run.json"
@@ -614,6 +627,7 @@ async fn workflow(
         Mode::Agent
             | Mode::AgentRead
             | Mode::AgentGovernment
+            | Mode::AgentHumanGovernment
             | Mode::AgentScroll
             | Mode::AgentDisclosure
             | Mode::AgentCollection
@@ -1192,7 +1206,7 @@ async fn agent_workflow(
         Mode::AgentDetails => AGENT_DETAILS_OBJECTIVE,
         Mode::AgentMoney => AGENT_MONEY_OBJECTIVE,
         Mode::AgentRead => AGENT_READ_OBJECTIVE,
-        Mode::AgentGovernment => AGENT_GOVERNMENT_OBJECTIVE,
+        Mode::AgentGovernment | Mode::AgentHumanGovernment => AGENT_GOVERNMENT_OBJECTIVE,
         Mode::AgentDisclosure => "Read https://www.lego.com/en-us/product/tower-bridge-21067 in one browser assignment. Find the Specifications disclosure, bring it into view if needed, expand it, and inspect its revealed content. Return the product name, displayed price, piece count and exact dimensions with citations from this page. Do not follow links, buy, sign in, change locale, or substitute public search. Leave unsupported details unknown. Use one browser read assignment and a source-backed note.",
         Mode::AgentScroll => "Read https://www.lego.com/en-us/product/tower-bridge-21067 in one browser assignment. Dismiss entry and privacy notices if needed. Before extracting, scroll the document down by one page, inspect the new viewport, then scroll the document down by another page and inspect again. Report the product name and any details visible after scrolling, with cited evidence. The two actual scrolls are required: snapshots alone do not satisfy this task. Do not buy, sign in, change locale, or follow links. Use one read responsibility and a source-backed note.",
         _ => AGENT_OBJECTIVE,
@@ -1328,67 +1342,75 @@ async fn agent_workflow(
             approved
         })
     });
-    let state = WorkAgentService::new(handle.clone())
-        .with_diagnostic(|event| {
-            let _ = writeln!(std::io::stdout().lock(), "agent-work: loop={event:?}");
-        })
-        .run(
-            profile,
-            zephium_ipc::work::WorkCommandV1 {
-                version: 1,
-                work,
-                expected_revision: created.applied_revision,
-                command: WorkCommandId::generate(),
-                intent: WorkRuntimeIntent::BeginAgent { grant, limits },
-            },
-            None,
-            WorkAgentProviders {
-                turn: if collection {
-                    &collection_assignment
-                } else {
-                    &agent
+    let agent_run = async {
+        WorkAgentService::new(handle.clone())
+            .with_diagnostic(|event| {
+                let _ = writeln!(std::io::stdout().lock(), "agent-work: loop={event:?}");
+            })
+            .run(
+                profile,
+                zephium_ipc::work::WorkCommandV1 {
+                    version: 1,
+                    work,
+                    expected_revision: created.applied_revision,
+                    command: WorkCommandId::generate(),
+                    intent: WorkRuntimeIntent::BeginAgent { grant, limits },
                 },
-                search: &search,
-            },
-            |probe, request| {
-                let key = keys.lock().ok().and_then(|mut keys| keys.pop());
-                let callback = &callback;
-                async move {
-                    let key = key.ok_or(WorkError::Capacity)?;
-                    let _ = writeln!(
-                        std::io::stdout().lock(),
-                        "agent-work: browser_step={}; content=redacted",
-                        serde_json::to_value(&request.step)
-                            .ok()
-                            .and_then(|value| value["kind"].as_str().map(str::to_owned))
-                            .unwrap_or_default()
-                    );
-                    if collection {
-                        let schema = money_schema()?;
-                        composition
-                            .run_collection_step(
-                                callback,
-                                &probe,
-                                request,
-                                browser_settings(binding, key),
-                                schema,
-                            )
-                            .await
+                None,
+                WorkAgentProviders {
+                    turn: if collection {
+                        &collection_assignment
                     } else {
-                        composition
-                            .run_agent_step(
-                                callback,
-                                &probe,
-                                request,
-                                browser_settings(binding, key),
-                            )
-                            .await
+                        &agent
+                    },
+                    search: &search,
+                },
+                |probe, request| {
+                    let key = keys.lock().ok().and_then(|mut keys| keys.pop());
+                    let callback = &callback;
+                    async move {
+                        let key = key.ok_or(WorkError::Capacity)?;
+                        let _ = writeln!(
+                            std::io::stdout().lock(),
+                            "agent-work: browser_step={}; content=redacted",
+                            serde_json::to_value(&request.step)
+                                .ok()
+                                .and_then(|value| value["kind"].as_str().map(str::to_owned))
+                                .unwrap_or_default()
+                        );
+                        if collection {
+                            let schema = money_schema()?;
+                            composition
+                                .run_collection_step(
+                                    callback,
+                                    &probe,
+                                    request,
+                                    browser_settings(binding, key),
+                                    schema,
+                                )
+                                .await
+                        } else {
+                            composition
+                                .run_agent_step(
+                                    callback,
+                                    &probe,
+                                    request,
+                                    browser_settings(binding, key),
+                                )
+                                .await
+                        }
                     }
-                }
-            },
-            |_| {},
-        )
-        .await
+                },
+                |_| {},
+            )
+            .await
+    };
+    let state = if mode == Mode::AgentHumanGovernment {
+        tokio::select! {
+            result = agent_run => result,
+            result = human_government_input(composition, profile, work) => { result?; Err(WorkError::Unavailable) }
+        }
+    } else { agent_run.await }
         .map_err(|error| {
             let _ = writeln!(
                 std::io::stdout().lock(),
@@ -1618,4 +1640,79 @@ fn has_product_specification(data: &zephium_core::work::artifact::WorkArtifactDa
                     && matches!(&cell.value, WorkCellValue::Text { text } if !text.trim().is_empty())
             }))
     })
+}
+
+async fn human_government_input(
+    composition: &MacosWorkComposition,
+    profile: ProfileId,
+    work: WorkId,
+) -> Result<(), &'static str> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let continued = Arc::new(AtomicBool::new(false));
+    let mut presented = None;
+    let mut reader_started = false;
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let pages = composition
+            .human_pages(profile, work)
+            .map_err(|_| "human_pages")?;
+        if presented.is_some_and(|id| {
+            !pages
+                .iter()
+                .any(|page| page.id == id && page.phase != WorkHumanPhaseV1::Released)
+        }) {
+            return Err("human_wait_released");
+        }
+        if let Some(page) = pages.first() {
+            if page.phase == WorkHumanPhaseV1::WaitingForHuman && presented.is_none() {
+                composition
+                    .present_human_page(
+                        profile,
+                        work,
+                        page.id,
+                        WorkHumanRegionV1 {
+                            x: 0,
+                            y: 0,
+                            width: 760,
+                            height: 640,
+                        },
+                    )
+                    .map_err(|_| "human_present")?;
+                presented = Some(page.id);
+            }
+            if page.phase == WorkHumanPhaseV1::Presented && !reader_started {
+                reader_started = true;
+                let flag = continued.clone();
+                std::thread::Builder::new()
+                    .name("human-continue-input".into())
+                    .spawn(move || {
+                        use std::io::Read;
+                        let mut command = [0u8; 9];
+                        if std::io::stdin().read_exact(&mut command).is_ok()
+                            && &command == b"continue\n"
+                        {
+                            flag.store(true, Ordering::Release);
+                        }
+                    })
+                    .map_err(|_| "human_input")?;
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "agent-work: human_phase=presented explicit_continue_required=true"
+                );
+            }
+            if page.phase == WorkHumanPhaseV1::Presented
+                && page.can_continue
+                && continued.load(Ordering::Acquire)
+            {
+                composition
+                    .continue_human_page(profile, work, page.id, WorkHumanAccountV1::Anonymous)
+                    .map_err(|_| "human_continue")?;
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "agent-work: human_phase=continuing"
+                );
+                std::future::pending::<()>().await;
+            }
+        }
+    }
 }
