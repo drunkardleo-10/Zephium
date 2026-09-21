@@ -27,7 +27,9 @@ pub use platform::macos::agentic_liveness_probe::{
     feature = "agentic-browser-qa",
     feature = "native-agentic-semantic-probe"
 ))]
-pub use platform::macos::agentic_liveness_probe::run_construction_liveness_probe;
+pub use platform::macos::agentic_liveness_probe::{
+    run_construction_liveness_probe, run_human_takeover_probe,
+};
 
 #[cfg(all(
     feature = "native-agentic-work-lifetime-diagnostic",

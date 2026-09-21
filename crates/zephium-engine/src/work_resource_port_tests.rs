@@ -45,6 +45,72 @@ fn source() -> (WorkBrowserResources, WorkBrowserResourceRequest) {
     (rows, request)
 }
 
+#[test]
+fn human_native_delivery_seals_continue_and_acquire_until_physical_callback_return() {
+    let admission = admission();
+    let (mut rows, construct) = source();
+    let resource = construct.resource().clone();
+    let guard = WorkResourceGuard::new(&construct, &admission);
+    guard.outcome(&construct, Outcome::Constructed);
+    let _ = rows
+        .settle_at(construct.complete(Outcome::Constructed), tick(1))
+        .unwrap();
+    let region = zephium_agentic::WorkBrowserHumanRegion::try_new(0, 0, 600, 400).unwrap();
+    let present = rows
+        .present_human(&resource, region, tick(2), tick(100_000))
+        .unwrap();
+    guard.admit_lifecycle(&present, tick(2)).unwrap();
+    assert!(guard.human_current(Operation::PresentHuman, tick(3)));
+    guard.outcome(&present, Outcome::HumanPresented);
+    let _ = rows
+        .settle_at(present.complete(Outcome::HumanPresented), tick(3))
+        .unwrap();
+    let hide = rows.continue_after_human(&resource, tick(4)).unwrap();
+    assert!(guard.admit_lifecycle(&hide, tick(4)).is_err());
+    assert!(!guard.callbacks_drained());
+    guard.finish_human_delivery(Operation::PresentHuman, true, true);
+    guard.admit_lifecycle(&hide, tick(5)).unwrap();
+    assert!(guard.human_current(Operation::ContinueAfterHuman, tick(5)));
+    guard.outcome(&hide, Outcome::HumanContinued);
+    let _ = rows
+        .settle_at(
+            hide.complete_human_document(
+                ContextNavigationTarget::parse("https://example.test/verified").unwrap(),
+            ),
+            tick(6),
+        )
+        .unwrap();
+    let acquire = rows
+        .acquire(&resource, ContextRunId::generate(), tick(7), tick(90_000))
+        .unwrap();
+    assert!(guard.admit_lifecycle(&acquire, tick(7)).is_err());
+    guard.finish_human_delivery(Operation::ContinueAfterHuman, true, true);
+    guard.admit_lifecycle(&acquire, tick(8)).unwrap();
+    assert_eq!(guard.state.lock().unwrap().document_epoch, 2);
+}
+
+#[test]
+fn unreturned_human_callback_keeps_native_actor_admission_closed() {
+    let admission = admission();
+    let (mut rows, construct) = source();
+    let resource = construct.resource().clone();
+    let guard = WorkResourceGuard::new(&construct, &admission);
+    guard.outcome(&construct, Outcome::Constructed);
+    let _ = rows
+        .settle_at(construct.complete(Outcome::Constructed), tick(1))
+        .unwrap();
+    let region = zephium_agentic::WorkBrowserHumanRegion::try_new(0, 0, 600, 400).unwrap();
+    let present = rows
+        .present_human(&resource, region, tick(2), tick(100_000))
+        .unwrap();
+    guard.admit_lifecycle(&present, tick(2)).unwrap();
+    guard.outcome(&present, Outcome::HumanPresented);
+    guard.finish_human_delivery(Operation::PresentHuman, false, true);
+    assert!(!guard.is_healthy());
+    assert!(!guard.human_current(Operation::PresentHuman, tick(3)));
+    assert!(guard.callbacks_drained());
+}
+
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
 #[test]
 fn unclassified_guard_failure_records_original_caller_before_cleanup() {

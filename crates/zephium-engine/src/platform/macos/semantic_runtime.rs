@@ -1536,11 +1536,21 @@ fn install_semantic_runtime_epoch(
 /// reply is delivered, so a fixed world cannot distinguish a late callback
 /// from the replaced document through public `WKFrameInfo` alone.
 pub(crate) struct AgentSemanticRuntimeRegistration {
+    installation: Rc<SemanticDocumentInstallation>,
+    retired: bool,
+}
+
+pub(crate) struct SemanticDocumentInstallation {
     controller: Retained<WKUserContentController>,
     handler_name: Retained<NSString>,
     epochs: Rc<RefCell<SemanticRuntimeEpochs>>,
     channel: AgentSemanticRuntimeController,
-    retired: bool,
+}
+impl std::ops::Deref for AgentSemanticRuntimeRegistration {
+    type Target = SemanticDocumentInstallation;
+    fn deref(&self) -> &Self::Target {
+        &self.installation
+    }
 }
 
 impl AgentSemanticRuntimeRegistration {
@@ -1563,14 +1573,16 @@ impl AgentSemanticRuntimeRegistration {
         let active = install_semantic_runtime_epoch(&controller, &handler_name, &channel, mtm)?;
 
         let registration = Self {
-            controller,
-            handler_name,
-            epochs: Rc::new(RefCell::new(SemanticRuntimeEpochs {
-                active: Some(active),
-                active_runtime: None,
-                parked: Vec::new(),
-            })),
-            channel,
+            installation: Rc::new(SemanticDocumentInstallation {
+                controller,
+                handler_name,
+                epochs: Rc::new(RefCell::new(SemanticRuntimeEpochs {
+                    active: Some(active),
+                    active_runtime: None,
+                    parked: Vec::new(),
+                })),
+                channel,
+            }),
             retired: false,
         };
         registration.attest_configuration(configuration)?;
@@ -1581,7 +1593,7 @@ impl AgentSemanticRuntimeRegistration {
         self.channel.bind_view(view)
     }
 
-    pub(crate) const fn controller(&self) -> &AgentSemanticRuntimeController {
+    pub(crate) fn controller(&self) -> &AgentSemanticRuntimeController {
         &self.channel
     }
 
@@ -1711,12 +1723,69 @@ impl AgentSemanticRuntimeRegistration {
         })
     }
 
-    /// Revokes the old document world and installs the immutable program in a
-    /// fresh one before native navigation can begin.
     pub(crate) fn prepare_document_load(&mut self) -> Result<(), ()> {
         if self.retired {
             return Err(());
         }
+        self.installation.prepare_document_load()
+    }
+
+    pub(crate) fn human_navigation_preparer(&self) -> Rc<dyn Fn() -> bool> {
+        let installation = self.installation.clone();
+        Rc::new(move || {
+            if !installation.channel.ready_for_history()
+                || installation.channel.pending_for_audit() != Some(false)
+            {
+                return false;
+            }
+            let Ok(mut epochs) = installation.epochs.try_borrow_mut() else {
+                return false;
+            };
+            epochs.active_runtime = None;
+            epochs.parked.clear();
+            drop(epochs);
+            installation.prepare_document_load().is_ok()
+        })
+    }
+
+    pub(crate) fn attest_configuration(
+        &self,
+        configuration: &WKWebViewConfiguration,
+    ) -> Result<(), ()> {
+        if self.retired {
+            return Err(());
+        }
+        let _mtm = MainThreadMarker::new().ok_or(())?;
+        // SAFETY: the marker above proves main-thread access; `configuration`
+        // is live and objc2 retains its returned content controller.
+        let actual_controller = unsafe { configuration.userContentController() };
+        if Retained::as_ptr(&actual_controller) != Retained::as_ptr(&self.controller) {
+            return Err(());
+        }
+        self.attest_controller()
+    }
+
+    pub(crate) fn retire(mut self) -> Result<(), ()> {
+        let channel_clean = self.channel.retire();
+        let removed = clear_semantic_runtime_controller(&self.controller, &self.handler_name, None);
+        if let Ok(mut epochs) = self.epochs.try_borrow_mut() {
+            epochs.active = None;
+            epochs.active_runtime = None;
+            epochs.parked.clear();
+        }
+        self.retired = true;
+        if channel_clean && removed {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+}
+
+impl SemanticDocumentInstallation {
+    /// Revokes the old document world and installs the immutable program in a
+    /// fresh one before native navigation can begin.
+    fn prepare_document_load(&self) -> Result<(), ()> {
         self.channel.begin_document_load();
         let old = {
             let mut epochs = self.epochs.try_borrow_mut().map_err(|_| ())?;
@@ -1780,23 +1849,6 @@ impl AgentSemanticRuntimeRegistration {
         }
     }
 
-    pub(crate) fn attest_configuration(
-        &self,
-        configuration: &WKWebViewConfiguration,
-    ) -> Result<(), ()> {
-        if self.retired {
-            return Err(());
-        }
-        let _mtm = MainThreadMarker::new().ok_or(())?;
-        // SAFETY: the marker above proves main-thread access; `configuration`
-        // is live and objc2 retains its returned content controller.
-        let actual_controller = unsafe { configuration.userContentController() };
-        if Retained::as_ptr(&actual_controller) != Retained::as_ptr(&self.controller) {
-            return Err(());
-        }
-        self.attest_controller()
-    }
-
     fn attest_controller(&self) -> Result<(), ()> {
         let _mtm = MainThreadMarker::new().ok_or(())?;
         let epochs = self.epochs.try_borrow().map_err(|_| ())?;
@@ -1833,22 +1885,6 @@ impl AgentSemanticRuntimeRegistration {
         }
         let _ = &active.handler;
         Ok(())
-    }
-
-    pub(crate) fn retire(mut self) -> Result<(), ()> {
-        let channel_clean = self.channel.retire();
-        let removed = clear_semantic_runtime_controller(&self.controller, &self.handler_name, None);
-        if let Ok(mut epochs) = self.epochs.try_borrow_mut() {
-            epochs.active = None;
-            epochs.active_runtime = None;
-            epochs.parked.clear();
-        }
-        self.retired = true;
-        if channel_clean && removed {
-            Ok(())
-        } else {
-            Err(())
-        }
     }
 }
 

@@ -17,6 +17,8 @@ pub(super) struct Fixture {
     url: String,
     stop: Arc<AtomicBool>,
     released: Arc<AtomicBool>,
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    verified: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -39,14 +41,26 @@ impl Fixture {
         let released = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let worker_released = released.clone();
+        let verified = Arc::new(AtomicBool::new(false));
+        let worker_verified = verified.clone();
         let worker = thread::Builder::new()
             .name("liveness-fixture".into())
-            .spawn(move || serve(listener, worker_stop, worker_released, release_load))
+            .spawn(move || {
+                serve(
+                    listener,
+                    worker_stop,
+                    worker_released,
+                    worker_verified,
+                    release_load,
+                )
+            })
             .map_err(|_| "fixture_worker")?;
         Ok(Self {
             url: format!("http://127.0.0.1:{port}/"),
             stop,
             released,
+            #[cfg(feature = "native-agentic-semantic-probe")]
+            verified,
             worker: Some(worker),
         })
     }
@@ -57,6 +71,10 @@ impl Fixture {
 
     pub(super) fn released(&self) -> bool {
         self.released.load(Ordering::Acquire)
+    }
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    pub(super) fn verified(&self) -> bool {
+        self.verified.load(Ordering::Acquire)
     }
 }
 
@@ -80,6 +98,7 @@ fn serve(
     listener: TcpListener,
     stop: Arc<AtomicBool>,
     released: Arc<AtomicBool>,
+    verified: Arc<AtomicBool>,
     release_load: bool,
 ) {
     let deadline = Instant::now() + Duration::from_secs(45);
@@ -156,6 +175,17 @@ fn serve(
                 eprintln!("liveness_fixture route=Release request_bytes={length}");
                 released.store(true, Ordering::Release);
                 respond(stream, "text/plain", "");
+            } else if bytes[..length].starts_with(b"GET /verified HTTP/1.") {
+                let cookie = bytes[..length]
+                    .windows(b"zephium_fixture=present".len())
+                    .any(|value| value == b"zephium_fixture=present");
+                verified.store(cookie, Ordering::Release);
+                eprintln!("liveness_fixture route=Verified session_cookie={cookie}");
+                respond(
+                    stream,
+                    "text/html",
+                    "<!doctype html><title>Verified fixture</title><h1>Retained page verified</h1>",
+                );
             } else {
                 eprintln!("liveness_fixture route=Other request_bytes={length}");
                 respond(stream, "text/plain", "");
@@ -171,7 +201,7 @@ fn respond(mut stream: TcpStream, kind: &str, body: &str) {
             .set_write_timeout(Some(Duration::from_millis(250)))
             .is_ok()
     {
-        let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}", body.len());
+        let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nSet-Cookie: zephium_fixture=present; Path=/; SameSite=Lax; HttpOnly\r\nConnection: close\r\n\r\n{body}", body.len());
     }
 }
 

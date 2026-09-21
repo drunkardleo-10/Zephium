@@ -557,6 +557,7 @@ where
     )
     .map_err(|_| AgentOwnedViewConstructionError::ExtensionIsolation)?;
     let navigation_semantic = semantic.controller().clone();
+    let human_semantic_prepare = semantic.human_navigation_preparer();
     let renderer_semantic = semantic.controller().clone();
     let builder = WebViewBuilder::new()
         .with_url("about:blank")
@@ -579,10 +580,19 @@ where
         .with_picture_in_picture_enabled(false)
         .with_general_autofill_enabled(false)
         .with_apple_navigation_action_handler(move |target, action| {
+            let prepare_human = work_policy.as_ref().is_some_and(|gate| {
+                gate.human_load_preparation_needed(action.target_is_main_frame)
+            });
             let allowed = work_policy.as_ref().map_or_else(
                 || navigation_policy.allows(&target),
                 |gate| gate.allows_apple_action(&target, action),
             );
+            if allowed && prepare_human && !human_semantic_prepare() {
+                if let Some(gate) = &work_policy {
+                    gate.retire();
+                }
+                return false;
+            }
             #[cfg(feature = "agentic-browser-qa")]
             if url::Url::parse(&target)
                 .is_ok_and(|url| url.host_str() == Some("challenges.cloudflare.com"))

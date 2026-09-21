@@ -36,6 +36,11 @@ mod fixture;
 mod construction;
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub use construction::run_construction_liveness_probe;
+#[cfg(feature = "native-agentic-semantic-probe")]
+#[path = "agentic_human_probe.rs"]
+mod human;
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub use human::run_human_takeover_probe;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LivenessSite {

@@ -54,6 +54,8 @@ mod witness;
 
 #[path = "work_resource_action.rs"]
 mod action;
+#[path = "work_resource_human.rs"]
+mod human;
 #[path = "work_resource_navigation.rs"]
 mod navigation;
 #[path = "work_resource_observation.rs"]
@@ -124,6 +126,9 @@ pub(super) struct WorkNativeResource {
     pub(super) guard: Arc<WorkResourceGuard>,
     construction: Option<WorkLifecycleTask>,
     construction_presentation: Option<crate::platform::imp::WorkObservationPresentation>,
+    human_presentation: Option<crate::platform::imp::WorkHumanPresentation>,
+    human_wake: Option<crate::platform::imp::ContentPolicyTimeout>,
+    human_progress: Option<zephium_agentic::WorkBrowserHumanProgress>,
     revocation: Option<WorkLifecycleTask>,
     destruction: Option<WorkLifecycleTask>,
     watchdog: Option<crate::platform::imp::ContentPolicyTimeout>,
@@ -207,6 +212,9 @@ impl WorkNativeResource {
             guard,
             construction: None,
             construction_presentation: None,
+            human_presentation: None,
+            human_wake: None,
+            human_progress: None,
             revocation: None,
             destruction: None,
             watchdog: None,
@@ -488,7 +496,9 @@ impl WorkNativeResource {
             }
             Operation::Revoke => Stage::RevocationDrain,
             Operation::Destroy => Stage::DestructionDrain,
-            Operation::Acquire => Stage::Unattributed,
+            Operation::Acquire | Operation::PresentHuman | Operation::ContinueAfterHuman => {
+                Stage::Unattributed
+            }
         };
         ResourceFailureCause::LifecycleDeadline(stage)
     }
@@ -537,7 +547,8 @@ impl WorkNativeResource {
     fn retire_page(&mut self) -> bool {
         self.watchdog = None;
         super::work_frames::clear(self.guard.resource().identity().context());
-        if !self.retire_construction_presentation()
+        if !self.retire_human_presentation()
+            || !self.retire_construction_presentation()
             || !self.retire_reading_presentation()
             || !self.retire_observation_presentation()
             || !self.retire_action_presentation()
@@ -735,6 +746,9 @@ impl EngineHost {
             return;
         };
         match operation {
+            Operation::PresentHuman | Operation::ContinueAfterHuman => {
+                resource.handle_human(task);
+            }
             Operation::Acquire => {
                 let mut accepted = request.lease().is_some_and(|lease| {
                     work_browser_monotonic_now()
@@ -939,6 +953,9 @@ impl EngineHost {
             guard: guard.clone(),
             construction: None,
             construction_presentation: None,
+            human_presentation: None,
+            human_wake: None,
+            human_progress: None,
             revocation: None,
             destruction: None,
             watchdog: None,
@@ -1089,6 +1106,7 @@ impl EngineHost {
         }
         resource.progress_navigation(self.erasure_tombstones.contains(&resource.profile()));
         resource.progress_history_back(self.erasure_tombstones.contains(&resource.profile()));
+        resource.progress_human(self.erasure_tombstones.contains(&resource.profile()));
         if resource
             .construction_presentation
             .as_mut()
@@ -1117,6 +1135,7 @@ impl EngineHost {
             guard.fail();
         }
         if !guard.is_healthy() {
+            resource.retire_human_presentation();
             resource.retire_construction_presentation();
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             guard.record_failure_cause(ResourceFailureCause::UnattributedResourceFailure);

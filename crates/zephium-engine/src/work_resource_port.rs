@@ -52,6 +52,9 @@ enum Phase {
     Acquiring,
     Leased,
     Revoking,
+    PresentingHuman,
+    PresentedHuman,
+    ContinuingAfterHuman,
     Destroying,
     Destroyed,
     Quarantined,
@@ -63,6 +66,8 @@ struct State {
     // The lease terminal can transfer before its physical callback returns.
     // Keep that exact delivery reservation separate from the active lease.
     retirement_delivery: Option<WorkBrowserExecutionLease>,
+    human_delivery: Option<Operation>,
+    human_deadline: Option<AgentPolicyInstant>,
     reads: usize,
     navigation: Option<zephium_agentic::ContextOperationJoin>,
     action: Option<zephium_agentic::SemanticActionAttemptId>,
@@ -139,6 +144,8 @@ impl WorkResourceGuard {
                 construction_pending: true,
                 lease: None,
                 retirement_delivery: None,
+                human_delivery: None,
+                human_deadline: None,
                 reads: 0,
                 navigation: None,
                 action: None,
@@ -305,6 +312,7 @@ impl WorkResourceGuard {
                     && !state.uncertain
                     && state.lease.is_none()
                     && state.retirement_delivery.is_none()
+                    && state.human_delivery.is_none()
                     && state.reads == 0
                     && state.navigation.is_none()
                     && state.action.is_none()
@@ -316,6 +324,47 @@ impl WorkResourceGuard {
                     .ok_or(ContextPortFailure::TimedOut)?;
                 state.lease = Some(lease.clone());
                 state.phase = Phase::Acquiring;
+            }
+            Operation::PresentHuman
+                if self.session_current()
+                    && self.health_current()
+                    && state.phase == Phase::Retained
+                    && !state.uncertain
+                    && state.lease.is_none()
+                    && state.retirement_delivery.is_none()
+                    && state.human_delivery.is_none()
+                    && state.reads == 0
+                    && state.navigation.is_none()
+                    && state.action.is_none()
+                    && state.callbacks == 0 =>
+            {
+                let deadline = request
+                    .human_deadline()
+                    .filter(|deadline| {
+                        *deadline > now
+                            && deadline.millis() - now.millis()
+                                <= zephium_agentic::MAX_WORK_HUMAN_WAIT_MILLIS
+                    })
+                    .ok_or(ContextPortFailure::TimedOut)?;
+                if request.human_region().is_none() || request.human_source().is_none() {
+                    return Err(ContextPortFailure::Stale);
+                }
+                state.human_deadline = Some(deadline);
+                state.human_delivery = Some(Operation::PresentHuman);
+                state.observed = None;
+                state.phase = Phase::PresentingHuman;
+            }
+            Operation::ContinueAfterHuman
+                if self.session_current()
+                    && self.health_current()
+                    && state.phase == Phase::PresentedHuman
+                    && !state.uncertain
+                    && state.human_delivery.is_none()
+                    && state.human_deadline == request.human_deadline()
+                    && state.human_deadline.is_some_and(|deadline| now < deadline) =>
+            {
+                state.human_delivery = Some(Operation::ContinueAfterHuman);
+                state.phase = Phase::ContinuingAfterHuman;
             }
             Operation::Revoke if state.phase == Phase::Leased || state.phase == Phase::Revoking => {
                 if state.lease.as_ref() != request.lease() || state.retirement_delivery.is_some() {
@@ -374,6 +423,28 @@ impl WorkResourceGuard {
             state.lease.is_some() || state.retirement_delivery.is_some()
         })
     }
+    pub(crate) fn human_current(&self, operation: Operation, now: AgentPolicyInstant) -> bool {
+        self.session_current()
+            && self.port_open()
+            && self.health_current()
+            && self.state.lock().is_ok_and(|state| {
+                !state.uncertain
+                    && state.lease.is_none()
+                    && state.retirement_delivery.is_none()
+                    && state.reads == 0
+                    && state.navigation.is_none()
+                    && state.action.is_none()
+                    && state.callbacks == 0
+                    && state.human_deadline.is_some_and(|deadline| now < deadline)
+                    && matches!(
+                        (operation, state.phase),
+                        (
+                            Operation::PresentHuman,
+                            Phase::PresentingHuman | Phase::PresentedHuman
+                        ) | (Operation::ContinueAfterHuman, Phase::ContinuingAfterHuman)
+                    )
+            })
+    }
     pub(crate) fn lease_drained(&self, lease: &WorkBrowserExecutionLease) -> bool {
         self.health_current()
             && self.state.lock().is_ok_and(|state| {
@@ -391,6 +462,7 @@ impl WorkResourceGuard {
         self.state.lock().is_ok_and(|state| {
             !state.construction_pending
                 && state.retirement_delivery.is_none()
+                && state.human_delivery.is_none()
                 && state.reads == 0
                 && state.navigation.is_none()
                 && state.action.is_none()
@@ -551,6 +623,7 @@ impl WorkResourceGuard {
             (Operation::Destroy, Outcome::Destroyed)
                 if !state.construction_pending
                     && state.retirement_delivery.is_none()
+                    && state.human_delivery.is_none()
                     && state.reads == 0
                     && state.navigation.is_none()
                     && state.action.is_none()
@@ -558,6 +631,27 @@ impl WorkResourceGuard {
             {
                 state.phase = Phase::Destroyed;
                 state.lease = None;
+            }
+            (Operation::PresentHuman, Outcome::HumanPresented)
+                if state.phase == Phase::PresentingHuman
+                    && !state.uncertain
+                    && state.human_delivery == Some(Operation::PresentHuman) =>
+            {
+                state.phase = Phase::PresentedHuman;
+            }
+            (Operation::ContinueAfterHuman, Outcome::HumanContinued)
+                if state.phase == Phase::ContinuingAfterHuman
+                    && !state.uncertain
+                    && state.human_delivery == Some(Operation::ContinueAfterHuman) =>
+            {
+                if let Some(epoch) = state.document_epoch.checked_add(1) {
+                    state.document_epoch = epoch;
+                    state.phase = Phase::Retained;
+                    state.human_deadline = None;
+                } else {
+                    state.uncertain = true;
+                    state.phase = Phase::Quarantined;
+                }
             }
             _ => {
                 state.uncertain = true;
@@ -648,6 +742,9 @@ impl WorkResourceGuard {
                 state.phase = Phase::Retained;
             }
         } else {
+            if state.human_delivery == Some(request.operation()) {
+                state.human_delivery = None;
+            }
             if request.operation() == Operation::Revoke
                 && state.retirement_delivery.as_ref() == request.lease()
             {
@@ -657,6 +754,24 @@ impl WorkResourceGuard {
             if state.phase != Phase::Destroyed {
                 state.phase = Phase::Quarantined;
             }
+        }
+        drop(state);
+        self.report_uncertainty();
+    }
+    fn finish_human_delivery(&self, operation: Operation, returned: bool, released: bool) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let exact = state.human_delivery == Some(operation);
+        if !exact || !returned || !released {
+            state.uncertain = true;
+            if !matches!(state.phase, Phase::Destroying | Phase::Destroyed) {
+                state.phase = Phase::Quarantined;
+            }
+        }
+        if exact && released {
+            state.human_delivery = None;
         }
         drop(state);
         self.report_uncertainty();
@@ -764,6 +879,9 @@ impl WorkLifecycleTask {
     pub(crate) fn complete_document(mut self, effective: ContextNavigationTarget) {
         self.deliver_document(Outcome::Constructed, Some(effective));
     }
+    pub(crate) fn complete_human_document(mut self, effective: ContextNavigationTarget) {
+        self.deliver_document(Outcome::HumanContinued, Some(effective));
+    }
     fn deliver(&mut self, outcome: Outcome) {
         self.deliver_document(outcome, None);
     }
@@ -772,6 +890,11 @@ impl WorkLifecycleTask {
             return;
         };
         let construction = request.operation() == Operation::Construct;
+        let human = matches!(
+            request.operation(),
+            Operation::PresentHuman | Operation::ContinueAfterHuman
+        )
+        .then_some(request.operation());
         let revocation = (request.operation() == Operation::Revoke)
             .then(|| request.lease().cloned())
             .flatten();
@@ -785,6 +908,9 @@ impl WorkLifecycleTask {
         let callback_returned = if let Some(completion) = self.completion.take() {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 completion(match effective {
+                    Some(document) if outcome == Outcome::HumanContinued => {
+                        request.complete_human_document(document)
+                    }
                     Some(document) => request.complete_document(document),
                     None => request.complete(outcome),
                 })
@@ -824,6 +950,13 @@ impl WorkLifecycleTask {
             }
         }
         self.permit.release();
+        if let Some(operation) = human {
+            self.guard.finish_human_delivery(
+                operation,
+                callback_returned,
+                self.permit.released && self.permit.admission.counts().is_some(),
+            );
+        }
         if let Some(lease) = &revocation {
             self.guard.finish_revocation_delivery(
                 lease,
@@ -832,7 +965,9 @@ impl WorkLifecycleTask {
                 delivery,
             );
         }
-        if (construction || revocation.is_some()) && self.guard.destruction_started() {
+        if (construction || revocation.is_some() || human.is_some())
+            && self.guard.destruction_started()
+        {
             crate::host::notify_work_resource(self.guard.clone());
         }
     }

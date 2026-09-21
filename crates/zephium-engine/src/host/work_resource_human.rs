@@ -1,0 +1,197 @@
+use super::*;
+
+const HUMAN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+#[cfg(all(
+    feature = "agentic-browser-qa",
+    feature = "native-agentic-semantic-probe"
+))]
+impl EngineHost {
+    pub(crate) fn navigate_human_fixture(
+        &mut self,
+        resource: &zephium_agentic::WorkBrowserResourceJoin,
+    ) -> bool {
+        let Some(resource) = self
+            .work_resources
+            .get(&resource.identity().context())
+            .filter(|owned| owned.guard.resource() == resource)
+        else {
+            return false;
+        };
+        let Some(view) = resource.view.as_ref() else {
+            return false;
+        };
+        if !resource
+            .human_presentation
+            .as_ref()
+            .is_some_and(|presentation| presentation.current())
+            || !resource.guard.document().is_some_and(|target| {
+                target.as_url().host_str() == Some("127.0.0.1")
+                    && target.as_url().scheme() == "http"
+                    && target.as_url().path() == "/"
+            })
+        {
+            return false;
+        }
+        view.view()
+            .evaluate_script("location.assign('/verified')")
+            .is_ok()
+    }
+}
+
+impl WorkNativeResource {
+    pub(super) fn handle_human(&mut self, task: WorkLifecycleTask) {
+        let result = task.request().ok_or(()).and_then(|request| {
+            let operation = request.operation();
+            let now = work_browser_monotonic_now().ok_or(())?;
+            if !self.guard.human_current(operation, now)
+                || self.pending()
+                || self.frame_in_flight.load(Ordering::Acquire)
+            {
+                return Err(());
+            }
+            match operation {
+                Operation::PresentHuman => {
+                    if self.human_presentation.is_some()
+                        || !self.ready()
+                        || self.observation_visible()
+                    {
+                        return Err(());
+                    }
+                    let remaining = request
+                        .human_deadline()
+                        .ok_or(())?
+                        .millis()
+                        .checked_sub(now.millis())
+                        .ok_or(())?;
+                    let deadline = Instant::now()
+                        .checked_add(Duration::from_millis(remaining))
+                        .ok_or(())?;
+                    let view = self.view.as_ref().ok_or(())?;
+                    let presentation = crate::platform::imp::WorkHumanPresentation::prepare(
+                        view.view(),
+                        request.human_region().ok_or(())?,
+                        deadline,
+                    )
+                    .ok_or(())?;
+                    view.work_navigation()
+                        .ok_or(())?
+                        .begin_human(request.human_source().ok_or(())?, deadline)?;
+                    self.human_presentation = Some(presentation);
+                    self.human_progress = request.human_progress();
+                    if !self
+                        .human_presentation
+                        .as_mut()
+                        .is_some_and(|presentation| presentation.present())
+                        || !self.schedule_human_wake()
+                    {
+                        return Err(());
+                    }
+                    Ok(None)
+                }
+                Operation::ContinueAfterHuman => {
+                    if !self
+                        .human_presentation
+                        .as_ref()
+                        .is_some_and(|presentation| presentation.current())
+                        || !self.retire_human_presentation()
+                    {
+                        return Err(());
+                    }
+                    let view = self.view.as_ref().ok_or(())?;
+                    let gate = view.work_navigation().ok_or(())?;
+                    let revision = gate.human_revision().ok_or(())?;
+                    let current = crate::platform::imp::current_url(view.view()).ok_or(())?;
+                    let effective = gate.finish_human(&current, revision)?;
+                    if view.semantic_pending_for_audit() != Some(false) {
+                        return Err(());
+                    }
+                    Ok(Some(effective))
+                }
+                _ => Err(()),
+            }
+        });
+        match result {
+            Ok(None) => task.complete(Outcome::HumanPresented),
+            Ok(Some(document)) => task.complete_human_document(document),
+            Err(()) => {
+                self.retire_human_presentation();
+                self.guard.fail();
+                task.complete(Outcome::Refused);
+            }
+        }
+    }
+
+    fn schedule_human_wake(&mut self) -> bool {
+        if self.human_wake.is_some() {
+            return true;
+        }
+        let guard = self.guard.clone();
+        let rejected = guard.clone();
+        self.human_wake =
+            crate::platform::imp::schedule_content_policy_timeout(HUMAN_POLL_INTERVAL, move || {
+                if !crate::host::try_with_agent_context_terminal(move |host| {
+                    if let Some(resource) = host
+                        .work_resources
+                        .get_mut(&guard.resource().identity().context())
+                        .filter(|resource| Arc::ptr_eq(&resource.guard, &guard))
+                    {
+                        resource.human_wake = None;
+                    }
+                    host.progress_work_resource(&guard);
+                }) {
+                    rejected.fail();
+                }
+            });
+        self.human_wake.is_some()
+    }
+
+    pub(super) fn progress_human(&mut self, erased: bool) {
+        let Some(presentation) = self.human_presentation.as_ref() else {
+            return;
+        };
+        if let Some(progress) = &self.human_progress {
+            progress.record_ready(
+                self.view
+                    .as_ref()
+                    .and_then(|view| view.work_navigation())
+                    .is_some_and(|gate| gate.human_ready()),
+            );
+        }
+        if let Some((progress, revision)) = self.human_progress.as_ref().zip(
+            self.view
+                .as_ref()
+                .and_then(|view| view.work_navigation())
+                .and_then(|gate| gate.human_revision()),
+        ) {
+            progress.record_revision(revision);
+        }
+        if erased
+            || !presentation.current()
+            || !work_browser_monotonic_now().is_some_and(|now| {
+                self.guard.human_current(Operation::PresentHuman, now)
+                    || self.guard.human_current(Operation::ContinueAfterHuman, now)
+            })
+            || !self.schedule_human_wake()
+        {
+            self.retire_human_presentation();
+            self.guard.fail();
+        }
+    }
+
+    pub(super) fn retire_human_presentation(&mut self) -> bool {
+        self.human_wake = None;
+        self.human_progress = None;
+        let clean = self
+            .human_presentation
+            .as_mut()
+            .is_none_or(|presentation| presentation.retire());
+        if clean {
+            self.human_presentation = None;
+        } else {
+            self.retirement_clean = false;
+            self.guard.fail();
+        }
+        clean
+    }
+}

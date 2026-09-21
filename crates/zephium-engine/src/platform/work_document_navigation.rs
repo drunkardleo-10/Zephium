@@ -17,6 +17,7 @@ enum Phase {
     Finalizing,
     Sampling,
     Ready,
+    Human,
     Refused,
     Retired,
 }
@@ -41,6 +42,7 @@ struct State {
     admission_kind: Option<AdmissionKind>,
     navigation_epoch: u64,
     operation: Option<ContextOperationJoin>,
+    human: Option<human::HumanNavigation>,
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     url_observation_failure: Option<crate::WorkUrlObservationFailure>,
     #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -169,6 +171,7 @@ impl Default for WorkDocumentNavigation {
             admission_kind: None,
             navigation_epoch: 1,
             operation: None,
+            human: None,
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             url_observation_failure: None,
             #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -200,6 +203,7 @@ impl WorkDocumentNavigation {
                 Phase::Finalizing => Stage::ConstructionTargetFinalizing,
                 Phase::Sampling => Stage::ConstructionTargetSampling,
                 Phase::Ready => Stage::ConstructionTargetReady,
+                Phase::Human => Stage::Unattributed,
                 Phase::Refused => Stage::ConstructionRefused,
                 Phase::Retired => Stage::ConstructionRetired,
             })
@@ -401,6 +405,12 @@ impl WorkDocumentNavigation {
         let Ok(mut state) = self.0.lock() else {
             return false;
         };
+        if state.phase == Phase::Human {
+            return state
+                .human
+                .as_mut()
+                .is_some_and(|human| human.allows(target, action.target_is_main_frame));
+        }
         if state.phase == Phase::Bootstrap
             && target == "about:blank"
             && state.bootstrap_available
@@ -459,6 +469,15 @@ impl WorkDocumentNavigation {
         let mut state = self.0.lock().map_err(|_| ())?;
         if matches!(state.phase, Phase::Refused | Phase::Retired) {
             return Ok((false, false));
+        }
+        if state.phase == Phase::Human {
+            return match state.human.as_mut().ok_or(())?.observe(event) {
+                Ok(facts) => Ok(facts),
+                Err(()) => {
+                    state.phase = Phase::Refused;
+                    Ok((false, true))
+                }
+            };
         }
         #[cfg(feature = "native-agentic-work-resource-probe")]
         {
@@ -538,6 +557,15 @@ impl WorkDocumentNavigation {
     /// Missing, oversized or noncanonical values always revoke authority.
     pub(crate) fn location_changed(&self, current: Option<&str>) -> Result<bool, ()> {
         let mut state = self.0.lock().map_err(|_| ())?;
+        if state.phase == Phase::Human {
+            return match state.human.as_mut().ok_or(())?.location_changed(current) {
+                Ok(changed) => Ok(changed),
+                Err(()) => {
+                    state.phase = Phase::Refused;
+                    Ok(true)
+                }
+            };
+        }
         #[cfg(feature = "native-agentic-work-resource-probe")]
         if state.phase == Phase::Committed {
             // This is now a classified URL notification rather than erased
@@ -733,6 +761,7 @@ impl WorkDocumentNavigation {
         match self.0.lock() {
             Ok(mut state) => {
                 state.phase = Phase::Retired;
+                state.human = None;
                 true
             }
             Err(_) => false,
@@ -740,11 +769,14 @@ impl WorkDocumentNavigation {
     }
 }
 
+#[path = "work_human_navigation.rs"]
+mod human;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wry::NavigationEventPhase as E;
-    const URL: &str = "https://example.test/frozen";
+    pub(super) const URL: &str = "https://example.test/frozen";
     fn next_request() -> (ContextJoin, ContextNavigationRequest) {
         next_request_with_policy(zephium_agentic::WorkBrowserDocumentPolicy::Exact)
     }
@@ -792,7 +824,7 @@ mod tests {
             .unwrap(),
         )
     }
-    fn ready_gate() -> WorkDocumentNavigation {
+    pub(super) fn ready_gate() -> WorkDocumentNavigation {
         let gate = armed();
         for phase in [E::Started, E::Committed, E::Finished] {
             gate.observe(event(1, phase, URL)).unwrap();
@@ -800,7 +832,7 @@ mod tests {
         gate
     }
     #[cfg(any(target_os = "macos", target_os = "ios"))]
-    fn apple_action(
+    pub(super) fn apple_action(
         navigation_type: wry::AppleNavigationType,
         is_get: bool,
     ) -> wry::AppleNavigationAction {
@@ -1097,7 +1129,7 @@ mod tests {
         assert_eq!(gate.construction_evidence(), Some(refused));
         assert!(!gate.ready(Some(URL)));
     }
-    fn event(id: u64, phase: E, url: &str) -> wry::NavigationEvent {
+    pub(super) fn event(id: u64, phase: E, url: &str) -> wry::NavigationEvent {
         wry::NavigationEvent {
             id: wry::NavigationId::from_raw(id),
             phase,
