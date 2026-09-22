@@ -32,6 +32,17 @@ fn admitted_fixture() -> (
     SemanticObservation,
     DecisionObservation,
 ) {
+    admitted_fixture_with_actions(false)
+}
+
+fn admitted_fixture_with_actions(
+    actions: bool,
+) -> (
+    AgentRunPolicy,
+    AgentModelCallRequest,
+    SemanticObservation,
+    DecisionObservation,
+) {
     let identity = ContextIdentity::new(
         ContextId::from_raw(11),
         ContextRunId::from_raw(12),
@@ -62,9 +73,23 @@ fn admitted_fixture() -> (
         SemanticFrameTrust::SameOrigin,
     )
     .unwrap();
-    let snapshot = decode_semantic_snapshot(SemanticDecodeContext::new(SemanticInvocationId::new(1).unwrap(), frame,
-        SemanticSnapshotGeneration::new(1).unwrap()),
-        &serde_json::to_vec(&json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":[{"k":1,"r":"document"}]})).unwrap()).unwrap();
+    let nodes = if actions {
+        json!([{"k":1,"r":"document","o":16},{"k":2,"p":0,"r":"button","n":"Details","o":1}])
+    } else {
+        json!([{"k":1,"r":"document"}])
+    };
+    let snapshot = decode_semantic_snapshot(
+        SemanticDecodeContext::new(
+            SemanticInvocationId::new(1).unwrap(),
+            frame,
+            SemanticSnapshotGeneration::new(1).unwrap(),
+        ),
+        &serde_json::to_vec(
+            &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":nodes}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let observation = SemanticObservationAssembler::new(
         SemanticObservationRequest::initial(
             SemanticObservationId::new(1).unwrap(),
@@ -130,7 +155,14 @@ fn admitted_fixture() -> (
         &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
     )
     .unwrap();
-    let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+    let entries: Vec<_> = observation
+        .frames()
+        .iter()
+        .flat_map(SemanticSnapshot::nodes)
+        .filter(|node| !node.operations().is_empty())
+        .map(|node| (node.reference(), node.operations()))
+        .collect();
+    let authority = AgentProviderActionAuthority::try_new(&observation, &entries).unwrap();
     let projection =
         DecisionObservation::try_new(&observation, &objective, &authority, account).unwrap();
     (policy, call, observation, projection)
@@ -267,6 +299,328 @@ async fn over_ceiling_vendor_usage_never_becomes_exact_accounting() {
     assert_eq!(policy.pending_model_calls(), 0);
 }
 
+fn emulation_config() -> WorkPlanningConfig {
+    WorkPlanningConfig::try_new(
+        AgentProviderCallConfig::try_for_test(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderModelRevision::try_new("gpt-5.6-terra".into()).unwrap(),
+            AgentProviderReasoningEffort::Medium,
+            SemanticTokenizerRevision::try_new("decision-fixture:v1".into()).unwrap(),
+            AgentProviderPricingProfile::try_new(
+                AgentProviderPricingRevision::new(1).unwrap(),
+                32768,
+            )
+            .unwrap(),
+            1,
+            4096,
+            AgentProviderStreamBudget::STANDARD,
+        )
+        .unwrap(),
+        8192,
+        10_000,
+    )
+    .unwrap()
+}
+
+fn fixture_answers(request: &DecisionRequest) -> serde_json::Value {
+    let answers: BTreeMap<_, _> = request.questions().iter().map(|(key, question)| {
+        let value = match question {
+            Question::Noul { .. } => json!({"type":"noul","noul":0.01}),
+            Question::Choice { criteria, .. } => {
+                let probabilities: BTreeMap<_, _> = criteria.keys().map(|key| (key, if key == "none" { 1.0 } else { 0.0 })).collect();
+                json!({"type":"choice","choice":"none","confidence":1.0,"probabilities":probabilities})
+            }
+            Question::Score { .. } => panic!("unexpected fixture kind"),
+        };
+        (key.clone(), value)
+    }).collect();
+    json!({"answers":answers})
+}
+
+#[tokio::test]
+async fn borrowed_emulation_admits_disclosure_and_conservatively_settles_bad_envelopes() {
+    for extra_item in [false, true] {
+        let (mut policy, call, observation, projection) = admitted_fixture();
+        let mut body = json!({"object":"response","status":"completed","model":"gpt-5.6-terra","service_tier":"default","error":null,"incomplete_details":null,
+            "output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":fixture_answers(projection.request()).to_string()}]}],
+            "usage":{"input_tokens":100,"output_tokens":200,"total_tokens":300,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":50}}});
+        if extra_item {
+            body["output"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"type":"reasoning","summary":[]}));
+        }
+        let (mut endpoint, server) = server_for_model(
+            vec![
+                response(
+                    200,
+                    "",
+                    r#"{"object":"response.input_tokens","input_tokens":100}"#,
+                ),
+                response(200, "", &body.to_string()),
+            ],
+            "gpt-5.6-terra",
+        );
+        endpoint.set_path("/v1/responses");
+        let transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            endpoint.as_str(),
+            endpoint.as_str(),
+        )
+        .unwrap();
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-key".into(),
+        )
+        .unwrap();
+        let config = emulation_config();
+        let client = OpenAiDecisionCall::try_new(&transport, &credential, &config).unwrap();
+        let call = AgentModelCallRequest::new(
+            call.id(),
+            call.lease(),
+            call.account(),
+            client.call_budget().unwrap(),
+            AgentPolicyInstant::from_millis(101),
+        );
+        let server = server();
+        let mut accounting = Accounting::default();
+        let output = client
+            .evaluate_observation(
+                &mut policy,
+                call,
+                &observation,
+                &projection,
+                Instant::now() + Duration::from_secs(4),
+                &AgentProviderCancellation::new(),
+                Some(&mut accounting),
+            )
+            .await
+            .unwrap();
+        assert_eq!(server.join().unwrap(), 2);
+        assert_eq!(accounting.active.len(), 1);
+        assert_eq!(accounting.receipts, vec![(output.receipt, output.input)]);
+        assert_eq!(
+            output
+                .input
+                .metrics()
+                .structured_input_tokens()
+                .unwrap()
+                .tokens(),
+            100
+        );
+        if extra_item {
+            assert!(output.call.response.is_err());
+            assert_eq!(
+                output.call.diagnostic.envelope_failure,
+                Some(DecisionEnvelopeFailure::ItemCount)
+            );
+            assert_eq!(
+                output.receipt.usage_accounting(),
+                AgentModelUsageAccounting::ReservationCeiling
+            );
+            assert_eq!(output.receipt.input_tokens(), 8192);
+            assert_eq!(output.receipt.output_tokens(), 4096);
+            assert_eq!(output.receipt.cost_micro_usd(), 10_000);
+        } else {
+            let answers = output.call.response.unwrap();
+            assert!(answers.answers.values().all(Result::is_ok));
+            assert_eq!(
+                output.receipt.usage_accounting(),
+                AgentModelUsageAccounting::Exact
+            );
+            assert_eq!(output.receipt.input_tokens(), 100);
+            assert_eq!(output.receipt.output_tokens(), 200);
+        }
+        assert_eq!(policy.pending_model_calls(), 0);
+        assert_eq!(credential.provider(), AgentProviderKind::OpenAiResponses);
+        assert!(transport.snapshot().unwrap().is_idle());
+    }
+}
+
+#[tokio::test]
+async fn dropping_dispatched_emulation_retains_receipts_and_seals_its_shared_transport() {
+    let hold = Arc::new(AtomicBool::new(true));
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (mut endpoint, server) = server_for_model_with_gate(
+        vec![
+            response(
+                200,
+                "",
+                r#"{"object":"response.input_tokens","input_tokens":100}"#,
+            ),
+            response(200, "", "{}"),
+        ],
+        "gpt-5.6-terra",
+        Some((hold.clone(), seen.clone())),
+    );
+    endpoint.set_path("/v1/responses");
+    let transport = AgentProviderTransport::try_new_loopback(
+        AgentProviderTransportConfig::STANDARD,
+        endpoint.as_str(),
+        endpoint.as_str(),
+    )
+    .unwrap();
+    let credential =
+        AgentProviderCredential::try_new(AgentProviderKind::OpenAiResponses, "fixture-key".into())
+            .unwrap();
+    let config = emulation_config();
+    let client = OpenAiDecisionCall::try_new(&transport, &credential, &config).unwrap();
+    let (mut policy, call, observation, projection) = admitted_fixture();
+    let call = AgentModelCallRequest::new(
+        call.id(),
+        call.lease(),
+        call.account(),
+        client.call_budget().unwrap(),
+        AgentPolicyInstant::from_millis(101),
+    );
+    let cancellation = AgentProviderCancellation::new();
+    let mut accounting = Accounting::default();
+    let server = server();
+    let mut pending = Box::pin(client.evaluate_observation(
+        &mut policy,
+        call,
+        &observation,
+        &projection,
+        Instant::now() + Duration::from_secs(5),
+        &cancellation,
+        Some(&mut accounting),
+    ));
+    while seen.load(Ordering::SeqCst) != 2 {
+        tokio::select! {
+            _ = &mut pending => panic!("call ended before generation was held"),
+            _ = tokio::time::sleep(Duration::from_millis(2)) => {},
+        }
+    }
+    drop(pending);
+    hold.store(false, Ordering::SeqCst);
+    assert_eq!(server.join().unwrap(), 2);
+    assert_eq!(accounting.active.len(), 1);
+    assert_eq!(accounting.receipts.len(), 1);
+    let (receipt, input) = accounting.receipts[0];
+    assert_eq!(receipt.id(), input.call());
+    assert_eq!(
+        receipt.usage_accounting(),
+        AgentModelUsageAccounting::ReservationCeiling
+    );
+    assert_eq!(receipt.input_tokens(), 8192);
+    assert_eq!(receipt.output_tokens(), 4096);
+    assert_eq!(receipt.cost_micro_usd(), 10_000);
+    assert_eq!(policy.pending_model_calls(), 0);
+    assert!(transport.snapshot().unwrap().is_sealed());
+}
+
+#[test]
+fn fallback_projection_preserves_binding_and_only_repeats_uncertain_heads() {
+    let (_, call, observation, projection) = admitted_fixture();
+    let mut body = fixture_answers(projection.request());
+    body["answers"]["challenge"]["noul"] = json!(0.5);
+    let primary = projection
+        .request()
+        .decode_emulation(
+            &serde_json::to_vec(&body).unwrap(),
+            DecisionUsage::default(),
+        )
+        .unwrap();
+    let fallback = projection.route(Ok(primary)).unwrap();
+    let subset = fallback.projection().unwrap();
+    assert_eq!(subset.question_count(), 1);
+    assert!(subset.matches(&observation, call.account()));
+    assert!(subset.request().questions().contains_key("challenge"));
+    let emulation = subset
+        .request()
+        .decode_emulation(
+            &serde_json::to_vec(&fixture_answers(subset.request())).unwrap(),
+            DecisionUsage::default(),
+        )
+        .unwrap();
+    let mut results = fallback.finish(Some(emulation));
+    let foreign_account = AgentContextAccountBinding::new(
+        AgentAccountAttestationId::from_raw(999),
+        call.account().context(),
+        AgentAccountScope::Anonymous,
+        call.account().observed_at(),
+    );
+    assert!(results
+        .take_challenge(&observation, foreign_account)
+        .is_err());
+    assert_eq!(
+        results
+            .take_challenge(&observation, call.account())
+            .unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        results
+            .take_challenge(&observation, call.account())
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        results
+            .take_operation(&observation, call.account())
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn action_selection_consumes_only_the_compatible_target_and_cannot_be_replayed() {
+    for select_click in [false, true] {
+        let (_, call, observation, projection) = admitted_fixture_with_actions(true);
+        let mut body = fixture_answers(projection.request());
+        for (key, selection) in [
+            ("operation", "click"),
+            ("scroll_target", "@a1"),
+            ("click_target", if select_click { "@a2" } else { "none" }),
+        ] {
+            let Question::Choice { criteria, .. } = &projection.request().questions()[key] else {
+                panic!("choice expected");
+            };
+            let selection = if key == "scroll_target" || (key == "click_target" && select_click) {
+                criteria
+                    .keys()
+                    .find(|key| key.as_str() != "none")
+                    .unwrap()
+                    .as_str()
+            } else {
+                selection
+            };
+            let probabilities: BTreeMap<_, _> = criteria
+                .keys()
+                .map(|key| (key, if key == selection { 1.0 } else { 0.0 }))
+                .collect();
+            body["answers"][key] = json!({"type":"choice","choice":selection,"confidence":1.0,"probabilities":probabilities});
+        }
+        let response = projection
+            .request()
+            .decode_emulation(
+                &serde_json::to_vec(&body).unwrap(),
+                DecisionUsage::default(),
+            )
+            .unwrap();
+        let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+        let selection = answers
+            .take_operation(&observation, call.account())
+            .unwrap();
+        assert_eq!(
+            selection,
+            if select_click {
+                Some(DecisionOperation::Click(
+                    observation.frames()[0].nodes()[1].reference(),
+                ))
+            } else {
+                None
+            }
+        );
+        assert_eq!(
+            answers
+                .take_operation(&observation, call.account())
+                .unwrap(),
+            None
+        );
+    }
+}
+
 fn request() -> DecisionRequest {
     DecisionRequest::try_new(
         json!("public fixed fixture"),
@@ -297,6 +651,23 @@ fn success() -> String {
 }
 
 fn server(responses: Vec<String>) -> (Url, impl FnOnce() -> thread::JoinHandle<usize>) {
+    server_for_model(responses, zephium_decision::JEV_MODEL)
+}
+
+fn server_for_model(
+    responses: Vec<String>,
+    model: &'static str,
+) -> (Url, impl FnOnce() -> thread::JoinHandle<usize>) {
+    server_for_model_with_gate(responses, model, None)
+}
+
+type ServerGate = (Arc<AtomicBool>, Arc<std::sync::atomic::AtomicUsize>);
+
+fn server_for_model_with_gate(
+    responses: Vec<String>,
+    model: &'static str,
+    gate: Option<ServerGate>,
+) -> (Url, impl FnOnce() -> thread::JoinHandle<usize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = Url::parse(&format!(
@@ -346,13 +717,22 @@ fn server(responses: Vec<String>) -> (Url, impl FnOnce() -> thread::JoinHandle<u
                         if bytes.len() >= end + 4 + body_len {
                             let request: serde_json::Value =
                                 serde_json::from_slice(&bytes[end + 4..]).unwrap();
-                            assert!(request["model"] == zephium_decision::JEV_MODEL);
+                            assert!(request["model"] == model);
                             break;
                         }
                     }
                 }
-                socket.write_all(response.as_bytes()).unwrap();
                 count += 1;
+                if let Some((hold, seen)) = &gate {
+                    seen.store(count, Ordering::SeqCst);
+                    while count == 2 && hold.load(Ordering::SeqCst) {
+                        assert!(Instant::now() < deadline);
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    let _ = socket.write_all(response.as_bytes());
+                } else {
+                    socket.write_all(response.as_bytes()).unwrap();
+                }
             }
             count
         })
@@ -388,7 +768,7 @@ async fn retries_only_explicit_rate_limit_and_accounts_one_answer() {
         )
         .await;
     assert!(output.response.is_ok(), "{:?}", output.diagnostic);
-    assert_eq!(output.diagnostic.attempts, 2);
+    assert_eq!(output.diagnostic.attempts, Some(2));
     assert_eq!(output.charged_usage.input_tokens, 123);
     assert_eq!(output.cost_micro_usd, 6);
     assert_eq!(join.join().unwrap(), 2);
@@ -436,7 +816,7 @@ async fn refuses_retry_after_beyond_deadline_without_dispatching_again() {
         "{:?}",
         output.diagnostic
     );
-    assert_eq!(output.diagnostic.attempts, 1);
+    assert_eq!(output.diagnostic.attempts, Some(1));
     assert_eq!(output.cost_micro_usd, 0);
     assert_eq!(join.join().unwrap(), 1);
 }
@@ -458,7 +838,7 @@ async fn cancellation_and_insufficient_budget_do_not_dispatch() {
         output.response,
         Err(DecisionCallFailure::Cancelled)
     ));
-    assert_eq!(output.diagnostic.attempts, 0);
+    assert_eq!(output.diagnostic.attempts, Some(0));
     let mut limited = limits();
     limited.model_tokens = 1;
     let output = client

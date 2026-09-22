@@ -10,7 +10,10 @@ use zephium_core::work::{planning::WorkPlanningError, runtime::WorkExecutionLimi
 use zephium_decision::{DecisionRequest, DecisionResponse, DecisionUsage, MAX_RESPONSE_BYTES};
 
 mod projection;
-pub use projection::{DecisionObservation, DecisionProjectionError};
+pub use projection::{
+    DecisionObservation, DecisionObservationAnswers, DecisionObservationFallback,
+    DecisionOperation, DecisionProjectionError,
+};
 
 const JEV_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 const JEV_CALL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -79,8 +82,8 @@ pub struct DecisionCallDiagnostic {
     pub elapsed_millis: u64,
     /// Last HTTP status, if one was received.
     pub http_status: Option<u16>,
-    /// Exact number of dispatched attempts.
-    pub attempts: u8,
+    /// Exact generation-attempt count; absent after interrupted emulation.
+    pub attempts: Option<u8>,
     /// Closed fallback cause, if any.
     pub failure: Option<DecisionCallFailure>,
     /// Closed emulation envelope rejection; never provider or model text.
@@ -89,6 +92,7 @@ pub struct DecisionCallDiagnostic {
 
 /// Validated questions plus conservatively charged usage even on failure.
 pub struct DecisionCallOutput {
+    exact_usage: bool,
     /// No browser authority is conferred by these answers.
     pub response: Result<DecisionResponse, DecisionCallFailure>,
     /// Actual usage, or the reservation ceiling after ambiguous dispatch.
@@ -135,6 +139,101 @@ impl Drop for DecisionPolicyGuard<'_, '_> {
                 accounting.settled(receipt, self.input);
             }
         }
+    }
+}
+
+impl<'a, 'b> DecisionPolicyGuard<'a, 'b> {
+    #[allow(clippy::too_many_arguments)]
+    fn admit(
+        policy: &'a mut AgentRunPolicy,
+        call: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        projection: &DecisionObservation,
+        input_tokens: u32,
+        request_bytes: u32,
+        accounting: Option<&'b mut dyn DecisionCallAccounting>,
+    ) -> Result<Self, AgentPolicyError> {
+        let admission = policy.prepare_decision_input(
+            call,
+            observation,
+            projection,
+            u64::from(input_tokens),
+        )?;
+        let acknowledgement =
+            crate::semantic_diff::SemanticObservationAcknowledgement::from_fingerprint(
+                crate::semantic_diff::SemanticObservationFingerprint::from_observation(observation),
+            );
+        // Commit conservatively before the first possible transport disclosure.
+        let active = policy.commit_observation_input(admission, &acknowledgement)?;
+        let input = AgentProviderInputMetricReceipt::from_decision(
+            &active,
+            projection.input_stats(),
+            request_bytes,
+            input_tokens,
+            SemanticTokenCountQuality::Conservative,
+        );
+        let mut owned = Self {
+            policy,
+            active: Some(active),
+            input,
+            accounting,
+        };
+        if let Some(accounting) = owned.accounting.as_deref_mut() {
+            let active = owned.active.as_ref().ok_or(AgentPolicyError::CallMissing)?;
+            if !accounting.activated(AgentProviderCallIdentity::from_active(active)) {
+                return Err(AgentPolicyError::Authority);
+            }
+        }
+        Ok(owned)
+    }
+
+    fn settle(
+        mut self,
+        output: DecisionCallOutput,
+        stats: crate::AgentProviderDecisionInputStats,
+        request_bytes: u32,
+    ) -> Result<AdmittedDecisionOutput, AgentPolicyError> {
+        let active = self.active.take().ok_or(AgentPolicyError::CallMissing)?;
+        let input = match output.diagnostic.input_tokens.filter(|tokens| *tokens != 0) {
+            Some(tokens) => AgentProviderInputMetricReceipt::from_decision(
+                &active,
+                stats,
+                request_bytes,
+                tokens,
+                SemanticTokenCountQuality::ProviderExact,
+            ),
+            None => self.input,
+        };
+        let receipt = if output.exact_usage {
+            self.policy.settle_model_call(
+                active,
+                if output.response.is_ok() {
+                    AgentModelCallSettlement::Completed
+                } else {
+                    AgentModelCallSettlement::ProviderFailed
+                },
+                u64::from(output.charged_usage.input_tokens),
+                u64::from(output.charged_usage.output_tokens),
+                output.cost_micro_usd,
+            )?
+        } else {
+            self.policy.settle_model_call_unaccounted(
+                active,
+                if output.diagnostic.failure == Some(DecisionCallFailure::Cancelled) {
+                    AgentModelCallUnaccountedSettlement::Cancelled
+                } else {
+                    AgentModelCallUnaccountedSettlement::ProviderFailed
+                },
+            )?
+        };
+        if let Some(accounting) = self.accounting.as_deref_mut() {
+            accounting.settled(receipt, input);
+        }
+        Ok(AdmittedDecisionOutput {
+            call: output,
+            receipt,
+            input,
+        })
     }
 }
 
@@ -200,37 +299,15 @@ impl JevDecisionClient {
                 .len(),
         )
         .map_err(|_| AgentPolicyError::Budget)?;
-        let admission = policy.prepare_decision_input(
+        let owned = DecisionPolicyGuard::admit(
+            policy,
             call,
             observation,
             projection,
-            u64::from(MAX_JEV_INPUT_TOKENS),
-        )?;
-        let acknowledgement =
-            crate::semantic_diff::SemanticObservationAcknowledgement::from_fingerprint(
-                crate::semantic_diff::SemanticObservationFingerprint::from_observation(observation),
-            );
-        // Commit conservatively before the first possible transport disclosure.
-        let active = policy.commit_observation_input(admission, &acknowledgement)?;
-        let input = AgentProviderInputMetricReceipt::from_decision(
-            &active,
-            projection.input_stats(),
-            request_bytes,
             MAX_JEV_INPUT_TOKENS,
-            SemanticTokenCountQuality::Conservative,
-        );
-        let mut owned = DecisionPolicyGuard {
-            policy,
-            active: Some(active),
-            input,
+            request_bytes,
             accounting,
-        };
-        if let Some(accounting) = owned.accounting.as_deref_mut() {
-            let active = owned.active.as_ref().ok_or(AgentPolicyError::CallMissing)?;
-            if !accounting.activated(AgentProviderCallIdentity::from_active(active)) {
-                return Err(AgentPolicyError::Authority);
-            }
-        }
+        )?;
         let output = self
             .run(
                 projection.request(),
@@ -246,49 +323,7 @@ impl JevDecisionClient {
                 cancellation,
             )
             .await;
-        let active = owned.active.take().ok_or(AgentPolicyError::CallMissing)?;
-        let input = match output.diagnostic.input_tokens.filter(|tokens| *tokens != 0) {
-            Some(tokens) => AgentProviderInputMetricReceipt::from_decision(
-                &active,
-                projection.input_stats(),
-                request_bytes,
-                tokens,
-                SemanticTokenCountQuality::ProviderExact,
-            ),
-            None => owned.input,
-        };
-        let receipt = if output.diagnostic.input_tokens.is_some()
-            || output.charged_usage == DecisionUsage::default()
-        {
-            owned.policy.settle_model_call(
-                active,
-                if output.response.is_ok() {
-                    AgentModelCallSettlement::Completed
-                } else {
-                    AgentModelCallSettlement::ProviderFailed
-                },
-                u64::from(output.charged_usage.input_tokens),
-                u64::from(output.charged_usage.output_tokens),
-                output.cost_micro_usd,
-            )?
-        } else {
-            owned.policy.settle_model_call_unaccounted(
-                active,
-                if output.diagnostic.failure == Some(DecisionCallFailure::Cancelled) {
-                    AgentModelCallUnaccountedSettlement::Cancelled
-                } else {
-                    AgentModelCallUnaccountedSettlement::ProviderFailed
-                },
-            )?
-        };
-        if let Some(accounting) = owned.accounting.as_deref_mut() {
-            accounting.settled(receipt, input);
-        }
-        Ok(AdmittedDecisionOutput {
-            call: output,
-            receipt,
-            input,
-        })
+        owned.settle(output, projection.input_stats(), request_bytes)
     }
 
     /// Dormant direct BYOK client; the credential must be TypeSafe-bound.
@@ -384,7 +419,7 @@ impl JevDecisionClient {
             input_tokens: None,
             elapsed_millis: 0,
             http_status: None,
-            attempts: 0,
+            attempts: Some(0),
             failure: None,
             envelope_failure: None,
         };
@@ -436,7 +471,7 @@ impl JevDecisionClient {
                     }
                     slot.mark_committed();
                 }
-                diagnostic.attempts += 1;
+                diagnostic.attempts = Some(diagnostic.attempts.unwrap_or(0) + 1);
                 charged_usage = reserve;
                 cost_micro_usd = jev_cost(reserve.input_tokens);
                 let response = self
@@ -462,11 +497,16 @@ impl JevDecisionClient {
                     charged_usage = DecisionUsage::default();
                     cost_micro_usd = 0;
                     slot.mark_completed();
-                    let delay =
-                        retry_delay(response.headers(), diagnostic.attempts, SystemTime::now());
+                    let delay = retry_delay(
+                        response.headers(),
+                        diagnostic.attempts.unwrap_or(0),
+                        SystemTime::now(),
+                    );
                     drop(response);
                     let Some(delay) = delay.filter(|delay| {
-                        diagnostic.attempts < MAX_JEV_ATTEMPTS
+                        diagnostic
+                            .attempts
+                            .is_some_and(|attempts| attempts < MAX_JEV_ATTEMPTS)
                             && Instant::now()
                                 .checked_add(*delay)
                                 .is_some_and(|next| next < deadline)
@@ -545,6 +585,8 @@ impl JevDecisionClient {
             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         diagnostic.failure = response.as_ref().err().copied();
         DecisionCallOutput {
+            exact_usage: diagnostic.input_tokens.is_some()
+                || charged_usage == DecisionUsage::default(),
             response,
             charged_usage,
             cost_micro_usd,
@@ -636,9 +678,147 @@ impl OpenAiDecisionClient {
         })
     }
 
+    /// Borrows this client's existing zeroizing owner for policy-admitted calls.
+    pub fn borrowed(&self) -> OpenAiDecisionCall<'_> {
+        OpenAiDecisionCall {
+            planner: self.planner.borrowed(),
+        }
+    }
+
+    #[cfg(feature = "probe-harness")]
     async fn run(
         &self,
         request: &DecisionRequest,
+        limits: WorkExecutionLimits,
+    ) -> DecisionCallOutput {
+        let borrowed = self.borrowed();
+        borrowed.run(request, borrowed.body(request), limits).await
+    }
+
+    /// Runs the same fixed public fixture as Jev; absent from release builds.
+    #[cfg(feature = "probe-harness")]
+    pub async fn evaluate_public_fixture(
+        &self,
+        index: usize,
+    ) -> Result<DecisionCallOutput, DecisionCallFailure> {
+        let fixtures =
+            zephium_decision::evals::fixtures().map_err(|_| DecisionCallFailure::InvalidRequest)?;
+        let fixture = fixtures
+            .get(index)
+            .ok_or(DecisionCallFailure::InvalidRequest)?;
+        Ok(self.run(&fixture.request, eval_limits()).await)
+    }
+}
+
+/// Policy-admitted emulation borrowing the session's zeroizing credential owner.
+pub struct OpenAiDecisionCall<'a> {
+    planner: OpenAiStructuredCall<'a>,
+}
+
+impl<'a> OpenAiDecisionCall<'a> {
+    /// Shares transport shutdown, credential lifetime and trusted catalog limits.
+    pub fn try_new(
+        transport: &'a AgentProviderTransport,
+        credential: &'a AgentProviderCredential,
+        config: &'a WorkPlanningConfig,
+    ) -> Result<Self, WorkPlanningError> {
+        Ok(Self {
+            planner: OpenAiStructuredCall::try_new(transport, credential, config)?,
+        })
+    }
+
+    /// Reserves the fixed output and cost ceilings before any provider disclosure.
+    pub fn call_budget(&self) -> Result<AgentModelCallBudget, AgentPolicyError> {
+        self.planner.config.decision_budget()
+    }
+
+    fn body(&self, request: &DecisionRequest) -> Result<serde_json::Value, WorkPlanningError> {
+        self.planner.structured_request(
+            serde_json::json!({"state":request.state(),"questions":request.questions()}),
+            EMULATION_INSTRUCTIONS,
+            "typed_decision",
+            request.answer_schema(),
+        )
+    }
+
+    /// Uses the same filtered observation, account policy and original deadline.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn evaluate_observation(
+        &self,
+        policy: &mut AgentRunPolicy,
+        call: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        projection: &DecisionObservation,
+        deadline: Instant,
+        cancellation: &AgentProviderCancellation,
+        accounting: Option<&mut dyn DecisionCallAccounting>,
+    ) -> Result<AdmittedDecisionOutput, AgentPolicyError> {
+        let budget = self.call_budget()?;
+        if call.budget() != budget || deadline <= Instant::now() || cancellation.is_cancelled() {
+            return Err(AgentPolicyError::Budget);
+        }
+        let body = self
+            .body(projection.request())
+            .map_err(|_| AgentPolicyError::PayloadMismatch)?;
+        let request_bytes = u32::try_from(
+            serde_json::to_vec(&body)
+                .map_err(|_| AgentPolicyError::PayloadMismatch)?
+                .len(),
+        )
+        .map_err(|_| AgentPolicyError::Budget)?;
+        if request_bytes as usize > crate::MAX_AGENT_PROVIDER_REQUEST_BYTES {
+            return Err(AgentPolicyError::Budget);
+        }
+        let owned = DecisionPolicyGuard::admit(
+            policy,
+            call,
+            observation,
+            projection,
+            self.planner.config.max_input(),
+            request_bytes,
+            accounting,
+        )?;
+        let limits = WorkExecutionLimits {
+            model_tokens: self.planner.config.max_input() + budget.output_tokens(),
+            cost_micro_usd: u32::try_from(budget.cost_micro_usd())
+                .map_err(|_| AgentPolicyError::Budget)?,
+            operations: 1,
+            timeout_seconds: 170,
+            max_workers: 1,
+        };
+        let started = Instant::now();
+        let result = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(DecisionCallFailure::Cancelled),
+            output = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), self.run(projection.request(), Ok(body), limits)) => output.map_err(|_| DecisionCallFailure::Deadline),
+        };
+        let output = result.unwrap_or_else(|failure| DecisionCallOutput {
+            exact_usage: false,
+            response: Err(failure),
+            charged_usage: DecisionUsage {
+                input_tokens: self.planner.config.max_input(),
+                output_tokens: budget.output_tokens(),
+            },
+            cost_micro_usd: budget.cost_micro_usd(),
+            diagnostic: DecisionCallDiagnostic {
+                backend: DecisionBackendKind::Emulation,
+                question_count: projection.question_count(),
+                state_bytes: projection.state_bytes(),
+                input_tokens: None,
+                elapsed_millis: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                http_status: None,
+                attempts: None,
+                failure: Some(failure),
+                envelope_failure: None,
+            },
+        });
+        owned.settle(output, projection.input_stats(), request_bytes)
+    }
+
+    async fn run(
+        &self,
+        request: &DecisionRequest,
+        body: Result<serde_json::Value, WorkPlanningError>,
         limits: WorkExecutionLimits,
     ) -> DecisionCallOutput {
         let started = Instant::now();
@@ -649,18 +829,12 @@ impl OpenAiDecisionClient {
             input_tokens: None,
             elapsed_millis: 0,
             http_status: None,
-            attempts: 0,
+            attempts: Some(0),
             failure: None,
             envelope_failure: None,
         };
-        let context = serde_json::json!({"state":request.state(),"questions":request.questions()});
         let envelope = std::sync::Mutex::new((false, None));
-        let result = match self.planner.structured_request(
-            context,
-            EMULATION_INSTRUCTIONS,
-            "typed_decision",
-            request.answer_schema(),
-        ) {
+        let result = match body {
             Ok(body) => {
                 self.planner
                     .run_bounded(body, Some(limits), |bytes, reserved, config| {
@@ -680,6 +854,10 @@ impl OpenAiDecisionClient {
             }
             diagnostic.envelope_failure = reason;
         }
+        let exact_usage = !matches!(
+            &result,
+            Err(WorkPlanningError::ProviderStalled(_) | WorkPlanningError::ProviderOutcomeUnknown)
+        );
         let (response, charged_usage, cost_micro_usd) = match result {
             Ok((text, usage)) => {
                 let charged = DecisionUsage {
@@ -688,7 +866,7 @@ impl OpenAiDecisionClient {
                 };
                 diagnostic.input_tokens = Some(usage.input_tokens);
                 diagnostic.http_status = Some(200);
-                diagnostic.attempts = 1;
+                diagnostic.attempts = Some(1);
                 (
                     request
                         .decode_emulation(text.as_bytes(), charged)
@@ -701,7 +879,8 @@ impl OpenAiDecisionClient {
                 WorkPlanningError::ProviderRefused(usage)
                 | WorkPlanningError::ProviderStalled(usage),
             ) => {
-                diagnostic.attempts = 1;
+                diagnostic.attempts = Some(1);
+                diagnostic.input_tokens = Some(usage.input_tokens);
                 (
                     Err(DecisionCallFailure::Unavailable),
                     DecisionUsage {
@@ -720,6 +899,9 @@ impl OpenAiDecisionClient {
                 };
                 // An unknown generation outcome cannot refund the original call ceiling.
                 let unknown = matches!(error, WorkPlanningError::ProviderOutcomeUnknown);
+                if unknown {
+                    diagnostic.attempts = None;
+                }
                 (
                     Err(reason),
                     if unknown {
@@ -742,25 +924,12 @@ impl OpenAiDecisionClient {
             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         diagnostic.failure = response.as_ref().err().copied();
         DecisionCallOutput {
+            exact_usage,
             response,
             charged_usage,
             cost_micro_usd,
             diagnostic,
         }
-    }
-
-    /// Runs the same fixed public fixture as Jev; absent from release builds.
-    #[cfg(feature = "probe-harness")]
-    pub async fn evaluate_public_fixture(
-        &self,
-        index: usize,
-    ) -> Result<DecisionCallOutput, DecisionCallFailure> {
-        let fixtures =
-            zephium_decision::evals::fixtures().map_err(|_| DecisionCallFailure::InvalidRequest)?;
-        let fixture = fixtures
-            .get(index)
-            .ok_or(DecisionCallFailure::InvalidRequest)?;
-        Ok(self.run(&fixture.request, eval_limits()).await)
     }
 }
 

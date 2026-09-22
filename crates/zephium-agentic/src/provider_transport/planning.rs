@@ -1,6 +1,7 @@
 //! Work authoring has its own disclosure contract, independent of browser-run
 //! admission. Only explicit context leaves the process; output cannot execute.
 use super::*;
+use crate::AgentModelCallBudget;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use zephium_core::work::planning::*;
@@ -18,6 +19,12 @@ pub struct WorkPlanningConfig {
     max_cost: u64,
 }
 impl WorkPlanningConfig {
+    pub(super) fn decision_budget(&self) -> Result<AgentModelCallBudget, AgentPolicyError> {
+        AgentModelCallBudget::try_new(0, self.call.max_output_tokens(), self.max_cost)
+    }
+    pub(super) const fn max_input(&self) -> u32 {
+        self.max_input
+    }
     /// Limits input to 32K tokens, output to 8K tokens, and reservation to $1.
     /// Actual input must be counted by the provider before generation dispatch.
     pub fn try_new(
@@ -83,6 +90,70 @@ impl OpenAiWorkPlanner {
     ) -> Result<WorkPlanningResult, WorkPlanningError> {
         let body = self.request(&input)?;
         self.run_bounded(body, None, decode).await
+    }
+    pub(super) fn borrowed(&self) -> OpenAiStructuredCall<'_> {
+        OpenAiStructuredCall {
+            transport: &self.transport,
+            credential: &self.credential,
+            config: &self.config,
+            diagnostic: self.diagnostic,
+            #[cfg(feature = "probe-harness")]
+            retain_public_responses: self.retain_public_responses,
+        }
+    }
+    pub(super) async fn run_bounded<T>(
+        &self,
+        body: Value,
+        limits: Option<zephium_core::work::runtime::WorkExecutionLimits>,
+        decode: impl Fn(&[u8], u32, &WorkPlanningConfig) -> Option<Result<T, WorkPlanningUsage>>
+            + Send
+            + Sync,
+    ) -> Result<T, WorkPlanningError> {
+        self.borrowed().run_bounded(body, limits, decode).await
+    }
+    fn request(&self, input: &WorkPlanningDisclosure) -> Result<Value, WorkPlanningError> {
+        let context =
+            serde_json::to_value(input.context()).map_err(|_| WorkPlanningError::Invalid)?;
+        self.structured_request(context, INSTRUCTIONS, "work_planning", schema())
+    }
+    pub(super) fn structured_request(
+        &self,
+        context: Value,
+        instructions: &'static str,
+        name: &'static str,
+        schema: Value,
+    ) -> Result<Value, WorkPlanningError> {
+        self.borrowed()
+            .structured_request(context, instructions, name, schema)
+    }
+}
+
+pub(super) struct OpenAiStructuredCall<'a> {
+    transport: &'a AgentProviderTransport,
+    credential: &'a AgentProviderCredential,
+    pub(super) config: &'a WorkPlanningConfig,
+    diagnostic: Option<fn(zephium_core::work::synthesis::WorkSynthesisDiagnostic)>,
+    #[cfg(feature = "probe-harness")]
+    retain_public_responses: bool,
+}
+
+impl<'a> OpenAiStructuredCall<'a> {
+    pub(super) fn try_new(
+        transport: &'a AgentProviderTransport,
+        credential: &'a AgentProviderCredential,
+        config: &'a WorkPlanningConfig,
+    ) -> Result<Self, WorkPlanningError> {
+        if credential.provider() != AgentProviderKind::OpenAiResponses {
+            return Err(WorkPlanningError::Invalid);
+        }
+        Ok(Self {
+            transport,
+            credential,
+            config,
+            diagnostic: None,
+            #[cfg(feature = "probe-harness")]
+            retain_public_responses: false,
+        })
     }
     pub(super) async fn run_bounded<T>(
         &self,
@@ -193,7 +264,7 @@ impl OpenAiWorkPlanner {
             let decoded = response
                 .as_ref()
                 .ok()
-                .and_then(|response| decode(response, tokens, &self.config));
+                .and_then(|response| decode(response, tokens, self.config));
             // Inspectable public development runs keep the refused body on disk
             // beside the provider-side retention they already opted into.
             #[cfg(feature = "probe-harness")]
@@ -257,11 +328,6 @@ impl OpenAiWorkPlanner {
         } else {
             result
         }
-    }
-    fn request(&self, input: &WorkPlanningDisclosure) -> Result<Value, WorkPlanningError> {
-        let context =
-            serde_json::to_value(input.context()).map_err(|_| WorkPlanningError::Invalid)?;
-        self.structured_request(context, INSTRUCTIONS, "work_planning", schema())
     }
     pub(super) fn structured_request(
         &self,
@@ -330,6 +396,7 @@ impl OpenAiWorkPlanner {
         Ok(bytes)
     }
 }
+
 impl WorkPlanningProvider for OpenAiWorkPlanner {
     fn propose_execution(&self, input: WorkPlanningDisclosure) -> WorkExecutionPlanningFuture<'_> {
         Box::pin(self.execution_proposal(input))

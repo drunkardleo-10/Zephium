@@ -176,6 +176,164 @@ impl DecisionObservation {
     }
 }
 
+/// Exact fallback subset retaining the original privacy and observation bindings.
+pub struct DecisionObservationFallback {
+    original: DecisionObservation,
+    fallback: Option<DecisionObservation>,
+    routing: zephium_decision::DecisionFallback,
+}
+
+/// Consumed, confidence-checked results still requiring native binding and policy.
+pub struct DecisionObservationAnswers {
+    projection: DecisionObservation,
+    results: zephium_decision::DecisionResults,
+}
+
+/// Semantic operation selection; this value carries no native effect authority.
+#[must_use]
+#[derive(Debug, Eq, PartialEq)]
+pub enum DecisionOperation {
+    /// Select a currently offered click target.
+    Click(SemanticReferenceId),
+    /// Select a fill target; text must come from a separately admitted generator.
+    Type(SemanticReferenceId),
+    /// Select a currently offered scrolling region.
+    Scroll(SemanticReferenceId),
+    /// Request independent completeness verification.
+    Done,
+    /// Request human assistance.
+    Blocked,
+}
+
+impl DecisionObservation {
+    /// Keeps accepted heads and repeats only uncertain, unavailable or invalid ones.
+    pub fn route(
+        self,
+        primary: Result<zephium_decision::DecisionResponse, super::DecisionCallFailure>,
+    ) -> Result<DecisionObservationFallback, DecisionProjectionError> {
+        use zephium_decision::{DecisionFallback, DecisionPurpose, FallbackReason};
+        let purposes = self
+            .request
+            .questions()
+            .keys()
+            .map(|key| {
+                let purpose = match key.as_str() {
+                    "challenge" => DecisionPurpose::Challenge,
+                    "done" => DecisionPurpose::Completion,
+                    "relevant" | "more_below" => DecisionPurpose::Relevance,
+                    "wall" => DecisionPurpose::Wall,
+                    "operation" | "click_target" | "type_target" | "scroll_target"
+                    | "dismiss_target" => DecisionPurpose::Action,
+                    _ => return Err(DecisionProjectionError::Authority),
+                };
+                Ok((key.clone(), purpose))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let routing = DecisionFallback::assess(
+            &self.request,
+            purposes,
+            primary.map_err(|failure| match failure {
+                super::DecisionCallFailure::InvalidAnswer => FallbackReason::InvalidAnswer,
+                super::DecisionCallFailure::RateLimited => FallbackReason::RateLimited,
+                _ => FallbackReason::Unavailable,
+            }),
+        )
+        .map_err(|_| DecisionProjectionError::Authority)?;
+        let fallback = routing.request().map(|request| DecisionObservation {
+            request: request.clone(),
+            guard: self.guard,
+            references: self.references.clone(),
+            account: self.account,
+            #[cfg(feature = "probe-harness")]
+            json_comparison: None,
+        });
+        Ok(DecisionObservationFallback {
+            original: self,
+            fallback,
+            routing,
+        })
+    }
+}
+
+impl DecisionObservationFallback {
+    /// Same disclosed state, with only the heads requiring emulation.
+    pub fn projection(&self) -> Option<&DecisionObservation> {
+        self.fallback.as_ref()
+    }
+
+    /// Validates emulation against the exact subset, preserving primary answers.
+    pub fn finish(
+        self,
+        emulation: Option<zephium_decision::DecisionResponse>,
+    ) -> DecisionObservationAnswers {
+        DecisionObservationAnswers {
+            projection: self.original,
+            results: self.routing.finish(emulation),
+        }
+    }
+}
+
+impl DecisionObservationAnswers {
+    /// Consumes the challenge head once, only for the original document and account.
+    pub fn take_challenge(
+        &mut self,
+        observation: &SemanticObservation,
+        account: AgentContextAccountBinding,
+    ) -> Result<Option<bool>, DecisionProjectionError> {
+        if !self.projection.matches(observation, account) {
+            return Err(DecisionProjectionError::Authority);
+        }
+        match self.results.take("challenge") {
+            Some(zephium_decision::ResolvedDecision::Answer { answer, .. }) => match answer.value()
+            {
+                zephium_decision::AnswerValue::Noul { noul } => Ok(Some(*noul >= 0.5)),
+                _ => Err(DecisionProjectionError::Authority),
+            },
+            _ => Ok(None),
+        }
+    }
+
+    /// Consumes operation before its matching speculative target; never invents refs.
+    pub fn take_operation(
+        &mut self,
+        observation: &SemanticObservation,
+        account: AgentContextAccountBinding,
+    ) -> Result<Option<DecisionOperation>, DecisionProjectionError> {
+        if !self.projection.matches(observation, account) {
+            return Err(DecisionProjectionError::Authority);
+        }
+        let Some(zephium_decision::ResolvedDecision::Answer { answer, .. }) =
+            self.results.take("operation")
+        else {
+            return Ok(None);
+        };
+        let zephium_decision::AnswerValue::Choice { choice, .. } = answer.value() else {
+            return Err(DecisionProjectionError::Authority);
+        };
+        let (head, operation): (_, fn(SemanticReferenceId) -> DecisionOperation) =
+            match choice.as_str() {
+                "done" => return Ok(Some(DecisionOperation::Done)),
+                "blocked" => return Ok(Some(DecisionOperation::Blocked)),
+                "click" => ("click_target", DecisionOperation::Click),
+                "type" => ("type_target", DecisionOperation::Type),
+                "scroll" => ("scroll_target", DecisionOperation::Scroll),
+                _ => return Err(DecisionProjectionError::Authority),
+            };
+        let Some(zephium_decision::ResolvedDecision::Answer { answer, .. }) =
+            self.results.take(head)
+        else {
+            return Ok(None);
+        };
+        let zephium_decision::AnswerValue::Choice { choice, .. } = answer.value() else {
+            return Err(DecisionProjectionError::Authority);
+        };
+        SemanticReferenceId::parse(choice)
+            .filter(|reference| self.projection.references.contains(reference))
+            .map(|reference| Some(operation(reference)))
+            .ok_or(DecisionProjectionError::Authority)
+    }
+}
+
 #[cfg(feature = "probe-harness")]
 fn json_projection(
     observation: &SemanticObservation,
