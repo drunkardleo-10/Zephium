@@ -848,6 +848,38 @@ impl AgentPortAdmission {
 
 impl AgentContextTask {
     pub(crate) fn work_ingress_matches(&self, guards: Vec<Arc<WorkResourceGuard>>) -> bool {
+        if guards
+            .iter()
+            .map(|guard| guard.resource.identity().context())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != guards.len()
+        {
+            return false;
+        }
+        if let Some(group) = &self.permit.admission.group {
+            let Some(group) = group.upgrade() else {
+                return false;
+            };
+            let Ok(members) = group.members.lock() else {
+                return false;
+            };
+            let Ok(ingress) = members
+                .iter()
+                .map(|member| member.work.lock())
+                .collect::<Result<Vec<_>, _>>()
+            else {
+                return false;
+            };
+            return ingress.iter().map(|rows| rows.rows.len()).sum::<usize>() == guards.len()
+                && guards.iter().all(|guard| {
+                    ingress.iter().any(|rows| {
+                        rows.rows
+                            .get(&guard.resource.identity().context())
+                            .is_some_and(|current| Arc::ptr_eq(current, guard))
+                    })
+                });
+        }
         self.permit.admission.work.lock().is_ok_and(|ingress| {
             ingress.rows.len() == guards.len()
                 && guards.iter().all(|guard| {
@@ -1088,6 +1120,15 @@ impl EngineAgentBrowserPort {
         let Some(now) = work_browser_monotonic_now() else {
             return reject(request, ContextPortFailure::NativeRefused);
         };
+        if let Some(group) = &self.admission.group {
+            if group
+                .upgrade()
+                .is_none_or(|group| group.work != request.resource().identity().work())
+                || !request.isolated_public()
+            {
+                return reject(request, ContextPortFailure::NativeRefused);
+            }
+        }
         let health = request.take_resource_health_reporter();
         let health_permit = if health.is_some() {
             match self.admission.reserve() {
@@ -1103,6 +1144,9 @@ impl EngineAgentBrowserPort {
             };
             let id = request.resource().identity().context();
             if request.operation() == Operation::Construct {
+                if self.admission.group.is_some() && !ingress.rows.is_empty() {
+                    return reject(request, ContextPortFailure::ResourceExhausted);
+                }
                 if ingress.rows.contains_key(&id) {
                     return reject(request, ContextPortFailure::Stale);
                 }

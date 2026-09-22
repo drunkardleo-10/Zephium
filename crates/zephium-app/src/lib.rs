@@ -46,8 +46,8 @@ mod work_resources;
 #[cfg(feature = "work-execution")]
 pub use work_resources::product::{
     PreparedRetainedContinuation, PreparedRetainedWork, RetainedHumanPhase, RetainedHumanResume,
-    RetainedHumanSnapshot, RetainedWorkHandle, RetainedWorkNativeFactory, RetainedWorkPhase,
-    RetainedWorkPorts, RetainedWorkSnapshot,
+    RetainedHumanSnapshot, RetainedPageAdmission, RetainedWorkHandle, RetainedWorkNativeFactory,
+    RetainedWorkPhase, RetainedWorkPorts, RetainedWorkSnapshot,
 };
 
 #[cfg(feature = "work-execution-probe")]

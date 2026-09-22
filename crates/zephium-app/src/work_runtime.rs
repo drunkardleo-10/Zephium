@@ -421,6 +421,39 @@ pub struct WorkAttemptProbe {
     deadline: Instant,
 }
 impl WorkAttemptProbe {
+    #[cfg(feature = "work-execution")]
+    pub async fn admit_read_page(
+        &self,
+        step: WorkStepId,
+    ) -> Result<crate::RetainedPageAdmission, WorkError> {
+        if self.cancellation_requested().await? || Instant::now() >= self.deadline {
+            return Err(WorkError::Invalid);
+        }
+        let state = self.runtime_projection().await?;
+        let execution = state
+            .executions
+            .iter()
+            .find(|execution| execution.id == self.execution)
+            .ok_or(WorkError::NotFound)?;
+        if execution.authorization != WorkExecutionAuthorization::UserDirectedAgent
+            || !execution.steps.iter().any(|fact| {
+                fact.id == step
+                    && fact.status == WorkStepStatus::Running
+                    && matches!(fact.kind, WorkStepKindV1::Read { .. })
+            })
+        {
+            return Err(WorkError::Invalid);
+        }
+        Ok(crate::RetainedPageAdmission {
+            profile: self.profile,
+            work: self.work,
+            execution: self.execution,
+            attempt: self.attempt,
+            step,
+            workers: execution.spec.limits.max_workers.min(3),
+            deadline: self.deadline,
+        })
+    }
     pub fn browser_session(&self) -> &zephium_agentic::WorkBrowserSession {
         &self.browser_session
     }

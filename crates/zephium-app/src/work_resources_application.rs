@@ -196,6 +196,8 @@ enum DurableReply {
 }
 
 pub(super) struct RetainedWork {
+    runtime_group: Option<AgentRuntimeWorkerGroup>,
+    group_shutdown: bool,
     human: Option<human::HumanHandoff>,
     prior_human: Option<AgentWorkWaitingForHuman>,
     human_generation: u32,
@@ -282,6 +284,8 @@ impl RetainedWork {
         waker: Waker,
     ) -> Self {
         Self {
+            runtime_group: None,
+            group_shutdown: false,
             human: None,
             prior_human: None,
             human_generation: 0,
@@ -636,6 +640,10 @@ impl RetainedWork {
         Ok(())
     }
 
+    pub(super) fn set_runtime_group(&mut self, group: AgentRuntimeWorkerGroup) {
+        self.runtime_group = Some(group);
+    }
+
     fn activate(&mut self) {
         let Some(staged) = self.staged.take() else {
             self.fail(AgentWorkFailure::Contract);
@@ -654,7 +662,12 @@ impl RetainedWork {
             ..
         } = staged;
         handle.set_waker(self.waker.clone());
-        let pending = match PendingScopedAgentRuntime::spawn_suspended(config, scope, controller) {
+        let pending = match match &self.runtime_group {
+            Some(group) => PendingScopedAgentRuntime::spawn_suspended_in_group(
+                config, scope, controller, group,
+            ),
+            None => PendingScopedAgentRuntime::spawn_suspended(config, scope, controller),
+        } {
             Ok(pending) => pending,
             Err(_) => {
                 self.unstarted = handle.take_outcome();
@@ -1337,7 +1350,20 @@ impl RetainedWork {
                 .is_none_or(|active| active.drained.is_some())
     }
 
+    pub(super) fn ready_for_group_shutdown(&self) -> bool {
+        self.destroyed && self.owner.locally_retired()
+    }
+    pub(super) fn locally_closed(&self) -> bool {
+        self.local_shutdown_settled() && !self.final_scoped_recovery_is_classified()
+    }
+    pub(super) fn allow_group_shutdown(&mut self) {
+        self.group_shutdown = true;
+    }
+
     fn poll_native_shutdown(&mut self, deadline: Option<Instant>) -> Result<bool, Refusal> {
+        if self.runtime_group.is_some() && !self.group_shutdown {
+            return Ok(false);
+        }
         let local_ready = self.local_shutdown_settled()
             || (self.destroyed
                 && self.owner.locally_retired()

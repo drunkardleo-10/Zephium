@@ -14,6 +14,7 @@ use zephium_store::SqliteStore;
 /// effect assessment, account attestation, manifest or profile assignment.
 /// This layer intentionally has no default task or implicit effect permission.
 pub struct TrustedWorkRequest {
+    page: Option<zephium_app::RetainedPageAdmission>,
     anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
     work: Option<zephium_agentic::WorkId>,
     pub(crate) input: AgentWorkRunInput,
@@ -34,6 +35,7 @@ impl TrustedWorkRequest {
         task: Box<dyn AgentWorkTask>,
     ) -> Self {
         Self {
+            page: None,
             anonymous_session: None,
             work: None,
             input,
@@ -44,6 +46,11 @@ impl TrustedWorkRequest {
             #[cfg(feature = "public-qualification")]
             public_qualification: false,
         }
+    }
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) fn with_page_admission(mut self, page: zephium_app::RetainedPageAdmission) -> Self {
+        self.page = Some(page);
+        self
     }
     pub(crate) fn with_anonymous_session(
         mut self,
@@ -117,7 +124,7 @@ impl MacosWorkComposition {
             self.engine.clone(),
             self.store.clone(),
             self.store.clone(),
-            self.native_factory(),
+            self.native_factory_for_group(request.page.as_ref().map(|page| page.native_group())),
         );
         let prepare = zephium_app::PreparedRetainedWork::try_new;
         #[cfg(feature = "public-qualification")]
@@ -140,6 +147,10 @@ impl MacosWorkComposition {
         };
         let prepared = match request.anonymous_session {
             Some(session) => prepared.with_anonymous_session(session)?,
+            None => prepared,
+        };
+        let prepared = match request.page {
+            Some(page) => prepared.with_page_admission(page)?,
             None => prepared,
         };
         Ok(shell.attach_retained_work(prepared))
@@ -178,7 +189,7 @@ impl MacosWorkComposition {
         &self,
         request: TrustedWorkRequest,
     ) -> Result<PreparedAgentWork, AgentWorkFailure> {
-        if request.anonymous_session.is_some() {
+        if request.anonymous_session.is_some() || request.page.is_some() {
             return Err(AgentWorkFailure::Contract);
         }
         let binding = request.browser_profile.ok_or(AgentWorkFailure::Contract)?;
@@ -220,6 +231,13 @@ impl MacosWorkComposition {
     // Both product lifetimes share the original one-shot factory acquisition;
     // neither composition can reopen a port or fork native lifetime ownership.
     fn native_factory(&self) -> zephium_app::RetainedWorkNativeFactory {
+        self.native_factory_for_group(None)
+    }
+
+    fn native_factory_for_group(
+        &self,
+        group: Option<(zephium_agentic::WorkId, u8)>,
+    ) -> zephium_app::RetainedWorkNativeFactory {
         let engine = self.engine.clone();
         let native = self.native.clone();
         Box::new(move |sink| {
@@ -233,7 +251,12 @@ impl MacosWorkComposition {
             let NativeLifetimeOwner::Factory(factory) = &mut *native else {
                 return None;
             };
-            factory.begin(move |event| sink(event)).ok()
+            match group {
+                Some((work, capacity)) => factory
+                    .begin_work_page(work, capacity, move |event| sink(event))
+                    .ok(),
+                None => factory.begin(move |event| sink(event)).ok(),
+            }
         })
     }
 }

@@ -190,6 +190,10 @@ pub struct Shell {
     work: Option<Box<crate::work::ApplicationWork>>,
     #[cfg(feature = "work-execution")]
     retained_work: Option<Box<crate::work_resources::product::ProductWork>>,
+    #[cfg(feature = "work-execution")]
+    retained_pages: Vec<crate::work_resources::product::ProductWork>,
+    #[cfg(feature = "work-execution")]
+    retained_page_runtime: Option<zephium_agent_runtime::AgentRuntimeWorkerGroup>,
     /// Retained works the runtime gave up on before they could close; they
     /// keep polling and shut down with the shell, out of the live slot.
     #[cfg(feature = "work-execution")]
@@ -491,6 +495,10 @@ impl Shell {
             #[cfg(feature = "work-execution")]
             retained_work: None,
             #[cfg(feature = "work-execution")]
+            retained_pages: Vec::new(),
+            #[cfg(feature = "work-execution")]
+            retained_page_runtime: None,
+            #[cfg(feature = "work-execution")]
             retained_graveyard: Vec::new(),
             extension_service: Some(extension_service),
             extension_startup_ready: false,
@@ -572,6 +580,10 @@ impl Shell {
                 if let Some(mut work) =
                     crate::work_resources::product::ProductWork::take(&attachment)
                 {
+                    self.retained_pages.retain(|page| !page.is_closed());
+                    if self.retained_pages.is_empty() {
+                        self.retained_page_runtime = None;
+                    }
                     if self
                         .retained_work
                         .as_ref()
@@ -589,8 +601,24 @@ impl Shell {
                             .is_some_and(|work| !work.is_closed())
                         || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
                         || !work.admits(&self.engine, &self.store, self.work_profile_binding())
+                        || if work.is_page() {
+                            !work.admits_peers(&self.retained_pages)
+                        } else {
+                            !self.retained_pages.is_empty()
+                        }
                     {
                         work.refuse();
+                    } else if work.is_page() {
+                        if self.retained_page_runtime.is_none() {
+                            self.retained_page_runtime = work.new_runtime_group().ok();
+                        }
+                        if let Some(group) = &self.retained_page_runtime {
+                            work.set_runtime_group(group.clone());
+                            self.retained_pages.push(work);
+                            self.retained_pages.last_mut().unwrap().initialize();
+                        } else {
+                            work.refuse();
+                        }
                     } else {
                         // Install original ownership before native construction.
                         self.retained_work = Some(Box::new(work));
@@ -603,6 +631,7 @@ impl Shell {
                 if let Some(mut work) = crate::work::ApplicationWork::take_attachment(&attachment) {
                     if !work.belongs_to_store(&self.store)
                         || self.retained_work.is_some()
+                        || !self.retained_pages.is_empty()
                         || !work.belongs_to_engine(&self.engine)
                         || !work.accepts_predecessor(self.work.as_deref())
                         || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
@@ -1095,6 +1124,26 @@ impl Shell {
 
     #[cfg(feature = "work-execution")]
     fn poll_work(&mut self) {
+        if !self.retained_pages.is_empty()
+            && self
+                .retained_pages
+                .iter()
+                .all(|page| page.ready_for_group_shutdown())
+        {
+            for page in &mut self.retained_pages {
+                page.allow_group_shutdown();
+            }
+        }
+        for page in &mut self.retained_pages {
+            page.poll();
+            if let Some(queue) = &self.self_queue {
+                queue.schedule_work(page.next_deadline());
+            }
+        }
+        self.retained_pages.retain(|page| !page.is_closed());
+        if self.retained_pages.is_empty() {
+            self.retained_page_runtime = None;
+        }
         if let Some(work) = &mut self.retained_work {
             work.poll();
             if let Some(queue) = &self.self_queue {
@@ -1117,6 +1166,10 @@ impl Shell {
     }
 
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
+        #[cfg(feature = "work-execution")]
+        for page in &mut self.retained_pages {
+            page.begin_shutdown();
+        }
         #[cfg(feature = "work-execution")]
         if let Some(work) = &mut self.retained_work {
             work.begin_shutdown();
@@ -1365,6 +1418,32 @@ impl Shell {
         #[cfg(feature = "work-execution")]
         for work in &mut self.retained_graveyard {
             buried &= work.shutdown_until(deadline);
+        }
+        #[cfg(feature = "work-execution")]
+        if !self.retained_pages.is_empty() {
+            for page in &mut self.retained_pages {
+                page.begin_shutdown();
+            }
+            while std::time::Instant::now() < deadline
+                && self.retained_pages.iter().any(|page| !page.is_closed())
+            {
+                if self
+                    .retained_pages
+                    .iter()
+                    .all(|page| page.ready_for_group_shutdown())
+                {
+                    for page in &mut self.retained_pages {
+                        page.allow_group_shutdown();
+                    }
+                }
+                for page in &mut self.retained_pages {
+                    page.poll();
+                }
+                if self.retained_pages.iter().any(|page| !page.is_closed()) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+            buried &= self.retained_pages.iter().all(|page| page.is_closed());
         }
         #[cfg(feature = "work-execution")]
         if let Some(work) = &mut self.retained_work {

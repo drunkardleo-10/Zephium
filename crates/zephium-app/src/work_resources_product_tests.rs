@@ -107,6 +107,31 @@ fn prepared_until_with_document_policy<S: AgentWorkJournalPort + AgentAuditPort 
     deadline: Instant,
     document_policy: WorkBrowserDocumentPolicy,
 ) -> PreparedRetainedWork {
+    prepared_until_isolated(
+        profile,
+        engine,
+        store,
+        native,
+        factories,
+        servers,
+        deadline,
+        document_policy,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepared_until_isolated<S: AgentWorkJournalPort + AgentAuditPort + 'static>(
+    profile: crate::AgentWorkProfileBinding,
+    engine: crate::SharedEngine,
+    store: Arc<S>,
+    native: Arc<Native>,
+    factories: Arc<AtomicUsize>,
+    servers: Servers,
+    deadline: Instant,
+    document_policy: WorkBrowserDocumentPolicy,
+    isolated: bool,
+) -> PreparedRetainedWork {
     let target = ContextNavigationTarget::parse("https://retained-fixture.invalid/frozen").unwrap();
     let identity = ContextIdentity::new(
         ContextId::generate(),
@@ -132,6 +157,11 @@ fn prepared_until_with_document_policy<S: AgentWorkJournalPort + AgentAuditPort 
         document_policy,
         AgentEffectScope::try_new(&effects).unwrap(),
     );
+    let input = if isolated {
+        input.with_isolated_website_data()
+    } else {
+        input
+    };
     let spec = input.retained_resource_spec().unwrap();
     let actor = ActorRequest {
         run: identity.owner(),
@@ -411,6 +441,203 @@ fn synchronous_action_rejection_persists_failed_terminal_and_shell_shuts_down_cl
     assert_eq!(shutdown.recv(), Ok(crate::ShutdownOutcome::Clean));
     assert_eq!(native.destructions.load(Ordering::Acquire), 1);
     assert!(native.global_sealed.load(Ordering::Acquire));
+}
+
+#[test]
+fn work_page_group_retains_three_distinct_pages_and_rejects_unrelated_admission() {
+    if child("work_page_group_retains_three_distinct_pages_and_rejects_unrelated_admission") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(zephium_store::SqliteStore::open(directory.path()).unwrap());
+    let engine = Arc::new(crate::shell::tests::FakeEngine::default());
+    let queue = crate::actor::CommandQueue::new();
+    let owner = crate::actor::Handle::new(queue.clone());
+    let callback = owner.callback_handle();
+    let mut shell = crate::Shell::new(
+        engine.clone(),
+        store.clone(),
+        Arc::new(crate::shell::tests::FakeChrome),
+        Box::new(|_| {}),
+    );
+    shell.attach_queue(queue.clone());
+    shell.handle(Command::Bootstrap);
+    let profile = selected(&owner, &queue, &mut shell);
+    let factories = Arc::new(AtomicUsize::new(0));
+    let servers = Servers::default();
+    let work = WorkId::generate();
+    let execution = zephium_core::work::WorkExecutionId::generate();
+    let attempt = zephium_core::work::WorkAttemptId::generate();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let steps: Vec<_> = (0..4)
+        .map(|_| zephium_core::work::WorkStepId::generate())
+        .collect();
+    let mut native_pages = Vec::new();
+    let mut views = Vec::new();
+    for step in &steps[..2] {
+        let native = Arc::new(Native::default());
+        native.allow_global_shutdown.store(true, Ordering::Release);
+        let request = prepared_until_isolated(
+            profile,
+            engine.clone(),
+            store.clone(),
+            native.clone(),
+            factories.clone(),
+            servers.clone(),
+            deadline,
+            WorkBrowserDocumentPolicy::Exact,
+            true,
+        )
+        .with_work_identity(work)
+        .with_page_admission(crate::RetainedPageAdmission {
+            profile: profile.profile(),
+            work,
+            execution,
+            attempt,
+            step: *step,
+            workers: 3,
+            deadline,
+        })
+        .unwrap();
+        views.push(callback.attach_retained_work(request).unwrap());
+        native_pages.push(native);
+    }
+    pump(&queue, &mut shell, || {
+        for view in &views {
+            while view.take_event().is_some() {}
+        }
+        views
+            .iter()
+            .all(|view| view.snapshot().phase == RetainedWorkPhase::Terminal)
+    });
+    assert_eq!(factories.load(Ordering::Acquire), 2);
+    assert!(views.iter().all(|view| view
+        .snapshot()
+        .record
+        .is_some_and(|record| record.disposition() == AgentWorkDisposition::Succeeded)));
+    for (step, candidate_work, candidate_attempt) in [
+        (steps[0], work, attempt),
+        (steps[3], WorkId::generate(), attempt),
+        (
+            steps[3],
+            work,
+            zephium_core::work::WorkAttemptId::generate(),
+        ),
+    ] {
+        let request = prepared_until_isolated(
+            profile,
+            engine.clone(),
+            store.clone(),
+            Arc::new(Native::default()),
+            factories.clone(),
+            servers.clone(),
+            deadline,
+            WorkBrowserDocumentPolicy::Exact,
+            true,
+        )
+        .with_work_identity(candidate_work)
+        .with_page_admission(crate::RetainedPageAdmission {
+            profile: profile.profile(),
+            work: candidate_work,
+            execution,
+            attempt: candidate_attempt,
+            step,
+            workers: 3,
+            deadline,
+        })
+        .unwrap();
+        let refused = callback.attach_retained_work(request).unwrap();
+        pump(&queue, &mut shell, || {
+            refused.snapshot().phase == RetainedWorkPhase::Refused
+        });
+    }
+    assert_eq!(factories.load(Ordering::Acquire), 2);
+    let native = Arc::new(Native::default());
+    native.allow_global_shutdown.store(true, Ordering::Release);
+    let request = prepared_until_isolated(
+        profile,
+        engine.clone(),
+        store.clone(),
+        native.clone(),
+        factories.clone(),
+        servers.clone(),
+        deadline,
+        WorkBrowserDocumentPolicy::Exact,
+        true,
+    )
+    .with_work_identity(work)
+    .with_page_admission(crate::RetainedPageAdmission {
+        profile: profile.profile(),
+        work,
+        execution,
+        attempt,
+        step: steps[2],
+        workers: 3,
+        deadline,
+    })
+    .unwrap();
+    views.push(callback.attach_retained_work(request).unwrap());
+    native_pages.push(native);
+    pump(&queue, &mut shell, || {
+        while views[2].take_event().is_some() {}
+        views[2].snapshot().phase == RetainedWorkPhase::Terminal
+    });
+    let request = prepared_until_isolated(
+        profile,
+        engine.clone(),
+        store.clone(),
+        Arc::new(Native::default()),
+        factories.clone(),
+        servers.clone(),
+        deadline,
+        WorkBrowserDocumentPolicy::Exact,
+        true,
+    )
+    .with_work_identity(work)
+    .with_page_admission(crate::RetainedPageAdmission {
+        profile: profile.profile(),
+        work,
+        execution,
+        attempt,
+        step: steps[3],
+        workers: 3,
+        deadline,
+    })
+    .unwrap();
+    let refused = callback.attach_retained_work(request).unwrap();
+    pump(&queue, &mut shell, || {
+        refused.snapshot().phase == RetainedWorkPhase::Refused
+    });
+    assert_eq!(factories.load(Ordering::Acquire), 3);
+    assert!(views[0].close());
+    pump(&queue, &mut shell, || {
+        native_pages[0].destructions.load(Ordering::Acquire) == 1
+    });
+    pump(&queue, &mut shell, || views[0].is_group_locally_retired());
+    assert!(!views[0].is_closed());
+    assert!(!views[1].is_group_locally_retired() && !views[2].is_group_locally_retired());
+    assert!(!views[1].is_closed() && !views[2].is_closed());
+    assert_eq!(native_pages[0].destructions.load(Ordering::Acquire), 1);
+    assert_eq!(native_pages[1].destructions.load(Ordering::Acquire), 0);
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 2);
+    }
+    let shutdown = owner.shutdown_with_deadline(Instant::now() + Duration::from_secs(5));
+    while let Some(command) = queue.try_recv() {
+        let terminal = matches!(command, Command::Shutdown { .. });
+        shell.handle(command);
+        if terminal {
+            break;
+        }
+    }
+    assert_eq!(shutdown.recv(), Ok(crate::ShutdownOutcome::Clean));
+    for native in native_pages {
+        native.join();
+        assert_eq!(native.destructions.load(Ordering::Acquire), 1);
+    }
 }
 
 #[test]

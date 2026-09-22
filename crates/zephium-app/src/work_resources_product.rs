@@ -93,6 +93,7 @@ impl RetainedWorkPorts {
 #[must_use]
 pub struct PreparedRetainedWork {
     anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
+    page: Option<RetainedPageAdmission>,
     work: Option<WorkId>,
     engine: crate::SharedEngine,
     journal: Arc<dyn AgentWorkJournalPort>,
@@ -103,6 +104,20 @@ pub struct PreparedRetainedWork {
     actor: ActorRequest,
 }
 impl PreparedRetainedWork {
+    pub fn with_page_admission(
+        mut self,
+        page: RetainedPageAdmission,
+    ) -> Result<Self, AgentWorkFailure> {
+        if !self.spec.isolated_public
+            || self.work != Some(page.work)
+            || self.profile.profile() != page.profile
+            || self.spec.deadline > page.deadline
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.page = Some(page);
+        Ok(self)
+    }
     pub fn with_anonymous_session(
         mut self,
         session: zephium_agentic::WorkBrowserSession,
@@ -173,6 +188,7 @@ impl PreparedRetainedWork {
         }
         Ok(Self {
             anonymous_session: None,
+            page: None,
             work: None,
             engine,
             journal,
@@ -196,6 +212,30 @@ impl PreparedRetainedWork {
         native: RetainedWorkNativeFactory,
     ) -> Result<Self, AgentWorkFailure> {
         Self::from_actor(spec, actor, profile, engine, journal, audit, native)
+    }
+}
+
+/// Move-only admission minted from an owned, running durable read step.
+pub struct RetainedPageAdmission {
+    pub(crate) profile: zephium_core::ids::ProfileId,
+    pub(crate) work: WorkId,
+    pub(crate) execution: zephium_core::work::WorkExecutionId,
+    pub(crate) attempt: zephium_core::work::WorkAttemptId,
+    pub(crate) step: zephium_core::work::WorkStepId,
+    pub(crate) workers: u8,
+    pub(crate) deadline: Instant,
+}
+impl RetainedPageAdmission {
+    pub fn native_group(&self) -> (WorkId, u8) {
+        (self.work, self.workers.min(3))
+    }
+    fn same_group(&self, other: &Self) -> bool {
+        self.profile == other.profile
+            && self.work == other.work
+            && self.execution == other.execution
+            && self.attempt == other.attempt
+            && self.workers == other.workers
+            && self.deadline == other.deadline
     }
 }
 
@@ -256,6 +296,7 @@ struct Projection {
 struct ProductSignal {
     close: AtomicBool,
     closed: AtomicBool,
+    group_locally_retired: AtomicBool,
     projection: Mutex<Projection>,
     stop: AtomicBool,
     reconcile: AtomicBool,
@@ -345,6 +386,11 @@ impl RetainedWorkHandle {
     /// Set only by the original resource owner's native shutdown proof.
     pub fn is_closed(&self) -> bool {
         self.signal.closed.load(Ordering::Acquire)
+    }
+    /// Scoped worker, resource and journal cleanup is complete. The Shell still
+    /// owns the group-wide native audit; this never substitutes for is_closed.
+    pub fn is_group_locally_retired(&self) -> bool {
+        self.signal.group_locally_retired.load(Ordering::Acquire)
     }
     pub fn snapshot(&self) -> RetainedWorkSnapshot {
         match self.signal.projection.lock() {
@@ -463,6 +509,7 @@ impl CallbackHandle {
         let signal = Arc::new(ProductSignal {
             close: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            group_locally_retired: AtomicBool::new(false),
             projection: Mutex::new(Projection {
                 human: None,
                 human_resume: None,
@@ -494,7 +541,11 @@ impl CallbackHandle {
             stop: AtomicBool::new(false),
             reconcile: AtomicBool::new(false),
         });
+        let mut prepared = prepared;
         let work = ProductWork {
+            page: prepared.page.take(),
+            runtime_group: None,
+            group_shutdown: false,
             clock: prepared.spec.clock.clone(),
             deadline: prepared.spec.deadline,
             prepared: Some(prepared),
@@ -516,6 +567,9 @@ impl CallbackHandle {
 }
 
 pub(crate) struct ProductWork {
+    page: Option<RetainedPageAdmission>,
+    runtime_group: Option<zephium_agent_runtime::AgentRuntimeWorkerGroup>,
+    group_shutdown: bool,
     prepared: Option<PreparedRetainedWork>,
     coordinator: Option<RetainedWork>,
     request: Option<ActorRequest>,
@@ -530,6 +584,55 @@ pub(crate) struct ProductWork {
     callback: CallbackHandle,
 }
 impl ProductWork {
+    pub(crate) fn ready_for_group_shutdown(&self) -> bool {
+        self.is_closed()
+            || self
+                .coordinator
+                .as_ref()
+                .is_some_and(RetainedWork::ready_for_group_shutdown)
+    }
+    pub(crate) fn allow_group_shutdown(&mut self) {
+        self.group_shutdown = true;
+        if let Some(coordinator) = &mut self.coordinator {
+            coordinator.allow_group_shutdown();
+        }
+    }
+    pub(crate) fn new_runtime_group(
+        &self,
+    ) -> Result<
+        zephium_agent_runtime::AgentRuntimeWorkerGroup,
+        zephium_agent_runtime::RuntimeSpawnError,
+    > {
+        let page = self
+            .page
+            .as_ref()
+            .ok_or(zephium_agent_runtime::RuntimeSpawnError::Group)?;
+        zephium_agent_runtime::AgentRuntimeWorkerGroup::try_new(page.work, page.workers.min(3))
+    }
+    pub(crate) fn set_runtime_group(
+        &mut self,
+        group: zephium_agent_runtime::AgentRuntimeWorkerGroup,
+    ) {
+        self.runtime_group = Some(group);
+    }
+    pub(crate) fn is_page(&self) -> bool {
+        self.page.is_some()
+    }
+    pub(crate) fn admits_peers(&self, peers: &[ProductWork]) -> bool {
+        let Some(page) = &self.page else {
+            return false;
+        };
+        peers.len() < usize::from(page.workers.min(3))
+            && Instant::now() < page.deadline
+            && peers.iter().all(|peer| {
+                !peer.group_shutdown
+                    && !peer.is_stuck()
+                    && peer
+                        .page
+                        .as_ref()
+                        .is_some_and(|other| page.same_group(other) && page.step != other.step)
+            })
+    }
     pub(crate) fn is_closed(&self) -> bool {
         self.signal.closed.load(Ordering::Acquire)
     }
@@ -617,6 +720,11 @@ impl ProductWork {
                     prepared.journal,
                     prepared.audit,
                 ));
+                if let Some(group) = self.runtime_group.take() {
+                    if let Some(coordinator) = self.coordinator.as_mut() {
+                        coordinator.set_runtime_group(group);
+                    }
+                }
                 self.request = Some(prepared.actor);
             }
             Err(_) => {
@@ -715,6 +823,12 @@ impl ProductWork {
             work.poll(now);
             false
         };
+        if self.page.is_some() && self.signal.close.load(Ordering::Acquire) && work.locally_closed()
+        {
+            self.signal
+                .group_locally_retired
+                .store(true, Ordering::Release);
+        }
         if let Ok(mut projection) = self.signal.projection.lock() {
             if let Some((record, decision)) = projection.review_requested.take() {
                 work.review(record, decision);
@@ -821,6 +935,7 @@ impl ProductWork {
     pub(crate) fn begin_shutdown(&mut self) {
         self.prepared.take();
         self.request.take();
+        self.signal.close.store(true, Ordering::Release);
         self.signal.stop.store(true, Ordering::Release);
         if let Some(work) = &mut self.coordinator {
             work.begin_shutdown();

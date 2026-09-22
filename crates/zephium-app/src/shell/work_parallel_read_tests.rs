@@ -105,18 +105,23 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                         turn: &provider,
                         search: &NoSearch,
                     },
-                    |_, request| {
+                    |probe, request| {
                         let ordinal = {
                             let mut requests = requests.lock().unwrap();
                             let ordinal = requests.len();
                             requests.push(request.clone());
                             ordinal
                         };
+                        if ordinal == 3 {
+                            assert_eq!(completed.load(Ordering::SeqCst), 3);
+                        }
                         let barrier = barrier.clone();
                         let active = active.clone();
                         let peak = peak.clone();
                         let completed = completed.clone();
                         async move {
+                            assert!(probe.admit_read_page(WorkStepId::generate()).await.is_err());
+                            let _admission = probe.admit_read_page(request.id).await.unwrap();
                             peak.fetch_max(
                                 active.fetch_add(1, Ordering::SeqCst) + 1,
                                 Ordering::SeqCst,

@@ -46,6 +46,48 @@ fn source() -> (WorkBrowserResources, WorkBrowserResourceRequest) {
 }
 
 #[test]
+fn work_group_audit_requires_the_exact_union_of_owned_resource_guards() {
+    let slot = AgentContextPortSlot::new(Arc::new(|_| false), Arc::new(|_| {}));
+    let mut factory = slot.take_factory().unwrap();
+    let work = WorkId::generate();
+    let _ports: Vec<_> = (0..3)
+        .map(|_| factory.begin_work_page(work, 3, |_| {}).unwrap())
+        .collect();
+    let group = factory.inner.state.lock().unwrap().group.clone().unwrap();
+    let members = group.members.lock().unwrap().clone();
+    let guards: Vec<_> = members
+        .iter()
+        .map(|member| {
+            let (_, request) = source();
+            let guard = Arc::new(WorkResourceGuard::new(&request, member));
+            member
+                .work
+                .lock()
+                .unwrap()
+                .rows
+                .insert(request.resource().identity().context(), guard.clone());
+            guard
+        })
+        .collect();
+    let task = AgentContextTask::new(
+        AgentPendingRequest::Audit(ContextResourceAuditId::new(1).unwrap()),
+        members[0].reserve_audit().unwrap(),
+        Arc::new(|_| {}),
+    );
+    assert!(task.work_ingress_matches(guards.clone()));
+    assert!(!task.work_ingress_matches(guards[..2].to_vec()));
+    assert!(!task.work_ingress_matches(vec![
+        guards[0].clone(),
+        guards[0].clone(),
+        guards[1].clone()
+    ]));
+    let (_, request) = source();
+    let foreign = Arc::new(WorkResourceGuard::new(&request, &members[0]));
+    assert!(!task.work_ingress_matches(vec![guards[0].clone(), guards[1].clone(), foreign]));
+    task.refuse(ContextPortFailure::NativeRefused);
+}
+
+#[test]
 fn human_native_delivery_seals_continue_and_acquire_until_physical_callback_return() {
     let admission = admission();
     let (mut rows, construct) = source();

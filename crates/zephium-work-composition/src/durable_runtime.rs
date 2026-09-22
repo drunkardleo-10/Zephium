@@ -277,7 +277,16 @@ impl MacosWorkComposition {
             decisions,
             deadline: probe.deadline().min(Instant::now() + MAX_STEP_DURATION),
         };
+        let admission = if matches!(request.step, WorkStepKindV1::Read { .. }) {
+            Some(probe.admit_read_page(request.id).await?)
+        } else {
+            None
+        };
         let invocation = compile_step(probe, request, settings, collection.as_ref(), None)?;
+        let invocation = match admission {
+            Some(page) => invocation.with_page_admission(page),
+            None => invocation,
+        };
         let mut run = self
             .run_retained(
                 shell,
@@ -541,7 +550,12 @@ impl MacosWorkComposition {
                 trace("close:attempt_deadline");
                 requested_close = true;
             }
-            if now >= cleanup_deadline {
+            if cleanup_expired(
+                now,
+                cleanup_deadline,
+                attempt.deadline() + Duration::from_secs(30),
+                guard.0.is_group_locally_retired(),
+            ) {
                 if anonymous {
                     // Nothing was written anywhere: a resource that cannot
                     // close is one failed page, charged with what settled.
@@ -874,6 +888,12 @@ impl MacosWorkComposition {
     }
 }
 
+fn cleanup_expired(now: Instant, local: Instant, group: Instant, locally_retired: bool) -> bool {
+    // A retired page has no local cleanup debt. Its original attempt still
+    // bounds waiting for peer reads and the Shell's global native proof.
+    now >= group || (now >= local && !locally_retired)
+}
+
 struct BrowserRun {
     status: WorkAttemptStatus,
     usage: Option<WorkUsage>,
@@ -989,6 +1009,23 @@ impl BrowserRun {
 #[cfg(test)]
 mod closed_result_tests {
     use super::*;
+
+    #[test]
+    fn group_join_never_extends_pending_resource_cleanup_or_the_original_deadline() {
+        let start = Instant::now();
+        let local = start + Duration::from_secs(30);
+        let group = start + Duration::from_secs(180);
+        assert!(!cleanup_expired(
+            local - Duration::from_millis(1),
+            local,
+            group,
+            false
+        ));
+        assert!(cleanup_expired(local, local, group, false));
+        assert!(!cleanup_expired(local, local, group, true));
+        assert!(cleanup_expired(group, local, group, true));
+        assert!(cleanup_expired(group, local, group, false));
+    }
 
     #[test]
     fn an_uncertain_page_bills_settled_model_calls_unless_one_is_in_flight() {

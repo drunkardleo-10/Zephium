@@ -49,6 +49,10 @@ impl Driver {
             };
             let batch = &reads[offset..offset + count];
             let mut pending = Vec::new();
+            let mut retries: Vec<(
+                WorkAgentBrowseRequest,
+                Result<WorkBrowserOutcome, WorkError>,
+            )> = Vec::new();
             let mut terminal = None;
             let mut failure = None;
             for (kind, limits) in batch.iter().zip(limits) {
@@ -80,14 +84,41 @@ impl Driver {
                     prior: None,
                 });
             }
-            while !pending.is_empty() {
-                let (request, outcome, prior) = next_read(&mut pending).await;
+            while !pending.is_empty() || !retries.is_empty() {
+                let (request, outcome, prior) = if pending.is_empty() {
+                    let (request, outcome) = retries.pop().expect("pending read or retry");
+                    if terminal.is_none() && failure.is_none() && !self.cancelled().await {
+                        let first = outcome
+                            .as_ref()
+                            .ok()
+                            .and_then(|outcome: &WorkBrowserOutcome| outcome.usage)
+                            .expect("retry requires known usage");
+                        if let Some(limits) = retry_limits(request.limits, first) {
+                            self.report(WorkAgentDiagnostic::ReadRetried);
+                            let request = WorkAgentBrowseRequest { limits, ..request };
+                            let future = Box::pin(browser(self.probe.clone(), request.clone()));
+                            pending.push(PendingRead {
+                                request,
+                                future,
+                                prior: Some(first),
+                            });
+                            continue;
+                        }
+                    }
+                    (request, outcome, None)
+                } else {
+                    next_read(&mut pending).await
+                };
                 let outcome = checked_outcome(outcome, request.limits);
                 let retry = prior.is_none()
                     && terminal.is_none()
                     && failure.is_none()
                     && matches!(&outcome, Ok(WorkBrowserOutcome { status: WorkStepStatus::Failed, usage: Some(_), note: Some(note), .. })
                         if note == read_note::HUMAN_CHECK || note == read_note::UNSETTLED);
+                if retry && !pending.is_empty() {
+                    retries.push((request, outcome));
+                    continue;
+                }
                 if retry && !self.cancelled().await {
                     let first = outcome
                         .as_ref()
