@@ -10,6 +10,7 @@ build = false
 default = []
 provider-transport = [
     "dep:zephium-agent-provider-transport",
+    "dep:zephium-decision",
     "zephium-agent-provider-transport/provider-transport",
 ]
 probe-harness = [
@@ -21,6 +22,7 @@ probe-harness = [
 thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }
 zephium-agentic.workspace = true
+zephium-decision = { workspace = true, optional = true }
 zephium-agent-model-catalog.workspace = true
 zephium-agent-provider-transport = { workspace = true, optional = true }
 zephium-agent-runtime.workspace = true

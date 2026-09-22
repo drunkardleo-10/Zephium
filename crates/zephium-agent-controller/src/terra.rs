@@ -54,6 +54,10 @@ use zephium_agentic::{
 
 use crate::action::AgentBrowserVerifiedTransition;
 
+#[path = "decision.rs"]
+mod decision;
+pub use decision::AgentBrowserDecisionProvider;
+
 #[path = "work.rs"]
 pub(crate) mod work;
 pub use work::{
@@ -1922,6 +1926,8 @@ struct AgentBrowserNavigationDispatchRefusal {
 /// this driver alone is not a fully closed Work run.
 #[must_use]
 pub struct AgentBrowserSession {
+    decisions: Option<decision::BrowserDecisions>,
+    initial_provider_started: bool,
     navigation: Option<zephium_agentic::AgentActiveNavigation>,
     navigation_refusal: Option<AgentBrowserNavigationDispatchRefusal>,
     navigation_receipt: Option<zephium_agentic::AgentNavigationReceipt>,
@@ -2149,6 +2155,8 @@ impl AgentBrowserSession {
         account_attestations.push(account.attestation());
         Ok(Self {
             policy,
+            decisions: None,
+            initial_provider_started: false,
             navigation: None,
             navigation_refusal: None,
             navigation_receipt: None,
@@ -2205,7 +2213,7 @@ impl AgentBrowserSession {
         action_authority: Option<&zephium_agentic::AgentProviderActionAuthority>,
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         self.check_live()?;
-        if self.turns != 0 || self.objective.is_none() {
+        if self.initial_provider_started || self.objective.is_none() {
             return Err(AgentBrowserProviderError::Continuation);
         }
         let payload = encode_semantic_observation(
@@ -2239,6 +2247,7 @@ impl AgentBrowserSession {
             ),
         }
         .map_err(AgentBrowserProviderError::from_request)?;
+        self.initial_provider_started = true;
         self.drive(prepared.into_transport_input()).await
     }
 
@@ -2409,6 +2418,13 @@ impl AgentBrowserSession {
     fn next_model_call_request(
         &mut self,
     ) -> Result<AgentModelCallRequest, AgentBrowserProviderError> {
+        self.next_model_call_request_with_budget(browser_call_budget(self.model)?)
+    }
+
+    fn next_model_call_request_with_budget(
+        &mut self,
+        budget: AgentModelCallBudget,
+    ) -> Result<AgentModelCallRequest, AgentBrowserProviderError> {
         let call_id =
             AgentModelCallId::new(self.next_call).ok_or(AgentBrowserProviderError::Authority)?;
         self.next_call = self
@@ -2420,7 +2436,7 @@ impl AgentBrowserSession {
             call_id,
             self.lease.lease(),
             self.account,
-            browser_call_budget(self.model)?,
+            budget,
             now,
         )
         .with_remaining_native_actions(
@@ -2903,6 +2919,7 @@ impl AgentBrowserSession {
         self.action_executions.seal();
         self.action_settlements.seal();
         drop(self.credential.take());
+        self.decisions.take();
         drop(self.objective.take());
         let mut close_failure = None;
         if let Some(attempt) = self.attempt.take() {
@@ -4209,6 +4226,197 @@ mod tests {
         )
         .expect("prepare")
         .into_transport_input()
+    }
+
+    #[tokio::test]
+    async fn decision_call_joins_the_shared_work_journal() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for count in [true, false] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let (header, length) = loop {
+                    let mut buffer = [0; 4096];
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert_ne!(read, 0);
+                    bytes.extend_from_slice(&buffer[..read]);
+                    if let Some(end) = bytes.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let headers = std::str::from_utf8(&bytes[..end]).unwrap();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        break (end + 4, length);
+                    }
+                };
+                while bytes.len() < header + length {
+                    let mut buffer = [0; 4096];
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert_ne!(read, 0);
+                    bytes.extend_from_slice(&buffer[..read]);
+                }
+                let request: serde_json::Value = serde_json::from_slice(&bytes[header..]).unwrap();
+                assert_eq!(request["model"], "gpt-5.6-terra");
+                let body = if count {
+                    serde_json::json!({"object":"response.input_tokens","input_tokens":100})
+                } else {
+                    let schema = &request["text"]["format"]["schema"]["properties"]["answers"]["properties"];
+                    let answers: serde_json::Map<_, _> = schema.as_object().unwrap().iter().map(|(key, schema)| {
+                        let value = if schema["properties"]["noul"].is_object() {
+                            serde_json::json!({"type":"noul","noul":0.01})
+                        } else {
+                            let probabilities: serde_json::Map<_, _> = schema["properties"]["probabilities"]["properties"].as_object().unwrap().keys()
+                                .map(|key| (key.clone(), serde_json::json!(if key == "none" { 1.0 } else { 0.0 }))).collect();
+                            serde_json::json!({"type":"choice","choice":"none","confidence":1.0,"probabilities":probabilities})
+                        };
+                        (key.clone(), value)
+                    }).collect();
+                    serde_json::json!({"object":"response","status":"completed","model":"gpt-5.6-terra","service_tier":"default","error":null,"incomplete_details":null,
+                        "output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":serde_json::json!({"answers":answers}).to_string()}]}],
+                        "usage":{"input_tokens":100,"output_tokens":200,"total_tokens":300,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":50}}})
+                }.to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+        });
+        let (mut session, observation) = browser_fixture();
+        session.transport = BrowserSessionTransport(
+            AgentProviderTransport::try_new_loopback(
+                AgentProviderTransportConfig::STANDARD,
+                &endpoint,
+                &endpoint,
+            )
+            .unwrap(),
+        );
+        let events = Arc::new(std::sync::Mutex::new(
+            work::WorkEvents::new(session.policy.manifest().run()).unwrap(),
+        ));
+        let mut journal = work::WorkJournal::new(
+            session.policy.manifest(),
+            session.lease.node(),
+            AgentSupervisorId::new(1).unwrap(),
+            AgentSupervisorCancellationId::new(1).unwrap(),
+            session.clock.clone(),
+            events,
+        )
+        .unwrap();
+        journal
+            .start(AgentSupervisorAttemptId::new(1).unwrap())
+            .unwrap();
+        session.journal = Some(journal);
+        session
+            .configure_decisions(AgentBrowserDecisionProvider::Emulation)
+            .unwrap();
+        let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        let mut answers = session
+            .decide_observation(&observation, &authority)
+            .await
+            .unwrap()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            answers
+                .take_challenge(&observation, session.account)
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(session.turns, 1);
+        assert!(!session.initial_provider_started);
+        assert_eq!(session.model_receipts.len(), 1);
+        assert_eq!(session.journal_receipts, 1);
+        assert_eq!(session.policy.pending_model_calls(), 0);
+        assert_eq!(session.policy.accounting().consumed_model_tokens(), 300);
+        let journal = session.journal.as_ref().unwrap();
+        assert!(journal.failure.is_none());
+        assert_eq!(journal.inputs.snapshot().calls(), 1);
+        assert_eq!(
+            journal
+                .inputs
+                .snapshot()
+                .kind(AgentProviderInputKind::Decision)
+                .calls(),
+            1
+        );
+        assert!(session.transport.snapshot().unwrap().is_idle());
+        assert!(session.try_finish().is_ok());
+    }
+
+    #[tokio::test]
+    async fn decision_calls_preserve_page_allowance_and_refuse_unaffordable_disclosure() {
+        for (budget, calls) in [
+            (
+                AgentRunBudget::try_new(2, 300_000, 1_000_000, 1).unwrap(),
+                8,
+            ),
+            (
+                AgentRunBudget::try_new(16, 300_000, 1_000_000, 1).unwrap(),
+                2,
+            ),
+            (AgentRunBudget::try_new(16, 300_000, 10_000, 1).unwrap(), 8),
+        ] {
+            let (mut session, observation) = browser_fixture_with_limits(budget, calls, 2);
+            session.transport = BrowserSessionTransport(
+                AgentProviderTransport::try_new_loopback(
+                    AgentProviderTransportConfig::STANDARD,
+                    "http://127.0.0.1:9/v1/responses",
+                    "http://127.0.0.1:9/v1/messages",
+                )
+                .unwrap(),
+            );
+            let deadline = session.deadline;
+            session
+                .configure_decisions(AgentBrowserDecisionProvider::Emulation)
+                .unwrap();
+            let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+            if let Some(mut answers) = session
+                .decide_observation(&observation, &authority)
+                .await
+                .unwrap()
+            {
+                assert_eq!(
+                    answers
+                        .take_challenge(&observation, session.account)
+                        .unwrap(),
+                    None
+                );
+            }
+            assert_eq!(session.deadline, deadline);
+            assert_eq!(session.turns, 0);
+            assert!(session.model_receipts.is_empty());
+            assert_eq!(session.policy.pending_model_calls(), 0);
+            assert_eq!(session.policy.accounting().consumed_model_tokens(), 0);
+            assert!(session.transport.snapshot().unwrap().is_idle());
+            assert!(session.try_finish().is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn decision_turns_do_not_impersonate_or_replay_the_initial_openai_turn() {
+        let (mut session, observation) = browser_fixture();
+        session.turns = 2;
+        session.credential.take();
+        assert_eq!(
+            session.start_initial(&observation).await.err(),
+            Some(AgentBrowserProviderError::Cancelled)
+        );
+        assert!(session.initial_provider_started);
+        assert_eq!(
+            session.start_initial(&observation).await.err(),
+            Some(AgentBrowserProviderError::Continuation)
+        );
+        assert_eq!(session.policy.pending_model_calls(), 0);
+        assert_eq!(session.turns, 2);
+        assert!(session.transport.snapshot().unwrap().is_idle());
+        assert!(session.try_finish().is_ok());
     }
 
     #[test]

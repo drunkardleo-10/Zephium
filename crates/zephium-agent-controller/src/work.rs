@@ -397,6 +397,7 @@ impl AgentWorkRunSettings {
 /// Approved product input, admitted before native or provider work begins.
 #[must_use]
 pub struct AgentWorkRunInput {
+    decision_provider: Option<super::AgentBrowserDecisionProvider>,
     manifest: AgentRunManifest,
     lease: AgentPlanLeaseBinding,
     context: AgentWorkContextSpec,
@@ -407,6 +408,12 @@ pub struct AgentWorkRunInput {
 }
 
 impl AgentWorkRunInput {
+    /// Enables typed decisions with a trusted provider configuration. Existing
+    /// OpenAI ownership supplies the per-question fallback; no scope is added.
+    pub fn with_decision_provider(mut self, provider: super::AgentBrowserDecisionProvider) -> Self {
+        self.decision_provider = Some(provider);
+        self
+    }
     /// Requires isolated native storage without changing account or disclosure scope.
     pub fn with_isolated_website_data(mut self) -> Self {
         self.isolated_store = true;
@@ -513,6 +520,7 @@ impl AgentWorkRunInput {
             AgentProviderObjective::try_admit_conservative_utf8(objective, config.tokenizer())
                 .map_err(|_| AgentWorkFailure::Contract)?;
         Ok(Self {
+            decision_provider: None,
             manifest,
             lease,
             context,
@@ -1221,6 +1229,7 @@ impl AgentWorkController {
                     observation: None,
                     native_terminal: None,
                     model_human_request: None,
+                    decision_answers: None,
                     terminal_intent: None,
                 }),
                 terminal: Arc::clone(&terminal),
@@ -1262,6 +1271,7 @@ struct WorkState {
     observation: Option<SemanticObservation>,
     native_terminal: Option<SemanticActionNativeSettlement>,
     model_human_request: Option<AgentWorkHumanRequest>,
+    decision_answers: Option<DecisionObservationAnswers>,
     terminal_intent: Option<WorkTerminalIntent>,
 }
 
@@ -2025,6 +2035,13 @@ impl AgentWorkController {
             state.retention,
         )
         .map_err(AgentWorkFailure::Browser)?;
+        if let Some(provider) = input.decision_provider.take() {
+            if let Err(error) = session.configure_decisions(provider) {
+                session.journal = state.journal.take();
+                state.session = Some(session);
+                return Err(AgentWorkFailure::Browser(error));
+            }
+        }
         if state.navigation_discovery.is_some() {
             if let Some(retained) = &state.native.retained {
                 session
@@ -2085,16 +2102,53 @@ impl AgentWorkController {
         Ok(())
     }
 
-    /// A bot check shown instead of the page gets a few seconds to pass on
-    /// its own. If it stays, the person is asked without spending a model
-    /// call; a task that cannot ask a person leaves the page to the model.
+    async fn classify_human_challenge(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        observation: &SemanticObservation,
+    ) -> Result<bool, AgentWorkFailure> {
+        state.decision_answers = None;
+        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        if session.decisions.is_none() {
+            return Ok(looks_like_human_challenge(observation));
+        }
+        state.refresh_account(worker, browser)?;
+        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        let authority = if session.config.permits_tool(AgentBrowserToolKind::Act) {
+            state.action_authority(observation)?
+        } else {
+            AgentProviderActionAuthority::try_new(observation, &[]).ok_or(AgentWorkFailure::Contract)?
+        };
+        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let answers = Self::provider(
+            &mut state.native,
+            worker,
+            browser,
+            session.cancellation.clone(),
+            session.decide_observation(observation, &authority),
+        )
+        .await?;
+        let Some(mut answers) = answers else {
+            return Ok(looks_like_human_challenge(observation));
+        };
+        let challenge = answers
+            .take_challenge(observation, session.account)
+            .map_err(|_| AgentWorkFailure::Contract)?;
+        state.decision_answers = Some(answers);
+        Ok(challenge.unwrap_or_else(|| looks_like_human_challenge(observation)))
+    }
+
+    /// Let automatic verification settle inside the original deadline before takeover.
     async fn settle_human_challenge(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
         mut observation: SemanticObservation,
     ) -> Result<(SemanticObservation, bool), AgentWorkFailure> {
-        if !state.human_request || !looks_like_human_challenge(&observation) {
+        if !state.human_request
+            || !Self::classify_human_challenge(state, worker, browser, &observation).await?
+        {
             return Ok((observation, false));
         }
         for millis in HUMAN_CHALLENGE_SETTLE_MILLIS {
@@ -2115,7 +2169,7 @@ impl AgentWorkController {
             state.refresh_account(worker, browser)?;
             observation =
                 Self::fit_model_observation(Self::observe(state, worker, browser).await?)?;
-            if !looks_like_human_challenge(&observation) {
+            if !Self::classify_human_challenge(state, worker, browser, &observation).await? {
                 return Ok((observation, false));
             }
         }
@@ -4435,6 +4489,8 @@ pub enum AgentWorkEventKind {
         /// Count plus streaming turn wall time, not server-only inference time.
         elapsed_millis: u64,
     },
+    /// One typed decision call settled with closed provider/size/latency facts.
+    DecisionSettled(DecisionCallDiagnostic),
     /// The model proposed a bounded typed tool.
     ToolProposed(AgentBrowserToolKind),
     /// Snapshot scope was incompatible with the delivered baseline. No native

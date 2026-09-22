@@ -52,7 +52,7 @@ pub use action::{
 
 #[cfg(feature = "provider-transport")]
 pub use terra::{
-    AgentBrowserAccountError, AgentBrowserModel, AgentBrowserProviderError,
+    AgentBrowserAccountError, AgentBrowserDecisionProvider, AgentBrowserModel, AgentBrowserProviderError,
     AgentBrowserProviderTurn, AgentBrowserRetention, AgentBrowserSession,
     AgentBrowserSessionFinishRefusal, AgentBrowserSessionTerminal, AgentWorkClosedUnsuccessfully,
     AgentWorkContextSpec, AgentWorkController, AgentWorkEvent, AgentWorkEventKind,

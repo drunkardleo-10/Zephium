@@ -6496,6 +6496,7 @@ dependencies = [
  "zephium-agent-provider-transport",
  "zephium-agent-runtime",
  "zephium-agentic",
+ "zephium-decision",
 ]
 
 [[package]]

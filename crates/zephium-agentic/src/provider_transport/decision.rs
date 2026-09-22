@@ -68,7 +68,7 @@ pub enum DecisionCallFailure {
 pub use super::planning::PlanningResponseRejection as DecisionEnvelopeFailure;
 
 /// One HTTP completion containing only closed facts.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DecisionCallDiagnostic {
     /// Provider protocol and routing kind.
     pub backend: DecisionBackendKind,
