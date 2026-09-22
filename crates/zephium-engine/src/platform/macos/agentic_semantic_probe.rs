@@ -3647,6 +3647,18 @@ fn pump_work_application_event(
             true,
         ) {
             *count += 1;
+            use objc2_app_kit::NSEventType;
+            let input_kind = match event.r#type() {
+                NSEventType::LeftMouseDown
+                | NSEventType::RightMouseDown
+                | NSEventType::OtherMouseDown => Some("PointerDown"),
+                NSEventType::KeyDown => Some("KeyDown"),
+                NSEventType::ScrollWheel => Some("Scroll"),
+                _ => None,
+            };
+            if let Some(kind) = input_kind {
+                eprintln!("work_probe input={kind} application_event={count}");
+            }
             app.sendEvent(&event);
         }
     });
