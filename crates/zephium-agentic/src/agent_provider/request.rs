@@ -703,6 +703,8 @@ pub enum AgentProviderInputEvidence {
 /// bytes, objective, URL, selector, tokenizer name, or provider response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentProviderSemanticInputStats {
+    /// Filtered observation state shared by code-owned typed questions.
+    Decision(AgentProviderDecisionInputStats),
     /// One complete compact semantic observation.
     Observation(SemanticEncodingStats),
     /// One compact semantic diff appended to a bounded replay.
@@ -721,6 +723,7 @@ impl AgentProviderSemanticInputStats {
     /// Exact model-facing semantic bytes, or canonical PNG bytes for a screenshot.
     pub const fn disclosed_bytes(self) -> u32 {
         match self {
+            Self::Decision(stats) => stats.bytes(),
             Self::Observation(stats) => stats.bytes(),
             Self::Diff(stats) => stats.bytes(),
             Self::Locate(stats) => stats.bytes(),
@@ -728,6 +731,37 @@ impl AgentProviderSemanticInputStats {
             Self::Extraction(stats) => stats.bytes(),
             Self::Screenshot(stats) => stats.canonical_png_bytes(),
         }
+    }
+}
+
+/// Content-free shape of one privacy-filtered typed decision input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentProviderDecisionInputStats {
+    bytes: u32,
+    nodes: u16,
+    questions: u8,
+}
+
+impl AgentProviderDecisionInputStats {
+    #[cfg(any(test, feature = "provider-transport"))]
+    pub(crate) const fn new(bytes: u32, nodes: u16, questions: u8) -> Self {
+        Self {
+            bytes,
+            nodes,
+            questions,
+        }
+    }
+    /// Serialized state bytes, excluding question rubrics and HTTP envelope.
+    pub const fn bytes(self) -> u32 {
+        self.bytes
+    }
+    /// Retained, non-secret observation references.
+    pub const fn nodes(self) -> u16 {
+        self.nodes
+    }
+    /// Code-owned questions sharing the state.
+    pub const fn questions(self) -> u8 {
+        self.questions
     }
 }
 
@@ -886,6 +920,29 @@ pub struct AgentProviderInputMetricReceipt {
 }
 
 impl AgentProviderInputMetricReceipt {
+    #[cfg(feature = "provider-transport")]
+    pub(crate) fn from_decision(
+        active: &AgentActiveModelCall,
+        stats: AgentProviderDecisionInputStats,
+        request_bytes: u32,
+        tokens: u32,
+        quality: SemanticTokenCountQuality,
+    ) -> Self {
+        Self {
+            manifest: active.manifest(),
+            manifest_guard: active.manifest_guard_for_metrics(),
+            call: active.id(),
+            lease: active.lease(),
+            node: active.node(),
+            metrics: AgentProviderInputMetrics {
+                serialized_request_bytes: request_bytes,
+                semantic: AgentProviderSemanticInputStats::Decision(stats),
+                semantic_payload_tokens: None,
+                structured_input_tokens: Some(AgentProviderInputTokenCount { tokens, quality }),
+            },
+        }
+    }
+
     fn from_committed(input: &AgentCommittedProviderInput) -> Self {
         Self {
             manifest: input.active.manifest(),

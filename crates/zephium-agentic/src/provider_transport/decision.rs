@@ -2,7 +2,9 @@
 //! browser disclosure and budget ownership have been admitted by Rust.
 
 use super::{planning::*, *};
-use crate::{AgentModelCallBudget, AgentModelCallRequest, SemanticObservation};
+use crate::{
+    AgentModelCallBudget, AgentModelCallRequest, SemanticObservation, SemanticTokenCountQuality,
+};
 use std::time::SystemTime;
 use zephium_core::work::{planning::WorkPlanningError, runtime::WorkExecutionLimits};
 use zephium_decision::{DecisionRequest, DecisionResponse, DecisionUsage, MAX_RESPONSE_BYTES};
@@ -103,20 +105,35 @@ pub struct AdmittedDecisionOutput {
     pub call: DecisionCallOutput,
     /// Exact policy accounting, including charged unknown outcomes.
     pub receipt: AgentModelCallReceipt,
+    /// Final, content-free input receipt bound to the same committed call.
+    pub input: AgentProviderInputMetricReceipt,
 }
 
-struct DecisionPolicyGuard<'a> {
+/// Retains call accounting in the host even when its async drive is cancelled.
+pub trait DecisionCallAccounting: Send {
+    /// Return false to stop dispatch when the host cannot record the active call.
+    fn activated(&mut self, call: AgentProviderCallIdentity) -> bool;
+    /// Preserve both receipts for the host's existing terminal journal closure.
+    fn settled(&mut self, receipt: AgentModelCallReceipt, input: AgentProviderInputMetricReceipt);
+}
+
+struct DecisionPolicyGuard<'a, 'b> {
     policy: &'a mut AgentRunPolicy,
     active: Option<AgentActiveModelCall>,
+    input: AgentProviderInputMetricReceipt,
+    accounting: Option<&'b mut dyn DecisionCallAccounting>,
 }
 
-impl Drop for DecisionPolicyGuard<'_> {
+impl Drop for DecisionPolicyGuard<'_, '_> {
     fn drop(&mut self) {
         if let Some(active) = self.active.take() {
-            let _ = self.policy.settle_model_call_unaccounted(
+            let settled = self.policy.settle_model_call_unaccounted(
                 active,
                 AgentModelCallUnaccountedSettlement::Cancelled,
             );
+            if let (Ok(receipt), Some(accounting)) = (settled, self.accounting.as_deref_mut()) {
+                accounting.settled(receipt, self.input);
+            }
         }
     }
 }
@@ -147,10 +164,42 @@ impl JevDecisionClient {
         deadline: Instant,
         cancellation: &AgentProviderCancellation,
     ) -> Result<AdmittedDecisionOutput, AgentPolicyError> {
+        self.evaluate_observation_accounted(
+            policy,
+            call,
+            observation,
+            projection,
+            deadline,
+            cancellation,
+            None,
+        )
+        .await
+    }
+
+    /// Uses the same policy path while preserving cancellation receipts in the host.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn evaluate_observation_accounted(
+        &self,
+        policy: &mut AgentRunPolicy,
+        call: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        projection: &DecisionObservation,
+        deadline: Instant,
+        cancellation: &AgentProviderCancellation,
+        accounting: Option<&mut dyn DecisionCallAccounting>,
+    ) -> Result<AdmittedDecisionOutput, AgentPolicyError> {
         let budget = Self::call_budget()?;
         if call.budget() != budget || deadline <= Instant::now() || cancellation.is_cancelled() {
             return Err(AgentPolicyError::Budget);
         }
+        let request_bytes = u32::try_from(
+            projection
+                .request()
+                .encode()
+                .map_err(|_| AgentPolicyError::PayloadMismatch)?
+                .len(),
+        )
+        .map_err(|_| AgentPolicyError::Budget)?;
         let admission = policy.prepare_decision_input(
             call,
             observation,
@@ -163,10 +212,25 @@ impl JevDecisionClient {
             );
         // Commit conservatively before the first possible transport disclosure.
         let active = policy.commit_observation_input(admission, &acknowledgement)?;
+        let input = AgentProviderInputMetricReceipt::from_decision(
+            &active,
+            projection.input_stats(),
+            request_bytes,
+            MAX_JEV_INPUT_TOKENS,
+            SemanticTokenCountQuality::Conservative,
+        );
         let mut owned = DecisionPolicyGuard {
             policy,
             active: Some(active),
+            input,
+            accounting,
         };
+        if let Some(accounting) = owned.accounting.as_deref_mut() {
+            let active = owned.active.as_ref().ok_or(AgentPolicyError::CallMissing)?;
+            if !accounting.activated(AgentProviderCallIdentity::from_active(active)) {
+                return Err(AgentPolicyError::Authority);
+            }
+        }
         let output = self
             .run(
                 projection.request(),
@@ -183,6 +247,16 @@ impl JevDecisionClient {
             )
             .await;
         let active = owned.active.take().ok_or(AgentPolicyError::CallMissing)?;
+        let input = match output.diagnostic.input_tokens.filter(|tokens| *tokens != 0) {
+            Some(tokens) => AgentProviderInputMetricReceipt::from_decision(
+                &active,
+                projection.input_stats(),
+                request_bytes,
+                tokens,
+                SemanticTokenCountQuality::ProviderExact,
+            ),
+            None => owned.input,
+        };
         let receipt = if output.diagnostic.input_tokens.is_some()
             || output.charged_usage == DecisionUsage::default()
         {
@@ -207,9 +281,13 @@ impl JevDecisionClient {
                 },
             )?
         };
+        if let Some(accounting) = owned.accounting.as_deref_mut() {
+            accounting.settled(receipt, input);
+        }
         Ok(AdmittedDecisionOutput {
             call: output,
             receipt,
+            input,
         })
     }
 
@@ -440,15 +518,15 @@ impl JevDecisionClient {
                 let response = request
                     .decode(&bytes)
                     .map_err(|_| DecisionCallFailure::InvalidAnswer)?;
-                charged_usage = response.usage;
-                cost_micro_usd = jev_cost(response.usage.input_tokens);
-                diagnostic.input_tokens = Some(response.usage.input_tokens);
                 slot.mark_completed();
                 if response.usage.input_tokens > reserve.input_tokens
                     || response.usage.output_tokens > reserve.output_tokens
                 {
                     return Err(DecisionCallFailure::Capacity);
                 }
+                charged_usage = response.usage;
+                cost_micro_usd = jev_cost(response.usage.input_tokens);
+                diagnostic.input_tokens = Some(response.usage.input_tokens);
                 return Ok(response);
             }
         };

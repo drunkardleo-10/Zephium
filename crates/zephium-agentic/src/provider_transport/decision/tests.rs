@@ -9,6 +9,23 @@ use std::{
 };
 use zephium_decision::Question;
 
+#[derive(Default)]
+struct Accounting {
+    reject: bool,
+    active: Vec<AgentProviderCallIdentity>,
+    receipts: Vec<(AgentModelCallReceipt, AgentProviderInputMetricReceipt)>,
+}
+
+impl DecisionCallAccounting for Accounting {
+    fn activated(&mut self, call: AgentProviderCallIdentity) -> bool {
+        self.active.push(call);
+        !self.reject
+    }
+    fn settled(&mut self, receipt: AgentModelCallReceipt, input: AgentProviderInputMetricReceipt) {
+        self.receipts.push((receipt, input));
+    }
+}
+
 fn admitted_fixture() -> (
     AgentRunPolicy,
     AgentModelCallRequest,
@@ -125,20 +142,28 @@ async fn admitted_decision_settles_actual_usage_and_dropped_dispatch_charges_the
     let client = client(endpoint);
     let server = server();
     let (mut policy, call, observation, projection) = admitted_fixture();
+    let mut accounting = Accounting::default();
     let output = client
-        .evaluate_observation(
+        .evaluate_observation_accounted(
             &mut policy,
             call,
             &observation,
             &projection,
             Instant::now() + Duration::from_secs(4),
             &AgentProviderCancellation::new(),
+            Some(&mut accounting),
         )
         .await
         .unwrap();
     assert_eq!(server.join().unwrap(), 1);
     assert_eq!(output.receipt.input_tokens(), 123);
     assert_eq!(output.receipt.output_tokens(), 7);
+    assert_eq!(accounting.active.len(), 1);
+    assert_eq!(accounting.receipts, vec![(output.receipt, output.input)]);
+    assert_eq!(output.input.call(), output.receipt.id());
+    let tokens = output.input.metrics().structured_input_tokens().unwrap();
+    assert_eq!(tokens.tokens(), 123);
+    assert_eq!(tokens.quality(), SemanticTokenCountQuality::ProviderExact);
     assert_eq!(policy.pending_model_calls(), 0);
 
     let (mut policy, call, observation, projection) = admitted_fixture();
@@ -154,10 +179,28 @@ async fn admitted_decision_settles_actual_usage_and_dropped_dispatch_charges_the
         crate::semantic_diff::SemanticObservationFingerprint::from_observation(&observation),
     );
     let active = policy.commit_observation_input(admission, &ack).unwrap();
+    let input = AgentProviderInputMetricReceipt::from_decision(
+        &active,
+        projection.input_stats(),
+        projection.request().encode().unwrap().len() as u32,
+        MAX_JEV_INPUT_TOKENS,
+        SemanticTokenCountQuality::Conservative,
+    );
+    let mut cancelled = Accounting::default();
     drop(DecisionPolicyGuard {
         policy: &mut policy,
         active: Some(active),
+        input,
+        accounting: Some(&mut cancelled),
     });
+    assert_eq!(cancelled.receipts.len(), 1);
+    let (receipt, input) = cancelled.receipts[0];
+    assert_eq!(receipt.id(), input.call());
+    assert_eq!(receipt.input_tokens(), u64::from(MAX_JEV_INPUT_TOKENS));
+    assert_eq!(
+        input.metrics().structured_input_tokens().unwrap().quality(),
+        SemanticTokenCountQuality::Conservative
+    );
     assert_eq!(policy.pending_model_calls(), 0);
     assert_eq!(
         policy.accounting().consumed_model_tokens(),
@@ -167,6 +210,61 @@ async fn admitted_decision_settles_actual_usage_and_dropped_dispatch_charges_the
         policy.accounting().consumed_cost_micro_usd(),
         jev_cost(MAX_JEV_INPUT_TOKENS)
     );
+}
+
+#[tokio::test]
+async fn host_accounting_refusal_stops_transport_and_preserves_terminal_receipts() {
+    let (endpoint, _) = server(vec![]);
+    let client = client(endpoint);
+    let (mut policy, call, observation, projection) = admitted_fixture();
+    let mut accounting = Accounting {
+        reject: true,
+        ..Accounting::default()
+    };
+    let result = client
+        .evaluate_observation_accounted(
+            &mut policy,
+            call,
+            &observation,
+            &projection,
+            Instant::now() + Duration::from_secs(2),
+            &AgentProviderCancellation::new(),
+            Some(&mut accounting),
+        )
+        .await;
+    assert!(matches!(result, Err(AgentPolicyError::Authority)));
+    assert_eq!(accounting.active.len(), 1);
+    assert_eq!(accounting.receipts.len(), 1);
+    assert_eq!(policy.pending_model_calls(), 0);
+    assert!(client.transport.snapshot().unwrap().is_idle());
+}
+
+#[tokio::test]
+async fn over_ceiling_vendor_usage_never_becomes_exact_accounting() {
+    let body = json!({"model":zephium_decision::JEV_MODEL,"answers":{},"usage":{"input_tokens":MAX_JEV_INPUT_TOKENS + 1,"output_tokens":7}});
+    let (endpoint, server) = server(vec![response(200, "", &body.to_string())]);
+    let client = client(endpoint);
+    let server = server();
+    let (mut policy, call, observation, projection) = admitted_fixture();
+    let output = client
+        .evaluate_observation(
+            &mut policy,
+            call,
+            &observation,
+            &projection,
+            Instant::now() + Duration::from_secs(4),
+            &AgentProviderCancellation::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(server.join().unwrap(), 1);
+    assert!(output.call.response.is_err());
+    assert_eq!(output.call.diagnostic.input_tokens, None);
+    assert_eq!(
+        output.receipt.input_tokens(),
+        u64::from(MAX_JEV_INPUT_TOKENS)
+    );
+    assert_eq!(policy.pending_model_calls(), 0);
 }
 
 fn request() -> DecisionRequest {

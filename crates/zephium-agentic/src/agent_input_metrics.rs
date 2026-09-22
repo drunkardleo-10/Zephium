@@ -25,6 +25,8 @@ pub const MAX_AGENT_PROVIDER_INPUT_SNAPSHOT_BYTES: usize = 1_024;
 /// Closed browser projection classes that can cross provider disclosure commit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentProviderInputKind {
+    /// Privacy-filtered state shared by typed decision questions.
+    Decision,
     /// Complete compact semantic observation.
     Observation,
     /// Compact semantic diff.
@@ -41,13 +43,14 @@ pub enum AgentProviderInputKind {
 
 impl AgentProviderInputKind {
     /// Canonical complete variant order for qualification output.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Observation,
         Self::Diff,
         Self::Locate,
         Self::Read,
         Self::Extraction,
         Self::Screenshot,
+        Self::Decision,
     ];
 
     const fn index(self) -> usize {
@@ -58,6 +61,7 @@ impl AgentProviderInputKind {
             Self::Read => 3,
             Self::Extraction => 4,
             Self::Screenshot => 5,
+            Self::Decision => 6,
         }
     }
 }
@@ -163,6 +167,8 @@ impl AgentProviderInputKindMetrics {
 /// Exact aggregate source-shape and redaction counts for committed inputs.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AgentProviderInputShapeMetrics {
+    decision_nodes: u64,
+    decision_questions: u64,
     observation_frames: u64,
     observation_nodes: u64,
     observation_secret_nodes: u64,
@@ -198,6 +204,14 @@ pub struct AgentProviderInputShapeMetrics {
 }
 
 impl AgentProviderInputShapeMetrics {
+    /// Aggregate retained references disclosed for typed decisions.
+    pub const fn decision_nodes(self) -> u64 {
+        self.decision_nodes
+    }
+    /// Aggregate typed questions sent with those states.
+    pub const fn decision_questions(self) -> u64 {
+        self.decision_questions
+    }
     /// Aggregate frames in full semantic observations.
     pub const fn observation_frames(self) -> u64 {
         self.observation_frames
@@ -364,6 +378,11 @@ impl AgentProviderInputShapeMetrics {
     ) -> Result<Self, AgentProviderInputMetricError> {
         let mut next = self;
         match semantic {
+            AgentProviderSemanticInputStats::Decision(stats) => {
+                next.decision_nodes = add_u64(next.decision_nodes, u64::from(stats.nodes()))?;
+                next.decision_questions =
+                    add_u64(next.decision_questions, u64::from(stats.questions()))?;
+            }
             AgentProviderSemanticInputStats::Observation(stats) => {
                 next.observation_frames =
                     add_u64(next.observation_frames, u64::from(stats.frames()))?;
@@ -498,7 +517,7 @@ pub struct AgentRunProviderInputSnapshot {
     calls: u32,
     serialized_request_bytes: u64,
     disclosed_bytes: u64,
-    kinds: [AgentProviderInputKindMetrics; 6],
+    kinds: [AgentProviderInputKindMetrics; 7],
     shapes: AgentProviderInputShapeMetrics,
 }
 
@@ -582,7 +601,7 @@ pub struct AgentRunProviderInputMetrics {
     calls: u32,
     serialized_request_bytes: u64,
     disclosed_bytes: u64,
-    kinds: [AgentProviderInputKindMetrics; 6],
+    kinds: [AgentProviderInputKindMetrics; 7],
     shapes: AgentProviderInputShapeMetrics,
     nodes: Vec<AgentProviderInputNodeRow>,
     receipts: Vec<AgentModelCallId>,
@@ -637,7 +656,7 @@ impl AgentRunProviderInputMetrics {
             calls: 0,
             serialized_request_bytes: 0,
             disclosed_bytes: 0,
-            kinds: [AgentProviderInputKindMetrics::default(); 6],
+            kinds: [AgentProviderInputKindMetrics::default(); 7],
             shapes: AgentProviderInputShapeMetrics::default(),
             nodes,
             receipts: Vec::new(),
@@ -790,6 +809,11 @@ fn validate_input_metrics(
         return Err(AgentProviderInputMetricError::Invariant);
     }
     match metrics.semantic() {
+        AgentProviderSemanticInputStats::Decision(stats)
+            if !semantic_tokens && structured_tokens && stats.questions() != 0 =>
+        {
+            Ok((AgentProviderInputKind::Decision, 0))
+        }
         AgentProviderSemanticInputStats::Observation(stats)
             if semantic_tokens && stats.secret_nodes() <= stats.nodes() =>
         {
@@ -987,7 +1011,7 @@ mod tests {
         Some((tokens, SemanticTokenCountQuality::ExactLocal))
     }
 
-    fn all_receipts(manifest: &AgentRunManifest) -> [AgentProviderInputMetricReceipt; 6] {
+    fn all_receipts(manifest: &AgentRunManifest) -> [AgentProviderInputMetricReceipt; 7] {
         let read = SemanticReadEncodingStats::for_input_metrics_test(40, 4, 1, 3, 1, 2);
         [
             receipt(
@@ -1061,6 +1085,16 @@ mod tests {
                 None,
                 exact(80),
             ),
+            receipt(
+                manifest,
+                7,
+                500,
+                AgentProviderSemanticInputStats::Decision(
+                    crate::AgentProviderDecisionInputStats::new(120, 3, 2),
+                ),
+                None,
+                exact(90),
+            ),
         ]
     }
 
@@ -1076,9 +1110,9 @@ mod tests {
         }
 
         let snapshot = reducer.snapshot();
-        assert_eq!(snapshot.calls(), 6);
-        assert_eq!(snapshot.serialized_request_bytes(), 5_200);
-        assert_eq!(snapshot.disclosed_bytes(), 480);
+        assert_eq!(snapshot.calls(), 7);
+        assert_eq!(snapshot.serialized_request_bytes(), 5_700);
+        assert_eq!(snapshot.disclosed_bytes(), 600);
         for kind in AgentProviderInputKind::ALL {
             assert_eq!(snapshot.kind(kind).calls(), 1);
         }
@@ -1113,6 +1147,8 @@ mod tests {
             1
         );
         let shapes = snapshot.shapes();
+        assert_eq!(shapes.decision_nodes(), 3);
+        assert_eq!(shapes.decision_questions(), 2);
         assert_eq!(shapes.observation_nodes(), 7);
         assert_eq!(shapes.observation_secret_nodes(), 2);
         assert_eq!(shapes.diff_entries(), 4);
@@ -1131,7 +1167,7 @@ mod tests {
             shapes.screenshot_layout(SemanticScreenshotPixelLayout::Rgba8),
             1
         );
-        assert_eq!(reducer.nodes().next().expect("node").calls(), 6);
+        assert_eq!(reducer.nodes().next().expect("node").calls(), 7);
 
         let before_replay = reducer.snapshot();
         assert_eq!(

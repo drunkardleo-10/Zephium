@@ -246,7 +246,8 @@ pub use agent_provider::{
     AgentProviderRequestDigest, AgentProviderRequestError, AgentProviderRequestSettlement,
     AgentProviderResponseIdentity, AgentProviderResponseRoute, AgentProviderRetryAfter,
     AgentProviderRetryDisposition, AgentProviderScreenshotRequestDraft,
-    AgentProviderSemanticInputStats, AgentProviderSettledTerminal, AgentProviderSettledToolTurn,
+    AgentProviderDecisionInputStats, AgentProviderSemanticInputStats, AgentProviderSettledTerminal,
+    AgentProviderSettledToolTurn,
     AgentProviderStopReason, AgentProviderStreamBatch, AgentProviderStreamBudget,
     AgentProviderStreamConclusion, AgentProviderStreamStats, AgentProviderTerminalFailure,
     AgentProviderTextDelta, AgentProviderTokenRates, AgentProviderTransportInput,
@@ -640,9 +641,9 @@ pub use sign_in_handoff::{
 pub use provider_transport::agent::OpenAiWorkAgent;
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::decision::{
-    AdmittedDecisionOutput, DecisionBackendKind, DecisionCallDiagnostic, DecisionCallFailure,
-    DecisionCallOutput, DecisionEnvelopeFailure, DecisionObservation, DecisionProjectionError,
-    JevDecisionClient, OpenAiDecisionClient,
+    AdmittedDecisionOutput, DecisionBackendKind, DecisionCallAccounting, DecisionCallDiagnostic,
+    DecisionCallFailure, DecisionCallOutput, DecisionEnvelopeFailure, DecisionObservation,
+    DecisionProjectionError, JevDecisionClient, OpenAiDecisionClient,
 };
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};

@@ -164,6 +164,13 @@ impl DecisionObservation {
     pub(crate) fn request(&self) -> &DecisionRequest {
         &self.request
     }
+    pub(crate) fn input_stats(&self) -> AgentProviderDecisionInputStats {
+        AgentProviderDecisionInputStats::new(
+            self.state_bytes() as u32,
+            self.references.len() as u16,
+            self.question_count() as u8,
+        )
+    }
     pub(crate) fn references(&self) -> &BTreeSet<SemanticReferenceId> {
         &self.references
     }
