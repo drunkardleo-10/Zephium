@@ -92,9 +92,11 @@ fn main() {
         [argument] if argument == "--live-agent-work" => work_durable::run_agent(),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-read-work" => work_durable::run_agent_read(),
+        #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-human-government-work" => {
             work_durable::run_agent_human_government()
         }
+        #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-government-work" => {
             work_durable::run_agent_government()
         }
@@ -114,6 +116,7 @@ fn main() {
         [argument] if argument == "--live-agent-product-details-work" => {
             work_durable::run_agent_details()
         }
+        #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-collection-work" => {
             work_durable::run_agent_collection()
         }
