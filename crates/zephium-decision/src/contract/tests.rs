@@ -133,6 +133,58 @@ fn score_must_preserve_ordered_legend_and_weighted_value() {
 }
 
 #[test]
+fn score_accepts_structured_levels_and_rejects_changed_legends_and_vendor_overflow() {
+    let levels = vec![
+        json!({"description":"blocked","examples":["challenge"]}),
+        json!(["readable", "evidence"]),
+        Value::Null,
+    ];
+    let request = DecisionRequest::try_new(
+        json!("state"),
+        BTreeMap::from([(
+            "coverage".into(),
+            Question::score(json!("Coverage?"), levels.clone()),
+        )]),
+    )
+    .unwrap();
+    let mut response = json!({"answers":{"coverage":{"type":"score","score":1.0,"confidence":1.0,"probabilities":{"0":0.0,"1":1.0,"2":0.0},"legend":{"0":levels[0],"1":levels[1],"2":levels[2]}}}});
+    assert!(request
+        .decode_emulation(
+            &serde_json::to_vec(&response).unwrap(),
+            DecisionUsage::default()
+        )
+        .unwrap()
+        .answers["coverage"]
+        .is_ok());
+    response["answers"]["coverage"]["legend"]["1"] = json!(["evidence", "readable"]);
+    assert!(request
+        .decode_emulation(
+            &serde_json::to_vec(&response).unwrap(),
+            DecisionUsage::default()
+        )
+        .unwrap()
+        .answers["coverage"]
+        .is_err());
+    let schema = request.answer_schema();
+    assert_eq!(
+        schema["properties"]["answers"]["properties"]["coverage"]["properties"]["legend"]
+            ["properties"]["0"]["additionalProperties"],
+        false
+    );
+    assert!(DecisionRequest::try_new(
+        json!("state"),
+        BTreeMap::from([(
+            "coverage".into(),
+            Question::score(
+                json!("Coverage?"),
+                vec![json!("level"); MAX_SCORE_LEVELS + 1]
+            )
+        )])
+    )
+    .is_err());
+}
+
+#[test]
 fn immutable_subset_preserves_state_and_refuses_unknown_or_duplicate_questions() {
     let original = request();
     let subset = original.subset(["target"]).unwrap();

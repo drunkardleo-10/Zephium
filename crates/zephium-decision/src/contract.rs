@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::*;
@@ -30,7 +31,7 @@ pub enum Question {
     },
     Score {
         instructions: Value,
-        criteria: Vec<String>,
+        criteria: Vec<Value>,
     },
 }
 
@@ -67,7 +68,7 @@ impl Question {
         Ok(question)
     }
 
-    pub fn score(instructions: Value, criteria: Vec<String>) -> Self {
+    pub fn score(instructions: Value, criteria: Vec<Value>) -> Self {
         Self::Score {
             instructions,
             criteria,
@@ -115,8 +116,8 @@ impl Question {
                 instructions,
                 criteria,
             } => {
-                if !(2..=MAX_CHOICE_OPTIONS).contains(&criteria.len())
-                    || criteria.iter().any(|level| level.trim().is_empty())
+                if !(2..=MAX_SCORE_LEVELS).contains(&criteria.len())
+                    || criteria.iter().any(|level| !entry(level))
                 {
                     return Err(ContractError::Options);
                 }
@@ -151,6 +152,8 @@ pub struct DecisionRequest {
     state: Value,
     model: &'static str,
     questions: BTreeMap<String, Question>,
+    #[serde(skip)]
+    digest: [u8; 32],
 }
 
 impl DecisionRequest {
@@ -175,14 +178,17 @@ impl DecisionRequest {
                 return Err(ContractError::Capacity);
             }
         }
-        let request = Self {
+        let mut request = Self {
             state,
             model: JEV_MODEL,
             questions,
+            digest: [0; 32],
         };
-        if encoded_len(&request)? > MAX_REQUEST_BYTES {
+        let encoded = request.encode()?;
+        if encoded.len() > MAX_REQUEST_BYTES {
             return Err(ContractError::Capacity);
         }
+        request.digest = Sha256::digest(&encoded).into();
         Ok(request)
     }
 
@@ -268,11 +274,29 @@ impl DecisionRequest {
                     let answer = answers
                         .get(key)
                         .ok_or(ContractError::MissingAnswer)
-                        .and_then(|value| validate_answer(question, value));
+                        .and_then(|value| validate_answer(question, value))
+                        .map(|mut answer| {
+                            answer.1 = self.answer_binding(key);
+                            answer
+                        });
                     (key.clone(), answer)
                 })
                 .collect(),
         })
+    }
+
+    fn answer_binding(&self, key: &str) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"zephium-decision-answer-v1\0");
+        digest.update(self.digest);
+        digest.update([0]);
+        digest.update(key.as_bytes());
+        digest.finalize().into()
+    }
+
+    /// An answer from another question, rubric, state or batch cannot be reused.
+    pub fn accepts(&self, key: &str, answer: &Answer) -> bool {
+        self.questions.contains_key(key) && answer.1 == self.answer_binding(key)
     }
 }
 
@@ -305,7 +329,7 @@ pub struct DecisionResponse {
 }
 
 /// Constructed only after validation against the exact offered question.
-pub struct Answer(AnswerValue);
+pub struct Answer(AnswerValue, [u8; 32]);
 
 impl Answer {
     pub fn value(&self) -> &AnswerValue {
@@ -336,7 +360,7 @@ pub enum AnswerValue {
         score: f64,
         confidence: f64,
         probabilities: BTreeMap<String, f64>,
-        legend: BTreeMap<String, String>,
+        legend: BTreeMap<String, Value>,
     },
 }
 
@@ -416,7 +440,7 @@ fn validate_answer(question: &Question, value: &Value) -> Result<Answer, Contrac
         _ => false,
     };
     if valid {
-        Ok(Answer(answer))
+        Ok(Answer(answer, [0; 32]))
     } else {
         Err(ContractError::Answer)
     }

@@ -60,9 +60,7 @@ pub(crate) fn answers(questions: &BTreeMap<String, Question>) -> Value {
                             criteria
                                 .iter()
                                 .enumerate()
-                                .map(|(i, level)| {
-                                    (i.to_string(), json!({"type":"string","enum":[level]}))
-                                })
+                                .map(|(i, level)| (i.to_string(), legend_schema(level)))
                                 .collect(),
                         ),
                     );
@@ -72,4 +70,28 @@ pub(crate) fn answers(questions: &BTreeMap<String, Question>) -> Value {
         })
         .collect();
     object(Map::from_iter([("answers".into(), object(answers))]))
+}
+
+fn legend_schema(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), legend_schema(value)))
+                .collect(),
+        ),
+        Value::Array(values) => {
+            let items: Vec<_> = values.iter().map(legend_schema).collect();
+            let items = if items.is_empty() {
+                json!({"type":"null"})
+            } else {
+                json!({"anyOf":items})
+            };
+            json!({"type":"array","items":items,"minItems":values.len(),"maxItems":values.len()})
+        }
+        Value::Null => json!({"type":"null"}),
+        Value::Bool(_) => json!({"type":"boolean","enum":[value]}),
+        Value::Number(_) => json!({"type":"number","enum":[value]}),
+        Value::String(_) => json!({"type":"string","enum":[value]}),
+    }
 }
