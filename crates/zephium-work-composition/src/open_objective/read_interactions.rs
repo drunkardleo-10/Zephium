@@ -257,10 +257,14 @@ impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
         let recipe = SemanticActionProposal::try_new(
             intent,
             SemanticEffectClass::Read,
-            SemanticWaitCondition::MutationQuiet(
-                SemanticMutationQuietPeriod::try_new(100)
-                    .map_err(|_| AgentWorkFailure::Contract)?,
-            ),
+            if class == SemanticOperationClass::Scroll {
+                SemanticWaitCondition::Immediate
+            } else {
+                SemanticWaitCondition::MutationQuiet(
+                    SemanticMutationQuietPeriod::try_new(100)
+                        .map_err(|_| AgentWorkFailure::Contract)?,
+                )
+            },
             verification,
             SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
                 .map_err(|_| AgentWorkFailure::Contract)?,

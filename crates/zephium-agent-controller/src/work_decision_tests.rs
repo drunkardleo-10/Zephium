@@ -2,7 +2,7 @@ use super::*;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 
-struct DecisionTask(SemanticExtractionSchema);
+struct DecisionTask(SemanticExtractionSchema, bool);
 impl AgentWorkTask for DecisionTask {
     fn allows_actions_before_extraction(&self) -> bool {
         true
@@ -15,9 +15,10 @@ impl AgentWorkTask for DecisionTask {
         observation: &SemanticObservation,
     ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
         Ok(
-            if observation.frames()[0].nodes()[1]
-                .states()
-                .contains(SemanticState::Expanded)
+            if !self.1
+                && observation.frames()[0].nodes()[1]
+                    .states()
+                    .contains(SemanticState::Expanded)
             {
                 AgentWorkTaskProgress::ReadyForExtraction
             } else {
@@ -30,29 +31,49 @@ impl AgentWorkTask for DecisionTask {
         node: &SemanticNode,
         _: &SemanticObservation,
     ) -> Result<SemanticOperations, AgentWorkFailure> {
-        Ok(if node.role() == SemanticRole::Button {
-            node.operations()
-        } else {
-            SemanticOperations::NONE
-        })
+        Ok(
+            if node.role()
+                == if self.1 {
+                    SemanticRole::Document
+                } else {
+                    SemanticRole::Button
+                }
+            {
+                node.operations()
+            } else {
+                SemanticOperations::NONE
+            },
+        )
     }
     fn decision_action_recipe(
         &self,
         operation: &DecisionOperation,
         _: &SemanticObservation,
     ) -> Result<Option<SemanticActionProposal>, AgentWorkFailure> {
-        let DecisionOperation::Click(target) = operation else {
-            return Ok(None);
-        };
-        Ok(Some(
-            SemanticActionProposal::try_new(
+        let (intent, verification) = match operation {
+            DecisionOperation::Click(target) if !self.1 => (
                 SemanticActionIntent::Click { target: *target },
-                SemanticEffectClass::Read,
-                SemanticWaitCondition::Immediate,
                 SemanticVerification::TargetState {
                     state: SemanticState::Expanded,
                     present: true,
                 },
+            ),
+            DecisionOperation::Scroll(target) if self.1 => (
+                SemanticActionIntent::Scroll {
+                    target: *target,
+                    direction: SemanticScrollDirection::Down,
+                    amount: SemanticScrollAmount::HalfPage,
+                },
+                SemanticVerification::ScrollPositionChanged,
+            ),
+            _ => return Ok(None),
+        };
+        Ok(Some(
+            SemanticActionProposal::try_new(
+                intent,
+                SemanticEffectClass::Read,
+                SemanticWaitCondition::Immediate,
+                verification,
                 SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS).unwrap(),
             )
             .unwrap(),
@@ -62,12 +83,23 @@ impl AgentWorkTask for DecisionTask {
         &self,
         action: &SemanticPreparedAction,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
-        assert_eq!(action.kind(), SemanticActionKind::Click);
+        assert_eq!(
+            action.kind(),
+            if self.1 {
+                SemanticActionKind::Scroll
+            } else {
+                SemanticActionKind::Click
+            }
+        );
         assert_eq!(
             action.verification(),
-            SemanticVerification::TargetState {
-                state: SemanticState::Expanded,
-                present: true
+            if self.1 {
+                SemanticVerification::ScrollPositionChanged
+            } else {
+                SemanticVerification::TargetState {
+                    state: SemanticState::Expanded,
+                    present: true,
+                }
             }
         );
         Ok(AgentEffectAssessment::new(
@@ -118,9 +150,9 @@ fn read_request(stream: &mut std::net::TcpStream) -> Value {
 }
 
 #[test]
-fn typed_click_verifies_or_closes_without_retry_and_keeps_accounting() {
+fn typed_native_read_verifies_or_closes_without_retry_and_keeps_accounting() {
     let _serial = lock(&SERIAL);
-    for applied in [false, true] {
+    for (scroll, applied) in [(false, false), (false, true), (true, false)] {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
@@ -151,12 +183,12 @@ fn typed_click_verifies_or_closes_without_retry_and_keeps_accounting() {
                             .unwrap();
                         let answers: serde_json::Map<_, _> = schemas.iter().map(|(key, schema)| {
                             let answer = if schema["properties"]["noul"].is_object() {
-                                json!({"type":"noul","noul":0.01})
+                                json!({"type":"noul","noul":if scroll && key == "more_below" {0.99} else {0.01}})
                             } else {
                                 let keys = schema["properties"]["probabilities"]["properties"].as_object().unwrap();
                                 let selection = match key.as_str() {
-                                    "operation" => "click",
-                                    "click_target" => keys.keys().find(|key| key.as_str() != "none").unwrap(),
+                                    "operation" => if scroll {"scroll"} else {"click"},
+                                    "click_target" | "scroll_target" => keys.keys().find(|key| key.as_str() != "none").unwrap(),
                                     _ => "none",
                                 };
                                 let probabilities: serde_json::Map<_, _> = keys.keys().map(|key| (key.clone(), json!(if key == selection {1.0} else {0.0}))).collect();
@@ -204,12 +236,20 @@ fn typed_click_verifies_or_closes_without_retry_and_keeps_accounting() {
             Arc::new(Audit(Fault::None)),
             Box::new(DecisionTask(
                 extraction.extraction_schema().unwrap().clone(),
+                scroll,
             )),
             AgentBrowserRetention::Stateless,
         )
         .unwrap();
-        let (outcome, shutdown, calls, events) =
-            drive(controller, handle, Fault::DecisionClick(applied));
+        let (outcome, shutdown, calls, events) = drive(
+            controller,
+            handle,
+            if scroll {
+                Fault::ScrollVerification
+            } else {
+                Fault::DecisionClick(applied)
+            },
+        );
         let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
             panic!("{outcome:?}");
         };

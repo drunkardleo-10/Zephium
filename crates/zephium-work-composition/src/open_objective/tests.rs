@@ -400,6 +400,37 @@ fn reading_observation(nodes: serde_json::Value, completeness: &str) -> Semantic
 
 #[cfg(feature = "durable-runtime")]
 #[test]
+fn reading_scroll_recipe_binds_with_position_change_verification() {
+    let policy = read_interactions::ReadingInteractionPolicy;
+    let observation = reading_observation(
+        serde_json::json!([{"k":1,"r":"document","fc":true,"o":16,
+            "b":{"x":0,"y":0,"w":800,"h":600}}]),
+        "complete",
+    );
+    let snapshot = &observation.frames()[0];
+    let target = snapshot.nodes()[0].reference();
+    let recipe = policy
+        .decision_action_recipe(&DecisionOperation::Scroll(target), &observation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recipe.wait(), SemanticWaitCondition::Immediate);
+    assert_eq!(
+        recipe.verification(),
+        SemanticVerification::ScrollPositionChanged
+    );
+    let batch = SemanticActionBatch::bind(
+        SemanticActionBatchId::new(1).unwrap(),
+        &observation,
+        &[snapshot.frame().clone()],
+        vec![recipe],
+    )
+    .unwrap();
+    let action = batch.actions()[0].prepare(snapshot).unwrap();
+    assert!(policy.assess(&action, &observation).is_ok());
+}
+
+#[cfg(feature = "durable-runtime")]
+#[test]
 fn reading_interactions_require_native_boundaries_and_intended_outcomes() {
     use serde_json::json;
     let policy = read_interactions::ReadingInteractionPolicy;
@@ -539,16 +570,19 @@ fn reading_interactions_require_native_boundaries_and_intended_outcomes() {
             allowed,
             "{role}/{name}/{activation}/{dialog}"
         );
-        let recipe = policy.decision_action_recipe(
-            &DecisionOperation::Click(node.reference()), &observation,
-        ).unwrap();
+        let recipe = policy
+            .decision_action_recipe(&DecisionOperation::Click(node.reference()), &observation)
+            .unwrap();
         assert_eq!(recipe.is_some(), allowed);
         if let Some(recipe) = recipe {
             assert_eq!(recipe.verification(), proof);
             let batch = SemanticActionBatch::bind(
-                SemanticActionBatchId::new(1).unwrap(), &observation,
-                &[snapshot.frame().clone()], vec![recipe],
-            ).unwrap();
+                SemanticActionBatchId::new(1).unwrap(),
+                &observation,
+                &[snapshot.frame().clone()],
+                vec![recipe],
+            )
+            .unwrap();
             let action = batch.actions()[0].prepare(snapshot).unwrap();
             assert!(policy.assess(&action, &observation).is_ok());
         }
