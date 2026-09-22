@@ -89,9 +89,9 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
             ExtensionNativeOwnershipMutationAdmission::default(),
         ),
         agent_audit_delivery_admission: OnceLock::new(),
-        lifecycle: Mutex::new(ActorLifecycle {
+        lifecycle: RwLock::new(ActorLifecycle {
             join: None,
-            exited,
+            exited: Mutex::new(exited),
             terminal_admitted: false,
         }),
         shutdown_clean: AtomicBool::new(false),
@@ -1514,7 +1514,7 @@ fn page_permission_unknown_ephemeral_terminal_and_full_queue_paths_fail_closed()
         .join(format!("profile-{ephemeral}.sqlite"))
         .exists());
 
-    store.lifecycle.lock().unwrap().terminal_admitted = true;
+    store.lifecycle.write().unwrap().terminal_admitted = true;
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let callback_completions = completions.clone();
     assert!(!store.load_page_permission_catalog(
@@ -1524,7 +1524,7 @@ fn page_permission_unknown_ephemeral_terminal_and_full_queue_paths_fail_closed()
         }),
     ));
     assert_eq!(completions.load(Ordering::Relaxed), 0);
-    store.lifecycle.lock().unwrap().terminal_admitted = false;
+    store.lifecycle.write().unwrap().terminal_admitted = false;
 
     let (tx, _rx) = mpsc::sync_channel(0);
     let full = std::mem::ManuallyDrop::new(test_store_with_sender(tx));
@@ -4466,7 +4466,7 @@ fn native_ownership_load_deadline_separates_non_admission_from_uncertainty() {
 
     store
         .lifecycle
-        .lock()
+        .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .terminal_admitted = true;
     assert_eq!(
@@ -5883,7 +5883,7 @@ fn extension_install_admission_and_callback_ownership_are_bounded() {
 
     let (terminal_tx, _terminal_rx) = mpsc::sync_channel(1);
     let terminal = test_store_with_sender(terminal_tx);
-    terminal.lifecycle.lock().unwrap().terminal_admitted = true;
+    terminal.lifecycle.write().unwrap().terminal_admitted = true;
     let terminal_callback = completions.clone();
     assert!(!terminal.mutate_extension_install_catalog(
         profile,
@@ -6209,7 +6209,7 @@ fn blocker_preference_update_rejects_unknown_profiles_and_terminal_admission() {
         BlockerConfigUpdateOutcome::NotRegistered
     );
 
-    store.lifecycle.lock().unwrap().terminal_admitted = true;
+    store.lifecycle.write().unwrap().terminal_admitted = true;
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let callback_completions = completions.clone();
     assert!(!store.update_profile_blocker_config(
@@ -6222,7 +6222,7 @@ fn blocker_preference_update_rejects_unknown_profiles_and_terminal_admission() {
     ));
     thread::sleep(Duration::from_millis(10));
     assert_eq!(completions.load(Ordering::Relaxed), 0);
-    store.lifecycle.lock().unwrap().terminal_admitted = false;
+    store.lifecycle.write().unwrap().terminal_admitted = false;
 }
 
 #[test]
@@ -6262,7 +6262,7 @@ fn blocker_preference_reconciliation_reads_one_exact_authoritative_row() {
 #[test]
 fn blocker_preference_reconciliation_rejects_terminal_and_full_queue_admission() {
     let store = SqliteStore::in_memory().unwrap();
-    store.lifecycle.lock().unwrap().terminal_admitted = true;
+    store.lifecycle.write().unwrap().terminal_admitted = true;
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let callback_completions = completions.clone();
     assert!(!store.load_profile_blocker_config(
@@ -6447,7 +6447,7 @@ fn terminal_shutdown_flushes_drops_sqlite_and_joins_the_actor() {
         StoreShutdownOutcome::Clean
     );
     assert!(store.shutdown_clean.load(Ordering::Acquire));
-    assert!(store.lifecycle.lock().unwrap().join.is_none());
+    assert!(store.lifecycle.write().unwrap().join.is_none());
     assert_eq!(
         store.shutdown_until(Instant::now() + Duration::from_secs(2)),
         StoreShutdownOutcome::Clean,
@@ -6478,7 +6478,7 @@ fn shutdown_deadline_bounds_actor_queue_admission_without_claiming_terminal_stat
         store.shutdown_until(started + Duration::from_millis(20)),
         StoreShutdownOutcome::RetryableFailure
     );
-    assert!(!store.lifecycle.lock().unwrap().terminal_admitted);
+    assert!(!store.lifecycle.write().unwrap().terminal_admitted);
     assert!(!store.shutdown_clean.load(Ordering::Acquire));
     assert!(started.elapsed() < Duration::from_millis(250));
 }
@@ -8564,6 +8564,23 @@ fn agent_audit_actor_commits_and_reconciles_the_exact_in_flight_delivery() {
 }
 
 #[test]
+fn agent_audit_admission_shares_live_readers_but_respects_terminal_exclusion() {
+    use zephium_agentic::{AgentAuditDeliveryId, AgentAuditDeliveryOutcome, AgentAuditDispatch, AgentAuditPort, AgentAuditSinkFailure};
+    let (tx, rx) = mpsc::sync_channel(MAX_PENDING_AGENT_AUDIT_DELIVERIES);
+    let store = test_store_with_sender(tx);
+    let mut ledger = agent_audit_ledger();
+    let first = ledger.begin_delivery(AgentAuditDeliveryId::new(1).unwrap(), 16).unwrap();
+    let proof = first.proof();
+    let reader = store.lifecycle.read().unwrap();
+    assert_eq!(store.append(first, Box::new(|_| {})), AgentAuditDispatch::Accepted(proof));
+    drop(reader);
+    let writer = store.lifecycle.write().unwrap();
+    assert_eq!(store.append(ledger.current_delivery().unwrap().unwrap(), Box::new(|_| panic!("refusal cannot transfer callback"))), AgentAuditDispatch::Refused(proof.settle(AgentAuditDeliveryOutcome::Refused(AgentAuditSinkFailure::Unavailable))));
+    drop(writer);
+    drop(rx);
+}
+
+#[test]
 fn agent_audit_actor_admission_is_independently_bounded_and_releases_commands() {
     use zephium_agentic::{
         AgentAuditDeliveryId, AgentAuditDeliveryOutcome, AgentAuditDispatch, AgentAuditPort,
@@ -8700,7 +8717,7 @@ fn work_document_mailbox_is_lazy_bounded_and_releases_refused_owners() {
             .load(Ordering::Acquire),
         0
     );
-    store.lifecycle.lock().unwrap().terminal_admitted = true;
+    store.lifecycle.write().unwrap().terminal_admitted = true;
     assert_eq!(
         store.work_document(
             1.into(),

@@ -67,7 +67,7 @@ impl AgentAuditPort for SqliteStore {
         completion: AgentAuditCompletion,
     ) -> AgentAuditDispatch {
         let proof = delivery.proof();
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => {

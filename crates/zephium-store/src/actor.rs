@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
-use std::sync::{Arc, Mutex, OnceLock, TryLockError};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, TryLockError};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -793,7 +793,7 @@ enum Cmd {
 
 struct ActorLifecycle {
     join: Option<JoinHandle<()>>,
-    exited: Receiver<()>,
+    exited: Mutex<Receiver<()>>,
     terminal_admitted: bool,
 }
 
@@ -1550,7 +1550,7 @@ pub struct SqliteStore {
     extension_grant_request_admission: Arc<Mutex<ExtensionGrantRequestAdmission>>,
     extension_native_ownership_mutation_admission: Arc<ExtensionNativeOwnershipMutationAdmission>,
     agent_audit_delivery_admission: OnceLock<Arc<AtomicUsize>>,
-    lifecycle: Mutex<ActorLifecycle>,
+    lifecycle: RwLock<ActorLifecycle>,
     shutdown_clean: AtomicBool,
     extension_service_store_authority_claimed: AtomicBool,
     extension_service_startup_requirement: ExtensionServiceStoreStartupRequirement,
@@ -1656,9 +1656,9 @@ impl SqliteStore {
             extension_grant_request_admission,
             extension_native_ownership_mutation_admission,
             agent_audit_delivery_admission: OnceLock::new(),
-            lifecycle: Mutex::new(ActorLifecycle {
+            lifecycle: RwLock::new(ActorLifecycle {
                 join: Some(join),
-                exited: actor_exit,
+                exited: Mutex::new(actor_exit),
                 terminal_admitted: false,
             }),
             shutdown_clean: AtomicBool::new(false),
@@ -1676,7 +1676,7 @@ impl SqliteStore {
     ) -> Result<ExtensionServiceStoreAuthority, ExtensionServiceStoreAuthorityClaimError> {
         let lifecycle = self
             .lifecycle
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
             return Err(ExtensionServiceStoreAuthorityClaimError::StoreUnavailable);
@@ -1696,7 +1696,7 @@ impl SqliteStore {
         deadline: Instant,
         done: ExtensionNativeOwnershipJournalLoadDone,
     ) -> bool {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -1717,7 +1717,7 @@ impl SqliteStore {
         deadline: Instant,
         done: ExtensionRuntimeStartupInventoryLoadDone,
     ) -> bool {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -1739,7 +1739,7 @@ impl SqliteStore {
         deadline: Instant,
         done: ExtensionInstallCatalogLoadDone,
     ) -> bool {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -1761,7 +1761,7 @@ impl SqliteStore {
         deadline: Instant,
         done: ExtensionNativeNamespaceLoadDone,
     ) -> bool {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -1784,7 +1784,7 @@ impl SqliteStore {
         deadline: Instant,
         done: ExtensionGrantCohortLoadDone,
     ) -> bool {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -1817,7 +1817,7 @@ impl SqliteStore {
         deadline: Instant,
         done: ExtensionProfilePolicyLoadDone,
     ) -> bool {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -1846,7 +1846,7 @@ impl SqliteStore {
         deadline: Instant,
         done: ExtensionProfilePolicyMutationDone,
     ) -> bool {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -1889,7 +1889,7 @@ impl SqliteStore {
         deadline: Instant,
         done: ExtensionGrantMutationDone,
     ) -> bool {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -1940,7 +1940,7 @@ impl SqliteStore {
         deadline: Instant,
         done: ExtensionInstallCatalogMutationDone,
     ) -> bool {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -1977,7 +1977,7 @@ impl SqliteStore {
         deadline: Instant,
         done: ExtensionInstallProvisionDone,
     ) -> bool {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -2039,7 +2039,7 @@ impl SqliteStore {
         deadline: Instant,
         done: ExtensionInstallUpdateDone,
     ) -> bool {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -2097,7 +2097,7 @@ impl SqliteStore {
         deadline: Instant,
         done: ExtensionNativeOwnershipJournalMutationDone,
     ) -> bool {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -2155,7 +2155,7 @@ impl SqliteStore {
         if !matches!(&mutation, ExtensionNativeOwnershipJournalMutation::Begin(_)) {
             return false;
         }
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -2195,7 +2195,7 @@ impl SqliteStore {
         deadline: Instant,
         done: ExtensionNativeOwnershipActivationDone,
     ) -> bool {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -2250,7 +2250,7 @@ impl SqliteStore {
         deadline: Instant,
         done: ExtensionNativeOwnershipJournalMutationDone,
     ) -> bool {
-        let lifecycle = match self.lifecycle.try_lock() {
+        let lifecycle = match self.lifecycle.try_read() {
             Ok(lifecycle) => lifecycle,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return false,
@@ -2353,7 +2353,7 @@ impl SqliteStore {
 
         let mut lifecycle = self
             .lifecycle
-            .lock()
+            .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.shutdown_clean.load(Ordering::Acquire) {
             return StoreShutdownOutcome::Clean;
@@ -2398,7 +2398,7 @@ impl SqliteStore {
         }
 
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || lifecycle.exited.recv_timeout(remaining).is_err() {
+        if remaining.is_zero() || lifecycle.exited.get_mut().unwrap_or_else(|poisoned| poisoned.into_inner()).recv_timeout(remaining).is_err() {
             return StoreShutdownOutcome::Unclean;
         }
         let Some(join) = lifecycle.join.take() else {
@@ -2557,7 +2557,7 @@ impl Store for SqliteStore {
         // transition so `true` always guarantees exactly one completion.
         let lifecycle = self
             .lifecycle
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
             return false;
@@ -2572,7 +2572,7 @@ impl Store for SqliteStore {
     fn load_profile_blocker_config(&self, profile: ProfileId, done: BlockerConfigLoadDone) -> bool {
         let lifecycle = self
             .lifecycle
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
             return false;
@@ -2585,7 +2585,7 @@ impl Store for SqliteStore {
     fn load_userscript_catalog(&self, profile: ProfileId, done: UserscriptCatalogLoadDone) -> bool {
         let lifecycle = self
             .lifecycle
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
             return false;
@@ -2607,7 +2607,7 @@ impl Store for SqliteStore {
         }
         let lifecycle = self
             .lifecycle
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
             return false;
@@ -2632,7 +2632,7 @@ impl Store for SqliteStore {
     ) -> bool {
         let lifecycle = self
             .lifecycle
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
             return false;
@@ -2651,7 +2651,7 @@ impl Store for SqliteStore {
     ) -> bool {
         let lifecycle = self
             .lifecycle
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
             return false;
@@ -2675,7 +2675,7 @@ impl Store for SqliteStore {
     ) -> bool {
         let lifecycle = self
             .lifecycle
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
             return false;
@@ -2694,7 +2694,7 @@ impl Store for SqliteStore {
     ) -> bool {
         let lifecycle = self
             .lifecycle
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
             return false;
@@ -2719,7 +2719,7 @@ impl Store for SqliteStore {
     ) -> bool {
         let lifecycle = self
             .lifecycle
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
             return false;
@@ -2744,7 +2744,7 @@ impl Store for SqliteStore {
     ) -> bool {
         let lifecycle = self
             .lifecycle
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
             return false;
@@ -2768,7 +2768,7 @@ impl Store for SqliteStore {
     ) -> bool {
         let lifecycle = self
             .lifecycle
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
             return false;
@@ -2799,7 +2799,7 @@ impl Store for SqliteStore {
     ) -> bool {
         let lifecycle = self
             .lifecycle
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
             return false;

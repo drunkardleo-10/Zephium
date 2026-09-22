@@ -20,7 +20,7 @@ impl SqliteStore {
             request.validate()?;
             let lifecycle = self
                 .lifecycle
-                .try_lock()
+                .try_read()
                 .map_err(|_| WorkError::Unavailable)?;
             if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
                 return Err(WorkError::Shutdown);
