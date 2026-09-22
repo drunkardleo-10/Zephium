@@ -684,6 +684,9 @@ async fn runtime_application_approves_exact_plan_settles_artifact_and_recovers_d
 #[path = "work_search_tests.rs"]
 mod search_tests;
 
+#[path = "work_parallel_read_tests.rs"]
+mod parallel_read_tests;
+
 #[tokio::test]
 async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
     use crate::work_agent::*;

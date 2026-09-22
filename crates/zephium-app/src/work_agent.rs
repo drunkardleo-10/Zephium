@@ -13,6 +13,9 @@ use zephium_core::{
 };
 use zephium_ipc::work::WorkActivityV1;
 
+#[path = "work_agent_reads.rs"]
+mod reads;
+
 /// A browser read or discovery the loop admitted for one step. The host
 /// compiles it into an anonymous, read-only public browsing task.
 #[derive(Clone)]
@@ -301,7 +304,7 @@ struct Driver {
 
 enum Fetched {
     Search(WorkStepId, WorkSearchOutcomeOwned),
-    Browse(WorkStepId, Result<WorkBrowserOutcome, WorkError>),
+    Browse(WorkStepId, Result<WorkBrowserOutcome, WorkError>, Option<WorkUsage>),
 }
 struct WorkSearchOutcomeOwned {
     status: WorkAttemptStatus,
@@ -804,7 +807,7 @@ impl Driver {
         }
     }
 
-    /// Searches run together; native reads run one at a time after them.
+    /// Searches and reads each use bounded batches after their prerequisites.
     /// Returns a terminal attempt status when the run cannot continue.
     async fn fetch<B, Fut>(
         &mut self,
@@ -891,70 +894,7 @@ impl Driver {
                 return Ok(Some(terminal));
             }
         }
-        for kind in browses {
-            if matches!(kind, WorkStepKindV1::Discover { .. }) {
-                // Provider search covers the web here; a native search engine
-                // page is never dispatched from the agent loop.
-                self.notice("Native discovery is not available in this run: provider search covers the web. Use search for facts and read for exact URLs listed in sources.");
-                continue;
-            }
-            if self.steps + 2 > u32::from(self.grant.max_steps) {
-                self.notice(STEPS_EXHAUSTED);
-                break;
-            }
-            let step = self.step(kind.clone(), WorkStepStatus::Running);
-            let id = self.begin(step, vec![], None).await?;
-            let fetched = if self.cancelled().await {
-                Fetched::Browse(
-                    id,
-                    Ok(WorkBrowserOutcome {
-                        status: WorkStepStatus::Cancelled,
-                        usage: Some(WorkUsage::default()),
-                        artifacts: vec![],
-                        intervention: None,
-                        note: None,
-                    }),
-                )
-            } else {
-                self.probe.record_activity(WorkActivityV1::Reading);
-                let request = WorkAgentBrowseRequest {
-                    id,
-                    step: kind,
-                    hops: self.grant.browse_hops,
-                    objective: self.objective.clone(),
-                    output: self.output.clone(),
-                    limits: WorkExecutionLimits {
-                        max_workers: 1,
-                        ..self.remaining()
-                    },
-                };
-                let mut outcome = browser(self.probe.clone(), request.clone()).await;
-                // A bot check the page ran in the background has settled by
-                // now, and its cookie lives in this session: one more load
-                // reads through it. A second refusal stands.
-                let retry = matches!(
-                    &outcome,
-                    Ok(WorkBrowserOutcome { status: WorkStepStatus::Failed, note: Some(note), .. })
-                        if note == read_note::HUMAN_CHECK || note == read_note::UNSETTLED
-                );
-                if retry && !self.cancelled().await {
-                    if let Ok(WorkBrowserOutcome { usage: Some(usage), .. }) = &outcome {
-                        self.charge(*usage);
-                    }
-                    self.report(WorkAgentDiagnostic::ReadRetried);
-                    let limits = WorkExecutionLimits {
-                        max_workers: 1,
-                        ..self.remaining()
-                    };
-                    outcome = browser(self.probe.clone(), WorkAgentBrowseRequest { limits, ..request }).await;
-                }
-                Fetched::Browse(id, outcome)
-            };
-            if let Some(terminal) = self.settle_fetched(attempt, fetched).await? {
-                return Ok(Some(terminal));
-            }
-        }
-        Ok(None)
+        self.fetch_browses(attempt, browser, browses).await
     }
 
     /// One step on the person's files. Reads settle at once with a record
@@ -1142,6 +1082,9 @@ impl Driver {
         fetched: Fetched,
     ) -> Result<Option<WorkAttemptStatus>, WorkError> {
         let mut terminal = None;
+        if let Fetched::Browse(_, _, Some(prior)) = &fetched {
+            self.charge(*prior);
+        }
         {
             match fetched {
                 Fetched::Search(id, outcome) => {
@@ -1201,7 +1144,7 @@ impl Driver {
                         }
                     }
                 }
-                Fetched::Browse(id, outcome) => match outcome {
+                Fetched::Browse(id, outcome, prior) => match outcome {
                     Ok(outcome) => {
                         if let Some(usage) = outcome.usage {
                             self.charge(usage);
@@ -1209,7 +1152,7 @@ impl Driver {
                         let usage = if outcome.status == WorkStepStatus::OutcomeUnknown {
                             None
                         } else {
-                            outcome.usage.or(Some(WorkUsage::default()))
+                            reads::combined_usage(prior, outcome.usage)
                         };
                         let artifacts: Vec<WorkArtifactV1> = outcome
                             .artifacts
@@ -1266,7 +1209,7 @@ impl Driver {
                         self.settle(
                             id,
                             WorkStepStatus::Failed,
-                            Some(WorkUsage::default()),
+                            prior.or(Some(WorkUsage::default())),
                             vec![],
                             None,
                             None,
