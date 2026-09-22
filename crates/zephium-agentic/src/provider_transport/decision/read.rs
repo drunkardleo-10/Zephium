@@ -123,6 +123,48 @@ impl DecisionObservationAnswers {
         account: AgentContextAccountBinding,
         schema: &SemanticExtractionSchema,
     ) -> Result<Option<DecisionReadSelection>, DecisionProjectionError> {
+        Ok(self
+            .take_read_candidates(observation, account, schema)?
+            .and_then(|(selection, complete)| complete.then_some(selection)))
+    }
+
+    /// Retains located public facts before further inspection can displace their broad capture.
+    pub fn take_read_selection_retaining_evidence(
+        &mut self,
+        observation: &SemanticObservation,
+        account: AgentContextAccountBinding,
+        schema: &SemanticExtractionSchema,
+        captured_at: SemanticCaptureInstant,
+        evidence: &mut SemanticRetainedReadEvidence,
+    ) -> Result<Option<DecisionReadSelection>, DecisionProjectionError> {
+        let Some((selection, complete)) =
+            self.take_read_candidates(observation, account, schema)?
+        else {
+            return Ok(None);
+        };
+        let references = selection.evidence_references(observation);
+        if !references.is_empty() {
+            let read = crate::semantic_read::read_located_semantic_observation(
+                observation,
+                &selection.baseline,
+                captured_at,
+                &selection.projection.schema,
+                &references,
+            )
+            .map_err(|_| DecisionProjectionError::Authority)?;
+            evidence
+                .retain(&read, &selection.baseline)
+                .map_err(|_| DecisionProjectionError::Authority)?;
+        }
+        Ok(complete.then_some(selection))
+    }
+
+    fn take_read_candidates(
+        &mut self,
+        observation: &SemanticObservation,
+        account: AgentContextAccountBinding,
+        schema: &SemanticExtractionSchema,
+    ) -> Result<Option<(DecisionReadSelection, bool)>, DecisionProjectionError> {
         if !self.projection.matches(observation, account) {
             return Err(DecisionProjectionError::Authority);
         }
@@ -159,14 +201,19 @@ impl DecisionObservationAnswers {
                     ));
             targets.push(target);
         }
-        Ok(ready.then(|| DecisionReadSelection {
-            projection,
-            account,
-            targets,
-            baseline: SemanticObservationAcknowledgement::from_fingerprint(
-                crate::semantic_diff::SemanticObservationFingerprint::from_observation(observation),
-            ),
-        }))
+        Ok(Some((
+            DecisionReadSelection {
+                projection,
+                account,
+                targets,
+                baseline: SemanticObservationAcknowledgement::from_fingerprint(
+                    crate::semantic_diff::SemanticObservationFingerprint::from_observation(
+                        observation,
+                    ),
+                ),
+            },
+            ready,
+        )))
     }
 }
 
@@ -181,6 +228,21 @@ pub struct DecisionLocatedRead<'a> {
 }
 
 impl DecisionReadSelection {
+    fn evidence_references(
+        &self,
+        observation: &SemanticObservation,
+    ) -> BTreeSet<SemanticReferenceId> {
+        let mut references = BTreeSet::new();
+        for (field, target) in self.projection.columns.iter().zip(&self.targets) {
+            let Some(target) = target else { continue };
+            references.insert(*target);
+            if !copy_only(field) {
+                references.extend(generation_neighborhood(observation, *target));
+            }
+        }
+        references
+    }
+
     /// Builds dense fragment identities without changing native capture or disclosure policy.
     pub fn prepare<'a>(
         self,
@@ -205,19 +267,7 @@ impl DecisionReadSelection {
             all.insert(*target);
             if !copy_only(field) {
                 generated.push(field.clone());
-                for frame in observation.frames() {
-                    if let Some(index) = frame
-                        .nodes()
-                        .iter()
-                        .position(|node| node.reference() == *target)
-                    {
-                        for node in &frame.nodes()[index.saturating_sub(GENERATION_NEIGHBORS)
-                            ..(index + GENERATION_NEIGHBORS + 1).min(frame.nodes().len())]
-                        {
-                            generation_refs.insert(node.reference());
-                        }
-                    }
-                }
+                generation_refs.extend(generation_neighborhood(observation, *target));
             }
         }
         all.extend(&generation_refs);
@@ -288,6 +338,27 @@ impl DecisionReadSelection {
             generation,
         })
     }
+}
+
+fn generation_neighborhood(
+    observation: &SemanticObservation,
+    target: SemanticReferenceId,
+) -> BTreeSet<SemanticReferenceId> {
+    let mut references = BTreeSet::new();
+    for frame in observation.frames() {
+        if let Some(index) = frame
+            .nodes()
+            .iter()
+            .position(|node| node.reference() == target)
+        {
+            for node in &frame.nodes()[index.saturating_sub(GENERATION_NEIGHBORS)
+                ..(index + GENERATION_NEIGHBORS + 1).min(frame.nodes().len())]
+            {
+                references.insert(node.reference());
+            }
+        }
+    }
+    references
 }
 
 fn copy_only(field: &SemanticExtractionFieldSchema) -> bool {

@@ -555,6 +555,86 @@ fn located_generation_is_focused_and_merges_only_exact_delivered_evidence() {
 }
 
 #[test]
+fn incomplete_reads_retain_only_confident_located_evidence_for_later_mapping() {
+    let (call, observation, schema, projection) = located_fixture(false);
+    let mut output = fixture_answers(projection.request());
+    output["answers"]["locate_1"] = located_answers(&projection)["answers"]["locate_1"].clone();
+    let response = projection
+        .request()
+        .decode_emulation(
+            &serde_json::to_vec(&output).unwrap(),
+            DecisionUsage::default(),
+        )
+        .unwrap();
+    let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+    let mut retained = SemanticRetainedReadEvidence::default();
+    assert!(answers
+        .take_read_selection_retaining_evidence(
+            &observation,
+            call.account(),
+            &schema,
+            SemanticCaptureInstant::from_millis(101),
+            &mut retained,
+        )
+        .unwrap()
+        .is_none());
+    assert_eq!(retained.retained_items(), 2);
+    assert_eq!(retained.retained_bytes(), 12);
+    assert!(answers
+        .take_read_selection(&observation, call.account(), &schema)
+        .unwrap()
+        .is_none());
+
+    let mut later_nodes = vec![json!({"k":1,"r":"document","n":"New section","fc":true})];
+    later_nodes.extend((2..=128).map(|key| json!({
+        "k":key + 100,"p":0,"r":"paragraph","t":format!("Unrelated current fact {key}"),"fc":true,
+    })));
+    let snapshot = decode_semantic_snapshot(
+        SemanticDecodeContext::new(
+            SemanticInvocationId::new(2).unwrap(),
+            observation.frames()[0].frame().clone(),
+            SemanticSnapshotGeneration::new(2).unwrap(),
+        ),
+        &serde_json::to_vec(
+            &json!({"v":SEMANTIC_WIRE_VERSION,"i":2,"g":2,"c":"complete","n":later_nodes}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let later = SemanticObservationAssembler::new(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(2).unwrap(),
+            call.account().context(),
+            SemanticObservationBudget::try_new(128, 32768, 1).unwrap(),
+        ),
+        snapshot,
+    )
+    .unwrap()
+    .finish()
+    .unwrap();
+    let ack = SemanticObservationAcknowledgement::from_fingerprint(
+        crate::semantic_diff::SemanticObservationFingerprint::from_observation(&later),
+    );
+    let current = read_semantic_observation_for_schema(
+        &later,
+        SemanticReadAuthority::Acknowledged(&ack),
+        SemanticCaptureInstant::from_millis(102),
+        SemanticReadSensitivityLimit::PublicOnly,
+        SemanticReadBudget::STANDARD,
+        &schema,
+    )
+    .unwrap();
+    assert_eq!(current.fragments().len(), 128);
+    let merged = retained.merge_for_extraction(current).unwrap();
+    assert_eq!(merged.fragments().len(), 128);
+    assert!(merged.fragments().iter().any(|fragment| fragment
+        .content()
+        .text()
+        .is_some_and(|text| text.as_str() == "$349.99")
+        && fragment.provenance().observation().get() == 1));
+}
+
+#[test]
 fn optional_values_still_need_inspection_before_a_typed_read_can_finish() {
     for absent in [1, 2] {
         let (call, observation, _, _) = located_fixture(false);

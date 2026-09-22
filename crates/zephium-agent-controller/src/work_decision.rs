@@ -60,7 +60,13 @@ impl AgentWorkController {
             if let Some(schema) = state.extraction_schema.as_ref() {
                 let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
                 if let Some(selection) = answers
-                    .take_read_selection(&observation, session.account, schema)
+                    .take_read_selection_retaining_evidence(
+                        &observation,
+                        session.account,
+                        schema,
+                        captured_at,
+                        &mut state.retained_read_evidence,
+                    )
                     .map_err(AgentWorkFailure::DecisionRead)?
                 {
                     state.refresh_account(worker, browser)?;

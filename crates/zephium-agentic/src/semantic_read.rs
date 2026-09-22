@@ -922,7 +922,9 @@ fn read_projection<'a>(
             );
         }
     }
-    Ok(builder.finish(subtree))
+    let mut read = builder.finish(subtree);
+    read.focused |= references.is_some();
+    Ok(read)
 }
 
 fn validate_authority(
