@@ -118,6 +118,7 @@ impl AgentWorkTask for DecisionTask {
 }
 
 fn read_request(stream: &mut std::net::TcpStream) -> Value {
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
