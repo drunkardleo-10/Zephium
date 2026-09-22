@@ -6,7 +6,7 @@ use zephium_agentic::*;
 /// Exact verified browser transition eligible for one provider replay.
 #[must_use]
 pub struct AgentBrowserVerifiedTransition {
-    pub(crate) continuation: AgentProviderContinuation,
+    pub(crate) continuation: Option<AgentProviderContinuation>,
     #[cfg(feature = "probe-harness")]
     pub(crate) probe_diff: Option<Box<SemanticDiff>>,
     pub(crate) terminal: Option<SemanticActionBatchResult>,
@@ -49,12 +49,12 @@ impl AgentBrowserVerifiedTransition {
         #[cfg(feature = "probe-harness")]
         if let Some(diff) = self.probe_diff {
             return Some((
-                self.continuation,
+                self.continuation?,
                 AgentBrowserVerifiedState::ProbeDiff(diff),
             ));
         }
         Some((
-            self.continuation,
+            self.continuation?,
             AgentBrowserVerifiedState::Accounted(Box::new(self.terminal?.into_final_state()?)),
         ))
     }
@@ -79,7 +79,8 @@ impl fmt::Debug for AgentBrowserVerifiedTransition {
 #[must_use]
 pub struct AgentBrowserActionProposal {
     action: SemanticPreparedAction,
-    continuation: AgentProviderContinuation,
+    baseline: SemanticObservationAcknowledgement,
+    continuation: Option<AgentProviderContinuation>,
     batch: SemanticActionBatchExecution,
     refusal_context: Option<AgentProviderActionRefusalContext>,
 }
@@ -95,8 +96,8 @@ impl AgentBrowserActionProposal {
     pub(crate) fn into_refusal(
         self,
         error: SemanticActionBindingError,
-    ) -> AgentProviderActionRefusal {
-        AgentProviderActionRefusal::unissued(self.continuation, error, self.refusal_context)
+    ) -> Option<AgentProviderActionRefusal> {
+        Some(AgentProviderActionRefusal::unissued(self.continuation?, error, self.refusal_context))
     }
 }
 
@@ -189,7 +190,8 @@ impl AgentBrowserActionProposal {
         }
         Ok(AgentBrowserActionBinding::Prepared(Box::new(Self {
             action,
-            continuation,
+            baseline: continuation.baseline().clone(),
+            continuation: Some(continuation),
             batch,
             refusal_context: context,
         })))
@@ -201,7 +203,56 @@ impl AgentBrowserActionProposal {
     }
 
     pub(crate) fn baseline(&self) -> &SemanticObservationAcknowledgement {
-        self.continuation.baseline()
+        &self.baseline
+    }
+
+    pub(crate) fn bind_decision(
+        selection: DecisionActionSelection,
+        recipe: SemanticActionProposal,
+        observation: &SemanticObservation,
+        frames: &[SemanticFrameJoin],
+        batch: SemanticActionBatchId,
+    ) -> Result<Self, AgentBrowserActionError> {
+        let (batch, baseline) = selection
+            .bind_action(recipe, observation, frames, batch)
+            .map_err(|_| AgentBrowserActionError::State)?;
+        let bound = batch
+            .actions()
+            .first()
+            .ok_or(AgentBrowserActionError::ActionCount)?;
+        let snapshot = observation
+            .frames()
+            .iter()
+            .find(|snapshot| snapshot.frame() == bound.frame())
+            .ok_or(AgentBrowserActionError::State)?;
+        let action = bound
+            .prepare(snapshot)
+            .map_err(AgentBrowserActionError::Checkpoint)?;
+        if !AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(&action.kind())
+            || matches!(
+                action.verification(),
+                SemanticVerification::NavigationCommitted | SemanticVerification::Dialog(_)
+            )
+            || !matches!(
+                action.wait(),
+                SemanticWaitCondition::Immediate | SemanticWaitCondition::MutationQuiet(_)
+            )
+        {
+            return Err(AgentBrowserActionError::Binding(
+                SemanticActionBindingError::UnsupportedVerification,
+            ));
+        }
+        if action.settle_budget().millis() < MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS {
+            return Err(AgentBrowserActionError::SettleBudget);
+        }
+        Ok(Self {
+            action,
+            baseline,
+            continuation: None,
+            batch: SemanticActionBatchExecution::new(&batch)
+                .map_err(AgentBrowserActionError::Batch)?,
+            refusal_context: None,
+        })
     }
 
     /// Authorizes the separately assessed action and retains native authority.
@@ -448,7 +499,7 @@ impl AgentBrowserAction {
     pub(crate) fn into_rejected_refusal(
         self,
     ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
-        if self.proposal.action.effect() != SemanticEffectClass::Read {
+        if self.proposal.action.effect() != SemanticEffectClass::Read || self.proposal.continuation.is_none() {
             return Err(Box::new(self));
         }
         let mut this = *self.into_rejected_batch_keeping()?;
@@ -457,7 +508,7 @@ impl AgentBrowserAction {
             Ok(terminal) => Ok((
                 terminal,
                 AgentProviderActionRefusal::unissued(
-                    this.proposal.continuation,
+                    this.proposal.continuation.take().expect("checked provider continuation"),
                     SemanticActionBindingError::DispatchRejected,
                     this.proposal.refusal_context,
                 ),
@@ -481,6 +532,7 @@ impl AgentBrowserAction {
             || self.terminal.is_some()
             || self.journal_failed
             || self.proposal.action.effect() != SemanticEffectClass::Read
+            || self.proposal.continuation.is_none()
             || self.failed.as_ref().is_none_or(|failed| {
                 self.receipt != Some(failed.receipt()) || failed.verification_error().is_none()
             })
@@ -493,7 +545,7 @@ impl AgentBrowserAction {
             Ok(terminal) => Ok((
                 terminal,
                 AgentProviderActionRefusal::unissued(
-                    this.proposal.continuation,
+                    this.proposal.continuation.take().expect("checked provider continuation"),
                     SemanticActionBindingError::Unverified,
                     this.proposal.refusal_context,
                 ),
@@ -535,6 +587,29 @@ impl AgentBrowserAction {
                 self.receipt != Some(failed.receipt())
                     || failed.verification_error()
                         != Some(SemanticVerificationError::OutcomeNotObserved)
+                    || failed.execution().is_none_or(|execution| {
+                        execution.backend() != SemanticActionExecutionBackend::FixedSemanticRecipe
+                    })
+            })
+        {
+            return Err(Box::new(self));
+        }
+        self.into_failed_batch()
+    }
+
+    pub(crate) fn into_failed_decision_read_batch(
+        self,
+    ) -> Result<SemanticActionBatchResult, Box<Self>> {
+        if !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+            || self.proposal.continuation.is_some()
+            || self.proposal.action.effect() != SemanticEffectClass::Read
+            || self.failed.as_ref().is_none_or(|failed| {
+                self.receipt != Some(failed.receipt())
+                    || failed.verification_error().is_none()
                     || failed.execution().is_none_or(|execution| {
                         execution.backend() != SemanticActionExecutionBackend::FixedSemanticRecipe
                     })
@@ -764,7 +839,7 @@ impl AgentBrowserAction {
             &self.proposal.action,
             accounted,
             baseline,
-            self.proposal.continuation.baseline(),
+            &self.proposal.baseline,
             SemanticPostActionObservation::new(observed_at, current.clone()),
             SemanticDiffBudget::ACTION,
         )

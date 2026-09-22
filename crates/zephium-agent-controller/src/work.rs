@@ -28,6 +28,8 @@ mod tests;
 mod inspection;
 #[path = "work_navigation.rs"]
 mod navigation;
+#[path = "work_decision.rs"]
+mod decision;
 
 #[path = "work_retained.rs"]
 mod retained;
@@ -274,6 +276,15 @@ pub trait AgentWorkTask: Send {
         _: &SemanticObservation,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
         self.assess(action)
+    }
+    /// Supplies a code-owned recipe for a typed selection. None uses the page planner.
+    /// The recipe still requires ordinary semantic binding and independent assessment.
+    fn decision_action_recipe(
+        &self,
+        _: &DecisionOperation,
+        _: &SemanticObservation,
+    ) -> Result<Option<SemanticActionProposal>, AgentWorkFailure> {
+        Ok(None)
     }
     /// Supplies independently sourced current account facts for this exact
     /// context. Called at startup and before each provider/effect admission,
@@ -2468,6 +2479,17 @@ impl AgentWorkController {
             state.observation = Some(observation);
             return Ok(());
         }
+        let (current, at, next_progress, challenged) = Self::run_decision_actions(
+            state, worker, browser, observation, captured_at, progress,
+        )
+        .await?;
+        observation = current;
+        captured_at = at;
+        progress = next_progress;
+        if challenged || progress == AgentWorkTaskProgress::Complete {
+            state.observation = Some(observation);
+            return Ok(());
+        }
         state.refresh_account(worker, browser)?;
         let action_authority = state
             .session
@@ -2825,14 +2847,16 @@ impl AgentWorkController {
                                     < 3;
                             if starved {
                                 Err(proposal
-                                    .into_refusal(SemanticActionBindingError::BudgetExhausted))
+                                    .into_refusal(SemanticActionBindingError::BudgetExhausted)
+                                    .ok_or(AgentWorkFailure::Contract)?)
                             } else {
                                 match state.task.assess_observed(proposal.action(), &observation) {
                                     Ok(assessment) => Ok((*proposal, assessment)),
                                     Err(AgentWorkFailure::ActionDenied) => Err(proposal
                                         .into_refusal(
                                             SemanticActionBindingError::AssignmentDenied,
-                                        )),
+                                        )
+                                        .ok_or(AgentWorkFailure::Contract)?),
                                     Err(failure) => return Err(failure),
                                 }
                             }
@@ -2878,198 +2902,41 @@ impl AgentWorkController {
                     ))
                 }
             };
-            if state.progressive_observation || state.navigation_discovery.is_some() {
-                if let Some(schema) = &state.extraction_schema {
-                    session.check_live().map_err(AgentWorkFailure::Browser)?;
-                    let read = read_semantic_observation_for_schema(
-                        &observation,
-                        SemanticReadAuthority::Acknowledged(proposal.baseline()),
-                        captured_at,
-                        SemanticReadSensitivityLimit::PublicOnly,
-                        SemanticReadBudget::STANDARD,
-                        schema,
-                    )
-                    .map_err(|error| {
-                        AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
-                    })?;
-                    state
-                        .retained_read_evidence
-                        .retain(&read, proposal.baseline())
-                        .map_err(|error| {
-                            AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
-                        })?;
-                }
-            }
-            state.refresh_account(worker, browser)?;
-            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-            let id = state.native.identity.id();
-            let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
-            let automation = if let Some(retained) = &state.native.retained {
-                retained.automation_state(now)?
-            } else {
-                state
-                    .native
-                    .contexts()?
-                    .automation_state(id)
-                    .map_err(|_| AgentWorkFailure::Context)?
-            };
-            let request = session
-                .authorize_action(
-                    proposal,
-                    &assessment,
-                    automation,
-                    SemanticActionExecutionInstant::from_millis(now.millis()),
-                )
-                .map_err(AgentWorkFailure::Browser)?;
-            let action_deadline = request.deadline();
-            let dispatch = if let Some(retained) = &mut state.native.retained {
-                retained.dispatch_action(request, now)
-            } else {
-                browser.execute_semantic_action(request, worker.semantic_action_completion())
-            };
-            // Native ownership starts at dispatch, before fallible policy
-            // accounting. Recovery must drain even if that accounting fails.
-            state.native.action_pending = matches!(dispatch, ContextDispatch::Scheduled);
-            let rejected = match session.account_action_dispatch(dispatch) {
-                Ok(()) => None,
-                Err(AgentBrowserProviderError::ActionRejected(_)) => {
-                    Some(session.take_rejected_refusal())
-                }
-                Err(error) => return Err(AgentWorkFailure::Browser(error)),
-            };
-            if let Some(refusal) = rejected {
-                let refusal = refusal.ok_or(AgentWorkFailure::Contract)?;
-                state.native.action_pending = false;
-                state.native.check_control(worker, browser)?;
-                state.refresh_account(worker, browser)?;
-                state
-                    .journal_mut()?
-                    .emit(AgentWorkEventKind::ActionProposalRefused(refusal.reason()))?;
-                if let Some(key) = refusal.key() {
-                    if action_refusals.contains(&key) {
-                        return Err(AgentWorkFailure::Browser(
-                            AgentBrowserProviderError::ActionProposalLoop,
-                        ));
-                    }
-                    action_refusals
-                        .try_reserve(1)
-                        .map_err(|_| AgentWorkFailure::Contract)?;
-                    action_refusals.push(key);
-                }
-                let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-                turn = Self::provider(
-                    &mut state.native,
-                    worker,
-                    browser,
-                    session.cancellation.clone(),
-                    session.continue_after_action_refusal(refusal, &observation),
-                )
-                .await?;
-                continue;
-            }
-            let terminal = match state
-                .native
-                .next_action_event(worker, browser, action_deadline)
-                .await?
+            Self::retain_action_read_evidence(state, &proposal, &observation, captured_at)?;
+            let (current, current_at, transition) = match Self::execute_prepared_action(
+                state, worker, browser, proposal, assessment, &observation,
+            )
+            .await
             {
-                AgentRuntimeEvent::SemanticActionTerminal(terminal)
-                    if session.action.as_ref().is_some_and(|action| {
-                        action.accepts_settlement(&session.action_executions, &terminal)
-                    }) =>
-                {
-                    terminal
-                }
-                event => {
-                    state.native.retain(event)?;
-                    return Err(AgentWorkFailure::Mailbox);
-                }
-            };
-            state.native.action_pending = false;
-            state.native_terminal = Some(terminal);
-            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-            let terminal = state
-                .native_terminal
-                .take()
-                .ok_or(AgentWorkFailure::Contract)?;
-            let mut wake = session
-                .begin_action_settlement(terminal)
-                .map_err(AgentWorkFailure::Browser)?;
-            // Native evidence cannot restore a revoked document or authorize
-            // postcondition reads. Settle its original owner first, then fail
-            // closed before any continuation, success, or retry.
-            state.native.check_control(worker, browser)?;
-            for _ in 0..8 {
-                let Some(next_wake) = wake else {
-                    break;
-                };
-                let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
-                let delay = Duration::from_millis(next_wake.millis().saturating_sub(now.millis()));
-                tokio::select! {
-                    biased;
-                    event = state.native.next_event(worker, browser) => {
-                        state.native.retain(event?)?;
-                        return Err(AgentWorkFailure::Mailbox);
-                    }
-                    () = tokio::time::sleep(delay) => {}
-                }
-                let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
-                wake = session
-                    .wake_action_settlement(SemanticSettleInstant::from_millis(now.millis()))
-                    .map_err(AgentWorkFailure::Browser)?;
-            }
-            if wake.is_some() {
-                return Err(AgentWorkFailure::Contract);
-            }
-            state.journal_mut()?.emit(AgentWorkEventKind::Verifying)?;
-            let current = Self::observe(state, worker, browser).await?;
-            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-            let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
-            let verified = session.verify_action_settlement(
-                &observation,
-                &current,
-                SemanticSettleInstant::from_millis(now.millis()),
-            );
-            let (_, transition) = match verified {
                 Ok(verified) => verified,
-                // The action ran but its target left the page: the model
-                // hears so against the observation it holds and looks again.
-                Err(AgentBrowserProviderError::ActionUnverified) => {
-                    let refusal = state
-                        .session
-                        .as_mut()
+                Err(AgentWorkFailure::Browser(
+                    AgentBrowserProviderError::ActionRejected(_) | AgentBrowserProviderError::ActionUnverified,
+                )) => {
+                    let refusal = state.session.as_mut()
                         .and_then(|session| session.take_rejected_refusal())
                         .ok_or(AgentWorkFailure::Contract)?;
                     state.native.check_control(worker, browser)?;
                     state.refresh_account(worker, browser)?;
-                    state
-                        .journal_mut()?
-                        .emit(AgentWorkEventKind::ActionProposalRefused(refusal.reason()))?;
+                    state.journal_mut()?.emit(AgentWorkEventKind::ActionProposalRefused(refusal.reason()))?;
                     if let Some(key) = refusal.key() {
                         if action_refusals.contains(&key) {
-                            return Err(AgentWorkFailure::Browser(
-                                AgentBrowserProviderError::ActionProposalLoop,
-                            ));
+                            return Err(AgentWorkFailure::Browser(AgentBrowserProviderError::ActionProposalLoop));
                         }
-                        action_refusals
-                            .try_reserve(1)
-                            .map_err(|_| AgentWorkFailure::Contract)?;
+                        action_refusals.try_reserve(1).map_err(|_| AgentWorkFailure::Contract)?;
                         action_refusals.push(key);
                     }
                     let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                     turn = Self::provider(
-                        &mut state.native,
-                        worker,
-                        browser,
-                        session.cancellation.clone(),
+                        &mut state.native, worker, browser, session.cancellation.clone(),
                         session.continue_after_action_refusal(refusal, &observation),
                     )
                     .await?;
                     continue;
                 }
-                Err(error) => return Err(AgentWorkFailure::Browser(error)),
+                Err(error) => return Err(error),
             };
             observation = current;
-            captured_at = SemanticCaptureInstant::from_millis(now.millis());
+            captured_at = current_at;
             state.task.accept_verified_action(
                 transition
                     .batch_result()

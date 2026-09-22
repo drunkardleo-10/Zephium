@@ -11,7 +11,7 @@ use zephium_decision::{DecisionRequest, DecisionResponse, DecisionUsage, MAX_RES
 
 mod projection;
 pub use projection::{
-    DecisionObservation, DecisionObservationAnswers, DecisionObservationFallback,
+    DecisionActionSelection, DecisionObservation, DecisionObservationAnswers, DecisionObservationFallback,
     DecisionOperation, DecisionProjectionError,
 };
 

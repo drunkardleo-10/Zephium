@@ -210,6 +210,65 @@ fn consequential(text: &str) -> bool {
 }
 
 impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
+    fn decision_action_recipe(
+        &self,
+        operation: &DecisionOperation,
+        observation: &SemanticObservation,
+    ) -> Result<Option<SemanticActionProposal>, AgentWorkFailure> {
+        let (target, class) = match operation {
+            DecisionOperation::Click(target) => (*target, SemanticOperationClass::Click),
+            DecisionOperation::Scroll(target) => (*target, SemanticOperationClass::Scroll),
+            _ => return Ok(None),
+        };
+        let node = observation
+            .frames()
+            .first()
+            .and_then(|frame| frame.nodes().iter().find(|node| node.reference() == target))
+            .ok_or(AgentWorkFailure::Contract)?;
+        let (intent, verification) = match interaction(node, observation, class) {
+            Some(Interaction::Scroll) => (
+                SemanticActionIntent::Scroll {
+                    target,
+                    direction: SemanticScrollDirection::Down,
+                    amount: SemanticScrollAmount::HalfPage,
+                },
+                SemanticVerification::ScrollPositionChanged,
+            ),
+            Some(Interaction::Tab) => (
+                SemanticActionIntent::Click { target },
+                SemanticVerification::TargetState {
+                    state: SemanticState::Selected,
+                    present: true,
+                },
+            ),
+            Some(Interaction::Disclosure) => (
+                SemanticActionIntent::Click { target },
+                SemanticVerification::TargetState {
+                    state: SemanticState::Expanded,
+                    present: !node.states().contains(SemanticState::Expanded),
+                },
+            ),
+            Some(Interaction::Dismiss) => (
+                SemanticActionIntent::Click { target },
+                SemanticVerification::PageDialogClosed,
+            ),
+            None => return Ok(None),
+        };
+        let recipe = SemanticActionProposal::try_new(
+            intent,
+            SemanticEffectClass::Read,
+            SemanticWaitCondition::MutationQuiet(
+                SemanticMutationQuietPeriod::try_new(100)
+                    .map_err(|_| AgentWorkFailure::Contract)?,
+            ),
+            verification,
+            SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
+                .map_err(|_| AgentWorkFailure::Contract)?,
+        )
+        .map_err(|_| AgentWorkFailure::Contract)?;
+        Ok(Some(recipe))
+    }
+
     fn model_action_effect(&self) -> Option<SemanticEffectClass> {
         Some(SemanticEffectClass::Read)
     }

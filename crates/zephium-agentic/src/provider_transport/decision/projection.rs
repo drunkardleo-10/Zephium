@@ -205,6 +205,46 @@ pub enum DecisionOperation {
     Blocked,
 }
 
+/// One consumed decision bound to the exact acknowledged observation.
+/// It grants no effect permission and cannot create an OpenAI continuation.
+#[must_use]
+pub struct DecisionActionSelection {
+    operation: DecisionOperation,
+    baseline: SemanticObservationAcknowledgement,
+}
+
+impl DecisionActionSelection {
+    /// Closed operation and offered reference selected by the accepted answers.
+    pub const fn operation(&self) -> &DecisionOperation {
+        &self.operation
+    }
+
+    /// Binds a trusted recipe without permitting substitution of its operation or target.
+    pub fn bind_action(
+        self,
+        recipe: SemanticActionProposal,
+        observation: &SemanticObservation,
+        frames: &[SemanticFrameJoin],
+        batch: SemanticActionBatchId,
+    ) -> Result<(SemanticActionBatch, SemanticObservationAcknowledgement), DecisionProjectionError>
+    {
+        let compatible = match (&self.operation, recipe.intent()) {
+            (DecisionOperation::Click(selected), SemanticActionIntent::Click { target })
+            | (DecisionOperation::Scroll(selected), SemanticActionIntent::Scroll { target, .. })
+            | (DecisionOperation::Type(selected), SemanticActionIntent::Fill { target, .. }) => {
+                selected == target
+            }
+            _ => false,
+        };
+        if !compatible || !self.baseline.authenticates(observation) {
+            return Err(DecisionProjectionError::Authority);
+        }
+        let bound = SemanticActionBatch::bind(batch, observation, frames, vec![recipe])
+            .map_err(|_| DecisionProjectionError::Authority)?;
+        Ok((bound, self.baseline))
+    }
+}
+
 impl DecisionObservation {
     /// Keeps accepted heads and repeats only uncertain, unavailable or invalid ones.
     pub fn route(
@@ -274,6 +314,41 @@ impl DecisionObservationFallback {
 }
 
 impl DecisionObservationAnswers {
+    /// Whether accepted evidence says useful content lies further down the page.
+    pub fn take_more_below(
+        &mut self,
+        observation: &SemanticObservation,
+        account: AgentContextAccountBinding,
+    ) -> Result<Option<bool>, DecisionProjectionError> {
+        if !self.projection.matches(observation, account) {
+            return Err(DecisionProjectionError::Authority);
+        }
+        match self.results.take("more_below") {
+            Some(zephium_decision::ResolvedDecision::Answer { answer, .. }) => match answer.value()
+            {
+                zephium_decision::AnswerValue::Noul { noul } => Ok(Some(*noul >= 0.5)),
+                _ => Err(DecisionProjectionError::Authority),
+            },
+            _ => Ok(None),
+        }
+    }
+
+    /// Consumes the selected operation and seals its observation before any mutation.
+    pub fn take_action_selection(
+        &mut self,
+        observation: &SemanticObservation,
+        account: AgentContextAccountBinding,
+    ) -> Result<Option<DecisionActionSelection>, DecisionProjectionError> {
+        Ok(self
+            .take_operation(observation, account)?
+            .map(|operation| DecisionActionSelection {
+                operation,
+                baseline: SemanticObservationAcknowledgement::from_fingerprint(
+                    SemanticObservationFingerprint::from_observation(observation),
+                ),
+            }))
+    }
+
     /// Consumes the challenge head once, only for the original document and account.
     pub fn take_challenge(
         &mut self,

@@ -3359,11 +3359,7 @@ impl AgentBrowserSession {
         ) {
             Ok(accounted) => accounted,
             Err(error) => {
-                if error
-                    == crate::AgentBrowserActionError::Verification(
-                        zephium_agentic::SemanticVerificationError::OutcomeNotObserved,
-                    )
-                {
+                if matches!(error, crate::AgentBrowserActionError::Verification(_)) {
                     self.close_failed_read_scroll()?;
                 }
                 let error = AgentBrowserProviderError::Action(error);
@@ -3436,11 +3432,7 @@ impl AgentBrowserSession {
                     self.rejected_refusal = Some(refusal);
                     return Err(AgentBrowserProviderError::ActionUnverified);
                 }
-                if error
-                    == crate::AgentBrowserActionError::Verification(
-                        zephium_agentic::SemanticVerificationError::OutcomeNotObserved,
-                    )
-                {
+                if matches!(error, crate::AgentBrowserActionError::Verification(_)) {
                     self.close_failed_read_scroll()?;
                 }
                 let error = AgentBrowserProviderError::Action(error);
@@ -3504,7 +3496,8 @@ impl AgentBrowserSession {
         let Some(action) = self.action.take() else {
             return Ok(());
         };
-        let terminal = match action.into_failed_read_scroll_batch() {
+        let terminal = match action.into_failed_decision_read_batch()
+            .or_else(|action| action.into_failed_read_scroll_batch()) {
             Ok(terminal) => terminal,
             Err(action) => {
                 self.action = Some(*action);
@@ -3992,6 +3985,9 @@ pub enum AgentBrowserProviderError {
     /// same observation after one explicit corrective result.
     #[error("browser model repeated a refused action proposal")]
     ActionProposalLoop,
+    /// Three successive verified actions produced no new semantic evidence.
+    #[error("browser made no semantic progress")]
+    NoProgress,
     /// The verified result could not bind to the exact prior provider turn.
     #[error("Terra probe continuation did not match the prior turn")]
     Continuation,

@@ -131,7 +131,7 @@ impl TerraProbeActionBridge {
         Ok((
             TerraProbeActionReport { applied },
             TerraProbeVerifiedTransition {
-                continuation: self.continuation,
+                continuation: Some(self.continuation),
                 probe_diff: Some(diff),
                 terminal: None,
             },

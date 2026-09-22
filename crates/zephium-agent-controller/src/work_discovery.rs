@@ -23,6 +23,15 @@ pub trait AgentWorkAccountSource: Send {
 /// an assessment cannot prove that arbitrary page handlers have no side effects.
 /// Calls must be bounded and nonblocking.
 pub trait AgentWorkLocalActionPolicy: Send {
+    /// Supplies a fixed recipe for an accepted typed selection without granting authority.
+    fn decision_action_recipe(
+        &self,
+        _: &DecisionOperation,
+        _: &SemanticObservation,
+    ) -> Result<Option<SemanticActionProposal>, AgentWorkFailure> {
+        Ok(None)
+    }
+
     /// Returns the independently approved operation subset for this exact
     /// observed node. This is model-affordance projection only; `assess`
     /// remains the final host classification after semantic action binding.
@@ -125,6 +134,17 @@ impl AgentWorkDiscoveryTask {
 }
 
 impl AgentWorkTask for AgentWorkDiscoveryTask {
+    fn decision_action_recipe(
+        &self,
+        operation: &DecisionOperation,
+        observation: &SemanticObservation,
+    ) -> Result<Option<SemanticActionProposal>, AgentWorkFailure> {
+        match self.local_actions.as_ref() {
+            Some(policy) => policy.decision_action_recipe(operation, observation),
+            None => Ok(None),
+        }
+    }
+
     fn navigation_discovery(&self) -> Option<&AgentNavigationDiscovery> {
         Some(&self.discovery)
     }

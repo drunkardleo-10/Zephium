@@ -642,7 +642,7 @@ pub use provider_transport::agent::OpenAiWorkAgent;
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::decision::{
     AdmittedDecisionOutput, DecisionBackendKind, DecisionCallAccounting, DecisionCallDiagnostic,
-    DecisionCallFailure, DecisionCallOutput, DecisionEnvelopeFailure, DecisionObservation,
+    DecisionActionSelection, DecisionCallFailure, DecisionCallOutput, DecisionEnvelopeFailure, DecisionObservation,
     DecisionObservationAnswers, DecisionObservationFallback, DecisionOperation,
     DecisionProjectionError, JevDecisionClient, OpenAiDecisionCall, OpenAiDecisionClient,
 };
