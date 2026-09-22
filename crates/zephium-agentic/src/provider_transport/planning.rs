@@ -19,6 +19,13 @@ pub struct WorkPlanningConfig {
     max_cost: u64,
 }
 impl WorkPlanningConfig {
+    pub(super) fn decision_model_label(&self) -> &'static str {
+        match self.call.model().as_str() {
+            "gpt-5.6-terra" => "gpt-5.6-terra",
+            "gpt-5.6-luna" => "gpt-5.6-luna",
+            _ => "unlisted_openai",
+        }
+    }
     pub(super) fn decision_budget(&self) -> Result<AgentModelCallBudget, AgentPolicyError> {
         AgentModelCallBudget::try_new(0, self.call.max_output_tokens(), self.max_cost)
     }

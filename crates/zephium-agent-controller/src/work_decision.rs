@@ -69,10 +69,10 @@ impl AgentWorkController {
             let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
             let more_below = answers
                 .take_more_below(&observation, session.account)
-                .map_err(|_| AgentWorkFailure::Contract)?;
+                .map_err(AgentWorkFailure::DecisionMoreBelow)?;
             let Some(selection) = answers
                 .take_action_selection(&observation, session.account)
-                .map_err(|_| AgentWorkFailure::Contract)?
+                .map_err(AgentWorkFailure::DecisionOperation)?
             else {
                 break;
             };

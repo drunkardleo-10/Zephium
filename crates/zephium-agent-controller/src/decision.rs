@@ -85,8 +85,12 @@ impl AgentBrowserSession {
                 &base_url,
             )),
         }
-        .transpose()
-        .map_err(|_| AgentBrowserProviderError::Transport)?;
+        .transpose();
+        let jev = match jev {
+            Ok(client) => client,
+            Err(DecisionCallFailure::Unavailable) => None,
+            Err(_) => return Err(AgentBrowserProviderError::Transport),
+        };
         let config = try_terra_provider_exact_call_config(EMULATION_OUTPUT_TOKENS)
             .map_err(|_| AgentBrowserProviderError::Catalog)?;
         let emulation =
@@ -174,6 +178,16 @@ impl AgentBrowserSession {
             .route(primary)
             .map_err(|_| AgentBrowserProviderError::Authority)?;
         let can_emulate = self.has_decision_capacity()?;
+        if fallback.projection().is_some() {
+            if let Some(journal) = &self.journal {
+                journal
+                    .emit(work::AgentWorkEventKind::DecisionFallback {
+                        counts: fallback.fallback_counts(),
+                        capacity: can_emulate,
+                    })
+                    .map_err(|_| AgentBrowserProviderError::Journal)?;
+            }
+        }
         let emulation = if let Some(projection) = fallback.projection().filter(|_| can_emulate) {
             self.check_live()?;
             let decisions = self

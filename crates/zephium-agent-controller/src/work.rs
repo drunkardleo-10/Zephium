@@ -24,12 +24,12 @@ use super::{
 #[path = "work_tests.rs"]
 mod tests;
 
+#[path = "work_decision.rs"]
+mod decision;
 #[path = "work_inspection.rs"]
 mod inspection;
 #[path = "work_navigation.rs"]
 mod navigation;
-#[path = "work_decision.rs"]
-mod decision;
 
 #[path = "work_retained.rs"]
 mod retained;
@@ -424,6 +424,11 @@ impl AgentWorkRunInput {
     pub fn with_decision_provider(mut self, provider: super::AgentBrowserDecisionProvider) -> Self {
         self.decision_provider = Some(provider);
         self
+    }
+
+    /// Replaces only the trusted dormant provider selection before admission.
+    pub fn set_decision_provider(&mut self, provider: super::AgentBrowserDecisionProvider) {
+        self.decision_provider = Some(provider);
     }
     /// Requires isolated native storage without changing account or disclosure scope.
     pub fn with_isolated_website_data(mut self) -> Self {
@@ -2129,7 +2134,8 @@ impl AgentWorkController {
         let authority = if session.config.permits_tool(AgentBrowserToolKind::Act) {
             state.action_authority(observation)?
         } else {
-            AgentProviderActionAuthority::try_new(observation, &[]).ok_or(AgentWorkFailure::Contract)?
+            AgentProviderActionAuthority::try_new(observation, &[])
+                .ok_or(AgentWorkFailure::Contract)?
         };
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let answers = Self::provider(
@@ -2145,7 +2151,7 @@ impl AgentWorkController {
         };
         let challenge = answers
             .take_challenge(observation, session.account)
-            .map_err(|_| AgentWorkFailure::Contract)?;
+            .map_err(AgentWorkFailure::DecisionChallenge)?;
         state.decision_answers = Some(answers);
         Ok(challenge.unwrap_or_else(|| looks_like_human_challenge(observation)))
     }
@@ -2479,10 +2485,9 @@ impl AgentWorkController {
             state.observation = Some(observation);
             return Ok(());
         }
-        let (current, at, next_progress, challenged) = Self::run_decision_actions(
-            state, worker, browser, observation, captured_at, progress,
-        )
-        .await?;
+        let (current, at, next_progress, challenged) =
+            Self::run_decision_actions(state, worker, browser, observation, captured_at, progress)
+                .await?;
         observation = current;
         captured_at = at;
         progress = next_progress;
@@ -2853,9 +2858,7 @@ impl AgentWorkController {
                                 match state.task.assess_observed(proposal.action(), &observation) {
                                     Ok(assessment) => Ok((*proposal, assessment)),
                                     Err(AgentWorkFailure::ActionDenied) => Err(proposal
-                                        .into_refusal(
-                                            SemanticActionBindingError::AssignmentDenied,
-                                        )
+                                        .into_refusal(SemanticActionBindingError::AssignmentDenied)
                                         .ok_or(AgentWorkFailure::Contract)?),
                                     Err(failure) => return Err(failure),
                                 }
@@ -2904,30 +2907,47 @@ impl AgentWorkController {
             };
             Self::retain_action_read_evidence(state, &proposal, &observation, captured_at)?;
             let (current, current_at, transition) = match Self::execute_prepared_action(
-                state, worker, browser, proposal, assessment, &observation,
+                state,
+                worker,
+                browser,
+                proposal,
+                assessment,
+                &observation,
             )
             .await
             {
                 Ok(verified) => verified,
                 Err(AgentWorkFailure::Browser(
-                    AgentBrowserProviderError::ActionRejected(_) | AgentBrowserProviderError::ActionUnverified,
+                    AgentBrowserProviderError::ActionRejected(_)
+                    | AgentBrowserProviderError::ActionUnverified,
                 )) => {
-                    let refusal = state.session.as_mut()
+                    let refusal = state
+                        .session
+                        .as_mut()
                         .and_then(|session| session.take_rejected_refusal())
                         .ok_or(AgentWorkFailure::Contract)?;
                     state.native.check_control(worker, browser)?;
                     state.refresh_account(worker, browser)?;
-                    state.journal_mut()?.emit(AgentWorkEventKind::ActionProposalRefused(refusal.reason()))?;
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::ActionProposalRefused(refusal.reason()))?;
                     if let Some(key) = refusal.key() {
                         if action_refusals.contains(&key) {
-                            return Err(AgentWorkFailure::Browser(AgentBrowserProviderError::ActionProposalLoop));
+                            return Err(AgentWorkFailure::Browser(
+                                AgentBrowserProviderError::ActionProposalLoop,
+                            ));
                         }
-                        action_refusals.try_reserve(1).map_err(|_| AgentWorkFailure::Contract)?;
+                        action_refusals
+                            .try_reserve(1)
+                            .map_err(|_| AgentWorkFailure::Contract)?;
                         action_refusals.push(key);
                     }
                     let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                     turn = Self::provider(
-                        &mut state.native, worker, browser, session.cancellation.clone(),
+                        &mut state.native,
+                        worker,
+                        browser,
+                        session.cancellation.clone(),
                         session.continue_after_action_refusal(refusal, &observation),
                     )
                     .await?;
@@ -4358,6 +4378,13 @@ pub enum AgentWorkEventKind {
     },
     /// One typed decision call settled with closed provider/size/latency facts.
     DecisionSettled(DecisionCallDiagnostic),
+    /// Per-kind fallback reasons; counts follow the decision routing contract.
+    DecisionFallback {
+        /// Noul, Choice and Score counts by unavailable, rate limited, invalid, uncertain.
+        counts: [[u8; 4]; 3],
+        /// Whether the shared call allowance permits attempting emulation.
+        capacity: bool,
+    },
     /// The model proposed a bounded typed tool.
     ToolProposed(AgentBrowserToolKind),
     /// Snapshot scope was incompatible with the delivered baseline. No native
@@ -4424,6 +4451,12 @@ impl AgentWorkEvent {
 /// Closed failure vocabulary; no variant contains page, provider or user text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentWorkFailure {
+    /// Challenge decision failed its exact observation/account binding.
+    DecisionChallenge(DecisionProjectionError),
+    /// Further-content decision failed its exact observation/account binding.
+    DecisionMoreBelow(DecisionProjectionError),
+    /// Action selection failed its exact observation/account or offered-option binding.
+    DecisionOperation(DecisionProjectionError),
     /// Accounted scoped read reported AnchorMissing while its original retained
     /// document and lease remained live. Only progressive inspection may recover.
     InspectionAnchorLost,

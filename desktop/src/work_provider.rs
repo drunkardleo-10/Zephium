@@ -260,9 +260,7 @@ impl WorkProviders {
                                         settings.diagnostic = Some(|attempt, snapshot| {
                                             record_diagnostic(format_args!("work: attempt={attempt} phase=agent_browser state={:?} failure={:?} persistence_failure={:?}", snapshot.phase, snapshot.failure, snapshot.persistence_failure));
                                         });
-                                        settings.model_diagnostic = Some(|event| {
-                                            record_diagnostic(format_args!("work: phase=agent_browser event={event:?}"));
-                                        });
+                                        settings.model_diagnostic = Some(record_browser_diagnostic);
                                         settings.stage_diagnostic = Some(|stage| {
                                             record_diagnostic(format_args!("work: phase=agent_browser stage={stage}"));
                                         });
@@ -526,6 +524,39 @@ async fn credential() -> Result<zephium_agentic::AgentProviderCredential, WorkEr
 
 // Only this module's closed facts enter the development log; generic application
 // diagnostics may contain page/provider text and are deliberately excluded.
+#[cfg(feature = "work-development-traces")]
+fn record_browser_diagnostic(event: zephium_agent_controller::AgentWorkEventKind) {
+    use zephium_agent_controller::AgentWorkEventKind;
+    match event {
+        AgentWorkEventKind::DecisionSettled(fact) => {
+            record_diagnostic(format_args!(
+                "work: phase=decision backend={:?} model={} questions={} state_bytes={} input_tokens={:?} elapsed_ms={} http_status={:?} attempts={:?} failure={:?} envelope={:?}",
+                fact.backend, fact.model, fact.question_count, fact.state_bytes,
+                fact.input_tokens, fact.elapsed_millis, fact.http_status, fact.attempts,
+                fact.failure, fact.envelope_failure,
+            ));
+            for (kind, counts) in ["noul", "choice", "score"]
+                .into_iter()
+                .zip(fact.confidence_buckets)
+            {
+                record_diagnostic(format_args!(
+                    "work: phase=decision_confidence kind={kind} below_080={} below_095={} below_098={} at_least_098={}",
+                    counts[0], counts[1], counts[2], counts[3],
+                ));
+            }
+        }
+        AgentWorkEventKind::DecisionFallback { counts, capacity } => {
+            for (kind, counts) in ["noul", "choice", "score"].into_iter().zip(counts) {
+                record_diagnostic(format_args!(
+                    "work: phase=decision_fallback kind={kind} capacity={capacity} unavailable={} rate_limited={} invalid_answer={} low_confidence={}",
+                    counts[0], counts[1], counts[2], counts[3],
+                ));
+            }
+        }
+        event => record_diagnostic(format_args!("work: phase=agent_browser event={event:?}")),
+    }
+}
+
 pub(crate) fn record_diagnostic(arguments: std::fmt::Arguments<'_>) {
     #[cfg(feature = "work-development-traces")]
     super::work_diagnostics::record(arguments);

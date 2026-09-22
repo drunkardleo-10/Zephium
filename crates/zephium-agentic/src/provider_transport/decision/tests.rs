@@ -522,6 +522,7 @@ fn fallback_projection_preserves_binding_and_only_repeats_uncertain_heads() {
         )
         .unwrap();
     let fallback = projection.route(Ok(primary)).unwrap();
+    assert_eq!(fallback.fallback_counts(), [[0, 0, 0, 1], [0; 4], [0; 4]]);
     let subset = fallback.projection().unwrap();
     assert_eq!(subset.question_count(), 1);
     assert!(subset.matches(&observation, call.account()));
@@ -626,32 +627,98 @@ fn consumed_decision_recipe_cannot_substitute_target_operation_or_observation() 
     for case in 0..5 {
         let (_, call, observation, projection) = admitted_fixture_with_actions(true);
         let mut body = fixture_answers(projection.request());
-        for (key, selection) in [("operation", "click".to_owned()), ("click_target", observation.frames()[0].nodes()[1].reference().model_token().to_string())] {
-            let Question::Choice { criteria, .. } = &projection.request().questions()[key] else { panic!("choice"); };
-            let probabilities: BTreeMap<_, _> = criteria.keys().map(|key| (key, if key == &selection {1.0} else {0.0})).collect();
+        for (key, selection) in [
+            ("operation", "click".to_owned()),
+            (
+                "click_target",
+                observation.frames()[0].nodes()[1]
+                    .reference()
+                    .model_token()
+                    .to_string(),
+            ),
+        ] {
+            let Question::Choice { criteria, .. } = &projection.request().questions()[key] else {
+                panic!("choice");
+            };
+            let probabilities: BTreeMap<_, _> = criteria
+                .keys()
+                .map(|key| (key, if key == &selection { 1.0 } else { 0.0 }))
+                .collect();
             body["answers"][key] = json!({"type":"choice","choice":selection,"confidence":1.0,"probabilities":probabilities});
         }
-        let response = projection.request().decode_emulation(&serde_json::to_vec(&body).unwrap(), DecisionUsage::default()).unwrap();
+        let response = projection
+            .request()
+            .decode_emulation(
+                &serde_json::to_vec(&body).unwrap(),
+                DecisionUsage::default(),
+            )
+            .unwrap();
         let mut answers = projection.route(Ok(response)).unwrap().finish(None);
-        let selection = answers.take_action_selection(&observation, call.account()).unwrap().unwrap();
-        assert!(answers.take_action_selection(&observation, call.account()).unwrap().is_none());
-        let target = observation.frames()[0].nodes()[if case == 1 {0} else {1}].reference();
+        let selection = answers
+            .take_action_selection(&observation, call.account())
+            .unwrap()
+            .unwrap();
+        assert!(answers
+            .take_action_selection(&observation, call.account())
+            .unwrap()
+            .is_none());
+        let target = observation.frames()[0].nodes()[if case == 1 { 0 } else { 1 }].reference();
         let (intent, verification) = if case == 2 {
-            (SemanticActionIntent::Scroll { target, direction: SemanticScrollDirection::Down, amount: SemanticScrollAmount::HalfPage }, SemanticVerification::ScrollPositionChanged)
+            (
+                SemanticActionIntent::Scroll {
+                    target,
+                    direction: SemanticScrollDirection::Down,
+                    amount: SemanticScrollAmount::HalfPage,
+                },
+                SemanticVerification::ScrollPositionChanged,
+            )
         } else {
-            (SemanticActionIntent::Click { target }, SemanticVerification::TargetState { state: SemanticState::Focused, present: true })
+            (
+                SemanticActionIntent::Click { target },
+                SemanticVerification::TargetState {
+                    state: SemanticState::Focused,
+                    present: true,
+                },
+            )
         };
-        let recipe = SemanticActionProposal::try_new(intent, SemanticEffectClass::Read, SemanticWaitCondition::Immediate, verification, SemanticSettleBudget::try_new(2000).unwrap()).unwrap();
-        let frames = if case == 4 { vec![] } else { vec![observation.frames()[0].frame().clone()] };
+        let recipe = SemanticActionProposal::try_new(
+            intent,
+            SemanticEffectClass::Read,
+            SemanticWaitCondition::Immediate,
+            verification,
+            SemanticSettleBudget::try_new(2000).unwrap(),
+        )
+        .unwrap();
+        let frames = if case == 4 {
+            vec![]
+        } else {
+            vec![observation.frames()[0].frame().clone()]
+        };
         let current = if case == 3 {
             SemanticObservationAssembler::new(
-                SemanticObservationRequest::initial(SemanticObservationId::new(2).unwrap(), observation.request().context(), SemanticObservationBudget::INITIAL_FILTERED),
+                SemanticObservationRequest::initial(
+                    SemanticObservationId::new(2).unwrap(),
+                    observation.request().context(),
+                    SemanticObservationBudget::INITIAL_FILTERED,
+                ),
                 observation.frames()[0].clone(),
-            ).unwrap().finish().unwrap()
-        } else { observation.clone() };
-        let bound = selection.bind_action(recipe, &current, &frames, SemanticActionBatchId::new(1).unwrap());
+            )
+            .unwrap()
+            .finish()
+            .unwrap()
+        } else {
+            observation.clone()
+        };
+        let bound = selection.bind_action(
+            recipe,
+            &current,
+            &frames,
+            SemanticActionBatchId::new(1).unwrap(),
+        );
         assert_eq!(bound.is_ok(), case == 0, "case {case}");
-        if let Ok((_, baseline)) = bound { assert!(baseline.authenticates(&observation)); }
+        if let Ok((_, baseline)) = bound {
+            assert!(baseline.authenticates(&observation));
+        }
     }
 }
 

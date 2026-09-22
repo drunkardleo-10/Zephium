@@ -296,6 +296,31 @@ impl DecisionObservation {
 }
 
 impl DecisionObservationFallback {
+    /// Counts for Noul, Choice and Score, split by unavailable, rate limited,
+    /// invalid answer and low confidence. No question or option text escapes.
+    pub fn fallback_counts(&self) -> [[u8; 4]; 3] {
+        use zephium_decision::{FallbackReason, QuestionKind};
+        let mut counts = [[0u8; 4]; 3];
+        for (key, reason) in self.routing.reasons() {
+            let Some(question) = self.original.request.questions().get(key) else {
+                continue;
+            };
+            let kind = match question.kind() {
+                QuestionKind::Noul => 0,
+                QuestionKind::Choice => 1,
+                QuestionKind::Score => 2,
+            };
+            let reason = match reason {
+                FallbackReason::Unavailable => 0,
+                FallbackReason::RateLimited => 1,
+                FallbackReason::InvalidAnswer => 2,
+                FallbackReason::LowConfidence => 3,
+            };
+            counts[kind][reason] = counts[kind][reason].saturating_add(1);
+        }
+        counts
+    }
+
     /// Same disclosed state, with only the heads requiring emulation.
     pub fn projection(&self) -> Option<&DecisionObservation> {
         self.fallback.as_ref()

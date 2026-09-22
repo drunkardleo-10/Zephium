@@ -409,6 +409,7 @@ impl ProbeFailure {
             Self::Provider(TerraProbeProviderError::ActionProposalLoop) => {
                 "provider_action_proposal_loop"
             }
+            Self::Provider(TerraProbeProviderError::NoProgress) => "provider_no_progress",
             Self::Proposal { .. } => "proposal_contract",
             Self::Engine(_) => "native_engine",
             Self::Verification => "fresh_snapshot_verification",

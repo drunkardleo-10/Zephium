@@ -23,9 +23,22 @@ use zephium_app::{
 };
 use zephium_core::work::{artifact::*, runtime::*, WorkError, WorkStepId};
 
+/// Trusted provider preference; page/model output cannot change it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WorkDecisionPreference {
+    /// Use the fixed TypeSafe Keychain item, with per-question OpenAI fallback.
+    #[default]
+    Recommended,
+    /// Answer the same typed questions through the existing OpenAI credential.
+    Emulation,
+    /// Use the existing page planner directly.
+    Disabled,
+}
+
 /// Trusted host operands. Model output cannot select credentials, a profile,
 /// a controller implementation or provider configuration.
 pub struct WorkBrowserAdapterSettings {
+    pub decisions: WorkDecisionPreference,
     /// Explicit opt-in for public development traces; absent in release builds.
     #[cfg(feature = "public-qualification")]
     pub retain_public_responses: bool,
@@ -53,6 +66,7 @@ impl WorkBrowserAdapterSettings {
         credential: AgentProviderCredential,
     ) -> Self {
         Self {
+            decisions: WorkDecisionPreference::Recommended,
             #[cfg(feature = "public-qualification")]
             retain_public_responses: false,
             #[cfg(feature = "retained-lifetime-diagnostic")]
@@ -131,6 +145,7 @@ impl MacosWorkComposition {
             _ => None,
         };
         let diagnostics = Diagnostics::from(&settings);
+        let decisions = settings.decisions;
         let invocation = compile(&attempt, settings, collection.as_ref())?;
         let outputs: Vec<String> = attempt
             .node()
@@ -149,6 +164,7 @@ impl MacosWorkComposition {
                 collection.as_ref(),
                 None,
                 diagnostics,
+                decisions,
                 None,
             )
             .await?;
@@ -229,6 +245,7 @@ impl MacosWorkComposition {
             });
         }
         let diagnostics = Diagnostics::from(&settings);
+        let decisions = settings.decisions;
         let outputs = vec![request.output.clone()];
         let limits = request.limits;
         let host = match &request.step {
@@ -257,6 +274,7 @@ impl MacosWorkComposition {
             profile: settings.profile,
             model: settings.model,
             config: settings.config.clone(),
+            decisions,
             deadline: probe.deadline().min(Instant::now() + MAX_STEP_DURATION),
         };
         let invocation = compile_step(probe, request, settings, collection.as_ref(), None)?;
@@ -271,6 +289,7 @@ impl MacosWorkComposition {
                 collection.as_ref(),
                 Some(page),
                 diagnostics,
+                decisions,
                 Some(resume_plan),
             )
             .await?;
@@ -299,13 +318,14 @@ impl MacosWorkComposition {
         &self,
         shell: &CallbackHandle,
         attempt: &WorkAttemptProbe,
-        invocation: crate::TrustedWorkRequest,
+        mut invocation: crate::TrustedWorkRequest,
         intervention_origin: Option<String>,
         limits: WorkExecutionLimits,
         outputs: &[String],
         collection: Option<&WorkBrowseCollectionSchema>,
         page: Option<(WorkStepId, String)>,
         diagnostics: Diagnostics,
+        decisions: WorkDecisionPreference,
         resume_plan: Option<ResumePlan>,
     ) -> Result<BrowserRun, WorkError> {
         #[cfg(feature = "public-qualification")]
@@ -323,6 +343,7 @@ impl MacosWorkComposition {
             .retained_resource_spec()
             .map_err(|_| WorkError::Invalid)?;
         let original_deadline = original_spec.deadline;
+        configure_decisions(&mut invocation, decisions, original_deadline).await?;
         let view = self
             .launch_retained(shell, invocation)
             .map_err(|_| WorkError::Unavailable)?
@@ -419,6 +440,8 @@ impl MacosWorkComposition {
                         | AgentWorkEventKind::ActionProposalRefused(_)
                         | AgentWorkEventKind::Verified
                         | AgentWorkEventKind::ModelRequestedHuman(_)
+                        | AgentWorkEventKind::DecisionSettled(_)
+                        | AgentWorkEventKind::DecisionFallback { .. }
                 ) {
                     if let Some(diagnostic) = diagnostics.model_diagnostic {
                         diagnostic(event.kind());
@@ -572,13 +595,14 @@ impl MacosWorkComposition {
                             url: resume.document.as_url().to_string(),
                             collection: None,
                         };
-                        let settings = WorkBrowserAdapterSettings::new(
+                        let mut settings = WorkBrowserAdapterSettings::new(
                             plan.profile,
                             plan.model,
                             plan.config.clone(),
                             credential,
                         );
-                        let invocation = compile_step(
+                        settings.decisions = plan.decisions;
+                        let mut invocation = compile_step(
                             attempt,
                             request,
                             settings,
@@ -592,6 +616,12 @@ impl MacosWorkComposition {
                                 account,
                             }),
                         )?;
+                        configure_decisions(
+                            &mut invocation,
+                            plan.decisions,
+                            original_deadline.min(plan.deadline),
+                        )
+                        .await?;
                         let prepared = zephium_app::PreparedRetainedContinuation::try_new(
                             resume.generation,
                             invocation.input,
@@ -875,6 +905,9 @@ fn failure_note(failure: AgentWorkFailure) -> &'static str {
         AgentWorkFailure::Browser(Browser::ActionProposalLoop) => {
             "The page agent kept proposing an action the page refuses"
         }
+        AgentWorkFailure::Browser(Browser::NoProgress) => {
+            "The page stopped showing new information"
+        }
         AgentWorkFailure::Browser(Browser::NoExtractionEvidence | Browser::Extraction(_)) => {
             "The page showed nothing usable for the request"
         }
@@ -1050,7 +1083,39 @@ struct ResumePlan {
     profile: AgentWorkProfileBinding,
     model: AgentBrowserModel,
     config: AgentWorkApplicationConfig,
+    decisions: WorkDecisionPreference,
     deadline: Instant,
+}
+async fn configure_decisions(
+    invocation: &mut crate::TrustedWorkRequest,
+    preference: WorkDecisionPreference,
+    deadline: Instant,
+) -> Result<(), WorkError> {
+    use zephium_agent_controller::AgentBrowserDecisionProvider;
+    if preference == WorkDecisionPreference::Disabled {
+        return Ok(());
+    }
+    if Instant::now() >= deadline {
+        return Err(WorkError::Capacity);
+    }
+    let provider = match preference {
+        WorkDecisionPreference::Recommended => {
+            let loaded = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                tokio::task::spawn_blocking(load_macos_development_typesafe_credential),
+            )
+            .await
+            .map_err(|_| WorkError::Capacity)?;
+            match loaded {
+                Ok(Ok(credential)) => AgentBrowserDecisionProvider::TypeSafe(credential),
+                _ => AgentBrowserDecisionProvider::Emulation,
+            }
+        }
+        WorkDecisionPreference::Emulation => AgentBrowserDecisionProvider::Emulation,
+        WorkDecisionPreference::Disabled => return Ok(()),
+    };
+    invocation.input.set_decision_provider(provider);
+    Ok(())
 }
 struct ResumeCompile {
     context: ContextId,

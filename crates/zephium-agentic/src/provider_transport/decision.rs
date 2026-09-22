@@ -11,8 +11,8 @@ use zephium_decision::{DecisionRequest, DecisionResponse, DecisionUsage, MAX_RES
 
 mod projection;
 pub use projection::{
-    DecisionActionSelection, DecisionObservation, DecisionObservationAnswers, DecisionObservationFallback,
-    DecisionOperation, DecisionProjectionError,
+    DecisionActionSelection, DecisionObservation, DecisionObservationAnswers,
+    DecisionObservationFallback, DecisionOperation, DecisionProjectionError,
 };
 
 const JEV_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
@@ -72,6 +72,8 @@ pub use super::planning::PlanningResponseRejection as DecisionEnvelopeFailure;
 pub struct DecisionCallDiagnostic {
     /// Provider protocol and routing kind.
     pub backend: DecisionBackendKind,
+    /// Exact catalog revision for the shipping backend; unknown configs are named explicitly.
+    pub model: &'static str,
     /// Fixed request question count.
     pub question_count: usize,
     /// Serialized state bytes, not page text.
@@ -88,6 +90,48 @@ pub struct DecisionCallDiagnostic {
     pub failure: Option<DecisionCallFailure>,
     /// Closed emulation envelope rejection; never provider or model text.
     pub envelope_failure: Option<DecisionEnvelopeFailure>,
+    /// Counts for Noul, Choice and Score, each split at 0.80, 0.95 and 0.98.
+    /// Noul uses the selected truth probability; Choice uses the lower of
+    /// selected probability and confidence; Score uses vendor confidence.
+    pub confidence_buckets: [[u8; 4]; 3],
+}
+
+fn confidence_buckets(
+    response: &Result<zephium_decision::DecisionResponse, DecisionCallFailure>,
+) -> [[u8; 4]; 3] {
+    use zephium_decision::AnswerValue;
+    let mut counts = [[0u8; 4]; 3];
+    if let Ok(response) = response {
+        for answer in response
+            .answers
+            .values()
+            .filter_map(|answer| answer.as_ref().ok())
+        {
+            let (kind, confidence) = match answer.value() {
+                AnswerValue::Noul { noul } => (0, noul.max(1.0 - noul)),
+                AnswerValue::Choice {
+                    choice,
+                    confidence,
+                    probabilities,
+                } => (
+                    1,
+                    confidence.min(probabilities.get(choice).copied().unwrap_or(0.0)),
+                ),
+                AnswerValue::Score { confidence, .. } => (2, *confidence),
+            };
+            let bucket = if confidence < 0.80 {
+                0
+            } else if confidence < 0.95 {
+                1
+            } else if confidence < 0.98 {
+                2
+            } else {
+                3
+            };
+            counts[kind][bucket] = counts[kind][bucket].saturating_add(1);
+        }
+    }
+    counts
 }
 
 /// Validated questions plus conservatively charged usage even on failure.
@@ -414,6 +458,7 @@ impl JevDecisionClient {
             .min(started + self.transport.config.request_timeout);
         let mut diagnostic = DecisionCallDiagnostic {
             backend: self.backend,
+            model: zephium_decision::JEV_MODEL,
             question_count: request.questions().len(),
             state_bytes: request.state_bytes(),
             input_tokens: None,
@@ -422,6 +467,7 @@ impl JevDecisionClient {
             attempts: Some(0),
             failure: None,
             envelope_failure: None,
+            confidence_buckets: [[0; 4]; 3],
         };
         let mut charged_usage = DecisionUsage::default();
         let mut cost_micro_usd = 0;
@@ -584,6 +630,7 @@ impl JevDecisionClient {
         diagnostic.elapsed_millis =
             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         diagnostic.failure = response.as_ref().err().copied();
+        diagnostic.confidence_buckets = confidence_buckets(&response);
         DecisionCallOutput {
             exact_usage: diagnostic.input_tokens.is_some()
                 || charged_usage == DecisionUsage::default(),
@@ -802,6 +849,7 @@ impl<'a> OpenAiDecisionCall<'a> {
             cost_micro_usd: budget.cost_micro_usd(),
             diagnostic: DecisionCallDiagnostic {
                 backend: DecisionBackendKind::Emulation,
+                model: self.planner.config.decision_model_label(),
                 question_count: projection.question_count(),
                 state_bytes: projection.state_bytes(),
                 input_tokens: None,
@@ -810,6 +858,7 @@ impl<'a> OpenAiDecisionCall<'a> {
                 attempts: None,
                 failure: Some(failure),
                 envelope_failure: None,
+                confidence_buckets: [[0; 4]; 3],
             },
         });
         owned.settle(output, projection.input_stats(), request_bytes)
@@ -824,6 +873,7 @@ impl<'a> OpenAiDecisionCall<'a> {
         let started = Instant::now();
         let mut diagnostic = DecisionCallDiagnostic {
             backend: DecisionBackendKind::Emulation,
+            model: self.planner.config.decision_model_label(),
             question_count: request.questions().len(),
             state_bytes: request.state_bytes(),
             input_tokens: None,
@@ -832,6 +882,7 @@ impl<'a> OpenAiDecisionCall<'a> {
             attempts: Some(0),
             failure: None,
             envelope_failure: None,
+            confidence_buckets: [[0; 4]; 3],
         };
         let envelope = std::sync::Mutex::new((false, None));
         let result = match body {
@@ -923,6 +974,7 @@ impl<'a> OpenAiDecisionCall<'a> {
         diagnostic.elapsed_millis =
             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         diagnostic.failure = response.as_ref().err().copied();
+        diagnostic.confidence_buckets = confidence_buckets(&response);
         DecisionCallOutput {
             exact_usage,
             response,
