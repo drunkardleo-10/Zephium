@@ -111,6 +111,25 @@ fn planning_refusals_preserve_usage_and_duplicate_messages_are_rejected() {
     );
     assert!(decode(bytes.as_bytes(), 100, &config()).is_none());
 }
+
+#[test]
+fn closed_envelope_diagnostics_preserve_the_output_item_limit() {
+    let mut value = response();
+    let message = value["output"][1].clone();
+    value["output"].as_array_mut().unwrap().push(message);
+    let bytes = serde_json::to_vec(&value).unwrap();
+    assert!(matches!(
+        decode_response_checked(&bytes, 100, &config()),
+        Err(PlanningResponseRejection::ItemCount)
+    ));
+    assert!(decode_response(&bytes, 100, &config()).is_none());
+    value["output"].as_array_mut().unwrap().pop();
+    value["usage"]["total_tokens"] = json!(301);
+    assert!(matches!(
+        decode_response_checked(&serde_json::to_vec(&value).unwrap(), 100, &config()),
+        Err(PlanningResponseRejection::Usage)
+    ));
+}
 struct Server {
     endpoint: String,
     thread: std::thread::JoinHandle<Vec<(String, Value, Vec<u8>)>>,

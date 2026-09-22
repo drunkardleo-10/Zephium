@@ -139,6 +139,14 @@ impl AgentProviderActionAuthority {
         self
     }
 
+    pub(crate) fn decision_entries(
+        &self,
+        observation: &SemanticObservation,
+    ) -> Option<impl Iterator<Item = (SemanticReferenceId, SemanticOperations)> + '_> {
+        self.matches(observation)
+            .then(|| self.entries.iter().map(|entry| (entry.reference, entry.operations)))
+    }
+
     fn matches(&self, observation: &SemanticObservation) -> bool {
         self.observation == observation.request().id()
             && self.generation == observation.request().generation()

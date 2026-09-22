@@ -451,7 +451,7 @@ pub(super) fn decode_response(
     reserved: u32,
     config: &WorkPlanningConfig,
 ) -> Option<Result<(String, WorkPlanningUsage), WorkPlanningUsage>> {
-    decode_response_with(bytes, reserved, config, false)
+    decode_response_checked(bytes, reserved, config).ok()
 }
 
 /// Agent turns: a model that narrates several turns in one response is
@@ -461,7 +461,40 @@ pub(super) fn decode_first_message(
     reserved: u32,
     config: &WorkPlanningConfig,
 ) -> Option<Result<(String, WorkPlanningUsage), WorkPlanningUsage>> {
-    decode_response_with(bytes, reserved, config, true)
+    decode_response_with(bytes, reserved, config, true).ok()
+}
+
+/// Closed response rejection facts, without provider or model text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlanningResponseRejection {
+    /// Response exceeded the body limit.
+    BodySize,
+    /// Typed JSON envelope could not be decoded.
+    Json,
+    /// Response was not a completed, error-free response object.
+    Incomplete,
+    /// Model or service tier did not match the bound catalog entry.
+    Identity,
+    /// Response exceeded the permitted output-item count.
+    ItemCount,
+    /// Token usage contradicted the reservation or its own totals.
+    Usage,
+    /// Usage could not fit the bound pricing ceiling.
+    Cost,
+    /// Message roles, content or reasoning order were invalid.
+    OutputShape,
+    /// Output text exceeded the production text limit.
+    TextSize,
+    /// No text or explicit refusal was present.
+    MissingText,
+}
+
+pub(super) fn decode_response_checked(
+    bytes: &[u8],
+    reserved: u32,
+    config: &WorkPlanningConfig,
+) -> Result<Result<(String, WorkPlanningUsage), WorkPlanningUsage>, PlanningResponseRejection> {
+    decode_response_with(bytes, reserved, config, false)
 }
 
 fn decode_response_with(
@@ -469,22 +502,27 @@ fn decode_response_with(
     reserved: u32,
     config: &WorkPlanningConfig,
     first_message: bool,
-) -> Option<Result<(String, WorkPlanningUsage), WorkPlanningUsage>> {
+) -> Result<Result<(String, WorkPlanningUsage), WorkPlanningUsage>, PlanningResponseRejection> {
+    use PlanningResponseRejection as Rejection;
     if bytes.len() > MAX_BODY as usize {
-        return None;
+        return Err(Rejection::BodySize);
     }
-    let response: Response = serde_json::from_slice(bytes).ok()?;
+    let response: Response = serde_json::from_slice(bytes).map_err(|_| Rejection::Json)?;
     if response.object != "response"
         || response.status != "completed"
         || response.error.is_some()
         || response.incomplete_details.is_some()
-        || !config
-            .call
-            .planning_identity_matches(&response.model, &response.service_tier)
-        || (response.output.len() > 2 && !first_message)
-        || response.output.len() > 32
     {
-        return None;
+        return Err(Rejection::Incomplete);
+    }
+    if !config
+        .call
+        .planning_identity_matches(&response.model, &response.service_tier)
+    {
+        return Err(Rejection::Identity);
+    }
+    if (response.output.len() > 2 && !first_message) || response.output.len() > 32 {
+        return Err(Rejection::ItemCount);
     }
     let usage = response.usage;
     if usage.input_tokens == 0
@@ -492,21 +530,27 @@ fn decode_response_with(
         || u64::from(usage.input_tokens) > config.call.pricing_profile().max_input_tokens()
         || usage.input_tokens > reserved
         || usage.output_tokens > config.call.max_output_tokens()
-        || usage.input_tokens.checked_add(usage.output_tokens)? != usage.total_tokens
+        || usage
+            .input_tokens
+            .checked_add(usage.output_tokens)
+            .ok_or(Rejection::Usage)?
+            != usage.total_tokens
         || usage
             .input_tokens_details
             .cached_tokens
-            .checked_add(usage.input_tokens_details.cache_write_tokens)?
+            .checked_add(usage.input_tokens_details.cache_write_tokens)
+            .ok_or(Rejection::Usage)?
             > usage.input_tokens
         || usage.output_tokens_details.reasoning_tokens > usage.output_tokens
     {
-        return None;
+        return Err(Rejection::Usage);
     }
     let cost = config
         .call
-        .planning_cost_ceiling(usage.input_tokens, usage.output_tokens)?;
+        .planning_cost_ceiling(usage.input_tokens, usage.output_tokens)
+        .ok_or(Rejection::Cost)?;
     if cost > config.max_cost {
-        return None;
+        return Err(Rejection::Cost);
     }
     let usage = WorkPlanningUsage {
         input_tokens: usage.input_tokens,
@@ -534,7 +578,7 @@ fn decode_response_with(
                 && status == "completed"
                 && content.len() == 1 =>
             {
-                let value = match content.pop()? {
+                let value = match content.pop().ok_or(Rejection::OutputShape)? {
                     Content::OutputText { text } => text,
                     Content::Refusal {} => {
                         refused = true;
@@ -542,17 +586,17 @@ fn decode_response_with(
                     }
                 };
                 if value.len() > MAX_PLANNING_OUTPUT_BYTES {
-                    return None;
+                    return Err(Rejection::TextSize);
                 }
                 text = Some(value);
             }
-            _ => return None,
+            _ => return Err(Rejection::OutputShape),
         }
     }
     if refused {
-        return Some(Err(usage));
+        return Ok(Err(usage));
     }
-    Some(Ok((text?, usage)))
+    Ok(Ok((text.ok_or(Rejection::MissingText)?, usage)))
 }
 
 #[cfg(test)]

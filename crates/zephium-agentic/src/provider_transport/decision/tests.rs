@@ -1,4 +1,5 @@
 use super::*;
+use crate::*;
 use serde_json::json;
 use std::{
     collections::BTreeMap,
@@ -7,6 +8,166 @@ use std::{
     thread,
 };
 use zephium_decision::Question;
+
+fn admitted_fixture() -> (
+    AgentRunPolicy,
+    AgentModelCallRequest,
+    SemanticObservation,
+    DecisionObservation,
+) {
+    let identity = ContextIdentity::new(
+        ContextId::from_raw(11),
+        ContextRunId::from_raw(12),
+        zephium_core::ids::ProfileId::from(13),
+        ContextKind::Owned,
+    );
+    let mut contexts = ContextRegistry::new();
+    contexts
+        .reserve(
+            identity,
+            ContextCapabilities::try_new(ContextKind::Owned, &[ContextCapability::Observe])
+                .unwrap(),
+        )
+        .unwrap();
+    let op = contexts
+        .begin_context(identity.id(), ContextOperationId::new(1).unwrap())
+        .unwrap();
+    contexts
+        .settle_construction(identity.id(), op, ContextSettlement::Applied)
+        .unwrap();
+    let context = contexts.join(identity.id()).unwrap();
+    let source = SemanticOrigin::parse("https://example.test/").unwrap();
+    let frame = SemanticFrameJoin::try_new(
+        context,
+        FrameId::MAIN,
+        FrameGeneration::INITIAL,
+        source.clone(),
+        SemanticFrameTrust::SameOrigin,
+    )
+    .unwrap();
+    let snapshot = decode_semantic_snapshot(SemanticDecodeContext::new(SemanticInvocationId::new(1).unwrap(), frame,
+        SemanticSnapshotGeneration::new(1).unwrap()),
+        &serde_json::to_vec(&json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":[{"k":1,"r":"document"}]})).unwrap()).unwrap();
+    let observation = SemanticObservationAssembler::new(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(1).unwrap(),
+            context,
+            SemanticObservationBudget::try_new(8, 4096, 1).unwrap(),
+        ),
+        snapshot,
+    )
+    .unwrap()
+    .finish()
+    .unwrap();
+    let account = AgentContextAccountBinding::new(
+        AgentAccountAttestationId::from_raw(14),
+        context,
+        AgentAccountScope::Anonymous,
+        AgentPolicyInstant::from_millis(100),
+    );
+    let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).unwrap();
+    let budget = AgentRunBudget::try_new(3, 100_000, 10_000, 1).unwrap();
+    let node = AgentPlanNodeId::from_raw(15);
+    let lease = AgentPlanLeaseId::from_raw(16);
+    let manifest = AgentRunManifest::try_new(
+        AgentRunManifestId::from_raw(17),
+        ContextRunId::from_raw(12),
+        AgentRunScope::try_new(
+            vec![identity.profile()],
+            vec![AgentAccountScope::Anonymous],
+            vec![source.clone()],
+            SemanticSensitivity::Public,
+            effects,
+            vec![],
+        )
+        .unwrap(),
+        budget,
+        AgentPolicyInstant::from_millis(1),
+        AgentPolicyInstant::from_millis(10000),
+        vec![AgentPlanNodeScope::new(
+            node,
+            AgentPlanNodeAuthority::try_new(
+                vec![identity.profile()],
+                vec![AgentAccountScope::Anonymous],
+                vec![source],
+                SemanticSensitivity::Public,
+                effects,
+            )
+            .unwrap(),
+            budget,
+            AgentPolicyInstant::from_millis(9999),
+        )],
+    )
+    .unwrap();
+    let policy =
+        AgentRunPolicy::try_new(manifest, vec![AgentPlanLeaseBinding::new(lease, node)]).unwrap();
+    let call = AgentModelCallRequest::new(
+        AgentModelCallId::new(1).unwrap(),
+        lease,
+        account,
+        JevDecisionClient::call_budget().unwrap(),
+        AgentPolicyInstant::from_millis(101),
+    );
+    let objective = AgentProviderObjective::try_admit_conservative_utf8(
+        "Read this public document".into(),
+        &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
+    )
+    .unwrap();
+    let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+    let projection =
+        DecisionObservation::try_new(&observation, &objective, &authority, account).unwrap();
+    (policy, call, observation, projection)
+}
+
+#[tokio::test]
+async fn admitted_decision_settles_actual_usage_and_dropped_dispatch_charges_the_ceiling() {
+    let (endpoint, server) = server(vec![success()]);
+    let client = client(endpoint);
+    let server = server();
+    let (mut policy, call, observation, projection) = admitted_fixture();
+    let output = client
+        .evaluate_observation(
+            &mut policy,
+            call,
+            &observation,
+            &projection,
+            Instant::now() + Duration::from_secs(4),
+            &AgentProviderCancellation::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(server.join().unwrap(), 1);
+    assert_eq!(output.receipt.input_tokens(), 123);
+    assert_eq!(output.receipt.output_tokens(), 7);
+    assert_eq!(policy.pending_model_calls(), 0);
+
+    let (mut policy, call, observation, projection) = admitted_fixture();
+    let admission = policy
+        .prepare_decision_input(
+            call,
+            &observation,
+            &projection,
+            u64::from(MAX_JEV_INPUT_TOKENS),
+        )
+        .unwrap();
+    let ack = crate::semantic_diff::SemanticObservationAcknowledgement::from_fingerprint(
+        crate::semantic_diff::SemanticObservationFingerprint::from_observation(&observation),
+    );
+    let active = policy.commit_observation_input(admission, &ack).unwrap();
+    drop(DecisionPolicyGuard {
+        policy: &mut policy,
+        active: Some(active),
+    });
+    assert_eq!(policy.pending_model_calls(), 0);
+    assert_eq!(
+        policy.accounting().consumed_model_tokens(),
+        u64::from(MAX_JEV_INPUT_TOKENS + MAX_JEV_OUTPUT_TOKENS)
+    );
+    assert_eq!(
+        policy.accounting().consumed_cost_micro_usd(),
+        jev_cost(MAX_JEV_INPUT_TOKENS)
+    );
+}
 
 fn request() -> DecisionRequest {
     DecisionRequest::try_new(

@@ -1076,7 +1076,7 @@ fn write_frame_boundary(
     }
 }
 
-fn scope_label(scope: &SemanticScope) -> &'static str {
+pub(crate) fn scope_label(scope: &SemanticScope) -> &'static str {
     match scope {
         SemanticScope::Initial => "initial",
         SemanticScope::Region(_) => "region",
@@ -1096,7 +1096,7 @@ pub(crate) fn frame_trust_label(trust: SemanticFrameTrust) -> &'static str {
     }
 }
 
-fn completeness_label(completeness: SemanticCompleteness) -> &'static str {
+pub(crate) fn completeness_label(completeness: SemanticCompleteness) -> &'static str {
     match completeness {
         SemanticCompleteness::Complete => "complete",
         SemanticCompleteness::Truncated(SemanticTruncation::NodeLimit) => "truncated_nodes",

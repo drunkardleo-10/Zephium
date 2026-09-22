@@ -640,7 +640,8 @@ pub use sign_in_handoff::{
 pub use provider_transport::agent::OpenAiWorkAgent;
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::decision::{
-    DecisionBackendKind, DecisionCallDiagnostic, DecisionCallFailure, DecisionCallOutput,
+    AdmittedDecisionOutput, DecisionBackendKind, DecisionCallDiagnostic, DecisionCallFailure,
+    DecisionCallOutput, DecisionEnvelopeFailure, DecisionObservation, DecisionProjectionError,
     JevDecisionClient, OpenAiDecisionClient,
 };
 #[cfg(feature = "provider-transport")]

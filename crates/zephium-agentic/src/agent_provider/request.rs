@@ -250,7 +250,7 @@ impl AgentProviderObjective {
         self.content.len()
     }
 
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.content
     }
 

@@ -1389,6 +1389,71 @@ impl AgentRunPolicy {
         )
     }
 
+    #[cfg(feature = "provider-transport")]
+    pub(crate) fn prepare_decision_input(
+        &mut self,
+        request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        projection: &crate::DecisionObservation,
+        input_tokens: u64,
+    ) -> Result<AgentModelCallAdmission, AgentPolicyError> {
+        if !projection.matches(observation, request.account()) {
+            return Err(AgentPolicyError::PayloadMismatch);
+        }
+        let context = observation.request().context();
+        let source_guard = SemanticObservationFingerprint::from_observation(observation).digest();
+        let mut candidates = Vec::new();
+        for frame in observation.frames() {
+            let nodes: Vec<_> = frame
+                .nodes()
+                .iter()
+                .filter(|node| projection.references().contains(&node.reference()))
+                .collect();
+            if nodes.is_empty() {
+                continue;
+            }
+            let sensitivity = nodes
+                .iter()
+                .map(|node| node.sensitivity())
+                .max()
+                .ok_or(AgentPolicyError::PayloadMismatch)?;
+            if sensitivity == SemanticSensitivity::Secret
+                || (sensitivity == SemanticSensitivity::Sensitive
+                    && request.account().account() == AgentAccountScope::Anonymous)
+            {
+                return Err(AgentPolicyError::Sensitivity);
+            }
+            merge_taint(
+                &mut candidates,
+                AgentTaintCohort {
+                    context,
+                    observation: observation.request().id(),
+                    observation_generation: observation.request().generation(),
+                    source_guard,
+                    account: request.account().account(),
+                    origin: frame.frame().origin().clone(),
+                    sensitivity,
+                    trust: SemanticTrust::UntrustedPage,
+                    attested_at: request.account().observed_at(),
+                    references: canonical_references(
+                        nodes.iter().map(|node| node.reference()).collect(),
+                    ),
+                },
+            );
+        }
+        self.prepare_model_input(
+            request,
+            context,
+            ModelInputKind::Observation,
+            source_guard,
+            candidates,
+            ModelInputTokenReservation {
+                measured: input_tokens,
+                additional: 0,
+            },
+        )
+    }
+
     /// Reserve full observation delivery for an already-bound tool result.
     /// The predecessor's exact plan node must survive policy rejoining before
     /// any observation taint or model budget can be admitted.
@@ -4188,6 +4253,192 @@ mod tests {
         );
         let filled = observation_taints(&typed, account(context, NOW - 1)).unwrap();
         assert_eq!(filled[0].sensitivity(), SemanticSensitivity::Sensitive);
+    }
+
+    #[cfg(feature = "provider-transport")]
+    #[test]
+    fn decision_projection_omits_secret_metadata_and_anonymous_sensitive_nodes() {
+        let source = origin("source");
+        let context = make_context(7, 8, 9);
+        let observation = mixed_observation(context, source.clone(), 1);
+        let authority = crate::AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Read the page".into(),
+            &tokenizer(),
+        )
+        .unwrap();
+        let binding = account(context, NOW - 1);
+        let projection =
+            crate::DecisionObservation::try_new(&observation, &objective, &authority, binding)
+                .unwrap();
+        let encoded = projection.request().encode().unwrap();
+        let encoded = std::str::from_utf8(&encoded).unwrap();
+        assert!(encoded.contains("public marker"));
+        for omitted in [
+            "private marker",
+            "Password",
+            "must-never-escape",
+            "@a3",
+            "@a4",
+        ] {
+            assert!(!encoded.contains(omitted));
+            assert!(!format!("{projection:?}").contains(omitted));
+        }
+        assert!(!projection
+            .request()
+            .questions()
+            .contains_key("click_target"));
+        let mut fixture = policy_fixture(
+            7,
+            8,
+            source,
+            SemanticSensitivity::Public,
+            &[SemanticEffectClass::Read],
+            run_budget(3, 1000, 1000),
+        );
+        let admission = fixture
+            .policy
+            .prepare_decision_input(
+                call_request(1, fixture.lease, binding, 0, 10, 100, NOW),
+                &observation,
+                &projection,
+                500,
+            )
+            .unwrap();
+        let ack = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&observation),
+        );
+        let active = fixture
+            .policy
+            .commit_observation_input(admission, &ack)
+            .unwrap();
+        assert!(fixture
+            .policy
+            .taints()
+            .iter()
+            .all(|taint| taint.sensitivity() == SemanticSensitivity::Public));
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 100, 5, 5)
+            .unwrap();
+        assert_eq!(
+            fixture.policy.remaining_model_tokens(fixture.lease),
+            Ok(895)
+        );
+    }
+
+    #[cfg(feature = "provider-transport")]
+    #[test]
+    fn decision_sensitive_projection_still_requires_manifest_account_scope() {
+        let source = origin("source");
+        let context = make_context(7, 8, 9);
+        let observation = mixed_observation(context, source.clone(), 1);
+        let authority = crate::AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Read the page".into(),
+            &tokenizer(),
+        )
+        .unwrap();
+        let signed_in = AgentContextAccountBinding::new(
+            AgentAccountAttestationId::from_raw(17),
+            context,
+            AgentAccountScope::Authenticated(crate::AgentAccountId::from_raw(18)),
+            AgentPolicyInstant::from_millis(NOW - 1),
+        );
+        let projection =
+            crate::DecisionObservation::try_new(&observation, &objective, &authority, signed_in)
+                .unwrap();
+        let encoded = projection.request().encode().unwrap();
+        let encoded = std::str::from_utf8(&encoded).unwrap();
+        assert!(encoded.contains("private marker"));
+        assert!(!encoded.contains("Password"));
+        assert!(!encoded.contains("must-never-escape"));
+        let mut fixture = policy_fixture(
+            7,
+            8,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(3, 1000, 1000),
+        );
+        assert_eq!(
+            fixture
+                .policy
+                .prepare_decision_input(
+                    call_request(1, fixture.lease, signed_in, 0, 10, 100, NOW),
+                    &observation,
+                    &projection,
+                    500
+                )
+                .unwrap_err(),
+            AgentPolicyError::SourceOutsideScope
+        );
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+    }
+
+    #[cfg(feature = "provider-transport")]
+    #[test]
+    fn decision_projection_cannot_reuse_authority_or_account_after_observation_changes() {
+        let source = origin("source");
+        let context = make_context(7, 8, 9);
+        let first = actionable_observation(context, source.clone(), 1);
+        let next = actionable_observation(context, source.clone(), 2);
+        let target = first.frames()[0].nodes()[1].reference();
+        let allowed = SemanticOperations::try_new(&[SemanticOperationClass::Click]).unwrap();
+        let authority =
+            crate::AgentProviderActionAuthority::try_new(&first, &[(target, allowed)]).unwrap();
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Read the page".into(),
+            &tokenizer(),
+        )
+        .unwrap();
+        let binding = account(context, NOW - 1);
+        let projection =
+            crate::DecisionObservation::try_new(&first, &objective, &authority, binding).unwrap();
+        let zephium_decision::Question::Choice { criteria, .. } =
+            &projection.request().questions()["click_target"]
+        else {
+            panic!("choice");
+        };
+        assert_eq!(criteria.len(), 2);
+        assert!(criteria.contains_key(&target.model_token().to_string()));
+        assert!(!projection.request().questions().contains_key("type_target"));
+        assert!(
+            crate::DecisionObservation::try_new(&next, &objective, &authority, binding).is_err()
+        );
+        let mut fixture = policy_fixture(
+            7,
+            8,
+            source,
+            SemanticSensitivity::Public,
+            &[SemanticEffectClass::Read],
+            run_budget(3, 1000, 1000),
+        );
+        assert_eq!(
+            fixture
+                .policy
+                .prepare_decision_input(
+                    call_request(1, fixture.lease, binding, 0, 10, 100, NOW),
+                    &next,
+                    &projection,
+                    500
+                )
+                .unwrap_err(),
+            AgentPolicyError::PayloadMismatch
+        );
+        assert_eq!(
+            fixture
+                .policy
+                .prepare_decision_input(
+                    call_request(1, fixture.lease, account(context, NOW), 0, 10, 100, NOW),
+                    &first,
+                    &projection,
+                    500
+                )
+                .unwrap_err(),
+            AgentPolicyError::PayloadMismatch
+        );
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
     }
 
     #[test]
