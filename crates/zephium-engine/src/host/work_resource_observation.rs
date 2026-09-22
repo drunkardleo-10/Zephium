@@ -391,6 +391,12 @@ impl EngineHost {
         }
         let read = resource.observation.as_mut().unwrap();
         if Instant::now() >= read.deadline {
+            #[cfg(feature = "agentic-browser-qa")]
+            if read.refusal.is_none() {
+                eprintln!("work_observation phase=timeout ready={} dispatched={} callback_returned={} wakes={} presentation_facts={:?}",
+                    read.ready_since.is_some(), read.dispatched, read.callback_returned, read.wakes,
+                    read.presentation.as_ref().map(WorkObservationPresentation::liveness_facts));
+            }
             read.refuse(SemanticRuntimePortFailure::TimedOut);
         }
         if let Some(wake) = &read.wake {

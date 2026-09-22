@@ -88,6 +88,16 @@ pub(crate) struct WorkObservationPresentation {
 }
 
 impl WorkObservationPresentation {
+    #[cfg(feature = "agentic-browser-qa")]
+    pub(crate) fn liveness_facts(&self) -> (bool, bool, bool, bool, bool) {
+        (
+            !self.main.isMiniaturized(),
+            self.main.occlusionState().contains(NSWindowOcclusionState::Visible),
+            !self.page.visibleRect().is_empty(),
+            self.main.isOnActiveSpace(),
+            self.main.isVisible(),
+        )
+    }
     #[cfg(feature = "native-agentic-work-resource-probe")]
     pub(crate) fn record_probe_weak(&self, resource: &zephium_agentic::WorkBrowserResourceJoin) {
         super::agentic_foreground_probe::record_resource_observation_weak(

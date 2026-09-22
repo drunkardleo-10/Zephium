@@ -3635,19 +3635,22 @@ fn pump_work_application_event(
     input: crate::MacosWorkProbeInput,
 ) -> Result<(), &'static str> {
     // NSRunLoop does not deliver NSApplication's queued lifecycle events.
-    // Only the explicit human qualifier delivers queued physical input.
+    // Dequeue all event types so AppKit updates occlusion; filter input before delivery.
     if *count >= 8192 {
         return Err("actor_application_event_capacity");
     }
     objc2::rc::autoreleasepool(|_| {
         if let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
-            work_probe_event_mask(input),
+            objc2_app_kit::NSEventMask::Any,
             None,
             objc2_foundation::ns_string!("NSDefaultRunLoopMode"),
             true,
         ) {
             *count += 1;
             use objc2_app_kit::NSEventType;
+            if !work_probe_delivers_event(input, event.r#type()) {
+                return;
+            }
             let input_kind = match event.r#type() {
                 NSEventType::LeftMouseDown
                 | NSEventType::RightMouseDown
@@ -3665,28 +3668,68 @@ fn pump_work_application_event(
     Ok(())
 }
 
-fn work_probe_event_mask(input: crate::MacosWorkProbeInput) -> objc2_app_kit::NSEventMask {
+fn work_probe_delivers_event(
+    input: crate::MacosWorkProbeInput,
+    event: objc2_app_kit::NSEventType,
+) -> bool {
+    use objc2_app_kit::NSEventType;
     match input {
-        crate::MacosWorkProbeInput::LifecycleOnly => objc2_app_kit::NSEventMask::AppKitDefined,
-        crate::MacosWorkProbeInput::Human => objc2_app_kit::NSEventMask::Any,
+        crate::MacosWorkProbeInput::LifecycleOnly => matches!(
+            event,
+            NSEventType::AppKitDefined
+                | NSEventType::SystemDefined
+                | NSEventType::ApplicationDefined
+                | NSEventType::Periodic
+                | NSEventType::CursorUpdate
+        ),
+        crate::MacosWorkProbeInput::Human => true,
     }
 }
 
 #[cfg(test)]
 #[test]
 fn only_explicit_human_probe_delivers_physical_input() {
-    use objc2_app_kit::NSEventMask;
-    let lifecycle = work_probe_event_mask(crate::MacosWorkProbeInput::LifecycleOnly);
-    let human = work_probe_event_mask(crate::MacosWorkProbeInput::Human);
-    for mask in [
-        NSEventMask::LeftMouseDown,
-        NSEventMask::LeftMouseUp,
-        NSEventMask::KeyDown,
-        NSEventMask::KeyUp,
+    use objc2_app_kit::NSEventType;
+    for event in [
+        NSEventType::LeftMouseDown,
+        NSEventType::LeftMouseUp,
+        NSEventType::RightMouseDown,
+        NSEventType::RightMouseUp,
+        NSEventType::OtherMouseDown,
+        NSEventType::OtherMouseUp,
+        NSEventType::MouseMoved,
+        NSEventType::LeftMouseDragged,
+        NSEventType::RightMouseDragged,
+        NSEventType::KeyDown,
+        NSEventType::KeyUp,
+        NSEventType::FlagsChanged,
+        NSEventType::ScrollWheel,
+        NSEventType::TabletPoint,
+        NSEventType::TabletProximity,
+        NSEventType::Gesture,
+        NSEventType::Magnify,
+        NSEventType::Swipe,
+        NSEventType::Rotate,
+        NSEventType::BeginGesture,
+        NSEventType::EndGesture,
+        NSEventType::DirectTouch,
+        NSEventType::Pressure,
+        NSEventType::QuickLook,
+        NSEventType(63),
     ] {
-        assert!(!lifecycle.contains(mask));
-        assert!(human.contains(mask));
+        assert!(!work_probe_delivers_event(
+            crate::MacosWorkProbeInput::LifecycleOnly,
+            event
+        ));
+        assert!(work_probe_delivers_event(
+            crate::MacosWorkProbeInput::Human,
+            event
+        ));
     }
+    assert!(work_probe_delivers_event(
+        crate::MacosWorkProbeInput::LifecycleOnly,
+        NSEventType::AppKitDefined
+    ));
 }
 
 fn run_work_operation(operation: Box<dyn FnOnce() + Send>) {
