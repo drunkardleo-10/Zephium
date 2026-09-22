@@ -4,7 +4,7 @@
 use block2::RcBlock;
 use objc2::{rc::Retained, runtime::AnyObject, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSView, NSWindow,
+    NSAccessibility as _, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSView, NSWindow,
     NSWindowStyleMask,
 };
 use objc2_foundation::{
@@ -30,6 +30,9 @@ const INTERACTIVE_OBSERVATION_WINDOW: Duration = Duration::from_secs(120);
 
 #[path = "agentic_liveness_fixture.rs"]
 mod fixture;
+
+#[path = "agentic_challenge_ax_probe.rs"]
+mod challenge_ax;
 
 #[cfg(feature = "native-agentic-semantic-probe")]
 #[path = "agentic_construction_probe.rs"]
@@ -190,6 +193,7 @@ fn run(
     // SAFETY: retained owner handles release after child teardown.
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str("Zephium Liveness Probe"));
+    window.setAccessibilityIdentifier(Some(&NSString::from_str(challenge_ax::WINDOW_ID)));
     let host = Host(window.contentView().ok_or("content_view")?);
     let owned_stage = matches!(
         stage,
@@ -340,6 +344,20 @@ fn run(
         );
     }
     let page = super::native_webview(view.view());
+    for sample in 0..3 {
+        let facts = challenge_ax::inspect(&page);
+        eprintln!("liveness_probe site={site:?} stage={stage:?} ax_sample={sample} nodes={} web_areas={} challenge_areas={} checkboxes={} scoped_checkboxes={} named_checkboxes={} enabled_checkboxes={} candidates={} unresolved_remote={} root_getters={} bridge={:?} truncated={}",
+            facts.nodes, facts.web_areas, facts.challenge_areas, facts.checkboxes,
+            facts.scoped_checkboxes, facts.named_checkboxes, facts.enabled_checkboxes, facts.candidates, facts.unresolved_remote, facts.root_getters, facts.bridge, facts.truncated);
+        if facts.scoped_checkboxes > 0 && !facts.truncated { break; }
+        let wait_started = Instant::now();
+        while wait_started.elapsed() < Duration::from_millis(100) { pump(); }
+    }
+    let facts = challenge_ax::inspect_own_process(mtm);
+    eprintln!("liveness_probe site={site:?} stage={stage:?} ax_source=OwnProcess windows={} nodes={} web_areas={} challenge_areas={} checkboxes={} scoped_checkboxes={} named_checkboxes={} enabled_checkboxes={} candidates={} unresolved_remote={} bridge={:?} truncated={}",
+        facts.windows,
+        facts.nodes, facts.web_areas, facts.challenge_areas, facts.checkboxes,
+        facts.scoped_checkboxes, facts.named_checkboxes, facts.enabled_checkboxes, facts.candidates, facts.unresolved_remote, facts.bridge, facts.truncated);
     let cookies = Rc::new(RefCell::new(None));
     let cookie_result = cookies.clone();
     let cookie_callback = RcBlock::new(move |values: NonNull<NSArray<NSHTTPCookie>>| {
