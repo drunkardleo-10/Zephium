@@ -166,7 +166,7 @@ const AGENT_EXTRACTION_INSTRUCTIONS_V1: &str = concat!(
     "Preserve schema field order, omit only fields marked ",
     "required=false when evidence is insufficient, and cite one through four exact @rN evidence ",
     "tokens in each value's sources array, in strictly increasing numeric order, for every ",
-    "scalar, text_list collection, and text_list item. For url and image_url, return only k and a sources array containing exactly one ref: link_destination for url, image_source for image_url. Do not include a value property; the host copies the exact observed URL, preserving its query and fragment. Money requires proven complete source fields, amount as a plain decimal string and an adjacent explicit currency code in the same cited text fragment; never infer currency from a symbol or locale, or an ambiguous separator. For rows, S parent lines define each record: ",
+    "scalar, text_list collection, and text_list item. For a field marked copy=one_exact_source_fragment, return only k=text and one sources ref; Rust copies its complete text or form value. Choose the precise value fragment, not its label or a container of unrelated values. For url and image_url, return only k and a sources array containing exactly one ref: link_destination for url, image_source for image_url. Do not include a value property; the host copies the exact observed URL, preserving its query and fragment. Money requires proven complete source fields, amount as a plain decimal string and an adjacent explicit currency code in the same cited text fragment; never infer currency from a symbol or locale, or an ambiguous separator. For rows, S parent lines define each record: ",
     "cite each field separately, omit unsupported optional fields, and use an empty items array when no records are supported. ",
     "Printed inline markers are not citations: put all ",
     "supporting refs in sources, and split claims into list items when they need different ",
@@ -5883,7 +5883,22 @@ fn bound_extraction_fields(
             let mut value = variants[index].clone();
             match field.kind() {
                 crate::SemanticExtractionValueKind::Text => {
-                    value["properties"]["value"]["maxLength"] = json!(field.max_text_bytes());
+                    if field.verbatim_text() {
+                        value = strict_object(vec![
+                            ("k", json!({"type":"string","enum":["text"]})),
+                            ("sources", json!({"type":"array","minItems":1,"maxItems":1,"items":{"type":"string"}})),
+                        ]);
+                        if let Some(read) = read {
+                            let refs: Vec<_> = read.fragments().iter()
+                                .filter(|source| source.verbatim_text().is_some_and(|text| text.len() <= field.max_text_bytes().unwrap_or(0)))
+                                .map(|source| source.id().model_token()).collect();
+                            if !refs.is_empty() {
+                                value["properties"]["sources"]["items"] = json!({"type":"string","enum":refs});
+                            }
+                        }
+                    } else {
+                        value["properties"]["value"]["maxLength"] = json!(field.max_text_bytes());
+                    }
                 }
                 crate::SemanticExtractionValueKind::Money => {
                     value["properties"]["currency"]["enum"] = json!(field.currencies());
@@ -8643,7 +8658,7 @@ mod tests {
                 "records".into(),
                 true,
                 vec![
-                    Field::try_text("name".into(), true, 100).unwrap(),
+                    Field::try_text("name".into(), true, 100).unwrap().with_verbatim_text().unwrap(),
                     Field::try_unsigned("count".into(), false, 7).unwrap(),
                     Field::try_url("url".into(), false, 512).unwrap(),
                     Field::try_money("price".into(), false, vec!["USD".into(), "EUR".into()])
@@ -8662,6 +8677,10 @@ mod tests {
         let fields = &rows["items"]["properties"]["fields"];
         assert_eq!(fields["minItems"], 1);
         assert_eq!(fields["maxItems"], 4);
+        let copied = &fields["items"]["anyOf"][0]["properties"]["value"]["properties"];
+        assert!(copied.get("value").is_none());
+        assert_eq!(copied["sources"]["minItems"], 1);
+        assert_eq!(copied["sources"]["maxItems"], 1);
         let money = &fields["items"]["anyOf"][3]["properties"]["value"]["properties"];
         assert_eq!(money["k"]["enum"], json!(["money"]));
         assert_eq!(money["currency"]["enum"], json!(["USD", "EUR"]));

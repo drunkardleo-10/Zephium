@@ -1524,20 +1524,21 @@ fn admit_value<'a>(
                 sources: raw_sources,
             },
         ) => {
-            if field.verbatim_text() {
+            let value = if field.verbatim_text() {
                 let [source] = raw_sources.as_slice() else {
                     return Err(SemanticExtractionError::VerbatimMismatch);
                 };
-                let matches = SemanticReadFragmentId::parse_model_token(source)
+                let exact = SemanticReadFragmentId::parse_model_token(source)
                     .and_then(|id| read.fragment(id))
-                    .is_some_and(|fragment| {
-                        matches!(fragment.content(),
-                        crate::SemanticReadContent::Text(text) if text.as_str() == value)
-                    });
-                if !matches {
+                    .and_then(|fragment| fragment.verbatim_text())
+                    .ok_or(SemanticExtractionError::VerbatimMismatch)?;
+                if value.as_ref().is_some_and(|value| value != exact) {
                     return Err(SemanticExtractionError::VerbatimMismatch);
                 }
-            }
+                exact.to_owned()
+            } else {
+                value.ok_or(SemanticExtractionError::Malformed)?
+            };
             Ok(SemanticExtractedValue::Text(admit_text(
                 value,
                 *max_bytes,
@@ -1914,7 +1915,7 @@ enum RawValue {
     #[serde(rename = "rows")]
     Rows { items: Vec<RawRow> },
     #[serde(rename = "text")]
-    Text { value: String, sources: Vec<String> },
+    Text { value: Option<String>, sources: Vec<String> },
     #[serde(rename = "url")]
     Url {
         value: Option<String>,
@@ -2683,6 +2684,13 @@ mod tests {
             );
             assert_eq!(result.err(), expected);
         }
+        let source_only = json!({"v":1,"schema":29,"fields":[{
+            "name":"title","value":{"k":"text","sources":["@r1"]}
+        }]});
+        let copied = extract_semantic_read(&schema, &read, &delivery, SemanticReadSensitivityLimit::PublicOnly, &serde_json::to_vec(&source_only).unwrap()).unwrap();
+        assert!(matches!(copied.fields()[0].value(), SemanticExtractedValue::Text(text) if text.as_str() == "Quarterly summary"));
+        let generated = SemanticExtractionSchema::try_new(schema.id(), vec![SemanticExtractionFieldSchema::try_text("title".into(), true, 64).unwrap()]).unwrap();
+        assert_eq!(extract_semantic_read(&generated, &read, &delivery, SemanticReadSensitivityLimit::PublicOnly, &serde_json::to_vec(&source_only).unwrap()).unwrap_err(), SemanticExtractionError::Malformed);
         assert_eq!(
             SemanticExtractionFieldSchema::try_unsigned("count".into(), true, 100)
                 .unwrap()
@@ -2690,6 +2698,29 @@ mod tests {
                 .unwrap_err(),
             SemanticExtractionSchemaError::VerbatimKind,
         );
+    }
+
+    #[test]
+    fn verbatim_form_values_copy_only_complete_public_previews() {
+        for (value, sensitivity, expected) in [
+            ("Warsaw".to_owned(), "public", None),
+            ("Private location".to_owned(), "sensitive", Some(SemanticExtractionError::Sensitivity)),
+            ("x".repeat(crate::MAX_SEMANTIC_VALUE_PREVIEW_BYTES + 1), "public", Some(SemanticExtractionError::VerbatimMismatch)),
+        ] {
+            let observation = observation_with_nodes(json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"textbox","n":"Destination","v":{"k":"text","value":value},"q":sensitivity,"o":11}
+            ]));
+            let read = read(&observation, 31);
+            let source = read.fragments().iter().find(|source| source.field() == crate::SemanticReadField::TextValue).unwrap();
+            let schema = SemanticExtractionSchema::try_new(SemanticExtractionSchemaId::new(29).unwrap(), vec![SemanticExtractionFieldSchema::try_text("location".into(), true, 2048).unwrap().with_verbatim_text().unwrap()]).unwrap();
+            let output = json!({"v":1,"schema":29,"fields":[{"name":"location","value":{"k":"text","sources":[source.id().model_token()]}}]});
+            let result = extract_semantic_read(&schema, &read, &delivered(&read), SemanticReadSensitivityLimit::PublicOnly, &serde_json::to_vec(&output).unwrap());
+            match expected {
+                Some(error) => assert_eq!(result.unwrap_err(), error),
+                None => assert!(matches!(result.unwrap().fields()[0].value(), SemanticExtractedValue::Text(text) if text.as_str() == value)),
+            }
+        }
     }
 
     #[test]

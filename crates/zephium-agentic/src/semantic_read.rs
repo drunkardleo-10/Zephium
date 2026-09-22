@@ -549,6 +549,18 @@ impl<'a> SemanticReadFragment<'a> {
         self.content
     }
 
+    /// Complete displayed text or form value eligible for exact copying.
+    pub fn verbatim_text(self) -> Option<&'a str> {
+        if !self.provenance.fields_complete() {
+            return None;
+        }
+        match (self.field, self.content) {
+            (SemanticReadField::VisibleText | SemanticReadField::AccessibleName, SemanticReadContent::Text(text)) => Some(text.as_str()),
+            (SemanticReadField::TextValue, SemanticReadContent::ValuePreview(preview)) if !preview.truncated() => Some(preview.text()),
+            _ => None,
+        }
+    }
+
     /// Exact source provenance.
     pub const fn provenance(self) -> SemanticReadProvenance<'a> {
         self.provenance
