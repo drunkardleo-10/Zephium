@@ -66,9 +66,7 @@ const STAGED_STOP_CLOSED_MAILBOX: u8 = 4;
 const CONTROLLER_FAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 static RUNTIME_WORKER_HELD: AtomicBool = AtomicBool::new(false);
-// Only one worker can exist process-wide, so one retained ownership bundle is
-// a complete, bounded fallback when the best-effort reaper cannot start.
-static EMERGENCY_WORKER_REAP: Mutex<Option<RuntimeWorkerOwnership>> = Mutex::new(None);
+static EMERGENCY_WORKER_REAP: Mutex<Vec<RuntimeWorkerOwnership>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 static FORCE_REAPER_SPAWN_FAILURE: AtomicBool = AtomicBool::new(false);
@@ -127,6 +125,9 @@ impl AgentRuntimeConfig {
 /// Content-free failure while starting the suspended worker.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum RuntimeSpawnError {
+    /// A scoped group does not match the work or its fixed capacity.
+    #[error("agent runtime group does not admit this worker")]
+    Group,
     /// Another Zephium agent runtime worker has not yet exited.
     #[error("an agent runtime worker is already running")]
     AlreadyRunning,
@@ -1422,7 +1423,7 @@ pub struct PendingAgentRuntime {
 impl PendingAgentRuntime {
     /// Starts one named current-thread Tokio worker behind a startup gate.
     pub fn spawn_suspended(config: AgentRuntimeConfig) -> Result<Self, RuntimeSpawnError> {
-        Self::spawn_suspended_inner(config, None, None)
+        Self::spawn_suspended_inner(config, None, None, None)
     }
 
     /// Starts the suspended worker with one controller moved to that worker.
@@ -1435,14 +1436,19 @@ impl PendingAgentRuntime {
         config: AgentRuntimeConfig,
         controller: Box<dyn AgentRuntimeController>,
     ) -> Result<Self, RuntimeSpawnError> {
-        Self::spawn_suspended_inner(config, Some(RuntimeController::Legacy(controller)), None)
+        Self::spawn_suspended_inner(config, Some(RuntimeController::Legacy(controller)), None, None)
     }
 
     fn spawn_suspended_inner(
         config: AgentRuntimeConfig,
         controller: Option<RuntimeController>,
         scope: Option<AgentRuntimeScopedBinding>,
+        group: Option<&AgentRuntimeWorkerGroup>,
     ) -> Result<Self, RuntimeSpawnError> {
+        let permit = match group {
+            Some(group) => group.acquire(scope.as_ref().ok_or(RuntimeSpawnError::Group)?)?,
+            None => acquire_worker_permit()?,
+        };
         let inner = Arc::new(RuntimeInner {
             scope,
             scoped_closure: Mutex::new(None),
@@ -1465,7 +1471,6 @@ impl PendingAgentRuntime {
             completion: CompletionState::new(),
             joined: Arc::new(WorkerJoinCompletion::new()),
         });
-        let permit = acquire_worker_permit()?;
         let gate = Arc::new(StartupGate::new());
         let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
         let worker_inner = Arc::clone(&inner);
@@ -1654,13 +1659,11 @@ fn schedule_reap(worker: RuntimeWorkerOwnership) {
     let handoff = Arc::new(Mutex::new(Some(worker)));
     let reaper_handoff = Arc::clone(&handoff);
     if spawn_reaper(reaper_handoff).is_err() {
-        // Do not trade the caller's deadline for join ownership. The singleton
-        // worker permit guarantees this global slot is empty here: a later
-        // spawn retries this same reaper handoff and refuses admission until
-        // that worker has actually joined. No caller performs a blocking join.
+        // Ownership stays bounded by the exclusive reservation or its three
+        // group slots. A failed reaper never releases a slot before join.
         let worker = take_worker_ownership(&handoff);
         let mut emergency = recover_lock(&EMERGENCY_WORKER_REAP);
-        *emergency = worker;
+        if let Some(worker) = worker { emergency.push(worker); }
     }
 }
 
@@ -2080,27 +2083,61 @@ impl WorkerExitGate {
     }
 }
 
-struct WorkerPermit;
+struct WorkerPermit(Option<Arc<WorkerGroup>>);
+
+/// One exclusive process reservation split into at most three scoped workers.
+#[derive(Clone)]
+pub struct AgentRuntimeWorkerGroup(Arc<WorkerGroup>);
+
+struct WorkerGroup {
+    _permit: Arc<WorkerPermit>,
+    work: zephium_agentic::WorkId,
+    capacity: u8,
+    active: AtomicU8,
+}
+
+impl AgentRuntimeWorkerGroup {
+    /// Reserves the existing exclusive runtime slot for one trusted Work group.
+    pub fn try_new(work: zephium_agentic::WorkId, capacity: u8) -> Result<Self, RuntimeSpawnError> {
+        if !(1..=3).contains(&capacity) { return Err(RuntimeSpawnError::Group); }
+        Ok(Self(Arc::new(WorkerGroup { _permit: acquire_worker_permit()?, work, capacity, active: AtomicU8::new(0) })))
+    }
+
+    fn acquire(&self, scope: &AgentRuntimeScopedBinding) -> Result<Arc<WorkerPermit>, RuntimeSpawnError> {
+        if scope.work() != self.0.work { return Err(RuntimeSpawnError::Group); }
+        if retry_emergency_reapers() { return Err(RuntimeSpawnError::AlreadyRunning); }
+        self.0.active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| (active < self.0.capacity).then_some(active + 1)).map_err(|_| RuntimeSpawnError::Group)?;
+        Ok(Arc::new(WorkerPermit(Some(self.0.clone()))))
+    }
+}
 
 impl Drop for WorkerPermit {
     fn drop(&mut self) {
-        RUNTIME_WORKER_HELD.store(false, Ordering::Release);
+        match &self.0 {
+            Some(group) => { group.active.fetch_sub(1, Ordering::AcqRel); }
+            None => RUNTIME_WORKER_HELD.store(false, Ordering::Release),
+        }
     }
 }
 
 fn acquire_worker_permit() -> Result<Arc<WorkerPermit>, RuntimeSpawnError> {
-    let retained_worker = recover_lock(&EMERGENCY_WORKER_REAP).take();
-    if let Some(worker) = retained_worker {
-        schedule_reap(worker);
-        return Err(RuntimeSpawnError::AlreadyRunning);
-    }
+    if retry_emergency_reapers() { return Err(RuntimeSpawnError::AlreadyRunning); }
     if RUNTIME_WORKER_HELD
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
         return Err(RuntimeSpawnError::AlreadyRunning);
     }
-    Ok(Arc::new(WorkerPermit))
+    Ok(Arc::new(WorkerPermit(None)))
+}
+
+fn retry_emergency_reapers() -> bool {
+    let retained_workers = std::mem::take(&mut *recover_lock(&EMERGENCY_WORKER_REAP));
+    let retained = !retained_workers.is_empty();
+    if retained {
+        for worker in retained_workers { schedule_reap(worker); }
+    }
+    retained
 }
 
 #[cfg(test)]
@@ -3171,7 +3208,7 @@ mod tests {
                 Err(RuntimeSpawnError::AlreadyRunning) => {
                     std::thread::sleep(Duration::from_millis(5));
                 }
-                Err(RuntimeSpawnError::WorkerUnavailable) => {
+                Err(RuntimeSpawnError::WorkerUnavailable | RuntimeSpawnError::Group) => {
                     panic!("test worker infrastructure is unavailable")
                 }
             }
@@ -3951,7 +3988,7 @@ mod tests {
         // method returns, so admission remains closed across the handoff even
         // if the worker races to exit immediately afterwards.
         assert!(RUNTIME_WORKER_HELD.load(Ordering::Acquire));
-        assert!(recover_lock(&EMERGENCY_WORKER_REAP).is_some());
+        assert!(!recover_lock(&EMERGENCY_WORKER_REAP).is_empty());
         assert!(!completion.is_stopped());
 
         worker_exit_gate.release();
@@ -3963,7 +4000,7 @@ mod tests {
         ));
         drop(forced_failure);
         let next = spawn_after_true_worker_exit();
-        assert!(recover_lock(&EMERGENCY_WORKER_REAP).is_none());
+        assert!(recover_lock(&EMERGENCY_WORKER_REAP).is_empty());
         drop(next);
     }
 

@@ -31,6 +31,6 @@ pub use runtime::{
     AgentRuntimeScopedCommitRefusal, AgentRuntimeScopedComposition, AgentRuntimeScopedController,
     AgentRuntimeScopedDrain, AgentRuntimeScopedDrained, AgentRuntimeScopedLifecycle,
     AgentRuntimeStagedStopReason, AgentRuntimeStopReason, AgentRuntimeWorker,
-    AgentRuntimeWorkerFault, PendingAgentRuntime, PendingScopedAgentRuntime, RuntimeSpawnError,
+    AgentRuntimeWorkerFault, AgentRuntimeWorkerGroup, PendingAgentRuntime, PendingScopedAgentRuntime, RuntimeSpawnError,
     MAX_AGENT_RUNTIME_COMMAND_CAPACITY, MIN_AGENT_RUNTIME_COMMAND_CAPACITY,
 };
