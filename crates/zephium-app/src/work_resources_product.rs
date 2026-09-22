@@ -1,4 +1,5 @@
 //! Shipping single-page retained Work attachment. No UI or native authority in handles.
+pub(crate) use super::application::RetainedWorkGroup;
 use super::application::{ActorRequest, AdmissionPhase, RetainedWork, StagedActor};
 pub use super::application::{RetainedHumanPhase, RetainedHumanResume, RetainedHumanSnapshot};
 use super::*;
@@ -568,7 +569,7 @@ impl CallbackHandle {
 
 pub(crate) struct ProductWork {
     page: Option<RetainedPageAdmission>,
-    runtime_group: Option<zephium_agent_runtime::AgentRuntimeWorkerGroup>,
+    runtime_group: Option<RetainedWorkGroup>,
     group_shutdown: bool,
     prepared: Option<PreparedRetainedWork>,
     coordinator: Option<RetainedWork>,
@@ -599,20 +600,14 @@ impl ProductWork {
     }
     pub(crate) fn new_runtime_group(
         &self,
-    ) -> Result<
-        zephium_agent_runtime::AgentRuntimeWorkerGroup,
-        zephium_agent_runtime::RuntimeSpawnError,
-    > {
+    ) -> Result<RetainedWorkGroup, zephium_agent_runtime::RuntimeSpawnError> {
         let page = self
             .page
             .as_ref()
             .ok_or(zephium_agent_runtime::RuntimeSpawnError::Group)?;
-        zephium_agent_runtime::AgentRuntimeWorkerGroup::try_new(page.work, page.workers.min(3))
+        RetainedWorkGroup::try_new(page.work, page.workers.min(3))
     }
-    pub(crate) fn set_runtime_group(
-        &mut self,
-        group: zephium_agent_runtime::AgentRuntimeWorkerGroup,
-    ) {
+    pub(crate) fn set_runtime_group(&mut self, group: RetainedWorkGroup) {
         self.runtime_group = Some(group);
     }
     pub(crate) fn is_page(&self) -> bool {

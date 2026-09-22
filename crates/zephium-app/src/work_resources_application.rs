@@ -195,8 +195,73 @@ enum DurableReply {
     Artifact(AgentWorkArtifactReply),
 }
 
+#[derive(Clone)]
+pub(crate) struct RetainedWorkGroup {
+    runtime: AgentRuntimeWorkerGroup,
+    records: Arc<std::sync::Mutex<Vec<(ContextId, AgentWorkRecord)>>>,
+    failed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl RetainedWorkGroup {
+    pub(crate) fn try_new(work: WorkId, capacity: u8) -> Result<Self, RuntimeSpawnError> {
+        Ok(Self {
+            runtime: AgentRuntimeWorkerGroup::try_new(work, capacity)?,
+            records: Arc::new(std::sync::Mutex::new(Vec::new())),
+            failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+    }
+    fn remember(
+        &self,
+        context: ContextId,
+        record: AgentWorkRecord,
+    ) -> Result<(), AgentWorkJournalError> {
+        let mut records = self
+            .records
+            .lock()
+            .map_err(|_| AgentWorkJournalError::Conflict)?;
+        if let Some((_, prior)) = records.iter_mut().find(|(id, _)| *id == context) {
+            if prior.key() != record.key() && !historical_record_admissible(*prior) {
+                return Err(AgentWorkJournalError::Conflict);
+            }
+            *prior = record;
+        } else if records.len() < 3 {
+            records.push((context, record));
+        } else {
+            return Err(AgentWorkJournalError::Capacity);
+        }
+        Ok(())
+    }
+    fn admit(
+        &self,
+        context: ContextId,
+        record: AgentWorkRecord,
+    ) -> Result<(), AgentWorkJournalError> {
+        if self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(AgentWorkJournalError::Conflict);
+        }
+        self.remember(context, record)
+    }
+    fn owns_running(&self, owner: AgentWorkIncarnation, record: AgentWorkRecord) -> bool {
+        !self.failed.load(std::sync::atomic::Ordering::Acquire)
+            && record.incarnation() == owner
+            && matches!(
+                (record.disposition(), record.revision()),
+                (AgentWorkDisposition::Admitted, 1) | (AgentWorkDisposition::Running, 2)
+            )
+            && self.records.lock().is_ok_and(|records| {
+                records
+                    .iter()
+                    .any(|(_, expected)| expected.as_bytes()[16..] == record.as_bytes()[16..])
+            })
+    }
+    fn fail(&self) {
+        self.failed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
 pub(super) struct RetainedWork {
-    runtime_group: Option<AgentRuntimeWorkerGroup>,
+    runtime_group: Option<RetainedWorkGroup>,
     group_shutdown: bool,
     human: Option<human::HumanHandoff>,
     prior_human: Option<AgentWorkWaitingForHuman>,
@@ -485,6 +550,9 @@ impl RetainedWork {
     }
 
     fn fail(&mut self, failure: AgentWorkFailure) {
+        if let Some(group) = &self.runtime_group {
+            group.fail();
+        }
         self.failure.get_or_insert(failure);
         self.phase = AdmissionPhase::Uncertain;
         self.stopping = true;
@@ -519,6 +587,10 @@ impl RetainedWork {
                         .any(|pair| pair[0].key() >= pair[1].key())
                     || records.iter().any(|record| {
                         !(historical_record_admissible(*record)
+                            || self
+                                .runtime_group
+                                .as_ref()
+                                .is_some_and(|group| group.owns_running(owner, *record))
                             || (reviewable(record.disposition()) && record.incarnation() == owner))
                     })
                 {
@@ -532,11 +604,13 @@ impl RetainedWork {
                 self.inventory = records;
                 self.phase = if self.stopping {
                     AdmissionPhase::Uncertain
-                } else if self
-                    .inventory
-                    .iter()
-                    .any(|record| !historical_record_admissible(*record))
-                {
+                } else if self.inventory.iter().any(|record| {
+                    !historical_record_admissible(*record)
+                        && !self
+                            .runtime_group
+                            .as_ref()
+                            .is_some_and(|group| group.owns_running(owner, *record))
+                }) {
                     AdmissionPhase::NeedsReview
                 } else {
                     AdmissionPhase::Ready
@@ -546,6 +620,9 @@ impl RetainedWork {
                 AgentWorkJournalRequest::CompareAndSet(mutation),
                 AgentWorkJournalReply::Record(Some(record)),
             ) if record == mutation.next() => {
+                if let Some(group) = &self.runtime_group {
+                    group.remember(self.resource.identity().context(), record)?;
+                }
                 if let Some(previous) = self
                     .inventory
                     .iter_mut()
@@ -640,7 +717,7 @@ impl RetainedWork {
         Ok(())
     }
 
-    pub(super) fn set_runtime_group(&mut self, group: AgentRuntimeWorkerGroup) {
+    pub(super) fn set_runtime_group(&mut self, group: RetainedWorkGroup) {
         self.runtime_group = Some(group);
     }
 
@@ -664,7 +741,10 @@ impl RetainedWork {
         handle.set_waker(self.waker.clone());
         let pending = match match &self.runtime_group {
             Some(group) => PendingScopedAgentRuntime::spawn_suspended_in_group(
-                config, scope, controller, group,
+                config,
+                scope,
+                controller,
+                &group.runtime,
             ),
             None => PendingScopedAgentRuntime::spawn_suspended(config, scope, controller),
         } {
@@ -832,7 +912,18 @@ impl RetainedWork {
                                 let admission = self
                                     .incarnation
                                     .ok_or(AgentWorkFailure::Contract)
-                                    .and_then(|owner| staged.controller.journal_admission(owner));
+                                    .and_then(|owner| staged.controller.journal_admission(owner))
+                                    .and_then(|admission| {
+                                        if let Some(group) = &self.runtime_group {
+                                            group
+                                                .admit(
+                                                    self.resource.identity().context(),
+                                                    admission.next(),
+                                                )
+                                                .map_err(|_| AgentWorkFailure::Contract)?;
+                                        }
+                                        Ok(admission)
+                                    });
                                 self.staged = Some(staged);
                                 match admission {
                                     Ok(admission) => {
@@ -1467,4 +1558,50 @@ fn historical_record_admissible(record: AgentWorkRecord) -> bool {
                 record.disposition(),
                 AgentWorkDisposition::FreshAdmissionRequired | AgentWorkDisposition::Rejected
             ))
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+
+    #[test]
+    fn work_group_accepts_only_its_live_manifest_under_the_original_process_fence() {
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let group = RetainedWorkGroup::try_new(WorkId::generate(), 3).unwrap();
+        let owner = AgentWorkIncarnation::generate();
+        let mut bytes = [0; AGENT_WORK_RECORD_BYTES];
+        bytes[0] = 1;
+        bytes[1] = AgentWorkDisposition::Admitted as u8;
+        bytes[2] = AgentWorkDebt::UNKNOWN.bits();
+        bytes[15] = 1;
+        bytes[16..32].copy_from_slice(&owner.bytes());
+        bytes[47] = 1;
+        let record = AgentWorkRecord::decode(bytes).unwrap();
+        let context = ContextId::generate();
+        assert!(!group.owns_running(owner, record));
+        group.remember(context, record).unwrap();
+        assert!(group.owns_running(owner, record));
+        let running = record.transition(AgentWorkDisposition::Running).unwrap();
+        assert!(group.owns_running(owner, running));
+        assert!(!group.owns_running(AgentWorkIncarnation::generate(), running));
+        let mut foreign = bytes;
+        foreign[95] ^= 1;
+        assert!(!group.owns_running(owner, AgentWorkRecord::decode(foreign).unwrap()));
+        foreign = bytes;
+        foreign[47] = 2;
+        let foreign = AgentWorkRecord::decode(foreign).unwrap();
+        assert!(!group.owns_running(owner, foreign));
+        assert!(group.remember(context, foreign).is_err());
+        assert!(!group.owns_running(
+            owner,
+            running
+                .transition(AgentWorkDisposition::RecoveryRequired)
+                .unwrap()
+        ));
+        group.fail();
+        assert!(!group.owns_running(owner, running));
+        assert!(group.admit(ContextId::generate(), foreign).is_err());
+    }
 }

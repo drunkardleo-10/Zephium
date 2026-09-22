@@ -193,7 +193,7 @@ pub struct Shell {
     #[cfg(feature = "work-execution")]
     retained_pages: Vec<crate::work_resources::product::ProductWork>,
     #[cfg(feature = "work-execution")]
-    retained_page_runtime: Option<zephium_agent_runtime::AgentRuntimeWorkerGroup>,
+    retained_page_runtime: Option<crate::work_resources::product::RetainedWorkGroup>,
     /// Retained works the runtime gave up on before they could close; they
     /// keep polling and shut down with the shell, out of the live slot.
     #[cfg(feature = "work-execution")]

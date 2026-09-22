@@ -117,6 +117,7 @@ fn prepared_until_with_document_policy<S: AgentWorkJournalPort + AgentAuditPort 
         deadline,
         document_policy,
         false,
+        None,
     )
 }
 
@@ -131,6 +132,7 @@ fn prepared_until_isolated<S: AgentWorkJournalPort + AgentAuditPort + 'static>(
     deadline: Instant,
     document_policy: WorkBrowserDocumentPolicy,
     isolated: bool,
+    provider_gate: Option<Arc<AtomicBool>>,
 ) -> PreparedRetainedWork {
     let target = ContextNavigationTarget::parse("https://retained-fixture.invalid/frozen").unwrap();
     let identity = ContextIdentity::new(
@@ -200,7 +202,16 @@ fn prepared_until_isolated<S: AgentWorkJournalPort + AgentAuditPort + 'static>(
             } else {
                 Box::new(task())
             };
-            let (transport, server) = fixture_provider_responses(responses);
+            let (transport, server) =
+                crate::work_provider_fixture::fixture_provider_inspect(responses, move |_, _| {
+                    if let Some(gate) = &provider_gate {
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        while !gate.load(Ordering::Acquire) {
+                            assert!(Instant::now() < deadline, "provider test gate");
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                    }
+                });
             servers.lock().unwrap().push(server);
             StagedActor::for_probe(
                 input,
@@ -477,7 +488,8 @@ fn work_page_group_retains_three_distinct_pages_and_rejects_unrelated_admission(
         .collect();
     let mut native_pages = Vec::new();
     let mut views = Vec::new();
-    for step in &steps[..2] {
+    let provider_gate = Arc::new(AtomicBool::new(false));
+    for (index, step) in steps[..2].iter().enumerate() {
         let native = Arc::new(Native::default());
         native.allow_global_shutdown.store(true, Ordering::Release);
         let request = prepared_until_isolated(
@@ -490,6 +502,7 @@ fn work_page_group_retains_three_distinct_pages_and_rejects_unrelated_admission(
             deadline,
             WorkBrowserDocumentPolicy::Exact,
             true,
+            (index == 0).then(|| provider_gate.clone()),
         )
         .with_work_identity(work)
         .with_page_admission(crate::RetainedPageAdmission {
@@ -504,7 +517,20 @@ fn work_page_group_retains_three_distinct_pages_and_rejects_unrelated_admission(
         .unwrap();
         views.push(callback.attach_retained_work(request).unwrap());
         native_pages.push(native);
+        if index == 0 {
+            pump(&queue, &mut shell, || {
+                views[0]
+                    .snapshot()
+                    .record
+                    .is_some_and(|record| record.disposition() == AgentWorkDisposition::Running)
+            });
+        }
     }
+    pump(&queue, &mut shell, || {
+        while views[1].take_event().is_some() {}
+        views[1].snapshot().phase == RetainedWorkPhase::Terminal
+    });
+    provider_gate.store(true, Ordering::Release);
     pump(&queue, &mut shell, || {
         for view in &views {
             while view.take_event().is_some() {}
@@ -537,6 +563,7 @@ fn work_page_group_retains_three_distinct_pages_and_rejects_unrelated_admission(
             deadline,
             WorkBrowserDocumentPolicy::Exact,
             true,
+            None,
         )
         .with_work_identity(candidate_work)
         .with_page_admission(crate::RetainedPageAdmission {
@@ -567,6 +594,7 @@ fn work_page_group_retains_three_distinct_pages_and_rejects_unrelated_admission(
         deadline,
         WorkBrowserDocumentPolicy::Exact,
         true,
+        None,
     )
     .with_work_identity(work)
     .with_page_admission(crate::RetainedPageAdmission {
@@ -595,6 +623,7 @@ fn work_page_group_retains_three_distinct_pages_and_rejects_unrelated_admission(
         deadline,
         WorkBrowserDocumentPolicy::Exact,
         true,
+        None,
     )
     .with_work_identity(work)
     .with_page_admission(crate::RetainedPageAdmission {
