@@ -555,6 +555,100 @@ fn located_generation_is_focused_and_merges_only_exact_delivered_evidence() {
 }
 
 #[test]
+fn optional_values_still_need_inspection_before_a_typed_read_can_finish() {
+    for absent in [1, 2] {
+        let (call, observation, _, _) = located_fixture(false);
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![
+                SemanticExtractionFieldSchema::try_text("name".into(), true, 512)
+                    .unwrap()
+                    .with_verbatim_text()
+                    .unwrap(),
+                SemanticExtractionFieldSchema::try_text("price".into(), false, 512)
+                    .unwrap()
+                    .with_verbatim_text()
+                    .unwrap(),
+                SemanticExtractionFieldSchema::try_image_url("picture".into(), false, 1024)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Read the displayed product price and picture".into(),
+            &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
+        )
+        .unwrap();
+        let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        let projection = DecisionObservation::try_for_read(
+            &observation,
+            &objective,
+            &authority,
+            call.account(),
+            Some(&schema),
+        )
+        .unwrap();
+        let mut output = located_answers(&projection);
+        let key = format!("locate_{absent}");
+        output["answers"][&key] = fixture_answers(projection.request())["answers"][&key].clone();
+        let response = projection
+            .request()
+            .decode_emulation(
+                &serde_json::to_vec(&output).unwrap(),
+                DecisionUsage::default(),
+            )
+            .unwrap();
+        let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+        assert_eq!(
+            answers
+                .take_read_selection(&observation, call.account(), &schema)
+                .unwrap()
+                .is_some(),
+            absent == 2
+        );
+    }
+}
+
+#[test]
+fn read_completion_evals_match_the_production_questions_for_optional_columns() {
+    for (required, fixture) in [
+        (
+            true,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../zephium-decision/evals/yc_read_01.json"
+            )),
+        ),
+        (
+            false,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../zephium-decision/evals/yc_read_optional_01.json"
+            )),
+        ),
+    ] {
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![
+                SemanticExtractionFieldSchema::try_text("program_duration".into(), true, 1024)
+                    .unwrap()
+                    .with_verbatim_text()
+                    .unwrap(),
+                SemanticExtractionFieldSchema::try_text("office_hours".into(), required, 1024)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let read = super::read::ReadProjection::for_schema(&schema).unwrap();
+        let fixture: Value = serde_json::from_str(fixture).unwrap();
+        assert_eq!(
+            serde_json::to_value(read.completion_question()).unwrap(),
+            fixture["request"]["questions"]["done"]
+        );
+    }
+}
+
+#[test]
 fn located_read_requires_complete_required_answers_and_exact_schema() {
     for mode in 0..4 {
         let (call, observation, schema, projection) = located_fixture(false);

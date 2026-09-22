@@ -1,5 +1,5 @@
 {
-  "id": "yc_read_01",
+  "id": "yc_read_optional_01",
   "source_sha256": "1c13140209fd24bc561ed1e3661f8700629b6974b39c659701a30508dd185f3f",
   "request": {
     "state": {
@@ -55,7 +55,7 @@
             },
             {
               "name": "office_hours",
-              "required": true,
+              "required": false,
               "kind": "Text"
             }
           ]
