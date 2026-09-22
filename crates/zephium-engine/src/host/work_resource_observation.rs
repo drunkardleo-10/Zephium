@@ -40,6 +40,7 @@ pub(super) struct WorkObservation {
     correlation: SemanticRuntimeCorrelation,
     document: WorkDocumentStamp,
     presentation: Option<WorkObservationPresentation>,
+    awaiting_presentation: bool,
     deadline: Instant,
     ready_since: Option<Instant>,
     dispatched: bool,
@@ -153,6 +154,15 @@ impl WorkObservation {
     }
 }
 impl WorkNativeResource {
+    pub(super) fn presentation_in_flight(&self) -> bool {
+        self.construction_presentation.is_some()
+            || self.human_presentation.is_some()
+            || self
+                .observation
+                .as_ref()
+                .is_some_and(|read| !read.awaiting_presentation)
+            || self.action_presentation_in_flight()
+    }
     pub(super) fn retire_reading_presentation(&mut self) -> bool {
         if let Some(wake) = &mut self.presentation_wake {
             wake.cancel();
@@ -222,6 +232,19 @@ impl WorkNativeResource {
 }
 
 impl EngineHost {
+    pub(super) fn work_presentation_available(&mut self, context: ContextId) -> bool {
+        if self
+            .work_resources
+            .iter()
+            .any(|(id, resource)| *id != context && resource.presentation_in_flight())
+        {
+            return false;
+        }
+        self.work_resources
+            .iter_mut()
+            .filter(|(id, _)| **id != context)
+            .all(|(_, resource)| resource.retire_reading_presentation())
+    }
     pub(crate) fn handle_work_observation_task(&mut self, task: WorkObservationTask) {
         let guard = task.guard();
         let Some(request) = task.request() else {
@@ -231,21 +254,9 @@ impl EngineHost {
         let correlation = request.invocation().correlation();
         let lease = request.lease().clone();
         let context = request.invocation().frame().context();
-        // One presentation opportunity at a time. A second read never occludes
-        // the first page or silently shares its captured foreground owner.
-        if self.work_resources.values().any(|resource| {
-            (resource.guard.resource().identity().context()
-                != guard.resource().identity().context()
-                && resource.reading_presentation.is_some())
-                || resource.action.is_some()
-                || resource
-                    .observation
-                    .as_ref()
-                    .is_some_and(|read| read.presentation.is_some())
-        }) {
-            task.refuse(SemanticRuntimePortFailure::ResourceExhausted);
-            return;
-        }
+        let presentation_busy = self.work_resources.iter().any(|(id, resource)| {
+            *id != guard.resource().identity().context() && resource.presentation_in_flight()
+        });
         let Some(resource) = self
             .work_resources
             .get_mut(&guard.resource().identity().context())
@@ -267,6 +278,10 @@ impl EngineHost {
             && current_scope(request.observation().scope(), resource.last_invocation);
         if !admitted {
             task.refuse(SemanticRuntimePortFailure::Stale);
+            return;
+        }
+        if presentation_busy && !resource.retire_reading_presentation() {
+            task.refuse(SemanticRuntimePortFailure::NotReady);
             return;
         }
         #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -334,6 +349,7 @@ impl EngineHost {
             correlation,
             document,
             presentation,
+            awaiting_presentation: true,
             deadline,
             ready_since: None,
             dispatched: false,
@@ -353,18 +369,15 @@ impl EngineHost {
             guard.fail();
         } else if !work_browser_monotonic_now().is_some_and(|now| guard.admits(&read.lease, now)) {
             read.refuse(SemanticRuntimePortFailure::Cancelled);
-        } else if let Some(presentation) = &mut read.presentation {
-            #[cfg(feature = "native-agentic-work-resource-probe")]
-            presentation.record_probe_weak(guard.resource());
-            presentation.present();
         }
         self.progress_work_observation(&guard);
     }
 
     pub(super) fn progress_work_observation(&mut self, guard: &Arc<WorkResourceGuard>) {
+        let context = guard.resource().identity().context();
         let Some(resource) = self
             .work_resources
-            .get_mut(&guard.resource().identity().context())
+            .get(&context)
             .filter(|resource| Arc::ptr_eq(&resource.guard, guard))
         else {
             return;
@@ -386,6 +399,15 @@ impl EngineHost {
                 .and_then(|view| view.work_navigation())
                 .and_then(|gate| gate.observation_stamp(read.correlation.frame().context()))
                 == Some(read.document);
+        let present = current
+            && read.awaiting_presentation
+            && read.refusal.is_none()
+            && read.outcome.is_none()
+            && Instant::now() < read.deadline;
+        let present = present && self.work_presentation_available(context);
+        let Some(resource) = self.work_resources.get_mut(&context) else {
+            return;
+        };
         if !current {
             resource.cancel_observation(SemanticRuntimePortFailure::Cancelled);
         }
@@ -405,10 +427,21 @@ impl EngineHost {
             }
         }
         if read.refusal.is_none() && read.outcome.is_none() {
-            let state = read
-                .presentation
-                .as_mut()
-                .map_or(PresentationState::Ready, WorkObservationPresentation::poll);
+            if read.awaiting_presentation && present {
+                if let Some(presentation) = &mut read.presentation {
+                    #[cfg(feature = "native-agentic-work-resource-probe")]
+                    presentation.record_probe_weak(guard.resource());
+                    presentation.present();
+                }
+                read.awaiting_presentation = false;
+            }
+            let state = if read.awaiting_presentation {
+                PresentationState::Acquiring
+            } else {
+                read.presentation
+                    .as_mut()
+                    .map_or(PresentationState::Ready, WorkObservationPresentation::poll)
+            };
             match state {
                 PresentationState::Ready => {
                     let ready_since = *read.ready_since.get_or_insert_with(Instant::now);
@@ -641,6 +674,7 @@ mod tests {
             correlation: request.invocation().correlation(),
             document: WorkDocumentStamp::for_test(1),
             presentation: None,
+            awaiting_presentation: false,
             deadline: Instant::now() + OBSERVATION_BUDGET,
             ready_since: None,
             dispatched: false,
@@ -650,6 +684,18 @@ mod tests {
             wake: None,
             wakes: 0,
         }
+    }
+    #[test]
+    fn queued_observation_cannot_accept_a_snapshot_and_expiry_drains_without_dispatch() {
+        let mut read = observation();
+        read.awaiting_presentation = true;
+        let correlation = read.correlation.clone();
+        assert!(!read.accept_result(&correlation, Err(SemanticRuntimePortFailure::TimedOut)));
+        assert!(!read.delivery_ready(true, true));
+        read.refuse(SemanticRuntimePortFailure::TimedOut);
+        assert!(!read.dispatched);
+        assert!(read.retirement_ready());
+        assert!(read.delivery_ready(true, true));
     }
     #[test]
     fn scoped_observation_requires_the_exact_last_native_snapshot_generation() {

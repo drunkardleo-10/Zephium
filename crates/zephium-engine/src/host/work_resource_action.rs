@@ -26,6 +26,7 @@ pub(super) struct WorkAction {
     context: zephium_agentic::ContextJoin,
     document: WorkDocumentStamp,
     presentation: Option<WorkObservationPresentation>,
+    awaiting_presentation: bool,
     deadline: Instant,
     requested_at: Instant,
     dispatched: bool,
@@ -69,6 +70,11 @@ impl WorkAction {
     }
 }
 impl WorkNativeResource {
+    pub(super) fn action_presentation_in_flight(&self) -> bool {
+        self.action
+            .as_ref()
+            .is_some_and(|action| !action.awaiting_presentation)
+    }
     pub(super) fn action_visible(&self) -> bool {
         self.action
             .as_ref()
@@ -109,16 +115,9 @@ impl EngineHost {
         let native = request.action();
         let attempt = native.attempt();
         let context = native.frame().context();
-        if self.work_resources.values().any(|resource| {
-            resource.action.is_some()
-                || resource.observation.is_some()
-                || (resource.guard.resource().identity().context()
-                    != guard.resource().identity().context()
-                    && resource.reading_presentation.is_some())
-        }) {
-            task.refuse(SemanticActionNativeFailure::ResourceExhausted);
-            return;
-        }
+        let presentation_busy = self.work_resources.iter().any(|(id, resource)| {
+            *id != guard.resource().identity().context() && resource.presentation_in_flight()
+        });
         let Some(now) = work_browser_monotonic_now() else {
             task.refuse(SemanticActionNativeFailure::TimedOut);
             return;
@@ -141,6 +140,10 @@ impl EngineHost {
             && now.millis() < native.deadline().millis();
         if !admitted {
             task.refuse(SemanticActionNativeFailure::StaleReference);
+            return;
+        }
+        if presentation_busy && !resource.retire_reading_presentation() {
+            task.refuse(SemanticActionNativeFailure::TargetOccluded);
             return;
         }
         let Some(view) = resource.view.as_ref() else {
@@ -202,6 +205,7 @@ impl EngineHost {
             context,
             document,
             presentation: Some(presentation),
+            awaiting_presentation: true,
             deadline,
             requested_at,
             dispatched: false,
@@ -222,15 +226,14 @@ impl EngineHost {
             .is_some_and(|now| guard.action_current(&action.lease, attempt, now))
         {
             action.cancelled = true;
-        } else if let Some(presentation) = &mut action.presentation {
-            presentation.present();
         }
         self.progress_work_action(&guard);
     }
     pub(super) fn progress_work_action(&mut self, guard: &Arc<WorkResourceGuard>) {
+        let context = guard.resource().identity().context();
         let Some(resource) = self
             .work_resources
-            .get_mut(&guard.resource().identity().context())
+            .get(&context)
             .filter(|resource| Arc::ptr_eq(&resource.guard, guard))
         else {
             return;
@@ -278,6 +281,18 @@ impl EngineHost {
         #[cfg(not(target_os = "macos"))]
         let drain = false;
         let expired = Instant::now() >= action.deadline;
+        let present = current
+            && !expired
+            && action.awaiting_presentation
+            && !action.cancelled
+            && !action.authority_revoked;
+        let present = present && self.work_presentation_available(context);
+        let Some(resource) = self.work_resources.get_mut(&context) else {
+            return;
+        };
+        let Some(action) = resource.action.as_ref() else {
+            return;
+        };
         #[cfg(target_os = "macos")]
         if expired && action.dispatched && action.terminal.is_none() {
             if let Some(semantic) = resource.view.as_ref().and_then(|view| view.semantic()) {
@@ -346,10 +361,20 @@ impl EngineHost {
             }
         }
         if !action.cancelled && !action.authority_revoked && !action.dispatched {
-            let state = action.presentation.as_mut().map_or(
-                PresentationState::Unavailable,
-                WorkObservationPresentation::poll,
-            );
+            if action.awaiting_presentation && present {
+                if let Some(presentation) = &mut action.presentation {
+                    presentation.present();
+                }
+                action.awaiting_presentation = false;
+            }
+            let state = if action.awaiting_presentation {
+                PresentationState::Acquiring
+            } else {
+                action.presentation.as_mut().map_or(
+                    PresentationState::Unavailable,
+                    WorkObservationPresentation::poll,
+                )
+            };
             match state {
                 PresentationState::Ready => {
                     let Some(native) = action.task.as_mut().and_then(WorkActionTask::take_native)
@@ -623,6 +648,7 @@ mod tests {
             context: native.frame().context(),
             document: WorkDocumentStamp::for_test(1),
             presentation: None,
+            awaiting_presentation: false,
             deadline,
             requested_at: deadline,
             dispatched: true,
