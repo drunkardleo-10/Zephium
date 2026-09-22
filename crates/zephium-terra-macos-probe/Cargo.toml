@@ -8,6 +8,7 @@ build = false
 
 [features]
 default = []
+decision-eval = ["live-probe", "dep:zephium-agent-model-catalog", "dep:zephium-decision", "zephium-decision/evals"]
 durable-runtime = ["live-probe", "zephium-agentic/probe-harness", "zephium-work-composition/durable-runtime", "zephium-work-composition/retained-lifetime-diagnostic", "dep:zephium-agent-model-catalog"]
 live-probe = [
     "dep:zephium-app",
@@ -31,6 +32,7 @@ zephium-ipc.workspace = true
 zephium-agent-controller.workspace = true
 zephium-agent-provider-transport.workspace = true
 zephium-agentic.workspace = true
+zephium-decision = { workspace = true, optional = true }
 zephium-engine.workspace = true
 zephium-agent-runtime.workspace = true
 zephium-store.workspace = true

@@ -16,6 +16,8 @@
 
 /// Bounded objective/context planning over the shared fixed-endpoint transport.
 pub mod agent;
+/// Typed decisions over admitted, enumerated questions.
+pub mod decision;
 pub mod planning;
 mod rig;
 /// Bounded non-reasoning provider-native public search.
@@ -165,29 +167,43 @@ pub enum AgentProviderTransportConfigError {
 
 /// Move-only, provider-bound credential whose owned bytes are zeroized on drop.
 #[must_use]
-pub struct AgentProviderCredential {
-    provider: AgentProviderKind,
+pub struct AgentProviderCredential<P: AgentCredentialBinding = AgentProviderKind> {
+    provider: P,
     secret: Zeroizing<Vec<u8>>,
 }
 
-impl AgentProviderCredential {
+mod credential_binding {
+    pub trait Sealed {}
+    impl Sealed for crate::AgentProviderKind {}
+    impl Sealed for super::DecisionCredentialProvider {}
+}
+
+/// Closed provider identity carried by the shared zeroizing credential owner.
+pub trait AgentCredentialBinding: credential_binding::Sealed + Copy + fmt::Debug {}
+impl AgentCredentialBinding for AgentProviderKind {}
+impl AgentCredentialBinding for DecisionCredentialProvider {}
+
+/// Separate decision protocol identities; these cannot authenticate LLM transports.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecisionCredentialProvider {
+    /// Direct TypeSafe BYOK endpoint.
+    TypeSafe,
+    /// Session bearer for the Zephium decision proxy.
+    ZephiumCloud,
+}
+
+impl<P: AgentCredentialBinding> AgentProviderCredential<P> {
     /// Consumes and validates one visible-ASCII provider secret.
-    pub fn try_new(
-        provider: AgentProviderKind,
-        secret: String,
-    ) -> Result<Self, AgentProviderCredentialError> {
+    pub fn try_new(provider: P, secret: String) -> Result<Self, AgentProviderCredentialError> {
         Self::try_from_bytes(provider, secret.into_bytes())
     }
 
-    fn try_from_bytes(
-        provider: AgentProviderKind,
-        secret: Vec<u8>,
-    ) -> Result<Self, AgentProviderCredentialError> {
+    fn try_from_bytes(provider: P, secret: Vec<u8>) -> Result<Self, AgentProviderCredentialError> {
         Self::try_from_zeroizing(provider, Zeroizing::new(secret))
     }
 
     fn try_from_zeroizing(
-        provider: AgentProviderKind,
+        provider: P,
         secret: Zeroizing<Vec<u8>>,
     ) -> Result<Self, AgentProviderCredentialError> {
         if secret.is_empty()
@@ -200,7 +216,7 @@ impl AgentProviderCredential {
     }
 
     /// Exact provider protocol this credential may authenticate.
-    pub const fn provider(&self) -> AgentProviderKind {
+    pub const fn provider(&self) -> P {
         self.provider
     }
 
@@ -238,32 +254,64 @@ pub enum MacosAgentProviderCredentialError {
 #[cfg(target_os = "macos")]
 pub fn load_macos_development_openai_credential(
 ) -> Result<AgentProviderCredential, MacosAgentProviderCredentialError> {
-    use security_framework::os::macos::passwords::find_generic_password;
-    use security_framework_sys::base::errSecItemNotFound;
-
-    let (password, _item) = find_generic_password(
-        None,
+    load_macos_login_credential(
+        AgentProviderKind::OpenAiResponses,
         MACOS_OPENAI_KEYCHAIN_SERVICE,
         MACOS_OPENAI_KEYCHAIN_ACCOUNT,
     )
-    .map_err(|error| {
-        if error.code() == errSecItemNotFound {
-            MacosAgentProviderCredentialError::Missing
-        } else {
-            MacosAgentProviderCredentialError::Inaccessible
-        }
-    })?;
+}
+
+/// Fixed TypeSafe item in the person's login Keychain.
+#[cfg(target_os = "macos")]
+pub const MACOS_TYPESAFE_KEYCHAIN_SERVICE: &str = "app.zephium.agent-provider.typesafe";
+/// Fixed development account for TypeSafe BYOK.
+#[cfg(target_os = "macos")]
+pub const MACOS_TYPESAFE_KEYCHAIN_ACCOUNT: &str = "development";
+
+/// Loads TypeSafe BYOK into the same provider-bound zeroizing owner as OpenAI.
+#[cfg(target_os = "macos")]
+pub fn load_macos_development_typesafe_credential(
+) -> Result<AgentProviderCredential<DecisionCredentialProvider>, MacosAgentProviderCredentialError>
+{
+    load_macos_login_credential(
+        DecisionCredentialProvider::TypeSafe,
+        MACOS_TYPESAFE_KEYCHAIN_SERVICE,
+        MACOS_TYPESAFE_KEYCHAIN_ACCOUNT,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn load_macos_login_credential<P: AgentCredentialBinding>(
+    provider: P,
+    service: &'static str,
+    account: &'static str,
+) -> Result<AgentProviderCredential<P>, MacosAgentProviderCredentialError> {
+    use security_framework::os::macos::keychain::SecKeychain;
+    use security_framework::os::macos::passwords::find_generic_password;
+    use security_framework_sys::base::errSecItemNotFound;
+
+    let login_path = dirs::home_dir()
+        .ok_or(MacosAgentProviderCredentialError::Inaccessible)?
+        .join("Library/Keychains/login.keychain-db");
+    let login = SecKeychain::open(login_path)
+        .map_err(|_| MacosAgentProviderCredentialError::Inaccessible)?;
+    let (password, _item) =
+        find_generic_password(Some(&[login]), service, account).map_err(|error| {
+            if error.code() == errSecItemNotFound {
+                MacosAgentProviderCredentialError::Missing
+            } else {
+                MacosAgentProviderCredentialError::Inaccessible
+            }
+        })?;
     let mut secret = Zeroizing::new(Vec::new());
     secret
         .try_reserve_exact(password.len())
         .map_err(|_| MacosAgentProviderCredentialError::Capacity)?;
     secret.extend_from_slice(password.as_ref());
-    AgentProviderCredential::try_from_zeroizing(AgentProviderKind::OpenAiResponses, secret).map_err(
-        |error| match error {
-            AgentProviderCredentialError::Content => MacosAgentProviderCredentialError::Invalid,
-            AgentProviderCredentialError::Capacity => MacosAgentProviderCredentialError::Capacity,
-        },
-    )
+    AgentProviderCredential::try_from_zeroizing(provider, secret).map_err(|error| match error {
+        AgentProviderCredentialError::Content => MacosAgentProviderCredentialError::Invalid,
+        AgentProviderCredentialError::Capacity => MacosAgentProviderCredentialError::Capacity,
+    })
 }
 
 /// Uses the signed probe's own Keychain identity, just like the development app.
@@ -273,7 +321,7 @@ pub fn load_macos_probe_openai_credential(
     load_macos_development_openai_credential()
 }
 
-impl fmt::Debug for AgentProviderCredential {
+impl<P: AgentCredentialBinding> fmt::Debug for AgentProviderCredential<P> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AgentProviderCredential")

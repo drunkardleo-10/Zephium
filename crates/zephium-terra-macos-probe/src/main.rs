@@ -19,6 +19,8 @@ mod work_durable;
 mod work_navigation;
 mod work_route;
 mod work_sites;
+#[cfg(all(target_os = "macos", feature = "decision-eval"))]
+mod decision_eval;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -31,6 +33,8 @@ fn main() {
 
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let result = match arguments.as_slice() {
+        #[cfg(feature = "decision-eval")]
+        [argument] if argument == "--live-decision-eval" => decision_eval::run(),
         [argument] if argument == "--check-provider-keychain" => {
             let started = std::time::Instant::now();
             let result = zephium_agentic::load_macos_probe_openai_credential()

@@ -306,25 +306,28 @@ pub use provider_transport::load_macos_probe_openai_credential;
 pub use provider_transport::{exact_loopback_url, ProviderEndpoints};
 #[cfg(all(feature = "provider-transport", target_os = "macos"))]
 pub use provider_transport::{
-    load_macos_development_openai_credential, MacosAgentProviderCredentialError,
-    MACOS_OPENAI_KEYCHAIN_ACCOUNT, MACOS_OPENAI_KEYCHAIN_SERVICE,
+    load_macos_development_openai_credential, load_macos_development_typesafe_credential,
+    MacosAgentProviderCredentialError, MACOS_OPENAI_KEYCHAIN_ACCOUNT,
+    MACOS_OPENAI_KEYCHAIN_SERVICE, MACOS_TYPESAFE_KEYCHAIN_ACCOUNT,
+    MACOS_TYPESAFE_KEYCHAIN_SERVICE,
 };
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::{
-    AgentProviderAbortReason, AgentProviderAdmissionError, AgentProviderAttempt,
-    AgentProviderAttemptStateError, AgentProviderBatchDisposition, AgentProviderCancellation,
-    AgentProviderCountedAttempt, AgentProviderCredential, AgentProviderCredentialError,
-    AgentProviderDisclosureStage, AgentProviderExactCountOutcome, AgentProviderImmediateSettlement,
-    AgentProviderImmediateSettlementError, AgentProviderPolicySettlement, AgentProviderTransport,
-    AgentProviderTransportConfig, AgentProviderTransportConfigError, AgentProviderTransportOutcome,
-    AgentProviderTransportResult, AgentProviderTransportShutdownError,
-    AgentProviderTransportShutdownProof, AgentProviderTransportSnapshot,
-    AgentProviderTransportStateError, AgentProviderUsageKnowledge,
-    AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES, MAX_AGENT_PROVIDER_CONNECT_TIMEOUT_MILLIS,
-    MAX_AGENT_PROVIDER_CREDENTIAL_BYTES, MAX_AGENT_PROVIDER_HTTP2_FRAME_BYTES,
-    MAX_AGENT_PROVIDER_READ_TIMEOUT_MILLIS, MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS,
-    MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES, MAX_AGENT_PROVIDER_TRANSPORT_CALLS,
-    MAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES, MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTES,
+    AgentCredentialBinding, AgentProviderAbortReason, AgentProviderAdmissionError,
+    AgentProviderAttempt, AgentProviderAttemptStateError, AgentProviderBatchDisposition,
+    AgentProviderCancellation, AgentProviderCountedAttempt, AgentProviderCredential,
+    AgentProviderCredentialError, AgentProviderDisclosureStage, AgentProviderExactCountOutcome,
+    AgentProviderImmediateSettlement, AgentProviderImmediateSettlementError,
+    AgentProviderPolicySettlement, AgentProviderTransport, AgentProviderTransportConfig,
+    AgentProviderTransportConfigError, AgentProviderTransportOutcome, AgentProviderTransportResult,
+    AgentProviderTransportShutdownError, AgentProviderTransportShutdownProof,
+    AgentProviderTransportSnapshot, AgentProviderTransportStateError, AgentProviderUsageKnowledge,
+    DecisionCredentialProvider, AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES,
+    MAX_AGENT_PROVIDER_CONNECT_TIMEOUT_MILLIS, MAX_AGENT_PROVIDER_CREDENTIAL_BYTES,
+    MAX_AGENT_PROVIDER_HTTP2_FRAME_BYTES, MAX_AGENT_PROVIDER_READ_TIMEOUT_MILLIS,
+    MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS, MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES,
+    MAX_AGENT_PROVIDER_TRANSPORT_CALLS, MAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES,
+    MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTES,
 };
 pub use semantic_wait::{
     SemanticStandaloneWait, SemanticStandaloneWaitBackoff, SemanticStandaloneWaitError,
@@ -635,6 +638,11 @@ pub use sign_in_handoff::{
 
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::agent::OpenAiWorkAgent;
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::decision::{
+    DecisionBackendKind, DecisionCallDiagnostic, DecisionCallFailure, DecisionCallOutput,
+    JevDecisionClient, OpenAiDecisionClient,
+};
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};
 #[cfg(feature = "provider-transport")]

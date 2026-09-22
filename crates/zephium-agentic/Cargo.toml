@@ -17,11 +17,14 @@ provider-transport = [
     "dep:zeroize",
     "dep:security-framework",
     "dep:security-framework-sys",
+    "dep:dirs",
+    "dep:zephium-decision",
+    "dep:httpdate",
 ]
 # Fixed loopback fixtures and native-probe support are diagnostic code. The
 # crate-level optimized-build refusal makes this feature mechanically
 # unavailable to every release graph, even if a downstream manifest enables it.
-probe-harness = []
+probe-harness = ["zephium-decision?/evals"]
 
 [[bin]]
 name = "windows-agentic-input-evidence-review"
@@ -48,11 +51,14 @@ tokio = { workspace = true, features = ["sync", "time"], optional = true }
 ulid.workspace = true
 url.workspace = true
 zeroize = { version = "=1.9.0", optional = true }
+zephium-decision = { workspace = true, optional = true }
+httpdate = { version = "=1.0.3", optional = true }
 zephium-core.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "=3.7.0", optional = true }
 security-framework-sys = { version = "=2.17.0", optional = true }
+dirs = { version = "=6.0.0", optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
