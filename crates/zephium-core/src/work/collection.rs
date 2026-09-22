@@ -16,6 +16,17 @@ pub struct WorkBrowseColumn {
     pub name: String,
     pub value: WorkBrowseValue,
     pub required: bool,
+    #[serde(default)]
+    pub extraction: WorkBrowseExtraction,
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkBrowseExtraction {
+    Verbatim,
+    #[default]
+    Generate,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -58,6 +69,9 @@ impl WorkBrowseCollection {
             }
             match &column.value {
                 WorkBrowseValue::Money { currencies } => {
+                    if column.extraction == WorkBrowseExtraction::Verbatim {
+                        return Err(WorkError::Invalid);
+                    }
                     let mut unique = BTreeSet::new();
                     if currencies.is_empty()
                         || currencies.len() > 16
@@ -78,5 +92,31 @@ impl WorkBrowseCollection {
             return Err(WorkError::Invalid);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extraction_mode_is_additive_and_numeric_conversion_requires_generation() {
+        let mut request: WorkBrowseCollection = serde_json::from_value(serde_json::json!({
+            "title":"Observed product", "max_items":1,
+            "columns":[{"name":"price","value":{"kind":"text"},"required":true}]
+        }))
+        .unwrap();
+        assert_eq!(
+            request.columns[0].extraction,
+            WorkBrowseExtraction::Generate
+        );
+        request.columns[0].extraction = WorkBrowseExtraction::Verbatim;
+        assert!(request.validate().is_ok());
+        request.columns[0].value = WorkBrowseValue::Money {
+            currencies: vec!["USD".into()],
+        };
+        assert_eq!(request.validate(), Err(WorkError::Invalid));
+        request.columns[0].extraction = WorkBrowseExtraction::Generate;
+        assert!(request.validate().is_ok());
     }
 }

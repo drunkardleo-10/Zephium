@@ -477,6 +477,9 @@ fn encode_field(
             extraction_kind_label(field.kind()),
         ),
     )?;
+    if field.verbatim_text() {
+        checked_write(output, format_args!(" copy=one_exact_source_fragment"))?;
+    }
     match field.kind() {
         SemanticExtractionValueKind::Text
         | SemanticExtractionValueKind::Url
@@ -569,6 +572,7 @@ fn hash_field(hasher: &mut Sha256, field: &crate::SemanticExtractionFieldSchema)
     hasher.update((field.name().len() as u64).to_be_bytes());
     hasher.update(field.name().as_bytes());
     hasher.update([u8::from(field.required())]);
+    hasher.update([u8::from(field.verbatim_text())]);
     hasher.update([match field.kind() {
         SemanticExtractionValueKind::Text => 1,
         SemanticExtractionValueKind::Url => 6,
@@ -1073,6 +1077,30 @@ mod tests {
         ] {
             assert!(!receipt.matches(&changed, &read));
         }
+        let verbatim = SemanticExtractionSchema::try_new(
+            original.id(),
+            vec![SemanticExtractionFieldSchema::try_rows(
+                "items".into(),
+                true,
+                vec![
+                    SemanticExtractionFieldSchema::try_text("name".into(), true, 64)
+                        .unwrap()
+                        .with_verbatim_text()
+                        .unwrap(),
+                ],
+                3,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        assert!(!receipt.matches(&verbatim, &read));
+        let encoded = encode_semantic_extraction_request(
+            &verbatim,
+            &read,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap();
+        assert!(encoded.content.contains("copy=one_exact_source_fragment"));
     }
 
     #[test]

@@ -126,6 +126,7 @@ enum SemanticExtractionFieldSpec {
 pub struct SemanticExtractionFieldSchema {
     name: String,
     required: bool,
+    verbatim: bool,
     spec: SemanticExtractionFieldSpec,
 }
 
@@ -143,6 +144,7 @@ impl SemanticExtractionFieldSchema {
         Ok(Self {
             name,
             required,
+            verbatim: false,
             spec: SemanticExtractionFieldSpec::Text { max_bytes },
         })
     }
@@ -160,6 +162,7 @@ impl SemanticExtractionFieldSchema {
         Ok(Self {
             name,
             required,
+            verbatim: false,
             spec: SemanticExtractionFieldSpec::Url { max_bytes },
         })
     }
@@ -194,6 +197,7 @@ impl SemanticExtractionFieldSchema {
         Ok(Self {
             name,
             required,
+            verbatim: false,
             spec: SemanticExtractionFieldSpec::Money { currencies },
         })
     }
@@ -215,6 +219,7 @@ impl SemanticExtractionFieldSchema {
         Ok(Self {
             name,
             required,
+            verbatim: false,
             spec: SemanticExtractionFieldSpec::Boolean,
         })
     }
@@ -229,6 +234,7 @@ impl SemanticExtractionFieldSchema {
         Ok(Self {
             name,
             required,
+            verbatim: false,
             spec: SemanticExtractionFieldSpec::Unsigned { maximum },
         })
     }
@@ -250,6 +256,7 @@ impl SemanticExtractionFieldSchema {
         Ok(Self {
             name,
             required,
+            verbatim: false,
             spec: SemanticExtractionFieldSpec::TextList {
                 max_items,
                 max_item_bytes,
@@ -280,6 +287,7 @@ impl SemanticExtractionFieldSchema {
         Ok(Self {
             name,
             required,
+            verbatim: false,
             spec: SemanticExtractionFieldSpec::Rows { fields, max_items },
         })
     }
@@ -300,6 +308,20 @@ impl SemanticExtractionFieldSchema {
     /// Whether omission of this field is a refusal.
     pub const fn required(&self) -> bool {
         self.required
+    }
+
+    /// Requires a text cell to equal one complete cited source fragment.
+    pub fn with_verbatim_text(mut self) -> Result<Self, SemanticExtractionSchemaError> {
+        if self.kind() != SemanticExtractionValueKind::Text {
+            return Err(SemanticExtractionSchemaError::VerbatimKind);
+        }
+        self.verbatim = true;
+        Ok(self)
+    }
+
+    /// True for cells that Rust must copy without normalization or synthesis.
+    pub const fn verbatim_text(&self) -> bool {
+        self.verbatim
     }
 
     /// Closed value shape for this field.
@@ -469,6 +491,9 @@ impl fmt::Debug for SemanticExtractionSchema {
 /// Refusal to construct an invalid trusted extraction schema.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum SemanticExtractionSchemaError {
+    /// Only a text scalar can request exact copying; URLs already require exact sources.
+    #[error("verbatim extraction requires a text field")]
+    VerbatimKind,
     /// Rows contain only scalar fields.
     #[error("nested extraction collection refused")]
     NestedCollection,
@@ -1200,6 +1225,9 @@ impl fmt::Debug for SemanticExtractionResult<'_> {
 /// Closed refusal from hostile model-output extraction admission.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum SemanticExtractionError {
+    /// A copy-only cell differed from its one complete cited text fragment.
+    #[error("verbatim extraction source mismatch")]
+    VerbatimMismatch,
     /// The exact source read was not committed to the model transport.
     #[error("semantic extraction source read was not delivered")]
     ReadNotDelivered,
@@ -1478,15 +1506,31 @@ fn admit_value<'a>(
                 value,
                 sources: raw_sources,
             },
-        ) => Ok(SemanticExtractedValue::Text(admit_text(
-            value,
-            *max_bytes,
-            raw_sources,
-            read,
-            sensitivity_limit,
-            sources,
-            counters,
-        )?)),
+        ) => {
+            if field.verbatim_text() {
+                let [source] = raw_sources.as_slice() else {
+                    return Err(SemanticExtractionError::VerbatimMismatch);
+                };
+                let matches = SemanticReadFragmentId::parse_model_token(source)
+                    .and_then(|id| read.fragment(id))
+                    .is_some_and(|fragment| {
+                        matches!(fragment.content(),
+                        crate::SemanticReadContent::Text(text) if text.as_str() == value)
+                    });
+                if !matches {
+                    return Err(SemanticExtractionError::VerbatimMismatch);
+                }
+            }
+            Ok(SemanticExtractedValue::Text(admit_text(
+                value,
+                *max_bytes,
+                raw_sources,
+                read,
+                sensitivity_limit,
+                sources,
+                counters,
+            )?))
+        }
         (
             SemanticExtractionFieldSpec::Url { max_bytes },
             RawValue::Url {
@@ -2568,6 +2612,66 @@ mod tests {
             )
             .unwrap_err(),
             SemanticExtractionError::SchemaMismatch
+        );
+    }
+
+    #[test]
+    fn verbatim_text_requires_one_exact_source_and_preserves_privacy() {
+        let observation = observation();
+        let read = read(&observation, 31);
+        let delivery = delivered(&read);
+        let field = SemanticExtractionFieldSchema::try_text("title".into(), true, 64).unwrap();
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(29).unwrap(),
+            vec![field.with_verbatim_text().unwrap()],
+        )
+        .unwrap();
+        for (value, sources, expected) in [
+            ("Quarterly summary", json!(["@r1"]), None),
+            (
+                "Quarterly",
+                json!(["@r1"]),
+                Some(SemanticExtractionError::VerbatimMismatch),
+            ),
+            (
+                "Quarterly summary ",
+                json!(["@r1"]),
+                Some(SemanticExtractionError::VerbatimMismatch),
+            ),
+            (
+                "Quarterly summary",
+                json!(["@r2"]),
+                Some(SemanticExtractionError::VerbatimMismatch),
+            ),
+            (
+                "Quarterly summary",
+                json!(["@r1", "@r2"]),
+                Some(SemanticExtractionError::VerbatimMismatch),
+            ),
+            (
+                "Private customer note",
+                json!(["@r5"]),
+                Some(SemanticExtractionError::Sensitivity),
+            ),
+        ] {
+            let output = json!({"v":1,"schema":29,"fields":[{
+                "name":"title","value":{"k":"text","value":value,"sources":sources}
+            }]});
+            let result = extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &serde_json::to_vec(&output).unwrap(),
+            );
+            assert_eq!(result.err(), expected);
+        }
+        assert_eq!(
+            SemanticExtractionFieldSchema::try_unsigned("count".into(), true, 100)
+                .unwrap()
+                .with_verbatim_text()
+                .unwrap_err(),
+            SemanticExtractionSchemaError::VerbatimKind,
         );
     }
 

@@ -1,5 +1,5 @@
 use super::*;
-use zephium_core::work::collection::{WorkBrowseCollection, WorkBrowseValue};
+use zephium_core::work::collection::{WorkBrowseCollection, WorkBrowseExtraction, WorkBrowseValue};
 
 /// Host-selected record shape; contains no site code or new browser authority.
 #[derive(Clone)]
@@ -23,23 +23,27 @@ impl TryFrom<&WorkBrowseCollection> for WorkBrowseCollectionSchema {
         for column in &request.columns {
             let name = column.name.clone();
             let required = column.required;
-            fields.push(
-                match &column.value {
-                    WorkBrowseValue::Text => {
-                        SemanticExtractionFieldSchema::try_text(name, required, 1024)
-                    }
-                    WorkBrowseValue::Money { currencies } => {
-                        SemanticExtractionFieldSchema::try_money(name, required, currencies.clone())
-                    }
-                    WorkBrowseValue::Url => {
-                        SemanticExtractionFieldSchema::try_url(name, required, 2048)
-                    }
-                    WorkBrowseValue::ImageUrl => {
-                        SemanticExtractionFieldSchema::try_image_url(name, required, 2048)
-                    }
+            let mut field = match &column.value {
+                WorkBrowseValue::Text => {
+                    SemanticExtractionFieldSchema::try_text(name, required, 1024)
                 }
-                .map_err(|_| WorkError::Invalid)?,
-            );
+                WorkBrowseValue::Money { currencies } => {
+                    SemanticExtractionFieldSchema::try_money(name, required, currencies.clone())
+                }
+                WorkBrowseValue::Url => {
+                    SemanticExtractionFieldSchema::try_url(name, required, 2048)
+                }
+                WorkBrowseValue::ImageUrl => {
+                    SemanticExtractionFieldSchema::try_image_url(name, required, 2048)
+                }
+            }
+            .map_err(|_| WorkError::Invalid)?;
+            if column.extraction == WorkBrowseExtraction::Verbatim
+                && column.value == WorkBrowseValue::Text
+            {
+                field = field.with_verbatim_text().map_err(|_| WorkError::Invalid)?;
+            }
+            fields.push(field);
         }
         let mut schema = Self::try_new(
             request.title.clone(),
