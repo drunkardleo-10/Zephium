@@ -246,6 +246,8 @@ pub enum SemanticReadOmission {
     ValuePreviewLimit,
     /// Trusted source-role selection excluded otherwise readable fields.
     RoleSelection,
+    /// A decision-bound neighborhood excluded other observed nodes.
+    ReferenceSelection,
 }
 
 impl SemanticReadOmission {
@@ -826,6 +828,7 @@ pub fn read_selected_semantic_observation<'a>(
         budget,
         roles,
         0,
+        None,
     )
 }
 
@@ -846,9 +849,31 @@ pub fn read_semantic_observation_for_schema<'a>(
         budget,
         schema.source_roles(),
         schema.url_sources(),
+        None,
     )
 }
 
+#[cfg(feature = "provider-transport")]
+pub(crate) fn read_located_semantic_observation<'a>(
+    observation: &'a SemanticObservation,
+    acknowledgement: &SemanticObservationAcknowledgement,
+    captured_at: SemanticCaptureInstant,
+    schema: &crate::SemanticExtractionSchema,
+    references: &std::collections::BTreeSet<SemanticReferenceId>,
+) -> Result<SemanticReadResult<'a>, SemanticReadError> {
+    read_projection(
+        observation,
+        SemanticReadAuthority::Acknowledged(acknowledgement),
+        captured_at,
+        SemanticReadSensitivityLimit::PublicOnly,
+        SemanticReadBudget::STANDARD,
+        schema.source_roles(),
+        schema.url_sources(),
+        Some(references),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn read_projection<'a>(
     observation: &'a SemanticObservation,
     authority: SemanticReadAuthority<'_>,
@@ -857,6 +882,7 @@ fn read_projection<'a>(
     budget: SemanticReadBudget,
     roles: SemanticReadRoleSelection,
     url_sources: u8,
+    references: Option<&std::collections::BTreeSet<SemanticReferenceId>>,
 ) -> Result<SemanticReadResult<'a>, SemanticReadError> {
     let subtree = validate_authority(observation, authority)?;
     let mut builder = SemanticReadBuilder::new(observation, captured_at, budget, roles);
@@ -876,7 +902,12 @@ fn read_projection<'a>(
             builder.stats.incomplete_frames = builder.stats.incomplete_frames.saturating_add(1);
         }
         for node in snapshot.nodes() {
-            builder.read_node(snapshot, node, sensitivity);
+            builder.read_node(
+                snapshot,
+                node,
+                sensitivity,
+                references.is_none_or(|references| references.contains(&node.reference())),
+            );
         }
     }
     Ok(builder.finish(subtree))
@@ -1009,6 +1040,7 @@ impl<'a> SemanticReadBuilder<'a> {
         snapshot: &'a crate::SemanticSnapshot,
         node: &'a SemanticNode,
         limit: SemanticReadSensitivityLimit,
+        selected: bool,
     ) {
         let available = readable_field_count(node)
             + u16::from(self.url_sources & 1 != 0 && node.link_destination().is_some())
@@ -1034,6 +1066,15 @@ impl<'a> SemanticReadBuilder<'a> {
             self.stats.withheld_sensitive_nodes =
                 self.stats.withheld_sensitive_nodes.saturating_add(1);
             self.stats.omitted_items = self.stats.omitted_items.saturating_add(available);
+            return;
+        }
+
+        if !selected {
+            if available > 0 {
+                self.omissions
+                    .insert(SemanticReadOmission::ReferenceSelection);
+                self.stats.omitted_items = self.stats.omitted_items.saturating_add(available);
+            }
             return;
         }
 

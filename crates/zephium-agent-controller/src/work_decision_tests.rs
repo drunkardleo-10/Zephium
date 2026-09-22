@@ -151,6 +151,91 @@ fn read_request(stream: &mut std::net::TcpStream) -> Value {
 }
 
 #[test]
+fn typed_copy_finishes_after_one_decision_without_a_page_model_or_native_action() {
+    let _serial = lock(&SERIAL);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        for index in 0..2 {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline);
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            let request = read_request(&mut stream);
+            let body = if index == 0 {
+                json!({"object":"response.input_tokens","input_tokens":100})
+            } else {
+                let schemas = request["text"]["format"]["schema"]["properties"]["answers"]["properties"].as_object().unwrap();
+                assert!(schemas.contains_key("locate_0"));
+                let answers: serde_json::Map<_, _> = schemas.iter().map(|(key, schema)| {
+                    let answer = if schema["properties"]["noul"].is_object() {
+                        json!({"type":"noul","noul":if key == "done" {0.99} else {0.01}})
+                    } else {
+                        let keys = schema["properties"]["probabilities"]["properties"].as_object().unwrap();
+                        let selected = if key == "locate_0" {"@a2"} else {"none"};
+                        assert!(keys.contains_key(selected));
+                        let probabilities: serde_json::Map<_, _> = keys.keys().map(|key| (key.clone(), json!(if key == selected {1.0} else {0.0}))).collect();
+                        json!({"type":"choice","choice":selected,"confidence":1.0,"probabilities":probabilities})
+                    };
+                    (key.clone(), answer)
+                }).collect();
+                json!({"object":"response","status":"completed","model":"gpt-5.6-terra","service_tier":"default","error":null,"incomplete_details":null,
+                    "output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":json!({"answers":answers}).to_string()}]}],
+                    "usage":{"input_tokens":100,"output_tokens":200,"total_tokens":300,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":50}}})
+            }.to_string();
+            write!(stream, "HTTP/1.1 200 Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    let mut input = input_with_effects(&[SemanticEffectClass::Read]);
+    input.decision_provider = Some(super::super::super::AgentBrowserDecisionProvider::Emulation);
+    let task = AgentWorkExtractionTask::try_new(
+        vec![
+            SemanticExtractionFieldSchema::try_text("label".into(), true, 64)
+                .unwrap()
+                .with_verbatim_text()
+                .unwrap(),
+        ],
+        AgentAccountScope::Anonymous,
+    )
+    .unwrap();
+    let (controller, handle) = AgentWorkController::try_new_for_probe(
+        input,
+        AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            &endpoint,
+            &endpoint,
+        )
+        .unwrap(),
+        AgentProviderCredential::try_new(AgentProviderKind::OpenAiResponses, "fixture-key".into())
+            .unwrap(),
+        Arc::new(Audit(Fault::None)),
+        Box::new(task),
+        AgentBrowserRetention::Stateless,
+    )
+    .unwrap();
+    let (outcome, shutdown, calls, _) = drive(controller, handle, Fault::DecisionClick(false));
+    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+    assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+    let AgentWorkOutcome::Succeeded(success) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(success.closure().model_calls(), 1);
+    assert_eq!(success.closure().effects(), 0);
+    assert!(
+        matches!(success.extraction().unwrap().fields()[0].value(), SemanticExtractedValue::Text(value) if value.as_str() == "Details")
+    );
+    server.join().unwrap();
+}
+
+#[test]
 fn typed_native_read_verifies_or_closes_without_retry_and_keeps_accounting() {
     let _serial = lock(&SERIAL);
     for (scroll, applied) in [(false, false), (false, true), (true, false)] {
@@ -159,7 +244,7 @@ fn typed_native_read_verifies_or_closes_without_retry_and_keeps_accounting() {
         let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(10);
-            for index in 0..if applied { 3 } else { 2 } {
+            for index in 0..if applied { 5 } else { 2 } {
                 let mut stream = loop {
                     match listener.accept() {
                         Ok((stream, _)) => break stream,
@@ -172,11 +257,11 @@ fn typed_native_read_verifies_or_closes_without_retry_and_keeps_accounting() {
                 };
                 let request = read_request(&mut stream);
                 let (status, body) = match index {
-                    0 => (
+                    0 | 2 => (
                         200,
                         json!({"object":"response.input_tokens","input_tokens":100}),
                     ),
-                    1 => {
+                    1 | 3 => {
                         assert_eq!(request["model"], "gpt-5.6-terra");
                         let schemas = request["text"]["format"]["schema"]["properties"]["answers"]
                             ["properties"]
@@ -259,7 +344,7 @@ fn typed_native_read_verifies_or_closes_without_retry_and_keeps_accounting() {
         assert_eq!(closed.policy_settlement().closure().effects(), 1);
         assert_eq!(
             closed.policy_settlement().closure().model_calls(),
-            if applied { 2 } else { 1 }
+            if applied { 3 } else { 1 }
         );
         assert_eq!(
             events
@@ -280,7 +365,7 @@ fn typed_native_read_verifies_or_closes_without_retry_and_keeps_accounting() {
                 .iter()
                 .filter(|event| matches!(event.kind(), AgentWorkEventKind::DecisionSettled(_)))
                 .count(),
-            1
+            if applied { 2 } else { 1 }
         );
         server.join().unwrap();
     }

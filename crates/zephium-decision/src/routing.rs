@@ -149,6 +149,35 @@ impl DecisionFallback {
         &self.reasons
     }
 
+    /// Inspects an already validated primary head to choose which speculative work is needed.
+    pub fn resolved(&self, key: &str) -> Option<&ResolvedDecision> {
+        self.resolved.get(key)
+    }
+
+    /// Removes unused speculative fallback heads without promoting them to answers.
+    pub fn retain_fallback(&mut self, needed: impl Fn(&str) -> bool) -> Result<(), ContractError> {
+        let Some(request) = self.fallback.take() else {
+            return Ok(());
+        };
+        self.reasons.retain(|key, reason| {
+            if needed(key) {
+                true
+            } else {
+                self.resolved.insert(
+                    key.clone(),
+                    ResolvedDecision::Unresolved { reason: *reason },
+                );
+                false
+            }
+        });
+        self.fallback = if self.reasons.is_empty() {
+            None
+        } else {
+            Some(request.subset(self.reasons.keys().map(String::as_str))?)
+        };
+        Ok(())
+    }
+
     pub fn finish(mut self, emulation: Option<DecisionResponse>) -> DecisionResults {
         let mut answers = emulation
             .map(|response| response.answers)

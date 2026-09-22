@@ -2143,7 +2143,7 @@ impl AgentWorkController {
             worker,
             browser,
             session.cancellation.clone(),
-            session.decide_observation(observation, &authority),
+            session.decide_observation(observation, &authority, state.extraction_schema.as_ref()),
         )
         .await?;
         let Some(mut answers) = answers else {
@@ -4457,6 +4457,8 @@ pub enum AgentWorkFailure {
     DecisionMoreBelow(DecisionProjectionError),
     /// Action selection failed its exact observation/account or offered-option binding.
     DecisionOperation(DecisionProjectionError),
+    /// Read selection failed its exact observation, account or schema binding.
+    DecisionRead(DecisionProjectionError),
     /// Accounted scoped read reported AnchorMissing while its original retained
     /// document and lease remained live. Only progressive inspection may recover.
     InspectionAnchorLost,

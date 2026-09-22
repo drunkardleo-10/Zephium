@@ -115,6 +115,7 @@ impl AgentBrowserSession {
         &mut self,
         observation: &zephium_agentic::SemanticObservation,
         authority: &zephium_agentic::AgentProviderActionAuthority,
+        schema: Option<&zephium_agentic::SemanticExtractionSchema>,
     ) -> Result<Option<DecisionObservationAnswers>, AgentBrowserProviderError> {
         self.check_live()?;
         if self.decisions.is_none() || !self.has_decision_capacity()? {
@@ -123,13 +124,14 @@ impl AgentBrowserSession {
         if self.attempt.is_some() || self.retained_terminal.is_some() || self.action.is_some() {
             return Err(AgentBrowserProviderError::ActionPending);
         }
-        let projection = match DecisionObservation::try_new(
+        let projection = match DecisionObservation::try_for_read(
             observation,
             self.objective
                 .as_ref()
                 .ok_or(AgentBrowserProviderError::Continuation)?,
             authority,
             self.account,
+            schema,
         ) {
             Ok(projection) => projection,
             Err(DecisionProjectionError::Capacity) => return Ok(None),

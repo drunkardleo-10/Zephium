@@ -936,9 +936,22 @@ pub struct SemanticExtractionResult<'a> {
     guard: [u8; 32],
     read_omissions: crate::SemanticReadOmissions,
     read_stats: crate::SemanticReadStats,
+    #[cfg(feature = "provider-transport")]
+    read_guard: [u8; 32],
+    #[cfg(feature = "provider-transport")]
+    schema_guard: [u8; 32],
 }
 
 impl<'a> SemanticExtractionResult<'a> {
+    #[cfg(feature = "provider-transport")]
+    pub(crate) fn matches_input(
+        &self,
+        schema: &SemanticExtractionSchema,
+        read: &SemanticReadResult<'_>,
+    ) -> bool {
+        self.read_guard == read.guard()
+            && self.schema_guard == crate::semantic_extract_model::extraction_schema_guard(schema)
+    }
     /// Exact source-read omissions, never a whole-document completeness claim.
     pub const fn read_omissions(&self) -> crate::SemanticReadOmissions {
         self.read_omissions
@@ -1331,7 +1344,7 @@ pub fn extract_delivered_semantic_read<'a>(
     extract_semantic_read_inner(schema, read, sensitivity_limit, model_output)
 }
 
-fn extract_semantic_read_inner<'a>(
+pub(crate) fn extract_semantic_read_inner<'a>(
     schema: &SemanticExtractionSchema,
     read: &SemanticReadResult<'a>,
     sensitivity_limit: SemanticReadSensitivityLimit,
@@ -1388,6 +1401,10 @@ fn extract_semantic_read_inner<'a>(
         guard: result_guard,
         read_omissions: read.omissions(),
         read_stats: read.stats(),
+        #[cfg(feature = "provider-transport")]
+        read_guard: read.guard(),
+        #[cfg(feature = "provider-transport")]
+        schema_guard: crate::semantic_extract_model::extraction_schema_guard(schema),
     })
 }
 

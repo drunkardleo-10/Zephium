@@ -30,6 +30,7 @@ pub(super) fn run_case(case: &std::ffi::OsStr, model: ProbeModel) -> Result<(), 
         Some("yc-json") => 2,
         Some("airbnb") => 3,
         Some("cloudflare") => 4,
+        Some("yc-read") => 5,
         _ => return Err(ProbeFailure::Authority),
     };
     run_selected(Some(index), model)

@@ -1,6 +1,6 @@
 use super::*;
 use crate::*;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
@@ -335,6 +335,407 @@ fn fixture_answers(request: &DecisionRequest) -> serde_json::Value {
         (key.clone(), value)
     }).collect();
     json!({"answers":answers})
+}
+
+fn located_fixture(
+    generated: bool,
+) -> (
+    AgentModelCallRequest,
+    SemanticObservation,
+    SemanticExtractionSchema,
+    DecisionObservation,
+) {
+    let (_, call, previous, _) = admitted_fixture();
+    let nodes = json!([
+        {"k":1,"r":"document","fc":true},
+        {"k":2,"p":0,"r":"heading","l":1,"n":"Public product","t":"Public product","fc":true},
+        {"k":3,"p":0,"r":"paragraph","n":"Price","t":"$349.99","fc":true},
+        {"k":4,"p":0,"r":"image","n":"Product","m":"https://example.test/product.webp","fc":true},
+        {"k":5,"p":0,"r":"paragraph","t":"Product description","fc":true},
+        {"k":6,"p":0,"r":"paragraph","t":"Nearby evidence","fc":true},
+        {"k":7,"p":0,"r":"paragraph","t":"Personal value","q":"sensitive","fc":true},
+        {"k":8,"p":0,"r":"paragraph","t":"Unrelated footer","fc":true}
+    ]);
+    let snapshot = decode_semantic_snapshot(
+        SemanticDecodeContext::new(
+            SemanticInvocationId::new(1).unwrap(),
+            previous.frames()[0].frame().clone(),
+            SemanticSnapshotGeneration::new(1).unwrap(),
+        ),
+        &serde_json::to_vec(
+            &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":nodes}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let observation = SemanticObservationAssembler::new(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(1).unwrap(),
+            call.account().context(),
+            SemanticObservationBudget::try_new(16, 8192, 1).unwrap(),
+        ),
+        snapshot,
+    )
+    .unwrap()
+    .finish()
+    .unwrap();
+    let mut fields = vec![
+        SemanticExtractionFieldSchema::try_text("name".into(), true, 512)
+            .unwrap()
+            .with_verbatim_text()
+            .unwrap(),
+        SemanticExtractionFieldSchema::try_text("price".into(), true, 512)
+            .unwrap()
+            .with_verbatim_text()
+            .unwrap(),
+        SemanticExtractionFieldSchema::try_image_url("picture".into(), true, 1024).unwrap(),
+    ];
+    if generated {
+        fields.push(SemanticExtractionFieldSchema::try_text("summary".into(), true, 512).unwrap());
+    }
+    let schema = SemanticExtractionSchema::try_new(
+        SemanticExtractionSchemaId::new(1).unwrap(),
+        vec![SemanticExtractionFieldSchema::try_rows("output_0".into(), true, fields, 1).unwrap()],
+    )
+    .unwrap();
+    let objective = AgentProviderObjective::try_admit_conservative_utf8(
+        "Compare three product pages; read this page's columns".into(),
+        &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
+    )
+    .unwrap();
+    let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+    let projection = DecisionObservation::try_for_read(
+        &observation,
+        &objective,
+        &authority,
+        call.account(),
+        Some(&schema),
+    )
+    .unwrap();
+    (call, observation, schema, projection)
+}
+
+fn located_answers(projection: &DecisionObservation) -> Value {
+    let mut output = fixture_answers(projection.request());
+    output["answers"]["done"]["noul"] = json!(0.99);
+    for (index, target) in ["@a2", "@a3", "@a4", "@a5"].into_iter().enumerate() {
+        let key = format!("locate_{index}");
+        let Some(Question::Choice { criteria, .. }) = projection.request().questions().get(&key)
+        else {
+            continue;
+        };
+        let probabilities: BTreeMap<_, _> = criteria
+            .keys()
+            .map(|key| (key, if key == target { 1.0 } else { 0.0 }))
+            .collect();
+        output["answers"][&key] =
+            json!({"type":"choice","choice":target,"confidence":1.0,"probabilities":probabilities});
+    }
+    output
+}
+
+#[test]
+fn located_read_copies_exact_sources_and_discards_unused_speculative_fallback() {
+    let (call, observation, schema, projection) = located_fixture(false);
+    let mut output = located_answers(&projection);
+    output["answers"]["operation"]["confidence"] = json!(0.2);
+    output["answers"]["relevant"]["noul"] = json!(0.5);
+    let response = projection
+        .request()
+        .decode_emulation(
+            &serde_json::to_vec(&output).unwrap(),
+            DecisionUsage::default(),
+        )
+        .unwrap();
+    let fallback = projection.route(Ok(response)).unwrap();
+    assert!(fallback.projection().is_none());
+    let mut answers = fallback.finish(None);
+    let selection = answers
+        .take_read_selection(&observation, call.account(), &schema)
+        .unwrap()
+        .unwrap();
+    assert!(answers
+        .take_read_selection(&observation, call.account(), &schema)
+        .unwrap()
+        .is_none());
+    let located = selection
+        .prepare(
+            &observation,
+            call.account(),
+            SemanticCaptureInstant::from_millis(101),
+        )
+        .unwrap();
+    assert!(located.generation().is_none());
+    let result = located.finish(None).unwrap();
+    let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+        panic!()
+    };
+    assert!(
+        matches!(rows.items()[0].fields()[1].value(), SemanticExtractedValue::Text(text) if text.as_str() == "$349.99")
+    );
+    assert!(
+        matches!(rows.items()[0].fields()[2].value(), SemanticExtractedValue::ImageUrl(text) if text.as_str() == "https://example.test/product.webp")
+    );
+    assert!(result
+        .read_omissions()
+        .contains(SemanticReadOmission::ReferenceSelection));
+    assert_eq!(result.stats().values(), 3);
+}
+
+#[test]
+fn located_generation_is_focused_and_merges_only_exact_delivered_evidence() {
+    let (call, observation, schema, projection) = located_fixture(true);
+    let response = projection
+        .request()
+        .decode_emulation(
+            &serde_json::to_vec(&located_answers(&projection)).unwrap(),
+            DecisionUsage::default(),
+        )
+        .unwrap();
+    let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+    let located = answers
+        .take_read_selection(&observation, call.account(), &schema)
+        .unwrap()
+        .unwrap()
+        .prepare(
+            &observation,
+            call.account(),
+            SemanticCaptureInstant::from_millis(101),
+        )
+        .unwrap();
+    let (generation_schema, read) = located.generation().unwrap();
+    assert_eq!(generation_schema.fields().len(), 1);
+    assert_eq!(generation_schema.fields()[0].name(), "summary");
+    let encoded = encode_semantic_extraction_request(
+        generation_schema,
+        read,
+        SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+    )
+    .unwrap()
+    .admit_conservative_utf8(&SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap())
+    .unwrap();
+    for excluded in [
+        "Unrelated footer",
+        "Personal value",
+        "product.webp",
+        "Public product",
+    ] {
+        assert!(!encoded.as_str().contains(excluded));
+    }
+    let source = read
+        .fragments()
+        .iter()
+        .find(|fragment| {
+            fragment.provenance().reference() == SemanticReferenceId::parse("@a5").unwrap()
+        })
+        .unwrap();
+    let output = serde_json::to_vec(&json!({"v":1,"schema":1,"fields":[{"name":"summary","value":{"k":"text","value":"A product description","sources":[source.id().model_token().to_string()]}}]})).unwrap();
+    let (_, _, delivery) = encoded.into_provider_parts();
+    let generated = extract_delivered_semantic_read(
+        generation_schema,
+        read,
+        &delivery.commit(),
+        SemanticReadSensitivityLimit::PublicOnly,
+        &output,
+    )
+    .unwrap();
+    let result = located.finish(Some(generated)).unwrap();
+    let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+        panic!()
+    };
+    assert_eq!(rows.items()[0].fields().len(), 4);
+    let SemanticExtractedValue::Text(summary) = rows.items()[0].fields()[3].value() else {
+        panic!()
+    };
+    let source = result.sources(summary.source_span()).unwrap()[0].fragment();
+    assert_eq!(
+        source.content().text().unwrap().as_str(),
+        "Product description"
+    );
+}
+
+#[test]
+fn located_read_requires_complete_required_answers_and_exact_schema() {
+    for mode in 0..4 {
+        let (call, observation, schema, projection) = located_fixture(false);
+        let mut output = located_answers(&projection);
+        if mode == 0 {
+            output["answers"]["done"]["noul"] = json!(0.01);
+        }
+        if mode == 1 {
+            output["answers"]["locate_1"] =
+                fixture_answers(projection.request())["answers"]["locate_1"].clone();
+        }
+        if mode == 2 {
+            output["answers"]["locate_1"]["confidence"] = json!(0.1);
+        }
+        let response = projection
+            .request()
+            .decode_emulation(
+                &serde_json::to_vec(&output).unwrap(),
+                DecisionUsage::default(),
+            )
+            .unwrap();
+        let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+        let schema = if mode == 3 {
+            SemanticExtractionSchema::try_new(
+                schema.id(),
+                vec![SemanticExtractionFieldSchema::try_text("foreign".into(), true, 100).unwrap()],
+            )
+            .unwrap()
+        } else {
+            schema
+        };
+        let result = answers.take_read_selection(&observation, call.account(), &schema);
+        if mode == 3 {
+            assert!(result.is_err());
+        } else {
+            assert!(result.unwrap().is_none());
+        }
+    }
+}
+
+#[test]
+fn located_generation_requires_committed_decision_taint_and_admits_only_focused_input() {
+    let (mut policy, _, _, _) = admitted_fixture();
+    let (call, observation, schema, projection) = located_fixture(true);
+    let admission = policy
+        .prepare_decision_input(call, &observation, &projection, 1000)
+        .unwrap();
+    let ack = crate::semantic_diff::SemanticObservationAcknowledgement::from_fingerprint(
+        crate::semantic_diff::SemanticObservationFingerprint::from_observation(&observation),
+    );
+    let active = policy.commit_observation_input(admission, &ack).unwrap();
+    let prior = AgentProviderInputMetricReceipt::from_decision(
+        &active,
+        projection.input_stats(),
+        projection.request().encode().unwrap().len() as u32,
+        1000,
+        SemanticTokenCountQuality::Conservative,
+    );
+    policy
+        .settle_model_call(active, AgentModelCallSettlement::Completed, 1000, 100, 1)
+        .unwrap();
+    let response = projection
+        .request()
+        .decode_emulation(
+            &serde_json::to_vec(&located_answers(&projection)).unwrap(),
+            DecisionUsage::default(),
+        )
+        .unwrap();
+    let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+    let located = answers
+        .take_read_selection(&observation, call.account(), &schema)
+        .unwrap()
+        .unwrap()
+        .prepare(
+            &observation,
+            call.account(),
+            SemanticCaptureInstant::from_millis(101),
+        )
+        .unwrap();
+    let (schema, read) = located.generation().unwrap();
+    let revision = SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap();
+    let config = AgentProviderPricingSchedule::try_for_test(
+        AgentProviderKind::OpenAiResponses,
+        AgentProviderModelRevision::try_new("gpt-fixture".into()).unwrap(),
+        AgentProviderReasoningEffort::None,
+        revision.clone(),
+        AgentProviderPricingProfile::try_new(AgentProviderPricingRevision::new(1).unwrap(), 32768)
+            .unwrap(),
+        AgentProviderTokenRates::try_new(1, 1, 1, 1).unwrap(),
+    )
+    .unwrap()
+    .try_provider_exact_call_config(1024, AgentProviderStreamBudget::STANDARD)
+    .unwrap()
+    .restrict_to_extraction();
+    let request = AgentModelCallRequest::new(
+        AgentModelCallId::new(2).unwrap(),
+        call.lease(),
+        call.account(),
+        AgentModelCallBudget::try_new(32768, 1024, 1000).unwrap(),
+        AgentPolicyInstant::from_millis(102),
+    );
+    let objective = AgentProviderObjective::try_admit_conservative_utf8(
+        "Read the located summary".into(),
+        &revision,
+    )
+    .unwrap();
+    let draft = || {
+        let payload = encode_semantic_extraction_request(
+            schema,
+            read,
+            SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap()
+        .admit_conservative_utf8(&revision)
+        .unwrap();
+        AgentProviderExtractionRequestDraft::try_located(
+            &located, prior, request, &config, &objective, payload,
+        )
+        .unwrap()
+    };
+    let (mut foreign, _, _, _) = admitted_fixture();
+    assert!(matches!(
+        draft().try_prepare_for_provider_exact_count(&mut foreign, request, schema, read),
+        Err(AgentProviderRequestError::Policy(
+            AgentPolicyError::ReadBaselineMissing
+        ))
+    ));
+    assert_eq!(foreign.pending_model_calls(), 0);
+    let draft = draft();
+    let body: Value = serde_json::from_slice(draft.request().body()).unwrap();
+    let text = serde_json::to_string(&body["input"]).unwrap();
+    for excluded in [
+        "Public product",
+        "Unrelated footer",
+        "Personal value",
+        "product.webp",
+    ] {
+        assert!(!text.contains(excluded));
+    }
+    let prepared = draft
+        .try_prepare_for_provider_exact_count(&mut policy, request, schema, read)
+        .unwrap();
+    assert_eq!(policy.pending_model_calls(), 1);
+    let (input, _) = prepared.into_transport_parts();
+    let _ = input.cancel(&mut policy).unwrap();
+    assert_eq!(policy.pending_model_calls(), 0);
+}
+
+#[test]
+fn consumed_read_can_renew_the_same_account_but_cannot_change_scope_or_reverse_time() {
+    for mode in 0..3 {
+        let (call, observation, schema, projection) = located_fixture(false);
+        let response = projection
+            .request()
+            .decode_emulation(
+                &serde_json::to_vec(&located_answers(&projection)).unwrap(),
+                DecisionUsage::default(),
+            )
+            .unwrap();
+        let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+        let selection = answers
+            .take_read_selection(&observation, call.account(), &schema)
+            .unwrap()
+            .unwrap();
+        let account = AgentContextAccountBinding::new(
+            AgentAccountAttestationId::from_raw(999),
+            call.account().context(),
+            if mode == 1 {
+                AgentAccountScope::Authenticated(AgentAccountId::from_raw(1000))
+            } else {
+                AgentAccountScope::Anonymous
+            },
+            AgentPolicyInstant::from_millis(if mode == 2 { 99 } else { 102 }),
+        );
+        let prepared = selection.prepare(
+            &observation,
+            account,
+            SemanticCaptureInstant::from_millis(101),
+        );
+        assert_eq!(prepared.is_ok(), mode == 0);
+    }
 }
 
 #[tokio::test]

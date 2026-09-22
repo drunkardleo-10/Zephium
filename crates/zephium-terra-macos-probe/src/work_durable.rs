@@ -1577,7 +1577,9 @@ fn money_schema(
     zephium_work_composition::durable_runtime::WorkBrowseCollectionSchema::try_new(
         "Observed product prices".into(),
         vec![
-            Field::try_text("name".into(), true, 256).map_err(|_| WorkError::Invalid)?,
+            Field::try_text("name".into(), true, 256)
+                .and_then(Field::with_verbatim_text)
+                .map_err(|_| WorkError::Invalid)?,
             Field::try_money("price".into(), true, vec!["USD".into()])
                 .map_err(|_| WorkError::Invalid)?,
             Field::try_image_url("image_url".into(), true, 2048).map_err(|_| WorkError::Invalid)?,

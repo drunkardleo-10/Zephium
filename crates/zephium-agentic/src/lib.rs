@@ -227,8 +227,8 @@ pub use agent_provider::{
     AgentProviderBoundLocateContinuation, AgentProviderBoundReadContinuation,
     AgentProviderBoundScreenshotContinuation, AgentProviderCallConfig, AgentProviderCallIdentity,
     AgentProviderCompletion, AgentProviderContinuation, AgentProviderContinuationError,
-    AgentProviderContractError, AgentProviderDiffRequestDraft, AgentProviderEndpoint,
-    AgentProviderExactInputCount, AgentProviderExtractionOutputBinding,
+    AgentProviderContractError, AgentProviderDecisionInputStats, AgentProviderDiffRequestDraft,
+    AgentProviderEndpoint, AgentProviderExactInputCount, AgentProviderExtractionOutputBinding,
     AgentProviderExtractionOutputCollector, AgentProviderExtractionOutputError,
     AgentProviderExtractionRequestDraft, AgentProviderFailure, AgentProviderFailureClass,
     AgentProviderInputAccountingMode, AgentProviderInputEvidence, AgentProviderInputMetricReceipt,
@@ -246,8 +246,7 @@ pub use agent_provider::{
     AgentProviderRequestDigest, AgentProviderRequestError, AgentProviderRequestSettlement,
     AgentProviderResponseIdentity, AgentProviderResponseRoute, AgentProviderRetryAfter,
     AgentProviderRetryDisposition, AgentProviderScreenshotRequestDraft,
-    AgentProviderDecisionInputStats, AgentProviderSemanticInputStats, AgentProviderSettledTerminal,
-    AgentProviderSettledToolTurn,
+    AgentProviderSemanticInputStats, AgentProviderSettledTerminal, AgentProviderSettledToolTurn,
     AgentProviderStopReason, AgentProviderStreamBatch, AgentProviderStreamBudget,
     AgentProviderStreamConclusion, AgentProviderStreamStats, AgentProviderTerminalFailure,
     AgentProviderTextDelta, AgentProviderTokenRates, AgentProviderTransportInput,
@@ -641,10 +640,11 @@ pub use sign_in_handoff::{
 pub use provider_transport::agent::OpenAiWorkAgent;
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::decision::{
-    AdmittedDecisionOutput, DecisionBackendKind, DecisionCallAccounting, DecisionCallDiagnostic,
-    DecisionActionSelection, DecisionCallFailure, DecisionCallOutput, DecisionEnvelopeFailure, DecisionObservation,
-    DecisionObservationAnswers, DecisionObservationFallback, DecisionOperation,
-    DecisionProjectionError, JevDecisionClient, OpenAiDecisionCall, OpenAiDecisionClient,
+    AdmittedDecisionOutput, DecisionActionSelection, DecisionBackendKind, DecisionCallAccounting,
+    DecisionCallDiagnostic, DecisionCallFailure, DecisionCallOutput, DecisionEnvelopeFailure,
+    DecisionLocatedRead, DecisionObservation, DecisionObservationAnswers,
+    DecisionObservationFallback, DecisionOperation, DecisionProjectionError, DecisionReadSelection,
+    JevDecisionClient, OpenAiDecisionCall, OpenAiDecisionClient,
 };
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};

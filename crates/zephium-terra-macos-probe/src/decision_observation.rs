@@ -53,6 +53,16 @@ pub(super) fn run(site: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
         let authority = AgentProviderActionAuthority::try_new(&observation, &entries).ok_or("authority")?;
         let account = AgentContextAccountBinding::new(AgentAccountAttestationId::generate(), observation.request().context(),
             AgentAccountScope::Anonymous, AgentPolicyInstant::from_millis(1));
+        if matches!(site, DecisionObservationSite::Yc) {
+            let fields = vec![
+                SemanticExtractionFieldSchema::try_text("program_duration".into(), true, 1024).and_then(SemanticExtractionFieldSchema::with_verbatim_text).map_err(|_| "read_schema")?,
+                SemanticExtractionFieldSchema::try_text("office_hours".into(), true, 1024).map_err(|_| "read_schema")?,
+            ];
+            let schema = SemanticExtractionSchema::try_new(SemanticExtractionSchemaId::new(1).ok_or("read_schema")?, fields).map_err(|_| "read_schema")?;
+            let (read, _) = DecisionObservation::try_for_read(&observation, &objective, &authority, account, Some(&schema))
+                .and_then(DecisionObservation::into_anonymous_eval_requests).map_err(|_| "read_projection")?;
+            std::fs::write(directory.join("yc-read.json"), read.encode().map_err(|_| "decision_encoding")?).map_err(|_| "decision_output")?;
+        }
         let (decision, json_comparison) = DecisionObservation::try_new(&observation, &objective, &authority, account)
             .and_then(DecisionObservation::into_anonymous_eval_requests).map_err(|_| "decision_projection")?;
         std::fs::write(directory.join(format!("{name}.json")), decision.encode().map_err(|_| "decision_encoding")?)

@@ -556,7 +556,7 @@ fn extraction_kind_label(kind: SemanticExtractionValueKind) -> &'static str {
     }
 }
 
-fn extraction_schema_guard(schema: &SemanticExtractionSchema) -> [u8; 32] {
+pub(crate) fn extraction_schema_guard(schema: &SemanticExtractionSchema) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"zephium.semantic-extraction-schema.v2\0");
     hasher.update(schema.id().get().to_be_bytes());

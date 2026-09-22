@@ -695,6 +695,10 @@ fn write_omissions(
         (SemanticReadOmission::ByteLimit, "byte_limit"),
         (SemanticReadOmission::RoleSelection, "role_selection"),
         (
+            SemanticReadOmission::ReferenceSelection,
+            "reference_selection",
+        ),
+        (
             SemanticReadOmission::ValuePreviewLimit,
             "value_preview_limit",
         ),

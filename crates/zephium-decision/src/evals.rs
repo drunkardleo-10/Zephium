@@ -58,6 +58,7 @@ pub fn fixtures() -> Result<Vec<EvalFixture>, ContractError> {
             "cloudflare_government_01",
             include_str!("../evals/cloudflare_government_01.json"),
         ),
+        ("yc_read_01", include_str!("../evals/yc_read_01.json")),
     ];
     sources
         .into_iter()

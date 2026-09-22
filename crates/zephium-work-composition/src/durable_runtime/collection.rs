@@ -16,10 +16,17 @@ impl TryFrom<&WorkBrowseCollection> for WorkBrowseCollectionSchema {
 
     fn try_from(request: &WorkBrowseCollection) -> Result<Self, Self::Error> {
         request.validate()?;
-        let mut fields = vec![
-            SemanticExtractionFieldSchema::try_text("name".into(), true, 512)
-                .map_err(|_| WorkError::Invalid)?,
-        ];
+        let mut name = SemanticExtractionFieldSchema::try_text("name".into(), true, 512)
+            .map_err(|_| WorkError::Invalid)?;
+        if request.max_items == 1
+            && request
+                .columns
+                .iter()
+                .any(|column| column.extraction == WorkBrowseExtraction::Verbatim)
+        {
+            name = name.with_verbatim_text().map_err(|_| WorkError::Invalid)?;
+        }
+        let mut fields = vec![name];
         for column in &request.columns {
             let name = column.name.clone();
             let required = column.required;

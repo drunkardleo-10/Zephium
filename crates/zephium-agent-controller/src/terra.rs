@@ -2432,17 +2432,13 @@ impl AgentBrowserSession {
             .checked_add(1)
             .ok_or(AgentBrowserProviderError::Authority)?;
         let now = self.policy_now()?;
-        Ok(AgentModelCallRequest::new(
-            call_id,
-            self.lease.lease(),
-            self.account,
-            budget,
-            now,
+        Ok(
+            AgentModelCallRequest::new(call_id, self.lease.lease(), self.account, budget, now)
+                .with_remaining_native_actions(
+                    self.max_actions
+                        .saturating_sub(self.next_action.saturating_sub(1)),
+                ),
         )
-        .with_remaining_native_actions(
-            self.max_actions
-                .saturating_sub(self.next_action.saturating_sub(1)),
-        ))
     }
 
     /// Continues one settled read proposal against the exact already-delivered
@@ -2736,6 +2732,67 @@ impl AgentBrowserSession {
                 SemanticReadSensitivityLimit::PublicOnly,
             )
             .map_err(AgentBrowserProviderError::Extraction)
+    }
+
+    pub(super) async fn extract_located<'a>(
+        &mut self,
+        located: zephium_agentic::DecisionLocatedRead<'a>,
+    ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
+        use zephium_agentic::*;
+        self.check_live()?;
+        let generated = if let Some((schema, read)) = located.generation() {
+            if self.turns >= self.max_model_calls {
+                return Err(AgentBrowserProviderError::TurnLimit);
+            }
+            let payload = encode_semantic_extraction_request(
+                schema,
+                read,
+                SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+            )
+            .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+            .map_err(AgentBrowserProviderError::InitialEncoding)?;
+            let prior = self
+                .model_receipts
+                .last()
+                .map(|(_, input)| *input)
+                .ok_or(AgentBrowserProviderError::Authority)?;
+            let request = self.next_model_call_request()?;
+            let prepared = AgentProviderExtractionRequestDraft::try_located(
+                &located,
+                prior,
+                request,
+                &self.config,
+                self.objective
+                    .as_ref()
+                    .ok_or(AgentBrowserProviderError::Continuation)?,
+                payload,
+            )
+            .and_then(|draft| {
+                draft.try_prepare_for_provider_exact_count(&mut self.policy, request, schema, read)
+            })
+            .map_err(AgentBrowserProviderError::from_request)?;
+            let (input, output) = prepared.into_transport_parts();
+            let (terminal, _, _) = self.drive_terminal(input, Some(output)).await?;
+            Some(
+                self.extraction_output
+                    .take()
+                    .ok_or(AgentBrowserProviderError::Authority)?
+                    .finish(
+                        &terminal,
+                        schema,
+                        read,
+                        SemanticReadSensitivityLimit::PublicOnly,
+                    )
+                    .map_err(AgentBrowserProviderError::Extraction)?,
+            )
+        } else {
+            None
+        };
+        located.finish(generated).map_err(|error| {
+            AgentBrowserProviderError::Extraction(AgentProviderExtractionOutputError::Extraction(
+                error,
+            ))
+        })
     }
 
     async fn drive(
@@ -3454,7 +3511,8 @@ impl AgentBrowserSession {
     fn unverified_read_refusal(
         &mut self,
         error: crate::AgentBrowserActionError,
-    ) -> Result<Option<zephium_agentic::AgentProviderActionRefusal>, AgentBrowserProviderError> {
+    ) -> Result<Option<zephium_agentic::AgentProviderActionRefusal>, AgentBrowserProviderError>
+    {
         if !matches!(error, crate::AgentBrowserActionError::Verification(_))
             || self.action_executions.status().pending() != 0
             || self.action_settlements.status().pending() != 0
@@ -3496,8 +3554,10 @@ impl AgentBrowserSession {
         let Some(action) = self.action.take() else {
             return Ok(());
         };
-        let terminal = match action.into_failed_decision_read_batch()
-            .or_else(|action| action.into_failed_read_scroll_batch()) {
+        let terminal = match action
+            .into_failed_decision_read_batch()
+            .or_else(|action| action.into_failed_read_scroll_batch())
+        {
             Ok(terminal) => terminal,
             Err(action) => {
                 self.action = Some(*action);
@@ -4314,7 +4374,7 @@ mod tests {
             .unwrap();
         let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
         let mut answers = session
-            .decide_observation(&observation, &authority)
+            .decide_observation(&observation, &authority, None)
             .await
             .unwrap()
             .unwrap();
@@ -4374,7 +4434,7 @@ mod tests {
                 .unwrap();
             let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
             if let Some(mut answers) = session
-                .decide_observation(&observation, &authority)
+                .decide_observation(&observation, &authority, None)
                 .await
                 .unwrap()
             {

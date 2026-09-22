@@ -24,16 +24,7 @@ impl AgentWorkController {
             state.check_task_contract()?;
             state.native.check_control(worker, browser)?;
             let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
-            if session.decisions.is_none()
-                || !state.actions_before_extraction
-                || progress != AgentWorkTaskProgress::Continue
-                || session.next_action > session.max_actions
-                || session
-                    .policy
-                    .remaining_operations(session.lease.lease())
-                    .map_err(|_| AgentWorkFailure::Contract)?
-                    < 3
-            {
+            if session.decisions.is_none() || progress == AgentWorkTaskProgress::Complete {
                 break;
             }
             if state.decision_answers.is_none() {
@@ -59,14 +50,72 @@ impl AgentWorkController {
                         return Ok((observation, captured_at, progress, true));
                     }
                 }
-                if progress != AgentWorkTaskProgress::Continue {
+                if progress == AgentWorkTaskProgress::Complete {
                     break;
                 }
             }
             let Some(mut answers) = state.decision_answers.take() else {
                 break;
             };
+            if let Some(schema) = state.extraction_schema.as_ref() {
+                let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                if let Some(selection) = answers
+                    .take_read_selection(&observation, session.account, schema)
+                    .map_err(AgentWorkFailure::DecisionRead)?
+                {
+                    state.refresh_account(worker, browser)?;
+                    let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                    // A clipped or unavailable exact source leaves the normal planner available.
+                    let located =
+                        match selection.prepare(&observation, session.account, captured_at) {
+                            Ok(located) => located,
+                            Err(_) => break,
+                        };
+                    {
+                        state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
+                            AgentBrowserToolKind::Extract,
+                        ))?;
+                        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                        let result = Self::provider(
+                            &mut state.native,
+                            worker,
+                            browser,
+                            session.cancellation.clone(),
+                            session.extract_located(located),
+                        )
+                        .await?;
+                        if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete
+                        {
+                            return Err(AgentWorkFailure::Contract);
+                        }
+                        state.check_task_contract()?;
+                        state.extraction = Some(
+                            result
+                                .into_owned()
+                                .map_err(|_| AgentWorkFailure::Contract)?,
+                        );
+                        return Ok((
+                            observation,
+                            captured_at,
+                            AgentWorkTaskProgress::Complete,
+                            false,
+                        ));
+                    }
+                }
+            }
+            if !state.actions_before_extraction || progress != AgentWorkTaskProgress::Continue {
+                break;
+            }
             let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+            if session.next_action > session.max_actions
+                || session
+                    .policy
+                    .remaining_operations(session.lease.lease())
+                    .map_err(|_| AgentWorkFailure::Contract)?
+                    < 3
+            {
+                break;
+            }
             let more_below = answers
                 .take_more_below(&observation, session.account)
                 .map_err(AgentWorkFailure::DecisionMoreBelow)?;

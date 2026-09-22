@@ -2982,6 +2982,60 @@ pub struct AgentProviderExtractionRequestDraft {
 }
 
 impl AgentProviderExtractionRequestDraft {
+    /// A typed read starts a focused mapping call without inventing a browser-tool continuation.
+    #[cfg(feature = "provider-transport")]
+    pub fn try_located(
+        located: &crate::DecisionLocatedRead<'_>,
+        prior: AgentProviderInputMetricReceipt,
+        call: AgentModelCallRequest,
+        config: &AgentProviderCallConfig,
+        objective: &AgentProviderObjective,
+        payload: crate::SemanticExtractionModelPayload,
+    ) -> Result<Self, AgentProviderRequestError> {
+        let (schema, read) = located
+            .generation()
+            .ok_or(AgentProviderRequestError::Encoding)?;
+        if located.account() != call.account()
+            || prior.lease != call.lease()
+            || prior.call >= call.id()
+            || !payload.matches(schema, read)
+            || !read.matches_acknowledgement(located.baseline())
+            || !config.permits_tool(AgentBrowserToolKind::Extract)
+        {
+            return Err(AgentPolicyError::Authority.into());
+        }
+        let (text, semantic_stats, delivery) = payload.into_provider_parts();
+        let body = encode_openai_extraction_payload(
+            config,
+            objective.as_str(),
+            &text,
+            &bound_extraction_output_schema(schema, Some(read)),
+        )?;
+        let continuation_transcript =
+            AgentProviderTranscript::try_initial(Arc::from(objective.as_str()), text)
+                .ok_or(AgentProviderRequestError::Encoding)?;
+        Ok(Self {
+            request: AgentProviderRequest {
+                call: AgentProviderCallIdentity {
+                    manifest: prior.manifest,
+                    manifest_guard: prior.manifest_guard,
+                    call: call.id(),
+                    lease: call.lease(),
+                    node: prior.node,
+                },
+                config: config.clone(),
+                endpoint: AgentProviderEndpoint::OpenAiResponses,
+                body,
+            },
+            baseline: located.baseline().clone(),
+            delivery,
+            semantic_stats,
+            continuation_transcript,
+            schema: schema.id(),
+            subtree_target: None,
+        })
+    }
+
     /// Encodes the selected provider's fixed constrained-output protocol.
     pub fn try_new(
         continuation: AgentProviderBoundExtractionContinuation,
@@ -4567,14 +4621,28 @@ fn encode_openai_extraction_body(
     {
         return Err(AgentProviderRequestError::Encoding);
     }
+    encode_openai_extraction_payload(
+        config,
+        transcript.objective(),
+        transcript.latest().tool_result(),
+        output_schema,
+    )
+}
+
+fn encode_openai_extraction_payload(
+    config: &AgentProviderCallConfig,
+    objective: &str,
+    payload: &str,
+    output_schema: &Value,
+) -> Result<Vec<u8>, AgentProviderRequestError> {
+    if config.provider() != AgentProviderKind::OpenAiResponses {
+        return Err(AgentProviderRequestError::Encoding);
+    }
     // Mapping is a fresh constrained call. The exact Extract correlation stays
     // bound in Rust; browsing replay is neither evidence nor mapper authority.
     let input = vec![
-        OpenAiContinuationInputWire::Message(openai_text_message("user", transcript.objective())),
-        OpenAiContinuationInputWire::Message(openai_text_message(
-            "user",
-            transcript.latest().tool_result(),
-        )),
+        OpenAiContinuationInputWire::Message(openai_text_message("user", objective)),
+        OpenAiContinuationInputWire::Message(openai_text_message("user", payload)),
     ];
     let wire = OpenAiExtractionRequestWire {
         model: config.model().as_str(),
