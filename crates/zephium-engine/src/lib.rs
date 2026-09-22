@@ -126,7 +126,20 @@ pub fn run_macos_agentic_input_matrix(
     permit: &zephium_agentic::ProbeRunPermit,
     poll_control: impl FnMut(),
 ) -> Result<zephium_agentic::RunEvidence, zephium_agentic::ProbeFailure> {
-    platform::macos::run_agentic_input_matrix(request_id, matrix, permit, poll_control)
+    platform::macos::run_agentic_input_matrix(request_id, matrix, permit, false, poll_control)
+}
+
+/// Fixed local input experiment beneath a focus-owning native overlay.
+/// No production input authority or external navigation is exposed.
+#[cfg(all(target_os = "macos", feature = "native-agentic-input-probe"))]
+#[doc(hidden)]
+pub fn run_macos_owned_input_matrix(
+    request_id: u64,
+    matrix: &zephium_agentic::RunMatrixRequest,
+    permit: &zephium_agentic::ProbeRunPermit,
+    poll_control: impl FnMut(),
+) -> Result<zephium_agentic::RunEvidence, zephium_agentic::ProbeFailure> {
+    platform::macos::run_agentic_input_matrix(request_id, matrix, permit, true, poll_control)
 }
 
 /// Runs the fixed loopback production semantic-runtime qualification.

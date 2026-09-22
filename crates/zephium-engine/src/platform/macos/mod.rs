@@ -30,7 +30,7 @@ mod semantic_runtime;
 mod semantic_screenshot;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use semantic_screenshot::capture_work_frame;
-#[cfg(feature = "agentic-browser")]
+#[cfg(any(feature = "agentic-browser", feature = "native-agentic-input-probe"))]
 mod passive_page;
 #[cfg(feature = "agentic-browser")]
 mod work_human_presentation;

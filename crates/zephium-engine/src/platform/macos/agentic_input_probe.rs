@@ -3,6 +3,9 @@
 
 //! Release-excluded macOS native-input/isTrusted risk probe.
 
+#[path = "agentic_owned_input_probe.rs"]
+mod owned;
+
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -653,9 +656,14 @@ pub(crate) fn run(
     request_id: u64,
     matrix: &RunMatrixRequest,
     permit: &ProbeRunPermit,
+    owned_view: bool,
     mut poll_control: impl FnMut(),
 ) -> Result<RunEvidence, ProbeFailure> {
-    if request_id == 0 || request_id != permit.request_id() || matrix.validate().is_err() {
+    if request_id == 0
+        || request_id != permit.request_id()
+        || matrix.validate().is_err()
+        || (owned_view && matrix.presentation != PresentationState::VisibleFocused)
+    {
         return Err(failure(
             ProbeFailureCode::InvalidRequest,
             ProbeStage::Admit,
@@ -665,7 +673,7 @@ pub(crate) fn run(
         ));
     }
     let pending = objc2::rc::autoreleasepool(|_| {
-        begin_in_autorelease_pool(request_id, matrix, permit, &mut poll_control)
+        begin_in_autorelease_pool(request_id, matrix, permit, owned_view, &mut poll_control)
     })?;
     finish_teardown(pending, &mut poll_control)
 }
@@ -674,6 +682,7 @@ fn begin_in_autorelease_pool(
     request_id: u64,
     matrix: &RunMatrixRequest,
     permit: &ProbeRunPermit,
+    owned_view: bool,
     poll_control: &mut impl FnMut(),
 ) -> Result<PendingTeardown, ProbeFailure> {
     let started = Instant::now();
@@ -811,6 +820,14 @@ fn begin_in_autorelease_pool(
                 None,
             ));
         }
+        let owned_surface = if owned_view {
+            Some(
+                owned::OwnedInputSurface::new(mtm, &host.view, &window, &page)
+                    .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?,
+            )
+        } else {
+            None
+        };
         let mut presentation_control = NativeDispatchControl {
             permit,
             poll_control,
@@ -822,11 +839,12 @@ fn begin_in_autorelease_pool(
             &page,
             &webview,
             matrix.presentation,
+            owned_surface.as_ref(),
             &mut presentation_control,
         )
         .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
 
-        let runtime = runtime_fingerprint()
+        let runtime = runtime_fingerprint(owned_view)
             .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
         let capabilities = macos_capabilities();
         let mut cases = Vec::with_capacity(matrix.cases.len() * matrix.backends.len());
@@ -889,6 +907,7 @@ fn begin_in_autorelease_pool(
                     backend,
                     matrix.presentation,
                     geometry,
+                    owned_surface.as_ref(),
                     permit,
                     poll_control,
                     run_deadline,
@@ -1062,6 +1081,7 @@ fn apply_presentation(
     page: &WryWebView,
     webview: &wry::WebView,
     presentation: PresentationState,
+    owned_surface: Option<&owned::OwnedInputSurface>,
     control: &mut NativeDispatchControl<'_>,
 ) -> Result<(), AdapterError> {
     match presentation {
@@ -1094,7 +1114,10 @@ fn apply_presentation(
                 app.activateIgnoringOtherApps(true);
             }
             control.check()?;
-            if !window.makeFirstResponder(Some(page)) {
+            if !match owned_surface {
+                Some(surface) => surface.focus_chrome(),
+                None => window.makeFirstResponder(Some(page)),
+            } {
                 return Err(AdapterError::NativeConstruction);
             }
             control.check()?;
@@ -1166,6 +1189,7 @@ fn run_case(
     backend: InputBackend,
     presentation: PresentationState,
     geometry: Geometry,
+    owned_surface: Option<&owned::OwnedInputSurface>,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
     run_deadline: Instant,
@@ -1175,6 +1199,20 @@ fn run_case(
     let app_active_before = app.isActive();
     let key_before = window.isKeyWindow();
     let focus_before = native_focus_owner(window, false);
+    if backend == InputBackend::MacosAppKitEvent {
+        if let Some(surface) = owned_surface {
+            let mut control = NativeDispatchControl {
+                permit,
+                poll_control,
+                deadline: run_deadline,
+            };
+            surface
+                .verify_refusals(case, geometry, &mut control)
+                .map_err(|error| {
+                    adapter_failure(error, ProbeStage::Execute, Some(case), Some(backend))
+                })?;
+        }
+    }
     let outcome_hint = execute_backend(
         window,
         page,
@@ -1182,6 +1220,7 @@ fn run_case(
         backend,
         presentation,
         geometry,
+        owned_surface,
         permit,
         poll_control,
         run_deadline,
@@ -1203,6 +1242,29 @@ fn run_case(
             ));
         }
     };
+    if owned_surface.is_some_and(|surface| !surface.current()) {
+        return Err(adapter_failure(
+            AdapterError::FocusPolicy,
+            ProbeStage::Settle,
+            Some(case),
+            Some(backend),
+        ));
+    }
+    if owned_surface.is_some()
+        && state
+            .events
+            .iter()
+            .filter(|event| event.kind == InputEventKind::Click)
+            .count()
+            > 1
+    {
+        return Err(adapter_failure(
+            AdapterError::InvalidEvidence,
+            ProbeStage::Verify,
+            Some(case),
+            Some(backend),
+        ));
+    }
     let target = case.target();
     let target_received_focus = state
         .events
@@ -1259,6 +1321,7 @@ fn execute_backend(
     backend: InputBackend,
     presentation: PresentationState,
     geometry: Geometry,
+    owned_surface: Option<&owned::OwnedInputSurface>,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
     deadline: Instant,
@@ -1277,7 +1340,13 @@ fn execute_backend(
             Ok(None)
         }
         InputBackend::MacosAppKitEvent => {
-            dispatch_appkit(window, page, case, geometry, &mut control)?;
+            if let Some(surface) = owned_surface {
+                if !surface.dispatch_click(case, geometry, &mut control)? {
+                    return Ok(Some(CaseOutcome::Unsupported));
+                }
+            } else {
+                dispatch_appkit(window, page, case, geometry, &mut control)?;
+            }
             Ok(None)
         }
         InputBackend::MacosAccessibility => {
@@ -1566,7 +1635,7 @@ fn native_focus_owner(window: &NSWindow, target_focused: bool) -> FocusOwner {
     }
 }
 
-fn runtime_fingerprint() -> Result<RuntimeFingerprint, AdapterError> {
+fn runtime_fingerprint(owned_view: bool) -> Result<RuntimeFingerprint, AdapterError> {
     let version = NSProcessInfo::processInfo().operatingSystemVersion();
     let os_version = format!(
         "{}.{}.{}",
@@ -1579,8 +1648,12 @@ fn runtime_fingerprint() -> Result<RuntimeFingerprint, AdapterError> {
         engine: EvidenceLabel::new("WebKit").map_err(|_| AdapterError::InvalidEvidence)?,
         engine_version: EvidenceLabel::new(engine_version)
             .map_err(|_| AdapterError::InvalidEvidence)?,
-        adapter_revision: EvidenceLabel::new("native-input-m2")
-            .map_err(|_| AdapterError::InvalidEvidence)?,
+        adapter_revision: EvidenceLabel::new(if owned_view {
+            "native-input-owned-v1"
+        } else {
+            "native-input-m2"
+        })
+        .map_err(|_| AdapterError::InvalidEvidence)?,
     })
 }
 
@@ -1707,6 +1780,29 @@ fn failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_input_requires_the_dedicated_focused_fixture() {
+        for presentation in [
+            PresentationState::Hidden,
+            PresentationState::VisibleBackground,
+        ] {
+            let gate = zephium_agentic::ProbeGate::new();
+            let permit = gate.try_start(1).expect("permit");
+            let matrix = RunMatrixRequest {
+                cases: vec![FixtureCase::Button],
+                backends: vec![InputBackend::MacosAppKitEvent],
+                presentation,
+            };
+            let result = run(1, &matrix, &permit, true, || {});
+            assert_eq!(
+                result
+                    .expect_err("refuse before creating AppKit objects")
+                    .code,
+                ProbeFailureCode::InvalidRequest
+            );
+        }
+    }
 
     #[test]
     fn requested_presentation_requires_observed_native_state() {

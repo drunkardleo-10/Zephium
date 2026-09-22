@@ -36,10 +36,11 @@ mod macos {
             run_ci_hidden_fixed_dom();
             return;
         }
-        let allow_visible_focused = match arguments.as_slice() {
-            [] => false,
-            [argument] if argument == "--allow-visible-focused" => true,
-            _ => fail("expected no arguments, --allow-visible-focused, or --ci-hidden-fixed-dom"),
+        let (allow_visible_focused, owned_view) = match arguments.as_slice() {
+            [] => (false, false),
+            [argument] if argument == "--allow-visible-focused" => (true, false),
+            [argument] if argument == "--owned-view-control" => (true, true),
+            _ => fail("expected no arguments, --allow-visible-focused, --owned-view-control, or --ci-hidden-fixed-dom"),
         };
         let mut reader = match ControllerReader::start() {
             Ok(reader) => reader,
@@ -118,72 +119,72 @@ mod macos {
 
         let output_failed = std::cell::Cell::new(false);
         let shutdown_request = std::cell::Cell::new(None::<u64>);
-        let result = zephium_engine::run_macos_agentic_input_matrix(
-            run_request_id,
-            &matrix,
-            &permit,
-            || {
-                while let Ok(request) = reader.try_recv() {
-                    match request.command {
-                        ProbeCommand::Cancel(cancel) => {
-                            if gate.cancel(cancel.target_request_id) {
-                                output_failed.set(
-                                    output_failed.get()
-                                        || !emit(ProbeResponse {
-                                            protocol_version: PROBE_PROTOCOL_VERSION,
-                                            request_id: request.request_id,
-                                            reply: ProbeReply::Cancelled(CancelledReply {
-                                                target_request_id: cancel.target_request_id,
-                                            }),
-                                        }),
-                                );
-                            } else {
-                                emit_rejection(
-                                    request.request_id,
-                                    ProbeFailureCode::InvalidRequest,
-                                    ProbeStage::Admit,
-                                    false,
-                                );
-                            }
-                        }
-                        ProbeCommand::Hello(_) => {
+        let run = if owned_view {
+            zephium_engine::run_macos_owned_input_matrix
+        } else {
+            zephium_engine::run_macos_agentic_input_matrix
+        };
+        let result = run(run_request_id, &matrix, &permit, || {
+            while let Ok(request) = reader.try_recv() {
+                match request.command {
+                    ProbeCommand::Cancel(cancel) => {
+                        if gate.cancel(cancel.target_request_id) {
                             output_failed.set(
                                 output_failed.get()
                                     || !emit(ProbeResponse {
                                         protocol_version: PROBE_PROTOCOL_VERSION,
                                         request_id: request.request_id,
-                                        reply: ProbeReply::Hello(HelloReply::current()),
+                                        reply: ProbeReply::Cancelled(CancelledReply {
+                                            target_request_id: cancel.target_request_id,
+                                        }),
                                     }),
                             );
+                        } else {
+                            emit_rejection(
+                                request.request_id,
+                                ProbeFailureCode::InvalidRequest,
+                                ProbeStage::Admit,
+                                false,
+                            );
                         }
-                        ProbeCommand::Shutdown(_) => {
-                            if shutdown_request.get().is_none() {
-                                shutdown_request.set(Some(request.request_id));
-                                let _ = gate.cancel(run_request_id);
-                            } else {
-                                emit_rejection(
-                                    request.request_id,
-                                    ProbeFailureCode::ResourceExhausted,
-                                    ProbeStage::Teardown,
-                                    true,
-                                );
-                            }
-                        }
-                        ProbeCommand::RunMatrix(_) => {
+                    }
+                    ProbeCommand::Hello(_) => {
+                        output_failed.set(
+                            output_failed.get()
+                                || !emit(ProbeResponse {
+                                    protocol_version: PROBE_PROTOCOL_VERSION,
+                                    request_id: request.request_id,
+                                    reply: ProbeReply::Hello(HelloReply::current()),
+                                }),
+                        );
+                    }
+                    ProbeCommand::Shutdown(_) => {
+                        if shutdown_request.get().is_none() {
+                            shutdown_request.set(Some(request.request_id));
+                            let _ = gate.cancel(run_request_id);
+                        } else {
                             emit_rejection(
                                 request.request_id,
                                 ProbeFailureCode::ResourceExhausted,
-                                ProbeStage::Admit,
+                                ProbeStage::Teardown,
                                 true,
                             );
                         }
                     }
+                    ProbeCommand::RunMatrix(_) => {
+                        emit_rejection(
+                            request.request_id,
+                            ProbeFailureCode::ResourceExhausted,
+                            ProbeStage::Admit,
+                            true,
+                        );
+                    }
                 }
-                if reader.failed() || output_failed.get() {
-                    let _ = gate.cancel(run_request_id);
-                }
-            },
-        );
+            }
+            if reader.failed() || output_failed.get() {
+                let _ = gate.cancel(run_request_id);
+            }
+        });
         drop(permit);
 
         let response = ProbeResponse {
