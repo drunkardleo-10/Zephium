@@ -1494,7 +1494,10 @@ export type WorkBrowseColumn = {
 	name: string,
 	value: WorkBrowseValue,
 	required: boolean,
+	extraction?: WorkBrowseExtraction,
 };
+
+export type WorkBrowseExtraction = "verbatim" | "generate";
 
 export type WorkBrowseRoute = {
 	origin: string,
