@@ -1130,7 +1130,11 @@ impl Shell {
                 .iter()
                 .all(|page| page.ready_for_group_shutdown())
         {
-            for page in &mut self.retained_pages {
+            if let Some(page) = self
+                .retained_pages
+                .iter_mut()
+                .find(|page| !page.is_closed())
+            {
                 page.allow_group_shutdown();
             }
         }
@@ -1432,7 +1436,11 @@ impl Shell {
                     .iter()
                     .all(|page| page.ready_for_group_shutdown())
                 {
-                    for page in &mut self.retained_pages {
+                    if let Some(page) = self
+                        .retained_pages
+                        .iter_mut()
+                        .find(|page| !page.is_closed())
+                    {
                         page.allow_group_shutdown();
                     }
                 }

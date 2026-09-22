@@ -651,6 +651,31 @@ fn work_page_group_retains_three_distinct_pages_and_rejects_unrelated_admission(
     assert!(!views[1].is_closed() && !views[2].is_closed());
     assert_eq!(native_pages[0].destructions.load(Ordering::Acquire), 1);
     assert_eq!(native_pages[1].destructions.load(Ordering::Acquire), 0);
+    native_pages[0]
+        .hold_global_audit
+        .store(true, Ordering::Release);
+    native_pages[1]
+        .hold_global_audit
+        .store(true, Ordering::Release);
+    let auditing = native_pages.clone();
+    let audits = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        for index in 0..2 {
+            while auditing[index]
+                .pending_global_audit
+                .lock()
+                .unwrap()
+                .is_none()
+            {
+                assert!(Instant::now() < deadline, "group audit wait");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(auditing[index + 1..]
+                .iter()
+                .all(|native| !native.global_sealed.load(Ordering::Acquire)));
+            auditing[index].release_global_audit();
+        }
+    });
     for server in servers.lock().unwrap().drain(..) {
         assert_eq!(server.join().unwrap(), 2);
     }
@@ -663,6 +688,7 @@ fn work_page_group_retains_three_distinct_pages_and_rejects_unrelated_admission(
         }
     }
     assert_eq!(shutdown.recv(), Ok(crate::ShutdownOutcome::Clean));
+    audits.join().unwrap();
     for native in native_pages {
         native.join();
         assert_eq!(native.destructions.load(Ordering::Acquire), 1);
