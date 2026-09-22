@@ -55,6 +55,7 @@ const TEARDOWN_WINDOW: Duration = Duration::from_millis(250);
 const RUN_LOOP_SLICE: Duration = Duration::from_millis(5);
 const MAX_RUNTIME_MESSAGE_UTF16: usize = 32 * 1_024;
 const MAX_RUNTIME_MESSAGE_UTF8: usize = 32 * 1_024;
+const PROBE_VIEWPORT: (u32, u32) = (760, 640);
 
 struct ProbeHostView {
     view: Retained<NSView>,
@@ -119,6 +120,7 @@ enum AdapterError {
     Timeout,
     NativeConstruction,
     Navigation,
+    FocusPolicy,
     InvalidEvidence,
     NativeTeardown,
     ProfileTeardown,
@@ -135,6 +137,7 @@ impl AdapterError {
             Self::ProfileTeardown => ProbeFailureCode::ProfileTeardownIncomplete,
             Self::FixtureTeardown => ProbeFailureCode::FixtureTeardownIncomplete,
             Self::InvalidEvidence => ProbeFailureCode::VerificationFailed,
+            Self::FocusPolicy => ProbeFailureCode::FocusPolicyViolation,
         }
     }
 
@@ -734,7 +737,7 @@ fn begin_in_autorelease_pool(
     app.finishLaunching();
     let app_active_before_presentation = app.isActive();
 
-    let window = new_window(mtm)
+    let window = new_window(mtm, matrix.presentation)
         .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
     let host = ProbeHostView {
         view: window.contentView().ok_or_else(|| {
@@ -753,6 +756,10 @@ fn begin_in_autorelease_pool(
     let popup_requested = Rc::new(Cell::new(false));
     let popup_request_callback = Rc::clone(&popup_requested);
     let webview = wry::WebViewBuilder::new()
+        .with_bounds(wry::Rect {
+            position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+            size: wry::dpi::LogicalSize::new(PROBE_VIEWPORT.0, PROBE_VIEWPORT.1).into(),
+        })
         .with_incognito(true)
         .with_visible(false)
         .with_webview_configuration(configuration)
@@ -779,6 +786,8 @@ fn begin_in_autorelease_pool(
             )
         })?;
     let page = webview.webview();
+    let viewport_valid =
+        page.frame().size == NSSize::new(f64::from(PROBE_VIEWPORT.0), f64::from(PROBE_VIEWPORT.1));
     runtime_mailbox
         .bind_page(&page)
         .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
@@ -794,7 +803,7 @@ fn begin_in_autorelease_pool(
     };
     let run_loop = NSRunLoop::mainRunLoop();
     let execution = (|| -> Result<_, ProbeFailure> {
-        if !page_configuration_valid {
+        if !page_configuration_valid || !viewport_valid {
             return Err(adapter_failure(
                 AdapterError::NativeConstruction,
                 ProbeStage::Construct,
@@ -855,6 +864,20 @@ fn begin_in_autorelease_pool(
                 .map_err(|error| {
                     adapter_failure(error, ProbeStage::Navigate, Some(case), Some(backend))
                 })?;
+                if !presentation_matches(
+                    matrix.presentation,
+                    window.isVisible(),
+                    window.isKeyWindow(),
+                    app.isActive(),
+                    app_active_before_presentation,
+                ) {
+                    return Err(adapter_failure(
+                        AdapterError::FocusPolicy,
+                        ProbeStage::Execute,
+                        Some(case),
+                        Some(backend),
+                    ));
+                }
                 let evidence = run_case(
                     &app,
                     &window,
@@ -988,14 +1011,24 @@ fn finish_teardown(
     Ok(evidence)
 }
 
-fn new_window(mtm: MainThreadMarker) -> Result<Retained<NSWindow>, AdapterError> {
+fn new_window(
+    mtm: MainThreadMarker,
+    presentation: PresentationState,
+) -> Result<Retained<NSWindow>, AdapterError> {
     // SAFETY: the marker proves AppKit main-thread affinity. The window is
     // retained through child teardown and configured not to consume itself on close.
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
-            NSRect::new(NSPoint::new(80.0, 80.0), NSSize::new(760.0, 640.0)),
-            NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+            NSRect::new(
+                NSPoint::new(80.0, 80.0),
+                NSSize::new(f64::from(PROBE_VIEWPORT.0), f64::from(PROBE_VIEWPORT.1)),
+            ),
+            if presentation == PresentationState::VisibleFocused {
+                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable
+            } else {
+                NSWindowStyleMask::Borderless
+            },
             NSBackingStoreType::Buffered,
             false,
         )
@@ -1007,6 +1040,20 @@ fn new_window(mtm: MainThreadMarker) -> Result<Retained<NSWindow>, AdapterError>
         .contentView()
         .ok_or(AdapterError::NativeConstruction)?;
     Ok(window)
+}
+
+fn presentation_matches(
+    presentation: PresentationState,
+    visible: bool,
+    key: bool,
+    active: bool,
+    previously_active: bool,
+) -> bool {
+    match presentation {
+        PresentationState::VisibleFocused => visible && key && active,
+        PresentationState::VisibleBackground => visible && !key && (!active || previously_active),
+        PresentationState::Hidden => !visible && !key && (!active || previously_active),
+    }
 }
 
 fn apply_presentation(
@@ -1532,7 +1579,7 @@ fn runtime_fingerprint() -> Result<RuntimeFingerprint, AdapterError> {
         engine: EvidenceLabel::new("WebKit").map_err(|_| AdapterError::InvalidEvidence)?,
         engine_version: EvidenceLabel::new(engine_version)
             .map_err(|_| AdapterError::InvalidEvidence)?,
-        adapter_revision: EvidenceLabel::new("native-input-m1")
+        adapter_revision: EvidenceLabel::new("native-input-m2")
             .map_err(|_| AdapterError::InvalidEvidence)?,
     })
 }
@@ -1590,6 +1637,17 @@ fn accessibility_supported_case(case: FixtureCase) -> bool {
 
 fn pump_once(run_loop: &NSRunLoop) {
     objc2::rc::autoreleasepool(|_| {
+        if let Some(mtm) = MainThreadMarker::new() {
+            let app = NSApplication::sharedApplication(mtm);
+            if let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                objc2_app_kit::NSEventMask::AppKitDefined,
+                None,
+                objc2_foundation::ns_string!("NSDefaultRunLoopMode"),
+                true,
+            ) {
+                app.sendEvent(&event);
+            }
+        }
         run_loop.runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(
             RUN_LOOP_SLICE.as_secs_f64(),
         ));
@@ -1649,6 +1707,49 @@ fn failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requested_presentation_requires_observed_native_state() {
+        use PresentationState::*;
+        assert!(presentation_matches(
+            VisibleFocused,
+            true,
+            true,
+            true,
+            false
+        ));
+        assert!(!presentation_matches(
+            VisibleFocused,
+            true,
+            false,
+            false,
+            false
+        ));
+        assert!(presentation_matches(
+            VisibleBackground,
+            true,
+            false,
+            false,
+            false
+        ));
+        assert!(!presentation_matches(
+            VisibleBackground,
+            true,
+            true,
+            false,
+            false
+        ));
+        assert!(!presentation_matches(
+            VisibleBackground,
+            true,
+            false,
+            true,
+            false
+        ));
+        assert!(presentation_matches(Hidden, false, false, false, false));
+        assert!(!presentation_matches(Hidden, true, false, false, false));
+        assert!(!presentation_matches(Hidden, false, false, true, false));
+    }
 
     fn state(case: FixtureCase) -> FixtureState {
         FixtureState {
