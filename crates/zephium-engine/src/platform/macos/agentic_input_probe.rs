@@ -712,6 +712,10 @@ fn begin_in_autorelease_pool(
             false,
         )
     })?;
+    let app = NSApplication::sharedApplication(mtm);
+    initialize_application(&app, matrix.presentation)
+        .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
+    let app_active_before_presentation = app.isActive();
     let profile = EphemeralProbeProfile::new()
         .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
     let configuration = profile
@@ -740,11 +744,6 @@ fn begin_in_autorelease_pool(
             true,
         )
     })?;
-
-    let app = NSApplication::sharedApplication(mtm);
-    let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    app.finishLaunching();
-    let app_active_before_presentation = app.isActive();
 
     let window = new_window(mtm, matrix.presentation)
         .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
@@ -1028,6 +1027,42 @@ fn finish_teardown(
         )
     })?;
     Ok(evidence)
+}
+
+fn initialize_application(
+    app: &NSApplication,
+    presentation: PresentationState,
+) -> Result<(), AdapterError> {
+    if presentation == PresentationState::VisibleFocused {
+        if app.activationPolicy() != NSApplicationActivationPolicy::Accessory
+            && !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory)
+        {
+            return Err(AdapterError::NativeConstruction);
+        }
+        app.finishLaunching();
+        return Ok(());
+    }
+    // Launch without activation before any native window exists.
+    let valid = |policy| {
+        app.activationPolicy() == policy && !app.isActive() && app.windows().is_empty()
+    };
+    if app.isActive()
+        || !app.windows().is_empty()
+        || (app.activationPolicy() != NSApplicationActivationPolicy::Prohibited
+            && !app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited))
+        || !valid(NSApplicationActivationPolicy::Prohibited)
+    {
+        return Err(AdapterError::FocusPolicy);
+    }
+    app.finishLaunching();
+    if !valid(NSApplicationActivationPolicy::Prohibited)
+        || (app.activationPolicy() != NSApplicationActivationPolicy::Accessory
+            && !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory))
+        || !valid(NSApplicationActivationPolicy::Accessory)
+    {
+        return Err(AdapterError::FocusPolicy);
+    }
+    Ok(())
 }
 
 fn new_window(
