@@ -300,6 +300,20 @@ pub use platform::macos::MacosAgenticSemanticTwoActionScenario;
 #[doc(hidden)]
 pub type MacosAgentWorkProbePoll = Box<dyn FnMut(bool) -> Option<Result<(), &'static str>>>;
 
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe", feature = "agentic-browser-qa"))]
+#[doc(hidden)]
+pub use platform::macos::agentic_decision_probe::DecisionObservationSite;
+
+/// Records a fixed public anonymous page through the Work observation lifecycle.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe", feature = "agentic-browser-qa"))]
+#[doc(hidden)]
+pub fn run_macos_decision_observation_probe(
+    site: DecisionObservationSite,
+    capture: impl FnMut(zephium_agentic::SemanticObservation) -> Result<(), &'static str> + 'static,
+) -> Result<(), &'static str> {
+    platform::macos::agentic_decision_probe::run(site, capture)
+}
+
 /// Pumps the actual production EngineHost port for an excluded public qualifier.
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
 #[doc(hidden)]

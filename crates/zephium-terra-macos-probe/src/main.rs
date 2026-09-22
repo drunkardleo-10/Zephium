@@ -21,6 +21,8 @@ mod work_route;
 mod work_sites;
 #[cfg(all(target_os = "macos", feature = "decision-eval"))]
 mod decision_eval;
+#[cfg(all(target_os = "macos", feature = "decision-eval"))]
+mod decision_observation;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
@@ -35,6 +37,14 @@ fn main() {
     let result = match arguments.as_slice() {
         #[cfg(feature = "decision-eval")]
         [argument] if argument == "--live-decision-eval" => decision_eval::run(),
+        #[cfg(feature = "decision-eval")]
+        [argument, case] if argument == "--live-decision-eval-case" => decision_eval::run_case(case, ProbeModel::Luna),
+        #[cfg(feature = "decision-eval")]
+        [argument] if argument == "--live-decision-eval-terra" => decision_eval::run_terra(),
+        #[cfg(feature = "decision-eval")]
+        [argument, case] if argument == "--live-decision-eval-case-terra" => decision_eval::run_case(case, ProbeModel::Terra),
+        #[cfg(feature = "decision-eval")]
+        [argument, site] if argument == "--record-decision-observation" => decision_observation::run(site),
         [argument] if argument == "--check-provider-keychain" => {
             let started = std::time::Instant::now();
             let result = zephium_agentic::load_macos_probe_openai_credential()

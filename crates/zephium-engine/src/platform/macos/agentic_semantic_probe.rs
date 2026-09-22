@@ -3674,14 +3674,7 @@ fn work_probe_delivers_event(
 ) -> bool {
     use objc2_app_kit::NSEventType;
     match input {
-        crate::MacosWorkProbeInput::LifecycleOnly => matches!(
-            event,
-            NSEventType::AppKitDefined
-                | NSEventType::SystemDefined
-                | NSEventType::ApplicationDefined
-                | NSEventType::Periodic
-                | NSEventType::CursorUpdate
-        ),
+        crate::MacosWorkProbeInput::LifecycleOnly => event == NSEventType::AppKitDefined,
         crate::MacosWorkProbeInput::Human => true,
     }
 }
@@ -3715,6 +3708,10 @@ fn only_explicit_human_probe_delivers_physical_input() {
         NSEventType::DirectTouch,
         NSEventType::Pressure,
         NSEventType::QuickLook,
+        NSEventType::SystemDefined,
+        NSEventType::ApplicationDefined,
+        NSEventType::Periodic,
+        NSEventType::CursorUpdate,
         NSEventType(63),
     ] {
         assert!(!work_probe_delivers_event(
