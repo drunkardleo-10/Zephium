@@ -723,6 +723,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     fact.validate(&plan, revision).unwrap();
     // A settled search binds its provider record and usage.
     let record = WorkProviderSearchRecordV1 {
+        ranking: None,
         id: WorkArtifactId::from(40),
         node,
         attempt,

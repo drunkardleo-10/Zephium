@@ -34,23 +34,9 @@ impl WorkAttemptProbe {
             });
         }
         self.record_activity(zephium_ipc::work::WorkActivityV1::Searching);
-        let result = {
-            let cancelled = async {
-                loop {
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                    // A poll the store could not answer is not a stop.
-                    if self.cancellation_requested().await.unwrap_or(false) {
-                        break;
-                    }
-                }
-            };
-            tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(self.deadline().into()) => Err(WorkPublicSearchError::OutcomeUnknown),
-                _ = cancelled => Err(WorkPublicSearchError::OutcomeUnknown),
-                result = provider.search(scope, context, limits) => result,
-            }
-        };
+        let result = self
+            .bounded_search(provider.search(scope, context, limits))
+            .await;
         // A response that arrived is a known outcome: what it lacks is a
         // failed step with a reason. Only a lost outcome stays unknown.
         let failed = |usage: WorkUsage, note: &'static str| WorkSearchOutcome {
@@ -78,17 +64,31 @@ impl WorkAttemptProbe {
                     None
                 };
                 match refused {
-                    None => WorkSearchOutcome {
-                        status: WorkAttemptStatus::Succeeded,
-                        usage: Some(result.usage),
-                        note: None,
-                        record: Some(WorkProviderSearchRecordV1 {
-                            id: WorkArtifactId::generate(),
-                            node: self.node(),
-                            attempt: self.attempt(),
-                            evidence: result.evidence,
-                        }),
-                    },
+                    None => {
+                        let ranked = self
+                            .rank_search(provider, scope, &result.evidence, result.usage, limits)
+                            .await?;
+                        match ranked {
+                            Some((usage, ranking)) => WorkSearchOutcome {
+                                status: WorkAttemptStatus::Succeeded,
+                                usage: Some(usage),
+                                note: None,
+                                record: Some(WorkProviderSearchRecordV1 {
+                                    id: WorkArtifactId::generate(),
+                                    node: self.node(),
+                                    attempt: self.attempt(),
+                                    evidence: result.evidence,
+                                    ranking,
+                                }),
+                            },
+                            None => WorkSearchOutcome {
+                                status: WorkAttemptStatus::OutcomeUnknown,
+                                usage: None,
+                                note: None,
+                                record: None,
+                            },
+                        }
+                    }
                     Some(note) => failed(result.usage, note),
                 }
             }
@@ -105,6 +105,86 @@ impl WorkAttemptProbe {
                 record: None,
             },
         })
+    }
+
+    async fn bounded_search<T>(
+        &self,
+        future: impl std::future::Future<Output = Result<T, WorkPublicSearchError>>,
+    ) -> Result<T, WorkPublicSearchError> {
+        let cancelled = async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if self.cancellation_requested().await.unwrap_or(false) {
+                    break;
+                }
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(self.deadline().into()) => Err(WorkPublicSearchError::OutcomeUnknown),
+            _ = cancelled => Err(WorkPublicSearchError::OutcomeUnknown),
+            result = future => result,
+        }
+    }
+
+    async fn rank_search(
+        &self,
+        provider: &dyn WorkPublicSearchProvider,
+        scope: &WorkPublicSearchScope,
+        evidence: &WorkProviderSearchEvidenceV1,
+        used: WorkUsage,
+        limits: WorkExecutionLimits,
+    ) -> Result<Option<(WorkUsage, Option<WorkPublicSearchRanking>)>, WorkError> {
+        let remaining = WorkExecutionLimits {
+            model_tokens: limits.model_tokens - used.model_tokens,
+            cost_micro_usd: limits.cost_micro_usd - used.cost_micro_usd,
+            operations: limits.operations - used.operations,
+            ..limits
+        };
+        if evidence.citations.len() < 2
+            || remaining.validate().is_err()
+            || Instant::now() >= self.deadline()
+            || self.cancellation_requested().await?
+        {
+            return Ok(Some((used, None)));
+        }
+        let result = self
+            .bounded_search(provider.rerank(scope, evidence, remaining, self.deadline()))
+            .await;
+        let (extra, preferred) = match result {
+            Ok(ranking) => {
+                let preferred = if ranking.validate(evidence).is_ok() {
+                    ranking.preferred
+                } else {
+                    vec![]
+                };
+                (ranking.usage, preferred)
+            }
+            Err(WorkPublicSearchError::NotDispatched(_)) => return Ok(Some((used, None))),
+            Err(WorkPublicSearchError::Rejected(usage)) => (usage, vec![]),
+            Err(WorkPublicSearchError::OutcomeUnknown) => return Ok(None),
+        };
+        if !extra.within(remaining) || (extra != WorkUsage::default() && extra.operations == 0) {
+            return Ok(None);
+        }
+        Ok(Some((
+            WorkUsage {
+                model_tokens: used.model_tokens + extra.model_tokens,
+                cost_micro_usd: used.cost_micro_usd + extra.cost_micro_usd,
+                operations: used.operations + extra.operations,
+                accounting: if used.accounting == WorkUsageAccounting::ConservativeReservation
+                    || extra.accounting == WorkUsageAccounting::ConservativeReservation
+                {
+                    WorkUsageAccounting::ConservativeReservation
+                } else {
+                    WorkUsageAccounting::Exact
+                },
+            },
+            (extra != WorkUsage::default()).then_some(WorkPublicSearchRanking {
+                preferred,
+                usage: extra,
+            }),
+        )))
     }
 }
 

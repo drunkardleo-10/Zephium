@@ -915,6 +915,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
     )
     .unwrap();
     let record = WorkProviderSearchRecordV1 {
+        ranking: None,
         id: WorkArtifactId::from(40),
         node,
         attempt,

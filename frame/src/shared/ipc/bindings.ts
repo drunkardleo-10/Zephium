@@ -2076,7 +2076,7 @@ export type WorkExecutionFact_Deserialize = {
 	status: WorkExecutionStatus,
 	attempts: WorkAttemptFact[],
 	artifacts: WorkArtifactV1_Deserialize[],
-	provider_evidence?: WorkProviderSearchRecordV1[],
+	provider_evidence?: WorkProviderSearchRecordV1_Deserialize[],
 	/**  What file steps disclosed: listings, excerpts, hits and applied diffs. */
 	file_evidence?: WorkFileRecordV1[],
 	/**  User edits and decisions never overwrite the original agent output. */
@@ -2095,7 +2095,7 @@ export type WorkExecutionFact_Serialize = {
 	status: WorkExecutionStatus,
 	attempts: WorkAttemptFact[],
 	artifacts: WorkArtifactV1_Serialize[],
-	provider_evidence: WorkProviderSearchRecordV1[],
+	provider_evidence: WorkProviderSearchRecordV1_Serialize[],
 	/**  What file steps disclosed: listings, excerpts, hits and applied diffs. */
 	file_evidence?: WorkFileRecordV1[],
 	/**  User edits and decisions never overwrite the original agent output. */
@@ -2624,17 +2624,42 @@ export type WorkProviderSearchEvidenceV1 = {
  *  Original provider attribution committed with its attempt's outputs. This
  *  carries no native browser reference or authority to open its source URLs.
  */
-export type WorkProviderSearchRecordV1 = {
+export type WorkProviderSearchRecordV1 = WorkProviderSearchRecordV1_Serialize | WorkProviderSearchRecordV1_Deserialize;
+
+/**
+ *  Original provider attribution committed with its attempt's outputs. This
+ *  carries no native browser reference or authority to open its source URLs.
+ */
+export type WorkProviderSearchRecordV1_Deserialize = {
 	id: WorkArtifactId,
 	node: WorkPlanNodeId,
 	attempt: WorkAttemptId,
 	evidence: WorkProviderSearchEvidenceV1,
+	ranking?: WorkPublicSearchRanking | null,
+};
+
+/**
+ *  Original provider attribution committed with its attempt's outputs. This
+ *  carries no native browser reference or authority to open its source URLs.
+ */
+export type WorkProviderSearchRecordV1_Serialize = {
+	id: WorkArtifactId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	evidence: WorkProviderSearchEvidenceV1,
+	ranking?: WorkPublicSearchRanking | null,
 };
 
 export type WorkPublicDiscoveryScope = {
 	/**  Exact initial public search disclosure reviewed before execution. */
 	search_query: string,
 	max_hops: number,
+};
+
+/**  Advisory source priority; IDs are one-based indices into the unchanged citations. */
+export type WorkPublicSearchRanking = {
+	preferred: number[],
+	usage: WorkUsage,
 };
 
 export type WorkPublicSearchScope = {

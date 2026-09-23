@@ -1071,6 +1071,31 @@ pub struct WorkProviderSearchRecordV1 {
     pub node: WorkPlanNodeId,
     pub attempt: WorkAttemptId,
     pub evidence: super::search::WorkProviderSearchEvidenceV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ranking: Option<super::search::WorkPublicSearchRanking>,
+}
+impl WorkProviderSearchRecordV1 {
+    fn admits_usage(&self, usage: WorkUsage) -> bool {
+        let original = self
+            .evidence
+            .actual_input_tokens
+            .checked_add(self.evidence.actual_output_tokens);
+        let Some(ranking) = &self.ranking else {
+            return original == Some(usage.model_tokens);
+        };
+        let extra = ranking.usage;
+        ranking.validate(&self.evidence).is_ok()
+            && extra.operations > 0
+            && original.and_then(|tokens| tokens.checked_add(extra.model_tokens))
+                == Some(usage.model_tokens)
+            && extra.cost_micro_usd <= usage.cost_micro_usd
+            && extra
+                .operations
+                .checked_add(1)
+                .is_some_and(|operations| operations <= usage.operations)
+            && (extra.accounting != WorkUsageAccounting::ConservativeReservation
+                || usage.accounting == WorkUsageAccounting::ConservativeReservation)
+    }
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -1349,13 +1374,9 @@ impl WorkExecutionFact {
                 || !source_ids.insert(source.id)
                 || !source_attempts.insert(source.attempt)
                 || artifacts.contains(&source.id)
-                || attempt.usage.is_none_or(|usage| {
-                    Some(usage.model_tokens)
-                        != source
-                            .evidence
-                            .actual_input_tokens
-                            .checked_add(source.evidence.actual_output_tokens)
-                })
+                || attempt
+                    .usage
+                    .is_none_or(|usage| !source.admits_usage(usage))
                 || !self.artifacts.iter().any(|a| {
                     a.attempt == source.attempt
                         && a.evidence
@@ -1533,12 +1554,7 @@ impl WorkExecutionFact {
                         .find(|record| record.id == evidence)
                         .ok_or(WorkError::Invalid)?;
                     let usage = step.usage.ok_or(WorkError::Invalid)?;
-                    if Some(usage.model_tokens)
-                        != record
-                            .evidence
-                            .actual_input_tokens
-                            .checked_add(record.evidence.actual_output_tokens)
-                    {
+                    if !record.admits_usage(usage) {
                         return Err(WorkError::Invalid);
                     }
                 }
@@ -1796,5 +1812,100 @@ mod discovery_query_tests {
             max_hops: WORK_PUBLIC_DISCOVERY_MAX_HOPS,
         };
         assert_eq!(invalid.validate(), Err(WorkError::Invalid));
+    }
+}
+
+#[cfg(test)]
+mod search_ranking_tests {
+    use super::*;
+    use crate::work::search::*;
+
+    #[test]
+    fn ranking_usage_is_additive_and_cannot_replace_original_search_attribution() {
+        let mut record = WorkProviderSearchRecordV1 {
+            id: 1.into(),
+            node: 2.into(),
+            attempt: 3.into(),
+            ranking: None,
+            evidence: WorkProviderSearchEvidenceV1 {
+                version: 1,
+                provider: WorkSearchProvider::OpenAi,
+                model: PUBLIC_SEARCH_MODEL.into(),
+                response_model: PUBLIC_SEARCH_MODEL.into(),
+                response_id: "resp_fixture".into(),
+                search_call_id: "ws_fixture".into(),
+                answer: "Public source".into(),
+                citations: vec![WorkProviderSearchCitation {
+                    url: "https://example.test/".into(),
+                    title: "Source".into(),
+                    start_index: 0,
+                    end_index: 6,
+                }],
+                actual_input_tokens: 100,
+                actual_output_tokens: 10,
+            },
+        };
+        let original = WorkUsage {
+            model_tokens: 110,
+            cost_micro_usd: 10,
+            operations: 1,
+            accounting: WorkUsageAccounting::Exact,
+        };
+        assert!(record.admits_usage(original));
+        assert!(record.admits_usage(WorkUsage {
+            operations: 0,
+            ..original
+        }));
+        let legacy = serde_json::to_value(&record).unwrap();
+        assert!(legacy.get("ranking").is_none());
+        assert!(serde_json::from_value::<WorkProviderSearchRecordV1>(legacy)
+            .unwrap()
+            .ranking
+            .is_none());
+        record.ranking = Some(WorkPublicSearchRanking {
+            preferred: vec![1],
+            usage: WorkUsage {
+                model_tokens: 20,
+                cost_micro_usd: 5,
+                operations: 1,
+                accounting: WorkUsageAccounting::ConservativeReservation,
+            },
+        });
+        let total = WorkUsage {
+            model_tokens: 130,
+            cost_micro_usd: 15,
+            operations: 2,
+            accounting: WorkUsageAccounting::ConservativeReservation,
+        };
+        assert!(record.admits_usage(total));
+        assert!(!record.admits_usage(original));
+        for invalid in [
+            WorkUsage {
+                model_tokens: 131,
+                ..total
+            },
+            WorkUsage {
+                operations: 1,
+                ..total
+            },
+            WorkUsage {
+                cost_micro_usd: 4,
+                ..total
+            },
+            WorkUsage {
+                accounting: WorkUsageAccounting::Exact,
+                ..total
+            },
+        ] {
+            assert!(!record.admits_usage(invalid));
+        }
+        let mut foreign = record.clone();
+        foreign.ranking.as_mut().unwrap().preferred = vec![2];
+        assert!(!foreign.admits_usage(total));
+        let mut duplicate = record.clone();
+        duplicate.ranking.as_mut().unwrap().preferred = vec![1, 1];
+        assert!(!duplicate.admits_usage(total));
+        assert_eq!(record.evidence.actual_input_tokens, 100);
+        assert_eq!(record.evidence.actual_output_tokens, 10);
     }
 }

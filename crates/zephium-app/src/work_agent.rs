@@ -1372,8 +1372,18 @@ impl Driver {
         self.thread = thread.into_iter().rev().take(16).rev().collect();
     }
     fn remember(&mut self, record: &WorkProviderSearchRecordV1) {
+        let preferred = record
+            .ranking
+            .as_ref()
+            .map(|ranking| ranking.preferred.as_slice())
+            .unwrap_or_default();
         let mut seen = std::collections::BTreeSet::new();
-        for (index, citation) in record.evidence.citations.iter().enumerate() {
+        let indices = preferred.iter().map(|id| usize::from(*id) - 1).chain(
+            (0..record.evidence.citations.len())
+                .filter(|index| !preferred.contains(&((*index + 1) as u16))),
+        );
+        for index in indices {
+            let citation = &record.evidence.citations[index];
             if !seen.insert(source_key(&citation.url)) {
                 continue;
             }

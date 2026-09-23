@@ -196,6 +196,32 @@ pub enum WorkPublicSearchError {
 pub type WorkPublicSearchFuture<'a> = Pin<
     Box<dyn Future<Output = Result<WorkPublicSearchResult, WorkPublicSearchError>> + Send + 'a>,
 >;
+/// Advisory source priority; IDs are one-based indices into the unchanged citations.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkPublicSearchRanking {
+    pub preferred: Vec<u16>,
+    pub usage: WorkUsage,
+}
+impl WorkPublicSearchRanking {
+    pub fn validate(&self, evidence: &WorkProviderSearchEvidenceV1) -> Result<(), WorkError> {
+        let mut seen = std::collections::BTreeSet::new();
+        if self.preferred.len() > evidence.citations.len()
+            || self.preferred.iter().any(|id| {
+                *id == 0 || usize::from(*id) > evidence.citations.len() || !seen.insert(*id)
+            })
+            || (!self.preferred.is_empty() && self.usage.operations == 0)
+        {
+            return Err(WorkError::Invalid);
+        }
+        Ok(())
+    }
+}
+pub type WorkPublicSearchRankingFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<WorkPublicSearchRanking, WorkPublicSearchError>> + Send + 'a>,
+>;
+
 pub trait WorkPublicSearchProvider: Send + Sync {
     /// Pure scheduling hint, with no dispatch or disclosure. Unknown providers
     /// may omit it; every search still enforces its supplied limits independently.
@@ -205,6 +231,18 @@ pub trait WorkPublicSearchProvider: Send + Sync {
         _context: &[super::context::WorkContextBody],
     ) -> Option<WorkUsage> {
         None
+    }
+
+    /// Optional decisions over already admitted public search evidence. The caller
+    /// supplies only the original step's remaining budget and absolute deadline.
+    fn rerank<'a>(
+        &'a self,
+        _scope: &'a WorkPublicSearchScope,
+        _evidence: &'a WorkProviderSearchEvidenceV1,
+        _limits: WorkExecutionLimits,
+        _deadline: std::time::Instant,
+    ) -> WorkPublicSearchRankingFuture<'a> {
+        Box::pin(async { Ok(WorkPublicSearchRanking::default()) })
     }
 
     /// `context` carries only Rust-admitted public bodies for this attempt.

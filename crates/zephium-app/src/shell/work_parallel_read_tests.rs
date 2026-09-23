@@ -441,3 +441,227 @@ async fn work_parallel_searches_share_and_recalculate_the_remaining_grant() {
             .all(|step| step.status != WorkStepStatus::Running));
     }
 }
+
+struct RankedSearch {
+    mode: u8,
+    turns: AtomicUsize,
+    rankings: AtomicUsize,
+}
+impl WorkPublicSearchProvider for RankedSearch {
+    fn search<'a>(
+        &'a self,
+        scope: &'a WorkPublicSearchScope,
+        _: &'a [zephium_core::work::context::WorkContextBody],
+        _: WorkExecutionLimits,
+    ) -> WorkPublicSearchFuture<'a> {
+        Box::pin(async move {
+            Ok(WorkPublicSearchResult {
+                evidence: WorkProviderSearchEvidenceV1 {
+                    version: 1,
+                    provider: scope.provider,
+                    model: scope.model.clone(),
+                    response_model: PUBLIC_SEARCH_MODEL.into(),
+                    response_id: "resp_ranking".into(),
+                    search_call_id: "ws_ranking".into(),
+                    answer: "One two three public sources.".into(),
+                    citations: (1..=3)
+                        .map(|id| WorkProviderSearchCitation {
+                            url: format!("https://example.test/{id}"),
+                            title: id.to_string(),
+                            start_index: id * 2,
+                            end_index: id * 2 + 1,
+                        })
+                        .collect(),
+                    actual_input_tokens: 100,
+                    actual_output_tokens: 10,
+                },
+                usage: WorkUsage {
+                    model_tokens: 110,
+                    cost_micro_usd: 7,
+                    operations: 1,
+                    accounting: WorkUsageAccounting::Exact,
+                },
+            })
+        })
+    }
+    fn rerank<'a>(
+        &'a self,
+        _: &'a WorkPublicSearchScope,
+        evidence: &'a WorkProviderSearchEvidenceV1,
+        limits: WorkExecutionLimits,
+        deadline: std::time::Instant,
+    ) -> WorkPublicSearchRankingFuture<'a> {
+        Box::pin(async move {
+            self.rankings.fetch_add(1, Ordering::SeqCst);
+            assert!(deadline > std::time::Instant::now());
+            assert_eq!(limits.model_tokens, 100_000 - 110);
+            assert_eq!(limits.cost_micro_usd, 100_000 - 7);
+            assert_eq!(limits.operations, 30);
+            assert_eq!(evidence.citations[0].title, "1");
+            let usage = WorkUsage {
+                model_tokens: 10,
+                cost_micro_usd: 3,
+                operations: 1,
+                accounting: WorkUsageAccounting::Exact,
+            };
+            match self.mode {
+                2 => Err(WorkPublicSearchError::Rejected(usage)),
+                3 => Err(WorkPublicSearchError::OutcomeUnknown),
+                4 => Ok(WorkPublicSearchRanking {
+                    preferred: vec![],
+                    usage: WorkUsage {
+                        operations: 0,
+                        ..usage
+                    },
+                }),
+                _ => Ok(WorkPublicSearchRanking {
+                    preferred: if self.mode == 1 { vec![4] } else { vec![3, 1] },
+                    usage,
+                }),
+            }
+        })
+    }
+}
+impl WorkAgentTurnProvider for RankedSearch {
+    fn turn<'a>(
+        &'a self,
+        disclosure: &'a WorkAgentTurnDisclosure,
+        _: WorkSynthesisTrace,
+    ) -> WorkAgentTurnFuture<'a> {
+        Box::pin(async move {
+            let turn = self.turns.fetch_add(1, Ordering::SeqCst);
+            assert!(turn < 4);
+            if turn > 0 {
+                let expected = if self.mode == 0 {
+                    vec!["3", "1", "2"]
+                } else {
+                    vec!["1", "2", "3"]
+                };
+                assert_eq!(
+                    disclosure
+                        .context()
+                        .sources
+                        .iter()
+                        .map(|source| source.title.as_str())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+            Ok(WorkAgentTurnResult {
+                output: WorkAgentTurnOutput {
+                    say: None,
+                    artifacts: vec![],
+                    fetch: if turn == 0 {
+                        vec![WorkAgentFetch::Search {
+                            query: "public sources".into(),
+                        }]
+                    } else {
+                        vec![]
+                    },
+                    ask: None,
+                    finish: turn > 0,
+                    followups: vec![],
+                    malformed: 0,
+                },
+                usage: WorkUsage::default(),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn work_search_ranking_preserves_sources_and_accounts_for_refused_or_unknown_calls() {
+    for mode in 0..5 {
+        let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+        let (mut shell, queue, handle, profile) = fixture(store);
+        let create = handle
+            .work_document(WorkIntent::Create {
+                objective: "Compare public sources".into(),
+            })
+            .unwrap();
+        let work = create.work_id().unwrap();
+        drive(&mut shell, &queue, create).await.unwrap();
+        let provider = RankedSearch {
+            mode,
+            turns: AtomicUsize::new(0),
+            rankings: AtomicUsize::new(0),
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            drive(
+                &mut shell,
+                &queue,
+                WorkAgentService::new(handle).run(
+                    profile,
+                    WorkCommandV1 {
+                        version: 1,
+                        work,
+                        expected_revision: WorkRevision::INITIAL,
+                        command: WorkCommandId::generate(),
+                        intent: WorkRuntimeIntent::BeginAgent {
+                            grant: WorkAgentGrantV1 {
+                                provider: WorkSearchProvider::OpenAi,
+                                model: PUBLIC_SEARCH_MODEL.into(),
+                                max_turns: 8,
+                                max_steps: 24,
+                                browse_hops: 1,
+                                folders: vec![],
+                            },
+                            limits: WorkExecutionLimits {
+                                model_tokens: 100_000,
+                                cost_micro_usd: 100_000,
+                                operations: 32,
+                                timeout_seconds: 30,
+                                max_workers: 1,
+                            },
+                        },
+                    },
+                    None,
+                    WorkAgentProviders {
+                        turn: &provider,
+                        search: &provider,
+                    },
+                    |_, _| async { panic!("ranking fixture never reads a page") },
+                    |_| {},
+                ),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(provider.rankings.load(Ordering::SeqCst), 1);
+        let execution = &result.executions[0];
+        let search = execution
+            .steps
+            .iter()
+            .find(|step| matches!(step.kind, WorkStepKindV1::Search { .. }))
+            .unwrap();
+        if mode >= 3 {
+            assert_eq!(search.status, WorkStepStatus::OutcomeUnknown);
+            assert!(search.usage.is_none());
+            assert_eq!(provider.turns.load(Ordering::SeqCst), 1);
+            assert_eq!(execution.status, WorkExecutionStatus::Interrupted);
+        } else {
+            assert_eq!(search.status, WorkStepStatus::Succeeded);
+            assert_eq!(search.usage.unwrap().model_tokens, 120);
+            assert_eq!(search.usage.unwrap().cost_micro_usd, 10);
+            assert_eq!(search.usage.unwrap().operations, 2);
+            let record = execution
+                .provider_evidence
+                .iter()
+                .find(|record| Some(record.id) == search.evidence)
+                .unwrap();
+            assert_eq!(
+                record
+                    .evidence
+                    .citations
+                    .iter()
+                    .map(|source| source.title.as_str())
+                    .collect::<Vec<_>>(),
+                ["1", "2", "3"]
+            );
+            assert_eq!(record.evidence.actual_input_tokens, 100);
+            assert_eq!(record.evidence.actual_output_tokens, 10);
+        }
+    }
+}
