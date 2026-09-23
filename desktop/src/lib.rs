@@ -148,6 +148,10 @@ macro_rules! diagnostic {
 const SCROLLBAR_CSS: &str = "::-webkit-scrollbar{width:10px;height:10px;background:transparent}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-corner{background:transparent}::-webkit-scrollbar-button{display:none}";
 
 static APP_STORE: OnceLock<Arc<SqliteStore>> = OnceLock::new();
+// Work provider futures (reqwest, rustls) run on these workers; the 2 MiB
+// tokio default overflowed the same handshake on the agent runtime worker.
+const ASYNC_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+static ASYNC_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static AUTH_DENIAL_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(16);
 static NAVIGATION_DENIAL_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(16);
 static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
@@ -4519,8 +4523,22 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     }
 }
 
+fn install_async_runtime() {
+    match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(ASYNC_WORKER_STACK_BYTES)
+        .build()
+    {
+        Ok(runtime) => {
+            tauri::async_runtime::set(ASYNC_RUNTIME.get_or_init(|| runtime).handle().clone())
+        }
+        Err(_) => diagnostic!("startup: async runtime stack configuration unavailable"),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_async_runtime();
     #[cfg(target_os = "macos")]
     let runtime_security_advisories = match platform::imp::enforce_runtime_security_floor() {
         Ok(advisory) => advisory,
