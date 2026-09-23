@@ -6,7 +6,7 @@ use super::{
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin};
 
-pub const PUBLIC_SEARCH_MODEL: &str = "gpt-5.6-luna";
+pub const PUBLIC_SEARCH_MODEL: &str = "gpt-6-luna";
 pub const PUBLIC_SEARCH_MAX_QUERY_CHARS: usize = 512;
 pub const PUBLIC_SEARCH_MAX_QUERY_BYTES: usize = 2048;
 
@@ -45,7 +45,7 @@ pub fn validate_direct_public_read(
 }
 
 pub fn supported_public_search_model(model: &str) -> bool {
-    matches!(model, "gpt-4.1-mini" | "gpt-5.6-luna")
+    matches!(model, "gpt-4.1-mini" | "gpt-5.6-luna" | "gpt-6-luna")
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -139,6 +139,7 @@ impl WorkProviderSearchEvidenceV1 {
                 "gpt-4.1-mini" | "gpt-4.1-mini-2025-04-14"
             ),
             "gpt-5.6-luna" => self.response_model == "gpt-5.6-luna",
+            "gpt-6-luna" => self.response_model == "gpt-6-luna",
             _ => false,
         };
         if !model_matches
@@ -284,6 +285,10 @@ mod tests {
         };
         assert!(scope.validate().is_ok());
         assert!(!format!("{scope:?}").contains("public query"));
+        for model in ["gpt-4.1-mini", "gpt-5.6-luna", "gpt-6-luna"] {
+            scope.model = model.into();
+            assert!(scope.validate().is_ok());
+        }
         scope.model = "unadmitted-model".into();
         assert!(scope.validate().is_err());
     }
@@ -306,6 +311,15 @@ mod tests {
             actual_input_tokens: 100,
             actual_output_tokens: 10,
         };
+        assert!(evidence.validate().is_ok());
+        // Evidence stored under the earlier model still validates; a
+        // response from another model never does.
+        evidence.model = "gpt-5.6-luna".into();
+        evidence.response_model = "gpt-5.6-luna".into();
+        assert!(evidence.validate().is_ok());
+        evidence.response_model = PUBLIC_SEARCH_MODEL.into();
+        assert!(evidence.validate().is_err());
+        evidence.model = PUBLIC_SEARCH_MODEL.into();
         assert!(evidence.validate().is_ok());
         assert_eq!(evidence.citation_excerpt(0).unwrap(), "é source");
         assert_eq!(evidence.citation_excerpt(1), Err(WorkError::NotFound));
