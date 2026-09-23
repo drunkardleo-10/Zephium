@@ -505,6 +505,20 @@ impl SemanticExtractionSchema {
         matches!(self.fields.as_slice(), [field]
             if field.kind() == SemanticExtractionValueKind::TextList && !field.verbatim_text())
     }
+
+    /// One rows field of more than one record: a catalog of subjects read
+    /// from one page rather than one subject's own page.
+    pub fn is_row_collection(&self) -> bool {
+        matches!(self.fields.as_slice(), [field]
+            if field.kind() == SemanticExtractionValueKind::Rows
+                && field.max_list_items().is_some_and(|items| items > 1))
+    }
+
+    /// A read that decides over one whole-document capture: whole-page
+    /// findings, or a catalog whose rows lie below the first viewport.
+    pub fn reads_whole_page(&self) -> bool {
+        self.is_whole_page_findings() || self.is_row_collection()
+    }
 }
 
 impl fmt::Debug for SemanticExtractionSchema {

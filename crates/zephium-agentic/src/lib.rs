@@ -647,6 +647,7 @@ pub use provider_transport::decision::{
     DecisionCallDiagnostic, DecisionCallFailure, DecisionCallOutput, DecisionEnvelopeFacts,
     DecisionEnvelopeFailure, DecisionLocatedRead, DecisionObservation, DecisionObservationAnswers,
     DecisionObservationFallback, DecisionOperation, DecisionProjectionError, DecisionReadSelection,
+    DecisionRowDiscovery,
     JevDecisionClient, OpenAiDecisionCall, OpenAiDecisionClient, untracked_document_address,
 };
 #[cfg(feature = "provider-transport")]

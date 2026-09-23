@@ -73,6 +73,50 @@ impl DecisionObservation {
         Self::try_projection(observation, objective, authority, account, Some(schema), true)
     }
 
+    /// A catalog read's cell batch: per found record and text column, which
+    /// node inside that record holds it. Its state discloses only the records.
+    pub fn try_for_row_cells(
+        observation: &SemanticObservation,
+        objective: &AgentProviderObjective,
+        account: AgentContextAccountBinding,
+        discovery: &super::DecisionRowDiscovery,
+    ) -> Result<Self, DecisionProjectionError> {
+        if account.context() != observation.request().context() {
+            return Err(DecisionProjectionError::Authority);
+        }
+        let questions = discovery.cell_questions(observation, account)?;
+        if questions.is_empty() {
+            return Err(DecisionProjectionError::Capacity);
+        }
+        let disclosed = discovery.disclosed();
+        let references: BTreeSet<_> = observation
+            .frames()
+            .iter()
+            .flat_map(|frame| frame.nodes())
+            .filter(|node| {
+                permitted(node.sensitivity(), account.account())
+                    && disclosed.contains(&node.reference())
+            })
+            .map(SemanticNode::reference)
+            .collect();
+        #[cfg(feature = "probe-harness")]
+        let json_comparison = None;
+        let state = json!({"objective": objective.as_str(), "observation": compact(observation, &references, &BTreeMap::new())?});
+        let request = DecisionRequest::try_new(state, questions)
+            .map_err(|_| DecisionProjectionError::Capacity)?;
+        Ok(Self {
+            request,
+            guard: SemanticObservationFingerprint::from_observation(observation).digest(),
+            references,
+            account,
+            scrollable: Vec::new(),
+            navigation: false,
+            read: Some(discovery.projection().clone()),
+            #[cfg(feature = "probe-harness")]
+            json_comparison,
+        })
+    }
+
     fn try_projection(
         observation: &SemanticObservation,
         objective: &AgentProviderObjective,
@@ -219,6 +263,26 @@ impl DecisionObservation {
             return Err(DecisionProjectionError::Authority);
         }
         Ok((self.request, self.json_comparison))
+    }
+
+    /// Local public eval recording of a live anonymous batch, only when the
+    /// probe names a directory; no provider dispatch or browser authority.
+    #[cfg(feature = "probe-harness")]
+    pub fn record_anonymous_eval_request(&self) {
+        static RECORDED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let Some(directory) = std::env::var_os("ZEPHIUM_PROBE_DECISION_RECORD") else {
+            return;
+        };
+        if self.account.account() != AgentAccountScope::Anonymous {
+            return;
+        }
+        let Ok(encoded) = self.request.encode() else {
+            return;
+        };
+        let index = RECORDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let directory = std::path::PathBuf::from(directory);
+        let _ = std::fs::create_dir_all(&directory);
+        let _ = std::fs::write(directory.join(format!("decision-{index}.json")), encoded);
     }
 
     pub(crate) fn matches(

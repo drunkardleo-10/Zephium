@@ -3016,3 +3016,189 @@ async fn catalog_link_fallback_reaches_the_work_turn_and_charges_every_call() {
     );
     assert!(transport.snapshot().unwrap().is_idle());
 }
+
+#[test]
+fn a_catalog_read_copies_each_found_record_from_inside_it_or_leaves_the_planner() {
+    let (_, call, previous, _) = admitted_fixture();
+    // References are node keys: @a3, @a9 and @a15 are product records, @a21
+    // and @a23 a navigation list of the same parent shape rule.
+    let card = |k: u64, name: &str, text: &str, slug: &str| {
+        let parent = k - 1;
+        vec![
+            json!({"k":k,"p":1,"r":"list_item","fc":true}),
+            json!({"k":k+1,"p":parent,"r":"document","t":text,"fc":true}),
+            json!({"k":k+2,"p":k,"r":"link","n":name,"u":format!("https://shop.example.test/{slug}"),"fc":true}),
+            json!({"k":k+3,"p":k+1,"r":"image","n":"primary","m":format!("https://shop.example.test/{slug}.webp"),"fc":true}),
+            json!({"k":k+4,"p":k,"r":"heading","l":3,"n":name,"fc":true}),
+            json!({"k":k+5,"p":k,"r":"button","n":"Add to Bag","fc":true}),
+        ]
+    };
+    let mut nodes = vec![
+        json!({"k":1,"r":"document","fc":true}),
+        json!({"k":2,"p":0,"r":"list","fc":true}),
+    ];
+    nodes.extend(card(3, "Tower Bridge", "Tower Bridge $349.99 New", "tower-bridge"));
+    nodes.extend(card(9, "Paris", "Paris $79.99", "paris"));
+    nodes.extend(card(15, "London", "$39.99", "london"));
+    nodes.extend([
+        json!({"k":21,"p":0,"r":"list","fc":true}),
+        json!({"k":22,"p":20,"r":"list_item","fc":true}),
+        json!({"k":23,"p":21,"r":"link","n":"Home","u":"https://shop.example.test/","fc":true}),
+        json!({"k":24,"p":20,"r":"list_item","fc":true}),
+        json!({"k":25,"p":23,"r":"link","n":"Help","u":"https://shop.example.test/help","fc":true}),
+    ]);
+    let snapshot = decode_semantic_snapshot(
+        SemanticDecodeContext::new(
+            SemanticInvocationId::new(1).unwrap(),
+            previous.frames()[0].frame().clone(),
+            SemanticSnapshotGeneration::new(1).unwrap(),
+        ),
+        &serde_json::to_vec(
+            &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":nodes}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let observation = SemanticObservationAssembler::new(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(1).unwrap(),
+            call.account().context(),
+            SemanticObservationBudget::try_new(32, 8192, 1).unwrap(),
+        ),
+        snapshot,
+    )
+    .unwrap()
+    .finish()
+    .unwrap();
+    let columns = vec![
+        SemanticExtractionFieldSchema::try_text("name".into(), true, 512).unwrap(),
+        SemanticExtractionFieldSchema::try_text("price".into(), false, 512)
+            .unwrap()
+            .with_verbatim_text()
+            .unwrap(),
+        SemanticExtractionFieldSchema::try_url("product_url".into(), false, 1024).unwrap(),
+        SemanticExtractionFieldSchema::try_image_url("image".into(), false, 1024).unwrap(),
+    ];
+    let schema = SemanticExtractionSchema::try_new(
+        SemanticExtractionSchemaId::new(1).unwrap(),
+        vec![SemanticExtractionFieldSchema::try_rows("output_0".into(), true, columns, 3).unwrap()],
+    )
+    .unwrap();
+    assert!(schema.is_row_collection() && schema.reads_whole_page());
+    let objective = AgentProviderObjective::try_admit_conservative_utf8(
+        "Collect three sets with prices, links and pictures".into(),
+        &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
+    )
+    .unwrap();
+    let decide = |projection: &DecisionObservation, body: Value| {
+        let response = projection
+            .request()
+            .decode_emulation(&serde_json::to_vec(&body).unwrap(), DecisionUsage::default())
+            .unwrap();
+        response
+    };
+    for subjects in [true, false] {
+        let projection = DecisionObservation::try_for_read(
+            &observation,
+            &objective,
+            &AgentProviderActionAuthority::try_new(&observation, &[]).unwrap(),
+            call.account(),
+            Some(&schema),
+        )
+        .unwrap();
+        let Question::Choice { criteria, .. } = &projection.request().questions()["rows_0"] else {
+            panic!("choice expected");
+        };
+        assert_eq!(
+            criteria.keys().filter(|key| *key != "none").collect::<Vec<_>>(),
+            ["@a15", "@a3", "@a9"]
+        );
+        assert!(projection.request().questions().contains_key("group_1"));
+        let mut body = fixture_answers(projection.request());
+        if subjects {
+            body["answers"]["group_0"] = json!({"type":"noul","noul":0.95});
+        }
+        let response = decide(&projection, body);
+        let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+        let discovery = answers
+            .take_row_discovery(&observation, call.account(), &schema)
+            .unwrap();
+        let Some(discovery) = discovery else {
+            // No group of subjects: the page planner reads this page.
+            assert!(!subjects);
+            continue;
+        };
+        assert_eq!((discovery.rows(), discovery.max_items()), (3, 3));
+        assert!(discovery.needs_cells());
+        let cells = DecisionObservation::try_for_row_cells(
+            &observation,
+            &objective,
+            call.account(),
+            &discovery,
+        )
+        .unwrap();
+        let questions = cells.request().questions();
+        assert_eq!(
+            questions.keys().collect::<Vec<_>>(),
+            ["cell_0_1", "cell_1_1", "cell_2_1"]
+        );
+        let Question::Choice { criteria, .. } = &questions["cell_2_1"] else {
+            panic!("choice expected");
+        };
+        assert!(criteria.contains_key("@a16") && !criteria.contains_key("@a4"));
+        // The second record's head stays unsettled; the settled records agree
+        // on the position its value takes.
+        let answer = |key: &str, shares: &[(&str, f64)]| {
+            let Question::Choice { criteria, .. } = &questions[key] else {
+                panic!("choice expected");
+            };
+            let probabilities: BTreeMap<_, _> = criteria
+                .keys()
+                .map(|option| {
+                    let share = shares.iter().find(|(chosen, _)| chosen == option);
+                    (option.clone(), share.map_or(0.0, |(_, share)| *share))
+                })
+                .collect();
+            json!({"type":"choice","choice":shares[0].0,"confidence":shares[0].1,"probabilities":probabilities})
+        };
+        let body = json!({"answers":{
+            "cell_0_1": answer("cell_0_1", &[("@a4", 0.95), ("none", 0.05)]),
+            "cell_1_1": answer("cell_1_1", &[("@a13", 0.4), ("@a10", 0.35), ("none", 0.25)]),
+            "cell_2_1": answer("cell_2_1", &[("@a16", 0.95), ("none", 0.05)]),
+        }});
+        let response = decide(&cells, body);
+        let mut cells = cells.route(Ok(response)).unwrap().finish(None);
+        let located = discovery
+            .prepare(
+                &observation,
+                call.account(),
+                SemanticCaptureInstant::from_millis(101),
+                Some(&mut cells),
+            )
+            .unwrap();
+        assert!(located.generation().is_none());
+        let result = located.finish(None).unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!("rows expected");
+        };
+        let text = |value: &SemanticExtractedValue| match value {
+            SemanticExtractedValue::Text(text)
+            | SemanticExtractedValue::Url(text)
+            | SemanticExtractedValue::ImageUrl(text) => text.as_str().to_owned(),
+            _ => panic!("text expected"),
+        };
+        let copied: Vec<Vec<String>> = rows
+            .items()
+            .iter()
+            .map(|row| row.fields().iter().map(|field| text(field.value())).collect())
+            .collect();
+        assert_eq!(
+            copied,
+            [
+                ["Tower Bridge", "Tower Bridge $349.99 New", "https://shop.example.test/tower-bridge", "https://shop.example.test/tower-bridge.webp"],
+                ["Paris", "Paris $79.99", "https://shop.example.test/paris", "https://shop.example.test/paris.webp"],
+                ["London", "$39.99", "https://shop.example.test/london", "https://shop.example.test/london.webp"],
+            ]
+        );
+    }
+}

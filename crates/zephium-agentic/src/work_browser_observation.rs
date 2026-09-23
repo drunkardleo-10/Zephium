@@ -48,8 +48,9 @@ impl WorkBrowserObservationCapability {
     }
 
     /// The same capability with a larger node and text budget, for a trusted
-    /// whole-page findings schema only: most of a long document in one look,
-    /// so one typed batch can locate its evidence. Disclosure is unchanged.
+    /// whole-page findings or catalog schema only: most of a long document in
+    /// one look, so one typed batch can locate its evidence or its records.
+    /// Disclosure is unchanged.
     pub fn for_whole_page_read(self) -> Self {
         Self {
             runtime_budget: if self.runtime_budget.includes_link_url_state() {

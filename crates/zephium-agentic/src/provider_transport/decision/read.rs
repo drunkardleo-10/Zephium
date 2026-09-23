@@ -21,21 +21,21 @@ const MAX_FINDINGS_EVIDENCE: usize = 64;
 
 #[derive(Clone)]
 pub(super) struct ReadProjection {
-    schema: SemanticExtractionSchema,
-    row: Option<String>,
-    columns: Vec<SemanticExtractionFieldSchema>,
+    pub(super) schema: SemanticExtractionSchema,
+    pub(super) row: Option<String>,
+    pub(super) columns: Vec<SemanticExtractionFieldSchema>,
     /// A whole-page findings read: one generated text list, no columns to
     /// locate. It asks per chunk of text nodes which ones answer the objective.
     findings: bool,
+    /// A catalog read of up to this many records: Rust groups repeated
+    /// structure into candidate records and asks which groups are subjects.
+    pub(super) collection: Option<usize>,
 }
 
 impl ReadProjection {
     pub(super) fn for_schema(schema: &SemanticExtractionSchema) -> Option<Self> {
         let (row, columns) = match schema.fields() {
-            [field]
-                if field.kind() == SemanticExtractionValueKind::Rows
-                    && field.max_list_items() == Some(1) =>
-            {
+            [field] if field.kind() == SemanticExtractionValueKind::Rows => {
                 (Some(field.name().to_owned()), field.row_fields()?.to_vec())
             }
             fields
@@ -48,11 +48,21 @@ impl ReadProjection {
             _ => return None,
         };
         let findings = schema.is_whole_page_findings();
+        let collection = schema
+            .is_row_collection()
+            .then(|| {
+                schema
+                    .fields()
+                    .first()
+                    .and_then(SemanticExtractionFieldSchema::max_list_items)
+            })
+            .flatten();
         Some(Self {
             schema: schema.clone(),
             row,
             columns,
             findings,
+            collection,
         })
     }
 
@@ -141,6 +151,9 @@ impl ReadProjection {
         if self.findings {
             return self.findings_questions(observation, references, questions);
         }
+        if self.collection.is_some() {
+            return super::rows::row_questions(observation, references, questions);
+        }
         questions.insert("done".into(), self.completion_question());
         let titles = own_page_titles(observation, references);
         for (index, field) in self.columns.iter().enumerate() {
@@ -218,6 +231,9 @@ impl ReadProjection {
             } else {
                 None
             };
+        }
+        if self.collection.is_some() {
+            return super::rows::purpose(self, key);
         }
         let index: usize = key.strip_prefix("locate_")?.parse().ok()?;
         self.columns.get(index).map(|field| {
@@ -450,6 +466,10 @@ impl DecisionObservationAnswers {
         if projection.schema != *schema {
             return Err(DecisionProjectionError::Authority);
         }
+        if projection.collection.is_some() {
+            self.projection.read = Some(projection);
+            return Ok(None);
+        }
         if projection.findings {
             let evidence = self.take_findings(observation, &projection)?;
             let ready = !evidence.is_empty();
@@ -601,12 +621,14 @@ impl DecisionObservationAnswers {
 
 /// Focused evidence and exact copies; providers receive only the generation subset.
 pub struct DecisionLocatedRead<'a> {
-    projection: ReadProjection,
-    baseline: SemanticObservationAcknowledgement,
-    account: AgentContextAccountBinding,
-    read: SemanticReadResult<'a>,
-    copied: BTreeMap<String, Value>,
-    generation: Option<(SemanticExtractionSchema, SemanticReadResult<'a>)>,
+    pub(super) projection: ReadProjection,
+    pub(super) baseline: SemanticObservationAcknowledgement,
+    pub(super) account: AgentContextAccountBinding,
+    pub(super) read: SemanticReadResult<'a>,
+    pub(super) copied: BTreeMap<String, Value>,
+    pub(super) generation: Option<(SemanticExtractionSchema, SemanticReadResult<'a>)>,
+    /// A catalog read's records, each its fields in schema order, copied.
+    pub(super) rows: Option<Vec<Vec<Value>>>,
 }
 
 impl DecisionReadSelection {
@@ -797,6 +819,7 @@ impl DecisionReadSelection {
             read,
             copied,
             generation,
+            rows: None,
         })
     }
 }
@@ -901,6 +924,7 @@ impl DecisionReadSelection {
             read,
             copied,
             generation: None,
+            rows: None,
         })
     }
 }
@@ -1003,7 +1027,7 @@ fn own_page_titles(
 }
 
 /// What a verbatim copy takes: visible text, else a text value, else the name.
-fn copied_text(node: &SemanticNode) -> Option<&str> {
+pub(super) fn copied_text(node: &SemanticNode) -> Option<&str> {
     node.text()
         .map(SemanticText::as_str)
         .filter(|text| !text.trim().is_empty())
@@ -1091,9 +1115,13 @@ impl<'a> DecisionLocatedRead<'a> {
                     .map(|value| json!({"name":field.name(),"value":value}))
             })
             .collect();
-        let fields = match self.projection.row {
-            Some(row) => vec![json!({"name":row,"value":{"k":"rows","items":[{"fields":fields}]}})],
-            None => fields,
+        let fields = match (self.projection.row, self.rows) {
+            (Some(row), Some(rows)) => {
+                let items: Vec<_> = rows.into_iter().map(|fields| json!({"fields":fields})).collect();
+                vec![json!({"name":row,"value":{"k":"rows","items":items}})]
+            }
+            (Some(row), None) => vec![json!({"name":row,"value":{"k":"rows","items":[{"fields":fields}]}})],
+            (None, _) => fields,
         };
         let output = serde_json::to_vec(
             &json!({"v":1,"schema":self.projection.schema.id().get(),"fields":fields}),
