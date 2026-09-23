@@ -57,14 +57,25 @@ const INHERITED_ARTIFACTS: usize = 32;
 /// Earlier executions whose objects a run inherits whole; older ones reach
 /// the model through the thread, and by object only when the request names it.
 const INHERITED_EXECUTIONS: usize = 3;
-/// Time a run keeps to act on an answer. A question still open this close to
-/// the deadline suspends the run on it instead of letting the deadline fail it.
-const ASK_RESERVE: Duration = Duration::from_secs(180);
+/// How long a run waits on the person's answer or decision. The wait never
+/// spends the run's deadline; past it, the run stops on the question and the
+/// next request answers it.
+const WAIT_PATIENCE: Duration = Duration::from_secs(30 * 60);
 const ASK_SUSPENDED: &str = "Waiting for your answer";
+const DECISION_SUSPENDED: &str = "Waiting for your decision";
 const BUDGET_SPENT: &str = "The run used its turns, steps or budget before it could finish";
+const BUDGET_EXHAUSTED: &str = "The token or cost budget is used up: no more searches or reads will run. Publish the result from the sources already collected and finish.";
 const CONTEXT_FULL: &str = "The work has grown too large for one turn";
 const TURN_UNPREPARED: &str = "The turn could not be prepared";
 const OUT_OF_TIME: &str = "The run ran out of time";
+const STOPPED: &str = "Stopped by you";
+const INTERRUPTED: &str = "The run was interrupted";
+const ANSWER_LOST: &str = "The answer was lost on the way; it may have been charged";
+const RUN_BROKEN: &str = "The run could not record its progress";
+const NO_PROGRESS: &str = "The agent stopped making progress";
+const PRIVATE_QUERY: &str = "A search would have repeated private context";
+const UNPUBLISHED: &str = "The result could not be placed on the canvas";
+const OVER_BUDGET: &str = "The model's turn cost more than the run had left";
 
 /// Closed loop facts for development logs; never model, page or user text.
 #[derive(Clone, Copy, Debug)]
@@ -102,8 +113,15 @@ pub enum WorkAgentDiagnostic {
     DisclosureRefused { error: WorkError },
     /// Turns, steps, tokens or cost left no room for another turn.
     BudgetSpent,
-    /// A question was still open near the deadline; the run stops on it.
+    /// A question or proposal stayed open past the wait; the run stops on it.
     AskSuspended,
+    /// A step failed on an error the person reads as the step's note.
+    StepFailed {
+        kind: &'static str,
+        error: WorkError,
+    },
+    /// Objects a step or turn produced that the canvas could not take.
+    ArtifactsDropped { kind: &'static str, count: usize },
     CommitRefused {
         kind: &'static str,
         error: WorkError,
@@ -243,6 +261,7 @@ impl WorkAgentService {
             thread: Vec::new(),
             unreadable_polls: std::sync::atomic::AtomicU8::new(0),
             stopped: std::sync::Mutex::new(None),
+            waiting: false,
             files: None,
             previews: Vec::new(),
             used: WorkUsage::default(),
@@ -264,21 +283,10 @@ impl WorkAgentService {
         }
         driver.files = (!files.is_empty()).then_some(files);
         driver.inherit(&projection, receipt.execution).await;
-        let outcome = match driver.drive(&attempt, &providers, &mut browser).await {
-            Ok(WorkAttemptStatus::Cancelled | WorkAttemptStatus::Failed)
-                if driver.out_of_time() =>
-            {
-                driver.say_out_of_time().await
-            }
-            outcome => outcome,
-        };
-        let (status, usage) = match outcome {
+        let outcome = driver.drive(&attempt, &providers, &mut browser).await;
+        let (status, usage) = match driver.conclude(outcome).await {
             Ok(status) => (status, driver.settled_usage(status)),
-            Err(WorkError::OutcomeUnknown) => (WorkAttemptStatus::OutcomeUnknown, None),
-            Err(error) => {
-                driver.report(WorkAgentDiagnostic::LoopFailed { error });
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
         let settlement = attempt
             .settle_owned(WorkAdapterResult {
@@ -320,6 +328,8 @@ struct Driver {
     unreadable_polls: std::sync::atomic::AtomicU8,
     /// Why the run was told to stop, once it was.
     stopped: std::sync::Mutex<Option<crate::work_runtime::WorkCancelCause>>,
+    /// Waiting for the person: the deadline does not run meanwhile.
+    waiting: bool,
     /// Folders the person granted, once admitted by policy.
     files: Option<crate::work_files::WorkFileGrant>,
     private: Vec<String>,
@@ -339,13 +349,19 @@ struct Driver {
 
 enum Fetched {
     Search(WorkStepId, WorkSearchOutcomeOwned),
-    Browse(WorkStepId, Result<WorkBrowserOutcome, WorkError>, Option<WorkUsage>),
+    Browse(
+        WorkStepId,
+        Result<WorkBrowserOutcome, WorkError>,
+        Option<WorkUsage>,
+    ),
 }
 struct WorkSearchOutcomeOwned {
     status: WorkAttemptStatus,
     usage: Option<WorkUsage>,
     note: Option<&'static str>,
     record: Option<WorkProviderSearchRecordV1>,
+    /// Why the search could not be run at all, for the diagnostic.
+    error: Option<WorkError>,
 }
 
 impl Driver {
@@ -490,46 +506,98 @@ impl Driver {
             diagnostic(event);
         }
     }
-    fn out_of_time(&self) -> bool {
-        self.stopped
-            .lock()
-            .is_ok_and(|stopped| *stopped == Some(crate::work_runtime::WorkCancelCause::Deadline))
+    fn stop_cause(&self) -> Option<crate::work_runtime::WorkCancelCause> {
+        self.stopped.lock().ok().and_then(|stopped| *stopped)
     }
-    /// A run the deadline ended says so: on the step it was running, or on a
-    /// failed turn step when none was.
-    async fn say_out_of_time(&mut self) -> Result<WorkAttemptStatus, WorkError> {
-        let state = self.probe.runtime_projection().await?;
-        let running: Vec<WorkStepFact> = state
-            .executions
-            .iter()
-            .find(|execution| execution.id == self.probe.execution())
-            .map(|execution| {
-                execution
-                    .steps
-                    .iter()
-                    .filter(|step| step.status == WorkStepStatus::Running)
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        if running.is_empty() {
-            return self.fail_turn(OUT_OF_TIME).await;
+    /// Why a step ended early, in the person's words, once the run was told to stop.
+    fn stop_note(&self) -> Option<&'static str> {
+        use crate::work_runtime::WorkCancelCause;
+        self.stop_cause().map(|cause| match cause {
+            WorkCancelCause::Deadline => OUT_OF_TIME,
+            WorkCancelCause::Requested => STOPPED,
+            _ => INTERRUPTED,
+        })
+    }
+    /// Why a step that ended early did, asking the store once when the run
+    /// has not yet heard that it was told to stop.
+    async fn why_stopped(&self) -> Option<&'static str> {
+        if self.stop_cause().is_none() {
+            self.cancelled().await;
         }
+        self.stop_note()
+    }
+    /// Every run that does not succeed says why, and leaves no step running:
+    /// the store refuses to settle an attempt over a running step.
+    async fn conclude(
+        &mut self,
+        outcome: Result<WorkAttemptStatus, WorkError>,
+    ) -> Result<WorkAttemptStatus, WorkError> {
+        let (mut status, broken) = match outcome {
+            Ok(WorkAttemptStatus::Succeeded) => return outcome,
+            Ok(status) => (status, None),
+            Err(WorkError::OutcomeUnknown) => (WorkAttemptStatus::OutcomeUnknown, None),
+            Err(error) => {
+                self.report(WorkAgentDiagnostic::LoopFailed { error });
+                (WorkAttemptStatus::Failed, Some(error))
+            }
+        };
+        let out_of_time = self.stop_cause() == Some(crate::work_runtime::WorkCancelCause::Deadline);
+        let note = self.stop_note().unwrap_or(match (broken, status) {
+            (Some(WorkError::Capacity), _) => CONTEXT_FULL,
+            (Some(_), _) => RUN_BROKEN,
+            (None, WorkAttemptStatus::OutcomeUnknown) => ANSWER_LOST,
+            _ => INTERRUPTED,
+        });
+        let running = match self.probe.runtime_projection().await {
+            Ok(state) => state
+                .executions
+                .into_iter()
+                .find(|execution| execution.id == self.probe.execution())
+                .map(|execution| {
+                    execution
+                        .steps
+                        .into_iter()
+                        .filter(|step| step.status == WorkStepStatus::Running)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            Err(error) => return Err(broken.unwrap_or(error)),
+        };
+        let swept = !running.is_empty();
         for step in running {
             // A fetch cut off mid-flight may have been charged: its outcome is unknown.
-            let status = match step.kind {
+            let settled = match step.kind {
                 WorkStepKindV1::Search { .. }
                 | WorkStepKindV1::Read { .. }
                 | WorkStepKindV1::Discover { .. } => WorkStepStatus::OutcomeUnknown,
-                // A proposal settles through the person's decision, never here.
-                WorkStepKindV1::WriteFile { .. } | WorkStepKindV1::EditFile { .. } => continue,
                 _ => WorkStepStatus::Cancelled,
             };
-            let _ = self
-                .settle(step.id, status, None, vec![], None, Some(OUT_OF_TIME.into()), None)
-                .await;
+            if self
+                .settle(
+                    step.id,
+                    settled,
+                    None,
+                    vec![],
+                    None,
+                    Some(note.into()),
+                    None,
+                )
+                .await
+                .is_err()
+            {
+                return Err(broken.unwrap_or(WorkError::Conflict));
+            }
+            if settled == WorkStepStatus::OutcomeUnknown && !out_of_time {
+                status = WorkAttemptStatus::OutcomeUnknown;
+            }
         }
-        Ok(WorkAttemptStatus::Failed)
+        if out_of_time && status != WorkAttemptStatus::OutcomeUnknown {
+            status = WorkAttemptStatus::Failed;
+        }
+        if !swept && (out_of_time || broken.is_some()) {
+            self.fail_turn(note).await?;
+        }
+        Ok(status)
     }
     /// Ends the run on a failed turn step that says why, when the grant still
     /// has room for the step; the attempt fails either way.
@@ -583,7 +651,7 @@ impl Driver {
         // as unreadable when the answer stays out of reach.
         let cause = match self.probe.cancellation_cause().await {
             Ok(Some(cause)) => Some(cause),
-            Ok(None) if Instant::now() >= self.probe.deadline() => {
+            Ok(None) if !self.waiting && Instant::now() >= self.probe.deadline() => {
                 Some(crate::work_runtime::WorkCancelCause::Deadline)
             }
             Ok(None) => {
@@ -689,6 +757,10 @@ impl Driver {
             let (turn, usage) = match result {
                 Ok(Ok(result)) => {
                     if !result.usage.within(self.remaining()) {
+                        let mut step =
+                            self.step(WorkStepKindV1::Turn, WorkStepStatus::OutcomeUnknown);
+                        step.note = Some(OVER_BUDGET.into());
+                        let _ = self.begin(step, vec![], None).await;
                         return Err(WorkError::OutcomeUnknown);
                     }
                     self.charge(result.usage);
@@ -730,7 +802,14 @@ impl Driver {
                 }
                 Ok(Err(WorkSynthesisError::OutcomeUnknown)) | Err(_) => {
                     let mut step = self.step(WorkStepKindV1::Turn, WorkStepStatus::OutcomeUnknown);
-                    step.note = None;
+                    step.note = Some(
+                        if result.is_err() {
+                            OUT_OF_TIME
+                        } else {
+                            ANSWER_LOST
+                        }
+                        .into(),
+                    );
                     let _ = self.begin(step, vec![], None).await;
                     return Err(WorkError::OutcomeUnknown);
                 }
@@ -818,12 +897,13 @@ impl Driver {
                 ));
             }
             if idle && self.failed_turns >= MAX_FAILED_TURNS {
-                return Ok(WorkAttemptStatus::Failed);
+                return self.fail_turn(NO_PROGRESS).await;
             }
             if !turn.artifacts.is_empty() {
                 self.probe
                     .record_activity(WorkActivityV1::ProducingArtifact);
                 let headroom = MAX_WORK_ARTIFACTS.saturating_sub(execution.artifacts.len());
+                let proposed = turn.artifacts.len();
                 let artifacts: Vec<WorkArtifactV1> = turn
                     .artifacts
                     .into_iter()
@@ -839,6 +919,17 @@ impl Driver {
                             .ok()
                     })
                     .collect();
+                if artifacts.len() < proposed {
+                    self.report(WorkAgentDiagnostic::ArtifactsDropped {
+                        kind: "publish",
+                        count: proposed - artifacts.len(),
+                    });
+                    self.notice(if proposed > headroom {
+                        "The canvas of this run is full: objects beyond its limit were not placed. Finish with what is placed."
+                    } else {
+                        "A proposed object could not be placed: it failed validation. Repair it from the listed sources."
+                    });
+                }
                 if !artifacts.is_empty() {
                     let mut step = self.step(WorkStepKindV1::Publish, WorkStepStatus::Succeeded);
                     step.artifacts = artifacts.iter().map(|a| a.id).collect();
@@ -859,7 +950,7 @@ impl Driver {
                     self.failed_turns += 1;
                     self.notice("A search query repeated private context and was not sent. Rephrase the query without that text.");
                     if self.failed_turns >= MAX_FAILED_TURNS {
-                        return Ok(WorkAttemptStatus::Failed);
+                        return self.fail_turn(PRIVATE_QUERY).await;
                     }
                     continue;
                 }
@@ -879,7 +970,7 @@ impl Driver {
             }
             if turn.finish && (self.published == 0 || self.pending_output_repair) {
                 if self.finish_refusals >= 2 {
-                    return Ok(WorkAttemptStatus::Failed);
+                    return self.fail_turn(UNPUBLISHED).await;
                 }
                 self.finish_refusals += 1;
                 self.notice("Finish was refused: the requested result has not been published successfully. Repair the refused object using the existing sources and publish it before finishing. Earlier partial results do not replace that object.");
@@ -925,6 +1016,7 @@ impl Driver {
                 break;
             }
             let Some(remaining) = reads::remaining_limits(self.limits, self.used) else {
+                self.notice(BUDGET_EXHAUSTED);
                 break;
             };
             let mut count = cap
@@ -960,6 +1052,7 @@ impl Driver {
                     count -= 1;
                 };
             let Some(shares) = shares else {
+                self.notice(BUDGET_EXHAUSTED);
                 break;
             };
             let batch = &searches[offset..offset + count];
@@ -995,13 +1088,15 @@ impl Driver {
                                     usage: outcome.usage,
                                     note: outcome.note,
                                     record: outcome.record,
+                                    error: None,
                                 },
                                 // Nothing was sent: a failed step, not a lost one.
-                                Err(_) => WorkSearchOutcomeOwned {
+                                Err(error) => WorkSearchOutcomeOwned {
                                     status: WorkAttemptStatus::Failed,
                                     usage: Some(WorkUsage::default()),
                                     note: Some("The search could not be run"),
                                     record: None,
+                                    error: Some(error),
                                 },
                             },
                         )
@@ -1117,6 +1212,7 @@ impl Driver {
         kind: &WorkStepKindV1,
     ) -> Result<Option<WorkAttemptStatus>, WorkError> {
         self.probe.record_activity(WorkActivityV1::WaitingForHuman);
+        let since = self.wait();
         loop {
             tokio::time::sleep(ASK_POLL).await;
             let state = self.probe.runtime_projection().await?;
@@ -1130,7 +1226,11 @@ impl Driver {
                 .iter()
                 .find(|s| s.id == id)
                 .ok_or(WorkError::NotFound)?;
-            match proposed.kind.file_decision() {
+            let decision = proposed.kind.file_decision();
+            if decision.is_some() {
+                self.resume(since);
+            }
+            match decision {
                 Some(true) => {
                     let outcome = match kind {
                         WorkStepKindV1::WriteFile { path, content, .. } => {
@@ -1156,19 +1256,44 @@ impl Driver {
                 }
                 None => {}
             }
-            if self.cancelled().await {
-                let status = if Instant::now() >= self.probe.deadline() {
-                    WorkStepStatus::Failed
-                } else {
-                    WorkStepStatus::Cancelled
-                };
-                self.settle_file(id, status, None, None).await?;
-                return Ok(Some(if status == WorkStepStatus::Failed {
-                    WorkAttemptStatus::Failed
-                } else {
-                    WorkAttemptStatus::Cancelled
-                }));
+            if since.elapsed() >= WAIT_PATIENCE {
+                self.suspend().await;
+                self.settle_file(
+                    id,
+                    WorkStepStatus::Cancelled,
+                    None,
+                    Some(DECISION_SUSPENDED.into()),
+                )
+                .await?;
+                return Ok(Some(WorkAttemptStatus::Cancelled));
             }
+            if self.cancelled().await {
+                let note = self.stop_note().unwrap_or(INTERRUPTED);
+                self.settle_file(id, WorkStepStatus::Cancelled, None, Some(note.into()))
+                    .await?;
+                return Ok(Some(WorkAttemptStatus::Cancelled));
+            }
+        }
+    }
+    /// Starts waiting for the person; the deadline stands still until `resume`.
+    fn wait(&mut self) -> Instant {
+        self.waiting = true;
+        Instant::now()
+    }
+    /// The person answered: the run gets back the time it waited.
+    fn resume(&mut self, since: Instant) {
+        self.waiting = false;
+        self.probe.resume_after_wait(since.elapsed());
+    }
+    /// Nobody answered in time: the run stops on the open question through
+    /// the same cancel request a person's Stop sends, so it reads as stopped.
+    async fn suspend(&mut self) {
+        self.report(WorkAgentDiagnostic::AskSuspended);
+        if let Err(error) = self.probe.request_stop().await {
+            self.report(WorkAgentDiagnostic::CommitRefused {
+                kind: "suspend",
+                error,
+            });
         }
     }
     /// The disclosed excerpt is capped below the record so the turn stays
@@ -1226,10 +1351,16 @@ impl Driver {
                             let artifacts = if record.evidence.citations.is_empty() {
                                 vec![]
                             } else {
-                                attempt
-                                    .mint_artifact(sources_draft(&self.output, &record))
-                                    .map(|artifact| vec![artifact])
-                                    .unwrap_or_default()
+                                match attempt.mint_artifact(sources_draft(&self.output, &record)) {
+                                    Ok(artifact) => vec![artifact],
+                                    Err(_) => {
+                                        self.report(WorkAgentDiagnostic::ArtifactsDropped {
+                                            kind: "search",
+                                            count: 1,
+                                        });
+                                        vec![]
+                                    }
+                                }
                             };
                             self.remember(&record);
                             let note = Some(sources_note(record.evidence.citations.len()));
@@ -1245,32 +1376,44 @@ impl Driver {
                             .await?;
                         }
                         (WorkAttemptStatus::OutcomeUnknown, _) => {
+                            let note = self.why_stopped().await.unwrap_or(ANSWER_LOST);
                             self.settle(
                                 id,
                                 WorkStepStatus::OutcomeUnknown,
                                 None,
                                 vec![],
                                 None,
-                                None,
+                                Some(note.into()),
                                 None,
                             )
                             .await?;
                             terminal = Some(WorkAttemptStatus::OutcomeUnknown);
                         }
                         (status, _) => {
-                            if let Some(note) = outcome.note {
+                            if let Some(error) = outcome.error {
+                                self.report(WorkAgentDiagnostic::StepFailed {
+                                    kind: "search",
+                                    error,
+                                });
+                            } else if let Some(note) = outcome.note {
                                 self.report(WorkAgentDiagnostic::SearchRefused { note });
+                            }
+                            if let Some(note) = outcome.note {
                                 self.notice(&format!(
                                     "A search failed: {note}. Try one differently worded search or read a listed page."
                                 ));
                             }
+                            let note = match outcome.note {
+                                Some(note) => note,
+                                None => self.why_stopped().await.unwrap_or(INTERRUPTED),
+                            };
                             self.settle(
                                 id,
                                 step_status(status),
                                 outcome.usage.or(Some(WorkUsage::default())),
                                 vec![],
                                 None,
-                                outcome.note.map(str::to_owned),
+                                Some(note.into()),
                                 None,
                             )
                             .await?;
@@ -1288,20 +1431,35 @@ impl Driver {
                         } else {
                             reads::combined_usage(prior, outcome.usage)
                         };
+                        let drafted = outcome.artifacts.len();
                         let artifacts: Vec<WorkArtifactV1> = outcome
                             .artifacts
                             .into_iter()
                             .filter_map(|draft| attempt.mint_artifact(draft).ok())
                             .collect();
+                        if artifacts.len() < drafted {
+                            self.report(WorkAgentDiagnostic::ArtifactsDropped {
+                                kind: "read",
+                                count: drafted - artifacts.len(),
+                            });
+                        }
                         let (status, artifacts) = if outcome.status == WorkStepStatus::Succeeded {
                             (WorkStepStatus::Succeeded, artifacts)
                         } else {
                             (outcome.status, vec![])
                         };
-                        let note = if status == WorkStepStatus::Succeeded {
-                            Some(read_note(&artifacts))
-                        } else {
-                            outcome.note.clone()
+                        let note = match (status, outcome.note.clone()) {
+                            (WorkStepStatus::Succeeded, _) => read_note(&artifacts),
+                            (_, Some(note)) => note,
+                            (status, None) => self
+                                .why_stopped()
+                                .await
+                                .unwrap_or(match status {
+                                    WorkStepStatus::OutcomeUnknown => ANSWER_LOST,
+                                    WorkStepStatus::Cancelled => INTERRUPTED,
+                                    _ => "The page gave nothing",
+                                })
+                                .to_owned(),
                         };
                         if status == WorkStepStatus::Failed {
                             self.notice(&format!(
@@ -1314,7 +1472,7 @@ impl Driver {
                         if let Some(measured) = measurements {
                             self.report(WorkAgentDiagnostic::ReadMeasured(measured));
                         }
-                        self.settle(id, status, usage, artifacts, None, note, measurements)
+                        self.settle(id, status, usage, artifacts, None, Some(note), measurements)
                             .await?;
                         self.published += published;
                         for link in links {
@@ -1338,26 +1496,35 @@ impl Driver {
                         let _ = outcome.intervention;
                     }
                     Err(WorkError::OutcomeUnknown) => {
+                        let note = self.why_stopped().await.unwrap_or(ANSWER_LOST);
                         self.settle(
                             id,
                             WorkStepStatus::OutcomeUnknown,
                             None,
                             vec![],
                             None,
-                            None,
+                            Some(note.into()),
                             None,
                         )
                         .await?;
                         terminal = Some(WorkAttemptStatus::OutcomeUnknown);
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        self.report(WorkAgentDiagnostic::StepFailed {
+                            kind: "read",
+                            error,
+                        });
+                        let note = browse_error_note(error);
+                        self.notice(&format!(
+                            "A page read failed: {note}. Use another listed source or finish with what the canvas has."
+                        ));
                         self.settle(
                             id,
                             WorkStepStatus::Failed,
                             prior.or(Some(WorkUsage::default())),
                             vec![],
                             None,
-                            None,
+                            Some(note.into()),
                             None,
                         )
                         .await?;
@@ -1382,6 +1549,7 @@ impl Driver {
             WorkStepStatus::Running,
         );
         let id = self.begin(step, vec![], None).await?;
+        let since = self.wait();
         loop {
             tokio::time::sleep(ASK_POLL).await;
             let state = self.probe.runtime_projection().await?;
@@ -1396,6 +1564,7 @@ impl Driver {
                 .find(|s| s.id == id)
                 .ok_or(WorkError::NotFound)?;
             if asked.status == WorkStepStatus::Succeeded {
+                self.resume(since);
                 if let WorkStepKindV1::Ask {
                     prompt,
                     answer: Some(answer),
@@ -1409,17 +1578,10 @@ impl Driver {
                 }
                 return Ok(None);
             }
-            // An open question suspends the run rather than spending it: near
-            // the deadline the run stops on the question, and an answer or
-            // Continue resumes it as the next request.
-            if Instant::now() + ASK_RESERVE >= self.probe.deadline() {
-                self.report(WorkAgentDiagnostic::AskSuspended);
-                if let Err(error) = self.probe.request_stop().await {
-                    self.report(WorkAgentDiagnostic::CommitRefused {
-                        kind: "suspend",
-                        error,
-                    });
-                }
+            // An open question never spends the run; unanswered past the
+            // wait, the run stops on it and an answer or Continue resumes it.
+            if since.elapsed() >= WAIT_PATIENCE {
+                self.suspend().await;
                 self.settle(
                     id,
                     WorkStepStatus::Cancelled,
@@ -1433,13 +1595,14 @@ impl Driver {
                 return Ok(Some(WorkAttemptStatus::Cancelled));
             }
             if self.cancelled().await {
+                let note = self.stop_note().unwrap_or(INTERRUPTED);
                 self.settle(
                     id,
                     WorkStepStatus::Cancelled,
                     None,
                     vec![],
                     None,
-                    None,
+                    Some(note.into()),
                     None,
                 )
                 .await?;
@@ -1512,7 +1675,10 @@ impl Driver {
                 summary: execution_summary(execution),
             });
         }
-        if thread.last().is_some_and(|entry| entry.request == self.objective) {
+        if thread
+            .last()
+            .is_some_and(|entry| entry.request == self.objective)
+        {
             thread.pop();
         }
         self.thread = thread.into_iter().rev().take(16).rev().collect();
@@ -1822,6 +1988,16 @@ fn step_kind_label(kind: &WorkStepKindV1) -> &'static str {
         WorkStepKindV1::WriteFile { .. } => "write_file",
         WorkStepKindV1::EditFile { .. } => "edit_file",
         WorkStepKindV1::Finish { .. } => "finish",
+    }
+}
+
+/// Why a page could not be opened at all, in the person's words.
+fn browse_error_note(error: WorkError) -> &'static str {
+    match error {
+        WorkError::Capacity => "Too many pages were already open",
+        WorkError::Unavailable | WorkError::Shutdown => "The browser was not available",
+        WorkError::ProfileUnavailable => "The browsing profile was not available",
+        _ => "The page could not be opened",
     }
 }
 

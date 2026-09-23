@@ -35,7 +35,7 @@ impl Drop for Permit {
 /// selected textual fields through their own provider policy boundary.
 #[must_use]
 pub struct WorkNodeAttempt {
-    browser_session: zephium_agentic::WorkBrowserSession,
+    lifetime: Lifetime,
     basis_revision: Arc<Mutex<WorkRevision>>,
     owner: WorkRuntimeSessionId,
     progress: Arc<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
@@ -49,7 +49,6 @@ pub struct WorkNodeAttempt {
     decisions: Vec<zephium_core::work::planning::PlanningAnswer>,
     dependencies: Vec<WorkArtifactV1>,
     spec: WorkNodeExecutionSpec,
-    deadline: Instant,
     settled: bool,
     _permit: Permit,
 }
@@ -62,7 +61,7 @@ impl WorkNodeAttempt {
         &self,
         node: WorkPlanNodeId,
     ) -> Result<WorkNodeAttempt, WorkError> {
-        if self.cancellation_requested().await? || Instant::now() >= self.deadline {
+        if self.cancellation_requested().await? || Instant::now() >= self.deadline() {
             return Err(WorkError::Unavailable);
         }
         let state = self.runtime_projection().await?;
@@ -73,7 +72,7 @@ impl WorkNodeAttempt {
                 state.work.revision,
                 self.execution,
                 node,
-                Some((self.attempt, self.deadline)),
+                Some((self.attempt, self.deadline())),
             )
             .await
     }
@@ -111,7 +110,7 @@ impl WorkNodeAttempt {
     /// restart the attempt.
     pub fn probe(&self) -> WorkAttemptProbe {
         WorkAttemptProbe {
-            browser_session: self.browser_session.clone(),
+            lifetime: self.lifetime.clone(),
             basis_revision: self.basis_revision.clone(),
             owner: self.owner,
             progress: self.progress.clone(),
@@ -122,7 +121,6 @@ impl WorkNodeAttempt {
             execution: self.execution,
             attempt: self.attempt,
             node: self.node.id,
-            deadline: self.deadline,
         }
     }
     pub(crate) fn mint_artifact(
@@ -181,7 +179,7 @@ impl WorkNodeAttempt {
         &self.spec
     }
     pub fn deadline(&self) -> Instant {
-        self.deadline
+        self.lifetime.deadline()
     }
 
     pub(crate) async fn read_evidence(
@@ -405,9 +403,59 @@ pub enum WorkCancelCause {
     /// The durable state could not be read.
     Unreadable,
 }
+/// The attempt's deadline and the anonymous browser scope bound to it. Time
+/// spent waiting for the person moves both, once the wait is over.
+#[derive(Clone)]
+struct Lifetime(Arc<Mutex<LifetimeState>>);
+struct LifetimeState {
+    deadline: Instant,
+    session: zephium_agentic::WorkBrowserSession,
+    closed: bool,
+    work: WorkId,
+}
+impl Lifetime {
+    fn new(profile: ProfileId, work: WorkId, deadline: Instant) -> Self {
+        Self(Arc::new(Mutex::new(LifetimeState {
+            deadline,
+            session: zephium_agentic::WorkBrowserSession::new(profile, work, deadline),
+            closed: false,
+            work,
+        })))
+    }
+    fn state(&self) -> std::sync::MutexGuard<'_, LifetimeState> {
+        self.0.lock().unwrap_or_else(|error| error.into_inner())
+    }
+    fn deadline(&self) -> Instant {
+        self.state().deadline
+    }
+    fn session(&self) -> zephium_agentic::WorkBrowserSession {
+        self.state().session.clone()
+    }
+    fn close(&self) {
+        let mut state = self.state();
+        state.closed = true;
+        state.session.close();
+    }
+    /// Gives back the time the attempt spent waiting for the person. No page
+    /// is open during a wait, so the browser scope is replaced rather than
+    /// stretched; a closed scope stays closed.
+    fn extend(&self, waited: Duration) {
+        let mut state = self.state();
+        if state.closed || waited.is_zero() {
+            return;
+        }
+        state.deadline += waited;
+        let session = zephium_agentic::WorkBrowserSession::new(
+            state.session.profile(),
+            state.work,
+            state.deadline,
+        );
+        std::mem::replace(&mut state.session, session).close();
+    }
+}
 #[derive(Clone)]
 pub struct WorkAttemptProbe {
-    browser_session: zephium_agentic::WorkBrowserSession,
+    lifetime: Lifetime,
     basis_revision: Arc<Mutex<WorkRevision>>,
     owner: WorkRuntimeSessionId,
     progress: Arc<Mutex<Option<zephium_ipc::work::WorkSignalV1>>>,
@@ -418,7 +466,6 @@ pub struct WorkAttemptProbe {
     execution: WorkExecutionId,
     attempt: WorkAttemptId,
     node: WorkPlanNodeId,
-    deadline: Instant,
 }
 impl WorkAttemptProbe {
     #[cfg(feature = "work-execution")]
@@ -426,7 +473,7 @@ impl WorkAttemptProbe {
         &self,
         step: WorkStepId,
     ) -> Result<crate::RetainedPageAdmission, WorkError> {
-        if self.cancellation_requested().await? || Instant::now() >= self.deadline {
+        if self.cancellation_requested().await? || Instant::now() >= self.deadline() {
             return Err(WorkError::Invalid);
         }
         let state = self.runtime_projection().await?;
@@ -451,11 +498,11 @@ impl WorkAttemptProbe {
             attempt: self.attempt,
             step,
             workers: execution.spec.limits.max_workers.min(3),
-            deadline: self.deadline,
+            deadline: self.deadline(),
         })
     }
-    pub fn browser_session(&self) -> &zephium_agentic::WorkBrowserSession {
-        &self.browser_session
+    pub fn browser_session(&self) -> zephium_agentic::WorkBrowserSession {
+        self.lifetime.session()
     }
     pub fn profile(&self) -> ProfileId {
         self.profile
@@ -473,7 +520,11 @@ impl WorkAttemptProbe {
         self.node
     }
     pub fn deadline(&self) -> Instant {
-        self.deadline
+        self.lifetime.deadline()
+    }
+    /// Time spent waiting for the person does not count against the attempt.
+    pub(crate) fn resume_after_wait(&self, waited: Duration) {
+        self.lifetime.extend(waited);
     }
     /// Records the newest frame of one browser step's page, bounded per attempt.
     pub fn record_page_frame(
@@ -606,7 +657,7 @@ impl WorkAttemptProbe {
             None
         };
         if cause.is_some() {
-            self.browser_session.close();
+            self.lifetime.close();
         }
         Ok(cause)
     }
@@ -656,12 +707,14 @@ impl WorkAttemptProbe {
                         artifacts,
                         evidence,
                         file,
+                        note,
                         ..
                     } if *status == WorkStepStatus::Succeeded => {
                         *status = WorkStepStatus::Failed;
                         artifacts.clear();
                         *evidence = None;
                         *file = None;
+                        *note = Some(KEPT_NOTHING.into());
                     }
                     WorkRuntimeUpdate::BeginStep {
                         step,
@@ -673,6 +726,7 @@ impl WorkAttemptProbe {
                         step.status = WorkStepStatus::Failed;
                         step.artifacts.clear();
                         step.evidence = None;
+                        step.note = Some(KEPT_NOTHING.into());
                         artifacts.clear();
                         *evidence = None;
                         *file = None;
@@ -686,9 +740,11 @@ impl WorkAttemptProbe {
         Err(WorkError::Conflict)
     }
 }
+/// A step whose result the execution record had no room left to keep.
+const KEPT_NOTHING: &str = "The work has grown too large to keep this result";
 impl Drop for WorkNodeAttempt {
     fn drop(&mut self) {
-        self.browser_session.close();
+        self.lifetime.close();
         if let Ok(mut progress) = self.progress.lock() {
             progress.take();
         }
@@ -853,7 +909,7 @@ impl WorkRuntimeService {
             deadline.min(parent_deadline)
         });
         let owned = WorkNodeAttempt {
-            browser_session: zephium_agentic::WorkBrowserSession::new(profile, work, deadline),
+            lifetime: Lifetime::new(profile, work, deadline),
             basis_revision: Arc::new(Mutex::new(projection.work.revision)),
             owner: projection
                 .owners
@@ -872,7 +928,6 @@ impl WorkRuntimeService {
             decisions: decision_context(&projection.work),
             dependencies,
             spec,
-            deadline,
             settled: false,
             _permit: permit,
         };
