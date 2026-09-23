@@ -38,7 +38,10 @@ impl OpenAiPublicSearchConfig {
     pub fn try_new(call: AgentProviderCallConfig) -> Result<Self, WorkError> {
         if call.provider() != AgentProviderKind::OpenAiResponses
             || call.response_route() != crate::AgentProviderResponseRoute::OpenAiDefault
-            || !matches!(call.model().as_str(), "gpt-4.1-mini" | "gpt-5.6-luna")
+            || !matches!(
+                call.model().as_str(),
+                "gpt-4.1-mini" | "gpt-5.6-luna" | "gpt-6-luna"
+            )
             || call.max_output_tokens() > 8192
             || call.pricing_profile().max_input_tokens()
                 < u64::from(

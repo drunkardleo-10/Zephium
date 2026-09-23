@@ -23,6 +23,7 @@ impl WorkPlanningConfig {
         match self.call.model().as_str() {
             "gpt-5.6-terra" => "gpt-5.6-terra",
             "gpt-5.6-luna" => "gpt-5.6-luna",
+            "gpt-6-luna" => "gpt-6-luna",
             _ => "unlisted_openai",
         }
     }

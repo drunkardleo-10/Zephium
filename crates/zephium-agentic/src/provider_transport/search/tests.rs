@@ -494,44 +494,47 @@ fn answer_newline_and_tab_remain_usable() {
 
 #[test]
 fn luna_search_preserves_reasoning_and_prices_actual_input_with_one_tool_fee() {
-    let cfg = config_for("gpt-5.6-luna");
-    let body: Value = serde_json::from_slice(&request(&cfg, "public query", &[]).unwrap()).unwrap();
-    assert_eq!(body["model"], "gpt-5.6-luna");
-    assert_eq!(body["reasoning"]["effort"], "medium");
-    assert_eq!(body["max_tool_calls"], 1);
-    assert_eq!(body["tools"].as_array().unwrap().len(), 1);
-    let reserved = cfg.reservation(1000).unwrap();
-    assert_eq!(reserved.model_tokens, SEARCH_CONTEXT_TOKENS + 1000 + 4096);
-    assert_eq!(
-        u64::from(reserved.cost_micro_usd),
-        cfg.call
-            .planning_cost_ceiling(SEARCH_CONTEXT_TOKENS + 1000, 4096)
+    for model in ["gpt-5.6-luna", "gpt-6-luna"] {
+        let cfg = config_for(model);
+        let body: Value =
+            serde_json::from_slice(&request(&cfg, "public query", &[]).unwrap()).unwrap();
+        assert_eq!(body["model"], model);
+        assert_eq!(body["reasoning"]["effort"], "medium");
+        assert_eq!(body["max_tool_calls"], 1);
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+        let reserved = cfg.reservation(1000).unwrap();
+        assert_eq!(reserved.model_tokens, SEARCH_CONTEXT_TOKENS + 1000 + 4096);
+        assert_eq!(
+            u64::from(reserved.cost_micro_usd),
+            cfg.call
+                .planning_cost_ceiling(SEARCH_CONTEXT_TOKENS + 1000, 4096)
+                .unwrap()
+                + 10000
+        );
+        let mut r = response();
+        r["model"] = json!(model);
+        r["usage"]["output_tokens_details"]["reasoning_tokens"] = json!(50);
+        r["output"]
+            .as_array_mut()
             .unwrap()
-            + 10000
-    );
-    let mut r = response();
-    r["model"] = json!("gpt-5.6-luna");
-    r["usage"]["output_tokens_details"]["reasoning_tokens"] = json!(50);
-    r["output"]
-        .as_array_mut()
-        .unwrap()
-        .insert(0, json!({"type":"reasoning","id":"rs_test","summary":[]}));
-    let result = decode(&serde_json::to_vec(&r).unwrap(), &cfg, 1000)
-        .unwrap()
-        .unwrap();
-    assert_eq!(result.response_model, "gpt-5.6-luna");
-    assert_eq!(result.usage.model_tokens, 9100);
-    assert_eq!(
-        u64::from(result.usage.cost_micro_usd),
-        cfg.call.planning_cost_ceiling(9000, 100).unwrap() + 10000
-    );
-    assert!(decode(&serde_json::to_vec(&r).unwrap(), &config(), 1000).is_none());
-    r["usage"]["output_tokens_details"]["reasoning_tokens"] = json!(101);
-    assert!(decode(&serde_json::to_vec(&r).unwrap(), &cfg, 1000).is_none());
-    r["usage"]["output_tokens_details"]["reasoning_tokens"] = json!(50);
-    let extra = r["output"][1].clone();
-    r["output"].as_array_mut().unwrap().insert(2, extra);
-    assert!(decode(&serde_json::to_vec(&r).unwrap(), &cfg, 1000).is_none());
+            .insert(0, json!({"type":"reasoning","id":"rs_test","summary":[]}));
+        let result = decode(&serde_json::to_vec(&r).unwrap(), &cfg, 1000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.response_model, model);
+        assert_eq!(result.usage.model_tokens, 9100);
+        assert_eq!(
+            u64::from(result.usage.cost_micro_usd),
+            cfg.call.planning_cost_ceiling(9000, 100).unwrap() + 10000
+        );
+        assert!(decode(&serde_json::to_vec(&r).unwrap(), &config(), 1000).is_none());
+        r["usage"]["output_tokens_details"]["reasoning_tokens"] = json!(101);
+        assert!(decode(&serde_json::to_vec(&r).unwrap(), &cfg, 1000).is_none());
+        r["usage"]["output_tokens_details"]["reasoning_tokens"] = json!(50);
+        let extra = r["output"][1].clone();
+        r["output"].as_array_mut().unwrap().insert(2, extra);
+        assert!(decode(&serde_json::to_vec(&r).unwrap(), &cfg, 1000).is_none());
+    }
 }
 
 #[test]
