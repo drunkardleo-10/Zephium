@@ -555,6 +555,121 @@ fn located_generation_is_focused_and_merges_only_exact_delivered_evidence() {
 }
 
 #[test]
+fn located_form_values_copy_complete_public_values_without_substituting_labels() {
+    for (name, value, sensitivity, offered, truncated) in [
+        (None, "Warsaw".to_owned(), "public", true, false),
+        (
+            Some("Destination"),
+            "Warsaw".to_owned(),
+            "public",
+            true,
+            false,
+        ),
+        (
+            Some("Destination"),
+            "x".repeat(MAX_SEMANTIC_VALUE_PREVIEW_BYTES + 1),
+            "public",
+            true,
+            true,
+        ),
+        (
+            None,
+            "Private location".to_owned(),
+            "sensitive",
+            false,
+            false,
+        ),
+        (None, "Private location".to_owned(), "secret", false, false),
+    ] {
+        let (_, call, previous, _) = admitted_fixture();
+        let mut node = json!({"k":2,"p":0,"r":"textbox","v":{"k":"text","value":value},"q":sensitivity,"fc":true});
+        if let Some(name) = name {
+            node["n"] = json!(name);
+        }
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(SemanticInvocationId::new(1).unwrap(), previous.frames()[0].frame().clone(), SemanticSnapshotGeneration::new(1).unwrap()),
+            &serde_json::to_vec(&json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":[{"k":1,"r":"document","fc":true},node,{"k":3,"p":0,"r":"heading","l":1,"n":"Travel search","fc":true}]})).unwrap(),
+        ).unwrap();
+        let observation = SemanticObservationAssembler::new(
+            SemanticObservationRequest::initial(
+                SemanticObservationId::new(1).unwrap(),
+                call.account().context(),
+                SemanticObservationBudget::try_new(16, 8192, 1).unwrap(),
+            ),
+            snapshot,
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![
+                SemanticExtractionFieldSchema::try_text("destination".into(), true, 2048)
+                    .unwrap()
+                    .with_verbatim_text()
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Read the public destination".into(),
+            &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
+        )
+        .unwrap();
+        let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        let projection = DecisionObservation::try_for_read(
+            &observation,
+            &objective,
+            &authority,
+            call.account(),
+            Some(&schema),
+        )
+        .unwrap();
+        let Question::Choice { criteria, .. } = &projection.request().questions()["locate_0"]
+        else {
+            panic!()
+        };
+        assert_eq!(criteria.contains_key("@a2"), offered);
+        if !offered {
+            assert!(!projection
+                .request()
+                .state()
+                .to_string()
+                .contains("Private location"));
+            continue;
+        }
+        let response = projection
+            .request()
+            .decode_emulation(
+                &serde_json::to_vec(&located_answers(&projection)).unwrap(),
+                DecisionUsage::default(),
+            )
+            .unwrap();
+        let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+        let selection = answers
+            .take_read_selection(&observation, call.account(), &schema)
+            .unwrap()
+            .unwrap();
+        let located = selection.prepare(
+            &observation,
+            call.account(),
+            SemanticCaptureInstant::from_millis(101),
+        );
+        if truncated {
+            assert!(matches!(
+                located,
+                Err(SemanticExtractionError::VerbatimMismatch)
+            ));
+        } else {
+            let result = located.unwrap().finish(None).unwrap();
+            assert!(
+                matches!(result.fields()[0].value(), SemanticExtractedValue::Text(text) if text.as_str() == value)
+            );
+        }
+    }
+}
+
+#[test]
 fn incomplete_reads_retain_only_confident_located_evidence_for_later_mapping() {
     let (call, observation, schema, projection) = located_fixture(false);
     let mut output = fixture_answers(projection.request());
@@ -725,6 +840,22 @@ fn read_completion_evals_match_the_production_questions_for_optional_columns() {
             serde_json::to_value(read.completion_question()).unwrap(),
             fixture["request"]["questions"]["done"]
         );
+        let (_, observation, _, _) = located_fixture(false);
+        let references = observation
+            .frames()
+            .iter()
+            .flat_map(|frame| frame.nodes())
+            .map(SemanticNode::reference)
+            .collect();
+        let mut questions = BTreeMap::new();
+        read.questions(&observation, &references, &mut questions)
+            .unwrap();
+        for (key, question) in questions {
+            assert_eq!(
+                serde_json::to_value(question).unwrap()["instructions"],
+                fixture["request"]["questions"][&key]["instructions"]
+            );
+        }
     }
 }
 
