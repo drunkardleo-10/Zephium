@@ -16,6 +16,8 @@ mod work_artifact_cleanup;
 mod work_commerce;
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]
 mod work_durable;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod acceptance;
 mod work_navigation;
 mod work_route;
 mod work_sites;
@@ -106,8 +108,14 @@ fn main() {
         [argument] if argument == "--live-public-work-product" => work_durable::run_product(),
         #[cfg(feature = "durable-runtime")]
         [argument, path, count] if argument == "--replay-agent-turn" => {
-            work_durable::replay_agent_turn(path, count)
+            work_durable::replay_agent_turn(path, count, None)
         }
+        #[cfg(feature = "durable-runtime")]
+        [argument, path, count, effort] if argument == "--replay-agent-turn" => {
+            work_durable::replay_agent_turn(path, count, Some(effort))
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-acceptance" => acceptance::run(),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-work" => work_durable::run_agent(),
         #[cfg(feature = "durable-runtime")]

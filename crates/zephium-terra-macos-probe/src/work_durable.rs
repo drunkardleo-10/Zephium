@@ -140,15 +140,24 @@ pub(super) fn run_agent_files() -> Result<(), super::ProbeFailure> {
 }
 
 /// Sends one retained public turn request again, four at a time, and keeps
-/// each text with whether the turn wire admitted it.
+/// each text with whether the turn wire admitted it. An effort (none, low,
+/// medium) replaces the retained request's reasoning effort.
 pub(super) fn replay_agent_turn(
     path: &std::ffi::OsStr,
     count: &std::ffi::OsStr,
+    effort: Option<&std::ffi::OsStr>,
 ) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
-    let body: serde_json::Value =
+    let mut body: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path).map_err(|_| Error::Authority)?)
             .map_err(|_| Error::Authority)?;
+    if let Some(effort) = effort {
+        let effort = effort
+            .to_str()
+            .filter(|effort| matches!(*effort, "none" | "low" | "medium"))
+            .ok_or(Error::Authority)?;
+        body["reasoning"]["effort"] = serde_json::json!(effort);
+    }
     let count: usize = count
         .to_str()
         .and_then(|count| count.parse().ok())
@@ -182,7 +191,13 @@ pub(super) fn replay_agent_turn(
                     .map_err(|_| Error::Runtime)?;
                 let mut results = Vec::new();
                 for index in (worker..count).step_by(4) {
+                    let started = Instant::now();
                     let text = runtime.block_on(agent.replay_retained_turn(body.clone()));
+                    let _ = writeln!(
+                        std::io::stdout().lock(),
+                        "replay-agent-turn: index={index} elapsed_ms={}",
+                        started.elapsed().as_millis()
+                    );
                     let (decoded, faults) = text
                         .as_deref()
                         .map(zephium_agentic::agent_turn_wire_faults)
@@ -652,6 +667,21 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         }
         _ => true,
     };
+    if mode == Mode::AgentListing {
+        // The read asked for ?adults=1; only the page's canonical address,
+        // not the admitted one, cites the listing without that query.
+        let canonical = "https://www.airbnb.com/rooms/23813739";
+        let cited = state.executions[0].artifacts.iter().any(|artifact| {
+            matches!(&artifact.data, zephium_core::work::artifact::WorkArtifactDataV1::ComparisonMatrix { subjects, cells, .. }
+                if subjects.iter().any(|subject| subject.homepage.as_deref() == Some(canonical))
+                    || cells.iter().flatten().any(|cell| matches!(&cell.value,
+                        zephium_core::work::artifact::WorkCellValue::Text { text } if text == canonical)))
+        });
+        let _ = writeln!(
+            std::io::stdout().lock(),
+            "listing_address canonical_cited={cited}"
+        );
+    }
     if matches!(mode, Mode::AgentTrip | Mode::AgentAirbnb | Mode::AgentListing) {
         let _ = writeln!(
             std::io::stdout().lock(),
@@ -753,6 +783,10 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     {
         return Err(Error::Runtime);
     }
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "agent-acceptance: collection={collection_accepted} money={money_accepted} travel={travel_accepted}"
+    );
     if !collection_accepted || !money_accepted || !travel_accepted {
         return Err(Error::Runtime);
     }
@@ -1384,7 +1418,7 @@ async fn agent_workflow(
         Mode::AgentTrip => "Plan a trip from Poland to San Francisco for a YC batch as a solo founder; for flats check Airbnb. Use public sources for batch timing, travel logistics and practical accommodation tradeoffs, with cited findings. Read Airbnb itself before making any claim about its listings. Dates and budget are unspecified: state planning assumptions and leave live availability and total stay cost unknown unless the pages establish them. Do not book, submit forms, sign in, create accounts, send messages or interact with verification controls. Report blocked pages honestly.",
         Mode::AgentAirbnb => "Find three good Airbnb options in San Francisco for a solo founder attending a YC batch, compare and recommend one using cited public page evidence. Inspect Airbnb itself and observed listing links. Dates and budget are unspecified: state assumptions, distinguish nightly prices from total stay costs, and leave unavailable details unknown. Include observed pictures when available. Do not book, submit forms, sign in, create accounts, send messages or interact with verification controls. If access prevents three verified options, report that limitation instead of inventing options.",
         Mode::AgentMoney => AGENT_MONEY_OBJECTIVE,
-        Mode::AgentListing => "Read https://www.airbnb.com/rooms/23813739 in one browser read and collect this one listing: its name, displayed nightly price, displayed monthly total, stay dates or minimum stay, listing URL and picture. Dates are unspecified, so leave any value the page does not show unknown. Do not search, follow links, book, sign in or interact with verification controls.",
+        Mode::AgentListing => "Read https://www.airbnb.com/rooms/23813739?adults=1 in one browser read and collect this one listing: its name, displayed nightly price, displayed monthly total, stay dates or minimum stay, its own page address as an optional url column named listing_url, and picture. Dates are unspecified, so leave any value the page does not show unknown. Do not search, follow links, book, sign in or interact with verification controls.",
         Mode::AgentRead => AGENT_READ_OBJECTIVE,
         Mode::AgentGovernment | Mode::AgentHumanGovernment => AGENT_GOVERNMENT_OBJECTIVE,
         Mode::AgentDisclosure => "Read https://www.lego.com/en-us/product/tower-bridge-21067 in one browser assignment. Find the Specifications disclosure, bring it into view if needed, expand it, and inspect its revealed content. Return the product name, displayed price, piece count and exact dimensions with citations from this page. Do not follow links, buy, sign in, change locale, or substitute public search. Leave unsupported details unknown. Use one browser read assignment and a source-backed note.",
