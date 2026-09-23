@@ -16,6 +16,8 @@ pub enum DecisionObservationSite {
     DemoStore,
     /// Public scraping-sandbox book product page.
     BookStore,
+    /// The same sandbox's catalog: twenty books, each a repeated card.
+    BookCatalog,
     /// Public test-site computer product page.
     TestStore,
     /// Public Airbnb listing page without stay dates.
@@ -38,6 +40,7 @@ impl DecisionObservationSite {
             Self::Government => "https://travel.state.gov/",
             Self::DemoStore => "https://www.scrapingcourse.com/ecommerce/product/adrienne-trek-jacket/",
             Self::BookStore => "https://books.toscrape.com/catalogue/the-black-maria_991/index.html",
+            Self::BookCatalog => "https://books.toscrape.com/catalogue/page-1.html",
             Self::TestStore => "https://www.demoblaze.com/prod.html?idp_=1",
             Self::AirbnbListing => "https://www.airbnb.com/rooms/23813739",
             Self::LegoTheme => "https://www.lego.com/en-us/themes/architecture",

@@ -55,6 +55,9 @@ pub(super) fn run_case(case: &std::ffi::OsStr, model: ProbeModel) -> Result<(), 
         Some("lego-gate") => 16,
         Some("ikea-consent") => 17,
         Some("zalando-consent") => 18,
+        Some("lego-catalog") => 19,
+        Some("lego-catalog-cells") => 20,
+        Some("book-catalog") => 21,
         _ => return Err(ProbeFailure::Authority),
     };
     run_selected(Some(index), model)
@@ -242,6 +245,7 @@ fn report(
                 "done" => DecisionPurpose::Completion,
                 "picture" | "tower_bridge_picture" => DecisionPurpose::Picture,
                 "wall" => DecisionPurpose::Wall,
+                key if key.starts_with("rows_") => DecisionPurpose::Evidence,
                 "operation" | "click_target" if navigation => DecisionPurpose::Navigation,
                 "operation" | "click_target" | "type_target" | "scroll_target"
                 | "dismiss_target" | "tower_bridge_link" => DecisionPurpose::Action,

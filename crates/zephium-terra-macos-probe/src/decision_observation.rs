@@ -11,6 +11,7 @@ pub(super) fn run(site: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
         Some("government") => (DecisionObservationSite::Government, "government"),
         Some("demo-store") => (DecisionObservationSite::DemoStore, "demo-store"),
         Some("book-store") => (DecisionObservationSite::BookStore, "book-store"),
+        Some("book-catalog") => (DecisionObservationSite::BookCatalog, "book-catalog"),
         Some("test-store") => (DecisionObservationSite::TestStore, "test-store"),
         Some("airbnb-listing") => (DecisionObservationSite::AirbnbListing, "airbnb-listing"),
         Some("lego-theme") => (DecisionObservationSite::LegoTheme, "lego-theme"),
@@ -49,6 +50,7 @@ pub(super) fn run(site: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
             | DecisionObservationSite::TestStore => "Read this product page and report the product name, its displayed price and the product picture.",
             DecisionObservationSite::AirbnbListing => "Read this listing and report its name, displayed nightly price, displayed monthly total, stay dates or minimum stay, and picture.",
             DecisionObservationSite::LegoTheme => "Collect three LEGO Architecture sets from this catalog with their displayed prices, product links and pictures.",
+            DecisionObservationSite::BookCatalog => "Collect three books from this catalog with their displayed prices, availability, product links and pictures.",
             DecisionObservationSite::Consent => "List the product categories this store's home page offers.",
             DecisionObservationSite::Interstitial => "List the clothing categories this store's home page offers.",
             DecisionObservationSite::Documentation => "List every situation in which WAL mode does not work or has drawbacks.",
@@ -120,6 +122,22 @@ pub(super) fn run(site: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
                     DecisionProjectionError::Capacity => "read_projection_capacity",
                     DecisionProjectionError::Authority => "read_projection_authority",
                 })?;
+            std::fs::write(directory.join(format!("{name}-read.json")), read.encode().map_err(|_| "decision_encoding")?).map_err(|_| "decision_output")?;
+        }
+        if matches!(site, DecisionObservationSite::BookCatalog) {
+            let verbatim = |name: &str| SemanticExtractionFieldSchema::try_text(name.into(), false, 1024).and_then(SemanticExtractionFieldSchema::with_verbatim_text);
+            let columns = vec![
+                SemanticExtractionFieldSchema::try_text("name".into(), true, 512).map_err(|_| "read_schema")?,
+                verbatim("displayed_price").map_err(|_| "read_schema")?,
+                verbatim("availability").map_err(|_| "read_schema")?,
+                SemanticExtractionFieldSchema::try_url("product_url".into(), false, 2048).map_err(|_| "read_schema")?,
+                SemanticExtractionFieldSchema::try_image_url("image".into(), false, 2048).map_err(|_| "read_schema")?,
+            ];
+            let rows = SemanticExtractionFieldSchema::try_rows("output_0".into(), true, columns, 3).map_err(|_| "read_schema")?;
+            let schema = SemanticExtractionSchema::try_new(SemanticExtractionSchemaId::new(1).ok_or("read_schema")?, vec![rows]).map_err(|_| "read_schema")?;
+            let (read, _) = DecisionObservation::try_for_read(&observation, &objective, &authority, account, Some(&schema))
+                .and_then(DecisionObservation::into_anonymous_eval_requests)
+                .map_err(|_| "read_projection")?;
             std::fs::write(directory.join(format!("{name}-read.json")), read.encode().map_err(|_| "decision_encoding")?).map_err(|_| "decision_output")?;
         }
         if matches!(site, DecisionObservationSite::Yc) {
