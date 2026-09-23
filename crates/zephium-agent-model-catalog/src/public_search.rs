@@ -31,6 +31,9 @@ pub fn try_public_search_provider_exact_call_config(
     if max_output_tokens == 0 || max_output_tokens > 8192 {
         return Err(E::OutputTokens);
     }
+    if requested_model == GPT6_LUNA_MODEL_REVISION {
+        return try_gpt6_luna_provider_exact_call_config(max_output_tokens).map_err(|_| E::Catalog);
+    }
     if requested_model == LUNA_MODEL_REVISION {
         return try_luna_provider_exact_call_config(max_output_tokens).map_err(|_| E::Catalog);
     }
@@ -76,6 +79,12 @@ mod tests {
         assert_eq!(config, existing);
         assert!(try_public_search_provider_exact_call_config("unknown", 4096).is_err());
         assert!(try_public_search_provider_exact_call_config("gpt-5.6-luna", 8193).is_err());
+        let config = try_public_search_provider_exact_call_config("gpt-6-luna", 8192).unwrap();
+        assert_eq!(
+            config,
+            try_gpt6_luna_provider_exact_call_config(8192).unwrap()
+        );
+        assert_eq!(config.model().as_str(), "gpt-6-luna");
     }
     #[test]
     fn public_search_catalog_is_explicit_nonreasoning_and_bounded() {

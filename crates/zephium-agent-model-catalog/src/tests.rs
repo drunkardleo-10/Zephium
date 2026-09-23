@@ -171,6 +171,30 @@ fn luna_provider_factory_and_terminal_surface_are_closed() {
         settle_luna_provider_terminal;
 }
 
+#[test]
+fn gpt6_luna_is_a_separate_exact_entry_with_its_published_prices() {
+    let config = try_gpt6_luna_provider_exact_call_config(4_096).expect("GPT-6 Luna config");
+    assert_eq!(config.model().as_str(), "gpt-6-luna");
+    assert_eq!(config.tokenizer().as_str(), GPT6_LUNA_TOKENIZER_REVISION);
+    assert_eq!(config.pricing_profile().max_input_tokens(), 272_000);
+    assert_ne!(config, try_luna_provider_exact_call_config(4_096).unwrap());
+    let schedule = gpt6_luna_pricing_schedule().expect("GPT-6 Luna schedule");
+    assert!(schedule.allows_effective_model("gpt-6-luna"));
+    assert!(!schedule.allows_effective_model(LUNA_MODEL_REVISION));
+    assert_eq!(
+        schedule.accounting_guard(),
+        luna_guard(
+            "gpt-6-luna",
+            20_260_923,
+            [100_000, 10_000, 125_000, 500_000]
+        )
+    );
+    assert_eq!(
+        try_gpt6_luna_provider_exact_call_config(128_001),
+        Err(LunaModelCatalogError::OutputTokens)
+    );
+}
+
 fn independently_constructed_guard() -> [u8; 32] {
     let model =
         AgentProviderModelRevision::try_new("gpt-5.6-terra".to_owned()).expect("reviewed model");
@@ -201,19 +225,26 @@ fn independently_constructed_guard() -> [u8; 32] {
 }
 
 fn independently_constructed_luna_guard() -> [u8; 32] {
-    let model =
-        AgentProviderModelRevision::try_new("gpt-5.6-luna".to_owned()).expect("reviewed model");
-    let allowed_model = AgentProviderModelRevision::try_new("gpt-5.6-luna".to_owned())
-        .expect("reviewed effective model");
-    let tokenizer = SemanticTokenizerRevision::try_new("openai:gpt-5.6-luna:v1".to_owned())
+    luna_guard(
+        "gpt-5.6-luna",
+        20_260_904,
+        [200_000, 20_000, 250_000, 1_200_000],
+    )
+}
+
+fn luna_guard(model: &str, revision: u64, rates: [u64; 4]) -> [u8; 32] {
+    let tokenizer = SemanticTokenizerRevision::try_new(format!("openai:{model}:v1"))
         .expect("reviewed tokenizer");
+    let allowed_model =
+        AgentProviderModelRevision::try_new(model.to_owned()).expect("reviewed effective model");
+    let model = AgentProviderModelRevision::try_new(model.to_owned()).expect("reviewed model");
     let profile = AgentProviderPricingProfile::try_for_input_range(
-        AgentProviderPricingRevision::new(20_260_904).expect("reviewed revision"),
+        AgentProviderPricingRevision::new(revision).expect("reviewed revision"),
         1,
         272_000,
     )
     .expect("reviewed range");
-    let rates = AgentProviderTokenRates::try_new(200_000, 20_000, 250_000, 1_200_000)
+    let rates = AgentProviderTokenRates::try_new(rates[0], rates[1], rates[2], rates[3])
         .expect("reviewed rates");
     AgentProviderPricingSchedule::try_new(
         AgentProviderKind::OpenAiResponses,
