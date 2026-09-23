@@ -639,7 +639,7 @@ pub use sign_in_handoff::{
 
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::agent::{OpenAiWorkAgent, WorkAgentWireFault};
-#[cfg(feature = "probe-harness")]
+#[cfg(all(feature = "probe-harness", feature = "provider-transport"))]
 pub use provider_transport::agent::agent_turn_wire_faults;
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::decision::{

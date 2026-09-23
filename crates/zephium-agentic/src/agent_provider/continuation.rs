@@ -139,6 +139,7 @@ impl AgentProviderActionAuthority {
         self
     }
 
+    #[cfg(feature = "provider-transport")]
     pub(crate) fn decision_entries(
         &self,
         observation: &SemanticObservation,

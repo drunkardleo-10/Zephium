@@ -484,6 +484,7 @@ impl<'a> SemanticReadProvenance<'a> {
     }
 
     /// Native node identity, stable across looks at the same document.
+    #[cfg(feature = "provider-transport")]
     pub(crate) const fn node_key(self) -> crate::semantic::SemanticNodeKey {
         self.node_key
     }
@@ -896,6 +897,7 @@ pub(crate) fn read_located_semantic_observation<'a>(
 /// The same located read, plus the read's own admitted document address as
 /// one fragment of the main frame's public document node. The address must
 /// be an exact model-safe public URL on that frame's origin, or it is omitted.
+#[cfg(feature = "provider-transport")]
 pub(crate) fn read_located_semantic_observation_at<'a>(
     observation: &'a SemanticObservation,
     acknowledgement: &SemanticObservationAcknowledgement,
