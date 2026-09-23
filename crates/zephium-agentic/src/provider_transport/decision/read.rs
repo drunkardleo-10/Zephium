@@ -277,13 +277,33 @@ impl DecisionObservationAnswers {
         let mut unresolved = Vec::new();
         let mut absent = Vec::new();
         let mut ready = true;
+        // A single-record read is on its subject's own page, whose declared
+        // picture answers an optional picture column the value head could not
+        // settle.
+        let page_image = (projection.row.is_some()
+            || projection
+                .columns
+                .iter()
+                .any(SemanticExtractionFieldSchema::document_address))
+        .then(|| page_image(observation, self.projection.references()))
+        .flatten();
         for (index, field) in projection.columns.iter().enumerate() {
             // The read's own admitted address answers this column at prepare.
             if field.document_address() {
                 targets.push(None);
                 continue;
             }
-            let target = match self.results.take(&format!("locate_{index}")) {
+            let resolved = self.results.take(&format!("locate_{index}"));
+            if field.kind() == SemanticExtractionValueKind::ImageUrl
+                && !field.required()
+                && !matches!(resolved, Some(ResolvedDecision::Answer { .. }))
+            {
+                if let Some(image) = page_image {
+                    targets.push(Some(image));
+                    continue;
+                }
+            }
+            let target = match resolved {
                 Some(ResolvedDecision::Answer { answer, .. }) => match answer.value() {
                     AnswerValue::Choice { choice, .. } => Some(
                         SemanticReferenceId::parse(choice)
@@ -653,6 +673,25 @@ impl DecisionReadSelection {
             generation: None,
         })
     }
+}
+
+fn page_image(
+    observation: &SemanticObservation,
+    references: &BTreeSet<SemanticReferenceId>,
+) -> Option<SemanticReferenceId> {
+    observation
+        .frames()
+        .first()?
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.role() == SemanticRole::Image
+                && node.name().is_some_and(|name| name.as_str() == "Page image")
+                && node.image_source().is_some()
+                && node.sensitivity() == SemanticSensitivity::Public
+                && references.contains(&node.reference())
+        })
+        .map(SemanticNode::reference)
 }
 
 /// The admitted document address without tracking parameters: utm_*,

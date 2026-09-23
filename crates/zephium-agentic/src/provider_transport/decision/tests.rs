@@ -1094,8 +1094,9 @@ fn an_own_address_column_cites_only_the_admitted_document_address() {
 }
 
 #[test]
-fn an_own_page_read_cites_its_canonical_address() {
+fn an_own_page_read_cites_its_canonical_address_and_page_image() {
     let canonical = json!({"k":9,"p":0,"r":"link","n":"Page address","u":"https://example.test/rooms/42","fc":true});
+    let page_image = json!({"k":10,"p":0,"r":"image","n":"Page image","m":"https://example.test/og.jpg","fc":true});
     let schema = SemanticExtractionSchema::try_new(
         SemanticExtractionSchemaId::new(1).unwrap(),
         vec![
@@ -1107,6 +1108,7 @@ fn an_own_page_read_cites_its_canonical_address() {
                 .unwrap()
                 .with_document_address()
                 .unwrap(),
+            SemanticExtractionFieldSchema::try_image_url("picture".into(), false, 2048).unwrap(),
         ],
     )
     .unwrap();
@@ -1118,6 +1120,7 @@ fn an_own_page_read_cites_its_canonical_address() {
     assert_eq!(untracked.as_url().as_str(), "https://example.test/rooms/42?adults=1");
     let read = |extra: &[Value]| {
         let (call, observation, _, _) = located_fixture_with(false, extra);
+        let own_image = !extra.is_empty();
         let objective = AgentProviderObjective::try_admit_conservative_utf8(
             "Read this listing".into(),
             &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
@@ -1133,7 +1136,14 @@ fn an_own_page_read_cites_its_canonical_address() {
         )
         .unwrap();
         let mut output = located_answers(&projection);
-        output["answers"]["done"]["noul"] = json!(0.5);
+        if own_image {
+            // An unsettled completion head and an uncertain picture head.
+            output["answers"]["done"]["noul"] = json!(0.5);
+            output["answers"]["locate_2"]["confidence"] = json!(0.3);
+        } else {
+            output["answers"]["locate_2"] =
+                fixture_answers(projection.request())["answers"]["locate_2"].clone();
+        }
         let response = projection
             .request()
             .decode_emulation(
@@ -1174,15 +1184,17 @@ fn an_own_page_read_cites_its_canonical_address() {
             })
             .collect::<Vec<_>>()
     };
-    // Canonical head metadata answers the page's own address.
-    let fields = read(&[canonical]);
+    // Canonical metadata and the page image answer the page's own columns.
+    let fields = read(&[canonical, page_image]);
     assert!(fields.contains(&("listing_url".into(), "https://example.test/rooms/42".into())));
-    // Without it, the admitted address with tracking parameters removed.
+    assert!(fields.contains(&("picture".into(), "https://example.test/og.jpg".into())));
+    // Without them: the untracked admitted address, and no picture.
     let fields = read(&[]);
     assert!(fields.contains(&(
         "listing_url".into(),
         "https://example.test/rooms/42?adults=1".into()
     )));
+    assert!(!fields.iter().any(|(name, _)| name == "picture"));
 }
 
 #[test]
