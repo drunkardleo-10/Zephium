@@ -1,6 +1,8 @@
 use super::*;
 use zephium_core::work::collection::{WorkBrowseCollection, WorkBrowseExtraction, WorkBrowseValue};
 
+const IMPLICIT_IMAGE_FIELD: &str = "image";
+
 /// Host-selected record shape; contains no site code or new browser authority.
 #[derive(Clone)]
 pub struct WorkBrowseCollectionSchema {
@@ -9,6 +11,7 @@ pub struct WorkBrowseCollectionSchema {
     max_items: usize,
     subject_url_field: Option<String>,
     subject_image_fields: Vec<String>,
+    implicit_image: bool,
 }
 
 impl TryFrom<&WorkBrowseCollection> for WorkBrowseCollectionSchema {
@@ -65,7 +68,9 @@ impl TryFrom<&WorkBrowseCollection> for WorkBrowseCollectionSchema {
                         "listing_url" | "homepage" | "url" | "page_url"
                     ))
             {
-                field = field.with_document_address().map_err(|_| WorkError::Invalid)?;
+                field = field
+                    .with_document_address()
+                    .map_err(|_| WorkError::Invalid)?;
             }
             fields.push(field);
         }
@@ -84,6 +89,13 @@ impl TryFrom<&WorkBrowseCollection> for WorkBrowseCollectionSchema {
         for column in &request.columns {
             if column.value == WorkBrowseValue::ImageUrl {
                 schema = schema.with_subject_image_field(&column.name)?;
+            }
+        }
+        if schema.subject_image_fields.is_empty() {
+            // Pictures never depend on the request naming a column; a full
+            // record shape keeps its limits and simply goes without one.
+            if let Ok(pictured) = schema.clone().with_implicit_image() {
+                schema = pictured;
             }
         }
         Ok(schema)
@@ -120,9 +132,33 @@ impl WorkBrowseCollectionSchema {
             max_items,
             subject_url_field: None,
             subject_image_fields: vec![],
+            implicit_image: false,
         };
         schema.extraction_field()?;
         Ok(schema)
+    }
+
+    fn with_implicit_image(mut self) -> Result<Self, WorkError> {
+        if self.fields.len() > MAX_ARTIFACT_CRITERIA
+            || self
+                .fields
+                .iter()
+                .any(|field| field.name() == IMPLICIT_IMAGE_FIELD)
+        {
+            return Err(WorkError::Invalid);
+        }
+        self.fields.push(
+            SemanticExtractionFieldSchema::try_image_url(IMPLICIT_IMAGE_FIELD.into(), false, 2048)
+                .map_err(|_| WorkError::Invalid)?,
+        );
+        self.extraction_field()?;
+        self = self.with_subject_image_field(IMPLICIT_IMAGE_FIELD)?;
+        self.implicit_image = true;
+        Ok(self)
+    }
+
+    fn visible(&self, field: &SemanticExtractionFieldSchema) -> bool {
+        !(self.implicit_image && field.name() == IMPLICIT_IMAGE_FIELD)
     }
 
     /// Selects which source-backed URL identifies a subject in Work.
@@ -297,6 +333,22 @@ impl WorkBrowseCollectionSchema {
             let mut row_cells = Vec::new();
             // Include identity evidence in each cell: it binds the value to its subject.
             for field in self.fields.iter().skip(1) {
+                if !self.visible(field) {
+                    match row
+                        .iter()
+                        .find(|cell| cell.name() == field.name())
+                        .map(ArchivedField::value)
+                    {
+                        Some(ArchivedValue::ImageUrl { value, .. }) => subjects
+                            .last_mut()
+                            .ok_or(WorkError::Invalid)?
+                            .image_candidates
+                            .push(value.clone()),
+                        None => {}
+                        Some(_) => return Err(WorkError::Invalid),
+                    }
+                    continue;
+                }
                 let mut cell_evidence = name_evidence.clone();
                 let value = match row
                     .iter()
@@ -392,6 +444,7 @@ impl WorkBrowseCollectionSchema {
             .fields
             .iter()
             .skip(1)
+            .filter(|field| self.visible(field))
             .map(|field| WorkCriterion {
                 name: field.name().replace('_', " "),
                 kind: if field.kind() == SemanticExtractionValueKind::Boolean {
@@ -448,6 +501,117 @@ mod tests {
             currencies: vec!["USD".into(), "USD".into()],
         };
         assert!(WorkBrowseCollectionSchema::try_from(&invalid).is_err());
+    }
+
+    #[test]
+    fn request_without_image_column_reads_an_implicit_picture_outside_the_criteria() {
+        let request: WorkBrowseCollection = serde_json::from_value(serde_json::json!({
+            "title":"Product details", "max_items":1, "columns":[
+                {"name":"price","required":false,"value":{"kind":"text"},"extraction":"verbatim"},
+                {"name":"pieces","required":false,"value":{"kind":"text"},"extraction":"verbatim"}
+            ]
+        }))
+        .unwrap();
+        let schema = WorkBrowseCollectionSchema::try_from(&request).unwrap();
+        let image = schema.fields.last().unwrap();
+        assert_eq!(image.name(), "image");
+        assert_eq!(image.kind(), SemanticExtractionValueKind::ImageUrl);
+        assert!(!image.required());
+        let mut objective = String::new();
+        schema.append_browsing_fields(&mut objective).unwrap();
+        assert!(objective.contains("image: image_url optional"));
+        let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([[
+            {"name":"name","value":{"kind":"text","value":"London","sources":[1]}},
+            {"name":"price","value":{"kind":"text","value":"$59.99","sources":[2]}},
+            {"name":"image","value":{"kind":"image_url","value":"https://www.lego.com/london.png","sources":[3]}}
+        ]])).unwrap();
+        let data = schema
+            .comparison(&rows, &mut |ids| Ok(ids.iter().map(|id| id - 1).collect()))
+            .unwrap();
+        data.validate(3).unwrap();
+        let WorkArtifactDataV1::ComparisonMatrix {
+            subjects,
+            criteria,
+            cells,
+            ..
+        } = data
+        else {
+            panic!()
+        };
+        assert_eq!(
+            subjects[0].image_candidates,
+            ["https://www.lego.com/london.png"]
+        );
+        assert_eq!(
+            criteria
+                .iter()
+                .map(|criterion| criterion.name.as_str())
+                .collect::<Vec<_>>(),
+            ["price", "pieces"]
+        );
+        assert_eq!(cells[0].len(), 2);
+        let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([[
+            {"name":"name","value":{"kind":"text","value":"London","sources":[1]}}
+        ]]))
+        .unwrap();
+        let unpictured = schema
+            .comparison(&rows, &mut |ids| Ok(ids.iter().map(|id| id - 1).collect()))
+            .unwrap();
+        let WorkArtifactDataV1::ComparisonMatrix { subjects, .. } = unpictured else {
+            panic!()
+        };
+        assert!(subjects[0].image_candidates.is_empty());
+        let mut full = request.clone();
+        full.columns = (0..MAX_ARTIFACT_CRITERIA)
+            .map(|index| {
+                let mut column = request.columns[0].clone();
+                column.name = format!("fact_{index}");
+                column
+            })
+            .collect();
+        let full = WorkBrowseCollectionSchema::try_from(&full).unwrap();
+        assert!(!full.implicit_image);
+        assert_eq!(full.fields.len(), MAX_ARTIFACT_CRITERIA + 1);
+    }
+
+    #[test]
+    fn explicit_image_column_stays_a_visible_criterion_without_an_implicit_field() {
+        let request: WorkBrowseCollection = serde_json::from_value(serde_json::json!({
+            "title":"Products", "max_items":1, "columns":[
+                {"name":"price","required":false,"value":{"kind":"text"}},
+                {"name":"photo","required":false,"value":{"kind":"image_url"}}
+            ]
+        }))
+        .unwrap();
+        let schema = WorkBrowseCollectionSchema::try_from(&request).unwrap();
+        assert!(!schema.implicit_image);
+        assert_eq!(schema.subject_image_fields, ["photo"]);
+        assert_eq!(schema.fields.len(), 3);
+        let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([[
+            {"name":"name","value":{"kind":"text","value":"London","sources":[1]}},
+            {"name":"photo","value":{"kind":"image_url","value":"https://www.lego.com/london.png","sources":[2]}}
+        ]])).unwrap();
+        let data = schema
+            .comparison(&rows, &mut |ids| Ok(ids.iter().map(|id| id - 1).collect()))
+            .unwrap();
+        let WorkArtifactDataV1::ComparisonMatrix {
+            subjects,
+            criteria,
+            cells,
+            ..
+        } = data
+        else {
+            panic!()
+        };
+        assert_eq!(
+            subjects[0].image_candidates,
+            ["https://www.lego.com/london.png"]
+        );
+        assert_eq!(criteria[1].name, "photo");
+        assert!(
+            matches!(&cells[0][1].value, WorkCellValue::Text { text } if text == "https://www.lego.com/london.png")
+        );
+        assert_eq!(cells[0][1].evidence, [0, 1]);
     }
 
     #[test]
