@@ -692,7 +692,6 @@ fn decode_response_with(
     };
     let mut text = None;
     let mut refused = false;
-    let mut reasoning = false;
     for output in response.output {
         if first_message && (text.is_some() || refused) {
             break;
@@ -701,9 +700,7 @@ fn decode_response_with(
             // Reasoning items carry no content here. A model may emit several
             // before its single answer; anything after the answer, and any
             // second message, still fails the shape check below.
-            Output::Reasoning {} if first_message || (text.is_none() && !refused) => {
-                reasoning = true
-            }
+            Output::Reasoning {} if first_message || (text.is_none() && !refused) => {}
             Output::Message {
                 role,
                 status,
