@@ -1331,6 +1331,32 @@ async fn agent_workflow(
             "agent-work: turn_diagnostic={event:?}"
         );
     });
+    let link_primary =
+        tokio::task::spawn_blocking(zephium_agentic::load_macos_development_typesafe_credential)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|key| {
+                zephium_agentic::JevDecisionClient::direct(transport.clone(), key).ok()
+            });
+    let agent = agent
+        .with_link_decisions(
+            link_primary,
+            WorkPlanningConfig::try_new(
+                zephium_agent_model_catalog::try_luna_provider_exact_call_config(4096)
+                    .map_err(|_| "link_model")?,
+                32_768,
+                100_000,
+            )
+            .map_err(|_| "link_limits")?,
+            Some(|fact| {
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "agent-work: link_decision={fact:?}"
+                );
+            }),
+        )
+        .map_err(|_| "link_provider")?;
     let grant = WorkAgentGrantV1 {
         provider: zephium_core::work::search::WorkSearchProvider::OpenAi,
         model: zephium_core::work::search::PUBLIC_SEARCH_MODEL.into(),

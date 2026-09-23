@@ -35,6 +35,8 @@ pub(super) fn run_case(case: &std::ffi::OsStr, model: ProbeModel) -> Result<(), 
         Some("search-flow") => 7,
         Some("search-unrelated") => 8,
         Some("search-mixed") => 9,
+        Some("catalog-link") => 10,
+        Some("catalog-absent") => 11,
         _ => return Err(ProbeFailure::Authority),
     };
     run_selected(Some(index), model)

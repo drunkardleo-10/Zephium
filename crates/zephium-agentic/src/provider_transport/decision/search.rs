@@ -61,52 +61,14 @@ impl SearchDecisionRanking {
     ) -> Result<WorkPublicSearchRanking, WorkPublicSearchError> {
         let request =
             search_projection(scope, evidence).map_err(WorkPublicSearchError::NotDispatched)?;
-        limits
-            .validate()
-            .map_err(WorkPublicSearchError::NotDispatched)?;
-        if deadline <= Instant::now() {
-            return Err(WorkPublicSearchError::NotDispatched(WorkError::Capacity));
-        }
-        let mut usage = WorkUsage::default();
-        let primary = match &self.primary {
-            Some(client) => {
-                let output = client
-                    .run(
-                        &request,
-                        limits,
-                        deadline,
-                        &AgentProviderCancellation::new(),
-                    )
-                    .await;
-                self.account(&output, &mut usage, limits)?;
-                output.response.map_err(fallback_reason)
-            }
-            None => Err(FallbackReason::Unavailable),
-        };
         let purposes = request
             .questions()
             .keys()
             .map(|key| (key.clone(), DecisionPurpose::Relevance))
             .collect();
-        let fallback = DecisionFallback::assess(&request, purposes, primary)
-            .map_err(|_| WorkPublicSearchError::Rejected(usage))?;
-        let mut emulated = None;
-        if let Some(request) = fallback.request() {
-            let remaining = WorkExecutionLimits {
-                model_tokens: limits.model_tokens - usage.model_tokens,
-                cost_micro_usd: limits.cost_micro_usd - usage.cost_micro_usd,
-                operations: limits.operations - usage.operations,
-                ..limits
-            };
-            if remaining.validate().is_ok() && Instant::now() < deadline {
-                let client = OpenAiDecisionCall::try_new(transport, credential, &self.emulation)
-                    .map_err(|_| WorkPublicSearchError::Rejected(usage))?;
-                let output = client.run(request, client.body(request), remaining).await;
-                self.account(&output, &mut usage, limits)?;
-                emulated = output.response.ok();
-            }
-        }
-        let mut resolved = fallback.finish(emulated);
+        let (mut resolved, usage) = self
+            .resolve(transport, credential, &request, purposes, limits, deadline)
+            .await?;
         let mut selected = Vec::new();
         for key in request.questions().keys() {
             if let Some(ResolvedDecision::Answer { answer, .. }) = resolved.take(key) {
@@ -126,6 +88,53 @@ impl SearchDecisionRanking {
             preferred: selected.into_iter().map(|(id, _)| id).collect(),
             usage,
         })
+    }
+
+    pub(super) async fn resolve(
+        &self,
+        transport: &AgentProviderTransport,
+        credential: &AgentProviderCredential,
+        request: &DecisionRequest,
+        purposes: BTreeMap<String, DecisionPurpose>,
+        limits: WorkExecutionLimits,
+        deadline: Instant,
+    ) -> Result<(zephium_decision::DecisionResults, WorkUsage), WorkPublicSearchError> {
+        limits
+            .validate()
+            .map_err(WorkPublicSearchError::NotDispatched)?;
+        if deadline <= Instant::now() {
+            return Err(WorkPublicSearchError::NotDispatched(WorkError::Capacity));
+        }
+        let mut usage = WorkUsage::default();
+        let primary = match &self.primary {
+            Some(client) => {
+                let output = client
+                    .run(request, limits, deadline, &AgentProviderCancellation::new())
+                    .await;
+                self.account(&output, &mut usage, limits)?;
+                output.response.map_err(fallback_reason)
+            }
+            None => Err(FallbackReason::Unavailable),
+        };
+        let fallback = DecisionFallback::assess(request, purposes, primary)
+            .map_err(|_| WorkPublicSearchError::Rejected(usage))?;
+        let mut emulated = None;
+        if let Some(request) = fallback.request() {
+            let remaining = WorkExecutionLimits {
+                model_tokens: limits.model_tokens - usage.model_tokens,
+                cost_micro_usd: limits.cost_micro_usd - usage.cost_micro_usd,
+                operations: limits.operations - usage.operations,
+                ..limits
+            };
+            if remaining.validate().is_ok() && Instant::now() < deadline {
+                let client = OpenAiDecisionCall::try_new(transport, credential, &self.emulation)
+                    .map_err(|_| WorkPublicSearchError::Rejected(usage))?;
+                let output = client.run(request, client.body(request), remaining).await;
+                self.account(&output, &mut usage, limits)?;
+                emulated = output.response.ok();
+            }
+        }
+        Ok((fallback.finish(emulated), usage))
     }
 
     fn account(

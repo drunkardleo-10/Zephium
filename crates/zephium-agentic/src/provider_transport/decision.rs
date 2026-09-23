@@ -12,6 +12,7 @@ use zephium_decision::{DecisionRequest, DecisionResponse, DecisionUsage, MAX_RES
 mod projection;
 mod read;
 mod search;
+mod link;
 pub(super) use search::SearchDecisionRanking;
 pub use projection::{
     DecisionActionSelection, DecisionObservation, DecisionObservationAnswers,

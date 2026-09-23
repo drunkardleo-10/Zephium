@@ -1488,6 +1488,15 @@ fn server_for_model_with_gate(
     model: &'static str,
     gate: Option<ServerGate>,
 ) -> (Url, impl FnOnce() -> thread::JoinHandle<usize>) {
+    server_for_model_captured(responses, model, gate, None)
+}
+
+fn server_for_model_captured(
+    responses: Vec<String>,
+    model: &'static str,
+    gate: Option<ServerGate>,
+    capture: Option<Arc<std::sync::Mutex<Vec<Value>>>>,
+) -> (Url, impl FnOnce() -> thread::JoinHandle<usize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = Url::parse(&format!(
@@ -1538,6 +1547,9 @@ fn server_for_model_with_gate(
                             let request: serde_json::Value =
                                 serde_json::from_slice(&bytes[end + 4..]).unwrap();
                             assert!(request["model"] == model);
+                            if let Some(capture) = &capture {
+                                capture.lock().unwrap().push(request);
+                            }
                             break;
                         }
                     }
@@ -1889,10 +1901,9 @@ fn recorded_search_eval_requests_match_the_shipping_projection_and_emulation_bod
             .unwrap()
             .to_owned();
         let actual = super::search::search_projection(&scope, &evidence).unwrap();
-        assert_eq!(actual.state(), &fixture["request"]["state"]);
-        assert_eq!(
-            serde_json::to_value(actual.questions()).unwrap(),
-            fixture["request"]["questions"]
+        assert!(actual.state() == &fixture["request"]["state"]);
+        assert!(
+            serde_json::to_value(actual.questions()).unwrap() == fixture["request"]["questions"]
         );
         let body = client.body(&actual).unwrap();
         assert_eq!(body["instructions"], EMULATION_INSTRUCTIONS);
@@ -1958,4 +1969,220 @@ async fn search_ranking_deadline_keeps_interrupted_generation_unknown() {
     hold.store(false, Ordering::SeqCst);
     assert_eq!(server.join().unwrap(), 2);
     assert!(transport.snapshot().unwrap().is_sealed());
+}
+
+fn catalog_previews() -> Vec<zephium_core::work::artifact::WorkEvidencePreviewV1> {
+    serde_json::from_str(include_str!(
+        "../../../../zephium-decision/evals/catalog_links_source_01.json"
+    ))
+    .unwrap()
+}
+
+fn catalog_disclosure() -> zephium_core::work::agent::WorkAgentTurnDisclosure {
+    use zephium_core::work::agent::*;
+    WorkAgentTurnDisclosure::try_new(
+        "Read the Tower Bridge LEGO product page to obtain its displayed price and pieces count.",
+        vec![],
+        vec![],
+        &[],
+        &catalog_previews(),
+        &[],
+        WorkAgentBudget {
+            turns_left: 3,
+            steps_left: 8,
+            browse_available: true,
+        },
+        WorkExecutionLimits {
+            operations: 8,
+            ..limits()
+        },
+        vec![],
+    )
+    .unwrap()
+}
+
+#[test]
+fn catalog_link_projection_matches_recorded_evals_and_excludes_unadmitted_targets() {
+    use super::link::link_projection;
+    let input = catalog_disclosure();
+    let context = input.context();
+    for raw in [
+        include_str!("../../../../zephium-decision/evals/catalog_tower_bridge_01.json"),
+        include_str!("../../../../zephium-decision/evals/catalog_absent_01.json"),
+    ] {
+        let fixture: Value = serde_json::from_str(raw).unwrap();
+        use sha2::Digest as _;
+        let digest = sha2::Sha256::digest(include_bytes!(
+            "../../../../zephium-decision/evals/catalog_links_source_01.json"
+        ));
+        assert_eq!(fixture["source_sha256"], format!("{digest:x}"));
+        let actual = link_projection(
+            fixture["request"]["state"]["objective"].as_str().unwrap(),
+            &context.sources,
+            &[],
+            true,
+        )
+        .unwrap();
+        assert!(actual.state() == &fixture["request"]["state"]);
+        assert!(
+            serde_json::to_value(actual.questions()).unwrap() == fixture["request"]["questions"]
+        );
+    }
+    assert!(link_projection(&context.objective, &context.sources, &[], false).is_err());
+    let mut sources = catalog_disclosure()
+        .context()
+        .sources
+        .iter()
+        .map(|source| zephium_core::work::agent::WorkAgentSourceView {
+            key: source.key,
+            acquired_by: source.acquired_by,
+            title: source.title.clone(),
+            url: source.url.clone(),
+            link_destination: source.link_destination.clone(),
+            text: source.text.clone(),
+            truncated: source.truncated,
+        })
+        .collect::<Vec<_>>();
+    for source in &mut sources {
+        source.acquired_by = "provider_search";
+    }
+    assert!(link_projection("detail", &sources, &[], true).is_err());
+    for source in &mut sources {
+        source.acquired_by = "native_browser";
+        source.truncated = true;
+    }
+    assert!(link_projection("detail", &sources, &[], true).is_err());
+    for source in &mut sources {
+        source.truncated = false;
+        source.text = "forged destination".into();
+    }
+    assert!(link_projection("detail", &sources, &[], true).is_err());
+    let steps = context
+        .sources
+        .iter()
+        .map(|source| zephium_core::work::agent::WorkAgentStepView {
+            turn: 1,
+            kind: "read",
+            detail: source.link_destination.clone().unwrap(),
+            outcome: "failed",
+            note: None,
+        })
+        .collect::<Vec<_>>();
+    assert!(link_projection("detail", &context.sources, &steps, true).is_err());
+    assert!(link_projection(
+        "Authorization: Bearer do-not-disclose-this-secret",
+        &context.sources,
+        &[],
+        true
+    )
+    .is_err());
+}
+
+#[tokio::test]
+async fn catalog_link_fallback_reaches_the_work_turn_and_charges_every_call() {
+    use zephium_core::work::agent::WorkAgentTurnProvider;
+    let input = catalog_disclosure();
+    let request = super::link::link_projection(
+        &input.context().objective,
+        &input.context().sources,
+        &[],
+        true,
+    )
+    .unwrap();
+    let Question::Choice { criteria, .. } = &request.questions()["next_page"] else {
+        panic!()
+    };
+    let selected = criteria
+        .keys()
+        .find(|key| key.as_str() != "none")
+        .unwrap()
+        .clone();
+    let answer = |confident: bool| {
+        let probabilities: BTreeMap<_, _> = criteria
+            .keys()
+            .map(|key| {
+                (
+                    key,
+                    if confident {
+                        if *key == selected {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        1.0 / criteria.len() as f64
+                    },
+                )
+            })
+            .collect();
+        json!({"next_page":{"type":"choice","choice":if confident { selected.as_str() } else { "none" },"confidence":if confident { 1.0 } else { 1.0 / criteria.len() as f64 },"probabilities":probabilities}})
+    };
+    let (endpoint, jev_server) = server(vec![response(200, "", &json!({"model":zephium_decision::JEV_MODEL,"answers":answer(false),"usage":{"input_tokens":123,"output_tokens":7}}).to_string())]);
+    let body = |text: Value| {
+        json!({"object":"response","status":"completed","model":"gpt-5.6-terra","service_tier":"default","error":null,"incomplete_details":null,
+        "output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":text.to_string()}]}],
+        "usage":{"input_tokens":100,"output_tokens":200,"total_tokens":300,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":50}}})
+    };
+    let count = response(
+        200,
+        "",
+        r#"{"object":"response.input_tokens","input_tokens":100}"#,
+    );
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (mut openai_endpoint, openai_server) = server_for_model_captured(vec![
+        count.clone(), response(200, "", &body(json!({"answers":answer(true)})).to_string()),
+        count, response(200, "", &body(json!({"say":null,"artifacts":[],"fetch":[],"ask":null,"finish":true,"followups":[]})).to_string()),
+    ], "gpt-5.6-terra", None, Some(captured.clone()));
+    openai_endpoint.set_path("/v1/responses");
+    let transport = AgentProviderTransport::try_new_loopback(
+        AgentProviderTransportConfig::STANDARD,
+        openai_endpoint.as_str(),
+        openai_endpoint.as_str(),
+    )
+    .unwrap();
+    let credential =
+        AgentProviderCredential::try_new(AgentProviderKind::OpenAiResponses, "fixture-key".into())
+            .unwrap();
+    let agent = super::super::agent::OpenAiWorkAgent::try_new(
+        transport.clone(),
+        credential,
+        emulation_config(),
+    )
+    .unwrap()
+    .with_link_decisions(Some(client(endpoint)), emulation_config(), None)
+    .unwrap();
+    let jev_server = jev_server();
+    let openai_server = openai_server();
+    let output = agent
+        .turn(
+            &input,
+            zephium_core::work::synthesis::WorkSynthesisTrace {
+                work: 1.into(),
+                execution: 1.into(),
+                attempt: 1.into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(jev_server.join().unwrap(), 1);
+    assert_eq!(openai_server.join().unwrap(), 4);
+    assert_eq!(output.usage.model_tokens, 730);
+    assert_eq!(output.usage.operations, 3);
+    assert!(output.output.finish);
+    let captured = captured.lock().unwrap();
+    let context: Value = serde_json::from_str(
+        captured[3]["input"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        context["next_page_candidate"]["source_key"],
+        selected
+            .strip_prefix("source_")
+            .unwrap()
+            .parse::<u16>()
+            .unwrap()
+    );
+    assert!(transport.snapshot().unwrap().is_idle());
 }

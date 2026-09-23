@@ -136,8 +136,8 @@ impl OpenAiWorkPlanner {
 }
 
 pub(super) struct OpenAiStructuredCall<'a> {
-    transport: &'a AgentProviderTransport,
-    credential: &'a AgentProviderCredential,
+    pub(super) transport: &'a AgentProviderTransport,
+    pub(super) credential: &'a AgentProviderCredential,
     pub(super) config: &'a WorkPlanningConfig,
     diagnostic: Option<fn(zephium_core::work::synthesis::WorkSynthesisDiagnostic)>,
     #[cfg(feature = "probe-harness")]
