@@ -535,6 +535,11 @@ fn record_browser_diagnostic(event: zephium_agent_controller::AgentWorkEventKind
                 fact.input_tokens, fact.elapsed_millis, fact.http_status, fact.attempts,
                 fact.failure, fact.envelope_failure,
             ));
+            if let Some(facts) = fact.rejected_envelope {
+                record_diagnostic(format_args!(
+                    "work: phase=decision_rejected_envelope facts={facts:?}"
+                ));
+            }
             for (kind, counts) in ["noul", "choice", "score"]
                 .into_iter()
                 .zip(fact.confidence_buckets)

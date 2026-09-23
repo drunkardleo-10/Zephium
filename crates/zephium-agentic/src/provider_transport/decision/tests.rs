@@ -1124,10 +1124,23 @@ async fn borrowed_emulation_admits_disclosure_and_conservatively_settles_bad_env
                 output.receipt.usage_accounting(),
                 AgentModelUsageAccounting::ReservationCeiling
             );
+            let facts = output.call.diagnostic.rejected_envelope.unwrap();
+            assert_eq!(facts.output_items, 3);
+            assert_eq!(facts.reasoning_items, 2);
+            assert_eq!(facts.message_items, 1);
+            assert_eq!(facts.text_items, 1);
+            assert_eq!(facts.refusal_items, 0);
+            assert_eq!(facts.reported_output_tokens, 200);
+            assert_eq!(facts.reported_reasoning_tokens, 50);
+            assert_eq!(
+                facts.text_bytes,
+                fixture_answers(projection.request()).to_string().len()
+            );
             assert_eq!(output.receipt.input_tokens(), 8192);
             assert_eq!(output.receipt.output_tokens(), 4096);
             assert_eq!(output.receipt.cost_micro_usd(), 10_000);
         } else {
+            assert!(output.call.diagnostic.rejected_envelope.is_none());
             let answers = output.call.response.unwrap();
             assert!(answers.answers.values().all(Result::is_ok));
             assert_eq!(

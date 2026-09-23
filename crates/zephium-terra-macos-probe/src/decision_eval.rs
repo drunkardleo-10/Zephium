@@ -135,6 +135,9 @@ fn report(
         _ => zephium_decision::JEV_MODEL,
     };
     writeln!(std::io::stderr(), "decision_eval phase=call fixture={index} repetition={repetition} backend={:?} model={model} questions={} state_bytes={} input_tokens={:?} output_tokens={} elapsed_ms={} status={:?} attempts={:?} reason={:?} envelope={:?} cost_micro_usd={}", d.backend,d.question_count,d.state_bytes,d.input_tokens,output.charged_usage.output_tokens,d.elapsed_millis,d.http_status,d.attempts,d.failure,d.envelope_failure,output.cost_micro_usd).map_err(|_| ProbeFailure::Output)?;
+    if let Some(facts) = d.rejected_envelope {
+        writeln!(std::io::stderr(), "decision_eval phase=rejected_envelope fixture={index} repetition={repetition} backend={:?} facts={facts:?}", d.backend).map_err(|_| ProbeFailure::Output)?;
+    }
     let completed = output.response.is_ok();
     let response = output
         .response

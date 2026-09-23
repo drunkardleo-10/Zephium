@@ -67,7 +67,10 @@ pub enum DecisionCallFailure {
     Capacity,
 }
 
-pub use super::planning::PlanningResponseRejection as DecisionEnvelopeFailure;
+pub use super::planning::{
+    PlanningResponseFacts as DecisionEnvelopeFacts,
+    PlanningResponseRejection as DecisionEnvelopeFailure,
+};
 
 /// One HTTP completion containing only closed facts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,6 +95,8 @@ pub struct DecisionCallDiagnostic {
     pub failure: Option<DecisionCallFailure>,
     /// Closed emulation envelope rejection; never provider or model text.
     pub envelope_failure: Option<DecisionEnvelopeFailure>,
+    /// Content-free counts from rejected emulation envelopes; never accounting evidence.
+    pub rejected_envelope: Option<DecisionEnvelopeFacts>,
     /// Counts for Noul, Choice and Score, each split at 0.80, 0.95 and 0.98.
     /// Noul uses the selected truth probability; Choice uses the lower of
     /// selected probability and confidence; Score uses vendor confidence.
@@ -469,6 +474,7 @@ impl JevDecisionClient {
             attempts: Some(0),
             failure: None,
             envelope_failure: None,
+            rejected_envelope: None,
             confidence_buckets: [[0; 4]; 3],
         };
         let mut charged_usage = DecisionUsage::default();
@@ -860,6 +866,7 @@ impl<'a> OpenAiDecisionCall<'a> {
                 attempts: None,
                 failure: Some(failure),
                 envelope_failure: None,
+                rejected_envelope: None,
                 confidence_buckets: [[0; 4]; 3],
             },
         });
@@ -884,16 +891,21 @@ impl<'a> OpenAiDecisionCall<'a> {
             attempts: Some(0),
             failure: None,
             envelope_failure: None,
+            rejected_envelope: None,
             confidence_buckets: [[0; 4]; 3],
         };
-        let envelope = std::sync::Mutex::new((false, None));
+        let envelope = std::sync::Mutex::new((false, None, None));
         let result = match body {
             Ok(body) => {
                 self.planner
                     .run_bounded(body, Some(limits), |bytes, reserved, config| {
                         let decoded = decode_response_checked(bytes, reserved, config);
                         if let Ok(mut envelope) = envelope.lock() {
-                            *envelope = (true, decoded.as_ref().err().copied());
+                            *envelope = (
+                                true,
+                                decoded.as_ref().err().copied(),
+                                decoded.is_err().then(|| response_facts(bytes)).flatten(),
+                            );
                         }
                         decoded.ok()
                     })
@@ -901,11 +913,12 @@ impl<'a> OpenAiDecisionCall<'a> {
             }
             Err(error) => Err(error),
         };
-        if let Ok((observed, reason)) = envelope.into_inner() {
+        if let Ok((observed, reason, facts)) = envelope.into_inner() {
             if observed {
                 diagnostic.http_status = Some(200);
             }
             diagnostic.envelope_failure = reason;
+            diagnostic.rejected_envelope = facts;
         }
         let exact_usage = !matches!(
             &result,

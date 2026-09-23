@@ -563,6 +563,58 @@ pub enum PlanningResponseRejection {
     MissingText,
 }
 
+/// Bounded envelope counts for diagnosis only; these confer no usage or answer authority.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PlanningResponseFacts {
+    /// Number of output items.
+    pub output_items: usize,
+    /// Number of reasoning items.
+    pub reasoning_items: usize,
+    /// Number of assistant or other message items.
+    pub message_items: usize,
+    /// Number of text content items.
+    pub text_items: usize,
+    /// Number of refusal content items.
+    pub refusal_items: usize,
+    /// Total text content bytes.
+    pub text_bytes: usize,
+    /// Provider-reported output tokens; unvalidated, never charged from this fact.
+    pub reported_output_tokens: u32,
+    /// Provider-reported reasoning tokens; unvalidated, never charged from this fact.
+    pub reported_reasoning_tokens: u32,
+}
+
+pub(super) fn response_facts(bytes: &[u8]) -> Option<PlanningResponseFacts> {
+    if bytes.len() > MAX_BODY as usize {
+        return None;
+    }
+    let response: Response = serde_json::from_slice(bytes).ok()?;
+    let mut facts = PlanningResponseFacts {
+        output_items: response.output.len(),
+        reported_output_tokens: response.usage.output_tokens,
+        reported_reasoning_tokens: response.usage.output_tokens_details.reasoning_tokens,
+        ..Default::default()
+    };
+    for output in response.output {
+        match output {
+            Output::Reasoning {} => facts.reasoning_items += 1,
+            Output::Message { content, .. } => {
+                facts.message_items += 1;
+                for content in content {
+                    match content {
+                        Content::OutputText { text } => {
+                            facts.text_items += 1;
+                            facts.text_bytes += text.len();
+                        }
+                        Content::Refusal {} => facts.refusal_items += 1,
+                    }
+                }
+            }
+        }
+    }
+    Some(facts)
+}
+
 pub(super) fn decode_response_checked(
     bytes: &[u8],
     reserved: u32,
