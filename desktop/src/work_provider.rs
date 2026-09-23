@@ -50,15 +50,15 @@ impl WorkProviders {
                 error: error.into(),
             },
         };
-        let outcome = match &state {
-            WorkOperationStateV1::Planned { .. } => "planning_response",
-            WorkOperationStateV1::Settled { .. } => "settled_response",
-            WorkOperationStateV1::Refused { .. } => "refused",
-            WorkOperationStateV1::Pending { .. } => "pending",
-            WorkOperationStateV1::Unknown => "unknown",
+        let (outcome, error) = match &state {
+            WorkOperationStateV1::Planned { .. } => ("planning_response", None),
+            WorkOperationStateV1::Settled { .. } => ("settled_response", None),
+            WorkOperationStateV1::Refused { error } => ("refused", Some(error)),
+            WorkOperationStateV1::Pending { .. } => ("pending", None),
+            WorkOperationStateV1::Unknown => ("unknown", None),
         };
         record_diagnostic(format_args!(
-            "work: work={work} phase={phase} state={outcome} elapsed_ms={}",
+            "work: work={work} phase={phase} state={outcome} error={error:?} elapsed_ms={}",
             started.elapsed().as_millis()
         ));
         if let WorkOperationStateV1::Planned { response } = &state {
