@@ -18,7 +18,9 @@ const {
   SNAP_THRESHOLD,
   applyDragWidth,
   resolveDragWidth,
+  adoptMode,
   setPanelExtent,
+  sidebarMode,
   toggleMode,
 } = await import("../sidebar-mode.svelte");
 
@@ -79,5 +81,49 @@ describe("which width changes the page travels with", () => {
     expect(last()[1]).toBe(true);
     setPanelExtent(0);
     expect(last()[1]).toBe(true);
+  });
+});
+
+describe("the stored preference catching up with a toggle", () => {
+  it("never bounces the column back to the shape it just left", () => {
+    adoptMode("default");
+    vi.useFakeTimers();
+    native.width.mockClear();
+    toggleMode();
+    expect(sidebarMode()).toBe("compact");
+    expect(native.width.mock.calls).toEqual([[COMPACT_WIDTH, true]]);
+
+    // The store still holds the old value, then reports the new one: neither
+    // is a change of shape, so neither moves anything.
+    adoptMode("default");
+    adoptMode("compact");
+    expect(sidebarMode()).toBe("compact");
+    expect(native.width.mock.calls).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
+  it("ignores the report of a save already overtaken by the next toggle", () => {
+    vi.useFakeTimers();
+    toggleMode();
+    toggleMode();
+    const shape = sidebarMode();
+    const sent = native.width.mock.calls.length;
+    adoptMode(shape === "compact" ? "default" : "compact");
+    adoptMode(shape);
+    expect(sidebarMode()).toBe(shape);
+    expect(native.width.mock.calls).toHaveLength(sent);
+    vi.useRealTimers();
+  });
+
+  it("still follows a change made elsewhere, and a save whose report never came", () => {
+    vi.useFakeTimers();
+    toggleMode();
+    const shape = sidebarMode();
+    vi.advanceTimersByTime(2000);
+    const other = shape === "compact" ? "default" : "compact";
+    adoptMode(other);
+    expect(sidebarMode()).toBe(other);
+    expect((native.width.mock.calls.at(-1) as unknown as [number, boolean])[1]).toBe(false);
+    vi.useRealTimers();
   });
 });

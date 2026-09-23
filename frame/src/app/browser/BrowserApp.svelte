@@ -1,7 +1,7 @@
 <script lang="ts">
   import { installCloseService } from "$shared/lib/close";
   import "$styles/global.css";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { ExtensionPermissionPrompt } from "$features/extensions";
   import { PagePermissionPrompt } from "$features/permissions";
   import * as sidebar from "$session/sidebar-mode.svelte";
@@ -24,9 +24,13 @@
   import { preferences } from "$domain/preferences";
   import Shell from "./Shell.svelte";
 
+  // Follows the stored preference and nothing else. Adopting reads the
+  // sidebar's own shape; tracked, that read made every toggle re-adopt the
+  // not-yet-saved old value, bouncing the column back and forth and cutting
+  // the page's slide short.
   $effect(() => {
     const mode = preferences.value("sidebar.mode");
-    if (mode === "default" || mode === "compact") sidebar.adoptMode(mode);
+    if (mode === "default" || mode === "compact") untrack(() => sidebar.adoptMode(mode));
   });
 
   $effect(() => {

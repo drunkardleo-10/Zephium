@@ -72,10 +72,30 @@ export function applyDragWidth(value: number) {
   expandedWidth = next.expanded;
   // Crossing the snap point is a change of shape, not a drag step.
   publish(modeChanged);
-  if (modeChanged) void commands.settingSet(MODE_SETTING, mode);
+  if (modeChanged) save(mode);
 }
 
+// The shape this column last saved, until the store reports it back. Values
+// arriving meanwhile are the store catching up with saves made here, not a
+// change from elsewhere: adopting them would snap the column back to a shape
+// it has already left. A save whose report never comes stops counting.
+let saving: { mode: SidebarMode; timer: ReturnType<typeof setTimeout> } | null = null;
+
+function save(next: SidebarMode) {
+  if (saving) clearTimeout(saving.timer);
+  saving = { mode: next, timer: setTimeout(() => (saving = null), 2000) };
+  void commands.settingSet(MODE_SETTING, next);
+}
+
+/** A stored preference reached this column: from here, or from elsewhere. */
 export function adoptMode(next: SidebarMode) {
+  if (saving) {
+    if (next === saving.mode) {
+      clearTimeout(saving.timer);
+      saving = null;
+    }
+    return;
+  }
   if (next === mode) return;
   mode = next;
   desiredMode = next;
@@ -87,7 +107,7 @@ export function setMode(next: SidebarMode) {
   mode = next;
   desiredMode = next;
   publish(true);
-  void commands.settingSet(MODE_SETTING, next);
+  save(next);
 }
 
 export function toggleMode() {
