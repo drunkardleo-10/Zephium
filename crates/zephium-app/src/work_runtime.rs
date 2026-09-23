@@ -529,6 +529,34 @@ impl WorkAttemptProbe {
     pub async fn cancellation_requested(&self) -> Result<bool, WorkError> {
         self.cancellation_cause().await.map(|cause| cause.is_some())
     }
+    /// Asks the store to stop this execution as the person's Stop would, so
+    /// the attempt settles as stopped rather than failed.
+    pub(crate) async fn request_stop(&self) -> Result<(), WorkError> {
+        let mut conflicts = 0;
+        loop {
+            let state = self.runtime_projection().await?;
+            let submitted = self.handle.submit_work_document(
+                WorkRequest::RuntimeCommand {
+                    id: self.work,
+                    expected: state.work.revision,
+                    command: WorkCommandId::generate(),
+                    intent: WorkRuntimeIntent::Cancel {
+                        execution: self.execution,
+                        intervention: None,
+                    },
+                },
+                Some(self.profile),
+            )?;
+            let reply = tokio::time::timeout(Duration::from_secs(10), submitted)
+                .await
+                .map_err(|_| WorkError::OutcomeUnknown)?;
+            match reply {
+                Err(WorkError::Conflict) if conflicts < 2 => conflicts += 1,
+                Err(error) => return Err(error),
+                Ok(_) => return Ok(()),
+            }
+        }
+    }
     /// Why this attempt must stop, from a fresh durable read; None while it
     /// still owns a running execution.
     pub async fn cancellation_cause(&self) -> Result<Option<WorkCancelCause>, WorkError> {

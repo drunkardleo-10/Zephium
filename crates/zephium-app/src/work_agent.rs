@@ -54,6 +54,16 @@ const ASK_POLL: Duration = Duration::from_millis(500);
 const MAX_PREVIEWS: usize = 96;
 const INHERITED_PREVIEWS: usize = 64;
 const INHERITED_ARTIFACTS: usize = 32;
+/// Earlier executions whose objects a run inherits whole; older ones reach
+/// the model through the thread, and by object only when the request names it.
+const INHERITED_EXECUTIONS: usize = 3;
+/// Time a run keeps to act on an answer. A question still open this close to
+/// the deadline suspends the run on it instead of letting the deadline fail it.
+const ASK_RESERVE: Duration = Duration::from_secs(180);
+const ASK_SUSPENDED: &str = "Waiting for your answer";
+const BUDGET_SPENT: &str = "The run used its turns, steps or budget before it could finish";
+const CONTEXT_FULL: &str = "The work has grown too large for one turn";
+const TURN_UNPREPARED: &str = "The turn could not be prepared";
 
 /// Closed loop facts for development logs; never model, page or user text.
 #[derive(Clone, Copy, Debug)]
@@ -87,6 +97,12 @@ pub enum WorkAgentDiagnostic {
     ReadMeasured(WorkStepMeasurementsV1),
     /// The loop ended on an error the run reports as interrupted.
     LoopFailed { error: WorkError },
+    /// No turn could be disclosed, even after shedding older context.
+    DisclosureRefused { error: WorkError },
+    /// Turns, steps, tokens or cost left no room for another turn.
+    BudgetSpent,
+    /// A question was still open near the deadline; the run stops on it.
+    AskSuspended,
     CommitRefused {
         kind: &'static str,
         error: WorkError,
@@ -222,6 +238,7 @@ impl WorkAgentService {
             bodies,
             private,
             inherited: Vec::new(),
+            kept: Vec::new(),
             thread: Vec::new(),
             unreadable_polls: std::sync::atomic::AtomicU8::new(0),
             files: None,
@@ -287,6 +304,8 @@ struct Driver {
     /// Earlier executions of this work: their cards stay on the canvas and
     /// their sources stay citable.
     inherited: Vec<WorkArtifactV1>,
+    /// Inherited objects the request names or the last run produced: never shed.
+    kept: Vec<WorkArtifactId>,
     thread: Vec<WorkAgentThreadEntry>,
     /// Consecutive cancellation polls the store could not answer.
     unreadable_polls: std::sync::atomic::AtomicU8,
@@ -460,6 +479,17 @@ impl Driver {
             diagnostic(event);
         }
     }
+    /// Ends the run on a failed turn step that says why, when the grant still
+    /// has room for the step; the attempt fails either way.
+    async fn fail_turn(&mut self, note: &str) -> Result<WorkAttemptStatus, WorkError> {
+        if self.steps < u32::from(self.grant.max_steps) {
+            let mut step = self.step(WorkStepKindV1::Turn, WorkStepStatus::Failed);
+            step.usage = Some(WorkUsage::default());
+            step.note = Some(note.to_owned());
+            let _ = self.begin(step, vec![], None).await;
+        }
+        Ok(WorkAttemptStatus::Failed)
+    }
     #[allow(clippy::too_many_arguments)]
     async fn settle(
         &mut self,
@@ -535,7 +565,8 @@ impl Driver {
                 return Ok(WorkAttemptStatus::Cancelled);
             }
             if !self.budget_left() {
-                return Ok(WorkAttemptStatus::Failed);
+                self.report(WorkAgentDiagnostic::BudgetSpent);
+                return self.fail_turn(BUDGET_SPENT).await;
             }
             self.turn += 1;
             self.probe.record_activity(WorkActivityV1::Planning);
@@ -549,17 +580,6 @@ impl Driver {
             self.steps = self
                 .steps
                 .max(u32::try_from(execution.steps.len()).unwrap_or(u32::MAX));
-            let room = zephium_core::work::artifact::MAX_WORK_ARTIFACTS
-                .saturating_sub(execution.artifacts.len());
-            let artifacts: Vec<WorkArtifactV1> = self
-                .inherited
-                .iter()
-                .rev()
-                .take(room)
-                .rev()
-                .chain(execution.artifacts.iter())
-                .cloned()
-                .collect();
             let budget = WorkAgentBudget {
                 turns_left: self.grant.max_turns.saturating_sub(self.turn),
                 steps_left: u8::try_from(
@@ -569,25 +589,34 @@ impl Driver {
                 browse_available: true,
             };
             let notices = std::mem::take(&mut self.notices);
-            // A context that no longer fits sheds its oldest uncited sources
-            // first; the canvas keeps them, the model keeps what it cited.
-            let disclosure = loop {
-                let disclosed = WorkAgentTurnDisclosure::try_new(
-                    &self.objective,
-                    self.decisions.clone(),
-                    self.bodies.clone(),
-                    &execution.steps,
-                    &self.previews,
-                    &artifacts,
-                    budget,
-                    self.remaining(),
-                    notices.clone(),
-                )
-                .and_then(|disclosure| disclosure.with_thread(self.thread.clone()));
-                match disclosed {
-                    Ok(disclosure) => break disclosure,
-                    Err(WorkError::Capacity) if self.evict_previews(&artifacts) => continue,
-                    Err(_) => return Ok(WorkAttemptStatus::Failed),
+            let view = TurnView {
+                objective: &self.objective,
+                decisions: &self.decisions,
+                bodies: &self.bodies,
+                steps: &execution.steps,
+                current: &execution.artifacts,
+                budget,
+                remaining: self.remaining(),
+                notices: &notices,
+            };
+            let disclosed = disclose(
+                &view,
+                &mut self.previews,
+                &mut self.inherited,
+                &self.kept,
+                &mut self.thread,
+            );
+            let disclosure = match disclosed {
+                Ok(disclosure) => disclosure,
+                Err(error) => {
+                    self.report(WorkAgentDiagnostic::DisclosureRefused { error });
+                    return self
+                        .fail_turn(if error == WorkError::Capacity {
+                            CONTEXT_FULL
+                        } else {
+                            TURN_UNPREPARED
+                        })
+                        .await;
                 }
             };
             let trace = WorkSynthesisTrace {
@@ -1325,61 +1354,97 @@ impl Driver {
                 }
                 return Ok(None);
             }
+            // An open question suspends the run rather than spending it: near
+            // the deadline the run stops on the question, and an answer or
+            // Continue resumes it as the next request.
+            if Instant::now() + ASK_RESERVE >= self.probe.deadline() {
+                self.report(WorkAgentDiagnostic::AskSuspended);
+                if let Err(error) = self.probe.request_stop().await {
+                    self.report(WorkAgentDiagnostic::CommitRefused {
+                        kind: "suspend",
+                        error,
+                    });
+                }
+                self.settle(
+                    id,
+                    WorkStepStatus::Cancelled,
+                    None,
+                    vec![],
+                    None,
+                    Some(ASK_SUSPENDED.into()),
+                    None,
+                )
+                .await?;
+                return Ok(Some(WorkAttemptStatus::Cancelled));
+            }
             if self.cancelled().await {
-                let status = if Instant::now() >= self.probe.deadline() {
-                    WorkStepStatus::Failed
-                } else {
-                    WorkStepStatus::Cancelled
-                };
-                self.settle(id, status, None, vec![], None, None, None)
-                    .await?;
-                return Ok(Some(if status == WorkStepStatus::Failed {
-                    WorkAttemptStatus::Failed
-                } else {
-                    WorkAttemptStatus::Cancelled
-                }));
+                self.settle(
+                    id,
+                    WorkStepStatus::Cancelled,
+                    None,
+                    vec![],
+                    None,
+                    None,
+                    None,
+                )
+                .await?;
+                return Ok(Some(WorkAttemptStatus::Cancelled));
             }
         }
     }
 
-    /// Seeds the thread from this work's earlier executions, newest first
-    /// within the caps, so a continuation builds on what is already there.
+    /// Seeds the thread from this work's earlier executions. Objects come
+    /// whole from the last few runs, plus older ones the request names; a
+    /// question the last run stopped on is answered by this request.
     async fn inherit(&mut self, projection: &WorkRuntimeProjection, current: WorkExecutionId) {
-        let mut artifacts = Vec::new();
-        for execution in projection
+        let earlier: Vec<&WorkExecutionFact> = projection
             .executions
             .iter()
-            .rev()
             .filter(|execution| execution.id != current)
-        {
+            .collect();
+        let produced: Vec<&[WorkArtifactV1]> = earlier
+            .iter()
+            .map(|execution| execution.artifacts.as_slice())
+            .collect();
+        let (artifacts, kept) = inheritable(&produced, &self.objective, &self.bodies);
+        let recent = earlier.len().saturating_sub(INHERITED_EXECUTIONS);
+        for execution in earlier[recent..].iter().rev() {
             for record in &execution.provider_evidence {
                 if self.previews.len() >= INHERITED_PREVIEWS {
                     break;
                 }
                 self.remember(record);
             }
-            for artifact in execution.artifacts.iter().rev() {
-                if artifacts.len() >= INHERITED_ARTIFACTS {
+        }
+        for artifact in artifacts.iter().rev() {
+            for link in &artifact.evidence {
+                if self.previews.len() >= INHERITED_PREVIEWS {
                     break;
                 }
-                for link in &artifact.evidence {
-                    if self.previews.len() >= INHERITED_PREVIEWS {
-                        break;
-                    }
-                    if self.previews.iter().any(|preview| preview.link == *link) {
-                        continue;
-                    }
-                    if let Ok(preview) = self.probe.read_evidence(link.clone()).await {
-                        self.keep_preview(preview);
-                    }
+                if self.previews.iter().any(|preview| preview.link == *link) {
+                    continue;
                 }
-                artifacts.push(artifact.clone());
+                if let Ok(preview) = self.probe.read_evidence(link.clone()).await {
+                    self.keep_preview(preview);
+                }
             }
         }
-        artifacts.reverse();
         self.inherited = artifacts;
+        self.kept = kept;
+        if let Some((question, _)) = earlier.last().and_then(|last| pending_question(last)) {
+            let answer = projection
+                .executions
+                .iter()
+                .find(|execution| execution.id == current)
+                .and_then(|execution| execution.spec.request.clone())
+                .unwrap_or_else(|| self.objective.clone());
+            self.decisions.push(planning::PlanningAnswer {
+                question: question.to_owned(),
+                answer,
+            });
+        }
         let mut thread: Vec<WorkAgentThreadEntry> = Vec::new();
-        for execution in projection.executions.iter().filter(|e| e.id != current) {
+        for execution in &earlier {
             let Some(request) = &execution.spec.request else {
                 continue;
             };
@@ -1443,24 +1508,6 @@ impl Driver {
             });
         }
     }
-    /// Drops the oldest sources no current object cites; false when none can go.
-    fn evict_previews(&mut self, artifacts: &[WorkArtifactV1]) -> bool {
-        let cited: Vec<&WorkEvidenceLink> = artifacts
-            .iter()
-            .flat_map(|artifact| artifact.evidence.iter())
-            .collect();
-        let before = self.previews.len();
-        let mut dropped = 0;
-        self.previews.retain(|preview| {
-            if dropped < 16 && !cited.iter().any(|link| **link == preview.link) {
-                dropped += 1;
-                false
-            } else {
-                true
-            }
-        });
-        self.previews.len() < before
-    }
     fn keep_preview(&mut self, preview: WorkEvidencePreviewV1) {
         if let Some(index) = self.previews.iter().position(|p| p.link == preview.link) {
             self.previews.remove(index);
@@ -1470,6 +1517,192 @@ impl Driver {
         }
         self.previews.push(preview);
     }
+}
+
+/// What one turn discloses besides the context it may shed.
+struct TurnView<'a> {
+    objective: &'a str,
+    decisions: &'a [planning::PlanningAnswer],
+    bodies: &'a [context::WorkContextBody],
+    steps: &'a [WorkStepFact],
+    current: &'a [WorkArtifactV1],
+    budget: WorkAgentBudget,
+    remaining: WorkExecutionLimits,
+    notices: &'a [String],
+}
+
+/// Builds the turn, shedding until it fits: the disclosure itself first drops
+/// older object bodies and shortens source text; then uncited sources go,
+/// then inherited objects oldest first (never the kept ones), then thread
+/// summaries oldest first, and only then the oldest thread entries. The
+/// canvas keeps everything; only the model's view shrinks.
+fn disclose(
+    view: &TurnView<'_>,
+    previews: &mut Vec<WorkEvidencePreviewV1>,
+    inherited: &mut Vec<WorkArtifactV1>,
+    kept: &[WorkArtifactId],
+    thread: &mut Vec<WorkAgentThreadEntry>,
+) -> Result<WorkAgentTurnDisclosure, WorkError> {
+    loop {
+        let room = MAX_WORK_ARTIFACTS.saturating_sub(view.current.len());
+        let artifacts: Vec<WorkArtifactV1> = inherited
+            .iter()
+            .rev()
+            .take(room)
+            .rev()
+            .chain(view.current)
+            .cloned()
+            .collect();
+        let disclosed = WorkAgentTurnDisclosure::try_new(
+            view.objective,
+            view.decisions.to_vec(),
+            view.bodies.to_vec(),
+            view.steps,
+            previews,
+            &artifacts,
+            view.budget,
+            view.remaining,
+            view.notices.to_vec(),
+        )
+        .and_then(|disclosure| disclosure.with_thread(thread.clone()));
+        match disclosed {
+            Err(WorkError::Capacity) => {}
+            other => return other,
+        }
+        if evict_previews(previews, &artifacts) {
+            continue;
+        }
+        let before = inherited.len();
+        let mut shed = 0;
+        inherited.retain(|artifact| {
+            if shed < 4 && !kept.contains(&artifact.id) {
+                shed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        if inherited.len() < before {
+            continue;
+        }
+        if let Some(entry) = thread.iter_mut().find(|entry| entry.summary.is_some()) {
+            entry.summary = None;
+            continue;
+        }
+        if thread.len() > 1 {
+            thread.remove(0);
+            continue;
+        }
+        return Err(WorkError::Capacity);
+    }
+}
+
+/// Drops the oldest sources no current object cites; false when none can go.
+fn evict_previews(previews: &mut Vec<WorkEvidencePreviewV1>, artifacts: &[WorkArtifactV1]) -> bool {
+    let cited: Vec<&WorkEvidenceLink> = artifacts
+        .iter()
+        .flat_map(|artifact| artifact.evidence.iter())
+        .collect();
+    let before = previews.len();
+    let mut dropped = 0;
+    previews.retain(|preview| {
+        if dropped < 16 && !cited.iter().any(|link| **link == preview.link) {
+            dropped += 1;
+            false
+        } else {
+            true
+        }
+    });
+    previews.len() < before
+}
+
+/// Objects a run inherits, oldest first, from earlier executions' objects
+/// (oldest execution first): everything from the last few runs plus older
+/// subjects and comparisons the request names. Kept: those named and those
+/// the latest producing run placed.
+fn inheritable(
+    executions: &[&[WorkArtifactV1]],
+    objective: &str,
+    bodies: &[context::WorkContextBody],
+) -> (Vec<WorkArtifactV1>, Vec<WorkArtifactId>) {
+    let recent = executions.len().saturating_sub(INHERITED_EXECUTIONS);
+    let latest = executions
+        .iter()
+        .rposition(|artifacts| !artifacts.is_empty());
+    let mut artifacts = Vec::new();
+    let mut kept = Vec::new();
+    for (index, produced) in executions.iter().enumerate().rev() {
+        for artifact in produced.iter().rev() {
+            if artifacts.len() >= INHERITED_ARTIFACTS {
+                break;
+            }
+            let named = referenced(artifact, objective, bodies);
+            let last = Some(index) == latest;
+            if index < recent && !named && !last {
+                continue;
+            }
+            if named || last {
+                kept.push(artifact.id);
+            }
+            artifacts.push(artifact.clone());
+        }
+    }
+    artifacts.reverse();
+    (artifacts, kept)
+}
+
+/// A subject or comparison object the request names by its title or one of
+/// its subjects, or selects as context.
+fn referenced(
+    artifact: &WorkArtifactV1,
+    objective: &str,
+    bodies: &[context::WorkContextBody],
+) -> bool {
+    let subjects: &[WorkSubject] = match &artifact.data {
+        WorkArtifactDataV1::ComparisonMatrix { subjects, .. }
+        | WorkArtifactDataV1::Findings { subjects, .. }
+        | WorkArtifactDataV1::EvidenceCollection { subjects, .. } => subjects,
+        WorkArtifactDataV1::Comparison { .. } => &[],
+        _ => return false,
+    };
+    if subjects.is_empty() && !matches!(artifact.data, WorkArtifactDataV1::Comparison { .. }) {
+        return false;
+    }
+    let objective = objective.to_lowercase();
+    let named = |name: &str| {
+        let name = name.trim().to_lowercase();
+        name.chars().count() >= 3 && objective.contains(&name)
+    };
+    named(&artifact.title)
+        || subjects.iter().any(|subject| named(&subject.name))
+        || bodies.iter().any(|body| {
+            matches!(
+                body.kind,
+                context::WorkContextItemKind::Artifact | context::WorkContextItemKind::Subject
+            ) && (body.title == artifact.title
+                || subjects.iter().any(|subject| subject.name == body.title))
+        })
+}
+
+/// The question a settled execution stopped on, still unanswered.
+fn pending_question(execution: &WorkExecutionFact) -> Option<(&str, &[String])> {
+    if !execution.status.terminal() {
+        return None;
+    }
+    execution
+        .steps
+        .iter()
+        .rev()
+        .find_map(|step| match &step.kind {
+            WorkStepKindV1::Ask {
+                prompt,
+                options,
+                answer: None,
+            } if step.status != WorkStepStatus::Running => {
+                Some((prompt.as_str(), options.as_slice()))
+            }
+            _ => None,
+        })
 }
 
 fn reuses_completed_read(request: &WorkStepKindV1, step: &WorkStepFact) -> bool {
@@ -1691,6 +1924,61 @@ async fn join_all<T>(mut futures: Vec<Pin<Box<dyn Future<Output = T> + Send + '_
     results.into_iter().flatten().collect()
 }
 
+fn execution_ended(status: WorkExecutionStatus) -> &'static str {
+    match status {
+        WorkExecutionStatus::Completed | WorkExecutionStatus::NeedsReview => "completed",
+        WorkExecutionStatus::Cancelled | WorkExecutionStatus::CancelRequested => "stopped",
+        WorkExecutionStatus::Failed => "failed",
+        WorkExecutionStatus::Interrupted => "interrupted",
+        WorkExecutionStatus::Approved | WorkExecutionStatus::Running => "running",
+    }
+}
+
+/// The run's last line for the person, or the note of the step that ended
+/// it, plus what it did; the model reads it, so it is clipped.
+fn execution_summary(execution: &WorkExecutionFact) -> Option<String> {
+    let last = execution
+        .steps
+        .iter()
+        .rev()
+        .find_map(|step| step.note.as_deref().filter(|note| !note.trim().is_empty()));
+    let searches = execution
+        .steps
+        .iter()
+        .filter(|step| matches!(step.kind, WorkStepKindV1::Search { .. }))
+        .count();
+    let reads = execution
+        .steps
+        .iter()
+        .filter(|step| {
+            matches!(
+                step.kind,
+                WorkStepKindV1::Read { .. } | WorkStepKindV1::Discover { .. }
+            ) && step.status == WorkStepStatus::Succeeded
+        })
+        .count();
+    // A question the run stopped on leads, so clipping never loses it.
+    let mut summary = match pending_question(execution) {
+        Some((prompt, [])) => format!("Stopped waiting for the person's answer to: {prompt}"),
+        Some((prompt, options)) => format!(
+            "Stopped waiting for the person's answer to: {prompt} Options: {}.",
+            options.join("; ")
+        ),
+        None => last.map(str::to_owned).unwrap_or_default(),
+    };
+    if !summary.is_empty() {
+        summary.push(' ');
+    }
+    summary.push_str(&format!(
+        "({searches} searches, {reads} pages read, {} objects placed)",
+        execution.artifacts.len()
+    ));
+    Some(zephium_core::work::agent::clip_text(
+        &summary,
+        MAX_WORK_STEP_NOTE_BYTES,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1804,6 +2092,118 @@ mod tests {
     }
 
     #[test]
+    fn a_long_work_still_discloses_a_turn_after_shedding() {
+        let artifact = |execution: u128, index: u128, data: WorkArtifactDataV1| WorkArtifactV1 {
+            version: 1,
+            id: (execution * 100 + index).into(),
+            execution: execution.into(),
+            node: 1.into(),
+            attempt: execution.into(),
+            output: "results".into(),
+            title: format!("Result {execution}.{index}"),
+            data,
+            evidence: (1..=2)
+                .map(|source_id| WorkEvidenceLink {
+                    extraction_id: (execution * 100 + index).into(),
+                    source_id,
+                })
+                .collect(),
+            review: WorkOutputReview::SourceMappedNeedsReview,
+            presentation: WorkArtifactPresentationV1::Automatic,
+        };
+        let document = || WorkArtifactDataV1::Document {
+            paragraphs: vec!["x".repeat(3000)],
+            formatted: None,
+        };
+        let executions: Vec<Vec<WorkArtifactV1>> = (1..=16)
+            .map(|execution| {
+                (1..=4)
+                    .map(|index| {
+                        let data = if execution == 2 && index == 1 {
+                            WorkArtifactDataV1::Findings {
+                                subjects: vec![WorkSubject {
+                                    name: "Lisbon shortlist".into(),
+                                    descriptor: None,
+                                    homepage: None,
+                                    image_candidates: vec![],
+                                }],
+                                items: vec![],
+                            }
+                        } else {
+                            document()
+                        };
+                        artifact(execution, index, data)
+                    })
+                    .collect()
+            })
+            .collect();
+        let slices: Vec<&[WorkArtifactV1]> = executions.iter().map(Vec::as_slice).collect();
+        let objective = "Check the visa rules for the Lisbon shortlist as well";
+        let (mut inherited, kept) = inheritable(&slices, objective, &[]);
+        assert_eq!(inherited.len(), 3 * 4 + 1);
+        assert!(inherited.iter().any(|a| a.title == "Result 2.1"));
+        assert!(kept.contains(&WorkArtifactId::from(201)) && kept.contains(&1601.into()));
+        let current: Vec<WorkArtifactV1> = (1..=4)
+            .map(|index| artifact(17, index, document()))
+            .collect();
+        let mut previews: Vec<WorkEvidencePreviewV1> = inherited
+            .iter()
+            .chain(&current)
+            .flat_map(|a| a.evidence.clone())
+            .chain((1..=40).map(|source_id| WorkEvidenceLink {
+                extraction_id: 9999.into(),
+                source_id,
+            }))
+            .map(|link| WorkEvidencePreviewV1 {
+                version: 1,
+                link,
+                origin: "https://example.test".into(),
+                role: "page".into(),
+                text: "y".repeat(8000),
+                truncated: false,
+                source_bytes: "8000".into(),
+                link_destination: None,
+                source: WorkEvidenceSourceV1::NativeExtraction,
+            })
+            .collect();
+        let mut thread: Vec<WorkAgentThreadEntry> = (0..16)
+            .map(|_| WorkAgentThreadEntry {
+                request: "r".repeat(1500),
+                ended: "completed",
+                summary: Some("s".repeat(500)),
+            })
+            .collect();
+        let view = TurnView {
+            objective,
+            decisions: &[],
+            bodies: &[],
+            steps: &[],
+            current: &current,
+            budget: WorkAgentBudget {
+                turns_left: 4,
+                steps_left: 8,
+                browse_available: true,
+            },
+            remaining: WorkExecutionLimits {
+                model_tokens: 100_000,
+                cost_micro_usd: 100_000,
+                operations: 32,
+                timeout_seconds: 600,
+                max_workers: 1,
+            },
+            notices: &[],
+        };
+        let disclosure = disclose(&view, &mut previews, &mut inherited, &kept, &mut thread)
+            .expect("a long work still gets its turn");
+        let context = disclosure.context();
+        assert!(previews.len() < 74, "uncited sources went first");
+        assert_eq!(context.thread.len(), 16);
+        for title in ["Result 2.1", "Result 16.1", "Result 17.4"] {
+            assert!(context.artifacts.iter().any(|a| a.title == title));
+        }
+    }
+
+    #[test]
     fn private_context_never_rides_a_search_query() {
         let private = vec!["Our Q3 revenue target is 4.2M with a hiring freeze".to_owned()];
         assert!(query_discloses(
@@ -1813,51 +2213,4 @@ mod tests {
         assert!(!query_discloses("best canvas libraries 2026", &private));
         assert!(!query_discloses("hiring freeze", &private));
     }
-}
-
-fn execution_ended(status: WorkExecutionStatus) -> &'static str {
-    match status {
-        WorkExecutionStatus::Completed | WorkExecutionStatus::NeedsReview => "completed",
-        WorkExecutionStatus::Cancelled | WorkExecutionStatus::CancelRequested => "stopped",
-        WorkExecutionStatus::Failed => "failed",
-        WorkExecutionStatus::Interrupted => "interrupted",
-        WorkExecutionStatus::Approved | WorkExecutionStatus::Running => "running",
-    }
-}
-
-/// The run's last line for the person, or the note of the step that ended
-/// it, plus what it did; the model reads it, so it is clipped.
-fn execution_summary(execution: &WorkExecutionFact) -> Option<String> {
-    let last = execution
-        .steps
-        .iter()
-        .rev()
-        .find_map(|step| step.note.as_deref().filter(|note| !note.trim().is_empty()));
-    let searches = execution
-        .steps
-        .iter()
-        .filter(|step| matches!(step.kind, WorkStepKindV1::Search { .. }))
-        .count();
-    let reads = execution
-        .steps
-        .iter()
-        .filter(|step| {
-            matches!(
-                step.kind,
-                WorkStepKindV1::Read { .. } | WorkStepKindV1::Discover { .. }
-            ) && step.status == WorkStepStatus::Succeeded
-        })
-        .count();
-    let mut summary = last.map(str::to_owned).unwrap_or_default();
-    if !summary.is_empty() {
-        summary.push(' ');
-    }
-    summary.push_str(&format!(
-        "({searches} searches, {reads} pages read, {} objects placed)",
-        execution.artifacts.len()
-    ));
-    Some(zephium_core::work::agent::clip_text(
-        &summary,
-        MAX_WORK_STEP_NOTE_BYTES,
-    ))
 }

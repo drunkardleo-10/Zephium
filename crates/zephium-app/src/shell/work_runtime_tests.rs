@@ -836,3 +836,138 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
         .all(|step| step.note.as_deref() != Some("Completed the final comparison")));
     assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst), 4);
 }
+
+#[tokio::test]
+async fn an_open_question_stops_the_run_and_the_next_request_answers_it() {
+    use crate::work_agent::*;
+    use std::sync::Mutex;
+    use zephium_core::work::{agent::*, search::*, synthesis::*};
+    const PROMPT: &str = "Airbnb shows no monthly totals without dates. What should I do next?";
+    type Seen = (Vec<planning::PlanningAnswer>, Vec<Option<String>>);
+    #[derive(Default)]
+    struct Asks(Mutex<Vec<Seen>>);
+    impl WorkAgentTurnProvider for Asks {
+        fn turn<'a>(
+            &'a self,
+            input: &'a WorkAgentTurnDisclosure,
+            _: WorkSynthesisTrace,
+        ) -> WorkAgentTurnFuture<'a> {
+            Box::pin(async move {
+                let context = input.context();
+                self.0.lock().unwrap().push((
+                    context.decisions.clone(),
+                    context
+                        .thread
+                        .iter()
+                        .map(|entry| entry.summary.clone())
+                        .collect(),
+                ));
+                Ok(WorkAgentTurnResult {
+                    output: WorkAgentTurnOutput {
+                        say: None,
+                        artifacts: vec![],
+                        fetch: vec![],
+                        ask: Some(WorkAgentQuestion {
+                            prompt: PROMPT.into(),
+                            options: vec!["Use sample dates".into(), "Skip totals".into()],
+                        }),
+                        finish: false,
+                        followups: vec![],
+                        malformed: 0,
+                    },
+                    usage: WorkUsage::default(),
+                })
+            })
+        }
+    }
+    struct NoSearch;
+    impl WorkPublicSearchProvider for NoSearch {
+        fn search<'a>(
+            &'a self,
+            _: &'a WorkPublicSearchScope,
+            _: &'a [zephium_core::work::context::WorkContextBody],
+            _: WorkExecutionLimits,
+        ) -> WorkPublicSearchFuture<'a> {
+            panic!("no search");
+        }
+    }
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Compare the Airbnb shortlist by monthly total".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let provider = Asks::default();
+    let command = |expected| WorkCommandV1 {
+        version: 1,
+        work,
+        expected_revision: expected,
+        command: WorkCommandId::generate(),
+        intent: WorkRuntimeIntent::BeginAgent {
+            grant: WorkAgentGrantV1 {
+                provider: WorkSearchProvider::OpenAi,
+                model: PUBLIC_SEARCH_MODEL.into(),
+                max_turns: 8,
+                max_steps: 24,
+                browse_hops: 1,
+                folders: vec![],
+            },
+            limits: WorkExecutionLimits {
+                model_tokens: 100_000,
+                cost_micro_usd: 100_000,
+                operations: 32,
+                timeout_seconds: 30,
+                max_workers: 1,
+            },
+        },
+    };
+    let service = WorkAgentService::new(handle.clone());
+    let run = |expected| {
+        service.run(
+            profile,
+            command(expected),
+            None,
+            WorkAgentProviders {
+                turn: &provider,
+                search: &NoSearch,
+            },
+            |_, _| async { Err(WorkError::Unavailable) },
+            |_| {},
+        )
+    };
+    let stopped = drive(&mut shell, &queue, run(WorkRevision::INITIAL))
+        .await
+        .unwrap();
+    let execution = &stopped.executions[0];
+    assert_eq!(execution.status, WorkExecutionStatus::Cancelled);
+    let ask = execution.steps.last().unwrap();
+    assert!(matches!(
+        &ask.kind,
+        WorkStepKindV1::Ask { answer: None, .. }
+    ));
+    assert_eq!(ask.status, WorkStepStatus::Cancelled);
+    assert_eq!(ask.note.as_deref(), Some("Waiting for your answer"));
+
+    let edit = handle
+        .work_document(WorkIntent::Edit {
+            id: work,
+            expected: stopped.work.revision,
+            edit: WorkUserEdit::SetObjective {
+                objective: "Use sample dates".into(),
+            },
+        })
+        .unwrap();
+    drive(&mut shell, &queue, edit).await.unwrap();
+    let revision = stopped.work.revision.next().unwrap();
+    drive(&mut shell, &queue, run(revision)).await.unwrap();
+    let seen = provider.0.lock().unwrap();
+    let (decisions, summaries) = seen.last().unwrap();
+    assert!(decisions
+        .iter()
+        .any(|decision| decision.question == PROMPT && decision.answer == "Use sample dates"));
+    let summary = summaries[0].as_deref().unwrap();
+    assert!(summary.contains(PROMPT) && summary.contains("Use sample dates; Skip totals"));
+}
