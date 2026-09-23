@@ -1,6 +1,7 @@
 import type {
   WorkEnvironmentChanged,
   WorkChanged,
+  WorkHumanChanged,
   PanelState,
   ResourceChanged,
   BlockerStatusChanged,
@@ -42,6 +43,7 @@ function scopedEvent<T>(name: string) {
 export const nativeEventNames = {
   workEnvironmentChanged: "zephium:work-environment-changed",
   workChanged: "zephium:work-changed",
+  workHumanChanged: "zephium:work-human-changed",
   panelState: "zephium:panel-state",
   resourceChanged: "zephium:resource-changed",
   resourceClose: "zephium:resource-close",
@@ -72,6 +74,7 @@ export const events = {
     nativeEventNames.workEnvironmentChanged,
   ),
   workChanged: scopedEvent<WorkChanged>(nativeEventNames.workChanged),
+  workHumanChanged: scopedEvent<WorkHumanChanged>(nativeEventNames.workHumanChanged),
   resourceClose: scopedEvent<string>(nativeEventNames.resourceClose),
   resourceCloseCancelled: scopedEvent<string>(nativeEventNames.resourceCloseCancelled),
   resourceChanged: scopedEvent<ResourceChanged>(nativeEventNames.resourceChanged),

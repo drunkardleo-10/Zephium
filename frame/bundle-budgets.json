@@ -134,9 +134,9 @@
     "description": "Measured 328183 JS bytes with the agent run operation, step labels, and the agent line on the canvas card in the shared graph."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 548000,
+    "js": 551000,
     "css": 119600,
-    "description": "Measured 545758 JS and 118421 CSS bytes: the product compare card, the settling of a new card, the drawn edge and the glow of the running stage."
+    "description": "Measured 549630 JS and 118944 CSS bytes: the page card now carries the badge a page waiting for a person shows."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
     "js": 70000,
@@ -144,9 +144,9 @@
     "description": "Measured 65242 JS and 2553 CSS bytes: a hand-written SVG plot with no chart library."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 570000,
+    "js": 574000,
     "css": 113000,
-    "description": "Measured 563831 JS and 110055 CSS bytes; lowered because project-work resolves its own host and no longer pulls the Artifact UI module into this graph."
+    "description": "Measured 572668 JS and 109980 CSS bytes: the canvas reads the pages each run holds open for a person."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 110000,

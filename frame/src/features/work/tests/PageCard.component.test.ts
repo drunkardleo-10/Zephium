@@ -37,3 +37,33 @@ test("a settled page shows its frame on first mount and follows it when it chang
   expect(screen.container.querySelector(".placeholder")?.textContent).toBe("s");
   await screen.unmount();
 });
+
+test("a page the run is holding says why it needs you, and the countdown only near the end", async () => {
+  await page.viewport(1200, 800);
+  const waiting = card(GIF);
+  waiting.status = "Waiting for you";
+  waiting.page!.human = {
+    attempt: "attempt",
+    step: "read",
+    generation: 2,
+    phase: "waiting_for_human",
+    reason: "sign_in",
+    remaining: 120_000,
+    canContinue: false,
+  };
+  const screen = await render(PageCard, { item: waiting, selected: false });
+  await expect.element(screen.getByText("Needs you to sign in")).toBeVisible();
+  expect(screen.container.querySelector(".needs .left")).toBeNull();
+  await screen.rerender({
+    item: {
+      ...waiting,
+      page: { ...waiting.page!, human: { ...waiting.page!.human!, remaining: 24_000 } },
+    },
+    selected: false,
+  });
+  await expect.element(screen.getByText("24s left")).toBeVisible();
+  // Handed back: the card is an ordinary page again.
+  await screen.rerender({ item: card(GIF), selected: false });
+  expect(screen.container.querySelector(".needs")).toBeNull();
+  await screen.unmount();
+});

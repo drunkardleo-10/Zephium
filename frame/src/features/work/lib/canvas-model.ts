@@ -1,6 +1,7 @@
 import type { MediaAssetV1 } from "$domain/resources";
 import type { ArtifactView, FindingView, SubjectView } from "$shared/ui/data/Artifact";
 import type { Node } from "@xyflow/svelte";
+import type { HumanPage } from "./work-human";
 
 type CanvasKind =
   | "tab"
@@ -53,7 +54,14 @@ export type CanvasItem = {
     file?: { record: string; path: string; kind: string };
   }[];
   /** A page a browser step opened: its newest frame while the agent works there. */
-  page?: { url: string; host: string; frame: string | null; live: boolean };
+  page?: {
+    url: string;
+    host: string;
+    frame: string | null;
+    live: boolean;
+    /** Set while the run is holding this page open for a person. */
+    human?: HumanPage;
+  };
   unavailable?: boolean;
   /** The stage a run is working in right now; it glows while that is true. */
   active?: boolean;

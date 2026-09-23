@@ -667,3 +667,83 @@ test("every stage keeps the pages its own run read", async () => {
   });
   expect(stages[1]!.place.y).toBeGreaterThan(stages[0]!.place.y);
 });
+
+test("a page the run is holding for a person reaches its card, matched by attempt and step", async () => {
+  const { environmentStages } = await import("../lib/project-environment-thread");
+  const state = structuredClone(projection);
+  const run = state.executions[0]!;
+  run.status = "running";
+  run.spec.request = "Book the ferry";
+  run.spec.nodes[0]!.capability = {
+    kind: "agent",
+    grant: {
+      provider: "open_ai",
+      model: "gpt-5.6-luna",
+      max_turns: 10,
+      max_steps: 32,
+      browse_hops: 4,
+    },
+  };
+  run.artifacts = [];
+  run.steps = [
+    {
+      id: "read",
+      turn: 1,
+      kind: { kind: "read", url: "https://ferry.example/book" },
+      status: "running",
+    },
+  ];
+  const scene = { ...snapshot, elements: snapshot.elements.slice(0, 1) };
+  const objectives = new Map([["objective", state]]);
+  const stages = environmentStages(scene, objectives);
+  const recorded = [
+    {
+      execution: "execution",
+      attempt: "attempt",
+      step: "read",
+      url: "https://ferry.example/book",
+      live: true,
+      frame: null,
+    },
+  ];
+  const waiting = {
+    id: { attempt: "attempt", step: "read", generation: 2 },
+    phase: "waiting_for_human" as const,
+    reason: "sign_in" as const,
+    remaining_millis: 40_000,
+    document_revision: "3",
+    can_continue: false,
+  };
+  const held = environmentPages(
+    scene,
+    objectives,
+    stages,
+    () => recorded,
+    new Map(),
+    () => undefined,
+    new Set(),
+    () => [waiting],
+  ).items[0];
+  expect(held?.page?.human).toEqual({
+    attempt: "attempt",
+    step: "read",
+    generation: 2,
+    phase: "waiting_for_human",
+    reason: "sign_in",
+    remaining: 40_000,
+    canContinue: false,
+  });
+  expect(held?.status).toBe("Waiting for you");
+  // A takeover recorded against an earlier attempt is not this card's page.
+  const stale = environmentPages(
+    scene,
+    objectives,
+    stages,
+    () => recorded,
+    new Map(),
+    () => undefined,
+    new Set(),
+    () => [{ ...waiting, id: { ...waiting.id, attempt: "earlier" } }],
+  ).items[0];
+  expect(stale?.page?.human).toBeUndefined();
+});

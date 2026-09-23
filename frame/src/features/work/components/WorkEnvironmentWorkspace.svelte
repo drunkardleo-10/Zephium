@@ -16,6 +16,7 @@
   import { commands } from "$shared/ipc/bindings";
   import { layout } from "$domain/layout";
   import { workPane, type WorkPaneRect, type WorkPaneTarget } from "$domain/work-pane";
+  import { WorkHumanSession } from "$domain/work-human";
   import { preferences } from "$domain/preferences";
   import { loadNotes, loadNoteEditorHost } from "$features/notes";
   import { loadTasks } from "$features/tasks";
@@ -101,6 +102,15 @@
   onMount(() => {
     void context.start();
     return () => context.dispose();
+  });
+  // The pages the runs on this canvas are holding open for a person.
+  const human = untrack(() => new WorkHumanSession(session.profile));
+  onMount(() => {
+    void human.start();
+    return () => human.dispose();
+  });
+  $effect(() => {
+    human.update([...context.objectives.keys()]);
   });
   onMount(() => {
     session.tabsIntroduced = true;
@@ -562,6 +572,7 @@
           sources.cards,
           signalOf,
           new Set(agents.items.map((item) => item.id)),
+          (objective) => human.pages.get(objective) ?? [],
         )
       : { items: [], links: [], positions: {} },
   );

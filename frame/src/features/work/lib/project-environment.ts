@@ -6,6 +6,7 @@ import type {
   TabView,
   ResourceSummary,
   WorkExecutionFact,
+  WorkHumanPageV1,
   WorkPageV1,
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
@@ -15,6 +16,7 @@ import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
 import { CARD_GAP, COLUMNS, PAGE_SIZE, SOURCES_SIZE } from "./organize";
 import { firstRequest, type WorkStage } from "./project-environment-thread";
 import { fileFolder } from "./work-files";
+import { heldPage, humanPage, phaseLabel } from "./work-human";
 import { pageFrameUrl } from "$domain/resources";
 
 /** How many cited pages one Sources card lists; the lift shows the rest. */
@@ -684,6 +686,8 @@ export function environmentPages(
   activity: (objective: string) => string | undefined = () => undefined,
   /** The agent presences the scene already has; a tie to an absent one is no tie. */
   present: ReadonlySet<string> = new Set(),
+  /** The pages this work is holding open for a person, if any are. */
+  human: (objective: string) => readonly WorkHumanPageV1[] = () => [],
 ): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
   const items: CanvasItem[] = [];
   const links: CanvasLink[] = [];
@@ -692,6 +696,7 @@ export function environmentPages(
     const projection = objectives.get(stage.objective);
     if (!projection) continue;
     const recorded = pages(projection.work.id);
+    const waiting = human(projection.work.id);
     const paused = activity(projection.work.id) === "paused";
     const agent = `agent:${stage.element}`;
     const home = { x: COLUMNS.pages(stage.place.x), y: stage.place.y };
@@ -744,6 +749,19 @@ export function environmentPages(
         const frame = entry.page?.frame
           ? pageFrameUrl(entry.page.attempt, entry.page.step, entry.page.frame.generation)
           : null;
+        // Rust names a held page by its read step; one card folds several of them.
+        const held = heldPage(
+          waiting.filter((candidate) =>
+            entry.steps.some(
+              (step) =>
+                step.id === candidate.id.step &&
+                !opened.some(
+                  (record) =>
+                    record.step === candidate.id.step && record.attempt !== candidate.id.attempt,
+                ),
+            ),
+          ),
+        );
         const id = `page:${execution.id}:${first.id}`;
         items.push({
           id,
@@ -751,15 +769,17 @@ export function environmentPages(
           kind: m.work_env_page(),
           title: pageHost || m.work_env_page(),
           detail: clipText(url, DETAIL_TEXT),
-          status: live
-            ? paused
-              ? m.work_line_paused()
-              : m.work_env_page_live()
-            : succeeded
-              ? m.work_env_page_read()
-              : clipText(refused, STATUS_TEXT) || m.work_env_status_failed(),
-          page: { url, host: pageHost, frame, live },
-          ...(live || succeeded ? {} : { unavailable: true }),
+          status: held
+            ? (phaseLabel(held.phase) ?? m.work_line_waiting_for_you())
+            : live
+              ? paused
+                ? m.work_line_paused()
+                : m.work_env_page_live()
+              : succeeded
+                ? m.work_env_page_read()
+                : clipText(refused, STATUS_TEXT) || m.work_env_status_failed(),
+          page: { url, host: pageHost, frame, live, ...(held ? { human: humanPage(held) } : {}) },
+          ...(live || succeeded || held ? {} : { unavailable: true }),
         });
         positions[id] = { x: home.x, y: home.y + index * (PAGE_SIZE.height + CARD_GAP) };
         index += 1;

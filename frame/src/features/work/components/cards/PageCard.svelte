@@ -1,7 +1,11 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import type { CanvasItem } from "../../lib/canvas-model";
+  import { cardCountdown, reasonBadge } from "../../lib/work-human";
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
+  /** Set while the run is holding this page open for a person. */
+  const human = $derived(item.page?.human ?? null);
+  const countdown = $derived(human ? cardCountdown(human.remaining) : null);
   // A frame that missed once must not pin the placeholder: the store serves it
   // again once the run settles, and every refresh mints a new generation.
   let failedFrame = $state<string | null>(null);
@@ -15,7 +19,7 @@
   });
 </script>
 
-<article class="page" class:selected class:live={item.page?.live}>
+<article class="page" class:selected class:live={item.page?.live} class:held={!!human}>
   <header class="work-drag-handle">
     <span class="host">{item.page?.host || item.kind}</span>
     {#if !item.unavailable}<span class="state">
@@ -34,6 +38,12 @@
       />
     {:else}
       <span class="placeholder" aria-hidden="true">{(item.page?.host || "?").slice(0, 1)}</span>
+    {/if}
+    {#if human}
+      <p class="needs">
+        <span class="why">{reasonBadge(human.reason)}</span>
+        {#if countdown}<span class="left">{countdown}</span>{/if}
+      </p>
     {/if}
   </div>
   <!-- A read that gave up says so in Rust's words, not with a shrug. -->
@@ -108,6 +118,43 @@
     overflow: hidden;
     display: grid;
     place-items: center;
+  }
+
+  .page.held .frame {
+    box-shadow: inset 0 0 0 1px var(--color-border-strong);
+  }
+
+  .needs {
+    position: absolute;
+    inset-inline: 0;
+    inset-block-end: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 0;
+    padding: 18px 8px 8px;
+    background: linear-gradient(to top, var(--color-surface) 46%, transparent);
+    font-size: var(--text-caption);
+    line-height: 16px;
+  }
+
+  .why {
+    padding: 2px 8px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill);
+    box-shadow: inset 0 0 0 1px var(--color-border-strong);
+    color: var(--color-text);
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .left {
+    flex: none;
+    color: var(--color-muted);
+    font-variant-numeric: tabular-nums;
   }
 
   .frame img {
