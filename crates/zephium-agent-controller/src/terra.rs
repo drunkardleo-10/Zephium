@@ -6,7 +6,11 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use zephium_agent_model_catalog::{
-    settle_luna_provider_terminal, try_luna_provider_exact_call_config,
+    settle_gpt6_luna_provider_terminal, settle_luna_provider_terminal,
+    try_gpt6_luna_provider_exact_call_config, try_luna_provider_exact_call_config,
+    GPT6_LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS, GPT6_LUNA_MAX_OUTPUT_TOKENS,
+    GPT6_LUNA_MODEL_REVISION, GPT6_LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS,
+    GPT6_LUNA_STANDARD_RATE_MAX_INPUT_TOKENS,
     LunaProviderTerminalSettlement, LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS,
     LUNA_MAX_OUTPUT_TOKENS, LUNA_MODEL_REVISION, LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS,
     LUNA_STANDARD_RATE_MAX_INPUT_TOKENS, TERRA_MODEL_REVISION,
@@ -85,6 +89,7 @@ const MAX_BROWSER_ACTIONS: u64 = 8;
 const MAX_WORK_MODEL_CALLS: u8 = 64;
 const MAX_WORK_ACTIONS: u64 = 64;
 const LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD: u64 = 77_830;
+const GPT6_LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD: u64 = 38_096;
 
 const _: () = {
     assert!(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS < TERRA_MAX_OUTPUT_TOKENS);
@@ -97,6 +102,18 @@ const _: () = {
                     * TERRA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS
                     / 1_000_000
     );
+    {
+        assert!(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS < GPT6_LUNA_MAX_OUTPUT_TOKENS);
+        assert!(
+            GPT6_LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD
+                == GPT6_LUNA_STANDARD_RATE_MAX_INPUT_TOKENS
+                    * GPT6_LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS
+                    / 1_000_000
+                    + (TERRA_CONTROLLER_MAX_OUTPUT_TOKENS as u64)
+                        * GPT6_LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS
+                        / 1_000_000
+        );
+    }
     {
         assert!(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS < LUNA_MAX_OUTPUT_TOKENS);
         assert!(
@@ -116,8 +133,10 @@ const _: () = {
 pub enum AgentBrowserModel {
     /// Balanced-intelligence GPT-5.6 Terra qualification baseline.
     Terra,
-    /// Cost-sensitive GPT-5.6 Luna qualification target.
+    /// Cost-sensitive GPT-5.6 Luna; kept for stored runs and qualifiers.
     Luna,
+    /// GPT-6 Luna, the shipping page model.
+    Gpt6Luna,
 }
 
 impl AgentBrowserModel {
@@ -126,6 +145,7 @@ impl AgentBrowserModel {
         match self {
             Self::Terra => TERRA_MODEL_REVISION,
             Self::Luna => LUNA_MODEL_REVISION,
+            Self::Gpt6Luna => GPT6_LUNA_MODEL_REVISION,
         }
     }
 }
@@ -319,6 +339,10 @@ impl TerraControllerRunInput {
             }
             AgentBrowserModel::Luna => {
                 try_luna_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
+                    .map_err(|_| TerraControllerConstructionError::Catalog)?
+            }
+            AgentBrowserModel::Gpt6Luna => {
+                try_gpt6_luna_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
                     .map_err(|_| TerraControllerConstructionError::Catalog)?
             }
         };
@@ -2135,6 +2159,10 @@ impl AgentBrowserSession {
                 try_luna_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
                     .map_err(|_| AgentBrowserProviderError::Catalog)?
             }
+            AgentBrowserModel::Gpt6Luna => {
+                try_gpt6_luna_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
+                    .map_err(|_| AgentBrowserProviderError::Catalog)?
+            }
         };
         let config = config.restrict_to_locate_and_act();
         let config = match retention {
@@ -3742,6 +3770,10 @@ fn browser_call_budget(
             LUNA_STANDARD_RATE_MAX_INPUT_TOKENS,
             LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD,
         ),
+        AgentBrowserModel::Gpt6Luna => (
+            GPT6_LUNA_STANDARD_RATE_MAX_INPUT_TOKENS,
+            GPT6_LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD,
+        ),
     };
     let input_ceiling =
         u32::try_from(input_ceiling).map_err(|_| AgentBrowserProviderError::Catalog)?;
@@ -3844,8 +3876,13 @@ fn settle_browser_terminal(
                         }
                     }
                 }
-                AgentBrowserModel::Luna => {
-                    match settle_luna_provider_terminal(*settlement, policy).map_err(|error| {
+                AgentBrowserModel::Luna | AgentBrowserModel::Gpt6Luna => {
+                    let settle = if model == AgentBrowserModel::Luna {
+                        settle_luna_provider_terminal
+                    } else {
+                        settle_gpt6_luna_provider_terminal
+                    };
+                    match settle(*settlement, policy).map_err(|error| {
                         *retained = error.into_retained().map(BrowserUnsettledTerminal::Luna);
                         AgentBrowserProviderError::Settlement
                     })? {

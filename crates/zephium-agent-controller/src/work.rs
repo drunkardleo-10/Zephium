@@ -531,6 +531,10 @@ impl AgentWorkRunInput {
                 super::TERRA_CONTROLLER_MAX_OUTPUT_TOKENS,
             )
             .map_err(|_| AgentWorkFailure::Contract)?,
+            AgentBrowserModel::Gpt6Luna => super::try_gpt6_luna_provider_exact_call_config(
+                super::TERRA_CONTROLLER_MAX_OUTPUT_TOKENS,
+            )
+            .map_err(|_| AgentWorkFailure::Contract)?,
         };
         let objective =
             AgentProviderObjective::try_admit_conservative_utf8(objective, config.tokenizer())
