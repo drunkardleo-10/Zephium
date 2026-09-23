@@ -114,6 +114,20 @@ pub struct DecisionReadSelection {
     baseline: SemanticObservationAcknowledgement,
     account: AgentContextAccountBinding,
     targets: Vec<Option<SemanticReferenceId>>,
+    /// Columns whose value head never settled at threshold. They are never
+    /// copied verbatim; only a focused generation call may still answer them.
+    unresolved: Vec<usize>,
+}
+
+impl DecisionReadSelection {
+    /// Columns still without a settled value head.
+    pub fn unresolved(&self) -> usize {
+        self.unresolved.len()
+    }
+    /// Columns whose value node the primary backend located.
+    pub fn located(&self) -> usize {
+        self.targets.iter().filter(|target| target.is_some()).count()
+    }
 }
 
 impl DecisionObservationAnswers {
@@ -126,7 +140,7 @@ impl DecisionObservationAnswers {
     ) -> Result<Option<DecisionReadSelection>, DecisionProjectionError> {
         Ok(self
             .take_read_candidates(observation, account, schema)?
-            .and_then(|(selection, complete)| complete.then_some(selection)))
+            .and_then(|(selection, ready)| ready.then_some(selection)))
     }
 
     /// Retains located public facts before further inspection can displace their broad capture.
@@ -138,8 +152,28 @@ impl DecisionObservationAnswers {
         captured_at: SemanticCaptureInstant,
         evidence: &mut SemanticRetainedReadEvidence,
     ) -> Result<Option<DecisionReadSelection>, DecisionProjectionError> {
-        let Some((selection, complete)) =
-            self.take_read_candidates(observation, account, schema)?
+        Ok(self
+            .take_read_progress_retaining_evidence(
+                observation,
+                account,
+                schema,
+                captured_at,
+                evidence,
+            )?
+            .and_then(|(selection, ready)| ready.then_some(selection)))
+    }
+
+    /// The same consumption, but the caller also learns whether the typed path
+    /// already finished. An unready selection authorizes no verbatim copy.
+    pub fn take_read_progress_retaining_evidence(
+        &mut self,
+        observation: &SemanticObservation,
+        account: AgentContextAccountBinding,
+        schema: &SemanticExtractionSchema,
+        captured_at: SemanticCaptureInstant,
+        evidence: &mut SemanticRetainedReadEvidence,
+    ) -> Result<Option<(DecisionReadSelection, bool)>, DecisionProjectionError> {
+        let Some((selection, ready)) = self.take_read_candidates(observation, account, schema)?
         else {
             return Ok(None);
         };
@@ -157,7 +191,7 @@ impl DecisionObservationAnswers {
                 .retain(&read, &selection.baseline)
                 .map_err(|_| DecisionProjectionError::Authority)?;
         }
-        Ok(complete.then_some(selection))
+        Ok(Some((selection, ready)))
     }
 
     fn take_read_candidates(
@@ -175,9 +209,18 @@ impl DecisionObservationAnswers {
         if projection.schema != *schema {
             return Err(DecisionProjectionError::Authority);
         }
-        let complete = matches!(self.results.take("done"), Some(ResolvedDecision::Answer { answer, .. }) if matches!(answer.value(), AnswerValue::Noul { noul } if *noul >= 0.5));
+        // An accepted completion head decides; only an unsettled one lets Rust's
+        // own structural check stand in for it.
+        let complete = match self.results.take("done") {
+            Some(ResolvedDecision::Answer { answer, .. }) => match answer.value() {
+                AnswerValue::Noul { noul } => Some(*noul >= 0.5),
+                _ => return Err(DecisionProjectionError::Authority),
+            },
+            _ => None,
+        };
         let mut targets = Vec::new();
-        let mut ready = complete;
+        let mut unresolved = Vec::new();
+        let mut ready = true;
         for (index, field) in projection.columns.iter().enumerate() {
             let target = match self.results.take(&format!("locate_{index}")) {
                 Some(ResolvedDecision::Answer { answer, .. }) => match answer.value() {
@@ -190,7 +233,7 @@ impl DecisionObservationAnswers {
                 },
                 Some(ResolvedDecision::Abstained { .. }) => None,
                 _ => {
-                    ready = false;
+                    unresolved.push(index);
                     None
                 }
             };
@@ -202,11 +245,16 @@ impl DecisionObservationAnswers {
                     ));
             targets.push(target);
         }
+        // Rust's own completeness check: every requested value head settled at
+        // threshold and every column this read must publish has a source. It
+        // substitutes for an unsettled completion head, never overrides one.
+        ready &= complete.unwrap_or(unresolved.is_empty());
         Ok(Some((
             DecisionReadSelection {
                 projection,
                 account,
                 targets,
+                unresolved,
                 baseline: SemanticObservationAcknowledgement::from_fingerprint(
                     crate::semantic_diff::SemanticObservationFingerprint::from_observation(
                         observation,
@@ -251,6 +299,31 @@ impl DecisionReadSelection {
         account: AgentContextAccountBinding,
         captured_at: SemanticCaptureInstant,
     ) -> Result<DecisionLocatedRead<'a>, SemanticExtractionError> {
+        self.prepare_inner(observation, account, captured_at, false)
+    }
+
+    /// One focused completion of the columns the typed path could not settle.
+    /// Their values are generated from the located neighbourhood alone and stay
+    /// subject to the unchanged verbatim, citation and sensitivity contracts.
+    pub fn prepare_completing<'a>(
+        self,
+        observation: &'a SemanticObservation,
+        account: AgentContextAccountBinding,
+        captured_at: SemanticCaptureInstant,
+    ) -> Result<DecisionLocatedRead<'a>, SemanticExtractionError> {
+        if self.unresolved.is_empty() || self.located() == 0 {
+            return Err(SemanticExtractionError::ReadNotDelivered);
+        }
+        self.prepare_inner(observation, account, captured_at, true)
+    }
+
+    fn prepare_inner<'a>(
+        self,
+        observation: &'a SemanticObservation,
+        account: AgentContextAccountBinding,
+        captured_at: SemanticCaptureInstant,
+        completing: bool,
+    ) -> Result<DecisionLocatedRead<'a>, SemanticExtractionError> {
         if self.account.account() != account.account()
             || self.account.context() != account.context()
             || self.account.observed_at() > account.observed_at()
@@ -261,13 +334,27 @@ impl DecisionReadSelection {
         let mut all = BTreeSet::new();
         let mut generation_refs = BTreeSet::new();
         let mut generated = Vec::new();
-        for (field, target) in self.projection.columns.iter().zip(&self.targets) {
+        for (index, (field, target)) in self
+            .projection
+            .columns
+            .iter()
+            .zip(&self.targets)
+            .enumerate()
+        {
             let Some(target) = target else {
+                if completing && self.unresolved.contains(&index) {
+                    generated.push(field.clone());
+                }
                 continue;
             };
             all.insert(*target);
             if !copy_only(field) {
                 generated.push(field.clone());
+                generation_refs.extend(generation_neighborhood(observation, *target));
+            }
+        }
+        if completing {
+            for target in self.targets.iter().flatten() {
                 generation_refs.extend(generation_neighborhood(observation, *target));
             }
         }

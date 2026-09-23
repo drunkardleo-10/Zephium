@@ -116,6 +116,7 @@ impl AgentBrowserSession {
         observation: &zephium_agentic::SemanticObservation,
         authority: &zephium_agentic::AgentProviderActionAuthority,
         schema: Option<&zephium_agentic::SemanticExtractionSchema>,
+        locate_only: bool,
     ) -> Result<Option<DecisionObservationAnswers>, AgentBrowserProviderError> {
         self.check_live()?;
         if self.decisions.is_none() || !self.has_decision_capacity()? {
@@ -124,15 +125,27 @@ impl AgentBrowserSession {
         if self.attempt.is_some() || self.retained_terminal.is_some() || self.action.is_some() {
             return Err(AgentBrowserProviderError::ActionPending);
         }
-        let projection = match DecisionObservation::try_for_read(
-            observation,
-            self.objective
-                .as_ref()
-                .ok_or(AgentBrowserProviderError::Continuation)?,
-            authority,
-            self.account,
-            schema,
-        ) {
+        let objective = self
+            .objective
+            .as_ref()
+            .ok_or(AgentBrowserProviderError::Continuation)?;
+        let built = match schema.filter(|_| locate_only) {
+            Some(schema) => DecisionObservation::try_for_locate(
+                observation,
+                objective,
+                authority,
+                self.account,
+                schema,
+            ),
+            None => DecisionObservation::try_for_read(
+                observation,
+                objective,
+                authority,
+                self.account,
+                schema,
+            ),
+        };
+        let projection = match built {
             Ok(projection) => projection,
             Err(DecisionProjectionError::Capacity) => return Ok(None),
             Err(_) => return Err(AgentBrowserProviderError::Authority),
@@ -185,6 +198,7 @@ impl AgentBrowserSession {
                 journal
                     .emit(work::AgentWorkEventKind::DecisionFallback {
                         counts: fallback.fallback_counts(),
+                        purposes: fallback.fallback_purposes(),
                         capacity: can_emulate,
                     })
                     .map_err(|_| AgentBrowserProviderError::Journal)?;

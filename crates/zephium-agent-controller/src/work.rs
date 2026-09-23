@@ -2123,6 +2123,7 @@ impl AgentWorkController {
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
         observation: &SemanticObservation,
+        locate_only: bool,
     ) -> Result<bool, AgentWorkFailure> {
         state.decision_answers = None;
         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
@@ -2143,7 +2144,12 @@ impl AgentWorkController {
             worker,
             browser,
             session.cancellation.clone(),
-            session.decide_observation(observation, &authority, state.extraction_schema.as_ref()),
+            session.decide_observation(
+                observation,
+                &authority,
+                state.extraction_schema.as_ref(),
+                locate_only,
+            ),
         )
         .await?;
         let Some(mut answers) = answers else {
@@ -2164,7 +2170,7 @@ impl AgentWorkController {
         mut observation: SemanticObservation,
     ) -> Result<(SemanticObservation, bool), AgentWorkFailure> {
         if !state.human_request
-            || !Self::classify_human_challenge(state, worker, browser, &observation).await?
+            || !Self::classify_human_challenge(state, worker, browser, &observation, false).await?
         {
             return Ok((observation, false));
         }
@@ -2186,7 +2192,8 @@ impl AgentWorkController {
             state.refresh_account(worker, browser)?;
             observation =
                 Self::fit_model_observation(Self::observe(state, worker, browser).await?)?;
-            if !Self::classify_human_challenge(state, worker, browser, &observation).await? {
+            if !Self::classify_human_challenge(state, worker, browser, &observation, false).await?
+            {
                 return Ok((observation, false));
             }
         }
@@ -2539,6 +2546,7 @@ impl AgentWorkController {
         // weak model cannot consume the rest of a run repeating an impossible
         // proposal. Fresh observations carry distinct identities.
         let mut action_refusals = Vec::<AgentProviderActionRefusalKey>::new();
+        let mut refused_inspections = 0u8;
         loop {
             state.check_task_contract()?;
             // Deliver acknowledged audit batches while idle so long runs keep
@@ -2627,7 +2635,17 @@ impl AgentWorkController {
                         state
                             .journal_mut()?
                             .emit(AgentWorkEventKind::InspectionRefused)?;
+                        refused_inspections = refused_inspections.saturating_add(1);
                         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                        // A page that has already refused this many inspections
+                        // yields nothing more from snapshots. Narrow the
+                        // remaining allowance to the extract and mapping pair
+                        // instead of spending the read on refusals.
+                        if refused_inspections >= MAX_REFUSED_INSPECTIONS {
+                            session.max_model_calls = session
+                                .max_model_calls
+                                .min(session.turns.saturating_add(REMAINING_EXTRACTION_CALLS));
+                        }
                         turn = Self::provider(
                             &mut state.native,
                             worker,
@@ -4320,6 +4338,13 @@ const HUMAN_CHALLENGE_PHRASES: [&str; 18] = [
 const MAX_HUMAN_CHALLENGE_NODES: usize = 48;
 /// How long a script-only check gets to pass on its own before a person is asked.
 const HUMAN_CHALLENGE_SETTLE_MILLIS: [u64; 3] = [2_000, 3_000, 4_000];
+/// Refused inspections one read tolerates before snapshots stop being worth a
+/// model call. Two lets the planner correct one genuinely wrong scope; beyond
+/// that the recorded runs only repeated unchanged captures.
+const MAX_REFUSED_INSPECTIONS: u8 = 2;
+/// Calls kept for the extract proposal and its mapping turn after the planner's
+/// snapshot allowance is narrowed.
+const REMAINING_EXTRACTION_CALLS: u8 = 2;
 
 fn looks_like_human_challenge(observation: &SemanticObservation) -> bool {
     let mut nodes = 0;
@@ -4382,6 +4407,9 @@ pub enum AgentWorkEventKind {
     DecisionFallback {
         /// Noul, Choice and Score counts by unavailable, rate limited, invalid, uncertain.
         counts: [[u8; 4]; 3],
+        /// Unresolved heads by declared purpose, in the closed purpose order:
+        /// challenge, action, locate, picture, relevance, wall, completion, score.
+        purposes: [u8; zephium_decision::DecisionPurpose::COUNT],
         /// Whether the shared call allowance permits attempting emulation.
         capacity: bool,
     },

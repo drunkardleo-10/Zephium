@@ -1,6 +1,11 @@
 use super::*;
 
 const MAX_UNCHANGED_DECISION_OBSERVATIONS: u8 = 3;
+/// Cheap typed re-observations of one page before the read stops asking the
+/// recommended backend. Two covers a value that is one or two screens below the
+/// first viewport, which is what the recorded product pages needed, and bounds
+/// the added native work at two scrolls and two sub-second batches.
+const MAX_READ_REOBSERVATIONS: u8 = 2;
 
 impl AgentWorkController {
     pub(super) async fn run_decision_actions(
@@ -20,6 +25,7 @@ impl AgentWorkController {
         AgentWorkFailure,
     > {
         let mut unchanged = 0u8;
+        let mut reobservations = 0u8;
         loop {
             state.check_task_contract()?;
             state.native.check_control(worker, browser)?;
@@ -29,7 +35,15 @@ impl AgentWorkController {
             }
             if state.decision_answers.is_none() {
                 if !state.human_request {
-                    if Self::classify_human_challenge(state, worker, browser, &observation).await? {
+                    if Self::classify_human_challenge(
+                        state,
+                        worker,
+                        browser,
+                        &observation,
+                        reobservations > 0,
+                    )
+                    .await?
+                    {
                         break;
                     }
                 } else {
@@ -57,49 +71,29 @@ impl AgentWorkController {
             let Some(mut answers) = state.decision_answers.take() else {
                 break;
             };
-            if let Some(schema) = state.extraction_schema.as_ref() {
+            let mut gap = None;
+            if let Some(schema) = state.extraction_schema.clone() {
                 let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
-                if let Some(selection) = answers
-                    .take_read_selection_retaining_evidence(
+                if let Some((selection, ready)) = answers
+                    .take_read_progress_retaining_evidence(
                         &observation,
                         session.account,
-                        schema,
+                        &schema,
                         captured_at,
                         &mut state.retained_read_evidence,
                     )
                     .map_err(AgentWorkFailure::DecisionRead)?
                 {
-                    state.refresh_account(worker, browser)?;
-                    let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
-                    // A clipped or unavailable exact source leaves the normal planner available.
-                    let located =
-                        match selection.prepare(&observation, session.account, captured_at) {
-                            Ok(located) => located,
-                            Err(_) => break,
-                        };
-                    {
-                        state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
-                            AgentBrowserToolKind::Extract,
-                        ))?;
-                        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-                        let result = Self::provider(
-                            &mut state.native,
-                            worker,
-                            browser,
-                            session.cancellation.clone(),
-                            session.extract_located(located),
-                        )
-                        .await?;
-                        if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete
-                        {
-                            return Err(AgentWorkFailure::Contract);
-                        }
-                        state.check_task_contract()?;
-                        state.extraction = Some(
-                            result
-                                .into_owned()
-                                .map_err(|_| AgentWorkFailure::Contract)?,
-                        );
+                    if ready {
+                        state.refresh_account(worker, browser)?;
+                        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                        // A clipped or unavailable exact source leaves the normal planner available.
+                        let located =
+                            match selection.prepare(&observation, session.account, captured_at) {
+                                Ok(located) => located,
+                                Err(_) => break,
+                            };
+                        Self::finish_located_read(state, worker, browser, located).await?;
                         return Ok((
                             observation,
                             captured_at,
@@ -107,35 +101,84 @@ impl AgentWorkController {
                             false,
                         ));
                     }
+                    gap = Some(selection);
                 }
             }
-            if !state.actions_before_extraction || progress != AgentWorkTaskProgress::Continue {
-                break;
-            }
             let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
-            if session.next_action > session.max_actions
-                || session
-                    .policy
-                    .remaining_operations(session.lease.lease())
-                    .map_err(|_| AgentWorkFailure::Contract)?
-                    < 3
-            {
-                break;
-            }
             let more_below = answers
                 .take_more_below(&observation, session.account)
                 .map_err(AgentWorkFailure::DecisionMoreBelow)?;
-            let Some(selection) = answers
-                .take_action_selection(&observation, session.account)
-                .map_err(AgentWorkFailure::DecisionOperation)?
-            else {
-                break;
+            let actionable = state.actions_before_extraction
+                && progress == AgentWorkTaskProgress::Continue
+                && session.next_action <= session.max_actions
+                && session
+                    .policy
+                    .remaining_operations(session.lease.lease())
+                    .map_err(|_| AgentWorkFailure::Contract)?
+                    >= 3;
+            // One cheap typed re-observation before any generated value: scroll
+            // an already offered region and ask the recommended backend again.
+            let reobserve = actionable
+                && reobservations < MAX_READ_REOBSERVATIONS
+                && gap
+                    .as_ref()
+                    .is_some_and(|gap| gap.unresolved() > 0 || more_below == Some(true));
+            let scroll = if reobserve {
+                answers
+                    .take_reobservation_scroll(&observation, session.account)
+                    .map_err(AgentWorkFailure::DecisionOperation)?
+            } else {
+                None
             };
-            if matches!(selection.operation(), DecisionOperation::Scroll(_))
-                && more_below != Some(true)
-            {
-                break;
-            }
+            let selection = match scroll {
+                Some(scroll) => {
+                    reobservations = reobservations.saturating_add(1);
+                    gap = None;
+                    scroll
+                }
+                None => {
+                    // The recommended backend stopped short. One focused
+                    // generation over the located neighbourhood finishes the
+                    // read; the general planner is not asked for this page.
+                    if let Some(gap) = gap.filter(|gap| gap.unresolved() > 0 && gap.located() > 0) {
+                        state.refresh_account(worker, browser)?;
+                        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                        let located = match gap.prepare_completing(
+                            &observation,
+                            session.account,
+                            captured_at,
+                        ) {
+                            Ok(located) => located,
+                            Err(_) => break,
+                        };
+                        Self::finish_located_read(state, worker, browser, located).await?;
+                        return Ok((
+                            observation,
+                            captured_at,
+                            AgentWorkTaskProgress::Complete,
+                            false,
+                        ));
+                    }
+                    if !actionable {
+                        break;
+                    }
+                    let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                    let Some(selection) = answers
+                        .take_action_selection(&observation, session.account)
+                        .map_err(AgentWorkFailure::DecisionOperation)?
+                    else {
+                        break;
+                    };
+                    if matches!(selection.operation(), DecisionOperation::Scroll(_))
+                        && more_below != Some(true)
+                    {
+                        break;
+                    }
+                    selection
+                }
+            };
+            let _ = gap;
+            let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
             let Some(recipe) = state
                 .task
                 .decision_action_recipe(selection.operation(), &observation)?
@@ -204,6 +247,40 @@ impl AgentWorkController {
             }
         }
         Ok((observation, captured_at, progress, false))
+    }
+
+    /// One extraction from located sources. Focused generation is the only
+    /// provider call it can make, and it never reopens the general planner.
+    async fn finish_located_read(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        located: zephium_agentic::DecisionLocatedRead<'_>,
+    ) -> Result<(), AgentWorkFailure> {
+        state
+            .journal_mut()?
+            .emit(AgentWorkEventKind::ToolProposed(
+                AgentBrowserToolKind::Extract,
+            ))?;
+        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let result = Self::provider(
+            &mut state.native,
+            worker,
+            browser,
+            session.cancellation.clone(),
+            session.extract_located(located),
+        )
+        .await?;
+        if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete {
+            return Err(AgentWorkFailure::Contract);
+        }
+        state.check_task_contract()?;
+        state.extraction = Some(
+            result
+                .into_owned()
+                .map_err(|_| AgentWorkFailure::Contract)?,
+        );
+        Ok(())
     }
 
     pub(super) fn retain_action_read_evidence(

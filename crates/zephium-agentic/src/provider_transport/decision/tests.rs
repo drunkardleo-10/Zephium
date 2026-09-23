@@ -435,6 +435,73 @@ fn located_answers(projection: &DecisionObservation) -> Value {
 }
 
 #[test]
+fn an_uncertain_read_head_never_reaches_emulation_but_an_unanswered_one_still_does() {
+    let (_, _, _, projection) = located_fixture(false);
+    let mut output = located_answers(&projection);
+    output["answers"]["locate_1"]["confidence"] = json!(0.1);
+    output["answers"]["operation"]["confidence"] = json!(0.2);
+    output["answers"]["done"]["noul"] = json!(0.5);
+    let response = projection
+        .request()
+        .decode_emulation(
+            &serde_json::to_vec(&output).unwrap(),
+            DecisionUsage::default(),
+        )
+        .unwrap();
+    // Every uncertain head is dropped: no emulated batch is built at all.
+    assert!(projection.route(Ok(response)).unwrap().projection().is_none());
+
+    let (_, _, _, projection) = located_fixture(false);
+    let asked = projection.question_count();
+    let unanswered = projection
+        .route(Err(super::DecisionCallFailure::Unavailable))
+        .unwrap();
+    let emulated = unanswered.projection().expect("unanswered heads emulate");
+    assert_eq!(emulated.question_count(), asked);
+}
+
+#[test]
+fn a_settled_value_batch_completes_the_read_without_the_completion_head() {
+    for (done, ready) in [(0.99, true), (0.01, false)] {
+        let (call, observation, schema, projection) = located_fixture(false);
+        let mut output = located_answers(&projection);
+        output["answers"]["done"]["noul"] = json!(done);
+        let response = projection
+            .request()
+            .decode_emulation(
+                &serde_json::to_vec(&output).unwrap(),
+                DecisionUsage::default(),
+            )
+            .unwrap();
+        let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+        assert_eq!(
+            answers
+                .take_read_selection(&observation, call.account(), &schema)
+                .unwrap()
+                .is_some(),
+            ready,
+            "an accepted completion head decides"
+        );
+    }
+    // An unsettled completion head leaves Rust's own structural check in charge.
+    let (call, observation, schema, projection) = located_fixture(false);
+    let mut output = located_answers(&projection);
+    output["answers"]["done"]["noul"] = json!(0.5);
+    let response = projection
+        .request()
+        .decode_emulation(
+            &serde_json::to_vec(&output).unwrap(),
+            DecisionUsage::default(),
+        )
+        .unwrap();
+    let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+    assert!(answers
+        .take_read_selection(&observation, call.account(), &schema)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
 fn located_read_copies_exact_sources_and_discards_unused_speculative_fallback() {
     let (call, observation, schema, projection) = located_fixture(false);
     let mut output = located_answers(&projection);

@@ -4374,7 +4374,7 @@ mod tests {
             .unwrap();
         let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
         let mut answers = session
-            .decide_observation(&observation, &authority, None)
+            .decide_observation(&observation, &authority, None, false)
             .await
             .unwrap()
             .unwrap();
@@ -4434,7 +4434,7 @@ mod tests {
                 .unwrap();
             let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
             if let Some(mut answers) = session
-                .decide_observation(&observation, &authority, None)
+                .decide_observation(&observation, &authority, None, false)
                 .await
                 .unwrap()
             {

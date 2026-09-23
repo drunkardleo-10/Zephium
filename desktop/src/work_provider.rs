@@ -612,13 +612,22 @@ fn record_browser_diagnostic(event: zephium_agent_controller::AgentWorkEventKind
                 ));
             }
         }
-        AgentWorkEventKind::DecisionFallback { counts, capacity } => {
+        AgentWorkEventKind::DecisionFallback {
+            counts,
+            purposes,
+            capacity,
+        } => {
             for (kind, counts) in ["noul", "choice", "score"].into_iter().zip(counts) {
                 record_diagnostic(format_args!(
                     "work: phase=decision_fallback kind={kind} capacity={capacity} unavailable={} rate_limited={} invalid_answer={} low_confidence={}",
                     counts[0], counts[1], counts[2], counts[3],
                 ));
             }
+            record_diagnostic(format_args!(
+                "work: phase=decision_fallback_purpose challenge={} action={} locate={} picture={} relevance={} wall={} completion={} score={}",
+                purposes[0], purposes[1], purposes[2], purposes[3],
+                purposes[4], purposes[5], purposes[6], purposes[7],
+            ));
         }
         event => record_diagnostic(format_args!("work: phase=agent_browser event={event:?}")),
     }
