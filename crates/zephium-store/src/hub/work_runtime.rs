@@ -632,12 +632,7 @@ pub(super) fn command(
             if row.owner == session.session || row.fact.status.terminal() {
                 return Err(WorkError::Conflict);
             }
-            row.fact.status = WorkExecutionStatus::Interrupted;
-            for attempt in &mut row.fact.attempts {
-                if attempt.status == WorkAttemptStatus::Running {
-                    attempt.status = WorkAttemptStatus::OutcomeUnknown;
-                }
-            }
+            row.fact.interrupt();
             write(tx, id, &row.fact)?;
             execution
         }

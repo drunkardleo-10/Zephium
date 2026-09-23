@@ -8,6 +8,8 @@ pub const MAX_WORK_ATTEMPTS: usize = 128;
 pub const MAX_WORK_COMMANDS: usize = 256;
 pub const MAX_WORK_STEPS: usize = 48;
 pub const MAX_WORK_STEP_NOTE_BYTES: usize = 512;
+/// The note of a step that was running when the app closed.
+pub const WORK_STEP_INTERRUPTED: &str = "Zephium closed during this step";
 pub const MAX_WORK_FOLLOWUPS: usize = 3;
 pub const MAX_WORK_FOLLOWUP_BYTES: usize = 120;
 pub const MAX_WORK_FOLDERS: usize = 8;
@@ -1540,6 +1542,29 @@ impl WorkExecutionFact {
             return Err(WorkError::Invalid);
         }
         Ok(())
+    }
+    /// Settles what an owner the app lost left behind: running attempts have
+    /// unknown outcomes, and every running step says the app closed during it.
+    pub fn interrupt(&mut self) {
+        self.status = WorkExecutionStatus::Interrupted;
+        for attempt in &mut self.attempts {
+            if attempt.status == WorkAttemptStatus::Running {
+                attempt.status = WorkAttemptStatus::OutcomeUnknown;
+            }
+        }
+        for step in &mut self.steps {
+            if step.status != WorkStepStatus::Running {
+                continue;
+            }
+            // A fetch cut off mid-flight may have been charged.
+            step.status = match step.kind {
+                WorkStepKindV1::Search { .. }
+                | WorkStepKindV1::Read { .. }
+                | WorkStepKindV1::Discover { .. } => WorkStepStatus::OutcomeUnknown,
+                _ => WorkStepStatus::Cancelled,
+            };
+            step.note = Some(WORK_STEP_INTERRUPTED.into());
+        }
     }
     pub fn is_agent(&self) -> bool {
         matches!(self.spec.nodes.as_slice(), [node] if matches!(node.capability, WorkCapability::Agent { .. }))
