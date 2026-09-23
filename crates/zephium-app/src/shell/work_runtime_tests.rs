@@ -971,3 +971,111 @@ async fn an_open_question_stops_the_run_and_the_next_request_answers_it() {
     let summary = summaries[0].as_deref().unwrap();
     assert!(summary.contains(PROMPT) && summary.contains("Use sample dates; Skip totals"));
 }
+
+#[tokio::test]
+async fn a_run_that_runs_out_of_time_says_so() {
+    use crate::work_agent::*;
+    use zephium_core::work::{agent::*, search::*, synthesis::*};
+    struct Reads;
+    impl WorkAgentTurnProvider for Reads {
+        fn turn<'a>(
+            &'a self,
+            _: &'a WorkAgentTurnDisclosure,
+            _: WorkSynthesisTrace,
+        ) -> WorkAgentTurnFuture<'a> {
+            Box::pin(async move {
+                Ok(WorkAgentTurnResult {
+                    output: WorkAgentTurnOutput {
+                        say: None,
+                        artifacts: vec![],
+                        fetch: vec![WorkAgentFetch::Read {
+                            url: "https://example.test/catalog".into(),
+                            collection: None,
+                        }],
+                        ask: None,
+                        finish: false,
+                        followups: vec![],
+                        malformed: 0,
+                    },
+                    usage: WorkUsage::default(),
+                })
+            })
+        }
+    }
+    struct NoSearch;
+    impl WorkPublicSearchProvider for NoSearch {
+        fn search<'a>(
+            &'a self,
+            _: &'a WorkPublicSearchScope,
+            _: &'a [zephium_core::work::context::WorkContextBody],
+            _: WorkExecutionLimits,
+        ) -> WorkPublicSearchFuture<'a> {
+            panic!("no search");
+        }
+    }
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Read https://example.test/catalog".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let service = WorkAgentService::new(handle);
+    let result = drive(
+        &mut shell,
+        &queue,
+        service.run(
+            profile,
+            WorkCommandV1 {
+                version: 1,
+                work,
+                expected_revision: WorkRevision::INITIAL,
+                command: WorkCommandId::generate(),
+                intent: WorkRuntimeIntent::BeginAgent {
+                    grant: WorkAgentGrantV1 {
+                        provider: WorkSearchProvider::OpenAi,
+                        model: PUBLIC_SEARCH_MODEL.into(),
+                        max_turns: 8,
+                        max_steps: 24,
+                        browse_hops: 1,
+                        folders: vec![],
+                    },
+                    limits: WorkExecutionLimits {
+                        model_tokens: 100_000,
+                        cost_micro_usd: 100_000,
+                        operations: 32,
+                        timeout_seconds: 1,
+                        max_workers: 1,
+                    },
+                },
+            },
+            None,
+            WorkAgentProviders {
+                turn: &Reads,
+                search: &NoSearch,
+            },
+            |_, _| async {
+                tokio::time::sleep(Duration::from_millis(1300)).await;
+                Ok(WorkBrowserOutcome {
+                    status: WorkStepStatus::Failed,
+                    usage: Some(WorkUsage::default()),
+                    intervention: None,
+                    note: None,
+                    measurements: None,
+                    artifacts: vec![],
+                })
+            },
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    let execution = &result.executions[0];
+    assert_eq!(execution.status, WorkExecutionStatus::Failed);
+    let last = execution.steps.last().unwrap();
+    assert!(matches!(last.kind, WorkStepKindV1::Turn));
+    assert_eq!(last.status, WorkStepStatus::Failed);
+    assert_eq!(last.note.as_deref(), Some("The run ran out of time"));
+}

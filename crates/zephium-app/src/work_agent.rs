@@ -64,6 +64,7 @@ const ASK_SUSPENDED: &str = "Waiting for your answer";
 const BUDGET_SPENT: &str = "The run used its turns, steps or budget before it could finish";
 const CONTEXT_FULL: &str = "The work has grown too large for one turn";
 const TURN_UNPREPARED: &str = "The turn could not be prepared";
+const OUT_OF_TIME: &str = "The run ran out of time";
 
 /// Closed loop facts for development logs; never model, page or user text.
 #[derive(Clone, Copy, Debug)]
@@ -241,6 +242,7 @@ impl WorkAgentService {
             kept: Vec::new(),
             thread: Vec::new(),
             unreadable_polls: std::sync::atomic::AtomicU8::new(0),
+            stopped: std::sync::Mutex::new(None),
             files: None,
             previews: Vec::new(),
             used: WorkUsage::default(),
@@ -262,7 +264,14 @@ impl WorkAgentService {
         }
         driver.files = (!files.is_empty()).then_some(files);
         driver.inherit(&projection, receipt.execution).await;
-        let outcome = driver.drive(&attempt, &providers, &mut browser).await;
+        let outcome = match driver.drive(&attempt, &providers, &mut browser).await {
+            Ok(WorkAttemptStatus::Cancelled | WorkAttemptStatus::Failed)
+                if driver.out_of_time() =>
+            {
+                driver.say_out_of_time().await
+            }
+            outcome => outcome,
+        };
         let (status, usage) = match outcome {
             Ok(status) => (status, driver.settled_usage(status)),
             Err(WorkError::OutcomeUnknown) => (WorkAttemptStatus::OutcomeUnknown, None),
@@ -309,6 +318,8 @@ struct Driver {
     thread: Vec<WorkAgentThreadEntry>,
     /// Consecutive cancellation polls the store could not answer.
     unreadable_polls: std::sync::atomic::AtomicU8,
+    /// Why the run was told to stop, once it was.
+    stopped: std::sync::Mutex<Option<crate::work_runtime::WorkCancelCause>>,
     /// Folders the person granted, once admitted by policy.
     files: Option<crate::work_files::WorkFileGrant>,
     private: Vec<String>,
@@ -479,6 +490,47 @@ impl Driver {
             diagnostic(event);
         }
     }
+    fn out_of_time(&self) -> bool {
+        self.stopped
+            .lock()
+            .is_ok_and(|stopped| *stopped == Some(crate::work_runtime::WorkCancelCause::Deadline))
+    }
+    /// A run the deadline ended says so: on the step it was running, or on a
+    /// failed turn step when none was.
+    async fn say_out_of_time(&mut self) -> Result<WorkAttemptStatus, WorkError> {
+        let state = self.probe.runtime_projection().await?;
+        let running: Vec<WorkStepFact> = state
+            .executions
+            .iter()
+            .find(|execution| execution.id == self.probe.execution())
+            .map(|execution| {
+                execution
+                    .steps
+                    .iter()
+                    .filter(|step| step.status == WorkStepStatus::Running)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if running.is_empty() {
+            return self.fail_turn(OUT_OF_TIME).await;
+        }
+        for step in running {
+            // A fetch cut off mid-flight may have been charged: its outcome is unknown.
+            let status = match step.kind {
+                WorkStepKindV1::Search { .. }
+                | WorkStepKindV1::Read { .. }
+                | WorkStepKindV1::Discover { .. } => WorkStepStatus::OutcomeUnknown,
+                // A proposal settles through the person's decision, never here.
+                WorkStepKindV1::WriteFile { .. } | WorkStepKindV1::EditFile { .. } => continue,
+                _ => WorkStepStatus::Cancelled,
+            };
+            let _ = self
+                .settle(step.id, status, None, vec![], None, Some(OUT_OF_TIME.into()), None)
+                .await;
+        }
+        Ok(WorkAttemptStatus::Failed)
+    }
     /// Ends the run on a failed turn step that says why, when the grant still
     /// has room for the step; the attempt fails either way.
     async fn fail_turn(&mut self, note: &str) -> Result<WorkAttemptStatus, WorkError> {
@@ -546,6 +598,9 @@ impl Driver {
         };
         if let Some(cause) = cause {
             self.report(WorkAgentDiagnostic::Stopped { cause });
+            if let Ok(mut stopped) = self.stopped.lock() {
+                stopped.get_or_insert(cause);
+            }
         }
         cause.is_some()
     }
