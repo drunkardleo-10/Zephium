@@ -32,6 +32,11 @@ pub trait AgentWorkLocalActionPolicy: Send {
         Ok(None)
     }
 
+    /// The dismiss control of a cookie consent dialog, by a closed name list.
+    fn consent_dismissal(&self, _: &SemanticObservation) -> Option<SemanticReferenceId> {
+        None
+    }
+
     /// Returns the independently approved operation subset for this exact
     /// observed node. This is model-affordance projection only; `assess`
     /// remains the final host classification after semantic action binding.
@@ -143,6 +148,12 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
             Some(policy) => policy.decision_action_recipe(operation, observation),
             None => Ok(None),
         }
+    }
+
+    fn consent_dismissal(&self, observation: &SemanticObservation) -> Option<SemanticReferenceId> {
+        self.local_actions
+            .as_ref()
+            .and_then(|policy| policy.consent_dismissal(observation))
     }
 
     fn navigation_discovery(&self) -> Option<&AgentNavigationDiscovery> {

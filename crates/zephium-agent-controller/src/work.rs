@@ -286,6 +286,11 @@ pub trait AgentWorkTask: Send {
     ) -> Result<Option<SemanticActionProposal>, AgentWorkFailure> {
         Ok(None)
     }
+    /// The control that dismisses a cookie consent dialog on this observation,
+    /// picked by the task's own closed name list; never a provider's choice.
+    fn consent_dismissal(&self, _: &SemanticObservation) -> Option<SemanticReferenceId> {
+        None
+    }
     /// Supplies independently sourced current account facts for this exact
     /// context. Called at startup and before each provider/effect admission,
     /// including nonterminal inspection and extraction mapping. It must be

@@ -27,6 +27,7 @@ impl AgentWorkController {
     > {
         let mut unchanged = 0u8;
         let mut reobservations = 0u8;
+        let mut consent_dismissed = false;
         let mut pending: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
         // The address the one-document gate admitted, never one from page text.
         let document = state
@@ -162,16 +163,28 @@ impl AgentWorkController {
                     .remaining_operations(session.lease.lease())
                     .map_err(|_| AgentWorkFailure::Contract)?
                     >= 3;
-            // A settled action head is already paid for, so it is preferred.
-            // Otherwise one cheap typed re-observation runs before any generated
-            // value: Rust scrolls an already offered region and asks the
-            // recommended backend again over value heads only.
-            let proposed = if actionable {
+            // A consent dialog the wall head recognised is dismissed first by
+            // the task's own recipe, once per read, with no provider choosing.
+            // Then a settled action head is already paid for, so it is
+            // preferred. Otherwise one cheap typed re-observation runs before
+            // any generated value: Rust scrolls an already offered region and
+            // asks the recommended backend again over value heads only.
+            let consent = if actionable && !consent_dismissed {
                 answers
-                    .take_action_selection(&observation, session.account)
+                    .take_consent_dismissal(&observation, session.account, || {
+                        state.task.consent_dismissal(&observation)
+                    })
                     .map_err(AgentWorkFailure::DecisionOperation)?
             } else {
                 None
+            };
+            consent_dismissed |= consent.is_some();
+            let proposed = match consent {
+                Some(consent) => Some(consent),
+                None if actionable => answers
+                    .take_action_selection(&observation, session.account)
+                    .map_err(AgentWorkFailure::DecisionOperation)?,
+                None => None,
             };
             if proposed
                 .as_ref()

@@ -707,3 +707,87 @@ fn human_account_attestation_keeps_isolated_storage_and_single_page_scope() {
         AgentAccountScope::Authenticated(account)
     );
 }
+
+#[cfg(feature = "durable-runtime")]
+#[test]
+fn a_recorded_consent_dialog_is_dismissed_by_its_refusing_control_only_by_recipe() {
+    use serde_json::json;
+    let policy = read_interactions::ReadingInteractionPolicy;
+    let button = |key: u32, name: &str, y: u32| {
+        json!({"k":key,"p":0,"r":"button","n":name,"ak":1,"o":9,"fc":true,"b":{"x":10,"y":y,"w":300,"h":40}})
+    };
+    // IKEA's Polish consent dialog as recorded on 2026-09-23: accept all,
+    // accept only necessary, and a settings control.
+    let consent = |title: &str, topic: &str| {
+        reading_observation(
+            json!([
+                {"k":1,"r":"dialog","n":title,"fc":true,"b":{"x":0,"y":0,"w":800,"h":600}},
+                {"k":2,"p":0,"r":"paragraph","t":topic,"fc":true},
+                button(3, "Akceptuj wszystkie cookies", 400),
+                button(4, "Akceptuj tylko niezbędne", 450),
+                button(5, "Ustawienia cookies, otwiera okno dialogowe centrum preferencji", 500)
+            ]),
+            "complete",
+        )
+    };
+    let observation = consent(
+        "Ty decydujesz jakich ciasteczek użyjemy",
+        "My, IKEA, korzystamy na naszych stronach z plików cookies (ciasteczek).",
+    );
+    let nodes = observation.frames()[0].nodes();
+    assert_eq!(
+        policy.consent_dismissal(&observation),
+        Some(nodes[3].reference())
+    );
+    for node in &nodes[2..] {
+        assert!(!policy
+            .model_action_operations(node, &observation)
+            .unwrap()
+            .contains(SemanticOperationClass::Click));
+    }
+    let recipe = policy
+        .decision_action_recipe(&DecisionOperation::Click(nodes[3].reference()), &observation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recipe.verification(), SemanticVerification::PageDialogClosed);
+    let snapshot = &observation.frames()[0];
+    let batch = SemanticActionBatch::bind(
+        SemanticActionBatchId::new(1).unwrap(),
+        &observation,
+        &[snapshot.frame().clone()],
+        vec![recipe],
+    )
+    .unwrap();
+    let action = batch.actions()[0].prepare(snapshot).unwrap();
+    assert!(policy.assess(&action, &observation).is_ok());
+    assert!(policy
+        .decision_action_recipe(&DecisionOperation::Click(nodes[4].reference()), &observation)
+        .unwrap()
+        .is_none());
+    // The same controls in a dialog that is not about cookies stay refused.
+    let other = reading_observation(
+        json!([
+            {"k":1,"r":"dialog","n":"Twoje zamówienie","fc":true,"b":{"x":0,"y":0,"w":800,"h":600}},
+            {"k":2,"p":0,"r":"paragraph","t":"Potwierdź zamówienie.","fc":true},
+            button(3, "Akceptuj", 400)
+        ]),
+        "complete",
+    );
+    assert_eq!(policy.consent_dismissal(&other), None);
+    // LEGO's entry gate names cookies and offers Continue, which the model
+    // may also choose; the recipe picks it too.
+    let gate = reading_observation(
+        json!([
+            {"k":1,"r":"dialog","fc":true,"b":{"x":0,"y":0,"w":800,"h":600}},
+            {"k":2,"p":0,"r":"paragraph","t":"We want to let you know that we are placing cookies on your device.","fc":true},
+            button(3, "Continue", 300)
+        ]),
+        "complete",
+    );
+    let continue_button = gate.frames()[0].nodes()[2].reference();
+    assert_eq!(policy.consent_dismissal(&gate), Some(continue_button));
+    assert!(policy
+        .model_action_operations(&gate.frames()[0].nodes()[2], &gate)
+        .unwrap()
+        .contains(SemanticOperationClass::Click));
+}

@@ -2,12 +2,125 @@ use super::*;
 
 pub(super) struct ReadingInteractionPolicy;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Interaction {
     Scroll,
     Tab,
     Disclosure,
     Dismiss,
+    /// A cookie consent dialog's own dismiss control, clicked only by the
+    /// code-owned consent recipe and never offered to a provider.
+    Consent,
+}
+
+/// Dismiss names in preference order: refusing optional cookies first, then
+/// acknowledging. Matched as whole words, English and Polish.
+const CONSENT_REFUSE: [&str; 14] = [
+    "reject",
+    "reject all",
+    "decline",
+    "refuse",
+    "deny",
+    "necessary only",
+    "only necessary",
+    "necessary cookies only",
+    "essential only",
+    "only essential",
+    "continue without accepting",
+    "odrzuć",
+    "odrzuć wszystkie",
+    "tylko niezbędne",
+];
+const CONSENT_ACKNOWLEDGE: [&str; 12] = [
+    "accept",
+    "accept all",
+    "agree",
+    "i agree",
+    "allow all",
+    "ok",
+    "okay",
+    "got it",
+    "continue",
+    "akceptuj",
+    "zgadzam się",
+    "rozumiem",
+];
+const CONSENT_TOPIC: [&str; 4] = ["cookie", "cookies", "ciasteczek", "ciasteczka"];
+const CONSENT_SETTINGS: [&str; 8] = [
+    "settings",
+    "manage",
+    "customize",
+    "preferences",
+    "ustawienia",
+    "zarządzaj",
+    "ustaw",
+    "preferencje",
+];
+
+fn words(text: &str) -> String {
+    let words: Vec<_> = text
+        .to_lowercase()
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_owned)
+        .collect();
+    format!(" {} ", words.join(" "))
+}
+
+fn names_any(text: &str, phrases: &[&str]) -> bool {
+    phrases
+        .iter()
+        .any(|phrase| text.contains(&format!(" {phrase} ")))
+}
+
+/// The consent dialog containing `node`, as (index, end) of its subtree, when
+/// that dialog's own text is about cookies and was captured completely.
+fn consent_dialog(node: &SemanticNode, snapshot: &SemanticSnapshot) -> Option<(usize, usize)> {
+    let mut parent = node.parent();
+    while let Some(index) = parent {
+        let ancestor = snapshot.nodes().get(usize::from(index))?;
+        if ancestor.role() == SemanticRole::Dialog {
+            let index = usize::from(index);
+            let end = snapshot
+                .nodes()
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .find(|(_, next)| next.depth() <= ancestor.depth())
+                .map_or(snapshot.nodes().len(), |(end, _)| end);
+            let subtree = &snapshot.nodes()[index..end];
+            return (subtree
+                .iter()
+                .all(|part| part.sensitivity() == SemanticSensitivity::Public)
+                && subtree.iter().any(|part| {
+                    part.name()
+                        .into_iter()
+                        .chain(part.text())
+                        .any(|text| names_any(&words(text.as_str()), &CONSENT_TOPIC))
+                }))
+            .then_some((index, end));
+        }
+        parent = ancestor.parent();
+    }
+    None
+}
+
+/// 0 refuses optional cookies, 1 acknowledges; a settings control is never one.
+fn consent_rank(node: &SemanticNode) -> Option<u8> {
+    if node.role() != SemanticRole::Button {
+        return None;
+    }
+    let name = words(node.name()?.as_str());
+    if names_any(&name, &CONSENT_SETTINGS) {
+        return None;
+    }
+    if names_any(&name, &CONSENT_REFUSE) {
+        Some(0)
+    } else if names_any(&name, &CONSENT_ACKNOWLEDGE) {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 fn interaction(
@@ -65,6 +178,20 @@ fn interaction(
     {
         return None;
     }
+    let ordinary = ordinary_interaction(node, observation);
+    if ordinary.is_none()
+        && consent_rank(node).is_some()
+        && consent_dialog(node, snapshot).is_some()
+    {
+        return Some(Interaction::Consent);
+    }
+    ordinary
+}
+
+fn ordinary_interaction(
+    node: &SemanticNode,
+    observation: &SemanticObservation,
+) -> Option<Interaction> {
     let name = node.name()?.as_str().to_lowercase();
     if consequential(&name) {
         return None;
@@ -248,7 +375,7 @@ impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
                     present: !node.states().contains(SemanticState::Expanded),
                 },
             ),
-            Some(Interaction::Dismiss) => (
+            Some(Interaction::Dismiss | Interaction::Consent) => (
                 SemanticActionIntent::Click { target },
                 SemanticVerification::PageDialogClosed,
             ),
@@ -273,6 +400,22 @@ impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
         Ok(Some(recipe))
     }
 
+    fn consent_dismissal(&self, observation: &SemanticObservation) -> Option<SemanticReferenceId> {
+        let snapshot = observation.frames().first()?;
+        snapshot
+            .nodes()
+            .iter()
+            .filter(|node| {
+                matches!(
+                    interaction(node, observation, SemanticOperationClass::Click),
+                    Some(Interaction::Consent | Interaction::Dismiss)
+                ) && consent_dialog(node, snapshot).is_some()
+            })
+            .filter_map(|node| Some((consent_rank(node)?, node.reference())))
+            .min_by_key(|(rank, _)| *rank)
+            .map(|(_, reference)| reference)
+    }
+
     fn model_action_effect(&self) -> Option<SemanticEffectClass> {
         Some(SemanticEffectClass::Read)
     }
@@ -287,7 +430,10 @@ impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
             SemanticOperationClass::Scroll,
         ]
         .into_iter()
-        .filter(|operation| interaction(node, observation, *operation).is_some())
+        .filter(|operation| {
+            interaction(node, observation, *operation)
+                .is_some_and(|interaction| interaction != Interaction::Consent)
+        })
         .collect::<Vec<_>>();
         SemanticOperations::try_new(&operations).map_err(|_| AgentWorkFailure::Contract)
     }
@@ -334,7 +480,7 @@ impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
                         ..
                     }
                 ),
-                Interaction::Dismiss => {
+                Interaction::Dismiss | Interaction::Consent => {
                     action.verification() == SemanticVerification::PageDialogClosed
                 }
                 Interaction::Scroll => false,
