@@ -62,6 +62,17 @@ test("a page the run is holding says why it needs you, and the countdown only ne
     selected: false,
   });
   await expect.element(screen.getByText("24s left")).toBeVisible();
+  // Presented: the header carries that state and the card stops asking.
+  await screen.rerender({
+    item: {
+      ...waiting,
+      status: "Yours right now",
+      page: { ...waiting.page!, human: { ...waiting.page!.human!, phase: "presented" } },
+    },
+    selected: false,
+  });
+  expect(screen.container.querySelector(".needs")).toBeNull();
+  await expect.element(screen.getByText("Yours right now")).toBeVisible();
   // Handed back: the card is an ordinary page again.
   await screen.rerender({ item: card(GIF), selected: false });
   expect(screen.container.querySelector(".needs")).toBeNull();

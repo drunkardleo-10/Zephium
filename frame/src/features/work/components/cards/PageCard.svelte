@@ -7,8 +7,9 @@
     $props();
   /** Set while the run is holding this page open for a person. */
   const human = $derived(item.page?.human ?? null);
-  const countdown = $derived(human ? cardCountdown(human.remaining) : null);
+  /** Only a page still waiting asks for a person; the rest say so in the header. */
   const waiting = $derived(human?.phase === "waiting_for_human");
+  const countdown = $derived(waiting && human ? cardCountdown(human.remaining) : null);
   // A frame that missed once must not pin the placeholder: the store serves it
   // again once the run settles, and every refresh mints a new generation.
   let failedFrame = $state<string | null>(null);
@@ -42,12 +43,12 @@
     {:else}
       <span class="placeholder" aria-hidden="true">{(item.page?.host || "?").slice(0, 1)}</span>
     {/if}
-    {#if human}
+    {#if waiting && human}
       <p class="needs">
         <span class="why">{reasonBadge(human.reason)}</span>
         <span class="act">
           {#if countdown}<span class="left">{countdown}</span>{/if}
-          {#if waiting && onhelp}<button
+          {#if onhelp}<button
               type="button"
               class="help nodrag nopan"
               onclick={(event) => {
