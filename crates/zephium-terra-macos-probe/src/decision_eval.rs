@@ -40,6 +40,7 @@ pub(super) fn run_case(case: &std::ffi::OsStr, model: ProbeModel) -> Result<(), 
         Some("book-product") => 12,
         Some("jacket-product") => 13,
         Some("phone-product") => 14,
+        Some("airbnb-listing") => 15,
         _ => return Err(ProbeFailure::Authority),
     };
     run_selected(Some(index), model)

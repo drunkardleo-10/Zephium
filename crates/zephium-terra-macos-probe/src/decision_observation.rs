@@ -12,6 +12,7 @@ pub(super) fn run(site: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
         Some("demo-store") => (DecisionObservationSite::DemoStore, "demo-store"),
         Some("book-store") => (DecisionObservationSite::BookStore, "book-store"),
         Some("test-store") => (DecisionObservationSite::TestStore, "test-store"),
+        Some("airbnb-listing") => (DecisionObservationSite::AirbnbListing, "airbnb-listing"),
         _ => return Err(ProbeFailure::Authority),
     };
     zephium_engine::run_macos_decision_observation_probe(site, move |observation| {
@@ -42,6 +43,7 @@ pub(super) fn run(site: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
             DecisionObservationSite::DemoStore
             | DecisionObservationSite::BookStore
             | DecisionObservationSite::TestStore => "Read this product page and report the product name, its displayed price and the product picture.",
+            DecisionObservationSite::AirbnbListing => "Read this listing and report its name, displayed nightly price, displayed monthly total, stay dates or minimum stay, and picture.",
         }.into(), &SemanticTokenizerRevision::try_new("public-eval-utf8-upper-bound-v1".into()).map_err(|_| "tokenizer")?)
             .map_err(|_| "objective")?;
         let mut entries = Vec::new();
@@ -69,6 +71,24 @@ pub(super) fn run(site: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
                 SemanticExtractionFieldSchema::try_text("product_name".into(), true, 512).and_then(SemanticExtractionFieldSchema::with_verbatim_text).map_err(|_| "read_schema")?,
                 SemanticExtractionFieldSchema::try_text("displayed_price".into(), true, 64).and_then(SemanticExtractionFieldSchema::with_verbatim_text).map_err(|_| "read_schema")?,
                 SemanticExtractionFieldSchema::try_image_url("product_picture".into(), false, 2048).map_err(|_| "read_schema")?,
+            ];
+            let schema = SemanticExtractionSchema::try_new(SemanticExtractionSchemaId::new(1).ok_or("read_schema")?, fields).map_err(|_| "read_schema")?;
+            let (read, _) = DecisionObservation::try_for_read(&observation, &objective, &authority, account, Some(&schema))
+                .and_then(DecisionObservation::into_anonymous_eval_requests)
+                .map_err(|error| match error {
+                    DecisionProjectionError::Capacity => "read_projection_capacity",
+                    DecisionProjectionError::Authority => "read_projection_authority",
+                })?;
+            std::fs::write(directory.join(format!("{name}-read.json")), read.encode().map_err(|_| "decision_encoding")?).map_err(|_| "decision_output")?;
+        }
+        if matches!(site, DecisionObservationSite::AirbnbListing) {
+            let verbatim = |name: &str, required| SemanticExtractionFieldSchema::try_text(name.into(), required, 512).and_then(SemanticExtractionFieldSchema::with_verbatim_text);
+            let fields = vec![
+                verbatim("listing_name", true).map_err(|_| "read_schema")?,
+                verbatim("nightly_price", false).map_err(|_| "read_schema")?,
+                verbatim("monthly_total_displayed", false).map_err(|_| "read_schema")?,
+                verbatim("stay_dates_or_minimum", false).map_err(|_| "read_schema")?,
+                SemanticExtractionFieldSchema::try_image_url("listing_picture".into(), false, 2048).map_err(|_| "read_schema")?,
             ];
             let schema = SemanticExtractionSchema::try_new(SemanticExtractionSchemaId::new(1).ok_or("read_schema")?, fields).map_err(|_| "read_schema")?;
             let (read, _) = DecisionObservation::try_for_read(&observation, &objective, &authority, account, Some(&schema))

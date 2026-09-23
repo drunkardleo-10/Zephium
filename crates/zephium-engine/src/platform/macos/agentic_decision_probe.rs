@@ -18,6 +18,8 @@ pub enum DecisionObservationSite {
     BookStore,
     /// Public test-site computer product page.
     TestStore,
+    /// Public Airbnb listing page without stay dates.
+    AirbnbListing,
 }
 
 impl DecisionObservationSite {
@@ -29,6 +31,23 @@ impl DecisionObservationSite {
             Self::DemoStore => "https://www.scrapingcourse.com/ecommerce/product/adrienne-trek-jacket/",
             Self::BookStore => "https://books.toscrape.com/catalogue/the-black-maria_991/index.html",
             Self::TestStore => "https://www.demoblaze.com/prod.html?idp_=1",
+            Self::AirbnbListing => "https://www.airbnb.com/rooms/23813739",
+        }
+    }
+
+    /// A listing rewrites its query during setup, exactly as a Work read admits.
+    fn document_policy(self) -> WorkBrowserDocumentPolicy {
+        match self {
+            Self::AirbnbListing => WorkBrowserDocumentPolicy::PublicQueryFinalization,
+            _ => WorkBrowserDocumentPolicy::Exact,
+        }
+    }
+
+    /// A heavy client-rendered listing needs longer before its first capture.
+    fn settle(self) -> Duration {
+        match self {
+            Self::AirbnbListing => Duration::from_secs(8),
+            _ => Duration::from_secs(2),
         }
     }
 }
@@ -43,11 +62,12 @@ pub fn run(
         let now = crate::work_browser_monotonic_now().ok_or("clock")?;
         let target = ContextNavigationTarget::parse(site.target()).map_err(|_| "target")?;
         let request = rows
-            .construct_document(
+            .construct_document_with_policy(
                 WorkBrowserResourceId::generate(),
                 ContextId::generate(),
                 ContextProfileStorageClass::Ephemeral,
                 target,
+                site.document_policy(),
                 now,
             )
             .map_err(|_| "construction_request")?;
@@ -82,7 +102,7 @@ pub fn run(
                 return Some(Err("clock"));
             };
             if phase == 2 {
-                if acquired.is_none_or(|at: Instant| at.elapsed() < Duration::from_secs(2)) {
+                if acquired.is_none_or(|at: Instant| at.elapsed() < site.settle()) {
                     return None;
                 }
                 let Some(current) = lease.as_ref() else {
@@ -159,7 +179,9 @@ pub fn run(
                         &resource,
                         ContextRunId::generate(),
                         now,
-                        AgentPolicyInstant::from_millis(now.millis() + 10_000),
+                        AgentPolicyInstant::from_millis(
+                            now.millis() + 10_000 + site.settle().as_millis() as u64,
+                        ),
                     )
                 }
                 (1, WorkBrowserResourceEvent::Acquired(current)) => {
