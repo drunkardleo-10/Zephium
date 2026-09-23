@@ -29,7 +29,8 @@ control clusters. Radius is named by role, never by size: `--radius-inset` (8),
 and `--radius-card` (18), `--radius-panel` (22) and `--radius-capsule`. Tailwind's
 size-named radius scale is removed from the theme, and `check-styles` fails on a
 `rounded-md`-style class, which would otherwise compile to a square corner. The
-native content radius and startup canvas colors remain shared contracts, not freely adjustable
+native page view uses the continuous (squircle) corner curve. The native content
+radius and startup canvas colors remain shared contracts, not freely adjustable
 theme knobs. Body type is 13 px, labels 12 px, captions 11 px; page titles and
 specimen display sizes are intentionally larger.
 
