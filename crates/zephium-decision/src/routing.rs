@@ -21,11 +21,15 @@ pub enum DecisionPurpose {
     /// A read-only navigation choice among at most three offered same-origin
     /// links or buttons, with no typing, form, download or transaction.
     Navigation,
+    /// A ranking of offered page nodes as evidence for a whole-page read. Its
+    /// probabilities choose which nodes a generation call may see; it never
+    /// selects an action or a single copied value, so any valid answer stands.
+    Evidence,
 }
 
 impl DecisionPurpose {
     /// Closed ordinal for content-free per-purpose diagnostics.
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 10;
 
     /// Stable index matching the declaration order; never a question or option.
     pub const fn index(self) -> usize {
@@ -39,15 +43,19 @@ impl DecisionPurpose {
             Self::Completion => 6,
             Self::OrderedScore => 7,
             Self::Navigation => 8,
+            Self::Evidence => 9,
         }
     }
 
     fn kind(self) -> QuestionKind {
         match self {
             Self::Challenge | Self::Relevance | Self::Completion => QuestionKind::Noul,
-            Self::Action | Self::Locate | Self::Picture | Self::Wall | Self::Navigation => {
-                QuestionKind::Choice
-            }
+            Self::Action
+            | Self::Locate
+            | Self::Picture
+            | Self::Wall
+            | Self::Navigation
+            | Self::Evidence => QuestionKind::Choice,
             Self::OrderedScore => QuestionKind::Score,
         }
     }
@@ -57,11 +65,13 @@ impl DecisionPurpose {
     /// answers, the emulation's do not, so its conservative values stand.
     fn threshold(self, backend: AnswerBackend) -> f64 {
         match backend {
+            _ if self == Self::Evidence => 0.0,
             AnswerBackend::Emulation => match self {
                 Self::Action | Self::Navigation => 0.98,
                 Self::Challenge | Self::Completion | Self::Locate | Self::Wall => 0.95,
                 Self::OrderedScore => 0.95,
                 Self::Relevance | Self::Picture => 0.80,
+                Self::Evidence => 0.0,
             },
             AnswerBackend::Primary => match self {
                 // An action head is the only one that moves the page, and a
@@ -84,7 +94,12 @@ impl DecisionPurpose {
                 AnswerValue::Noul { noul },
             ) => *noul <= 1.0 - threshold || *noul >= threshold,
             (
-                Self::Action | Self::Locate | Self::Wall | Self::Picture | Self::Navigation,
+                Self::Action
+                | Self::Locate
+                | Self::Wall
+                | Self::Picture
+                | Self::Navigation
+                | Self::Evidence,
                 AnswerValue::Choice {
                     choice,
                     confidence,
@@ -280,7 +295,10 @@ fn assess_answer(
     if !purpose.confident(&answer, backend) {
         return Err(FallbackReason::LowConfidence);
     }
-    if matches!(answer.value(), AnswerValue::Choice { choice, .. } if choice == NONE_OPTION) {
+    // An evidence ranking keeps its distribution even when none leads it.
+    if purpose != DecisionPurpose::Evidence
+        && matches!(answer.value(), AnswerValue::Choice { choice, .. } if choice == NONE_OPTION)
+    {
         Ok(ResolvedDecision::Abstained { backend })
     } else {
         Ok(ResolvedDecision::Answer { answer, backend })
@@ -367,13 +385,17 @@ mod tests {
             DecisionPurpose::Completion,
             DecisionPurpose::OrderedScore,
             DecisionPurpose::Navigation,
+            DecisionPurpose::Evidence,
         ] {
             assert!(
                 purpose.threshold(AnswerBackend::Emulation)
                     >= purpose.threshold(AnswerBackend::Primary),
                 "{purpose:?}"
             );
-            assert!(purpose.threshold(AnswerBackend::Primary) >= 0.70);
+            assert!(
+                purpose == DecisionPurpose::Evidence
+                    || purpose.threshold(AnswerBackend::Primary) >= 0.70
+            );
         }
         // A locate answer the recommended backend reports at 0.90 is accepted;
         // the same answer from the emulation still is not.

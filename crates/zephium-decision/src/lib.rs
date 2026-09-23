@@ -21,9 +21,12 @@ pub const NONE_OPTION: &str = "none";
 pub const MAX_CHOICE_OPTIONS: usize = 255;
 pub const MAX_SCORE_LEVELS: usize = 10;
 pub const MAX_QUESTIONS: usize = 64;
-/// Conservative byte ceilings leave space beneath the vendor's token ceilings.
-/// These are not represented as an exact vendor tokenizer count.
-pub const MAX_STATE_BYTES: usize = 24 * 1024;
-pub const MAX_STATE_AND_QUESTION_BYTES: usize = 28 * 1024;
-pub const MAX_REQUEST_BYTES: usize = 48 * 1024;
+/// Conservative byte ceilings leave space beneath the vendor's token ceilings
+/// (32k tokens for state plus the longest question, 64k per request). Live
+/// ZSEM3 batches measure about 2.9 bytes per token (6,398 tokens for an
+/// 18,496-byte request), so these stay near 18k and 28k tokens. They are not
+/// represented as an exact vendor tokenizer count.
+pub const MAX_STATE_BYTES: usize = 48 * 1024;
+pub const MAX_STATE_AND_QUESTION_BYTES: usize = 52 * 1024;
+pub const MAX_REQUEST_BYTES: usize = 80 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
