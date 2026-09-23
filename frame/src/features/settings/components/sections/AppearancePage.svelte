@@ -1,7 +1,7 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import { preferences } from "$domain/preferences";
-  import ChoiceGroup from "$shared/ui/ChoiceGroup";
+  import SegmentedControl from "$shared/ui/SegmentedControl";
   import Select from "$shared/ui/Select";
   import Switch from "$shared/ui/Switch";
   import PreviewNotice from "../PreviewNotice.svelte";
@@ -60,9 +60,8 @@
     title={m.settings_color_scheme()}
     description={m.settings_color_scheme_desc()}
   >
-    <ChoiceGroup
+    <SegmentedControl
       label={m.settings_color_scheme()}
-      segmented
       value={preferences.value("appearance")}
       disabled={preferences.saving()}
       options={[

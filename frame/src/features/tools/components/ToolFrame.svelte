@@ -5,7 +5,7 @@
   import { tools } from "../components/tool-views";
   import Icon from "$shared/ui/Icon";
   import IconButton from "$shared/ui/IconButton";
-  import ChoiceGroup from "$shared/ui/ChoiceGroup";
+  import SegmentedControl from "$shared/ui/SegmentedControl";
   import {
     ArrowLeft02Icon,
     Cancel01Icon,
@@ -86,9 +86,8 @@
             maxlength={1024}
             oninput={(event) => edit({ query: event.currentTarget.value })}
           />
-        </div>{/if}{#if filters}<ChoiceGroup
+        </div>{/if}{#if filters}<SegmentedControl
           label={meta.title()}
-          segmented
           full
           value={state.filter}
           options={filters}

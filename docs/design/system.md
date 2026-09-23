@@ -45,7 +45,7 @@ new overlay behavior or cross-WebView portals are introduced.
 | Field / TextArea | Required label, bindable string value, optional hint/error; native input attributes pass through |
 | SearchField | Required accessible label, bindable query, trimmed `onsubmit(value)`; does not navigate by itself |
 | Toggle | Checkbox or switch, label/description, bindable checked value, disabled, `onchange(checked)` |
-| Select / ChoiceGroup | Typed value/label options, bindable value; ChoiceGroup optionally uses segmented presentation |
+| Select / SegmentedControl | Typed value/label options, bindable value; SegmentedControl is the single presentation for a mutually exclusive choice |
 | Badge | Neutral/accent/success/warning/danger with an optional nonsemantic status dot; always include status text |
 | Surface | Canvas/surface/raised; layout belongs to the caller |
 | ListRow | Selection button with label, description, leading/trailing snippets and callback; do not nest interactive controls |
