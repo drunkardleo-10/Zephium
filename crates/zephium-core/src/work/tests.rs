@@ -1189,12 +1189,33 @@ fn agent_citations_round_trip_source_keys_without_model_renumbering() {
         let replayed = shown.resolve(replay).unwrap();
         assert_eq!(replayed.artifacts[0].evidence, proposed.evidence);
         assert!(replayed.artifacts[0].data == proposed.data);
+        // A citation of a source that does not exist is dropped on its own;
+        // the object stands on the real citations it still has.
         let mut unknown = output();
-        unknown.artifacts[0].evidence = vec![80];
+        unknown.artifacts[0].evidence = vec![80, 1];
+        let kept = disclosure.resolve(unknown).unwrap();
+        assert!(kept.refusals.is_empty());
+        assert_eq!(kept.artifacts[0].evidence, proposed.evidence);
+        assert!(kept
+            .notices
+            .iter()
+            .any(|notice| notice.starts_with("1 citations pointed at sources that do not exist")));
+        // With no real citation left, the object is refused.
+        let mut none = output();
+        none.artifacts[0].evidence = vec![80];
+        none.artifacts[0].data =
+            serde_json::from_str(&data.to_string().replace("70", "81").replace("20", "82"))
+                .unwrap();
+        let refused = disclosure.resolve(none).unwrap();
+        assert!(refused.artifacts.is_empty());
         assert_eq!(
-            disclosure.resolve(unknown).unwrap().refusals,
+            refused.refusals,
             vec![WorkAgentArtifactRefusal::UnknownEvidenceKey]
         );
+        assert!(refused
+            .notices
+            .iter()
+            .any(|notice| notice.starts_with("3 citations pointed at sources that do not exist")));
     }
 }
 
@@ -1354,13 +1375,22 @@ fn step_measurements_name_their_cost_basis_and_read_older_records() {
     let read = |extra: &str| -> WorkStepMeasurementsV1 {
         serde_json::from_str(&format!("{{{fields}{extra}}}")).unwrap()
     };
-    assert_eq!(read(r#","cost_exact":true"#).cost_basis, WorkCostBasis::Exact);
-    assert_eq!(read(r#","cost_exact":false"#).cost_basis, WorkCostBasis::Reserved);
+    assert_eq!(
+        read(r#","cost_exact":true"#).cost_basis,
+        WorkCostBasis::Exact
+    );
+    assert_eq!(
+        read(r#","cost_exact":false"#).cost_basis,
+        WorkCostBasis::Reserved
+    );
     let priced = read(r#","cost_basis":"priced""#);
     assert_eq!(priced.cost_basis, WorkCostBasis::Priced);
     let written = serde_json::to_string(&priced).unwrap();
     assert!(written.contains(r#""cost_basis":"priced""#) && !written.contains("cost_exact"));
-    assert_eq!(serde_json::from_str::<WorkStepMeasurementsV1>(&written).unwrap(), priced);
+    assert_eq!(
+        serde_json::from_str::<WorkStepMeasurementsV1>(&written).unwrap(),
+        priced
+    );
     assert!(serde_json::from_str::<WorkStepMeasurementsV1>(&format!(
         "{{{fields},\"cost_basis\":\"priced\",\"other\":1}}"
     ))

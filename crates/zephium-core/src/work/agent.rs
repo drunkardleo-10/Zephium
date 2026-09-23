@@ -319,6 +319,7 @@ impl WorkAgentTurnDisclosure {
             ));
         }
         let mut artifacts = Vec::new();
+        let mut unknown = 0;
         let mut refusals = vec![
             WorkAgentArtifactRefusal::Malformed;
             output.malformed.min(MAX_AGENT_ARTIFACTS_PER_TURN)
@@ -328,12 +329,17 @@ impl WorkAgentTurnDisclosure {
             .into_iter()
             .take(MAX_AGENT_ARTIFACTS_PER_TURN)
         {
-            match self.resolve_artifact(artifact) {
+            match self.resolve_artifact(artifact, &mut unknown) {
                 Ok(artifact) => artifacts.push(artifact),
                 Err(refusal) => refusals.push(refusal),
             }
         }
         let dropped = proposed - artifacts.len();
+        if unknown > 0 {
+            notices.push(format!(
+                "{unknown} citations pointed at sources that do not exist. Cite only keys from the sources list."
+            ));
+        }
         let mut fetch = Vec::new();
         for operation in output.fetch {
             if fetch.len() == MAX_AGENT_FETCHES_PER_TURN {
@@ -697,9 +703,13 @@ impl WorkAgentArtifactRefusal {
     }
 }
 impl WorkAgentTurnDisclosure {
+    /// Citations of keys the sources list does not have are dropped and
+    /// counted into `unknown`; the object stands while one real citation
+    /// remains, and is refused only when none does.
     fn resolve_artifact(
         &self,
         mut artifact: WorkAgentArtifactOutput,
+        unknown: &mut usize,
     ) -> Result<WorkSynthesisArtifact, WorkAgentArtifactRefusal> {
         use WorkAgentArtifactRefusal as Refusal;
         validate_text(&artifact.title, 512).map_err(|_| Refusal::Malformed)?;
@@ -709,13 +719,12 @@ impl WorkAgentTurnDisclosure {
         if artifact.evidence.len() > 64 {
             return Err(Refusal::Malformed);
         }
-        if artifact
-            .evidence
-            .iter()
-            .any(|key| usize::from(*key) >= self.links.len())
-        {
-            return Err(Refusal::UnknownEvidenceKey);
-        }
+        let known = |key: u16| usize::from(key) < self.links.len();
+        let cited = artifact.evidence.len();
+        artifact.evidence.retain(|key| known(*key));
+        let dropped =
+            cited - artifact.evidence.len() + drop_unknown_citations(&mut artifact.data, known);
+        *unknown += dropped;
         remap_citations(&mut artifact.data, |key| {
             if usize::from(key) >= self.links.len() {
                 return Err(Refusal::UnknownEvidenceKey);
@@ -729,6 +738,13 @@ impl WorkAgentTurnDisclosure {
             artifact.evidence.push(key);
             Ok((artifact.evidence.len() - 1) as u16)
         })?;
+        if artifact.evidence.is_empty() {
+            return Err(if dropped > 0 {
+                Refusal::UnknownEvidenceKey
+            } else {
+                Refusal::Uncited
+            });
+        }
         normalize_measurements(&mut artifact.data);
         artifact
             .data
@@ -799,6 +815,42 @@ fn normalize_measurements(data: &mut WorkArtifactDataV1) {
         }
     }
 }
+/// Removes claim-level citations of unknown keys and returns how many went.
+/// A finding or source entry left citing nothing but unknown keys goes too.
+fn drop_unknown_citations(data: &mut WorkArtifactDataV1, known: impl Fn(u16) -> bool) -> usize {
+    let mut dropped = 0;
+    let mut keep = |keys: &mut Vec<u16>| {
+        let before = keys.len();
+        keys.retain(|key| known(*key));
+        dropped += before - keys.len();
+        before == 0 || !keys.is_empty()
+    };
+    match data {
+        WorkArtifactDataV1::ComparisonMatrix { cells, .. } => {
+            for cell in cells.iter_mut().flatten() {
+                keep(&mut cell.evidence);
+            }
+        }
+        WorkArtifactDataV1::Findings { items, .. } => {
+            items.retain_mut(|item| keep(&mut item.evidence))
+        }
+        WorkArtifactDataV1::Chart { series, .. } => {
+            for point in series.iter_mut().flat_map(|series| &mut series.points) {
+                keep(&mut point.evidence);
+            }
+        }
+        WorkArtifactDataV1::EvidenceCollection { entries, .. } => {
+            entries.retain(|entry| keep(&mut vec![entry.evidence]));
+        }
+        WorkArtifactDataV1::Document { .. }
+        | WorkArtifactDataV1::Table { .. }
+        | WorkArtifactDataV1::Comparison { .. }
+        | WorkArtifactDataV1::Checklist { .. }
+        | WorkArtifactDataV1::BrowserResourcePreview { .. } => {}
+    }
+    dropped
+}
+
 fn remap_citations(
     data: &mut WorkArtifactDataV1,
     mut map: impl FnMut(u16) -> Result<u16, WorkAgentArtifactRefusal>,
