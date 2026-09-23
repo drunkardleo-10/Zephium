@@ -1185,6 +1185,75 @@ fn an_own_address_column_cites_only_the_admitted_document_address() {
 }
 
 #[test]
+fn document_metadata_nodes_are_never_name_text_or_evidence_candidates() {
+    let metadata = [
+        json!({"k":9,"p":0,"r":"link","n":"Page address","u":"https://example.test/rooms/42","fc":true}),
+        json!({"k":10,"p":0,"r":"image","n":"Page image","m":"https://example.test/og.jpg","fc":true}),
+    ];
+    let (call, observation, _, own_page) = located_fixture_with(true, &metadata);
+    let offered = |projection: &DecisionObservation, key: &str| {
+        let Question::Choice { criteria, .. } = &projection.request().questions()[key] else {
+            panic!("choice expected");
+        };
+        ["@a9", "@a10"].map(|token| criteria.contains_key(token))
+    };
+    // name, price (verbatim) and summary (generated) never see either node;
+    // the picture head keeps the page image.
+    for key in ["locate_0", "locate_1", "locate_3"] {
+        assert_eq!(offered(&own_page, key), [false, false], "{key}");
+    }
+    assert_eq!(offered(&own_page, "locate_2"), [false, true]);
+    let objective = AgentProviderObjective::try_admit_conservative_utf8(
+        "Collect the catalog's products".into(),
+        &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
+    )
+    .unwrap();
+    let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+    let catalog = SemanticExtractionSchema::try_new(
+        SemanticExtractionSchemaId::new(1).unwrap(),
+        vec![
+            SemanticExtractionFieldSchema::try_text("name".into(), true, 512).unwrap(),
+            SemanticExtractionFieldSchema::try_url("product_url".into(), false, 2048).unwrap(),
+            SemanticExtractionFieldSchema::try_image_url("image".into(), false, 2048).unwrap(),
+        ],
+    )
+    .unwrap();
+    let catalog = DecisionObservation::try_for_read(
+        &observation,
+        &objective,
+        &authority,
+        call.account(),
+        Some(&catalog),
+    )
+    .unwrap();
+    assert_eq!(offered(&catalog, "locate_0"), [false, false]);
+    assert_eq!(offered(&catalog, "locate_1"), [true, false]);
+    let findings = SemanticExtractionSchema::try_new(
+        SemanticExtractionSchemaId::new(1).unwrap(),
+        vec![SemanticExtractionFieldSchema::try_text_list("output_0".into(), true, 16, 1024).unwrap()],
+    )
+    .unwrap();
+    let findings = DecisionObservation::try_for_read(
+        &observation,
+        &objective,
+        &authority,
+        call.account(),
+        Some(&findings),
+    )
+    .unwrap();
+    let chunks = findings
+        .request()
+        .questions()
+        .keys()
+        .filter(|key| key.starts_with("find_"))
+        .count();
+    assert!(chunks > 0);
+    for index in 0..chunks {
+        assert_eq!(offered(&findings, &format!("find_{index}")), [false, false]);
+    }
+}
+
+#[test]
 fn an_own_page_read_cites_its_canonical_address_and_page_image() {
     let canonical = json!({"k":9,"p":0,"r":"link","n":"Page address","u":"https://example.test/rooms/42","fc":true});
     let page_image = json!({"k":10,"p":0,"r":"image","n":"Page image","m":"https://example.test/og.jpg","fc":true});

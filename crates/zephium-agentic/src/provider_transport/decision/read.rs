@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{json, Value};
 use zephium_decision::{AnswerValue, Question, ResolvedDecision};
 
-use super::projection::{choice, DecisionObservationAnswers, DecisionProjectionError};
+use super::projection::{
+    choice, document_metadata, DecisionObservationAnswers, DecisionProjectionError,
+};
 use crate::*;
 
 const GENERATION_NEIGHBORS: usize = 2;
@@ -67,6 +69,7 @@ impl ReadProjection {
             .filter(|node| {
                 references.contains(&node.reference())
                     && self.schema.source_roles().contains(node.role())
+                    && !document_metadata(node)
                     && (node.text().is_some_and(|text| !text.is_empty())
                         || node.name().is_some_and(|text| !text.is_empty()))
             })
@@ -155,9 +158,10 @@ impl ReadProjection {
                     SemanticExtractionValueKind::Url => node.link_destination().is_some(),
                     SemanticExtractionValueKind::ImageUrl => node.image_source().is_some(),
                     _ => {
-                        node.text().is_some_and(|text| !text.is_empty())
+                        !document_metadata(node)
+                            && (node.text().is_some_and(|text| !text.is_empty())
                             || node.name().is_some_and(|text| !text.is_empty())
-                            || matches!(node.value(), Some(SemanticValueSummary::Text(value)) if !value.is_empty())
+                            || matches!(node.value(), Some(SemanticValueSummary::Text(value)) if !value.is_empty()))
                     }
                 })
                 .map(|node| (node.reference().model_token().to_string(), Value::Null))
