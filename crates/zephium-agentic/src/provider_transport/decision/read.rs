@@ -124,6 +124,15 @@ impl DecisionReadSelection {
     pub fn unresolved(&self) -> usize {
         self.unresolved.len()
     }
+    /// Whether every unsettled column is one a focused generation call could
+    /// answer from located evidence. A column that must be copied from an exact
+    /// source cannot be generated, so the read still needs further inspection.
+    pub fn unresolved_are_generated(&self) -> bool {
+        self.unresolved
+            .iter()
+            .filter_map(|index| self.projection.columns.get(*index))
+            .all(|field| !copy_only(field))
+    }
     /// Columns whose value node the primary backend located.
     pub fn located(&self) -> usize {
         self.targets.iter().filter(|target| target.is_some()).count()
@@ -245,10 +254,14 @@ impl DecisionObservationAnswers {
                     ));
             targets.push(target);
         }
-        // Rust's own completeness check: every requested value head settled at
-        // threshold and every column this read must publish has a source. It
-        // substitutes for an unsettled completion head, never overrides one.
-        ready &= complete.unwrap_or(unresolved.is_empty());
+        // Rust's own completeness check substitutes for an unsettled completion
+        // head, and never overrides an accepted one. It is deliberately strict:
+        // every requested value head must have settled on a source, because an
+        // abstention means the value was not on this observation, which is the
+        // case re-observation exists for.
+        ready &= complete.unwrap_or_else(|| {
+            unresolved.is_empty() && targets.iter().all(Option::is_some)
+        });
         Ok(Some((
             DecisionReadSelection {
                 projection,

@@ -19,6 +19,9 @@ pub struct DecisionObservation {
     /// Offered scrolling regions, in observed order. Rust may re-observe with
     /// one of these without any provider having selected it.
     scrollable: Vec<SemanticReferenceId>,
+    /// Offered collapsed disclosures, in observed order. Expanding one reveals
+    /// content this page already holds; it is not a consequential effect.
+    expandable: Vec<SemanticReferenceId>,
     pub(super) read: Option<super::read::ReadProjection>,
     #[cfg(feature = "probe-harness")]
     json_comparison: Option<DecisionRequest>,
@@ -96,6 +99,7 @@ impl DecisionObservation {
         let mut fill = BTreeMap::new();
         let mut scroll = BTreeMap::new();
         let mut scrollable = Vec::new();
+        let mut expandable = Vec::new();
         for node in observation.frames().iter().flat_map(|frame| frame.nodes()) {
             if !references.contains(&node.reference())
                 || node.states().contains(SemanticState::Disabled)
@@ -114,6 +118,12 @@ impl DecisionObservation {
                     candidates.insert(node.reference().model_token().to_string(), Value::Null);
                     if operation == SemanticOperationClass::Scroll {
                         scrollable.push(node.reference());
+                    }
+                    if operation == SemanticOperationClass::Click
+                        && node.activation() == Some(SemanticActivation::Disclosure)
+                        && !node.states().contains(SemanticState::Expanded)
+                    {
+                        expandable.push(node.reference());
                     }
                 }
             }
@@ -185,6 +195,7 @@ impl DecisionObservation {
             references,
             account,
             scrollable,
+            expandable,
             read,
             #[cfg(feature = "probe-harness")]
             json_comparison,
@@ -374,6 +385,7 @@ impl DecisionObservation {
             references: self.references.clone(),
             account: self.account,
             scrollable: self.scrollable.clone(),
+            expandable: self.expandable.clone(),
             read: self.read.clone(),
             #[cfg(feature = "probe-harness")]
             json_comparison: None,
@@ -478,9 +490,10 @@ impl DecisionObservationAnswers {
             }))
     }
 
-    /// Rust's own re-observation recipe: scroll an already offered region so a
-    /// further batch can settle the value heads. No provider selected it, and it
-    /// grants no other effect.
+    /// Rust's own re-observation recipe: expand an already offered collapsed
+    /// disclosure, otherwise scroll an already offered region, so a further
+    /// batch can settle the value heads. No provider selected either, and
+    /// neither grants any further effect.
     pub fn take_reobservation_scroll(
         &mut self,
         observation: &SemanticObservation,
@@ -489,14 +502,22 @@ impl DecisionObservationAnswers {
         if !self.projection.matches(observation, account) {
             return Err(DecisionProjectionError::Authority);
         }
-        let Some(reference) = self.projection.scrollable.first().copied() else {
-            return Ok(None);
+        let (reference, expand) = match self.projection.expandable.first().copied() {
+            Some(reference) => (reference, true),
+            None => match self.projection.scrollable.first().copied() {
+                Some(reference) => (reference, false),
+                None => return Ok(None),
+            },
         };
         if !self.projection.references.contains(&reference) {
             return Err(DecisionProjectionError::Authority);
         }
         Ok(Some(DecisionActionSelection {
-            operation: DecisionOperation::Scroll(reference),
+            operation: if expand {
+                DecisionOperation::Click(reference)
+            } else {
+                DecisionOperation::Scroll(reference)
+            },
             baseline: SemanticObservationAcknowledgement::from_fingerprint(
                 SemanticObservationFingerprint::from_observation(observation),
             ),

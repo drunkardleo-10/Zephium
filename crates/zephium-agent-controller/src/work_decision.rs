@@ -2,10 +2,11 @@ use super::*;
 
 const MAX_UNCHANGED_DECISION_OBSERVATIONS: u8 = 3;
 /// Cheap typed re-observations of one page before the read stops asking the
-/// recommended backend. Two covers a value that is one or two screens below the
-/// first viewport, which is what the recorded product pages needed, and bounds
-/// the added native work at two scrolls and two sub-second batches.
-const MAX_READ_REOBSERVATIONS: u8 = 2;
+/// recommended backend. Three covers the recorded product pages: expanding one
+/// collapsed specification disclosure plus two screens of scrolling, and it
+/// bounds the added work at three native operations and three sub-second
+/// batches, well inside one read's existing action and call allowances.
+const MAX_READ_REOBSERVATIONS: u8 = 3;
 
 impl AgentWorkController {
     pub(super) async fn run_decision_actions(
@@ -71,7 +72,7 @@ impl AgentWorkController {
             let Some(mut answers) = state.decision_answers.take() else {
                 break;
             };
-            let mut gap = None;
+            let mut gap: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
             if let Some(schema) = state.extraction_schema.clone() {
                 let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
                 if let Some((selection, ready)) = answers
@@ -93,7 +94,10 @@ impl AgentWorkController {
                                 Ok(located) => located,
                                 Err(_) => break,
                             };
-                        Self::finish_located_read(state, worker, browser, located).await?;
+                        // Boxed: the read loop's future must stay well inside the
+                        // runtime worker's stack.
+                        Box::pin(Self::finish_located_read(state, worker, browser, located))
+                            .await?;
                         return Ok((
                             observation,
                             captured_at,
@@ -101,7 +105,7 @@ impl AgentWorkController {
                             false,
                         ));
                     }
-                    gap = Some(selection);
+                    gap = Some(Box::new(selection));
                 }
             }
             let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
@@ -116,65 +120,79 @@ impl AgentWorkController {
                     .remaining_operations(session.lease.lease())
                     .map_err(|_| AgentWorkFailure::Contract)?
                     >= 3;
-            // One cheap typed re-observation before any generated value: scroll
-            // an already offered region and ask the recommended backend again.
-            let reobserve = actionable
-                && reobservations < MAX_READ_REOBSERVATIONS
-                && gap
-                    .as_ref()
-                    .is_some_and(|gap| gap.unresolved() > 0 || more_below == Some(true));
-            let scroll = if reobserve {
+            // A settled action head is already paid for, so it is preferred.
+            // Otherwise one cheap typed re-observation runs before any generated
+            // value: Rust scrolls an already offered region and asks the
+            // recommended backend again over value heads only.
+            let proposed = if actionable {
                 answers
-                    .take_reobservation_scroll(&observation, session.account)
+                    .take_action_selection(&observation, session.account)
                     .map_err(AgentWorkFailure::DecisionOperation)?
             } else {
                 None
             };
-            let selection = match scroll {
-                Some(scroll) => {
-                    reobservations = reobservations.saturating_add(1);
-                    gap = None;
-                    scroll
-                }
+            if proposed
+                .as_ref()
+                .is_some_and(|selection| matches!(selection.operation(), DecisionOperation::Scroll(_)))
+                && more_below != Some(true)
+            {
+                break;
+            }
+            let selection = match proposed {
+                Some(selection) => selection,
                 None => {
-                    // The recommended backend stopped short. One focused
-                    // generation over the located neighbourhood finishes the
-                    // read; the general planner is not asked for this page.
-                    if let Some(gap) = gap.filter(|gap| gap.unresolved() > 0 && gap.located() > 0) {
-                        state.refresh_account(worker, browser)?;
-                        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
-                        let located = match gap.prepare_completing(
-                            &observation,
-                            session.account,
-                            captured_at,
-                        ) {
-                            Ok(located) => located,
-                            Err(_) => break,
-                        };
-                        Self::finish_located_read(state, worker, browser, located).await?;
-                        return Ok((
-                            observation,
-                            captured_at,
-                            AgentWorkTaskProgress::Complete,
-                            false,
-                        ));
-                    }
-                    if !actionable {
-                        break;
-                    }
-                    let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
-                    let Some(selection) = answers
-                        .take_action_selection(&observation, session.account)
-                        .map_err(AgentWorkFailure::DecisionOperation)?
-                    else {
-                        break;
+                    let reobserve = actionable
+                        && reobservations < MAX_READ_REOBSERVATIONS
+                        && gap.is_some();
+                    let scroll = if reobserve {
+                        answers
+                            .take_reobservation_scroll(&observation, session.account)
+                            .map_err(AgentWorkFailure::DecisionOperation)?
+                    } else {
+                        None
                     };
-                    if matches!(selection.operation(), DecisionOperation::Scroll(_))
-                        && more_below != Some(true)
-                    {
-                        break;
+                    match scroll {
+                        Some(scroll) => {
+                            reobservations = reobservations.saturating_add(1);
+                            gap = None;
+                            scroll
+                        }
+                        None => {
+                            // The recommended backend stopped short. One focused
+                            // generation over the located neighbourhood finishes
+                            // the read; the general planner is not asked here.
+                            if let Some(gap) = gap.filter(|gap| {
+                                gap.unresolved() > 0
+                                    && gap.located() > 0
+                                    && gap.unresolved_are_generated()
+                            }) {
+                                state.refresh_account(worker, browser)?;
+                                let session =
+                                    state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                                let located = match gap.prepare_completing(
+                                    &observation,
+                                    session.account,
+                                    captured_at,
+                                ) {
+                                    Ok(located) => located,
+                                    Err(_) => break,
+                                };
+                                // Boxed: the read loop's future must stay well
+                                // inside the runtime worker's stack.
+                                Box::pin(Self::finish_located_read(
+                                    state, worker, browser, located,
+                                ))
+                                .await?;
+                                return Ok((
+                                    observation,
+                                    captured_at,
+                                    AgentWorkTaskProgress::Complete,
+                                    false,
+                                ));
+                            }
+                            break;
+                        }
                     }
-                    selection
                 }
             };
             let _ = gap;
