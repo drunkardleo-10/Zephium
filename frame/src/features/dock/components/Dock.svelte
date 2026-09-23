@@ -2,29 +2,48 @@
   import type { Snippet } from "svelte";
   import ToolShelf from "./ToolShelf.svelte";
 
-  let { sites, compact = false }: { sites?: Snippet; compact?: boolean } = $props();
+  let {
+    sites,
+    above,
+    compact = false,
+  }: {
+    sites?: Snippet;
+    /** Kept sites that did not fit beside the shelf, in rows over it. */
+    above?: Snippet;
+    compact?: boolean;
+  } = $props();
 </script>
 
 <!--
-  The base of the column is one row: the mini-apps lead it and the kept sites
-  fill the rest of it. They are the same material at the same height, so what
-  sits down here reads as a single strip of things you can launch rather than
-  as a control bar with a list bolted underneath.
+  The base of the column. Its bottom row is the mini-apps and as many kept
+  sites as fit beside them; the rest of the sites stack in full-width rows
+  above, growing upwards, so the shelf never moves and the column above only
+  gives up a row when a whole row has been filled.
 -->
-<footer class="dock" data-compact={compact}>
-  <ToolShelf {compact} />
-  <span class="dock-rule" aria-hidden="true"></span>
-  {#if sites}<div class="dock-sites-slot">{@render sites()}</div>{/if}
+<!-- The base of the column settles last, once the list above it has. -->
+<footer class="dock" data-compact={compact} data-cascade style:--cascade={8}>
+  {#if above}{@render above()}{/if}
+  <div class="dock-base">
+    <ToolShelf {compact} />
+    <span class="dock-rule" aria-hidden="true"></span>
+    {#if sites}<div class="dock-sites-slot">{@render sites()}</div>{/if}
+  </div>
 </footer>
 
 <style>
   .dock {
     flex: none;
     display: flex;
-    align-items: center;
-    gap: var(--dock-shelf-gap);
+    flex-direction: column;
+    gap: var(--dock-gap);
     margin-block-start: 8px;
     padding: 0 var(--sidebar-inset) var(--sidebar-inset);
+  }
+
+  .dock-base {
+    display: flex;
+    align-items: center;
+    gap: var(--dock-shelf-gap);
   }
 
   /* Ours on one side of the rule, the web's on the other. */
@@ -44,10 +63,14 @@
 
   /* The rail stacks the same three parts it does at full width. */
   .dock[data-compact="true"] {
-    flex-direction: column;
     align-items: center;
     gap: 8px;
     padding-block-end: 8px;
+  }
+
+  .dock[data-compact="true"] .dock-base {
+    flex-direction: column;
+    gap: 8px;
   }
 
   .dock[data-compact="true"] .dock-rule {

@@ -541,7 +541,7 @@
   "settings_search_row": "Open this preference",
   "settings_profile_access": "Profile & account",
   "ui_mode_work_hint": "Switch between Browse and Work",
-  "essential_drop_hint": "Drop here to keep in Essentials",
+  "essential_drop_hint": "Drag a tab here to keep it",
   "essential_move_failed": "Could not move this tab. Try again.",
   "section_models": "Models",
   "section_models_description": "",

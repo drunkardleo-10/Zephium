@@ -32,6 +32,7 @@
   data-tabs-drop
   use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/tabs`}
   class="tab-scroller"
+  data-glide-scroller
 >
   <TabList entries={pinned} section="pinned" label={m.pinned_tabs()} {splitting} {onSelect} />
 
@@ -39,14 +40,21 @@
     <div class="tab-divider" aria-hidden="true"></div>
   {/if}
 
-  <div class="new-tab-slot">
+  <div class="new-tab-slot" data-cascade style:--cascade={pinned.length}>
     <button type="button" class="new-tab" onclick={tabs.open}>
       <Icon icon={Add01Icon} size={16} />
       <span>{m.new_tab()}</span>
     </button>
   </div>
 
-  <TabList entries={today} section="today" label={m.open_tabs()} {splitting} {onSelect} />
+  <TabList
+    entries={today}
+    section="today"
+    label={m.open_tabs()}
+    cascadeFrom={pinned.length + 1}
+    {splitting}
+    {onSelect}
+  />
 </div>
 
 <style>

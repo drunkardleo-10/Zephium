@@ -25,9 +25,9 @@ test("the sidebar column at rest", async () => {
   await page
     .elementLocator(screen.container)
     .screenshot({ path: "../../../../../target/sidebar-light.png" });
-  // Kept sites divide the row evenly; one alone would fill it.
+  // Kept sites stay one row, however many there are.
   const row = screen.container.querySelector<HTMLElement>(".dock-row")!;
-  expect(getComputedStyle(row).gridTemplateColumns.split(" ")).toHaveLength(3);
+  expect(getComputedStyle(row).gridAutoFlow).toBe("column");
 
   // And the shelf opened, which is the only state the column grows into.
   document.documentElement.dataset.theme = "dark";

@@ -9,6 +9,25 @@
   height: 100%;
   padding-inline-start: 8px;
 }
+/* The new tab sits above the sidebar, as a native page does: whatever the
+   column lets go of while it changes shape passes beneath it. The sidebar's
+   own floating panels still rise above it. Browser pages are left alone: a
+   layer here would trap their full-window dialogs beneath those panels. */
+[data-zephium-new-tab] {
+  position: relative;
+  z-index: 1;
+}
+.stage-page {
+  height: 100%;
+  transform-origin: 50% 40%;
+  animation: stage-in var(--motion-page) var(--ease-emphasized) both;
+}
+@keyframes stage-in {
+  from {
+    opacity: 0;
+    scale: 0.985;
+  }
+}
 .settings-shell,
 .library-shell {
   display: flex;
@@ -62,6 +81,10 @@
   font-size: 12px;
   line-height: 18px;
   cursor: default;
+}
+/* Positioned so its label stays drawn above a plate travelling beneath it. */
+.settings-nav-item {
+  position: relative;
 }
 .settings-nav-item > svg {
   flex: none;
@@ -550,6 +573,7 @@
   padding-block-start: 0;
 }
 .sidebar-columns {
+  position: relative;
   display: flex;
   flex: 1;
   min-height: 0;
@@ -566,6 +590,7 @@
   flex: 0 0 56px;
 }
 .settings-sidebar-navigation {
+  position: relative;
   min-height: 0;
   flex: 1;
   display: flex;
@@ -917,25 +942,39 @@
     border: 1px solid ButtonText;
   }
 }
-.sidebar-columns[data-launch="true"] .browse-tab[data-entrance="true"]:not([data-selected="true"]) {
-  animation: tab-enter 140ms var(--ease-out) var(--entrance-delay) both;
+/* A change of shape: the column's width travels on the page's curve, while
+   what it holds keeps its final width, so the morph's measured positions
+   stay true and only the space beside the column moves. */
+.browser-sidebar[data-reshaping="true"] {
+  transition: width var(--motion-page) var(--ease-emphasized);
 }
-@keyframes tab-enter {
+/* Width only: the column still fills the sidebar's height, or the dock at
+   its foot rides up under the tabs for the length of the change. */
+.browser-sidebar[data-reshaping="true"] > .sidebar-columns {
+  width: var(--sidebar-width);
+}
+/* The header is one shape or the other, never both; the new one fades in. */
+.browser-sidebar[data-header-fresh="true"] > header {
+  animation: interface-fade var(--motion-slow) var(--ease-out) both;
+}
+
+/* The launch cascade: the column's contents settle in from the top, one
+   beat apart, so the window arrives as a list being laid out rather than as
+   a picture of one. Past the first screenful every row shares the last
+   beat — nobody watches row forty arrive. */
+.sidebar-columns:is([data-launch="armed"], [data-launch="running"]) [data-cascade] {
+  animation: cascade-in var(--motion-page) var(--ease-emphasized) both;
+  animation-delay: calc(min(var(--cascade), 14) * 20ms);
+}
+/* Armed: every row waits at the start of its entrance until the window is
+   on screen, so none is ever seen before it arrives. */
+.sidebar-columns[data-launch="armed"] [data-cascade] {
+  animation-play-state: paused;
+}
+@keyframes cascade-in {
   from {
-    opacity: 0.65;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .sidebar-columns[data-launch] * {
-    animation: none !important;
-    transition: none !important;
-    opacity: 1 !important;
-    transform: none !important;
+    opacity: 0;
+    translate: 0 8px;
   }
 }
 .folder-row {
@@ -982,6 +1021,33 @@
   padding: 2px var(--sidebar-inset) 6px;
 }
 
+/* The current tab's plate in flight between two rows (selection-glide.ts).
+   It sits under everything the rows draw; the rows it leaves and reaches
+   stop painting their own plate while it travels. */
+.selection-glide {
+  position: absolute;
+  z-index: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+.selection-glide-fill {
+  position: absolute;
+  inset: 0;
+}
+[data-plate][data-gliding] {
+  background-color: transparent !important;
+  box-shadow: none !important;
+}
+
+/* A row being dragged to a new place in its list: lifted off the column,
+   the one thing in it that casts a shadow, until it is set down. */
+.browse-tab[data-lifted][data-lifted] {
+  z-index: 2;
+  scale: 1.02;
+  background: var(--row-active);
+  box-shadow: var(--shadow-float);
+}
+
 /* The dock's site row. */
 .dock-sites {
   border-radius: var(--radius-card);
@@ -989,25 +1055,25 @@
     background-color var(--motion-fast) var(--ease-out),
     box-shadow var(--motion-fast) var(--ease-out);
 }
-/* With nothing kept, the row still holds a tile's worth of space and draws
-   the outline of the tile that would go there. An empty band with a line of
-   grey text reads as a bug; an empty slot reads as an invitation. */
+/* With nothing kept, the row still holds a tile's worth of space on the
+   tiles' own ground: an empty slot, not a dashed outline of one. A line of
+   grey text alone would read as a bug; a wireframe reads as unfinished. */
 .dock-sites[data-empty="true"] {
-  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: var(--dock-tile);
-  border: 1.5px dashed var(--color-border-strong);
+  background: var(--color-card);
 }
 .dock-sites[data-over="true"] {
-  background: var(--row-hover);
-  box-shadow: inset 0 0 0 1.5px var(--color-accent);
+  background: var(--color-fill-hover);
+  box-shadow: inset 0 0 0 1px var(--color-border-strong);
 }
 .dock-sites-hint {
-  padding-inline: 8px;
+  padding-inline: 10px;
   color: var(--color-faint);
   font-size: 11.5px;
+  line-height: 1.3;
   text-align: center;
 }
 .sidebar-move-error {
@@ -1317,4 +1383,12 @@
   overflow: hidden;
   border-radius: var(--radius-control);
   background: var(--color-fill);
+  animation: tool-host-in var(--motion-page) var(--ease-emphasized) both;
+}
+/* A tool grows out of the rail it was opened from. */
+@keyframes tool-host-in {
+  from {
+    opacity: 0;
+    translate: -8px 0;
+  }
 }

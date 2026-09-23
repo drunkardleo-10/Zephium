@@ -43,6 +43,7 @@
   activates nothing at all.
 -->
 <li
+  data-motion-key={`tab:${tab.id}`}
   data-zephium-tab-id={tab.id}
   data-zephium-tab-url={tab.url ?? ""}
   data-zephium-projection-revision={tab.projection_revision}
@@ -51,6 +52,7 @@
 >
   <button
     type="button"
+    data-plate
     aria-current={active ? "page" : undefined}
     aria-label={tab.title || m.untitled_tab()}
     title={tab.title || m.untitled_tab()}
@@ -78,9 +80,9 @@
     min-width: 0;
   }
 
-  /* A plate, not a swatch: a hairline ring around a quiet ground is what
-     lets a handful of unrelated brand colours sit in one row without the
-     row turning into noise. */
+  /* A plate of quiet ground and nothing else. A drawn ring made every tile
+     read as a button; the fill alone already separates it from the column,
+     and a row of unrelated brand marks stays calm on it. */
   .essential > button {
     display: grid;
     place-items: center;
@@ -89,28 +91,25 @@
     border: 0;
     border-radius: var(--radius-card);
     background: var(--color-card);
-    box-shadow: inset 0 0 0 1px var(--color-border);
     cursor: default;
-    outline: none;
     transition:
       background-color var(--motion-fast) var(--ease-out),
       box-shadow var(--motion-fast) var(--ease-out),
-      scale var(--motion-slow) var(--ease-out);
+      scale var(--motion-slow) var(--ease-spring);
   }
 
   .essential > button:hover {
-    background: var(--row-hover);
-    box-shadow: inset 0 0 0 1px var(--color-border-strong);
+    background: var(--color-fill-hover);
   }
 
   .essential > button:active {
-    scale: 0.96;
+    scale: 0.95;
     transition-duration: var(--motion-instant);
   }
 
   .essential > button[aria-current="page"] {
-    background: var(--row-active);
-    box-shadow: var(--shadow-raised);
+    background: var(--color-fill-active);
+    box-shadow: var(--row-rim);
   }
 
   .essential[data-split-candidate="true"] > button {

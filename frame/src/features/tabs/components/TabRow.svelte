@@ -7,7 +7,7 @@
   import Icon from "$shared/ui/Icon";
 
   let {
-    entranceIndex = 6,
+    cascade = 0,
     tab,
     active,
     grouped = false,
@@ -23,7 +23,8 @@
     onPointerUp,
     onPointerCancel,
   }: {
-    entranceIndex?: number;
+    /** This row's place in the launch cascade. */
+    cascade?: number;
     tab: TabView;
     active: boolean;
     grouped?: boolean;
@@ -51,14 +52,16 @@
 </script>
 
 <li
+  data-motion-key={`tab:${tab.id}`}
+  data-plate
   data-zephium-tab-id={tab.id}
   data-zephium-tab-url={tab.url ?? ""}
   data-zephium-projection-revision={tab.projection_revision}
   class={["browse-tab", grouped && "browse-tab-grouped", className]}
   data-selected={active}
-  data-entrance={entranceIndex < 6}
   data-split-candidate={splitCandidate}
-  style:--entrance-delay={`${Math.min(entranceIndex, 5) * 16}ms`}
+  data-cascade
+  style:--cascade={cascade}
 >
   <button
     type="button"
@@ -77,7 +80,7 @@
       image={favicons.image(tab.icon)}
       tone={favicons.tone(tab.icon)}
       loading={tab.loading}
-      size={18}
+      size={16}
       lit={active}
       {fallback}
     />
@@ -115,7 +118,8 @@
     letter-spacing: -0.005em;
     transition:
       background-color var(--motion-fast) var(--ease-out),
-      box-shadow var(--motion-fast) var(--ease-out);
+      box-shadow var(--motion-fast) var(--ease-out),
+      color var(--motion-base) var(--ease-out);
   }
 
   .browse-tab-grouped {
@@ -136,7 +140,7 @@
   }
 
   .browse-tab[data-selected="true"]:not(.browse-tab-grouped) {
-    box-shadow: var(--shadow-raised);
+    box-shadow: var(--row-rim);
   }
 
   .browse-tab[data-split-candidate="true"] {
@@ -158,7 +162,12 @@
     font: inherit;
     text-align: start;
     cursor: default;
-    outline: none;
+  }
+
+  /* The ring sits inside the row: outside it, it would collide with the
+     rows above and below at a 4px gap. */
+  .tab-open:focus-visible {
+    outline-offset: -2px;
   }
 
   /*
@@ -193,7 +202,6 @@
     color: var(--color-faint);
     opacity: 0;
     cursor: default;
-    outline: none;
     transition:
       opacity var(--motion-fast) var(--ease-out),
       background-color var(--motion-fast) var(--ease-out),

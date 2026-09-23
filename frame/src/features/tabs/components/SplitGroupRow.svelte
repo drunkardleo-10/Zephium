@@ -7,6 +7,7 @@
     activeId,
     splitting,
     closable = true,
+    motionKey,
     class: className = "",
     onSelect,
     onClose,
@@ -20,6 +21,7 @@
     activeId: string | null;
     splitting: boolean;
     closable?: boolean;
+    motionKey?: string;
     class?: string;
     onSelect: (id: string) => void;
     onClose: (id: string) => void;
@@ -38,6 +40,7 @@
   a hairline seam, so the pairing is visible without a badge or a label.
 -->
 <li
+  data-motion-key={motionKey}
   class={[
     "overflow-hidden rounded-row transition-[box-shadow] duration-[var(--motion-fast)]",
     className,

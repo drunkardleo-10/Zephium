@@ -159,11 +159,47 @@ Components receive localized strings from their owners. Existing untouched
 feature copy remains an incremental localization migration, not a claim of a
 fully translated product. Text expansion and locale stress belong in development tests, never in persisted fake locale settings.
 
-The existing Browse treatment uses 120 ms feedback and 180 ms transitions, at
-most 220 ms. Switches and segmented selections use the timings documented below. Animate
-transform and opacity, with narrowly scoped color feedback. No shadow, blur,
-layout, startup, or native geometry animation. Native startup and tab-presentation barriers remain independent of decorative motion. There is
-no recurring animation or polling in the component kit.
+### Motion
+
+Motion is named by what it is for. `--motion-instant` (70 ms) answers the
+pointer; `--motion-fast` (120), `--motion-base` (200) and `--motion-slow` (300)
+are for things that change in place or travel; `--motion-page` (400) is for a
+surface arriving. Curves: `--ease-out` and `--ease-smooth` for feedback,
+`--ease-emphasized` for arrivals, `--ease-exit` for leaving (always quicker than
+arriving), `--ease-spring` (a damped spring sampled with `linear()`, 2%
+overshoot) for small things that move, and `--ease-snap` (a launched spring,
+1.4%) for what answers a click. Scripted motion reads the same tokens through
+`shared/lib/motion.ts`, so declared and scripted motion cannot drift.
+
+Everything that moves animates `transform` or `opacity`, measured once before a
+change and once after it:
+
+- `shared/lib/list-motion.ts` moves a keyed list: moved items slide from where
+  they were, new ones rise, departed ones fade as inert ghosts stripped of every
+  `data-zephium-*` sentinel (native must never find a closed tab), and an item
+  leaving one list for another carries its mark across. Only a change of order
+  or membership is measured; title and loading changes cost nothing.
+- `shared/lib/plate-glide.ts` carries a selection's plate to the next selection
+  (tabs, settings pages) inside a `data-glide-host`.
+- `features/sidebar/lib/shape-morph.ts` turns the list into the rail and back:
+  every mark travels, the old column fades as a ghost, and the column's width
+  travels on the page curve while its contents hold their final width.
+- `session/row-drag.svelte.ts` is the one drag gesture for rows, rails and kept
+  sites; rows reorder in place by transform and land through the list's motion.
+
+Native geometry moves too, and never lays a page out per frame. A deliberate
+change of shape (a toggle, a snap, a tool opening) is sent with a travel flag;
+the macOS stage keeps whichever of its two frames is wider for the journey and
+animates only its layer's translation, so a page is laid out once. A chrome that
+would narrow keeps its width until the page has arrived. Returning from a browser
+page fades and settles the page back in. Windows moves its page windows on the
+same curve and the same wider-frame rule. A drag, a restored preference and a
+window resize never travel.
+
+The launch cascade is armed before the first frame and runs when native reveals
+the window, so a row is never seen before it arrives. Reduced motion (system or
+in-app) collapses all of it. Nothing polls; the only continuous animation is a
+page's loading arc, which turns by transform alone.
 
 ## Native material
 

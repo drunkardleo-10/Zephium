@@ -13,7 +13,9 @@
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
   import { TabRail } from "$features/tabs";
+  import { selectionGlide } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
+  import { expanded as sidebarWidth } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { untrack } from "svelte";
   import { BlockerShield } from "$features/blocker";
@@ -69,7 +71,45 @@
     });
   });
   let splitting = $state(false);
+
+  // Kept sites fill the row beside the tool shelf first; the rest stack in
+  // rows of even columns above it. The floor is the narrowest a tile may get
+  // before a row gives one up; the lead is the shelf, its rule and their gaps
+  // (--dock-tile, --dock-shelf-gap), which the row beside it does not have.
+  const TILE_FLOOR = 48;
+  const TILE_GAP = 6;
+  const SHELF_LEAD = 65;
+  let sitesWidth = $state(0);
+  // Until the row has been measured, the column's own width stands in for
+  // it, so the first frame is already split the way the measured one will be.
+  let besideRoom = $derived(sitesWidth || Math.max(0, sidebarWidth() - SHELF_LEAD));
+  let beside = $derived(Math.max(1, Math.floor((besideRoom + TILE_GAP) / (TILE_FLOOR + TILE_GAP))));
+  let dockColumns = $derived(
+    Math.max(1, Math.floor((besideRoom + SHELF_LEAD + TILE_GAP) / (TILE_FLOOR + TILE_GAP))),
+  );
+
+  // The current tab's plate travels to the next current tab. Measured before
+  // the change lands and played after it, across every list in the column.
+  let shownActive: string | null = null;
+  let glideFrom: ReturnType<typeof selectionGlide.capture> = null;
+  $effect.pre(() => {
+    const next = tabs.activeId();
+    untrack(() => {
+      if (next !== shownActive) glideFrom = selectionGlide.capture(shownActive);
+    });
+  });
+  $effect(() => {
+    const next = tabs.activeId();
+    untrack(() => {
+      if (next === shownActive) return;
+      selectionGlide.play(glideFrom, next);
+      glideFrom = null;
+      shownActive = next;
+    });
+  });
   let tree = $derived(sidebarTree(tabs.sidebarNodes(), tabs.tabs()));
+  let keptBeside = $derived(tree.favorites.slice(0, beside));
+  let keptAbove = $derived(tree.favorites.slice(beside));
   // The rail shows one flat list. Folders and split grouping are shapes that
   // need labels, so they stay in the expanded body.
   let railTabs = $derived(
@@ -139,9 +179,29 @@
               onSelect={selectTab}
             />{/snippet}
         </Dock>{:else}<Dock>
+          {#snippet above()}
+            <div
+              class="dock-sites"
+              data-essentials-drop
+              data-over={tabDrag.overEssentials()}
+              hidden={keptAbove.length === 0}
+            >
+              <TabList
+                entries={keptAbove}
+                section="favorites"
+                variant="essentials"
+                columns={dockColumns}
+                label={m.essentials()}
+                {splitting}
+                onSelect={selectTab}
+                >{#snippet essentialTile(props)}<EssentialTile {...props} />{/snippet}</TabList
+              >
+            </div>
+          {/snippet}
           {#snippet sites()}
             <div
               class="dock-sites"
+              bind:clientWidth={sitesWidth}
               data-essentials-drop
               data-over={tabDrag.overEssentials()}
               data-empty={tree.favorites.length === 0}
@@ -150,7 +210,7 @@
                   >{m.essential_drop_hint()}</span
                 >{/if}
               <TabList
-                entries={tree.favorites}
+                entries={keptBeside}
                 section="favorites"
                 variant="essentials"
                 label={m.essentials()}
@@ -214,44 +274,49 @@
   {/if}
   {#if browserPage.currentPage() !== null}
     <main class="internal-stage">
-      <RenderBoundary title={m.surface_render_failed()} retryLabel={m.surface_retry()}>
-        {#if browserPage.currentPage() === "settings"}
-          <LazyView
-            loader={loadSettings}
-            loadingLabel={m.surface_loading()}
-            failureLabel={m.surface_render_failed()}
-            retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
-          >
-        {:else if browserPage.currentPage() === "work"}
-          {#key tabs.profile()?.id}<LazyView
-              loader={loadWorkWorkspace}
-              loadingLabel={m.surface_loading()}
-              failureLabel={m.surface_render_failed()}
-              retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
-            >{/key}
-        {:else if browserPage.currentPage() === "tasks"}
-          <LazyView
-            loader={loadTasksPage}
-            loadingLabel={m.surface_loading()}
-            failureLabel={m.surface_render_failed()}
-            retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
-          >
-        {:else if browserPage.currentPage() === "history"}
-          <LazyView
-            loader={loadHistoryPage}
-            loadingLabel={m.surface_loading()}
-            failureLabel={m.surface_render_failed()}
-            retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
-          >
-        {:else}
-          <LazyView
-            loader={loadLibraryPage}
-            loadingLabel={m.surface_loading()}
-            failureLabel={m.surface_render_failed()}
-            retryLabel={m.surface_retry()}
-            >{#snippet children(View)}<View kind="downloads" />{/snippet}</LazyView
-          >{/if}
-      </RenderBoundary>
+      <!-- Each destination arrives as its own page: the ground settles in
+           while its content rises onto it. -->
+      {#key browserPage.currentPage()}<div class="stage-page">
+          <RenderBoundary title={m.surface_render_failed()} retryLabel={m.surface_retry()}>
+            {#if browserPage.currentPage() === "settings"}
+              <LazyView
+                loader={loadSettings}
+                loadingLabel={m.surface_loading()}
+                failureLabel={m.surface_render_failed()}
+                retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
+              >
+            {:else if browserPage.currentPage() === "work"}
+              {#key tabs.profile()?.id}<LazyView
+                  loader={loadWorkWorkspace}
+                  loadingLabel={m.surface_loading()}
+                  failureLabel={m.surface_render_failed()}
+                  retryLabel={m.surface_retry()}
+                  >{#snippet children(View)}<View />{/snippet}</LazyView
+                >{/key}
+            {:else if browserPage.currentPage() === "tasks"}
+              <LazyView
+                loader={loadTasksPage}
+                loadingLabel={m.surface_loading()}
+                failureLabel={m.surface_render_failed()}
+                retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
+              >
+            {:else if browserPage.currentPage() === "history"}
+              <LazyView
+                loader={loadHistoryPage}
+                loadingLabel={m.surface_loading()}
+                failureLabel={m.surface_render_failed()}
+                retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
+              >
+            {:else}
+              <LazyView
+                loader={loadLibraryPage}
+                loadingLabel={m.surface_loading()}
+                failureLabel={m.surface_render_failed()}
+                retryLabel={m.surface_retry()}
+                >{#snippet children(View)}<View kind="downloads" />{/snippet}</LazyView
+              >{/if}
+          </RenderBoundary>
+        </div>{/key}
     </main>
   {/if}
 </div>

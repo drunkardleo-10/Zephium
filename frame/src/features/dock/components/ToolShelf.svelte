@@ -33,7 +33,13 @@
   rail width a name has nowhere to go, so the stack is glyphs, each named by
   its tooltip.
 -->
-<div class="shelf" data-compact={compact} role="presentation" oncontextmenu={nativeMenu}>
+<div
+  class="shelf"
+  data-compact={compact}
+  data-morph="tools"
+  role="presentation"
+  oncontextmenu={nativeMenu}
+>
   <Disclosure
     label={m.dock_tools()}
     menu

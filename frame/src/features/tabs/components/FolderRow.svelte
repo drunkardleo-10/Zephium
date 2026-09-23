@@ -6,8 +6,10 @@
     depth,
     expanded = true,
     ontoggle,
+    motionKey,
     class: className = "",
   }: {
+    motionKey?: string;
     name: string;
     depth: number;
     expanded?: boolean;
@@ -16,7 +18,7 @@
   } = $props();
 </script>
 
-<li class={className}>
+<li class={className} data-motion-key={motionKey}>
   <button
     type="button"
     class="folder-row"

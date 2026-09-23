@@ -64,28 +64,37 @@
     translate: -50% 0;
   }
 
+  /* The expanded switch, condensed: its own ground, carrying only the name
+     of the side you are on, so at rail width it still reads as that switch
+     rather than as loose text or one more tab. */
   .mode-trigger-rail {
-    height: 26px;
-    padding-inline: 9px;
+    min-width: 44px;
+    height: 22px;
+    padding-inline: 7px;
     border: 0;
     border-radius: var(--radius-capsule);
-    background: transparent;
-    color: var(--color-muted);
+    background: var(--color-fill);
+    color: var(--color-label-secondary);
     font: inherit;
-    font-size: 13px;
-    font-weight: 550;
-    letter-spacing: -0.006em;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.005em;
     white-space: nowrap;
     cursor: default;
-    outline: none;
     transition:
       background-color var(--motion-fast) var(--ease-out),
-      color var(--motion-fast) var(--ease-out);
+      color var(--motion-fast) var(--ease-out),
+      scale var(--motion-slow) var(--ease-spring);
   }
 
   .mode-trigger-rail:hover {
-    background: var(--row-hover);
+    background: var(--color-fill-hover);
     color: var(--color-text);
+  }
+
+  .mode-trigger-rail:active {
+    scale: 0.95;
+    transition-duration: var(--motion-instant);
   }
 
   .mode-rail[data-work="true"] .mode-trigger-rail {
