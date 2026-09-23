@@ -131,6 +131,8 @@ fn main() {
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-airbnb-work" => work_durable::run_agent_airbnb(),
         #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-airbnb-listing-work" => work_durable::run_agent_listing(),
+        #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-product-details-work" => {
             work_durable::run_agent_details()
         }

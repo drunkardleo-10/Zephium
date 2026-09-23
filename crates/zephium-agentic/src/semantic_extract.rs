@@ -127,6 +127,7 @@ pub struct SemanticExtractionFieldSchema {
     name: String,
     required: bool,
     verbatim: bool,
+    document_address: bool,
     spec: SemanticExtractionFieldSpec,
 }
 
@@ -145,6 +146,7 @@ impl SemanticExtractionFieldSchema {
             name,
             required,
             verbatim: false,
+            document_address: false,
             spec: SemanticExtractionFieldSpec::Text { max_bytes },
         })
     }
@@ -163,6 +165,7 @@ impl SemanticExtractionFieldSchema {
             name,
             required,
             verbatim: false,
+            document_address: false,
             spec: SemanticExtractionFieldSpec::Url { max_bytes },
         })
     }
@@ -198,6 +201,7 @@ impl SemanticExtractionFieldSchema {
             name,
             required,
             verbatim: false,
+            document_address: false,
             spec: SemanticExtractionFieldSpec::Money { currencies },
         })
     }
@@ -220,6 +224,7 @@ impl SemanticExtractionFieldSchema {
             name,
             required,
             verbatim: false,
+            document_address: false,
             spec: SemanticExtractionFieldSpec::Boolean,
         })
     }
@@ -235,6 +240,7 @@ impl SemanticExtractionFieldSchema {
             name,
             required,
             verbatim: false,
+            document_address: false,
             spec: SemanticExtractionFieldSpec::Unsigned { maximum },
         })
     }
@@ -257,6 +263,7 @@ impl SemanticExtractionFieldSchema {
             name,
             required,
             verbatim: false,
+            document_address: false,
             spec: SemanticExtractionFieldSpec::TextList {
                 max_items,
                 max_item_bytes,
@@ -288,6 +295,7 @@ impl SemanticExtractionFieldSchema {
             name,
             required,
             verbatim: false,
+            document_address: false,
             spec: SemanticExtractionFieldSpec::Rows { fields, max_items },
         })
     }
@@ -322,6 +330,21 @@ impl SemanticExtractionFieldSchema {
     /// True for cells that Rust must copy without normalization or synthesis.
     pub const fn verbatim_text(&self) -> bool {
         self.verbatim
+    }
+
+    /// Marks a URL column whose value is the subject's own page address. It
+    /// may then cite the read's admitted document address, never page text.
+    pub fn with_document_address(mut self) -> Result<Self, SemanticExtractionSchemaError> {
+        if self.kind() != SemanticExtractionValueKind::Url {
+            return Err(SemanticExtractionSchemaError::DocumentAddressKind);
+        }
+        self.document_address = true;
+        Ok(self)
+    }
+
+    /// True for a URL column the read's own document address may answer.
+    pub const fn document_address(&self) -> bool {
+        self.document_address
     }
 
     /// Closed value shape for this field.
@@ -494,6 +517,9 @@ pub enum SemanticExtractionSchemaError {
     /// Only a text scalar can request exact copying; URLs already require exact sources.
     #[error("verbatim extraction requires a text field")]
     VerbatimKind,
+    /// Only a URL field can be answered by the read's own document address.
+    #[error("document address extraction requires a url field")]
+    DocumentAddressKind,
     /// Rows contain only scalar fields.
     #[error("nested extraction collection refused")]
     NestedCollection,
@@ -1561,7 +1587,19 @@ fn admit_value<'a>(
                 &raw_sources,
                 read,
                 crate::SemanticReadField::LinkDestination,
-            )?;
+            )
+            .or_else(|error| {
+                if field.document_address() {
+                    resolve_source_url(
+                        None,
+                        &raw_sources,
+                        read,
+                        crate::SemanticReadField::DocumentAddress,
+                    )
+                } else {
+                    Err(error)
+                }
+            })?;
             Ok(SemanticExtractedValue::Url(admit_text(
                 value,
                 *max_bytes,

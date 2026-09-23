@@ -572,7 +572,7 @@ fn hash_field(hasher: &mut Sha256, field: &crate::SemanticExtractionFieldSchema)
     hasher.update((field.name().len() as u64).to_be_bytes());
     hasher.update(field.name().as_bytes());
     hasher.update([u8::from(field.required())]);
-    hasher.update([u8::from(field.verbatim_text())]);
+    hasher.update([u8::from(field.verbatim_text()) | (u8::from(field.document_address()) << 1)]);
     hasher.update([match field.kind() {
         SemanticExtractionValueKind::Text => 1,
         SemanticExtractionValueKind::Url => 6,

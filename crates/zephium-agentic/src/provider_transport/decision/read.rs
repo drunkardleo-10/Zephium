@@ -7,11 +7,6 @@ use super::projection::{choice, DecisionObservationAnswers, DecisionProjectionEr
 use crate::*;
 
 const GENERATION_NEIGHBORS: usize = 2;
-/// Observations on which an optional column's value head must confidently
-/// answer none before the typed path publishes it as unknown: the first look
-/// and one after a re-observation, so a value merely below the first screen
-/// is still found.
-const ABSENT_OPTIONAL_OBSERVATIONS: u8 = 2;
 
 #[derive(Clone)]
 pub(super) struct ReadProjection {
@@ -68,6 +63,9 @@ impl ReadProjection {
     ) -> Result<(), DecisionProjectionError> {
         questions.insert("done".into(), self.completion_question());
         for (index, field) in self.columns.iter().enumerate() {
+            if field.document_address() {
+                continue;
+            }
             let candidates = observation
                 .frames()
                 .iter()
@@ -124,13 +122,8 @@ pub struct DecisionReadSelection {
     unresolved: Vec<usize>,
     /// Columns whose value head confidently answered none on this observation.
     absent: Vec<usize>,
-}
-
-/// One read's memory of optional columns the recommended backend found absent.
-#[derive(Default)]
-pub struct DecisionReadAbsence {
-    schema: Option<SemanticExtractionSchema>,
-    counts: Vec<u8>,
+    /// Native identities of the located nodes, to find them on a later look.
+    keys: Vec<Option<crate::semantic::SemanticNodeKey>>,
 }
 
 impl DecisionReadSelection {
@@ -152,38 +145,43 @@ impl DecisionReadSelection {
         self.targets.iter().filter(|target| target.is_some()).count()
     }
 
-    /// Records this observation's confident abstentions, once per decision
-    /// batch, and reports whether the read can finish now with every remaining
-    /// gap an optional column found absent on enough observations. Those
-    /// columns publish unknown; a required column never settles this way.
-    pub fn settle_absent(&self, absence: &mut DecisionReadAbsence) -> bool {
-        let columns = &self.projection.columns;
-        if absence.schema.as_ref() != Some(&self.projection.schema) {
-            absence.schema = Some(self.projection.schema.clone());
-            absence.counts = vec![0; columns.len()];
-        }
-        for (index, count) in absence.counts.iter_mut().enumerate() {
-            *count = if self.absent.contains(&index) {
-                count.saturating_add(1)
-            } else {
-                0
-            };
-        }
-        let settled = |index: usize, field: &SemanticExtractionFieldSchema| {
+    /// Whether this look completes the read except for optional columns whose
+    /// value head confidently answered none. Such a look finishes the read,
+    /// publishing those columns unknown, once a later look confirms each
+    /// absence; a required column never settles this way. An optional link or
+    /// picture may stay unsettled, exactly as the completion rule allows.
+    pub fn awaits_absence(&self) -> bool {
+        let optional_link = |field: &SemanticExtractionFieldSchema| {
             !field.required()
-                && (absence.counts[index] >= ABSENT_OPTIONAL_OBSERVATIONS
-                    || matches!(
-                        field.kind(),
-                        SemanticExtractionValueKind::Url | SemanticExtractionValueKind::ImageUrl
-                    ))
+                && matches!(
+                    field.kind(),
+                    SemanticExtractionValueKind::Url | SemanticExtractionValueKind::ImageUrl
+                )
         };
-        self.unresolved.is_empty()
+        !self.absent.is_empty()
+            && self.unresolved.iter().all(|index| {
+                self.projection.columns.get(*index).is_some_and(optional_link)
+            })
             && self.located() > 0
-            && columns
+            && self
+                .projection
+                .columns
                 .iter()
                 .zip(&self.targets)
                 .enumerate()
-                .all(|(index, (field, target))| target.is_some() || settled(index, field))
+                .all(|(index, (field, target))| {
+                    target.is_some()
+                        || field.document_address()
+                        || optional_link(field)
+                        || (!field.required() && self.absent.contains(&index))
+                })
+    }
+
+    /// Whether this later look, over the same schema, again finds absent every
+    /// column `earlier` is waiting on.
+    pub fn confirms_absence(&self, earlier: &Self) -> bool {
+        self.projection.schema == earlier.projection.schema
+            && earlier.absent.iter().all(|index| self.absent.contains(index))
     }
 }
 
@@ -280,6 +278,11 @@ impl DecisionObservationAnswers {
         let mut absent = Vec::new();
         let mut ready = true;
         for (index, field) in projection.columns.iter().enumerate() {
+            // The read's own admitted address answers this column at prepare.
+            if field.document_address() {
+                targets.push(None);
+                continue;
+            }
             let target = match self.results.take(&format!("locate_{index}")) {
                 Some(ResolvedDecision::Answer { answer, .. }) => match answer.value() {
                     AnswerValue::Choice { choice, .. } => Some(
@@ -312,12 +315,30 @@ impl DecisionObservationAnswers {
         // abstention means the value was not on this observation, which is the
         // case re-observation exists for.
         ready &= complete.unwrap_or_else(|| {
-            unresolved.is_empty() && targets.iter().all(Option::is_some)
+            unresolved.is_empty()
+                && projection
+                    .columns
+                    .iter()
+                    .zip(&targets)
+                    .all(|(field, target)| target.is_some() || field.document_address())
         });
         Ok(Some((
             DecisionReadSelection {
                 projection,
                 account,
+                keys: targets
+                    .iter()
+                    .map(|target| {
+                        target.and_then(|target| {
+                            observation
+                                .frames()
+                                .iter()
+                                .flat_map(SemanticSnapshot::nodes)
+                                .find(|node| node.reference() == target)
+                                .map(SemanticNode::key)
+                        })
+                    })
+                    .collect(),
                 targets,
                 unresolved,
                 absent,
@@ -359,13 +380,16 @@ impl DecisionReadSelection {
     }
 
     /// Builds dense fragment identities without changing native capture or disclosure policy.
+    /// `document` is the address the one-document gate admitted for this read;
+    /// only a column marked as the subject's own address may cite it.
     pub fn prepare<'a>(
         self,
         observation: &'a SemanticObservation,
         account: AgentContextAccountBinding,
         captured_at: SemanticCaptureInstant,
+        document: Option<&'a ContextNavigationTarget>,
     ) -> Result<DecisionLocatedRead<'a>, SemanticExtractionError> {
-        self.prepare_inner(observation, account, captured_at, false)
+        self.prepare_inner(observation, account, captured_at, document, false)
     }
 
     /// One focused completion of the columns the typed path could not settle.
@@ -376,11 +400,12 @@ impl DecisionReadSelection {
         observation: &'a SemanticObservation,
         account: AgentContextAccountBinding,
         captured_at: SemanticCaptureInstant,
+        document: Option<&'a ContextNavigationTarget>,
     ) -> Result<DecisionLocatedRead<'a>, SemanticExtractionError> {
         if self.unresolved.is_empty() || self.located() == 0 {
             return Err(SemanticExtractionError::ReadNotDelivered);
         }
-        self.prepare_inner(observation, account, captured_at, true)
+        self.prepare_inner(observation, account, captured_at, document, true)
     }
 
     fn prepare_inner<'a>(
@@ -388,6 +413,7 @@ impl DecisionReadSelection {
         observation: &'a SemanticObservation,
         account: AgentContextAccountBinding,
         captured_at: SemanticCaptureInstant,
+        document: Option<&'a ContextNavigationTarget>,
         completing: bool,
     ) -> Result<DecisionLocatedRead<'a>, SemanticExtractionError> {
         if self.account.account() != account.account()
@@ -425,15 +451,45 @@ impl DecisionReadSelection {
             }
         }
         all.extend(&generation_refs);
-        let read = crate::semantic_read::read_located_semantic_observation(
+        let document = document.filter(|_| {
+            self.projection
+                .columns
+                .iter()
+                .any(SemanticExtractionFieldSchema::document_address)
+        });
+        let read = crate::semantic_read::read_located_semantic_observation_at(
             observation,
             &self.baseline,
             captured_at,
             &self.projection.schema,
             &all,
+            document,
         )
         .map_err(|_| SemanticExtractionError::ReadNotDelivered)?;
         let mut copied = BTreeMap::new();
+        for field in self
+            .projection
+            .columns
+            .iter()
+            .filter(|field| field.document_address())
+        {
+            match read
+                .fragments()
+                .iter()
+                .find(|fragment| fragment.field() == SemanticReadField::DocumentAddress)
+            {
+                Some(fragment) => {
+                    copied.insert(
+                        field.name().to_owned(),
+                        json!({"k":"url","sources":[fragment.id().model_token()]}),
+                    );
+                }
+                None if field.required() => {
+                    return Err(SemanticExtractionError::MissingRequiredField)
+                }
+                None => {}
+            }
+        }
         for (field, target) in self.projection.columns.iter().zip(&self.targets) {
             let Some(target) = target.filter(|_| copy_only(field)) else {
                 continue;
@@ -491,6 +547,110 @@ impl DecisionReadSelection {
             read,
             copied,
             generation,
+        })
+    }
+}
+
+impl DecisionReadSelection {
+    /// Finishes a read from an earlier look whose absent optional columns a
+    /// later look confirmed. The result is bound to the current observation;
+    /// the earlier look's located values are cited from the evidence retained
+    /// when it was taken, and absent optional columns publish unknown. Only
+    /// exact copies are supported here: a generated column falls back.
+    pub fn prepare_confirmed<'a>(
+        self,
+        current: &'a SemanticObservation,
+        account: AgentContextAccountBinding,
+        captured_at: SemanticCaptureInstant,
+        document: Option<&'a ContextNavigationTarget>,
+        evidence: &'a SemanticRetainedReadEvidence,
+    ) -> Result<DecisionLocatedRead<'a>, SemanticExtractionError> {
+        if self.account.account() != account.account()
+            || self.account.context() != account.context()
+            || self.account.observed_at() > account.observed_at()
+            || self
+                .projection
+                .columns
+                .iter()
+                .zip(&self.targets)
+                .any(|(field, target)| target.is_some() && !copy_only(field))
+        {
+            return Err(SemanticExtractionError::ReadNotDelivered);
+        }
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            crate::semantic_diff::SemanticObservationFingerprint::from_observation(current),
+        );
+        let located: BTreeSet<_> = current
+            .frames()
+            .iter()
+            .flat_map(SemanticSnapshot::nodes)
+            .filter(|node| self.keys.contains(&Some(node.key())))
+            .map(SemanticNode::reference)
+            .collect();
+        let read = crate::semantic_read::read_located_semantic_observation_at(
+            current,
+            &baseline,
+            captured_at,
+            &self.projection.schema,
+            &located,
+            document,
+        )
+        .and_then(|read| evidence.merge_for_extraction(read))
+        .map_err(|_| SemanticExtractionError::ReadNotDelivered)?;
+        let mut copied = BTreeMap::new();
+        for (field, target) in self.projection.columns.iter().zip(&self.keys) {
+            let (sources, required): (&[SemanticReadField], _) = match (target, field.kind()) {
+                (_, _) if field.document_address() => {
+                    (&[SemanticReadField::DocumentAddress], None)
+                }
+                (Some(_), SemanticExtractionValueKind::Url) => {
+                    (&[SemanticReadField::LinkDestination], *target)
+                }
+                (Some(_), SemanticExtractionValueKind::ImageUrl) => {
+                    (&[SemanticReadField::ImageSource], *target)
+                }
+                (Some(_), _) => (
+                    &[
+                        SemanticReadField::VisibleText,
+                        SemanticReadField::TextValue,
+                        SemanticReadField::AccessibleName,
+                    ],
+                    *target,
+                ),
+                (None, _) => continue,
+            };
+            let fragment = sources.iter().find_map(|source| {
+                read.fragments().iter().find(|fragment| {
+                    fragment.field() == *source
+                        && required.is_none_or(|key| fragment.provenance().node_key() == key)
+                })
+            });
+            let Some(fragment) = fragment else {
+                if field.required() {
+                    return Err(SemanticExtractionError::MissingRequiredField);
+                }
+                continue;
+            };
+            if !fragment.provenance().fields_complete() {
+                return Err(SemanticExtractionError::VerbatimMismatch);
+            }
+            let token = fragment.id().model_token();
+            let value = match field.kind() {
+                SemanticExtractionValueKind::Url => json!({"k":"url","sources":[token]}),
+                SemanticExtractionValueKind::ImageUrl => json!({"k":"image_url","sources":[token]}),
+                _ => json!({"k":"text","sources":[token],"value":fragment
+                    .verbatim_text()
+                    .ok_or(SemanticExtractionError::VerbatimMismatch)?}),
+            };
+            copied.insert(field.name().to_owned(), value);
+        }
+        Ok(DecisionLocatedRead {
+            projection: self.projection,
+            baseline,
+            account,
+            read,
+            copied,
+            generation: None,
         })
     }
 }

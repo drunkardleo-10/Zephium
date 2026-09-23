@@ -62,6 +62,7 @@ enum Mode {
     AgentDetails,
     AgentTrip,
     AgentAirbnb,
+    AgentListing,
     AgentMoney,
     MoneyNode,
 }
@@ -104,6 +105,10 @@ pub(super) fn run_agent_trip() -> Result<(), super::ProbeFailure> {
 
 pub(super) fn run_agent_airbnb() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::AgentAirbnb)
+}
+
+pub(super) fn run_agent_listing() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentListing)
 }
 
 pub(super) fn run_agent_details() -> Result<(), super::ProbeFailure> {
@@ -194,6 +199,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentDetails
             | Mode::AgentTrip
             | Mode::AgentAirbnb
+            | Mode::AgentListing
             | Mode::AgentMoney
     ) {
         6
@@ -218,6 +224,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         | Mode::AgentDetails
         | Mode::AgentTrip
         | Mode::AgentAirbnb
+        | Mode::AgentListing
         | Mode::AgentMoney => 720,
         Mode::Public => 160,
         _ => 240,
@@ -446,6 +453,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentDetails
             | Mode::AgentTrip
             | Mode::AgentAirbnb
+            | Mode::AgentListing
             | Mode::AgentMoney
     ) {
         let execution = &state.executions[0];
@@ -537,6 +545,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         .count();
     let travel_accepted = match mode {
         Mode::AgentTrip => !airbnb_reads.is_empty(),
+        Mode::AgentListing => airbnb_listing_reads == 1,
         Mode::AgentAirbnb => {
             airbnb_listing_reads >= 3
                 && state.executions[0].artifacts.iter().any(|artifact| {
@@ -557,7 +566,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         }
         _ => true,
     };
-    if matches!(mode, Mode::AgentTrip | Mode::AgentAirbnb) {
+    if matches!(mode, Mode::AgentTrip | Mode::AgentAirbnb | Mode::AgentListing) {
         let _ = writeln!(
             std::io::stdout().lock(),
             "travel_qualification airbnb_reads={} listing_reads={} accepted={travel_accepted}",
@@ -613,6 +622,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             "agent-trip-run.json"
         } else if mode == Mode::AgentAirbnb {
             "agent-airbnb-run.json"
+        } else if mode == Mode::AgentListing {
+            "agent-airbnb-listing-run.json"
         } else if mode == Mode::AgentDetails {
             if collection_accepted {
                 "agent-details-run.json"
@@ -711,6 +722,7 @@ async fn workflow(
             | Mode::AgentDetails
             | Mode::AgentTrip
             | Mode::AgentAirbnb
+            | Mode::AgentListing
             | Mode::AgentMoney
             | Mode::AgentFiles
     ) {
@@ -1286,6 +1298,7 @@ async fn agent_workflow(
         Mode::AgentTrip => "Plan a trip from Poland to San Francisco for a YC batch as a solo founder; for flats check Airbnb. Use public sources for batch timing, travel logistics and practical accommodation tradeoffs, with cited findings. Read Airbnb itself before making any claim about its listings. Dates and budget are unspecified: state planning assumptions and leave live availability and total stay cost unknown unless the pages establish them. Do not book, submit forms, sign in, create accounts, send messages or interact with verification controls. Report blocked pages honestly.",
         Mode::AgentAirbnb => "Find three good Airbnb options in San Francisco for a solo founder attending a YC batch, compare and recommend one using cited public page evidence. Inspect Airbnb itself and observed listing links. Dates and budget are unspecified: state assumptions, distinguish nightly prices from total stay costs, and leave unavailable details unknown. Include observed pictures when available. Do not book, submit forms, sign in, create accounts, send messages or interact with verification controls. If access prevents three verified options, report that limitation instead of inventing options.",
         Mode::AgentMoney => AGENT_MONEY_OBJECTIVE,
+        Mode::AgentListing => "Read https://www.airbnb.com/rooms/23813739 in one browser read and collect this one listing: its name, displayed nightly price, displayed monthly total, stay dates or minimum stay, listing URL and picture. Dates are unspecified, so leave any value the page does not show unknown. Do not search, follow links, book, sign in or interact with verification controls.",
         Mode::AgentRead => AGENT_READ_OBJECTIVE,
         Mode::AgentGovernment | Mode::AgentHumanGovernment => AGENT_GOVERNMENT_OBJECTIVE,
         Mode::AgentDisclosure => "Read https://www.lego.com/en-us/product/tower-bridge-21067 in one browser assignment. Find the Specifications disclosure, bring it into view if needed, expand it, and inspect its revealed content. Return the product name, displayed price, piece count and exact dimensions with citations from this page. Do not follow links, buy, sign in, change locale, or substitute public search. Leave unsupported details unknown. Use one browser read assignment and a source-backed note.",

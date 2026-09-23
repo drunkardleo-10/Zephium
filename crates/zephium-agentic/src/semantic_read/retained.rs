@@ -23,7 +23,9 @@ fn extraction_priority(field: SemanticReadField, role: SemanticRole) -> u8 {
         {
             0
         }
-        SemanticReadField::LinkDestination | SemanticReadField::ImageSource => 1,
+        SemanticReadField::LinkDestination
+        | SemanticReadField::ImageSource
+        | SemanticReadField::DocumentAddress => 1,
         _ => 2,
     }
 }

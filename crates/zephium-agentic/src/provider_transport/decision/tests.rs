@@ -530,6 +530,7 @@ fn located_read_copies_exact_sources_and_discards_unused_speculative_fallback() 
             &observation,
             call.account(),
             SemanticCaptureInstant::from_millis(101),
+            None,
         )
         .unwrap();
     assert!(located.generation().is_none());
@@ -568,6 +569,7 @@ fn located_generation_is_focused_and_merges_only_exact_delivered_evidence() {
             &observation,
             call.account(),
             SemanticCaptureInstant::from_millis(101),
+            None,
         )
         .unwrap();
     let (generation_schema, read) = located.generation().unwrap();
@@ -721,6 +723,7 @@ fn located_form_values_copy_complete_public_values_without_substituting_labels()
             &observation,
             call.account(),
             SemanticCaptureInstant::from_millis(101),
+            None,
         );
         if truncated {
             assert!(matches!(
@@ -872,7 +875,7 @@ fn optional_values_still_need_inspection_before_a_typed_read_can_finish() {
 }
 
 #[test]
-fn an_optional_value_absent_on_two_observations_publishes_unknown_but_a_required_one_never_does() {
+fn an_optional_value_absent_on_a_confirming_look_publishes_unknown_but_a_required_one_never_does() {
     for required in [false, true] {
         let (call, observation, _, _) = located_fixture(false);
         let schema = SemanticExtractionSchema::try_new(
@@ -895,7 +898,8 @@ fn an_optional_value_absent_on_two_observations_publishes_unknown_but_a_required
         )
         .unwrap();
         let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
-        let mut absence = DecisionReadAbsence::default();
+        let mut earlier = None;
+        let mut evidence = SemanticRetainedReadEvidence::default();
         for look in 0..2 {
             let projection = DecisionObservation::try_for_read(
                 &observation,
@@ -923,19 +927,25 @@ fn an_optional_value_absent_on_two_observations_publishes_unknown_but_a_required
                     call.account(),
                     &schema,
                     SemanticCaptureInstant::from_millis(101),
-                    &mut SemanticRetainedReadEvidence::default(),
+                    &mut evidence,
                 )
                 .unwrap()
                 .unwrap();
             assert!(!ready);
-            let settled = selection.settle_absent(&mut absence);
-            assert_eq!(settled, look == 1 && !required, "look {look}");
-            if settled {
-                let result = selection
-                    .prepare(
+            assert_eq!(selection.awaits_absence(), !required, "look {look}");
+            let Some(first) = earlier.take() else {
+                earlier = Some(selection);
+                continue;
+            };
+            assert!(selection.confirms_absence(&first));
+            if !required {
+                let result = first
+                    .prepare_confirmed(
                         &observation,
                         call.account(),
                         SemanticCaptureInstant::from_millis(101),
+                        None,
+                        &evidence,
                     )
                     .unwrap()
                     .finish(None)
@@ -944,6 +954,129 @@ fn an_optional_value_absent_on_two_observations_publishes_unknown_but_a_required
                 assert_eq!(names, ["name"]);
             }
         }
+    }
+}
+
+#[test]
+fn an_own_address_column_cites_only_the_admitted_document_address() {
+    let (call, observation, _, _) = located_fixture(false);
+    let schema = |document_address: bool| {
+        let url = SemanticExtractionFieldSchema::try_url("listing_url".into(), true, 2048).unwrap();
+        SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![
+                SemanticExtractionFieldSchema::try_text("name".into(), true, 512)
+                    .unwrap()
+                    .with_verbatim_text()
+                    .unwrap(),
+                if document_address {
+                    url.with_document_address().unwrap()
+                } else {
+                    url
+                },
+            ],
+        )
+        .unwrap()
+    };
+    assert!(SemanticExtractionFieldSchema::try_text("name".into(), true, 8)
+        .unwrap()
+        .with_document_address()
+        .is_err());
+    let objective = AgentProviderObjective::try_admit_conservative_utf8(
+        "Read the listing name and its address".into(),
+        &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
+    )
+    .unwrap();
+    let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+    let own = ContextNavigationTarget::parse("https://example.test/rooms/42").unwrap();
+    let foreign = ContextNavigationTarget::parse("https://elsewhere.test/rooms/42").unwrap();
+    let run = |schema: &SemanticExtractionSchema, document: Option<&ContextNavigationTarget>| {
+        let projection = DecisionObservation::try_for_read(
+            &observation,
+            &objective,
+            &authority,
+            call.account(),
+            Some(schema),
+        )
+        .unwrap();
+        let asked = projection.request().questions().contains_key("locate_1");
+        let mut output = located_answers(&projection);
+        output["answers"]["done"]["noul"] = json!(0.5);
+        let response = projection
+            .request()
+            .decode_emulation(
+                &serde_json::to_vec(&output).unwrap(),
+                DecisionUsage::default(),
+            )
+            .unwrap();
+        let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+        let (selection, ready) = answers
+            .take_read_progress_retaining_evidence(
+                &observation,
+                call.account(),
+                schema,
+                SemanticCaptureInstant::from_millis(101),
+                &mut SemanticRetainedReadEvidence::default(),
+            )
+            .unwrap()
+            .unwrap();
+        let settled = ready;
+        let result = selection
+            .prepare(
+                &observation,
+                call.account(),
+                SemanticCaptureInstant::from_millis(101),
+                document,
+            )
+            .and_then(|located| located.finish(None));
+        (asked, settled, result.map(|result| {
+            let SemanticExtractedValue::Url(url) = result.fields()[1].value() else {
+                panic!("url");
+            };
+            url.as_str().to_owned()
+        }))
+    };
+    // No locate head is asked; the read finishes with the admitted address.
+    let (asked, settled, value) = run(&schema(true), Some(&own));
+    assert!(!asked && settled);
+    assert_eq!(value.unwrap(), "https://example.test/rooms/42");
+    // Without an admitted address, or with one off the page's origin, a
+    // required own-address column is not answered at all.
+    assert!(run(&schema(true), None).2.is_err());
+    assert!(run(&schema(true), Some(&foreign)).2.is_err());
+    // An ordinary url column never cites the document address.
+    let ack = SemanticObservationAcknowledgement::from_fingerprint(
+        crate::semantic_diff::SemanticObservationFingerprint::from_observation(&observation),
+    );
+    for (document_address, admitted) in [(true, true), (false, false)] {
+        let schema = schema(document_address);
+        let read = crate::semantic_read::read_located_semantic_observation_at(
+            &observation,
+            &ack,
+            SemanticCaptureInstant::from_millis(101),
+            &schema,
+            &std::collections::BTreeSet::new(),
+            Some(&own),
+        )
+        .unwrap();
+        let [fragment] = read.fragments() else {
+            panic!("one document address fragment");
+        };
+        assert_eq!(fragment.field(), SemanticReadField::DocumentAddress);
+        let output = json!({"v":1,"schema":1,"fields":[
+            {"name":"listing_url","value":{"k":"url","sources":[fragment.id().model_token()]}}
+        ]});
+        let listing = crate::semantic_extract::extract_semantic_read_inner(
+            &SemanticExtractionSchema::try_new(
+                SemanticExtractionSchemaId::new(1).unwrap(),
+                vec![schema.fields()[1].clone()],
+            )
+            .unwrap(),
+            &read,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&output).unwrap(),
+        );
+        assert_eq!(listing.is_ok(), admitted);
     }
 }
 
@@ -1080,6 +1213,7 @@ fn located_generation_requires_committed_decision_taint_and_admits_only_focused_
             &observation,
             call.account(),
             SemanticCaptureInstant::from_millis(101),
+            None,
         )
         .unwrap();
     let (schema, read) = located.generation().unwrap();
@@ -1181,6 +1315,7 @@ fn consumed_read_can_renew_the_same_account_but_cannot_change_scope_or_reverse_t
             &observation,
             account,
             SemanticCaptureInstant::from_millis(101),
+            None,
         );
         assert_eq!(prepared.is_ok(), mode == 0);
     }

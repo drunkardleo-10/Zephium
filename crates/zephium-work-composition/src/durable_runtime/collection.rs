@@ -27,6 +27,13 @@ impl TryFrom<&WorkBrowseCollection> for WorkBrowseCollectionSchema {
             name = name.with_verbatim_text().map_err(|_| WorkError::Invalid)?;
         }
         let mut fields = vec![name];
+        // A single-subject read is on that subject's own page: its subject URL
+        // column is the page's own address, which the read itself can cite.
+        let subject_url = request
+            .columns
+            .iter()
+            .find(|column| column.value == WorkBrowseValue::Url)
+            .map(|column| column.name.as_str());
         for column in &request.columns {
             let name = column.name.clone();
             let required = column.required;
@@ -49,6 +56,16 @@ impl TryFrom<&WorkBrowseCollection> for WorkBrowseCollectionSchema {
                 && column.value == WorkBrowseValue::Text
             {
                 field = field.with_verbatim_text().map_err(|_| WorkError::Invalid)?;
+            }
+            if request.max_items == 1
+                && column.value == WorkBrowseValue::Url
+                && (subject_url == Some(column.name.as_str())
+                    || matches!(
+                        column.name.as_str(),
+                        "listing_url" | "homepage" | "url" | "page_url"
+                    ))
+            {
+                field = field.with_document_address().map_err(|_| WorkError::Invalid)?;
             }
             fields.push(field);
         }
@@ -415,6 +432,11 @@ mod tests {
         assert_eq!(schema.fields[1].currencies().unwrap(), ["USD"]);
         assert_eq!(schema.subject_url_field.as_deref(), Some("product_url"));
         assert_eq!(schema.subject_image_fields, ["image"]);
+        assert!(!schema.fields[2].document_address());
+        let mut single = request.clone();
+        single.max_items = 1;
+        let single = WorkBrowseCollectionSchema::try_from(&single).unwrap();
+        assert!(single.fields[2].document_address());
         let mut invalid = request.clone();
         invalid.columns[0].name = "name".into();
         assert!(WorkBrowseCollectionSchema::try_from(&invalid).is_err());

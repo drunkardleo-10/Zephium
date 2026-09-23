@@ -122,6 +122,7 @@ impl AgentWorkArtifactPublication {
                                 SemanticReadField::OrdinalValue => 5,
                                 SemanticReadField::LinkDestination => 6,
                                 SemanticReadField::ImageSource => 7,
+                                SemanticReadField::DocumentAddress => 8,
                             },
                             context: identity.id().bytes(),
                             context_generation: source.frame.context().context_generation().get(),
@@ -164,7 +165,9 @@ impl AgentWorkArtifactPublication {
         };
         let fields = archive_fields(result.fields(), &mut cite)?;
         let document = ArchivedDocument {
-            version: if fields.iter().any(contains_money) {
+            version: if sources.values().any(|source| source.field == 8) {
+                7
+            } else if fields.iter().any(contains_money) {
                 6
             } else if sources.values().any(|source| source.field == 7) {
                 5
@@ -557,7 +560,7 @@ impl fmt::Debug for AgentWorkArchivedExtraction {
 impl ArchivedDocument {
     fn validate(&self) -> Result<(), AgentWorkJournalError> {
         let invalid = AgentWorkJournalError::Uncertain;
-        if !matches!(self.version, 1..=6)
+        if !matches!(self.version, 1..=7)
             || self.id == [0; 16]
             || self.schema == 0
             || self.observation == 0
@@ -648,7 +651,8 @@ impl ArchivedDocument {
                     source_bytes: original,
                     truncated,
                 } if (source.field == 6 && self.version >= 4 && source.role == "link")
-                    || (source.field == 7 && self.version >= 5 && source.role == "image") =>
+                    || (source.field == 7 && self.version >= 5 && source.role == "image")
+                    || (source.field == 8 && self.version >= 7 && source.role == "document") =>
                 {
                     if *truncated
                         || *original != value.len() as u64
@@ -726,7 +730,7 @@ impl ArchivedDocument {
                         let image = matches!(field.value, ArchivedValue::ImageUrl { .. });
                         if self.version < if image { 5 } else { 4 } || !crate::semantic_extract::exact_public_url(value)
                             || !sources.iter().any(|id| self.sources.iter().any(|source|
-                                source.id == *id && source.field == if image { 7 } else { 6 } && matches!(&source.content,
+                                source.id == *id && (source.field == if image { 7 } else { 6 } || (!image && source.field == 8)) && matches!(&source.content,
                                     ArchivedSourceContent::Preview { value: observed, .. } if observed == value))) {
                             return Err(invalid);
                         }

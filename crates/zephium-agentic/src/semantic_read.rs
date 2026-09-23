@@ -309,6 +309,9 @@ pub enum SemanticReadField {
     LinkDestination,
     /// Exact native-observed public image source.
     ImageSource,
+    /// The read's own document address as the one-document gate admitted it,
+    /// attributed to the main frame's document node; never text from the page.
+    DocumentAddress,
 }
 
 /// Non-actionable model-facing identity for one read fragment.
@@ -478,6 +481,11 @@ impl<'a> SemanticReadProvenance<'a> {
     /// Exact frame snapshot generation.
     pub const fn snapshot(self) -> SemanticSnapshotGeneration {
         self.snapshot
+    }
+
+    /// Native node identity, stable across looks at the same document.
+    pub(crate) const fn node_key(self) -> crate::semantic::SemanticNodeKey {
+        self.node_key
     }
 
     /// Opaque observation-local source reference.
@@ -841,6 +849,7 @@ pub fn read_selected_semantic_observation<'a>(
         roles,
         0,
         None,
+        None,
     )
 }
 
@@ -862,6 +871,7 @@ pub fn read_semantic_observation_for_schema<'a>(
         schema.source_roles(),
         schema.url_sources(),
         None,
+        None,
     )
 }
 
@@ -873,6 +883,27 @@ pub(crate) fn read_located_semantic_observation<'a>(
     schema: &crate::SemanticExtractionSchema,
     references: &std::collections::BTreeSet<SemanticReferenceId>,
 ) -> Result<SemanticReadResult<'a>, SemanticReadError> {
+    read_located_semantic_observation_at(
+        observation,
+        acknowledgement,
+        captured_at,
+        schema,
+        references,
+        None,
+    )
+}
+
+/// The same located read, plus the read's own admitted document address as
+/// one fragment of the main frame's public document node. The address must
+/// be an exact model-safe public URL on that frame's origin, or it is omitted.
+pub(crate) fn read_located_semantic_observation_at<'a>(
+    observation: &'a SemanticObservation,
+    acknowledgement: &SemanticObservationAcknowledgement,
+    captured_at: SemanticCaptureInstant,
+    schema: &crate::SemanticExtractionSchema,
+    references: &std::collections::BTreeSet<SemanticReferenceId>,
+    document: Option<&'a crate::ContextNavigationTarget>,
+) -> Result<SemanticReadResult<'a>, SemanticReadError> {
     read_projection(
         observation,
         SemanticReadAuthority::Acknowledged(acknowledgement),
@@ -882,6 +913,7 @@ pub(crate) fn read_located_semantic_observation<'a>(
         schema.source_roles(),
         schema.url_sources(),
         Some(references),
+        document,
     )
 }
 
@@ -895,6 +927,7 @@ fn read_projection<'a>(
     roles: SemanticReadRoleSelection,
     url_sources: u8,
     references: Option<&std::collections::BTreeSet<SemanticReferenceId>>,
+    document: Option<&'a crate::ContextNavigationTarget>,
 ) -> Result<SemanticReadResult<'a>, SemanticReadError> {
     let subtree = validate_authority(observation, authority)?;
     let mut builder = SemanticReadBuilder::new(observation, captured_at, budget, roles);
@@ -921,6 +954,9 @@ fn read_projection<'a>(
                 references.is_none_or(|references| references.contains(&node.reference())),
             );
         }
+    }
+    if let Some(document) = document {
+        builder.admit_document_address(document);
     }
     let mut read = builder.finish(subtree);
     read.focused |= references.is_some();
@@ -1181,6 +1217,33 @@ impl<'a> SemanticReadBuilder<'a> {
         }
     }
 
+    fn admit_document_address(&mut self, document: &'a crate::ContextNavigationTarget) {
+        let value = document.as_url().as_str();
+        let Some(snapshot) = self.observation.frames().first() else {
+            return;
+        };
+        let Some(node) = snapshot.nodes().first() else {
+            return;
+        };
+        if node.role() != SemanticRole::Document
+            || node.sensitivity() != SemanticSensitivity::Public
+            || !crate::semantic_extract::exact_public_url(value)
+            || document.as_url().origin() != snapshot.frame().origin().as_url().origin()
+        {
+            return;
+        }
+        self.admit(
+            snapshot,
+            node,
+            SemanticReadField::DocumentAddress,
+            SemanticReadContent::ValuePreview(SemanticValuePreview::retained(
+                value,
+                value.len(),
+                false,
+            )),
+        );
+    }
+
     fn admit(
         &mut self,
         snapshot: &'a crate::SemanticSnapshot,
@@ -1390,6 +1453,7 @@ const fn read_field_code(field: SemanticReadField) -> u8 {
         SemanticReadField::OrdinalValue => 5,
         SemanticReadField::LinkDestination => 6,
         SemanticReadField::ImageSource => 7,
+        SemanticReadField::DocumentAddress => 8,
     }
 }
 

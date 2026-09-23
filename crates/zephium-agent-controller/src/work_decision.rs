@@ -27,7 +27,13 @@ impl AgentWorkController {
     > {
         let mut unchanged = 0u8;
         let mut reobservations = 0u8;
-        let mut absence = zephium_agentic::DecisionReadAbsence::default();
+        let mut pending: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
+        // The address the one-document gate admitted, never one from page text.
+        let document = state
+            .native
+            .retained
+            .as_ref()
+            .map(|browser| browser.binding().document().clone());
         loop {
             state.check_task_contract()?;
             state.native.check_control(worker, browser)?;
@@ -74,6 +80,7 @@ impl AgentWorkController {
                 break;
             };
             let mut gap: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
+            let mut candidate: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
             if let Some(schema) = state.extraction_schema.clone() {
                 let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
                 if let Some((selection, ready)) = answers
@@ -86,21 +93,46 @@ impl AgentWorkController {
                     )
                     .map_err(AgentWorkFailure::DecisionRead)?
                 {
-                    // An optional column found absent on two observations
-                    // publishes unknown; only a required one needs the planner.
-                    if selection.settle_absent(&mut absence) || ready {
+                    // A look that located everything except optional values it
+                    // confidently found absent finishes once a later look
+                    // confirms each absence; those columns publish unknown.
+                    // A required column never settles this way.
+                    let confirmed =
+                        pending.take_if(|earlier| !ready && selection.confirms_absence(earlier));
+                    if ready || confirmed.is_some() {
                         state.refresh_account(worker, browser)?;
                         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                        // The earlier look's values come from the evidence it
+                        // retained, cited under the current observation.
+                        let evidence = std::mem::take(&mut state.retained_read_evidence);
+                        let prepared = match confirmed {
+                            Some(earlier) => earlier.prepare_confirmed(
+                                &observation,
+                                session.account,
+                                captured_at,
+                                document.as_ref(),
+                                &evidence,
+                            ),
+                            None => selection.prepare(
+                                &observation,
+                                session.account,
+                                captured_at,
+                                document.as_ref(),
+                            ),
+                        };
                         // A clipped or unavailable exact source leaves the normal planner available.
-                        let located =
-                            match selection.prepare(&observation, session.account, captured_at) {
-                                Ok(located) => located,
-                                Err(_) => break,
-                            };
+                        let located = match prepared {
+                            Ok(located) => located,
+                            Err(_) => {
+                                state.retained_read_evidence = evidence;
+                                break;
+                            }
+                        };
                         // Boxed: the read loop's future must stay well inside the
                         // runtime worker's stack.
                         Box::pin(Self::finish_located_read(state, worker, browser, located))
                             .await?;
+                        state.retained_read_evidence = evidence;
                         return Ok((
                             observation,
                             captured_at,
@@ -108,7 +140,11 @@ impl AgentWorkController {
                             false,
                         ));
                     }
-                    gap = Some(Box::new(selection));
+                    if selection.awaits_absence() {
+                        candidate = Some(Box::new(selection));
+                    } else {
+                        gap = Some(Box::new(selection));
+                    }
                 }
             }
             let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
@@ -149,7 +185,7 @@ impl AgentWorkController {
                 None => {
                     let reobserve = actionable
                         && reobservations < MAX_READ_REOBSERVATIONS
-                        && gap.is_some();
+                        && (gap.is_some() || candidate.is_some() || pending.is_some());
                     let scroll = if reobserve {
                         answers
                             .take_reobservation_scroll(&observation, session.account)
@@ -180,6 +216,7 @@ impl AgentWorkController {
                                     &observation,
                                     session.account,
                                     captured_at,
+                                    document.as_ref(),
                                 ) {
                                     Ok(located) => located,
                                     Err(_) => break,
@@ -269,6 +306,9 @@ impl AgentWorkController {
             };
             state.task.accept_verified_action(batch, &current)?;
             observation = current;
+            if let Some(selection) = candidate.take() {
+                pending = Some(selection);
+            }
             captured_at = at;
             progress = state.task_progress(&observation)?;
             if unchanged >= MAX_UNCHANGED_DECISION_OBSERVATIONS {
