@@ -70,6 +70,7 @@
   } from "../lib/project-environment";
   import { environmentRequests, environmentStages } from "../lib/project-environment-thread";
   import { failureLine, humanPage, regionOf, sameRegion } from "../lib/work-human";
+  import type { PaneRect } from "../lib/pane-geometry";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
   import { subjectImageCandidates, subjectsOf } from "../lib/subjects";
   import { environmentResults, type ResultReference } from "../lib/project-environment-results";
@@ -405,20 +406,14 @@
     }
     if (page || takeoverSeen) untrack(() => endTakeover(false));
   });
-  function takeoverRegion(box: WorkPaneRect | null) {
+  function takeoverRegion(box: PaneRect | null) {
     const current = takeover;
     if (!current) return;
-    const region =
-      box &&
-      box.x !== null &&
-      box.y !== null &&
-      box.width !== null &&
-      box.height !== null &&
-      regionOf(
-        { x: box.x, y: box.y, width: box.width, height: box.height },
-        { width: window.innerWidth, height: window.innerHeight },
-      );
-    const next = region || null;
+    const next = box
+      ? regionOf(box, { width: window.innerWidth, height: window.innerHeight })
+      : null;
+    // A well Rust would refuse says so rather than waiting on a view forever.
+    if (box && !next) takeoverError = failureLine("invalid");
     if (sameRegion(next, takeoverSent)) return;
     const sent = takeoverSent;
     takeoverSent = next;
