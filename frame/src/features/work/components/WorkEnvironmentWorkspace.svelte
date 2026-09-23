@@ -404,7 +404,10 @@
       takeoverSeen = true;
       return;
     }
-    if (page || takeoverSeen) untrack(() => endTakeover(false));
+    // A settled phase means the agent already has it; a page that vanished
+    // from the projection is unknown, so its view is released to be sure.
+    if (page) untrack(() => endTakeover(false));
+    else if (takeoverSeen) untrack(() => endTakeover(true));
   });
   function takeoverRegion(box: PaneRect | null) {
     const current = takeover;
