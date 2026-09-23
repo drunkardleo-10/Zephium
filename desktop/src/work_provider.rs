@@ -651,11 +651,28 @@ fn record_browser_diagnostic(event: zephium_agent_controller::AgentWorkEventKind
                     counts[0], counts[1], counts[2], counts[3],
                 ));
             }
-            record_diagnostic(format_args!(
-                "work: phase=decision_fallback_purpose challenge={} action={} locate={} picture={} relevance={} wall={} completion={} score={}",
-                purposes[0], purposes[1], purposes[2], purposes[3],
-                purposes[4], purposes[5], purposes[6], purposes[7],
-            ));
+            // Declaration order of DecisionPurpose; a slot past it is still printed.
+            const PURPOSES: [&str; 10] = [
+                "challenge",
+                "action",
+                "locate",
+                "picture",
+                "relevance",
+                "wall",
+                "completion",
+                "score",
+                "navigation",
+                "evidence",
+            ];
+            let mut line = String::new();
+            for (index, count) in purposes.iter().enumerate() {
+                use std::fmt::Write;
+                let _ = match PURPOSES.get(index) {
+                    Some(purpose) => write!(line, " {purpose}={count}"),
+                    None => write!(line, " purpose_{index}={count}"),
+                };
+            }
+            record_diagnostic(format_args!("work: phase=decision_fallback_purpose{line}"));
         }
         event => record_diagnostic(format_args!("work: phase=agent_browser event={event:?}")),
     }
