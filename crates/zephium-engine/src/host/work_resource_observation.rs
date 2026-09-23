@@ -617,8 +617,10 @@ impl EngineHost {
 }
 
 fn admitted_observation_budget(budget: zephium_agentic::SemanticRuntimeBudget) -> bool {
-    budget == zephium_agentic::SemanticRuntimeBudget::INITIAL_FILTERED
-        || budget == zephium_agentic::SemanticRuntimeBudget::INITIAL_FILTERED.with_link_url_state()
+    use zephium_agentic::SemanticRuntimeBudget as Budget;
+    [Budget::INITIAL_FILTERED, Budget::WHOLE_PAGE]
+        .into_iter()
+        .any(|profile| budget == profile || budget == profile.with_link_url_state())
 }
 fn presentation_failure(state: PresentationState) -> SemanticRuntimePortFailure {
     match state {
@@ -640,6 +642,7 @@ mod tests {
         assert!(admitted_observation_budget(
             SemanticRuntimeBudget::INITIAL_FILTERED.with_link_url_state()
         ));
+        assert!(admitted_observation_budget(SemanticRuntimeBudget::WHOLE_PAGE));
         assert!(!admitted_observation_budget(
             SemanticRuntimeBudget::try_new(64, 4096, 16 * 1024, 4096, false).unwrap()
         ));

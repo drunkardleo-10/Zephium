@@ -25,12 +25,14 @@ pub(super) struct ObservationJoin {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkBrowserObservationCapability {
     runtime_budget: SemanticRuntimeBudget,
+    observation_budget: SemanticObservationBudget,
 }
 
 impl WorkBrowserObservationCapability {
     /// Conservative observation with no query/fragment projection.
     pub const RESTRICTED: Self = Self {
         runtime_budget: SemanticRuntimeBudget::INITIAL_FILTERED,
+        observation_budget: SemanticObservationBudget::INITIAL_FILTERED,
     };
 
     /// Derives the exact observation capability from frozen trusted discovery.
@@ -38,15 +40,35 @@ impl WorkBrowserObservationCapability {
         if discovery.is_some_and(AgentNavigationDiscovery::is_production) {
             Self {
                 runtime_budget: SemanticRuntimeBudget::INITIAL_FILTERED.with_link_url_state(),
+                ..Self::RESTRICTED
             }
         } else {
             Self::RESTRICTED
         }
     }
 
+    /// The same capability with a larger node and text budget, for a trusted
+    /// whole-page findings schema only: most of a long document in one look,
+    /// so one typed batch can locate its evidence. Disclosure is unchanged.
+    pub fn for_whole_page_read(self) -> Self {
+        Self {
+            runtime_budget: if self.runtime_budget.includes_link_url_state() {
+                SemanticRuntimeBudget::WHOLE_PAGE.with_link_url_state()
+            } else {
+                SemanticRuntimeBudget::WHOLE_PAGE
+            },
+            observation_budget: SemanticObservationBudget::WHOLE_PAGE,
+        }
+    }
+
     /// Exact runtime budget authorized by this closed capability.
     pub const fn runtime_budget(self) -> SemanticRuntimeBudget {
         self.runtime_budget
+    }
+
+    /// Exact assembled-observation budget authorized by this capability.
+    pub const fn observation_budget(self) -> SemanticObservationBudget {
+        self.observation_budget
     }
 }
 
@@ -356,20 +378,10 @@ impl WorkBrowserResources {
                 return Err(WorkBrowserResourceError::Stale);
             }
             previous
-                .begin_expansion(
-                    id,
-                    target,
-                    &frame,
-                    kind,
-                    SemanticObservationBudget::INITIAL_FILTERED,
-                )
+                .begin_expansion(id, target, &frame, kind, capability.observation_budget())
                 .map_err(|_| WorkBrowserResourceError::Stale)?
         } else {
-            SemanticObservationRequest::initial(
-                id,
-                context,
-                SemanticObservationBudget::INITIAL_FILTERED,
-            )
+            SemanticObservationRequest::initial(id, context, capability.observation_budget())
         };
         let invocation = encode_semantic_runtime_invocation(
             &observation,

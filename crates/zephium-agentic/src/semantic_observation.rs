@@ -98,6 +98,13 @@ impl SemanticObservationBudget {
         max_frames: 4,
     };
 
+    /// Matches the whole-page runtime budget for one findings read.
+    pub const WHOLE_PAGE: Self = Self {
+        max_nodes: 320,
+        max_text_bytes: 32 * 1024,
+        max_frames: 4,
+    };
+
     /// Validates nonzero ceilings under the process-wide hard limits.
     pub const fn try_new(
         max_nodes: u16,

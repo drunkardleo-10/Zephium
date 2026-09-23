@@ -498,6 +498,13 @@ impl SemanticExtractionSchema {
     pub fn fields(&self) -> &[SemanticExtractionFieldSchema] {
         &self.fields
     }
+
+    /// One generated text list and nothing else: cited findings about the
+    /// whole page rather than values of a subject.
+    pub fn is_whole_page_findings(&self) -> bool {
+        matches!(self.fields.as_slice(), [field]
+            if field.kind() == SemanticExtractionValueKind::TextList && !field.verbatim_text())
+    }
 }
 
 impl fmt::Debug for SemanticExtractionSchema {

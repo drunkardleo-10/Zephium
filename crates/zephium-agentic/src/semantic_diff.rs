@@ -599,6 +599,25 @@ impl SemanticObservationAcknowledgement {
         Self { fingerprint }
     }
 
+    /// Rust's own baseline for a code-owned capture of this whole document,
+    /// with no provider in between: the main frame's document root, when the
+    /// observation has one. It grants no action or model authority.
+    pub fn whole_page_scope(
+        observation: &SemanticObservation,
+    ) -> Option<(Self, crate::SemanticReferenceId)> {
+        let root = observation
+            .frames()
+            .first()?
+            .nodes()
+            .first()
+            .filter(|node| node.role() == crate::SemanticRole::Document)?
+            .reference();
+        Some((
+            Self::from_fingerprint(SemanticObservationFingerprint::from_observation(observation)),
+            root,
+        ))
+    }
+
     pub(crate) fn matches(&self, observation: &SemanticObservation) -> bool {
         self.fingerprint == SemanticObservationFingerprint::from_observation(observation)
     }

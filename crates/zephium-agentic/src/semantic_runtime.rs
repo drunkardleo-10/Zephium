@@ -178,6 +178,16 @@ impl SemanticRuntimeBudget {
         include_link_url_state: false,
     };
 
+    /// A whole-page findings read: most of a long document in one look.
+    pub const WHOLE_PAGE: Self = Self {
+        max_nodes: 320,
+        max_text_bytes: 32 * 1024,
+        max_wire_bytes: 128 * 1024,
+        max_visited_nodes: 16 * 1024,
+        include_geometry: true,
+        include_link_url_state: false,
+    };
+
     /// Validates hard per-frame resource ceilings.
     pub const fn try_new(
         max_nodes: u16,

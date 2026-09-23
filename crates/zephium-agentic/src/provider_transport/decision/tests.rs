@@ -647,6 +647,87 @@ fn located_generation_is_focused_and_merges_only_exact_delivered_evidence() {
 }
 
 #[test]
+fn a_whole_page_findings_read_generates_from_ranked_evidence_or_leaves_the_planner() {
+    let (call, observation, _, _) = located_fixture(false);
+    let schema = SemanticExtractionSchema::try_new(
+        SemanticExtractionSchemaId::new(1).unwrap(),
+        vec![SemanticExtractionFieldSchema::try_text_list("output_0".into(), true, 16, 1024).unwrap()],
+    )
+    .unwrap();
+    assert!(schema.is_whole_page_findings());
+    let objective = AgentProviderObjective::try_admit_conservative_utf8(
+        "List what this page says about the product".into(),
+        &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
+    )
+    .unwrap();
+    for relevant in [0.9, 0.1] {
+        let projection = DecisionObservation::try_for_read(
+            &observation,
+            &objective,
+            &AgentProviderActionAuthority::try_new(&observation, &[]).unwrap(),
+            call.account(),
+            Some(&schema),
+        )
+        .unwrap();
+        assert!(!projection.request().questions().contains_key("locate_0"));
+        let mut body = fixture_answers(projection.request());
+        body["answers"]["any_0"] = json!({"type":"noul","noul":relevant});
+        let Question::Choice { criteria, .. } = &projection.request().questions()["find_0"] else {
+            panic!("choice expected");
+        };
+        let probabilities: BTreeMap<_, _> = criteria
+            .keys()
+            .map(|key| {
+                let probability = match key.as_str() {
+                    "@a5" => 0.5,
+                    "@a6" => 0.3,
+                    "@a8" => 0.03,
+                    "none" => 0.17,
+                    _ => 0.0,
+                };
+                (key.clone(), probability)
+            })
+            .collect();
+        body["answers"]["find_0"] = json!({"type":"choice","choice":"@a5","confidence":0.5,"probabilities":probabilities});
+        let response = projection
+            .request()
+            .decode_emulation(&serde_json::to_vec(&body).unwrap(), DecisionUsage::default())
+            .unwrap();
+        let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        let (selection, ready) = answers
+            .take_read_progress_retaining_evidence(
+                &observation,
+                call.account(),
+                &schema,
+                SemanticCaptureInstant::from_millis(101),
+                &mut evidence,
+            )
+            .unwrap()
+            .unwrap();
+        if relevant < 0.5 {
+            // Nothing located: the page planner reads this page.
+            assert!(!ready && selection.located() == 0);
+            continue;
+        }
+        assert!(ready && selection.located() == 2);
+        let located = selection
+            .prepare(&observation, call.account(), SemanticCaptureInstant::from_millis(101), None)
+            .unwrap();
+        let (generation_schema, read) = located.generation().unwrap();
+        assert_eq!(generation_schema.fields()[0].name(), "output_0");
+        let texts: Vec<_> = read
+            .fragments()
+            .iter()
+            .filter_map(|fragment| fragment.content().text().map(|text| text.as_str().to_owned()))
+            .collect();
+        assert!(texts.iter().any(|text| text == "Product description"));
+        assert!(texts.iter().any(|text| text == "Nearby evidence"));
+        assert!(!texts.iter().any(|text| text == "Unrelated footer" || text == "$349.99"));
+    }
+}
+
+#[test]
 fn located_form_values_copy_complete_public_values_without_substituting_labels() {
     for (name, value, sensitivity, offered, truncated) in [
         (None, "Warsaw".to_owned(), "public", true, false),
