@@ -43,6 +43,21 @@ fn admitted_fixture_with_actions(
     SemanticObservation,
     DecisionObservation,
 ) {
+    admitted_fixture_with_nodes(if actions {
+        json!([{"k":1,"r":"document","o":16},{"k":2,"p":0,"r":"button","n":"Details","o":1}])
+    } else {
+        json!([{"k":1,"r":"document"}])
+    })
+}
+
+fn admitted_fixture_with_nodes(
+    nodes: Value,
+) -> (
+    AgentRunPolicy,
+    AgentModelCallRequest,
+    SemanticObservation,
+    DecisionObservation,
+) {
     let identity = ContextIdentity::new(
         ContextId::from_raw(11),
         ContextRunId::from_raw(12),
@@ -73,11 +88,6 @@ fn admitted_fixture_with_actions(
         SemanticFrameTrust::SameOrigin,
     )
     .unwrap();
-    let nodes = if actions {
-        json!([{"k":1,"r":"document","o":16},{"k":2,"p":0,"r":"button","n":"Details","o":1}])
-    } else {
-        json!([{"k":1,"r":"document"}])
-    };
     let snapshot = decode_semantic_snapshot(
         SemanticDecodeContext::new(
             SemanticInvocationId::new(1).unwrap(),
@@ -1625,8 +1635,11 @@ async fn dropping_dispatched_emulation_retains_receipts_and_seals_its_shared_tra
 }
 
 #[test]
-fn fallback_projection_preserves_binding_and_only_repeats_uncertain_heads() {
+fn fallback_projection_preserves_binding_and_only_repeats_unanswered_heads() {
+    // An answered but uncertain head is never emulated; its question is left
+    // to re-observation, a recipe or the planner.
     let (_, call, observation, projection) = admitted_fixture();
+    let account = call.account();
     let mut body = fixture_answers(projection.request());
     body["answers"]["challenge"]["noul"] = json!(0.5);
     let primary = projection
@@ -1637,7 +1650,29 @@ fn fallback_projection_preserves_binding_and_only_repeats_uncertain_heads() {
         )
         .unwrap();
     let fallback = projection.route(Ok(primary)).unwrap();
-    assert_eq!(fallback.fallback_counts(), [[0, 0, 0, 1], [0; 4], [0; 4]]);
+    assert!(fallback.projection().is_none());
+    assert_eq!(
+        fallback
+            .finish(None)
+            .take_challenge(&observation, account)
+            .unwrap(),
+        None
+    );
+    let (_, call, observation, projection) = admitted_fixture();
+    let mut body = fixture_answers(projection.request());
+    body["answers"]
+        .as_object_mut()
+        .unwrap()
+        .remove("challenge");
+    let primary = projection
+        .request()
+        .decode_emulation(
+            &serde_json::to_vec(&body).unwrap(),
+            DecisionUsage::default(),
+        )
+        .unwrap();
+    let fallback = projection.route(Ok(primary)).unwrap();
+    assert_eq!(fallback.fallback_counts(), [[0, 0, 1, 0], [0; 4], [0; 4]]);
     let subset = fallback.projection().unwrap();
     assert_eq!(subset.question_count(), 1);
     assert!(subset.matches(&observation, call.account()));
@@ -1677,6 +1712,41 @@ fn fallback_projection_preserves_binding_and_only_repeats_uncertain_heads() {
             .unwrap(),
         None
     );
+}
+
+#[test]
+fn a_small_read_only_navigation_acts_at_the_measured_threshold_and_a_transaction_does_not() {
+    for (name, acts) in [("Continue", true), ("Buy now", false)] {
+        let (_, call, observation, projection) = admitted_fixture_with_nodes(
+            json!([{"k":1,"r":"document"},{"k":2,"p":0,"r":"button","n":name,"o":1}]),
+        );
+        let mut body = fixture_answers(projection.request());
+        for key in ["operation", "click_target"] {
+            let Question::Choice { criteria, .. } = &projection.request().questions()[key] else {
+                panic!("choice expected");
+            };
+            let selection = if key == "operation" {
+                "click".to_owned()
+            } else {
+                criteria.keys().find(|key| key.as_str() != "none").unwrap().clone()
+            };
+            let probabilities: BTreeMap<_, _> = criteria
+                .keys()
+                .map(|key| (key.clone(), if *key == selection { 0.75 } else { 0.25 / (criteria.len() - 1) as f64 }))
+                .collect();
+            body["answers"][key] = json!({"type":"choice","choice":selection,"confidence":0.75,"probabilities":probabilities});
+        }
+        let response = projection
+            .request()
+            .decode_emulation(&serde_json::to_vec(&body).unwrap(), DecisionUsage::default())
+            .unwrap();
+        let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+        assert_eq!(
+            answers.take_operation(&observation, call.account()).unwrap(),
+            acts.then(|| DecisionOperation::Click(observation.frames()[0].nodes()[1].reference())),
+            "{name}"
+        );
+    }
 }
 
 #[test]
