@@ -7,6 +7,11 @@ use super::projection::{choice, DecisionObservationAnswers, DecisionProjectionEr
 use crate::*;
 
 const GENERATION_NEIGHBORS: usize = 2;
+/// Observations on which an optional column's value head must confidently
+/// answer none before the typed path publishes it as unknown: the first look
+/// and one after a re-observation, so a value merely below the first screen
+/// is still found.
+const ABSENT_OPTIONAL_OBSERVATIONS: u8 = 2;
 
 #[derive(Clone)]
 pub(super) struct ReadProjection {
@@ -117,6 +122,15 @@ pub struct DecisionReadSelection {
     /// Columns whose value head never settled at threshold. They are never
     /// copied verbatim; only a focused generation call may still answer them.
     unresolved: Vec<usize>,
+    /// Columns whose value head confidently answered none on this observation.
+    absent: Vec<usize>,
+}
+
+/// One read's memory of optional columns the recommended backend found absent.
+#[derive(Default)]
+pub struct DecisionReadAbsence {
+    schema: Option<SemanticExtractionSchema>,
+    counts: Vec<u8>,
 }
 
 impl DecisionReadSelection {
@@ -136,6 +150,40 @@ impl DecisionReadSelection {
     /// Columns whose value node the primary backend located.
     pub fn located(&self) -> usize {
         self.targets.iter().filter(|target| target.is_some()).count()
+    }
+
+    /// Records this observation's confident abstentions, once per decision
+    /// batch, and reports whether the read can finish now with every remaining
+    /// gap an optional column found absent on enough observations. Those
+    /// columns publish unknown; a required column never settles this way.
+    pub fn settle_absent(&self, absence: &mut DecisionReadAbsence) -> bool {
+        let columns = &self.projection.columns;
+        if absence.schema.as_ref() != Some(&self.projection.schema) {
+            absence.schema = Some(self.projection.schema.clone());
+            absence.counts = vec![0; columns.len()];
+        }
+        for (index, count) in absence.counts.iter_mut().enumerate() {
+            *count = if self.absent.contains(&index) {
+                count.saturating_add(1)
+            } else {
+                0
+            };
+        }
+        let settled = |index: usize, field: &SemanticExtractionFieldSchema| {
+            !field.required()
+                && (absence.counts[index] >= ABSENT_OPTIONAL_OBSERVATIONS
+                    || matches!(
+                        field.kind(),
+                        SemanticExtractionValueKind::Url | SemanticExtractionValueKind::ImageUrl
+                    ))
+        };
+        self.unresolved.is_empty()
+            && self.located() > 0
+            && columns
+                .iter()
+                .zip(&self.targets)
+                .enumerate()
+                .all(|(index, (field, target))| target.is_some() || settled(index, field))
     }
 }
 
@@ -229,6 +277,7 @@ impl DecisionObservationAnswers {
         };
         let mut targets = Vec::new();
         let mut unresolved = Vec::new();
+        let mut absent = Vec::new();
         let mut ready = true;
         for (index, field) in projection.columns.iter().enumerate() {
             let target = match self.results.take(&format!("locate_{index}")) {
@@ -240,7 +289,10 @@ impl DecisionObservationAnswers {
                     ),
                     _ => return Err(DecisionProjectionError::Authority),
                 },
-                Some(ResolvedDecision::Abstained { .. }) => None,
+                Some(ResolvedDecision::Abstained { .. }) => {
+                    absent.push(index);
+                    None
+                }
                 _ => {
                     unresolved.push(index);
                     None
@@ -268,6 +320,7 @@ impl DecisionObservationAnswers {
                 account,
                 targets,
                 unresolved,
+                absent,
                 baseline: SemanticObservationAcknowledgement::from_fingerprint(
                     crate::semantic_diff::SemanticObservationFingerprint::from_observation(
                         observation,

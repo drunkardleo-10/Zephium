@@ -644,8 +644,8 @@ pub use provider_transport::decision::{
     AdmittedDecisionOutput, DecisionActionSelection, DecisionBackendKind, DecisionCallAccounting,
     DecisionCallDiagnostic, DecisionCallFailure, DecisionCallOutput, DecisionEnvelopeFacts,
     DecisionEnvelopeFailure, DecisionLocatedRead, DecisionObservation, DecisionObservationAnswers,
-    DecisionObservationFallback, DecisionOperation, DecisionProjectionError, DecisionReadSelection,
-    JevDecisionClient, OpenAiDecisionCall, OpenAiDecisionClient,
+    DecisionObservationFallback, DecisionOperation, DecisionProjectionError, DecisionReadAbsence,
+    DecisionReadSelection, JevDecisionClient, OpenAiDecisionCall, OpenAiDecisionClient,
 };
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};

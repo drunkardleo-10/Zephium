@@ -872,6 +872,82 @@ fn optional_values_still_need_inspection_before_a_typed_read_can_finish() {
 }
 
 #[test]
+fn an_optional_value_absent_on_two_observations_publishes_unknown_but_a_required_one_never_does() {
+    for required in [false, true] {
+        let (call, observation, _, _) = located_fixture(false);
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![
+                SemanticExtractionFieldSchema::try_text("name".into(), true, 512)
+                    .unwrap()
+                    .with_verbatim_text()
+                    .unwrap(),
+                SemanticExtractionFieldSchema::try_text("monthly_total".into(), required, 512)
+                    .unwrap()
+                    .with_verbatim_text()
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Read the listing name and its displayed monthly total".into(),
+            &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
+        )
+        .unwrap();
+        let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        let mut absence = DecisionReadAbsence::default();
+        for look in 0..2 {
+            let projection = DecisionObservation::try_for_read(
+                &observation,
+                &objective,
+                &authority,
+                call.account(),
+                Some(&schema),
+            )
+            .unwrap();
+            let mut output = located_answers(&projection);
+            output["answers"]["done"]["noul"] = json!(0.01);
+            output["answers"]["locate_1"] =
+                fixture_answers(projection.request())["answers"]["locate_1"].clone();
+            let response = projection
+                .request()
+                .decode_emulation(
+                    &serde_json::to_vec(&output).unwrap(),
+                    DecisionUsage::default(),
+                )
+                .unwrap();
+            let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+            let (selection, ready) = answers
+                .take_read_progress_retaining_evidence(
+                    &observation,
+                    call.account(),
+                    &schema,
+                    SemanticCaptureInstant::from_millis(101),
+                    &mut SemanticRetainedReadEvidence::default(),
+                )
+                .unwrap()
+                .unwrap();
+            assert!(!ready);
+            let settled = selection.settle_absent(&mut absence);
+            assert_eq!(settled, look == 1 && !required, "look {look}");
+            if settled {
+                let result = selection
+                    .prepare(
+                        &observation,
+                        call.account(),
+                        SemanticCaptureInstant::from_millis(101),
+                    )
+                    .unwrap()
+                    .finish(None)
+                    .unwrap();
+                let names: Vec<_> = result.fields().iter().map(|field| field.name()).collect();
+                assert_eq!(names, ["name"]);
+            }
+        }
+    }
+}
+
+#[test]
 fn read_completion_evals_match_the_production_questions_for_optional_columns() {
     for (required, fixture) in [
         (

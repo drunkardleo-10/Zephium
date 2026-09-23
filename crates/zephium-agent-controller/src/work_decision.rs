@@ -27,6 +27,7 @@ impl AgentWorkController {
     > {
         let mut unchanged = 0u8;
         let mut reobservations = 0u8;
+        let mut absence = zephium_agentic::DecisionReadAbsence::default();
         loop {
             state.check_task_contract()?;
             state.native.check_control(worker, browser)?;
@@ -85,7 +86,9 @@ impl AgentWorkController {
                     )
                     .map_err(AgentWorkFailure::DecisionRead)?
                 {
-                    if ready {
+                    // An optional column found absent on two observations
+                    // publishes unknown; only a required one needs the planner.
+                    if selection.settle_absent(&mut absence) || ready {
                         state.refresh_account(worker, browser)?;
                         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
                         // A clipped or unavailable exact source leaves the normal planner available.
