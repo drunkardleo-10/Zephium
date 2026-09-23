@@ -29,6 +29,8 @@ use zephium_work_composition::{durable_runtime::WorkBrowserAdapterSettings, Maco
 const OBJECTIVE: &str = "Find SQLite's official explanation of why WAL mode does not work when clients on different machines share a database over a network filesystem. Produce one concise source-backed note as a single plan responsibility. Use only public documentation at sqlite.org or www.sqlite.org. No account, writes, installations, or external communication are needed. Every factual output needs source-mapped human review.";
 const COORDINATED_OBJECTIVE: &str = "Explain SQLite's official reason that WAL mode does not work when clients on different machines share a database over a network filesystem. Use exactly two plan responsibilities: a delegated public-documentation research worker with one source-backed findings output, then a primary agent that depends on those findings and produces one concise source-backed explanation. Both outputs require source_mapped_needs_review. Use only sqlite.org or www.sqlite.org. No accounts, writes, installations or external communication are needed.";
 
+// Provider TLS runs on these threads; match the app's agent worker stack.
+const PROVIDER_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 const AGENT_COLLECTION_OBJECTIVE: &str = "Read https://www.lego.com/en-us/themes/architecture in the browser and collect three distinct Architecture sets with their displayed prices and useful distinguishing details. Return a cited comparison with displayed price text, distinguishing details, product links and images from the actual page, using structured collection. Do not buy, sign in, change locale, or use search snippets as a substitute for inspecting the actual catalog. Omit details that the page does not establish.";
 const AGENT_DETAILS_OBJECTIVE: &str = "Open https://www.lego.com/en-us/themes/architecture, choose three distinct Architecture sets, and visit each of their observed product links. On each product page inspect the displayed price and product specifications, especially piece count and dimensions when shown. Return a cited structured comparison with product links, images and distinguishing details. The catalog alone is insufficient: inspect all three product pages. Do not buy, sign in, change locale, or use search snippets as a substitute. Leave unsupported details unknown.";
 const AGENT_MONEY_OBJECTIVE: &str = "Read https://demo.vercel.store/product/acme-geometric-circles-t-shirt in the browser and collect the Acme Circles T-Shirt with its explicitly displayed price, currency code and product image. Return only the target product with its observed amount and currency. Use one responsibility with one source-mapped output. Do not buy, sign in or change the cart. Do not substitute search snippets for the page.";
@@ -167,62 +169,65 @@ pub(super) fn replay_agent_turn(
     let workers = (0..4)
         .map(|worker| {
             let body = body.clone();
-            std::thread::spawn(move || -> Result<Vec<(usize, bool)>, Error> {
-                let key = load_macos_probe_openai_credential().map_err(|_| Error::Keychain)?;
-                let transport =
-                    AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
-                        .map_err(|_| Error::Runtime)?;
-                let agent = OpenAiWorkAgent::try_new(
-                    transport,
-                    key,
-                    WorkPlanningConfig::try_new(
-                        zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(8192)
-                            .map_err(|_| Error::Runtime)?,
-                        32_768,
-                        300_000,
+            std::thread::Builder::new()
+                .stack_size(PROVIDER_THREAD_STACK_BYTES)
+                .spawn(move || -> Result<Vec<(usize, bool)>, Error> {
+                    let key = load_macos_probe_openai_credential().map_err(|_| Error::Keychain)?;
+                    let transport =
+                        AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
+                            .map_err(|_| Error::Runtime)?;
+                    let agent = OpenAiWorkAgent::try_new(
+                        transport,
+                        key,
+                        WorkPlanningConfig::try_new(
+                            zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(8192)
+                                .map_err(|_| Error::Runtime)?,
+                            32_768,
+                            300_000,
+                        )
+                        .map_err(|_| Error::Runtime)?,
                     )
-                    .map_err(|_| Error::Runtime)?,
-                )
-                .map_err(|_| Error::Runtime)?
-                .with_public_response_retention();
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|_| Error::Runtime)?;
-                let mut results = Vec::new();
-                for index in (worker..count).step_by(4) {
-                    let started = Instant::now();
-                    let text = runtime.block_on(agent.replay_retained_turn(body.clone()));
-                    let _ = writeln!(
-                        std::io::stdout().lock(),
-                        "replay-agent-turn: index={index} elapsed_ms={}",
-                        started.elapsed().as_millis()
-                    );
-                    let (decoded, faults) = text
-                        .as_deref()
-                        .map(zephium_agentic::agent_turn_wire_faults)
-                        .unwrap_or_default();
-                    for fault in &faults {
+                    .map_err(|_| Error::Runtime)?
+                    .with_public_response_retention();
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|_| Error::Runtime)?;
+                    let mut results = Vec::new();
+                    for index in (worker..count).step_by(4) {
+                        let started = Instant::now();
+                        let text = runtime.block_on(agent.replay_retained_turn(body.clone()));
                         let _ = writeln!(
                             std::io::stdout().lock(),
-                            "replay-agent-turn: index={index} wire_error path={} expected={} dropped={}",
-                            fault.path,
-                            fault.expected,
-                            fault.dropped
+                            "replay-agent-turn: index={index} elapsed_ms={}",
+                            started.elapsed().as_millis()
                         );
+                        let (decoded, faults) = text
+                            .as_deref()
+                            .map(zephium_agentic::agent_turn_wire_faults)
+                            .unwrap_or_default();
+                        for fault in &faults {
+                            let _ = writeln!(
+                                std::io::stdout().lock(),
+                                "replay-agent-turn: index={index} wire_error path={} expected={} dropped={}",
+                                fault.path,
+                                fault.expected,
+                                fault.dropped
+                            );
+                        }
+                        if let Ok(text) = &text {
+                            let _ = std::fs::write(
+                                format!("target/work-runtime-proof/replay/{index}-{decoded}.json"),
+                                text,
+                            );
+                        }
+                        results.push((index, text.is_ok() && decoded));
                     }
-                    if let Ok(text) = &text {
-                        let _ = std::fs::write(
-                            format!("target/work-runtime-proof/replay/{index}-{decoded}.json"),
-                            text,
-                        );
-                    }
-                    results.push((index, text.is_ok() && decoded));
-                }
-                Ok(results)
-            })
+                    Ok(results)
+                })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| Error::Runtime)?;
     let mut refused = 0;
     for worker in workers {
         for (index, decoded) in worker.join().map_err(|_| Error::Runtime)?? {
@@ -369,6 +374,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             let worker_handle = shell.clone();
             let worker = std::thread::Builder::new()
                 .name("durable-work-qualification".into())
+                .stack_size(PROVIDER_THREAD_STACK_BYTES)
                 .spawn(move || {
                     let result = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
