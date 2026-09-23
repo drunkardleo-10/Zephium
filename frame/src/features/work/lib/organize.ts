@@ -27,6 +27,8 @@ const same = (a: WorkEnvironmentReference, b: WorkEnvironmentReference) =>
 const FINDINGS_PER_ARTIFACT = 8;
 const FINDINGS_PER_RUN = 32;
 const SUBJECTS_PER_RUN = 12;
+/** Rust's MAX_ENVIRONMENT_ELEMENTS: an add past it is refused, so none is planned. */
+const CANVAS_ELEMENTS = 500;
 const SIZES = {
   subject: { width: 240, height: 136 },
   pictured: { width: 240, height: 256 },
@@ -126,6 +128,7 @@ export function pendingOrganize(
 ): WorkExecutionFact | null {
   const execution = projection.executions.at(-1);
   if (!execution || projection.interrupted.includes(execution.id)) return null;
+  if (snapshot.elements.length >= CANVAS_ELEMENTS) return null;
   const agent = isAgentExecution(execution);
   if (!agent && !["completed", "needs_review"].includes(execution.status)) return null;
   if (agent) return unplacedRoots(snapshot, execution).length ? execution : null;
@@ -140,9 +143,13 @@ export function organizeExecution(
   anchor: CanvasPosition,
   snapshot?: WorkEnvironmentSnapshot,
 ): OrganizePlan {
-  if (snapshot && isAgentExecution(execution))
-    return organizeAgentRun(projection, execution, anchor, snapshot);
-  return organizeReviewedRun(projection, execution, anchor);
+  const plan =
+    snapshot && isAgentExecution(execution)
+      ? organizeAgentRun(projection, execution, anchor, snapshot)
+      : organizeReviewedRun(projection, execution, anchor);
+  // A long work fills the canvas; what does not fit stays in its run's result.
+  const room = CANVAS_ELEMENTS - (snapshot?.elements.length ?? 0);
+  return plan.adds.length > room ? { ...plan, adds: plan.adds.slice(0, Math.max(room, 0)) } : plan;
 }
 
 function organizeReviewedRun(

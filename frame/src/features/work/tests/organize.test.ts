@@ -278,3 +278,44 @@ test("subjects that only share a homepage stay separate hubs", () => {
     "artifact",
   ]);
 });
+
+test("a full canvas plans no more than it can hold and stops asking", () => {
+  const execution = agentRun();
+  execution.artifacts.push({
+    ...execution.artifacts[0]!,
+    id: "findings",
+    title: "Keyboards",
+    data: {
+      kind: "findings",
+      subjects: [{ name: "Keyboard A" }],
+      items: [
+        { claim: "Quiet switches", subject: 0, evidence: [0], confidence: "supported" },
+        { claim: "Ships in a week", subject: 0, evidence: [1], confidence: "supported" },
+      ],
+    },
+  });
+  execution.steps!.push({
+    id: "publish",
+    turn: 2,
+    kind: { kind: "publish" },
+    status: "succeeded",
+    artifacts: ["findings"],
+  });
+  const state = { ...projection, executions: [execution] };
+  const filler = (count: number): WorkEnvironmentSnapshot => ({
+    ...snapshot,
+    elements: [
+      ...snapshot.elements,
+      ...Array.from({ length: count }, (_, index) => ({
+        id: `filler-${index}`,
+        reference: { kind: "resource" as const, resource: `resource-${index}` },
+        area: null,
+      })),
+    ],
+  });
+  const nearlyFull = filler(500 - snapshot.elements.length - 2);
+  expect(organizeExecution(state, execution, { x: 0, y: 0 }, nearlyFull).adds).toHaveLength(2);
+  const full = filler(500 - snapshot.elements.length);
+  expect(pendingOrganize(full, state)).toBeNull();
+  expect(organizeExecution(state, execution, { x: 0, y: 0 }, full).adds).toEqual([]);
+});
