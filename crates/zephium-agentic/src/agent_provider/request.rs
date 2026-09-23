@@ -150,7 +150,9 @@ const AGENT_BROWSER_INSTRUCTIONS_V1: &str = concat!(
     "is supplied to terminal mapping for image_url fields. That flag grants no navigation authority. For collections, ",
     "inspect a container that includes the requested records and their fields together. Once enough records are ",
     "observed, extract instead of inspecting every record separately or reopening the same listing. ",
-    "Missing optional details can remain unknown. Missing ",
+    "A snapshot refused as repeated, unchanged or budget-exhausted means no further snapshot of this ",
+    "document will produce new content: do not propose another one. Extract the evidence already observed, ",
+    "or follow an admitted observed link. Missing optional details can remain unknown. Missing ",
     "mapping-only @r references in a browsing observation is not an unsupported interaction. Request human control ",
     "only when a necessary remaining step cannot be completed with the available tools."
 );
