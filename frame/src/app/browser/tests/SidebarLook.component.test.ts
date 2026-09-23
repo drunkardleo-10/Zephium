@@ -29,14 +29,15 @@ test("the sidebar column at rest", async () => {
   const row = screen.container.querySelector<HTMLElement>(".dock-row")!;
   expect(getComputedStyle(row).gridTemplateColumns.split(" ")).toHaveLength(3);
 
-  // And the shelf revealed, which is the only state the column grows into.
+  // And the shelf opened, which is the only state the column grows into.
   document.documentElement.dataset.theme = "dark";
-  await screen.getByRole("button", { name: "Tools", exact: true }).hover();
-  const flyout = screen.container.querySelector<HTMLElement>(".flyout")!;
-  await expect.poll(() => flyout.inert).toBe(false);
-  // The stack staggers in; capture it settled, not mid-rise.
-  const nearest = flyout.querySelector<HTMLElement>(".tool:last-child")!;
-  await expect.poll(() => getComputedStyle(nearest).opacity).toBe("1");
+  await screen.getByRole("button", { name: "Tools", exact: true }).click();
+  const stack = screen.container.querySelector<HTMLElement>(".shelf-stack")!;
+  await expect.poll(() => stack.inert).toBe(false);
+  // The stack unfolds; capture it settled, not mid-rise.
+  const farthest = stack.querySelector<HTMLElement>(".shelf-item")!;
+  await expect.poll(() => getComputedStyle(farthest).opacity).toBe("1");
+  await expect.poll(() => getComputedStyle(stack).opacity).toBe("1");
   await page
     .elementLocator(screen.container)
     .screenshot({ path: "../../../../../target/sidebar-shelf.png" });
@@ -50,13 +51,16 @@ test("the rail at rest", async () => {
     .elementLocator(screen.container)
     .screenshot({ path: "../../../../../target/rail-dark.png" });
 
-  // The rail's stack is glyphs only: at 56px a name has nowhere to go.
-  await screen.getByRole("button", { name: "Tools", exact: true }).hover();
-  const flyout = screen.container.querySelector<HTMLElement>(".flyout")!;
-  await expect.poll(() => flyout.inert).toBe(false);
-  const nearest = flyout.querySelector<HTMLElement>(".tool:last-child")!;
-  await expect.poll(() => getComputedStyle(nearest).opacity).toBe("1");
-  expect(nearest.textContent?.trim()).toBe("");
+  // The rail's stack is glyphs only: at 56px a name has nowhere to go, so
+  // each is named for assistive technology and by its tooltip instead.
+  await screen.getByRole("button", { name: "Tools", exact: true }).click();
+  const stack = screen.container.querySelector<HTMLElement>(".shelf-stack")!;
+  await expect.poll(() => stack.inert).toBe(false);
+  const farthest = stack.querySelector<HTMLElement>(".shelf-item")!;
+  await expect.poll(() => getComputedStyle(farthest).opacity).toBe("1");
+  await expect.poll(() => getComputedStyle(stack).opacity).toBe("1");
+  expect(farthest.textContent?.trim()).toBe("");
+  expect(farthest.getAttribute("aria-label")).toBe("Notes");
   await page
     .elementLocator(screen.container)
     .screenshot({ path: "../../../../../target/rail-shelf.png" });

@@ -16,35 +16,45 @@ vi.mock("$shared/ipc/bindings", async () => {
   });
 });
 
-test("the mini-apps stay out of reach until the case is hovered", async () => {
+test("the tools stay out of reach until the case is pressed", async () => {
   const screen = await render(ToolShelf);
   // The stack grows upward out of the case, so it needs room above it.
-  screen.container.style.paddingBlockStart = "180px";
-  const flyout = screen.container.querySelector<HTMLElement>(".flyout")!;
-  const notes = screen.getByRole("button", { name: "Notes", exact: true });
+  screen.container.style.paddingBlockStart = "280px";
+  const stack = screen.container.querySelector<HTMLElement>(".shelf-stack")!;
   const tools = screen.getByRole("button", { name: "Tools", exact: true });
 
-  // Inert, so the stack is neither clickable nor tabbable while concealed.
-  expect(flyout.inert).toBe(true);
-
+  // Inert, so the stack is neither clickable nor tabbable while concealed,
+  // and hovering the case is not a request for it.
+  expect(stack.inert).toBe(true);
   await tools.hover();
-  await expect.poll(() => flyout.inert).toBe(false);
+  expect(stack.inert).toBe(true);
+
+  await tools.click();
+  await expect.poll(() => stack.inert).toBe(false);
+  await expect.element(tools).toHaveAttribute("aria-expanded", "true");
 
   // Picking one puts the stack away; the panel it opened is the answer now.
-  await notes.click();
-  await expect.poll(() => flyout.inert).toBe(true);
+  await screen.getByRole("menuitem", { name: "Notes", exact: true }).click();
+  await expect.poll(() => stack.inert).toBe(true);
   await expect.poll(() => screen.container.querySelector(".case-lit")).not.toBeNull();
 
-  await tools.hover();
-  await expect.poll(() => flyout.inert).toBe(false);
-  await expect.element(notes).toHaveAttribute("aria-pressed", "true");
+  await tools.click();
+  await expect.poll(() => stack.inert).toBe(false);
+  await expect
+    .element(screen.getByRole("menuitem", { name: "Notes", exact: true }))
+    .toHaveAttribute("aria-current", "true");
 });
 
-test("the case hands the whole list to the native menu", async () => {
+test("the records follow the tools, and the whole list is a secondary click away", async () => {
   const screen = await render(ToolShelf);
   const tools = screen.getByRole("button", { name: "Tools", exact: true });
-
   await expect.element(tools).toHaveAttribute("aria-haspopup", "menu");
-  await tools.click();
+
+  const names = [...screen.container.querySelectorAll(".shelf-item")].map((item) =>
+    item.textContent?.trim(),
+  );
+  expect(names).toEqual(["Notes", "Tasks", "Activity", "Ask", "History", "Downloads"]);
+
+  await tools.click({ button: "right" });
   expect(native.toolsMenu).toHaveBeenCalledOnce();
 });

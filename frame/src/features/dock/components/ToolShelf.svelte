@@ -3,95 +3,65 @@
   import { ToolCaseIcon } from "@hugeicons/core-free-icons";
   import { commands } from "$shared/ipc/bindings";
   import * as tools from "$session/tools.svelte";
+  import Disclosure from "$shared/ui/Disclosure";
   import Icon from "$shared/ui/Icon";
-  import { SHELF_TOOLS, toolPresentation } from "../lib/dock-tools";
+  import { RECORD_TOOLS, SHELF_TOOLS, toolPresentation } from "../lib/dock-tools";
 
   let { compact = false }: { compact?: boolean } = $props();
 
-  let open = $state(false);
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  const groups = [SHELF_TOOLS, RECORD_TOOLS] as const;
+  const count = SHELF_TOOLS.length + RECORD_TOOLS.length;
 
-  // Leaving is deferred so a pointer crossing a corner of the shelf does not
-  // dismiss what it was travelling towards; entering cancels the pending one.
-  // The tile listens as well as the group: picking a tool hides the stack
-  // under the pointer, and the group never sees it leave.
-  function reveal() {
-    clearTimeout(timer);
-    open = true;
-  }
-  function conceal() {
-    clearTimeout(timer);
-    timer = setTimeout(() => (open = false), 90);
-  }
-  $effect(() => () => clearTimeout(timer));
-
-  function openMenu(event: MouseEvent) {
-    clearTimeout(timer);
-    open = false;
-    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    void commands.toolsMenuPopup(rect.left, rect.top);
-  }
-
-  function pick(kind: (typeof SHELF_TOOLS)[number]) {
-    clearTimeout(timer);
-    open = false;
+  function pick(kind: (typeof SHELF_TOOLS)[number] | (typeof RECORD_TOOLS)[number]) {
     if (tools.activeTool() === kind) tools.close();
     else tools.open(kind);
+  }
+
+  // The full native menu stays one gesture away, where a Mac user reaches for
+  // everything else a control can do.
+  function nativeMenu(event: MouseEvent) {
+    event.preventDefault();
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    void commands.toolsMenuPopup(rect.left, rect.top);
   }
 </script>
 
 <!--
-  A tile at the head of the site row, built from the same material as the
-  sites beside it: the mini-apps are things you launch, so they keep the
-  company of the other things you launch rather than sitting in a control
-  bar above them.
-
-  Hovering it grows them out of the tile, named and vertical, near-to-far so
-  the stack reads as coming from the tile rather than appearing beside it;
-  clicking hands the whole list to the native menu. Focus opens the same
-  stack, so the keyboard reaches them by tabbing forward out of the tile.
-
-  There is no card behind them. A panel would claim a region of the column
-  the tools do not need; each one carries its own ground instead, so what
-  arrives is the tools themselves and nothing else.
+  The head of the dock: the tools, stacked on demand. A click opens them as a
+  menu rising out of the case, nearest first, the way a stack opens from the
+  Dock; nothing opens on hover, because nothing on this platform does. At
+  rail width a name has nowhere to go, so the stack is glyphs, each named by
+  its tooltip.
 -->
-<div
-  class="shelf"
-  data-compact={compact}
-  role="group"
-  aria-label={m.dock_tools()}
-  onpointerenter={reveal}
-  onpointerleave={conceal}
-  onfocusin={reveal}
-  onfocusout={conceal}
->
-  <button
-    type="button"
-    class="case"
-    class:case-lit={tools.activeTool() !== null}
-    aria-label={m.dock_tools()}
-    title={m.dock_tools()}
-    aria-haspopup="menu"
-    onpointerenter={reveal}
-    onclick={openMenu}
+<div class="shelf" data-compact={compact} role="presentation" oncontextmenu={nativeMenu}>
+  <Disclosure
+    label={m.dock_tools()}
+    menu
+    triggerClass={["case", tools.activeTool() !== null && "case-lit"].filter(Boolean).join(" ")}
+    panelClass="shelf-stack"
   >
-    <Icon icon={ToolCaseIcon} size={18} />
-  </button>
-  <div class="flyout" data-open={open} inert={!open}>
-    {#each SHELF_TOOLS as kind, index (kind)}
-      {@const view = toolPresentation(kind)}
-      <button
-        type="button"
-        class="tool"
-        style:--step={SHELF_TOOLS.length - 1 - index}
-        aria-pressed={tools.activeTool() === kind}
-        onclick={() => pick(kind)}
-      >
-        <Icon icon={view.icon} size={14} />
-        {#if !compact}<span>{view.label()}</span>{/if}
-      </button>
+    {#snippet trigger()}<Icon icon={ToolCaseIcon} size={18} />{/snippet}
+    {#each groups as group, at (at)}
+      {#if at > 0}<div class="shelf-rule" role="separator"></div>{/if}
+      {#each group as kind, index (kind)}
+        {@const view = toolPresentation(kind)}
+        {@const step = count - 1 - (at === 0 ? index : SHELF_TOOLS.length + index)}
+        <button
+          type="button"
+          role="menuitem"
+          class="ui-menu-item shelf-item"
+          style:--step={step}
+          title={compact ? view.label() : undefined}
+          aria-label={compact ? view.label() : undefined}
+          aria-current={tools.activeTool() === kind || undefined}
+          onclick={() => pick(kind)}
+        >
+          <span class="ui-menu-icon"><Icon icon={view.icon} size={16} /></span>
+          {#if !compact}<span>{view.label()}</span>{/if}
+        </button>
+      {/each}
     {/each}
-  </div>
+  </Disclosure>
 </div>
 
 <style>
@@ -101,23 +71,18 @@
     flex: none;
   }
 
-  /* The one square in a row of wide tiles: same height, same radius, so it
-     keeps the row's rhythm — but sunk into the column instead of sitting on
-     it. The sites are plates carrying someone else's mark; this is a well cut
-     into our own chrome, which is the difference you should be able to see
-     without reading either of them. */
-  .case {
+  /* The one square at the head of the row, on the same ground as the kept
+     sites beside it: ours on one side of the rule, the web's on the other. */
+  .shelf :global(.case) {
     display: grid;
     place-items: center;
     width: var(--dock-tile);
     height: var(--dock-tile);
     border: 0;
     border-radius: var(--radius-card);
-    background: var(--color-fill);
-    box-shadow: var(--shadow-track);
+    background: var(--color-card);
     color: var(--color-muted);
     cursor: default;
-    outline: none;
     transition:
       background-color var(--motion-fast) var(--ease-out),
       color var(--motion-fast) var(--ease-out),
@@ -125,171 +90,106 @@
       scale var(--motion-slow) var(--ease-spring);
   }
 
-  .case:hover {
+  .shelf :global(.case:hover),
+  .shelf :global(.case[data-state="open"]) {
+    background: var(--color-fill-hover);
     color: var(--color-text);
   }
 
-  .case:active {
-    scale: 0.94;
+  .shelf :global(.case:active) {
+    scale: 0.95;
     transition-duration: var(--motion-instant);
   }
 
-  /* With a tool open the well fills and rises: the thing you opened is now
-     standing proud of the column it came out of. */
-  .case-lit {
-    background: var(--row-active);
-    box-shadow: var(--shadow-raised);
+  /* With a tool open the case is lit like any current thing in the column. */
+  .shelf :global(.case.case-lit) {
+    background: var(--color-fill-active);
+    box-shadow: var(--row-rim);
     color: var(--color-text);
   }
 
-  /*
-    The stack floats clear of the column rather than pushing it, and carries
-    a bridge over the gap back to the case so the pointer can travel between
-    them without crossing dead ground. It is a layout box only: every pixel
-    that gets painted belongs to one of the tools.
-  */
-  .flyout {
-    position: absolute;
+  /* The stack rises out of the case rather than dropping from it. */
+  .shelf :global(.shelf-stack) {
+    top: auto;
     bottom: calc(100% + 8px);
-    inset-inline-start: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 4px;
-    width: max-content;
-    visibility: hidden;
-    pointer-events: none;
-    transition: visibility 0s linear var(--motion-fast);
-  }
-
-  .flyout::after {
-    content: "";
-    position: absolute;
-    inset-inline: 0;
-    top: 100%;
-    height: 10px;
-  }
-
-  .flyout[data-open="true"] {
-    visibility: visible;
-    pointer-events: auto;
-    transition: visibility 0s;
-  }
-
-  /* Each one is the same plate as the tiles below — the essentials' own
-     ground and ring — so the stack reads as the shelf opening rather than as
-     a menu arriving over it. That ground is translucent, so it is laid over
-     the chrome's own colour to stay opaque above the tab list, and it takes
-     the tiles' raised shadow because here it really is above something. */
-  .tool {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    height: 30px;
-    padding-inline: 9px 12px;
-    border: 0;
-    border-radius: var(--radius-row);
-    background: linear-gradient(var(--color-card), var(--color-card)), var(--color-chrome);
-    box-shadow:
-      inset 0 0 0 1px var(--color-border),
-      var(--shadow-raised);
-    color: var(--color-label-secondary);
-    font: inherit;
-    font-size: 12px;
-    font-weight: 500;
-    letter-spacing: -0.004em;
-    white-space: nowrap;
-    text-align: start;
-    cursor: default;
-    outline: none;
+    min-width: 176px;
     transform-origin: bottom left;
-    opacity: 0;
-    scale: 0.9;
-    translate: 0 8px;
-    transition:
-      background-color var(--motion-fast) var(--ease-out),
-      box-shadow var(--motion-fast) var(--ease-out),
-      color var(--motion-fast) var(--ease-out),
-      opacity var(--motion-fast) var(--ease-exit),
-      scale var(--motion-fast) var(--ease-exit),
-      translate var(--motion-fast) var(--ease-exit);
   }
 
-  .tool:hover {
-    background: linear-gradient(var(--row-hover), var(--row-hover)), var(--color-chrome);
-    box-shadow:
-      inset 0 0 0 1px var(--color-border-strong),
-      var(--shadow-raised);
-    color: var(--color-text);
+  .shelf :global(.shelf-stack:not([data-open="true"])) {
+    translate: 0 6px;
   }
 
-  .tool:active {
-    scale: 0.96;
-    transition-duration: var(--motion-instant);
+  .shelf :global(.shelf-item) {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    font-size: var(--text-body);
+    text-align: start;
   }
 
-  /* The open tool is named by its glyph taking the accent, which is quieter
-     than a second lit plate inside a stack that is already floating. */
-  .tool[aria-pressed="true"] {
-    color: var(--color-text);
+  .shelf :global(.shelf-item:hover),
+  .shelf :global(.shelf-item:focus-visible) {
+    outline: none;
+    background: var(--row-active);
   }
 
-  .tool[aria-pressed="true"] :global(svg) {
+  .shelf :global(.shelf-item:active) {
+    background: var(--row-pressed);
+  }
+
+  .shelf :global(.shelf-item[aria-current="true"] .ui-menu-icon) {
     color: var(--color-accent);
   }
 
-  .flyout[data-open="true"] .tool {
-    opacity: 1;
-    scale: 1;
-    translate: 0 0;
-    transition:
-      background-color var(--motion-fast) var(--ease-out),
-      box-shadow var(--motion-fast) var(--ease-out),
-      color var(--motion-fast) var(--ease-out),
-      opacity var(--motion-base) var(--ease-smooth) calc(var(--step) * 30ms),
-      scale var(--motion-slow) var(--ease-spring) calc(var(--step) * 30ms),
-      translate var(--motion-slow) var(--ease-spring) calc(var(--step) * 30ms);
+  /* Each row settles in behind the one below it, so the stack reads as
+     unfolding from the case instead of arriving as a block. */
+  .shelf :global(.shelf-stack[data-open="true"] .shelf-item) {
+    animation: shelf-item-in var(--motion-slow) var(--ease-out) both;
+    animation-delay: calc(var(--step) * 16ms);
   }
 
-  /* At rail width a name has nowhere to go, so the stack is glyphs only and
-     each pill becomes the square its tile already is. */
-
-  /* The rail's rhythm is 40px, not the dock tile's 44, and everything in it
-     is a disc: at rail width a column of circles is what reads as a rail
-     rather than as a squeezed list. */
-  .shelf[data-compact="true"] .case {
-    width: 40px;
-    height: 40px;
-    border-radius: var(--radius-capsule);
-  }
-
-  .shelf[data-compact="true"] .flyout {
-    align-items: center;
-    inset-inline-start: 50%;
-    gap: 4px;
-    translate: -50% 0;
-  }
-
-  .shelf[data-compact="true"] .tool {
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    padding-inline: 0;
-    border-radius: var(--radius-capsule);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .tool {
-      transition-duration: 1ms;
-      transition-delay: 0s;
-      scale: 1;
-      translate: none;
+  /* stylelint-disable-next-line keyframes-name-pattern -- Svelte's global prefix. */
+  @keyframes -global-shelf-item-in {
+    from {
+      opacity: 0;
+      translate: 0 6px;
     }
   }
 
+  .shelf-rule {
+    height: 1px;
+    margin: 5px var(--menu-item-inset);
+    background: var(--color-menu-separator);
+  }
+
+  /* At rail width: a square plate like every other rail item, and a stack
+     of glyphs just wide enough for them. */
+  .shelf[data-compact="true"] :global(.case) {
+    width: 40px;
+    height: var(--row-sidebar);
+    border-radius: var(--radius-row);
+  }
+
+  /* Centred on the 40px case: four points either side of it. */
+  .shelf[data-compact="true"] :global(.shelf-stack) {
+    inset-inline-start: -4px;
+    min-width: 0;
+    width: 48px;
+  }
+
+  .shelf[data-compact="true"] :global(.shelf-item) {
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  .shelf[data-compact="true"] .shelf-rule {
+    margin-inline: 8px;
+  }
+
   @media (forced-colors: active) {
-    .case-lit,
-    .tool[aria-pressed="true"] {
+    .shelf :global(.case.case-lit) {
       border: 1px solid Highlight;
     }
   }

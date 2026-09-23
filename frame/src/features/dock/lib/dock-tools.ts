@@ -26,9 +26,9 @@ const PRESENTATION: Record<ToolKind, { icon: IconSvgElement; label: () => string
 export const toolPresentation = (kind: ToolKind) => PRESENTATION[kind];
 
 /**
- * The mini-apps the shelf reveals on hover: the things you make or ask for,
- * rather than the things that merely happened to you. They follow the native
- * menu's own order, so the stack and the menu never disagree. History,
- * downloads and the rest stay in that menu, which is the whole list.
+ * The shelf's two groups, in the native menu's own order so the stack and the
+ * menu never disagree: first the things you make or ask for, then the record
+ * of what happened.
  */
 export const SHELF_TOOLS = ["notes", "tasks", "time", "ai"] as const satisfies readonly ToolKind[];
+export const RECORD_TOOLS = ["history", "downloads"] as const satisfies readonly ToolKind[];

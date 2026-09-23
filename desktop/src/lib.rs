@@ -6069,9 +6069,10 @@ mod tests {
         let sidebar = crate::frame_sources::SRC_APP_SHELL_SVELTE;
         let shelf = crate::frame_sources::SRC_FEATURES_DOCK_TOOLSHELF_SVELTE;
 
-        // The tool shelf is the dock's native menu entry point. Its actions
-        // still return through the trusted command dispatcher.
-        assert!(shelf.contains(r#"aria-haspopup="menu""#));
+        // The tool shelf opens its own tool menu and keeps the native menu on
+        // its secondary click. Neither route mutates tabs from the frame.
+        assert!(shelf.contains("<Disclosure"));
+        assert!(shelf.contains("oncontextmenu={nativeMenu}"));
         assert!(shelf.contains("toolsMenuPopup"));
         assert!(!shelf.contains("tabs.split("));
         assert!(!shelf.contains("addMenuPopup"));
