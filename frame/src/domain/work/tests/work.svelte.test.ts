@@ -241,3 +241,28 @@ test("page frames survive a settled run, an overtaking read, and a return to Wor
   expect(session.pages).toEqual([]);
   session.dispose();
 });
+
+test("the next request first acknowledges a run an earlier launch left running", async () => {
+  const { WorkSession } = await import("../work.svelte");
+  const session = new WorkSession(profile);
+  const left = { id: "00000000000000000000000009", status: "running" } as WorkExecutionFact;
+  session.projection = { ...projection("4", [left]), interrupted: [left.id] };
+  const order: string[] = [];
+  const execute = vi.spyOn(session, "execute").mockImplementation(async (intent) => {
+    order.push(intent.kind);
+    session.projection = { ...projection("5", [{ ...left, status: "interrupted" }]) };
+    return true;
+  });
+  const begin = vi.spyOn(session.operations, "begin").mockImplementation(async (input) => {
+    order.push(input.kind);
+    return true as never;
+  });
+  await session.run();
+  expect(execute).toHaveBeenCalledExactlyOnceWith({
+    kind: "acknowledge_interruption",
+    execution: left.id,
+  });
+  expect(order).toEqual(["acknowledge_interruption", "run"]);
+  expect(begin.mock.calls[0]![0]).toMatchObject({ command: { expected_revision: "5" } });
+  session.dispose();
+});

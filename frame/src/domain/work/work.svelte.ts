@@ -438,6 +438,11 @@ export class WorkSession {
   }
   /** The routine loop: sending the objective grants the public envelope. */
   async run(context: WorkContextSelectionV1 | null = null) {
+    if (!this.projection || this.pending || this.operations.busy(this.projection.work.id)) return;
+    // What an earlier launch left running is acknowledged first: sending the
+    // next request moves on from it, and the work cannot run while it stands.
+    for (const execution of [...this.projection.interrupted])
+      if (!(await this.execute({ kind: "acknowledge_interruption", execution }))) return;
     const work = this.projection?.work;
     if (!work || this.pending || this.operations.busy(work.id)) return;
     await this.operations.begin({
