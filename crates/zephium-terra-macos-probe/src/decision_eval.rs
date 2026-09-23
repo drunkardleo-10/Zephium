@@ -23,6 +23,17 @@ pub(super) fn run_terra() -> Result<(), ProbeFailure> {
     run_selected(None, ProbeModel::Terra)
 }
 
+pub(super) fn run_effort(effort: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
+    use zephium_agent_model_catalog::Gpt6LunaDecisionEffort as Effort;
+    let effort = match effort.to_str() {
+        Some("none") => Effort::None,
+        Some("low") => Effort::Low,
+        Some("medium") => Effort::Medium,
+        _ => return Err(ProbeFailure::Authority),
+    };
+    run_with(None, ProbeModel::Luna, effort)
+}
+
 pub(super) fn run_case(case: &std::ffi::OsStr, model: ProbeModel) -> Result<(), ProbeFailure> {
     let index = match case.to_str() {
         Some("lego") => 0,
@@ -47,6 +58,18 @@ pub(super) fn run_case(case: &std::ffi::OsStr, model: ProbeModel) -> Result<(), 
 }
 
 fn run_selected(only: Option<usize>, model: ProbeModel) -> Result<(), ProbeFailure> {
+    run_with(
+        only,
+        model,
+        zephium_agent_model_catalog::Gpt6LunaDecisionEffort::Low,
+    )
+}
+
+fn run_with(
+    only: Option<usize>,
+    model: ProbeModel,
+    effort: zephium_agent_model_catalog::Gpt6LunaDecisionEffort,
+) -> Result<(), ProbeFailure> {
     let _ = writeln!(
         std::io::stderr(),
         "decision_eval phase=keychain backend=jev"
@@ -77,7 +100,7 @@ fn run_selected(only: Option<usize>, model: ProbeModel) -> Result<(), ProbeFailu
         .map_err(|_| ProbeFailure::Authority)?;
     let (config, model_revision) = match model {
         ProbeModel::Luna => (
-            zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(4096)
+            zephium_agent_model_catalog::try_gpt6_luna_decision_call_config(4096, effort)
                 .map_err(|_| ProbeFailure::Authority)?,
             zephium_agent_model_catalog::GPT6_LUNA_MODEL_REVISION,
         ),

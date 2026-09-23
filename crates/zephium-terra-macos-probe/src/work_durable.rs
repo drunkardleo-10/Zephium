@@ -1356,7 +1356,10 @@ async fn agent_workflow(
         .with_link_decisions(
             link_primary,
             WorkPlanningConfig::try_new(
-                zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(4096)
+                zephium_agent_model_catalog::try_gpt6_luna_decision_call_config(
+                    4096,
+                    zephium_agent_model_catalog::Gpt6LunaDecisionEffort::Low,
+                )
                     .map_err(|_| "link_model")?,
                 32_768,
                 100_000,
@@ -1405,7 +1408,10 @@ async fn agent_workflow(
         .with_decision_ranking(
             primary,
             WorkPlanningConfig::try_new(
-                zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(4096)
+                zephium_agent_model_catalog::try_gpt6_luna_decision_call_config(
+                    4096,
+                    zephium_agent_model_catalog::Gpt6LunaDecisionEffort::Low,
+                )
                     .map_err(|_| "ranking_model")?,
                 32_768,
                 100_000,

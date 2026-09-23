@@ -42,6 +42,8 @@ fn main() {
         #[cfg(feature = "decision-eval")]
         [argument] if argument == "--live-decision-eval-terra" => decision_eval::run_terra(),
         #[cfg(feature = "decision-eval")]
+        [argument, effort] if argument == "--live-decision-eval-effort" => decision_eval::run_effort(effort),
+        #[cfg(feature = "decision-eval")]
         [argument, case] if argument == "--live-decision-eval-case-terra" => decision_eval::run_case(case, ProbeModel::Terra),
         #[cfg(feature = "decision-eval")]
         [argument, site] if argument == "--record-decision-observation" => decision_observation::run(site),

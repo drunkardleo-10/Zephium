@@ -193,6 +193,19 @@ fn gpt6_luna_is_a_separate_exact_entry_with_its_published_prices() {
         try_gpt6_luna_provider_exact_call_config(128_001),
         Err(LunaModelCatalogError::OutputTokens)
     );
+    assert_eq!(
+        try_gpt6_luna_decision_call_config(4_096, Gpt6LunaDecisionEffort::Medium).unwrap(),
+        config
+    );
+    for (effort, expected) in [
+        (Gpt6LunaDecisionEffort::None, AgentProviderReasoningEffort::None),
+        (Gpt6LunaDecisionEffort::Low, AgentProviderReasoningEffort::Low),
+    ] {
+        let decision = try_gpt6_luna_decision_call_config(4_096, effort).unwrap();
+        assert_eq!(decision.reasoning_effort(), expected);
+        assert_eq!(decision.model().as_str(), "gpt-6-luna");
+        assert_eq!(decision.pricing_profile(), config.pricing_profile());
+    }
 }
 
 fn independently_constructed_guard() -> [u8; 32] {
