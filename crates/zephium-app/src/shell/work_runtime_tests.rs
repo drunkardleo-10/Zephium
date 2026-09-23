@@ -803,6 +803,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                     intervention: None,
                     note: None,
                     measurements: None,
+                    helped: false,
                     artifacts: vec![WorkArtifactDraft {
                         output: request.output,
                         title: "Earlier partial result".into(),
@@ -929,6 +930,7 @@ async fn a_run_that_runs_out_of_time_says_so() {
                     intervention: None,
                     note: None,
                     measurements: None,
+                    helped: false,
                     artifacts: vec![],
                 })
             },

@@ -213,6 +213,7 @@ async fn page(
                 intervention: None,
                 note: None,
                 measurements: None,
+                helped: false,
             });
         }
         if !hang {
@@ -243,6 +244,7 @@ async fn page(
         intervention: None,
         note: None,
         measurements: None,
+        helped: false,
     })
 }
 
@@ -904,4 +906,65 @@ async fn work_sixteen_runs_keep_working_within_their_limits() {
     assert!(refused.is_err(), "a work holds at most sixteen runs");
     let state = drive(&mut shell, &queue, projection(&handle, profile, work)).await;
     assert_eq!(state.executions.len(), MAX_WORK_EXECUTIONS);
+}
+
+#[tokio::test]
+async fn work_a_human_check_is_read_again_only_after_a_person_continued_it() {
+    for helped in [false, true] {
+        let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+        let (mut shell, queue, handle, profile) = fixture(store);
+        let work = new_work(&mut shell, &queue, &handle, "Read https://example.test/a").await;
+        let script = Script::default();
+        script.play([
+            output(vec![read("https://example.test/a")]),
+            output(vec![search("example rules")]),
+        ]);
+        let sources = Sources::default();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let state = drive(
+            &mut shell,
+            &queue,
+            WorkAgentService::new(handle.clone()).run(
+                profile,
+                begin(work, WorkRevision::INITIAL, 60),
+                None,
+                WorkAgentProviders {
+                    turn: &script,
+                    search: &sources,
+                },
+                |_, _| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        Ok(WorkBrowserOutcome {
+                            status: WorkStepStatus::Failed,
+                            usage: Some(WorkUsage {
+                                model_tokens: 10,
+                                cost_micro_usd: 1,
+                                operations: 1,
+                                accounting: WorkUsageAccounting::Exact,
+                            }),
+                            artifacts: vec![],
+                            intervention: None,
+                            note: Some(read_note::HUMAN_CHECK.into()),
+                            measurements: None,
+                            helped,
+                        })
+                    }
+                },
+                |_| {},
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), if helped { 2 } else { 1 });
+        let execution = &state.executions[0];
+        let read = execution
+            .steps
+            .iter()
+            .find(|step| matches!(step.kind, WorkStepKindV1::Read { .. }))
+            .unwrap();
+        assert_eq!(read.status, WorkStepStatus::Failed);
+        assert_eq!(read.note.as_deref(), Some(read_note::HUMAN_CHECK));
+        assert_eq!(execution.status, WorkExecutionStatus::NeedsReview);
+    }
 }

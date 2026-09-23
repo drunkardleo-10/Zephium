@@ -332,6 +332,7 @@ impl MacosWorkComposition {
                 intervention: None,
                 note: None,
                 measurements: None,
+                helped: false,
             });
         }
         let diagnostics = Diagnostics::from(&settings);
@@ -410,6 +411,7 @@ impl MacosWorkComposition {
             intervention: run.intervention,
             note: run.note,
             measurements: Some(run.measurements),
+            helped: run.helped,
         })
     }
 
@@ -492,6 +494,8 @@ impl MacosWorkComposition {
         let mut running_seen = false;
         let mut not_ready = false;
         let mut last_phase: Option<RetainedWorkPhase> = None;
+        // A person was shown the page and continued it.
+        let mut helped = false;
         #[cfg(feature = "public-qualification")]
         let trace = |label: &str| {
             if let Some(diagnostic) = stage_diagnostic {
@@ -672,6 +676,7 @@ impl MacosWorkComposition {
                             .into(),
                         ),
                         measurements: measure.settle(started, model_in_flight),
+                        helped,
                     });
                 }
                 return Err(WorkError::OutcomeUnknown);
@@ -679,6 +684,13 @@ impl MacosWorkComposition {
             if let Some(registration) = &registration {
                 registration.update();
             }
+            helped |= matches!(
+                guard.0.human_snapshot().map(|human| human.phase),
+                Some(
+                    zephium_app::RetainedHumanPhase::Continuing
+                        | zephium_app::RetainedHumanPhase::ReadyToResume
+                )
+            );
             if !requested_close {
                 if let Some(resume) = guard
                     .0
@@ -686,6 +698,7 @@ impl MacosWorkComposition {
                     .filter(|resume| resume.generation > resumed_generation)
                 {
                     resumed_generation = resume.generation;
+                    helped = true;
                     let result = async {
                         let plan = resume_plan.as_ref().ok_or(WorkError::Invalid)?;
                         let account = registration
@@ -827,6 +840,7 @@ impl MacosWorkComposition {
                         intervention: None,
                         note: Some("The browser was not ready for this page".into()),
                         measurements: measure.settle(started, model_in_flight),
+                        helped,
                     });
                 }
                 RetainedWorkPhase::Uncertain if anonymous => {
@@ -847,6 +861,7 @@ impl MacosWorkComposition {
                         ),
                         intervention,
                         measurements: measure.settle(started, model_in_flight),
+                        helped,
                     });
                 }
                 RetainedWorkPhase::Uncertain => {
@@ -1005,6 +1020,7 @@ impl MacosWorkComposition {
                     intervention,
                     note.map(str::to_owned),
                     measure.settle(started, model_in_flight),
+                    helped,
                 ));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1043,6 +1059,7 @@ struct BrowserRun {
     intervention: Option<WorkInterventionV1>,
     note: Option<String>,
     measurements: WorkStepMeasurementsV1,
+    helped: bool,
 }
 /// Closed words for why a page needs a person; shown on the step and read by the model.
 fn intervention_note(intervention: Option<&WorkInterventionV1>) -> Option<&'static str> {
@@ -1148,6 +1165,7 @@ impl BrowserRun {
         intervention: Option<WorkInterventionV1>,
         note: Option<String>,
         measurements: WorkStepMeasurementsV1,
+        helped: bool,
     ) -> Self {
         let (status, artifacts) = match result {
             Ok(result) => result,
@@ -1161,6 +1179,7 @@ impl BrowserRun {
             intervention,
             note: note.filter(|_| status != WorkAttemptStatus::Succeeded),
             measurements,
+            helped,
         }
     }
 }
@@ -1192,12 +1211,22 @@ mod closed_result_tests {
         let cap = since + Duration::from_millis(MAX_WORK_HUMAN_WAIT_MILLIS);
         let late = since + Duration::from_secs(3600);
         for phase in [None, Some(Phase::WaitingForHuman), Some(Phase::Released)] {
-            assert!(!human_wait_expired(cap - Duration::from_millis(1), since, late, phase));
+            assert!(!human_wait_expired(
+                cap - Duration::from_millis(1),
+                since,
+                late,
+                phase
+            ));
             assert!(human_wait_expired(cap, since, late, phase));
         }
         let early = since + Duration::from_secs(60);
         assert!(human_wait_expired(early, since, early, None));
-        for phase in [Phase::Presenting, Phase::Presented, Phase::Continuing, Phase::ReadyToResume] {
+        for phase in [
+            Phase::Presenting,
+            Phase::Presented,
+            Phase::Continuing,
+            Phase::ReadyToResume,
+        ] {
             assert!(!human_wait_expired(cap, since, late, Some(phase)));
         }
     }
@@ -1288,7 +1317,14 @@ mod closed_result_tests {
             (WorkError::Capacity, WorkAttemptStatus::Failed),
             (WorkError::OutcomeUnknown, WorkAttemptStatus::OutcomeUnknown),
         ] {
-            let run = BrowserRun::closed(Err(error), Some(usage), None, None, WorkStepMeasurementsV1::default());
+            let run = BrowserRun::closed(
+                Err(error),
+                Some(usage),
+                None,
+                None,
+                WorkStepMeasurementsV1::default(),
+                false,
+            );
             assert_eq!(run.status, expected);
             assert_eq!(run.usage, Some(usage));
             assert!(run.artifacts.is_empty());

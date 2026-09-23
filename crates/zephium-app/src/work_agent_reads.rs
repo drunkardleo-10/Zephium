@@ -116,8 +116,8 @@ impl Driver {
                 let retry = prior.is_none()
                     && terminal.is_none()
                     && failure.is_none()
-                    && matches!(&outcome, Ok(WorkBrowserOutcome { status: WorkStepStatus::Failed, usage: Some(_), note: Some(note), .. })
-                        if note == read_note::HUMAN_CHECK || note == read_note::UNSETTLED || note == read_note::CONSTRUCTION_TIMEOUT);
+                    && matches!(&outcome, Ok(WorkBrowserOutcome { status: WorkStepStatus::Failed, usage: Some(_), note: Some(note), helped, .. })
+                        if (note == read_note::HUMAN_CHECK && *helped) || note == read_note::UNSETTLED || note == read_note::CONSTRUCTION_TIMEOUT);
                 if retry && !pending.is_empty() {
                     retries.push((request, outcome));
                     continue;
@@ -371,6 +371,7 @@ mod tests {
                 intervention: None,
                 note: None,
                 measurements: None,
+                helped: false,
             };
             assert!(matches!(
                 checked_outcome(Ok(outcome), limits),

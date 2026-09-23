@@ -37,6 +37,8 @@ pub struct WorkBrowserOutcome {
     pub note: Option<String>,
     /// Closed wall time, provider call counts and exact accounting for this read.
     pub measurements: Option<WorkStepMeasurementsV1>,
+    /// A person was shown this page and continued it.
+    pub helped: bool,
 }
 pub struct WorkAgentProviders<'a> {
     pub turn: &'a dyn WorkAgentTurnProvider,
