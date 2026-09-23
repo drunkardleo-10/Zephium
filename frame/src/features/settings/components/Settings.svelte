@@ -29,6 +29,7 @@
     developer: () => import("./sections/DeveloperPage.svelte"),
     docs: () => import("./sections/DocumentationPage.svelte"),
     focus: () => import("./sections/FocusPage.svelte"),
+    work: () => import("./sections/WorkPage.svelte"),
     performance: () => import("./sections/PerformancePage.svelte"),
     account: () => import("./sections/AccountPage.svelte"),
     about: () => import("./sections/AboutPage.svelte"),

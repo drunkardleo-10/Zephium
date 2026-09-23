@@ -13,6 +13,7 @@ import {
   KeyboardIcon,
   Globe02Icon,
   SparklesIcon,
+  AiBrowserIcon,
   Clock01Icon,
   DashboardSpeed01Icon,
   PuzzleIcon,
@@ -95,6 +96,13 @@ export const sections = [
     title: m.section_languages,
     description: m.section_languages_description,
     icon: Globe02Icon,
+  },
+  {
+    id: "work",
+    group: "intelligence",
+    title: m.section_work,
+    description: m.section_work_description,
+    icon: AiBrowserIcon,
   },
   {
     id: "ai",

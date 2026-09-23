@@ -134,9 +134,9 @@
     "description": "Measured 328183 JS bytes with the agent run operation, step labels, and the agent line on the canvas card in the shared graph."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 553000,
+    "js": 555000,
     "css": 119600,
-    "description": "Measured 551883 JS and 119339 CSS bytes: the page card carries the waiting badge and its Help control."
+    "description": "Measured 554021 JS and 119339 CSS bytes: the regenerated decision-preference IPC surface enters every entry that reaches the bindings."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
     "js": 70000,
@@ -144,14 +144,14 @@
     "description": "Measured 65242 JS and 2553 CSS bytes: a hand-written SVG plot with no chart library."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 578000,
+    "js": 580000,
     "css": 113000,
-    "description": "Measured 577007 JS and 109980 CSS bytes: the canvas reads the pages each run holds for a person and drives the takeover."
+    "description": "Measured 579341 JS and 109980 CSS bytes: the regenerated decision-preference IPC surface enters every entry that reaches the bindings."
   },
   "lazy:features/work/components/AgentLine.svelte": {
-    "js": 110000,
+    "js": 111000,
     "css": 7000,
-    "description": "Measured 105901 JS and 6199 CSS bytes: one quiet line with the run's state, its question, the agent roster, and the steer/queue path."
+    "description": "Measured 110241 JS and 6813 CSS bytes: the regenerated decision-preference IPC surface enters every entry that reaches the bindings."
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
     "js": 162000,
@@ -182,5 +182,10 @@
     "js": 73000,
     "css": 11000,
     "description": "Measured 71637 JS and 10464 CSS bytes: the well the agent's own view is presented in, its reason, countdown, account choice and release."
+  },
+  "lazy:features/settings/components/sections/WorkPage.svelte": {
+    "js": 303000,
+    "css": 84000,
+    "description": "Measured 302457 JS and 83808 CSS bytes: the Decisions control over the shared settings graph and the work-decision session."
   }
 }
