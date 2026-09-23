@@ -6,6 +6,9 @@
   import { resourceSession, type ResourceSession } from "$domain/resources";
   import type {
     TabView,
+    WorkHumanAccountV1,
+    WorkHumanPageIdV1,
+    WorkHumanRegionV1,
     WorkEnvironmentReference,
     WorkFileEvidenceV1,
     WorkAccountEffectV1,
@@ -16,7 +19,7 @@
   import { commands } from "$shared/ipc/bindings";
   import { layout } from "$domain/layout";
   import { workPane, type WorkPaneRect, type WorkPaneTarget } from "$domain/work-pane";
-  import { WorkHumanSession } from "$domain/work-human";
+  import { WorkHumanSession, type WorkHumanFailure } from "$domain/work-human";
   import { preferences } from "$domain/preferences";
   import { loadNotes, loadNoteEditorHost } from "$features/notes";
   import { loadTasks } from "$features/tasks";
@@ -66,6 +69,7 @@
     fileEvidence,
   } from "../lib/project-environment";
   import { environmentRequests, environmentStages } from "../lib/project-environment-thread";
+  import { failureLine, humanPage, regionOf, sameRegion } from "../lib/work-human";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
   import { subjectImageCandidates, subjectsOf } from "../lib/subjects";
   import { environmentResults, type ResultReference } from "../lib/project-environment-results";
@@ -175,7 +179,10 @@
       return;
     }
     if (item.type === "page" && item.page) {
-      openPane({ kind: "url", url: item.page.url }, id);
+      // A page the run is waiting on opens as a takeover, not as a copy in the
+      // person's own profile: a sign-in there never reaches the agent.
+      if (item.page.human?.phase === "waiting_for_human") openTakeover(id);
+      else openPane({ kind: "url", url: item.page.url }, id);
       return;
     }
     const reference = session.snapshot?.elements.find((element) => element.id === id)?.reference;
@@ -242,6 +249,7 @@
   function openPane(target: WorkPaneTarget, originId: string | null) {
     chrome?.close();
     lifted = null;
+    endTakeover(true);
     const restore =
       pane?.restore ??
       (document.activeElement instanceof HTMLElement ? document.activeElement : null);
@@ -304,6 +312,130 @@
   function openCitation(url: string) {
     openPane({ kind: "url", url }, null);
   }
+  // The takeover: Rust presents the agent's own view inside the well this pane
+  // reserves. There is no resize command, so a moved well is released and
+  // presented again.
+  let takeover = $state.raw<{
+    work: string;
+    card: string;
+    page: WorkHumanPageIdV1;
+    host: string;
+    url: string;
+    restore: HTMLElement | null;
+  } | null>(null);
+  let takeoverError = $state<string | null>(null);
+  let takeoverSent: WorkHumanRegionV1 | null = null;
+  let takeoverSeen = false;
+  let takeoverQueue: Promise<unknown> = Promise.resolve();
+  const takeoverPage = $derived.by(() => {
+    const current = takeover;
+    if (!current) return null;
+    const found = (human.pages.get(current.work) ?? []).find(
+      (candidate) =>
+        candidate.id.attempt === current.page.attempt &&
+        candidate.id.step === current.page.step &&
+        candidate.id.generation === current.page.generation,
+    );
+    return found ? humanPage(found) : null;
+  });
+  const takeoverView = $derived.by(() => {
+    const current = takeover;
+    const page = takeoverPage;
+    const bounds = cardBounds;
+    return current && page && bounds ? { current, page, bounds } : null;
+  });
+  /** One command at a time: a release and its re-presentation never interleave. */
+  function applyTakeover(job: () => Promise<WorkHumanFailure | null>, report: boolean) {
+    const next = takeoverQueue.then(async () => {
+      const failure = await job();
+      if (report) takeoverError = failure ? failureLine(failure) : null;
+    });
+    takeoverQueue = next.catch(() => undefined);
+  }
+  function openTakeover(card: string) {
+    const item = items.find((entry) => entry.id === card);
+    const state = item?.page?.human;
+    if (!state || state.phase !== "waiting_for_human") return;
+    const work = [...human.pages].find(([, pages]) =>
+      pages.some(
+        (candidate) =>
+          candidate.id.attempt === state.attempt &&
+          candidate.id.step === state.step &&
+          candidate.id.generation === state.generation,
+      ),
+    )?.[0];
+    if (!work) return;
+    chrome?.close();
+    lifted = null;
+    inspected = null;
+    closePane();
+    const restore =
+      takeover?.restore ??
+      (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    takeoverSeen = false;
+    takeoverSent = null;
+    takeoverError = null;
+    takeover = {
+      work,
+      card,
+      page: { attempt: state.attempt, step: state.step, generation: state.generation },
+      host: item?.page?.host ?? "",
+      url: item?.page?.url ?? "",
+      restore,
+    };
+    canvasRef?.center(card);
+  }
+  function endTakeover(release: boolean) {
+    const current = takeover;
+    takeover = null;
+    takeoverError = null;
+    takeoverSeen = false;
+    takeoverSent = null;
+    if (current && release) applyTakeover(() => human.release(current.work, current.page), false);
+    current?.restore?.focus({ preventScroll: true });
+  }
+  // Once the page is the agent's again the pane has nothing left to hold.
+  $effect(() => {
+    if (!takeover) return;
+    const page = takeoverPage;
+    if (page && page.phase !== "reading" && page.phase !== "released") {
+      takeoverSeen = true;
+      return;
+    }
+    if (page || takeoverSeen) untrack(() => endTakeover(false));
+  });
+  function takeoverRegion(box: WorkPaneRect | null) {
+    const current = takeover;
+    if (!current) return;
+    const region =
+      box &&
+      box.x !== null &&
+      box.y !== null &&
+      box.width !== null &&
+      box.height !== null &&
+      regionOf(
+        { x: box.x, y: box.y, width: box.width, height: box.height },
+        { width: window.innerWidth, height: window.innerHeight },
+      );
+    const next = region || null;
+    if (sameRegion(next, takeoverSent)) return;
+    const sent = takeoverSent;
+    takeoverSent = next;
+    if (sent) applyTakeover(() => human.release(current.work, current.page), false);
+    if (next) applyTakeover(() => human.present(current.work, current.page, next), true);
+  }
+  function continueTakeover(account: WorkHumanAccountV1) {
+    const current = takeover;
+    if (!current) return;
+    takeoverSent = null;
+    applyTakeover(() => human.continue(current.work, current.page, account), true);
+  }
+  /** A window that goes away hands the page back; the command is already sent. */
+  function abandonTakeover() {
+    const current = takeover;
+    if (current) void human.release(current.work, current.page);
+  }
+  onMount(() => abandonTakeover);
   function liftSize(item: CanvasItem | undefined) {
     if (!item) return { width: 720, height: 520 };
     // A product compare wants every column at once, not a scrollbar.
@@ -949,6 +1081,7 @@
   );
   const loadCanvas = () => import("./WorkCanvas.svelte");
   const loadAgentLine = () => import("./AgentLine.svelte");
+  const loadTakeover = () => import("./pane/TakeoverPane.svelte");
   const loadDetail = () => import("./WorkObjectiveInspector.svelte");
   $effect(() => {
     const current = snapshot;
@@ -1670,6 +1803,7 @@
     <ContextManifest profile={session.profile} selection={contextSel} purpose="agent" />
   {/if}
 {/snippet}
+<svelte:window onbeforeunload={abandonTakeover} />
 <div
   class="environment"
   style:--work-header-height="52px"
@@ -1728,6 +1862,10 @@
                     element: id,
                     area: action.slice(5) || null,
                   });
+                  return;
+                }
+                if (action === "help") {
+                  openTakeover(id);
                   return;
                 }
                 if (action === "ask") {
@@ -2006,6 +2144,24 @@
       }}
       onclose={closePane}
     />
+  {/if}
+  {#if takeoverView}
+    <LazyView
+      loader={loadTakeover}
+      loadingLabel={m.surface_loading()}
+      failureLabel={m.surface_render_failed()}
+      retryLabel={m.surface_retry()}
+      >{#snippet children(Takeover)}<Takeover
+          host={takeoverView.current.host}
+          url={takeoverView.current.url}
+          bounds={takeoverView.bounds}
+          page={takeoverView.page}
+          error={takeoverError}
+          onregion={takeoverRegion}
+          oncontinue={continueTakeover}
+          onclose={() => endTakeover(true)}
+        />{/snippet}</LazyView
+    >
   {/if}
   <WorkChrome
     bind:this={chrome}

@@ -2,10 +2,13 @@
   import { untrack } from "svelte";
   import type { CanvasItem } from "../../lib/canvas-model";
   import { cardCountdown, reasonBadge } from "../../lib/work-human";
-  let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
+  import * as m from "$shared/i18n/messages";
+  let { item, selected, onhelp }: { item: CanvasItem; selected: boolean; onhelp?: () => void } =
+    $props();
   /** Set while the run is holding this page open for a person. */
   const human = $derived(item.page?.human ?? null);
   const countdown = $derived(human ? cardCountdown(human.remaining) : null);
+  const waiting = $derived(human?.phase === "waiting_for_human");
   // A frame that missed once must not pin the placeholder: the store serves it
   // again once the run settles, and every refresh mints a new generation.
   let failedFrame = $state<string | null>(null);
@@ -42,7 +45,17 @@
     {#if human}
       <p class="needs">
         <span class="why">{reasonBadge(human.reason)}</span>
-        {#if countdown}<span class="left">{countdown}</span>{/if}
+        <span class="act">
+          {#if countdown}<span class="left">{countdown}</span>{/if}
+          {#if waiting && onhelp}<button
+              type="button"
+              class="help nodrag nopan"
+              onclick={(event) => {
+                event.stopPropagation();
+                onhelp?.();
+              }}>{m.work_human_help()}</button
+            >{/if}
+        </span>
       </p>
     {/if}
   </div>
@@ -151,10 +164,34 @@
     white-space: nowrap;
   }
 
-  .left {
+  .act {
+    display: inline-flex;
     flex: none;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .left {
     color: var(--color-muted);
     font-variant-numeric: tabular-nums;
+  }
+
+  .help {
+    block-size: 22px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--radius-capsule);
+    background: var(--color-accent);
+    color: var(--color-on-primary);
+    font: inherit;
+    font-size: var(--text-caption);
+    font-weight: 600;
+    cursor: default;
+    transition: filter var(--motion-instant) ease;
+  }
+
+  .help:hover {
+    filter: brightness(1.08);
   }
 
   .frame img {

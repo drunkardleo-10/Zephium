@@ -11,7 +11,7 @@ import type {
 import { events } from "$shared/ipc/native-events";
 import { observe } from "$shared/lib/observe";
 
-type Failure = WorkFailureV1 | "transport";
+export type WorkHumanFailure = WorkFailureV1 | "transport";
 /** A page still held for a person; `released` and `reading` are settled states. */
 const held = (page: WorkHumanPageV1) => page.phase !== "reading" && page.phase !== "released";
 const BEAT = 1000;
@@ -106,7 +106,10 @@ export class WorkHumanSession {
   release(work: string, page: WorkHumanPageIdV1) {
     return this.act(work, commands.workHumanRelease(this.profile, work, page));
   }
-  private async act(work: string, request: Promise<WorkHumanResponseV1>): Promise<Failure | null> {
+  private async act(
+    work: string,
+    request: Promise<WorkHumanResponseV1>,
+  ): Promise<WorkHumanFailure | null> {
     const generation = this.generation;
     const response = await observe(request, 9000, this.lifetime.signal);
     if (response.state !== "received") return "transport";

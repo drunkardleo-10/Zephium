@@ -134,9 +134,9 @@
     "description": "Measured 328183 JS bytes with the agent run operation, step labels, and the agent line on the canvas card in the shared graph."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 551000,
+    "js": 553000,
     "css": 119600,
-    "description": "Measured 549630 JS and 118944 CSS bytes: the page card now carries the badge a page waiting for a person shows."
+    "description": "Measured 551883 JS and 119339 CSS bytes: the page card carries the waiting badge and its Help control."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
     "js": 70000,
@@ -144,9 +144,9 @@
     "description": "Measured 65242 JS and 2553 CSS bytes: a hand-written SVG plot with no chart library."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 574000,
+    "js": 578000,
     "css": 113000,
-    "description": "Measured 572668 JS and 109980 CSS bytes: the canvas reads the pages each run holds open for a person."
+    "description": "Measured 577007 JS and 109980 CSS bytes: the canvas reads the pages each run holds for a person and drives the takeover."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 110000,
@@ -177,5 +177,10 @@
     "js": 110000,
     "css": 8500,
     "description": "Measured 107031 JS and 7994 CSS bytes: the product view of one subject, its admitted pictures, facts with sources, and the pages behind them."
+  },
+  "lazy:features/work/components/pane/TakeoverPane.svelte": {
+    "js": 73000,
+    "css": 11000,
+    "description": "Measured 71637 JS and 10464 CSS bytes: the well the agent's own view is presented in, its reason, countdown, account choice and release."
   }
 }

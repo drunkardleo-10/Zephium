@@ -37,6 +37,8 @@
   const type = $derived(data.type ?? (data.artifact ? "result" : "objective"));
   /** A card the run drew, not an element the person placed: it takes no orders. */
   const inert = $derived(["responsibility", "agent", "page", "sources", "request"].includes(type));
+  /** A page held for a person opens the takeover, never a copy in Browse. */
+  const waiting = $derived(data.page?.human?.phase === "waiting_for_human");
 </script>
 
 <Handle
@@ -59,8 +61,10 @@
 />
 <NodeToolbar isVisible={selected} position={Position.Top} offset={10}>
   <div class="bar" role="toolbar" aria-label={data.title}>
-    <button type="button" onclick={() => open(id)}>
-      <Icon icon={ArrowUpRight01Icon} size={14} />{m.work_env_open()}
+    <button type="button" onclick={() => (waiting ? action(id, "help") : open(id))}>
+      <Icon icon={ArrowUpRight01Icon} size={14} />{waiting
+        ? m.work_human_help()
+        : m.work_env_open()}
     </button>
     {#if data.artifact}<button
         type="button"
@@ -110,7 +114,7 @@
   {:else if type === "finding"}<FindingCard item={data} {selected} />
   {:else if type === "sources"}<SourcesCard item={data} {selected} />
   {:else if type === "folder"}<FolderCard item={data} {selected} />
-  {:else if type === "page"}<PageCard item={data} {selected} />
+  {:else if type === "page"}<PageCard item={data} {selected} onhelp={() => action(id, "help")} />
   {:else if type === "agent"}<AgentCard item={data} {selected} />
   {:else if type === "note"}<NoteCard item={data} {selected} />
   {:else if type === "media"}<MediaCard item={data} {selected} />
