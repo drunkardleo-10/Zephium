@@ -857,7 +857,7 @@ impl DecisionReadSelection {
                 SemanticExtractionValueKind::Url => json!({"k":"url","sources":sources}),
                 SemanticExtractionValueKind::ImageUrl => json!({"k":"image_url","sources":sources}),
                 _ => {
-                    json!({"k":"text","sources":sources,"value":fragment.verbatim_text().ok_or(SemanticExtractionError::VerbatimMismatch)?})
+                    json!({"k":"text","sources":sources,"value":field.verbatim_value(fragment.verbatim_text().ok_or(SemanticExtractionError::VerbatimMismatch)?)})
                 }
             };
             copied.insert(field.name().to_owned(), value);
@@ -983,9 +983,9 @@ impl DecisionReadSelection {
             let value = match field.kind() {
                 SemanticExtractionValueKind::Url => json!({"k":"url","sources":[token]}),
                 SemanticExtractionValueKind::ImageUrl => json!({"k":"image_url","sources":[token]}),
-                _ => json!({"k":"text","sources":[token],"value":fragment
+                _ => json!({"k":"text","sources":[token],"value":field.verbatim_value(fragment
                     .verbatim_text()
-                    .ok_or(SemanticExtractionError::VerbatimMismatch)?}),
+                    .ok_or(SemanticExtractionError::VerbatimMismatch)?)}),
             };
             copied.insert(field.name().to_owned(), value);
         }

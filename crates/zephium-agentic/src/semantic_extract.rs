@@ -332,6 +332,21 @@ impl SemanticExtractionFieldSchema {
         self.verbatim
     }
 
+    /// What a verbatim copy of `exact` publishes: for a text column naming a
+    /// price, cost, total or amount, the one currency amount the text shows;
+    /// otherwise, or when it shows none or several, the whole text.
+    pub fn verbatim_value<'a>(&self, exact: &'a str) -> &'a str {
+        let name = self.name.to_ascii_lowercase();
+        let money_like = matches!(self.spec, SemanticExtractionFieldSpec::Text { .. })
+            && ["price", "cost", "total", "amount"]
+                .iter()
+                .any(|word| name.contains(word));
+        money_like
+            .then(|| crate::semantic_money::single_currency_amount(exact))
+            .flatten()
+            .unwrap_or(exact)
+    }
+
     /// Marks a URL column whose value is the subject's own page address. It
     /// may then cite the read's admitted document address, never page text.
     pub fn with_document_address(mut self) -> Result<Self, SemanticExtractionSchemaError> {
@@ -1579,10 +1594,14 @@ fn admit_value<'a>(
                     .and_then(|id| read.fragment(id))
                     .and_then(|fragment| fragment.verbatim_text())
                     .ok_or(SemanticExtractionError::VerbatimMismatch)?;
-                if value.as_ref().is_some_and(|value| value != exact) {
+                let published = field.verbatim_value(exact);
+                if value
+                    .as_ref()
+                    .is_some_and(|value| value != exact && value != published)
+                {
                     return Err(SemanticExtractionError::VerbatimMismatch);
                 }
-                exact.to_owned()
+                value.unwrap_or_else(|| published.to_owned())
             } else {
                 value.ok_or(SemanticExtractionError::Malformed)?
             };

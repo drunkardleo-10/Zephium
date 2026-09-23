@@ -3195,8 +3195,8 @@ fn a_catalog_read_copies_each_found_record_from_inside_it_or_leaves_the_planner(
         assert_eq!(
             copied,
             [
-                ["Tower Bridge", "Tower Bridge $349.99 New", "https://shop.example.test/tower-bridge", "https://shop.example.test/tower-bridge.webp"],
-                ["Paris", "Paris $79.99", "https://shop.example.test/paris", "https://shop.example.test/paris.webp"],
+                ["Tower Bridge", "$349.99", "https://shop.example.test/tower-bridge", "https://shop.example.test/tower-bridge.webp"],
+                ["Paris", "$79.99", "https://shop.example.test/paris", "https://shop.example.test/paris.webp"],
                 ["London", "$39.99", "https://shop.example.test/london", "https://shop.example.test/london.webp"],
             ]
         );

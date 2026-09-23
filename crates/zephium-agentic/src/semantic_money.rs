@@ -152,9 +152,114 @@ pub(crate) fn supports_money(text: &str, amount: &str, currency: &str) -> bool {
     })
 }
 
+/// Currency codes a displayed amount may carry beside its number.
+const CURRENCY_CODES: [&str; 12] = [
+    "USD", "EUR", "GBP", "PLN", "CHF", "CAD", "AUD", "JPY", "SEK", "NOK", "DKK", "CZK",
+];
+const CURRENCY_SYMBOLS: [&str; 4] = ["$", "€", "£", "zł"];
+
+fn spacing(ch: char) -> bool {
+    matches!(ch, ' ' | '\u{a0}' | '\u{202f}')
+}
+
+/// The marker ending `before` (a symbol, or a closed code at a word start),
+/// with at most one space between it and the number: where it starts.
+fn marker_before(before: &str) -> Option<usize> {
+    let trimmed = before
+        .strip_suffix(|ch: char| spacing(ch))
+        .unwrap_or(before);
+    CURRENCY_SYMBOLS
+        .iter()
+        .chain(&CURRENCY_CODES)
+        .find(|marker| {
+            trimmed.ends_with(**marker)
+                && (marker.chars().all(|ch| !ch.is_ascii_alphabetic())
+                    || !trimmed[..trimmed.len() - marker.len()]
+                        .chars()
+                        .last()
+                        .is_some_and(char::is_alphanumeric))
+        })
+        .map(|marker| trimmed.len() - marker.len())
+}
+
+/// The marker starting `after`, with at most one space before it: where it ends.
+fn marker_after(after: &str) -> Option<usize> {
+    let skipped = after.len()
+        - after
+            .strip_prefix(|ch: char| spacing(ch))
+            .unwrap_or(after)
+            .len();
+    let rest = &after[skipped..];
+    CURRENCY_SYMBOLS
+        .iter()
+        .chain(&CURRENCY_CODES)
+        .find(|marker| {
+            rest.starts_with(**marker)
+                && !rest[marker.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_alphanumeric)
+        })
+        .map(|marker| skipped + marker.len())
+}
+
+/// The one currency amount `text` displays, marker included, such as
+/// "$349.99" in "Tower Bridge $349.99 New"; none when it shows no amount or
+/// more than one.
+pub(crate) fn single_currency_amount(text: &str) -> Option<&str> {
+    let mut found = None;
+    let mut index = 0;
+    while index < text.len() {
+        let Some(offset) = text[index..].find(|ch: char| ch.is_ascii_digit()) else {
+            break;
+        };
+        let start = index + offset;
+        let mut end = start;
+        let mut chars = text[start..].char_indices().peekable();
+        while let Some((at, ch)) = chars.next() {
+            let continues = ch.is_ascii_digit()
+                || ((matches!(ch, '.' | ',') || spacing(ch))
+                    && chars.peek().is_some_and(|(_, next)| next.is_ascii_digit()));
+            if !continues {
+                break;
+            }
+            end = start + at + ch.len_utf8();
+        }
+        index = end.max(start + 1);
+        let span = match (marker_before(&text[..start]), marker_after(&text[end..])) {
+            (Some(from), _) => from..end,
+            (None, Some(to)) => start..end + to,
+            (None, None) => continue,
+        };
+        if found.replace(span).is_some() {
+            return None;
+        }
+    }
+    found.map(|span| &text[span])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_displayed_text_yields_its_one_currency_amount_or_none() {
+        for (text, amount) in [
+            ("Tower Bridge $349.99 New", Some("$349.99")),
+            ("Paris – City of Love $79.99", Some("$79.99")),
+            ("$39.99", Some("$39.99")),
+            ("Cena 1\u{a0}299,00 zł brutto", Some("1\u{a0}299,00 zł")),
+            ("£51.77", Some("£51.77")),
+            ("Price: USD 20", Some("USD 20")),
+            ("12,50 € pro Stück", Some("12,50 €")),
+            ("Tower Bridge 21067", None),
+            ("Was $59.99, now $39.99", None),
+            ("SKU 20 USDA", None),
+            ("Pieces:3745", None),
+        ] {
+            assert_eq!(single_currency_amount(text), amount, "{text}");
+        }
+    }
 
     #[test]
     fn money_requires_adjacent_explicit_currency_and_unambiguous_decimal_evidence() {
