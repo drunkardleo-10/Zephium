@@ -1,4 +1,12 @@
-import type { WorkExecutionFact } from "$domain/work";
+import type { WorkExecutionFact, WorkRuntimeProjection } from "$domain/work";
+
+/** Whether an execution is still going: not settled and not left by an earlier launch. */
+export function isLive(state: WorkRuntimeProjection, execution: WorkExecutionFact): boolean {
+  return (
+    ["approved", "running", "cancel_requested"].includes(execution.status) &&
+    !state.interrupted.includes(execution.id)
+  );
+}
 
 /**
  * The agent's latest line for people, from the most recent turn that said

@@ -10,8 +10,8 @@ import type {
   WorkPageV1,
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
-import { artifactView } from "./project-work";
-import { agentLine, isAgentExecution, FILE_STEPS } from "./agent-steps";
+import { activityLabel, artifactView } from "./project-work";
+import { agentLine, isAgentExecution, isLive, FILE_STEPS } from "./agent-steps";
 import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
 import { CARD_GAP, COLUMNS, PAGE_SIZE, SOURCES_SIZE } from "./organize";
 import { firstRequest, type WorkStage } from "./project-environment-thread";
@@ -424,22 +424,6 @@ export function environmentLinks(snapshot: WorkEnvironmentSnapshot): CanvasLink[
   );
 }
 
-const agentLabels: Record<string, () => string> = {
-  planning: m.work_activity_planning,
-  delegating: m.work_activity_delegating,
-  searching: m.work_activity_searching,
-  reading: m.work_activity_reading,
-  interacting: m.work_activity_interacting,
-  verifying: m.work_activity_verifying,
-  recovering: m.work_activity_recovering,
-  comparing: m.work_activity_comparing,
-  producing_artifact: m.work_activity_producing,
-  paused: m.work_activity_paused,
-  waiting_for_approval: m.work_activity_approval,
-  waiting_for_human: m.work_activity_human,
-  cancelling: m.work_activity_cancelling,
-  finishing: m.work_activity_finishing,
-};
 /** Transient agent presence for objectives with live executions; never persisted.
  * The primary avatar stands beside what it just placed; a worker avatar appears
  * beside it while a native step browses. */
@@ -458,15 +442,9 @@ export function environmentAgents(
     if (element.reference.kind !== "objective") continue;
     const projection = objectives.get(element.reference.objective);
     const execution = projection?.executions.at(-1);
-    if (
-      !projection ||
-      !execution ||
-      !["running", "cancel_requested", "approved"].includes(execution.status) ||
-      projection.interrupted.includes(execution.id)
-    )
-      continue;
+    if (!projection || !execution || !isLive(projection, execution)) continue;
     const signal = activity(projection.work.id);
-    const label = signal ? agentLabels[signal]?.() : undefined;
+    const label = signal ? activityLabel(signal) : undefined;
     let seed = 0;
     for (const char of projection.work.id) seed = (seed * 31 + char.charCodeAt(0)) % 9973;
     const id = `agent:${element.id}`;
@@ -578,9 +556,7 @@ export function environmentSources(
     for (const id of stage.executions) {
       const execution = projection.executions.find((entry) => entry.id === id);
       if (!execution || !isAgentExecution(execution)) continue;
-      const running =
-        ["running", "cancel_requested", "approved"].includes(execution.status) &&
-        !projection.interrupted.includes(execution.id);
+      const running = isLive(projection, execution);
       const seen = new Set<string>();
       const files = new Set<string>();
       const rows: SourceRow[] = [];
@@ -706,9 +682,7 @@ export function environmentPages(
       if (!execution || !isAgentExecution(execution)) continue;
       // Only the run that is still going marks its pages live; an earlier
       // stage keeps its last frames and says nothing about now.
-      const running =
-        ["running", "cancel_requested", "approved"].includes(execution.status) &&
-        !projection.interrupted.includes(execution.id);
+      const running = isLive(projection, execution);
       const opened = recorded.filter((page) => page.execution === execution.id);
       // One card per page: every step that opened the same URL folds into it.
       const byUrl = new Map<

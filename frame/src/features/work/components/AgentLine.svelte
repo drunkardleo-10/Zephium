@@ -2,7 +2,7 @@
   import { untrack } from "svelte";
   import type { WorkSession } from "$domain/work";
   import { currentActivity } from "$domain/work";
-  import { agentLine } from "../lib/agent-steps";
+  import { agentLine, isLive } from "../lib/agent-steps";
   import { cardCountdown } from "../lib/work-human";
   import { preparationFailure } from "../lib/preparation-failure";
   import { fileName } from "../lib/work-files";
@@ -45,11 +45,7 @@
   const run = $derived(work ? session.operations.latest(work.id, "run") : undefined);
   const execution = $derived(runtime?.executions.at(-1));
   const interrupted = $derived(!!execution && !!runtime?.interrupted.includes(execution.id));
-  const live = $derived(
-    !!execution &&
-      !interrupted &&
-      ["approved", "running", "cancel_requested"].includes(execution.status),
-  );
+  const live = $derived(!!runtime && !!execution && isLive(runtime, execution));
   const blocked = $derived(!!session.pending || !["ready", "rejected"].includes(session.delivery));
   const activity = $derived(
     runtime ? currentActivity(runtime, session.activity).at(-1)?.activity : undefined,

@@ -11,6 +11,7 @@ import type { ArtifactView, ArtifactContent, EvidenceReference } from "$shared/u
 import * as m from "$shared/i18n/messages";
 import type { CanvasItem, CanvasLink } from "./canvas-model";
 import { fileFolder } from "./work-files";
+import { isLive } from "./agent-steps";
 
 /** Hostname for a source label. Resolved here so a small lazy chunk that needs
  * one line of text does not pull the whole Artifact UI module with it. */
@@ -234,10 +235,7 @@ export function projectWork(
     plan && (!execution || plan.revision === execution.spec.plan_revision) ? plan : null;
   const nodes = exactPlan?.draft.nodes ?? [];
   const artifacts = execution?.artifacts ?? [];
-  const live =
-    execution &&
-    ["approved", "running", "cancel_requested"].includes(execution.status) &&
-    !interrupted;
+  const live = execution && isLive(state, execution);
   const nodeIds = new Set(nodes.map((node) => node.id));
   const items: ProjectedWork["items"][number][] = nodes.map((node) => {
     const attempts = execution?.attempts.filter((attempt) => attempt.node === node.id) ?? [];
@@ -263,7 +261,7 @@ export function projectWork(
       status: interrupted
         ? m.work_interrupted()
         : signal
-          ? activityLabel(signal.activity)
+          ? (activityLabel(signal.activity) ?? "")
           : (attempts.at(-1)?.status ?? m.work_not_started()),
     };
   });
@@ -347,22 +345,23 @@ export function projectWork(
   };
 }
 
-function activityLabel(activity: WorkSignalV1["activity"]): string {
-  const labels: Record<WorkSignalV1["activity"], string> = {
-    planning: m.work_activity_planning(),
-    delegating: m.work_activity_delegating(),
-    searching: m.work_activity_searching(),
-    reading: m.work_activity_reading(),
-    interacting: m.work_activity_interacting(),
-    verifying: m.work_activity_verifying(),
-    recovering: m.work_activity_recovering(),
-    comparing: m.work_activity_comparing(),
-    producing_artifact: m.work_activity_producing(),
-    paused: m.work_activity_paused(),
-    waiting_for_approval: m.work_activity_approval(),
-    waiting_for_human: m.work_activity_human(),
-    cancelling: m.work_activity_cancelling(),
-    finishing: m.work_activity_finishing(),
-  };
-  return labels[activity];
+const ACTIVITY_LABELS: Record<WorkSignalV1["activity"], () => string> = {
+  planning: m.work_activity_planning,
+  delegating: m.work_activity_delegating,
+  searching: m.work_activity_searching,
+  reading: m.work_activity_reading,
+  interacting: m.work_activity_interacting,
+  verifying: m.work_activity_verifying,
+  recovering: m.work_activity_recovering,
+  comparing: m.work_activity_comparing,
+  producing_artifact: m.work_activity_producing,
+  paused: m.work_activity_paused,
+  waiting_for_approval: m.work_activity_approval,
+  waiting_for_human: m.work_activity_human,
+  cancelling: m.work_activity_cancelling,
+  finishing: m.work_activity_finishing,
+};
+/** What a live attempt is doing, in a few words. */
+export function activityLabel(activity: string): string | undefined {
+  return (ACTIVITY_LABELS as Record<string, (() => string) | undefined>)[activity]?.();
 }

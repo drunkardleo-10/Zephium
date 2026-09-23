@@ -57,6 +57,7 @@
   import HostGlyph from "./cards/HostGlyph.svelte";
   import { defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
+  import { isLive } from "../lib/agent-steps";
   import { environmentPlan } from "../lib/project-environment-plan";
   import {
     environmentAgents,
@@ -1455,13 +1456,10 @@
   }
   const taskItems = $derived(taskList?.items ?? []);
   const tasksDone = $derived(taskItems.filter((task) => task.completed).length);
-  const activeExecution = $derived(
-    !!objectiveSession?.projection?.executions.some(
-      (execution) =>
-        ["running", "cancel_requested", "approved"].includes(execution.status) &&
-        !objectiveSession?.projection?.interrupted.includes(execution.id),
-    ),
-  );
+  const activeExecution = $derived.by(() => {
+    const projection = objectiveSession?.projection;
+    return !!projection?.executions.some((execution) => isLive(projection, execution));
+  });
   const needsDecision = $derived(
     !!objectiveSession?.projection?.work.questions.some((question) => question.state === "active"),
   );
