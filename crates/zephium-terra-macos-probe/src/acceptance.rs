@@ -137,18 +137,20 @@ pub(super) fn run() -> Result<(), super::ProbeFailure> {
                 .stderr(Stdio::null())
                 .spawn()
                 .map_err(|_| Error::Runtime)?;
-            running.push((repetition, name, Instant::now(), child));
+            running.push((repetition, name, directory, Instant::now(), child));
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
         let mut index = 0;
         while index < running.len() {
-            if running[index].3.try_wait().map_err(|_| Error::Runtime)?.is_none() {
+            if running[index].4.try_wait().map_err(|_| Error::Runtime)?.is_none() {
                 index += 1;
                 continue;
             }
-            let (repetition, name, started, child) = running.swap_remove(index);
+            let (repetition, name, directory, started, child) = running.swap_remove(index);
             let wall_ms = started.elapsed().as_millis();
             let output = child.wait_with_output().map_err(|_| Error::Runtime)?;
+            // The child's own closed-fact lines, kept for diagnosis.
+            let _ = std::fs::write(directory.join("run.log"), &output.stdout);
             let text = String::from_utf8_lossy(&output.stdout);
             let (row, reason, pass) = measure(&text, wall_ms);
             let pass = pass && output.status.success();
