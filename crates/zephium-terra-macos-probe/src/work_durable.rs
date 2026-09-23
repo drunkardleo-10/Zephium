@@ -770,7 +770,7 @@ async fn workflow(
                 transport.clone(),
                 browser_keys.pop().ok_or("synthesis_key")?,
                 WorkPlanningConfig::try_new(
-                    zephium_agent_model_catalog::try_luna_provider_exact_call_config(4096)
+                    zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(4096)
                         .map_err(|_| "synthesis_model")?,
                     8192,
                     10_000,
@@ -787,7 +787,7 @@ async fn workflow(
         transport,
         planning_key,
         WorkPlanningConfig::try_new(
-            zephium_agent_model_catalog::try_luna_provider_exact_call_config(4096)
+            zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(4096)
                 .map_err(|_| "model_config")?,
             8192,
             100_000,
@@ -1329,7 +1329,7 @@ async fn agent_workflow(
         transport.clone(),
         turn_key,
         WorkPlanningConfig::try_new(
-            zephium_agent_model_catalog::try_luna_provider_exact_call_config(8192)
+            zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(8192)
                 .map_err(|_| "agent_model")?,
             32_768,
             300_000,
