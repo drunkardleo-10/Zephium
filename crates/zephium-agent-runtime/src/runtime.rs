@@ -64,6 +64,9 @@ const STAGED_STOP_CLOSED_MAILBOX: u8 = 4;
 // inherit an absolute deadline. It still gets one bounded, controller-visible
 // reconciliation window before this host forcibly drops retained authority.
 const CONTROLLER_FAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+// Provider TLS (reqwest, rustls, aws-lc) is polled inline on this worker; an
+// unoptimized build overflowed the 2 MiB platform default mid-handshake.
+const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 static RUNTIME_WORKER_HELD: AtomicBool = AtomicBool::new(false);
 static EMERGENCY_WORKER_REAP: Mutex<Vec<RuntimeWorkerOwnership>> = Mutex::new(Vec::new());
@@ -1478,6 +1481,7 @@ impl PendingAgentRuntime {
         let worker_permit = Arc::clone(&permit);
         let worker = thread::Builder::new()
             .name("zephium-agent-runtime".to_owned())
+            .stack_size(WORKER_STACK_BYTES)
             .spawn(move || {
                 worker_main(
                     worker_inner,
@@ -3749,6 +3753,56 @@ mod tests {
         ));
         let next = spawn_after_true_worker_exit();
         drop(next);
+    }
+
+    struct DeepStackController {
+        report: mpsc::Sender<(Option<String>, u64)>,
+    }
+
+    #[inline(never)]
+    fn consume_stack(frames: usize) -> u64 {
+        let mut frame = [0u8; 64 * 1024];
+        std::hint::black_box(&mut frame);
+        if frames == 0 {
+            return u64::from(frame[0]);
+        }
+        consume_stack(frames - 1) + u64::from(std::hint::black_box(frame[frame.len() - 1]))
+    }
+
+    impl AgentRuntimeController for DeepStackController {
+        fn run(
+            self: Box<Self>,
+            _worker: AgentRuntimeWorker,
+            _browser: AgentRuntimeBrowser,
+        ) -> AgentRuntimeControllerFuture {
+            Box::pin(async move {
+                // Three times the 2 MiB platform default a provider handshake overflowed.
+                let depth = consume_stack(6 * 1024 * 1024 / (64 * 1024));
+                let _ = self
+                    .report
+                    .send((std::thread::current().name().map(str::to_owned), depth));
+            })
+        }
+    }
+
+    #[test]
+    fn worker_stack_admits_controller_frames_beyond_the_platform_default() {
+        let _guard = runtime_test_guard();
+        let (report, reported) = mpsc::channel();
+        let pending = spawn_suspended_with_controller(
+            AgentRuntimeConfig::STANDARD,
+            Box::new(DeepStackController { report }),
+        )
+        .expect("controller worker starts");
+        let (_handle, completion, lifecycle) = pending
+            .bind_browser_port(Arc::new(RecordingPort {
+                calls: AtomicUsize::new(0),
+            }))
+            .into_parts();
+        let observed = reported.recv_timeout(Duration::from_secs(5));
+        wait_stopped(&completion);
+        drop(lifecycle.shutdown_until(Instant::now() + Duration::from_secs(1)));
+        assert_eq!(observed, Ok((Some("zephium-agent-runtime".to_owned()), 0)));
     }
 
     #[test]
