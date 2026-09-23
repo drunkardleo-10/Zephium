@@ -231,7 +231,7 @@ pub struct WorkPlanningUsageV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkPlanningOutcomeV1 {
-    Settled { response: WorkResponseV1 },
+    Settled { response: Box<WorkResponseV1> },
     Refused { reason: WorkPlanningFailureV1 },
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]

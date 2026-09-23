@@ -66,7 +66,7 @@ impl WorkPlanningService {
             Ok((usage, spec)) => (
                 Some(usage_view(usage)),
                 WorkPlanningOutcomeV1::Settled {
-                    response: WorkResponseV1 {
+                    response: Box::new(WorkResponseV1 {
                         version: 1,
                         profile: profile.to_string(),
                         reply: match spec {
@@ -79,7 +79,7 @@ impl WorkPlanningService {
                                 error: error.into(),
                             },
                         },
-                    },
+                    }),
                 },
             ),
             Err(error) => (
@@ -231,7 +231,7 @@ impl WorkPlanningService {
                 (
                     Some(usage_view(completion.usage)),
                     WorkPlanningOutcomeV1::Settled {
-                        response: WorkResponseV1::from_result(profile, persistence),
+                        response: Box::new(WorkResponseV1::from_result(profile, persistence)),
                     },
                 )
             }
