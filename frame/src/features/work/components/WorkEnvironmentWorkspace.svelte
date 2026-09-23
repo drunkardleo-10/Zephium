@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack, onMount } from "svelte";
-  import { SvelteSet } from "svelte/reactivity";
+  import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { WorkEnvironmentContext, type WorkEnvironmentSession } from "$domain/work-environment";
   import { commandId, workSession, type WorkSession } from "$domain/work";
   import { resourceSession, type ResourceSession } from "$domain/resources";
@@ -855,7 +855,7 @@
         ...placements,
       ],
     });
-    void admitSubjectImages(projection, execution, placed);
+    void pictureSubjects();
   }
   // Subjects may name public image candidates from their cited sources. Rust
   // fetches, bounds, decodes, and stores an admitted copy; the canvas only ever
@@ -878,44 +878,107 @@
     }
     return undefined;
   }
-  async function admitSubjectImages(
-    projection: WorkRuntimeProjection,
-    execution: WorkExecutionFact,
-    placed: WorkEnvironmentSnapshot,
-  ) {
-    let budget = 6;
-    for (const element of placed.elements) {
-      if (budget <= 0) break;
+  /** A subject shows a picture once any "uses" relation leaves it. */
+  function pictured(current: WorkEnvironmentSnapshot, element: string): boolean {
+    return (current.relations ?? []).some(
+      (relation) => relation.from === element && relation.kind === "uses",
+    );
+  }
+  /** Subjects on this canvas still without a picture, with their candidates in order. */
+  function unpictured(current: WorkEnvironmentSnapshot) {
+    return current.elements.flatMap((element) => {
       const reference = element.reference;
-      if (reference.kind !== "subject" || reference.execution !== execution.id) continue;
-      // A later run adds subjects beside pictures its predecessor admitted.
-      const current = session.snapshot ?? placed;
-      if (!current.elements.some((candidate) => candidate.id === element.id)) continue;
-      const related = (current.relations ?? []).some(
-        (relation) => relation.from === element.id && relation.kind === "uses",
-      );
-      if (related) continue;
-      const run = projection.executions.find((entry) => entry.id === reference.execution);
+      if (reference.kind !== "subject" || pictured(current, element.id)) return [];
+      if (admittedFor.has(`${current.id} ${element.id}`)) return [];
+      const run = context.objectives
+        .get(reference.objective)
+        ?.executions.find((entry) => entry.id === reference.execution);
       const artifact = run?.artifacts.find((entry) => entry.id === reference.artifact);
       const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
-      const candidate = subject && run ? subjectImageCandidates(run, subject)[0] : undefined;
-      if (!candidate) continue;
-      const canonical = canonicalImageUrl(candidate);
-      const known = placedPicture(current, canonical);
-      if (known) {
-        // The picture is already here: point at it instead of fetching it twice.
-        await session.edit({ kind: "relate", from: element.id, to: known, relation: "uses" });
-        continue;
-      }
-      const key = `${placed.id} ${canonical}`;
-      if (imageAdmissions.has(key)) continue;
-      imageAdmissions.add(key);
-      budget -= 1;
-      try {
-        await commands.mediaAdmitRemote(session.profile, placed.id, element.id, candidate);
-      } catch {
-        /* Admission is best effort; the subject keeps its honest placeholder. */
-      }
+      const candidates = subject && run ? subjectImageCandidates(run, subject) : [];
+      return candidates.length ? [{ element: element.id, candidates }] : [];
+    });
+  }
+  // One queue per canvas, not a per-pass budget: it runs until every pictured
+  // subject has one picture, falls back to the next candidate when Rust
+  // refuses one, and retries a refused candidate once after a pause.
+  const PICTURE_RETRY_MS = 5000;
+  const refusals = new SvelteMap<string, { count: number; after: number }>();
+  const admittedFor = new SvelteSet<string>();
+  let picturing = false;
+  let pictureAgain = false;
+  let pictureTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const current = snapshot;
+    // A projection update can bring candidates for subjects already placed.
+    const runs = [...context.objectives.values()];
+    if (!current || !runs.length || session.pending || session.loading) return;
+    untrack(() => void pictureSubjects());
+  });
+  $effect(() => () => clearTimeout(pictureTimer));
+  async function admitPicture(environment: string, element: string, candidate: string) {
+    try {
+      const result = await commands.mediaAdmitRemote(
+        session.profile,
+        environment,
+        element,
+        candidate,
+      );
+      return result.status === "ok" && result.data.kind === "admitted";
+    } catch {
+      return false;
+    }
+  }
+  async function pictureSubjects() {
+    if (picturing) {
+      pictureAgain = true;
+      return;
+    }
+    picturing = true;
+    try {
+      do {
+        pictureAgain = false;
+        const current = session.snapshot;
+        if (!current) break;
+        let retry = Infinity;
+        for (const { element, candidates } of unpictured(current)) {
+          for (const candidate of candidates) {
+            const latest = session.snapshot ?? current;
+            if (latest.id !== current.id || pictured(latest, element)) break;
+            const canonical = canonicalImageUrl(candidate);
+            const known = placedPicture(latest, canonical);
+            if (known) {
+              // The picture is already here: point at it instead of fetching it twice.
+              if (
+                await session.edit({ kind: "relate", from: element, to: known, relation: "uses" })
+              )
+                break;
+              continue;
+            }
+            const key = `${current.id} ${canonical}`;
+            const refused = refusals.get(key) ?? { count: 0, after: 0 };
+            if (refused.count >= 2) continue;
+            if (Date.now() < refused.after) {
+              retry = Math.min(retry, refused.after);
+              continue;
+            }
+            imageAdmissions.add(key);
+            if (await admitPicture(current.id, element, candidate)) {
+              admittedFor.add(`${current.id} ${element}`);
+              break;
+            }
+            const after = Date.now() + PICTURE_RETRY_MS;
+            refusals.set(key, { count: refused.count + 1, after });
+            if (!refused.count) retry = Math.min(retry, after);
+          }
+        }
+        if (retry !== Infinity) {
+          clearTimeout(pictureTimer);
+          pictureTimer = setTimeout(() => void pictureSubjects(), Math.max(0, retry - Date.now()));
+        }
+      } while (pictureAgain);
+    } finally {
+      picturing = false;
     }
   }
   const liftedItem = $derived(items.find((item) => item.id === lifted?.id));

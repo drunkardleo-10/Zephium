@@ -144,9 +144,9 @@
     "description": "Measured 65242 JS and 2553 CSS bytes: a hand-written SVG plot with no chart library."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 580000,
+    "js": 580500,
     "css": 113000,
-    "description": "Measured 579341 JS and 109980 CSS bytes: the regenerated decision-preference IPC surface enters every entry that reaches the bindings."
+    "description": "Measured 580135 JS and 109980 CSS bytes: subject pictures admit through a per-canvas queue with fallback and one retry."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 111000,
