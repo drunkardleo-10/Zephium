@@ -1725,3 +1725,237 @@ fn cloud_endpoint_and_credentials_are_bound_independently_of_page_data() {
     )
     .is_err());
 }
+
+fn search_ranking_fixture(
+    count: usize,
+) -> (
+    zephium_core::work::search::WorkPublicSearchScope,
+    zephium_core::work::search::WorkProviderSearchEvidenceV1,
+) {
+    use zephium_core::work::search::*;
+    let scope = WorkPublicSearchScope {
+        provider: WorkSearchProvider::OpenAi,
+        model: "gpt-5.6-luna".into(),
+        query: "public source".into(),
+    };
+    let evidence = WorkProviderSearchEvidenceV1 {
+        version: 1,
+        provider: scope.provider,
+        model: scope.model.clone(),
+        response_model: scope.model.clone(),
+        response_id: "resp_ranking".into(),
+        search_call_id: "ws_ranking".into(),
+        answer: "Public provider evidence.".into(),
+        citations: (0..count)
+            .map(|index| WorkProviderSearchCitation {
+                url: format!("https://example.test/{index}?private_query=excluded"),
+                title: format!("Source {index}"),
+                start_index: 0,
+                end_index: 6,
+            })
+            .collect(),
+        actual_input_tokens: 100,
+        actual_output_tokens: 10,
+    };
+    (scope, evidence)
+}
+
+#[test]
+fn search_ranking_projection_is_bounded_and_uses_only_admitted_public_candidates() {
+    let (scope, evidence) = search_ranking_fixture(64);
+    let projection = super::search::search_projection(&scope, &evidence).unwrap();
+    assert_eq!(projection.questions().len(), 16);
+    let encoded = projection.encode().unwrap();
+    let text = std::str::from_utf8(&encoded).unwrap();
+    assert!(!text.contains("private_query"));
+    assert!(text.contains("untrusted_provider_search"));
+    assert!(projection
+        .questions()
+        .values()
+        .all(|question| question.kind() == zephium_decision::QuestionKind::Noul));
+    let mut different = scope.clone();
+    different.model = "gpt-4.1-mini".into();
+    assert!(super::search::search_projection(&different, &evidence).is_err());
+    let mut secret = evidence.clone();
+    secret.answer = "Authorization: Bearer do-not-disclose-this-secret".into();
+    assert!(super::search::search_projection(&scope, &secret).is_err());
+    let mut duplicate = evidence.clone();
+    for source in &mut duplicate.citations {
+        source.url = evidence.citations[0].url.clone();
+    }
+    assert!(super::search::search_projection(&scope, &duplicate).is_err());
+}
+
+#[tokio::test]
+async fn search_ranking_falls_back_per_question_and_charges_both_backends() {
+    let (scope, evidence) = search_ranking_fixture(2);
+    let (endpoint, jev_server) = server(vec![response(
+        200,
+        "",
+        &json!({
+            "model":zephium_decision::JEV_MODEL, "answers":{
+                "source_1":{"type":"noul","noul":0.01},
+                "source_2":{"type":"noul","noul":0.5}
+            }, "usage":{"input_tokens":123,"output_tokens":7}
+        })
+        .to_string(),
+    )]);
+    let jev = client(endpoint);
+    let body = json!({"object":"response","status":"completed","model":"gpt-5.6-terra","service_tier":"default","error":null,"incomplete_details":null,
+        "output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":json!({"answers":{"source_2":{"type":"noul","noul":0.99}}}).to_string()}]}],
+        "usage":{"input_tokens":100,"output_tokens":200,"total_tokens":300,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":50}}});
+    let (mut endpoint, emulation_server) = server_for_model(
+        vec![
+            response(
+                200,
+                "",
+                r#"{"object":"response.input_tokens","input_tokens":100}"#,
+            ),
+            response(200, "", &body.to_string()),
+        ],
+        "gpt-5.6-terra",
+    );
+    endpoint.set_path("/v1/responses");
+    let transport = AgentProviderTransport::try_new_loopback(
+        AgentProviderTransportConfig::STANDARD,
+        endpoint.as_str(),
+        endpoint.as_str(),
+    )
+    .unwrap();
+    let credential =
+        AgentProviderCredential::try_new(AgentProviderKind::OpenAiResponses, "fixture-key".into())
+            .unwrap();
+    let ranking = super::search::SearchDecisionRanking::new(Some(jev), emulation_config(), None);
+    let jev_server = jev_server();
+    let emulation_server = emulation_server();
+    let output = ranking
+        .rerank(
+            &transport,
+            &credential,
+            &scope,
+            &evidence,
+            limits(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(jev_server.join().unwrap(), 1);
+    assert_eq!(emulation_server.join().unwrap(), 2);
+    assert_eq!(output.preferred, vec![2]);
+    assert_eq!(output.usage.model_tokens, 430);
+    assert_eq!(output.usage.operations, 2);
+    assert_eq!(
+        output.usage.accounting,
+        zephium_core::work::runtime::WorkUsageAccounting::Exact
+    );
+    assert!(transport.snapshot().unwrap().is_idle());
+    output.validate(&evidence).unwrap();
+}
+
+#[test]
+fn recorded_search_eval_requests_match_the_shipping_projection_and_emulation_body() {
+    let transport =
+        AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD).unwrap();
+    let credential =
+        AgentProviderCredential::try_new(AgentProviderKind::OpenAiResponses, "fixture-key".into())
+            .unwrap();
+    let config = emulation_config();
+    let client = OpenAiDecisionCall::try_new(&transport, &credential, &config).unwrap();
+    for (source, raw_fixture) in [
+        (
+            include_str!("../../../../zephium-decision/evals/search_flow_source_01.json"),
+            include_str!("../../../../zephium-decision/evals/search_flow_01.json"),
+        ),
+        (
+            include_str!("../../../../zephium-decision/evals/search_flow_source_01.json"),
+            include_str!("../../../../zephium-decision/evals/search_flow_unrelated_01.json"),
+        ),
+        (
+            include_str!("../../../../zephium-decision/evals/search_mixed_source_01.json"),
+            include_str!("../../../../zephium-decision/evals/search_mixed_01.json"),
+        ),
+    ] {
+        let raw: Value = serde_json::from_str(source).unwrap();
+        let mut scope: zephium_core::work::search::WorkPublicSearchScope =
+            serde_json::from_value(raw["scope"].clone()).unwrap();
+        let evidence: zephium_core::work::search::WorkProviderSearchEvidenceV1 =
+            serde_json::from_value(raw["evidence"].clone()).unwrap();
+        let fixture: Value = serde_json::from_str(raw_fixture).unwrap();
+        use sha2::Digest as _;
+        let digest = sha2::Sha256::digest(source.as_bytes());
+        assert_eq!(fixture["source_sha256"], format!("{digest:x}"));
+        scope.query = fixture["request"]["state"]["public_query"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let actual = super::search::search_projection(&scope, &evidence).unwrap();
+        assert_eq!(actual.state(), &fixture["request"]["state"]);
+        assert_eq!(
+            serde_json::to_value(actual.questions()).unwrap(),
+            fixture["request"]["questions"]
+        );
+        let body = client.body(&actual).unwrap();
+        assert_eq!(body["instructions"], EMULATION_INSTRUCTIONS);
+        let content: Value =
+            serde_json::from_str(body["input"][0]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            content,
+            json!({"state": actual.state(), "questions": actual.questions()})
+        );
+        assert_eq!(body["text"]["format"]["schema"], actual.answer_schema());
+        assert_eq!(body["store"], false);
+        assert!(body.get("previous_response_id").is_none());
+    }
+}
+
+#[tokio::test]
+async fn search_ranking_deadline_keeps_interrupted_generation_unknown() {
+    let hold = Arc::new(AtomicBool::new(true));
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (mut endpoint, server) = server_for_model_with_gate(
+        vec![
+            response(
+                200,
+                "",
+                r#"{"object":"response.input_tokens","input_tokens":100}"#,
+            ),
+            response(200, "", "{}"),
+        ],
+        "gpt-5.6-terra",
+        Some((hold.clone(), seen.clone())),
+    );
+    endpoint.set_path("/v1/responses");
+    let transport = AgentProviderTransport::try_new_loopback(
+        AgentProviderTransportConfig::STANDARD,
+        endpoint.as_str(),
+        endpoint.as_str(),
+    )
+    .unwrap();
+    let credential =
+        AgentProviderCredential::try_new(AgentProviderKind::OpenAiResponses, "fixture-key".into())
+            .unwrap();
+    let ranking = super::search::SearchDecisionRanking::new(None, emulation_config(), None);
+    let (scope, evidence) = search_ranking_fixture(2);
+    let server = server();
+    let mut pending = Box::pin(ranking.rerank(
+        &transport,
+        &credential,
+        &scope,
+        &evidence,
+        limits(),
+        Instant::now() + Duration::from_secs(2),
+    ));
+    while seen.load(Ordering::SeqCst) != 2 {
+        tokio::select! {
+            _ = &mut pending => panic!("ranking ended before generation was held"),
+            _ = tokio::time::sleep(Duration::from_millis(2)) => {},
+        }
+    }
+    assert!(matches!(
+        pending.await,
+        Err(zephium_core::work::search::WorkPublicSearchError::OutcomeUnknown)
+    ));
+    hold.store(false, Ordering::SeqCst);
+    assert_eq!(server.join().unwrap(), 2);
+    assert!(transport.snapshot().unwrap().is_sealed());
+}

@@ -1262,7 +1262,7 @@ async fn agent_workflow(
             .collect(),
     };
     let search = OpenAiPublicSearch::try_new(
-        transport,
+        transport.clone(),
         browser_keys.pop().ok_or("search_key")?,
         OpenAiPublicSearchConfig::try_new(
             zephium_agent_model_catalog::try_public_search_provider_exact_call_config(
@@ -1275,6 +1275,30 @@ async fn agent_workflow(
     )
     .map_err(|_| "search_provider")?
     .with_public_response_retention();
+    let primary =
+        tokio::task::spawn_blocking(zephium_agentic::load_macos_development_typesafe_credential)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|key| zephium_agentic::JevDecisionClient::direct(transport, key).ok());
+    let search = search
+        .with_decision_ranking(
+            primary,
+            WorkPlanningConfig::try_new(
+                zephium_agent_model_catalog::try_luna_provider_exact_call_config(4096)
+                    .map_err(|_| "ranking_model")?,
+                32_768,
+                100_000,
+            )
+            .map_err(|_| "ranking_limits")?,
+            Some(|fact| {
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "agent-work: search_decision={fact:?}"
+                );
+            }),
+        )
+        .map_err(|_| "ranking_provider")?;
     let limits = WorkExecutionLimits {
         model_tokens: 1_000_000,
         cost_micro_usd: 1_500_000,

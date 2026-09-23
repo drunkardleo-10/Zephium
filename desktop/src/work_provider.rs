@@ -214,10 +214,11 @@ impl WorkProviders {
                         .map_err(|_| WorkError::Unavailable)?,
                     )?;
                     let search = zephium_agentic::OpenAiPublicSearch::try_new(
-                        search_transport,
+                        search_transport.clone(),
                         credential().await?,
                         search_config,
                     )?;
+                    let search = configure_search_ranking(search, search_transport).await?;
                     #[cfg(feature = "work-development-traces")]
                     let search = search.with_public_response_retention().with_diagnostic(|event| {
                         if let zephium_core::work::synthesis::WorkSynthesisDiagnostic::ProviderTransport { http_status, body_bytes, decoded, elapsed_millis } = event {
@@ -499,6 +500,42 @@ fn synthesis_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkE
     )
     .map_err(|_| WorkError::Unavailable)
 }
+async fn configure_search_ranking(
+    search: zephium_agentic::OpenAiPublicSearch,
+    transport: zephium_agentic::AgentProviderTransport,
+) -> Result<zephium_agentic::OpenAiPublicSearch, WorkError> {
+    #[cfg(target_os = "macos")]
+    let primary =
+        tokio::task::spawn_blocking(zephium_agentic::load_macos_development_typesafe_credential)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|key| zephium_agentic::JevDecisionClient::direct(transport, key).ok());
+    #[cfg(not(target_os = "macos"))]
+    let primary = {
+        let _ = transport;
+        None
+    };
+    let emulation = zephium_agentic::WorkPlanningConfig::try_new(
+        zephium_agent_model_catalog::try_luna_provider_exact_call_config(4096)
+            .map_err(|_| WorkError::Unavailable)?,
+        32_768,
+        100_000,
+    )
+    .map_err(|_| WorkError::Unavailable)?;
+    #[cfg(feature = "work-development-traces")]
+    let diagnostic = Some(
+        (|fact| {
+            record_browser_diagnostic(
+                zephium_agent_controller::AgentWorkEventKind::DecisionSettled(fact),
+            )
+        }) as fn(zephium_agentic::DecisionCallDiagnostic),
+    );
+    #[cfg(not(feature = "work-development-traces"))]
+    let diagnostic = None;
+    search.with_decision_ranking(primary, emulation, diagnostic)
+}
+
 async fn credential() -> Result<zephium_agentic::AgentProviderCredential, WorkError> {
     #[cfg(target_os = "macos")]
     {

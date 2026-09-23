@@ -419,7 +419,7 @@ fn encode(value: &Value) -> Result<Vec<u8>, WorkPlanningError> {
     }
     Ok(bytes)
 }
-fn contains_secret(value: &Value) -> bool {
+pub(super) fn contains_secret(value: &Value) -> bool {
     match value {
         Value::String(value) => crate::semantic_wire::looks_like_secret_value(value),
         Value::Array(values) => values.iter().any(contains_secret),

@@ -32,6 +32,9 @@ pub(super) fn run_case(case: &std::ffi::OsStr, model: ProbeModel) -> Result<(), 
         Some("cloudflare") => 4,
         Some("yc-read") => 5,
         Some("yc-read-optional") => 6,
+        Some("search-flow") => 7,
+        Some("search-unrelated") => 8,
+        Some("search-mixed") => 9,
         _ => return Err(ProbeFailure::Authority),
     };
     run_selected(Some(index), model)
@@ -68,7 +71,7 @@ fn run_selected(only: Option<usize>, model: ProbeModel) -> Result<(), ProbeFailu
         .map_err(|_| ProbeFailure::Authority)?;
     let (config, model_revision) = match model {
         ProbeModel::Luna => (
-            zephium_agent_model_catalog::try_luna_provider_exact_call_config(8192)
+            zephium_agent_model_catalog::try_luna_provider_exact_call_config(4096)
                 .map_err(|_| ProbeFailure::Authority)?,
             zephium_agent_model_catalog::LUNA_MODEL_REVISION,
         ),

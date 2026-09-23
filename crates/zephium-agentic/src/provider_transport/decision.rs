@@ -11,6 +11,8 @@ use zephium_decision::{DecisionRequest, DecisionResponse, DecisionUsage, MAX_RES
 
 mod projection;
 mod read;
+mod search;
+pub(super) use search::SearchDecisionRanking;
 pub use projection::{
     DecisionActionSelection, DecisionObservation, DecisionObservationAnswers,
     DecisionObservationFallback, DecisionOperation, DecisionProjectionError,

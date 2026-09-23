@@ -63,6 +63,18 @@ pub fn fixtures() -> Result<Vec<EvalFixture>, ContractError> {
             "yc_read_optional_01",
             include_str!("../evals/yc_read_optional_01.json"),
         ),
+        (
+            "search_flow_01",
+            include_str!("../evals/search_flow_01.json"),
+        ),
+        (
+            "search_flow_unrelated_01",
+            include_str!("../evals/search_flow_unrelated_01.json"),
+        ),
+        (
+            "search_mixed_01",
+            include_str!("../evals/search_mixed_01.json"),
+        ),
     ];
     sources
         .into_iter()

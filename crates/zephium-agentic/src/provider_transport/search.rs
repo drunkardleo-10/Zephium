@@ -1,5 +1,6 @@
 //! One-call OpenAI public search with explicit model-specific token and billing bounds.
 use super::*;
+use crate::{JevDecisionClient, OpenAiDecisionCall, WorkPlanningConfig, DecisionCallDiagnostic};
 use serde::Deserialize;
 use serde_json::Value;
 use zephium_core::work::search::*;
@@ -131,6 +132,7 @@ pub struct OpenAiPublicSearch {
     credential: AgentProviderCredential,
     config: OpenAiPublicSearchConfig,
     diagnostic: Option<fn(WorkSynthesisDiagnostic)>,
+    decisions: Option<super::decision::SearchDecisionRanking>,
 }
 impl OpenAiPublicSearch {
     /// Construct without dispatching any work.
@@ -147,6 +149,7 @@ impl OpenAiPublicSearch {
             credential,
             config,
             diagnostic: None,
+            decisions: None,
         })
     }
     /// Closed transport facts per search call (status, size, decoded, wall time).
@@ -249,6 +252,21 @@ impl OpenAiPublicSearch {
         }
         result
     }
+    /// Enables public source ranking through the shared typed-decision contract.
+    pub fn with_decision_ranking(
+        mut self,
+        primary: Option<JevDecisionClient>,
+        emulation: WorkPlanningConfig,
+        diagnostic: Option<fn(DecisionCallDiagnostic)>,
+    ) -> Result<Self, WorkError> {
+        OpenAiDecisionCall::try_new(&self.transport, &self.credential, &emulation)
+            .map_err(|_| WorkError::Invalid)?;
+        self.decisions = Some(super::decision::SearchDecisionRanking::new(
+            primary, emulation, diagnostic,
+        ));
+        Ok(self)
+    }
+
     /// `None`: no response arrived. `Some((status, None))`: a response the
     /// transport refused (status, headers or size). Otherwise the full body.
     async fn post(&self, body: Vec<u8>) -> Option<(u16, Option<Vec<u8>>)> {
@@ -587,6 +605,32 @@ fn search_input(
 }
 
 impl WorkPublicSearchProvider for OpenAiPublicSearch {
+    fn rerank<'a>(
+        &'a self,
+        scope: &'a WorkPublicSearchScope,
+        evidence: &'a WorkProviderSearchEvidenceV1,
+        limits: WorkExecutionLimits,
+        deadline: std::time::Instant,
+    ) -> WorkPublicSearchRankingFuture<'a> {
+        Box::pin(async move {
+            match &self.decisions {
+                Some(decisions) => {
+                    decisions
+                        .rerank(
+                            &self.transport,
+                            &self.credential,
+                            scope,
+                            evidence,
+                            limits,
+                            deadline,
+                        )
+                        .await
+                }
+                None => Ok(WorkPublicSearchRanking::default()),
+            }
+        })
+    }
+
     fn minimum_reservation(
         &self,
         scope: &WorkPublicSearchScope,
