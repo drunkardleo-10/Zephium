@@ -1869,7 +1869,7 @@ fn browser_settings(
             );
         }),
         profile,
-        model: zephium_agent_controller::AgentBrowserModel::Luna,
+        model: zephium_agent_controller::AgentBrowserModel::Gpt6Luna,
         config: zephium_app::AgentWorkApplicationConfig::new(
             zephium_agent_runtime::AgentRuntimeConfig::STANDARD,
             AgentProviderTransportConfig::STANDARD,

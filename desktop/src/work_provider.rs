@@ -259,7 +259,7 @@ impl WorkProviders {
                                 async move {
                                     let mut settings = zephium_work_composition::durable_runtime::WorkBrowserAdapterSettings::new(
                                         binding,
-                                        zephium_agent_controller::AgentBrowserModel::Luna,
+                                        zephium_agent_controller::AgentBrowserModel::Gpt6Luna,
                                         zephium_app::AgentWorkApplicationConfig::new(
                                             zephium_agent_runtime::AgentRuntimeConfig::STANDARD,
                                             AgentProviderTransportConfig::STANDARD,
@@ -441,7 +441,7 @@ impl WorkProviders {
                             }
                             let mut settings = zephium_work_composition::durable_runtime::WorkBrowserAdapterSettings::new(
                                 binding,
-                                zephium_agent_controller::AgentBrowserModel::Luna,
+                                zephium_agent_controller::AgentBrowserModel::Gpt6Luna,
                                 zephium_app::AgentWorkApplicationConfig::new(
                                     zephium_agent_runtime::AgentRuntimeConfig::STANDARD,
                                     AgentProviderTransportConfig::STANDARD,
