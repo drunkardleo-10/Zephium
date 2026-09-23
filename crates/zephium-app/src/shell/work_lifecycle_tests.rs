@@ -968,3 +968,48 @@ async fn work_a_human_check_is_read_again_only_after_a_person_continued_it() {
         assert_eq!(execution.status, WorkExecutionStatus::NeedsReview);
     }
 }
+
+#[tokio::test]
+async fn work_a_person_on_a_page_does_not_spend_the_run() {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let work = new_work(&mut shell, &queue, &handle, "Read https://example.test/a").await;
+    let script = Script::default();
+    script.play([output(vec![
+        search("example rules"),
+        read("https://example.test/a"),
+    ])]);
+    let sources = Sources::default();
+    let state = drive(
+        &mut shell,
+        &queue,
+        WorkAgentService::new(handle.clone()).run(
+            profile,
+            begin(work, WorkRevision::INITIAL, 3),
+            None,
+            WorkAgentProviders {
+                turn: &script,
+                search: &sources,
+            },
+            |probe, request| async move {
+                // The page is presented past the run's deadline, then continued.
+                let hold = probe.hold_for_person();
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                assert!(probe.deadline() > Instant::now());
+                drop(hold);
+                page(probe, request, false).await
+            },
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    let execution = &state.executions[0];
+    settled_with_notes(execution);
+    assert_eq!(execution.status, WorkExecutionStatus::NeedsReview);
+    assert!(execution
+        .steps
+        .iter()
+        .any(|step| matches!(step.kind, WorkStepKindV1::Read { .. })
+            && step.status == WorkStepStatus::Succeeded));
+}

@@ -404,7 +404,8 @@ pub enum WorkCancelCause {
     Unreadable,
 }
 /// The attempt's deadline and the anonymous browser scope bound to it. Time
-/// spent waiting for the person moves both, once the wait is over.
+/// spent waiting for the person, or with a person on one of its pages, does
+/// not count against the attempt.
 #[derive(Clone)]
 struct Lifetime(Arc<Mutex<LifetimeState>>);
 struct LifetimeState {
@@ -412,6 +413,15 @@ struct LifetimeState {
     session: zephium_agentic::WorkBrowserSession,
     closed: bool,
     work: WorkId,
+    /// Pages a person holds now, and since when the first of them was held.
+    held: u32,
+    held_since: Option<Instant>,
+}
+impl LifetimeState {
+    fn deadline(&self) -> Instant {
+        self.held_since
+            .map_or(self.deadline, |since| self.deadline + since.elapsed())
+    }
 }
 impl Lifetime {
     fn new(profile: ProfileId, work: WorkId, deadline: Instant) -> Self {
@@ -420,37 +430,64 @@ impl Lifetime {
             session: zephium_agentic::WorkBrowserSession::new(profile, work, deadline),
             closed: false,
             work,
+            held: 0,
+            held_since: None,
         })))
     }
     fn state(&self) -> std::sync::MutexGuard<'_, LifetimeState> {
         self.0.lock().unwrap_or_else(|error| error.into_inner())
     }
     fn deadline(&self) -> Instant {
-        self.state().deadline
+        self.state().deadline()
     }
+    /// The browser scope for a page about to open. A scope whose deadline the
+    /// attempt has since outlived is replaced; pages already open keep theirs.
     fn session(&self) -> zephium_agentic::WorkBrowserSession {
-        self.state().session.clone()
+        let mut state = self.state();
+        let deadline = state.deadline();
+        if !state.closed && !state.session.is_current() && Instant::now() < deadline {
+            state.session = zephium_agentic::WorkBrowserSession::new(
+                state.session.profile(),
+                state.work,
+                deadline,
+            );
+        }
+        state.session.clone()
     }
     fn close(&self) {
         let mut state = self.state();
         state.closed = true;
         state.session.close();
     }
-    /// Gives back the time the attempt spent waiting for the person. No page
-    /// is open during a wait, so the browser scope is replaced rather than
-    /// stretched; a closed scope stays closed.
+    /// Gives back the time the attempt spent waiting for the person.
     fn extend(&self, waited: Duration) {
         let mut state = self.state();
-        if state.closed || waited.is_zero() {
-            return;
+        if !state.closed {
+            state.deadline += waited;
         }
-        state.deadline += waited;
-        let session = zephium_agentic::WorkBrowserSession::new(
-            state.session.profile(),
-            state.work,
-            state.deadline,
-        );
-        std::mem::replace(&mut state.session, session).close();
+    }
+    fn hold(&self) {
+        let mut state = self.state();
+        state.held += 1;
+        state.held_since.get_or_insert_with(Instant::now);
+    }
+    fn release(&self) {
+        let mut state = self.state();
+        state.held = state.held.saturating_sub(1);
+        if state.held == 0 {
+            if let Some(since) = state.held_since.take() {
+                state.deadline += since.elapsed();
+            }
+        }
+    }
+}
+/// A person holds one of the attempt's pages: the attempt's deadline stands
+/// still until this is dropped. The page's own deadline is unchanged.
+#[must_use]
+pub struct WorkPersonHold(Lifetime);
+impl Drop for WorkPersonHold {
+    fn drop(&mut self) {
+        self.0.release();
     }
 }
 #[derive(Clone)]
@@ -525,6 +562,12 @@ impl WorkAttemptProbe {
     /// Time spent waiting for the person does not count against the attempt.
     pub(crate) fn resume_after_wait(&self, waited: Duration) {
         self.lifetime.extend(waited);
+    }
+    /// A person took one of this attempt's pages; the attempt's deadline
+    /// stands still until the returned hold is dropped.
+    pub fn hold_for_person(&self) -> WorkPersonHold {
+        self.lifetime.hold();
+        WorkPersonHold(self.lifetime.clone())
     }
     /// Records the newest frame of one browser step's page, bounded per attempt.
     pub fn record_page_frame(

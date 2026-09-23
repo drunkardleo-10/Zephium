@@ -496,6 +496,8 @@ impl MacosWorkComposition {
         let mut last_phase: Option<RetainedWorkPhase> = None;
         // A person was shown the page and continued it.
         let mut helped = false;
+        // While a person holds the page, the run's own deadline stands still.
+        let mut person_hold = None;
         #[cfg(feature = "public-qualification")]
         let trace = |label: &str| {
             if let Some(diagnostic) = stage_diagnostic {
@@ -684,13 +686,24 @@ impl MacosWorkComposition {
             if let Some(registration) = &registration {
                 registration.update();
             }
-            helped |= matches!(
-                guard.0.human_snapshot().map(|human| human.phase),
-                Some(
-                    zephium_app::RetainedHumanPhase::Continuing
-                        | zephium_app::RetainedHumanPhase::ReadyToResume
-                )
-            );
+            {
+                use zephium_app::RetainedHumanPhase as Phase;
+                let person = guard.0.human_snapshot().map(|human| human.phase);
+                helped |= matches!(person, Some(Phase::Continuing | Phase::ReadyToResume));
+                if matches!(
+                    person,
+                    Some(
+                        Phase::Presenting
+                            | Phase::Presented
+                            | Phase::Continuing
+                            | Phase::ReadyToResume
+                    )
+                ) {
+                    person_hold.get_or_insert_with(|| attempt.hold_for_person());
+                } else {
+                    person_hold = None;
+                }
+            }
             if !requested_close {
                 if let Some(resume) = guard
                     .0
