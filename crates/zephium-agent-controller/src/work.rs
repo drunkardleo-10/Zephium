@@ -1342,9 +1342,18 @@ impl WorkState {
     }
 
     fn observation_capability(&self) -> WorkBrowserObservationCapability {
-        WorkBrowserObservationCapability::for_navigation_discovery(
+        let capability = WorkBrowserObservationCapability::for_navigation_discovery(
             self.navigation_discovery.as_ref(),
-        )
+        );
+        if self
+            .extraction_schema
+            .as_ref()
+            .is_some_and(SemanticExtractionSchema::is_whole_page_findings)
+        {
+            capability.for_whole_page_read()
+        } else {
+            capability
+        }
     }
 
     fn requires_decision_budget(&self) -> bool {
@@ -2473,15 +2482,63 @@ impl AgentWorkController {
         }
     }
 
+    /// One code-owned capture of the whole document under the whole-page
+    /// capability. The initial capture holds the viewport and the headings
+    /// below it; this one holds the sections' own text. No provider is asked.
+    async fn whole_page_capture(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        initial: SemanticObservation,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        let Some((baseline, root)) = state
+            .native
+            .retained
+            .is_some()
+            .then(|| SemanticObservationAcknowledgement::whole_page_scope(&initial))
+            .flatten()
+        else {
+            return Ok(initial);
+        };
+        state.native.check_control(worker, browser)?;
+        state.refresh_account(worker, browser)?;
+        state.journal_mut()?.emit(AgentWorkEventKind::Observing)?;
+        let capability = state.observation_capability();
+        match state
+            .native
+            .observe_retained_scope(
+                worker,
+                Some((&initial, &baseline, root, SemanticExpansionKind::Region)),
+                capability,
+            )
+            .await
+        {
+            Ok(page) => Ok(page),
+            Err(AgentWorkFailure::InspectionAnchorLost) => Ok(initial),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn browser_loop(
         &mut self,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        let observation = Self::fit_model_observation(
-            Self::observe_initial_ready(state, worker, browser).await?,
-        )?;
+        // A whole-page findings read decides over its whole capture; only the
+        // page planner, if it is needed, sees the fitted prefix.
+        let whole_page = state
+            .extraction_schema
+            .as_ref()
+            .is_some_and(SemanticExtractionSchema::is_whole_page_findings);
+        let observation = Self::observe_initial_ready(state, worker, browser).await?;
+        let observation = if whole_page {
+            // Boxed: the read loop's future must stay well inside the
+            // runtime worker's stack.
+            Box::pin(Self::whole_page_capture(state, worker, browser, observation)).await?
+        } else {
+            Self::fit_model_observation(observation)?
+        };
         let (mut observation, challenged) =
             Self::settle_human_challenge(state, worker, browser, observation).await?;
         if challenged {
@@ -2510,6 +2567,21 @@ impl AgentWorkController {
         if challenged || progress == AgentWorkTaskProgress::Complete {
             state.observation = Some(observation);
             return Ok(());
+        }
+        // The page planner starts from an ordinary fitted capture.
+        if whole_page {
+            state.refresh_account(worker, browser)?;
+            observation =
+                Self::fit_model_observation(Box::pin(Self::observe(state, worker, browser)).await?)?;
+            captured_at = SemanticCaptureInstant::from_millis(
+                state
+                    .journal_mut()?
+                    .clock
+                    .now()
+                    .map_err(|_| AgentWorkFailure::Contract)?
+                    .millis(),
+            );
+            progress = state.task_progress(&observation)?;
         }
         state.refresh_account(worker, browser)?;
         let action_authority = state

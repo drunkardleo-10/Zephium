@@ -26,6 +26,8 @@ pub enum DecisionObservationSite {
     Consent,
     /// A public page behind a binary entry interstitial.
     Interstitial,
+    /// A long public documentation page read for cited findings.
+    Documentation,
 }
 
 impl DecisionObservationSite {
@@ -41,6 +43,7 @@ impl DecisionObservationSite {
             Self::LegoTheme => "https://www.lego.com/en-us/themes/architecture",
             Self::Consent => "https://www.ikea.com/pl/pl/",
             Self::Interstitial => "https://www.zalando.pl/",
+            Self::Documentation => "https://www.sqlite.org/wal.html",
         }
     }
 

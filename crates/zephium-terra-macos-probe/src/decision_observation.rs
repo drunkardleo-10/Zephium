@@ -16,6 +16,7 @@ pub(super) fn run(site: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
         Some("lego-theme") => (DecisionObservationSite::LegoTheme, "lego-theme"),
         Some("consent") => (DecisionObservationSite::Consent, "consent"),
         Some("interstitial") => (DecisionObservationSite::Interstitial, "interstitial"),
+        Some("documentation") => (DecisionObservationSite::Documentation, "documentation"),
         _ => return Err(ProbeFailure::Authority),
     };
     zephium_engine::run_macos_decision_observation_probe(site, move |observation| {
@@ -50,6 +51,7 @@ pub(super) fn run(site: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
             DecisionObservationSite::LegoTheme => "Collect three LEGO Architecture sets from this catalog with their displayed prices, product links and pictures.",
             DecisionObservationSite::Consent => "List the product categories this store's home page offers.",
             DecisionObservationSite::Interstitial => "List the clothing categories this store's home page offers.",
+            DecisionObservationSite::Documentation => "List every situation in which WAL mode does not work or has drawbacks.",
         }.into(), &SemanticTokenizerRevision::try_new("public-eval-utf8-upper-bound-v1".into()).map_err(|_| "tokenizer")?)
             .map_err(|_| "objective")?;
         let mut entries = Vec::new();
