@@ -842,7 +842,8 @@ if (tag === "td") return { role: "cell", tag, inputType };
 if (tag === "img" && attribute(node, "alt", 1) !== null) {
 return { role: "image", tag, inputType };
 }
-if (isPageImageMeta(node, tag)) return { role: "image", tag, inputType, pageImage: true };
+if (isPageImageMeta(node, tag)) return { role: "image", tag, inputType, pageImage: true, headMeta: true };
+if (isPageAddressMeta(node, tag)) return { role: "link", tag, inputType, pageAddress: true, headMeta: true, noOperations: true };
 if (tag === "progress" || tag === "meter") return { role: "progress", tag, inputType };
 if (tag === "output") return { role: "status", tag, inputType };
 return genericTextDescriptor(node, tag, inputType);
@@ -855,8 +856,8 @@ tag === "style" ||
 tag === "template" ||
 tag === "noscript" ||
 tag === "title" ||
-(tag === "meta" && !isPageImageMeta(element, tag)) ||
-tag === "link" ||
+(tag === "meta" && !isPageImageMeta(element, tag) && !isPageAddressMeta(element, tag)) ||
+(tag === "link" && !isPageAddressMeta(element, tag)) ||
 has(element, "hidden") ||
 has(element, "inert") ||
 (lower(attribute(element, "aria-hidden", 16) || "") === "true" && !isRenderedPhoto(element, tag))
@@ -864,6 +865,10 @@ has(element, "inert") ||
 }
 function isPageImageMeta(element, tag) {
 return tag === "meta" && lower(attribute(element, "property", 32) || "") === "og:image";
+}
+function isPageAddressMeta(element, tag) {
+return (tag === "link" && lower(attribute(element, "rel", 32) || "") === "canonical") ||
+(tag === "meta" && lower(attribute(element, "property", 32) || "") === "og:url");
 }
 function pushHiddenPhotos(stack, item, state) {
 const node = item.node;
@@ -1639,18 +1644,22 @@ const record = { wire, sink: null, sinkBytes: 0, sensitivity: "public", element 
 if (!isDocument) {
 const sensitivity = sensitivityFor(element);
 if (sensitivity !== "public") setSensitivity(record, sensitivity);
-let name = descriptor.pageImage === true ? "Page image" : labelledText(element, descriptor, state);
+let name = descriptor.pageImage === true ? "Page image" :
+descriptor.pageAddress === true ? "Page address" : labelledText(element, descriptor, state);
 if ((name === null || name === "") && descriptor.role === "image") name = ancestorLabel(element, state);
 if (name !== null && name !== "") addName(record, name, state);
 record.sink = recordSink(descriptor, wire.n !== undefined);
 if (record.sink === "value") record.sinkBytes = 0;
 const imageSource = descriptor.role === "image" && (descriptor.tag === "img" || descriptor.pageImage === true);
-if (((descriptor.role === "link" && descriptor.tag === "a") || imageSource) && record.sensitivity === "public") {
+if (((descriptor.role === "link" && (descriptor.tag === "a" || descriptor.pageAddress === true)) || imageSource) &&
+record.sensitivity === "public") {
 let destination;
 try {
-if (descriptor.pageImage === true) destination = attribute(element, "content", 2048) || undefined;
+if (descriptor.headMeta === true) {
+destination = attribute(element, descriptor.tag === "link" ? "href" : "content", 2048) || undefined;
+}
 else destination = read(imageSource ? imageCurrentSrcGetter : anchorHrefGetter, element);
-if (imageSource && !destination && descriptor.pageImage !== true) destination = read(imageSrcGetter, element);
+if (imageSource && !destination && descriptor.headMeta !== true) destination = read(imageSrcGetter, element);
 } catch (_) { destination = undefined; }
 if (typeof destination === "string" && destination !== "" &&
 utf8Length(destination, 2049) <= 2048 &&
@@ -1768,7 +1777,7 @@ sink = null;
 }
 disabled = disabledState(item.node, item.disabled);
 if (descriptor !== null) {
-const visibleStyle = descriptor.pageImage === true || styleIsVisible(item.node);
+const visibleStyle = descriptor.headMeta === true || styleIsVisible(item.node);
 const rect = visibleStyle ? elementRect(item.node) : null;
 const optionInExpansion = descriptor.role === "option" && anchored;
 const optionOfAdmittedSelect =
@@ -1779,14 +1788,14 @@ records[parent] !== undefined &&
 nodeType(records[parent].element) === 1 &&
 tagName(records[parent].element) === "select";
 const visible =
-visibleStyle && (rect !== null || optionInExpansion || optionOfAdmittedSelect || descriptor.pageImage === true);
+visibleStyle && (rect !== null || optionInExpansion || optionOfAdmittedSelect || descriptor.headMeta === true);
 const initialPriority =
 descriptor.role === "dialog" ||
 descriptor.role === "landmark" ||
 focused.has(item.node);
 const admitted = visible && (
 !anchored
-? optionOfAdmittedSelect || descriptor.pageImage === true || (rect !== null && (initialPriority || inViewport(rect)))
+? optionOfAdmittedSelect || descriptor.headMeta === true || (rect !== null && (initialPriority || inViewport(rect)))
 : true
 );
 if (!anchored && !admitted && visible &&

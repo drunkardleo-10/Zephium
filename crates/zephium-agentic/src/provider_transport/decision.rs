@@ -18,7 +18,7 @@ pub use projection::{
     DecisionActionSelection, DecisionObservation, DecisionObservationAnswers,
     DecisionObservationFallback, DecisionOperation, DecisionProjectionError,
 };
-pub use read::{DecisionLocatedRead, DecisionReadSelection};
+pub use read::{untracked_document_address, DecisionLocatedRead, DecisionReadSelection};
 
 const JEV_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 const JEV_CALL_TIMEOUT: Duration = Duration::from_secs(15);

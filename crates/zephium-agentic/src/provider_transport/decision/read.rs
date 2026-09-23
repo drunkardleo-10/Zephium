@@ -655,6 +655,30 @@ impl DecisionReadSelection {
     }
 }
 
+/// The admitted document address without tracking parameters: utm_*,
+/// source_impression_id, fbclid and gclid. Everything else is kept.
+pub fn untracked_document_address(document: &ContextNavigationTarget) -> ContextNavigationTarget {
+    let tracking = |key: &str| {
+        key.starts_with("utm_") || matches!(key, "source_impression_id" | "fbclid" | "gclid")
+    };
+    let url = document.as_url();
+    if !url.query_pairs().any(|(key, _)| tracking(&key)) {
+        return document.clone();
+    }
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| !tracking(key))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let mut url = url.clone();
+    if kept.is_empty() {
+        url.set_query(None);
+    } else {
+        url.query_pairs_mut().clear().extend_pairs(kept);
+    }
+    ContextNavigationTarget::parse(url.as_str()).unwrap_or_else(|_| document.clone())
+}
+
 fn generation_neighborhood(
     observation: &SemanticObservation,
     target: SemanticReferenceId,

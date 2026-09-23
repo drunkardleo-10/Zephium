@@ -645,7 +645,7 @@ pub use provider_transport::decision::{
     DecisionCallDiagnostic, DecisionCallFailure, DecisionCallOutput, DecisionEnvelopeFacts,
     DecisionEnvelopeFailure, DecisionLocatedRead, DecisionObservation, DecisionObservationAnswers,
     DecisionObservationFallback, DecisionOperation, DecisionProjectionError, DecisionReadSelection,
-    JevDecisionClient, OpenAiDecisionCall, OpenAiDecisionClient,
+    JevDecisionClient, OpenAiDecisionCall, OpenAiDecisionClient, untracked_document_address,
 };
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};

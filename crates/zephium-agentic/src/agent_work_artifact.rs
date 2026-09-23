@@ -652,7 +652,9 @@ impl ArchivedDocument {
                     truncated,
                 } if (source.field == 6 && self.version >= 4 && source.role == "link")
                     || (source.field == 7 && self.version >= 5 && source.role == "image")
-                    || (source.field == 8 && self.version >= 7 && source.role == "document") =>
+                    || (source.field == 8
+                        && self.version >= 7
+                        && matches!(source.role.as_str(), "document" | "link")) =>
                 {
                     if *truncated
                         || *original != value.len() as u64

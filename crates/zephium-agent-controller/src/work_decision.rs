@@ -33,7 +33,7 @@ impl AgentWorkController {
             .native
             .retained
             .as_ref()
-            .map(|browser| browser.binding().document().clone());
+            .map(|browser| zephium_agentic::untracked_document_address(browser.binding().document()));
         loop {
             state.check_task_contract()?;
             state.native.check_control(worker, browser)?;

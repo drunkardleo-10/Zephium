@@ -1218,20 +1218,39 @@ impl<'a> SemanticReadBuilder<'a> {
     }
 
     fn admit_document_address(&mut self, document: &'a crate::ContextNavigationTarget) {
-        let value = document.as_url().as_str();
         let Some(snapshot) = self.observation.frames().first() else {
             return;
         };
-        let Some(node) = snapshot.nodes().first() else {
-            return;
+        let same_origin = |target: &crate::ContextNavigationTarget| {
+            crate::semantic_extract::exact_public_url(target.as_url().as_str())
+                && target.as_url().origin() == snapshot.frame().origin().as_url().origin()
         };
-        if node.role() != SemanticRole::Document
-            || node.sensitivity() != SemanticSensitivity::Public
-            || !crate::semantic_extract::exact_public_url(value)
-            || document.as_url().origin() != snapshot.frame().origin().as_url().origin()
-        {
-            return;
-        }
+        // The page's canonical address, from head metadata the snapshot
+        // admitted, is preferred over the admitted document address.
+        let canonical = snapshot.nodes().iter().find_map(|node| {
+            let target = node.link_destination()?;
+            (node.role() == SemanticRole::Link
+                && node.name().is_some_and(|name| name.as_str() == "Page address")
+                && node.operations().is_empty()
+                && node.sensitivity() == SemanticSensitivity::Public
+                && same_origin(target))
+            .then_some((node, target))
+        });
+        let (node, value) = match canonical {
+            Some((node, target)) => (node, target.as_url().as_str()),
+            None => {
+                let Some(node) = snapshot.nodes().first() else {
+                    return;
+                };
+                if node.role() != SemanticRole::Document
+                    || node.sensitivity() != SemanticSensitivity::Public
+                    || !same_origin(document)
+                {
+                    return;
+                }
+                (node, document.as_url().as_str())
+            }
+        };
         self.admit(
             snapshot,
             node,

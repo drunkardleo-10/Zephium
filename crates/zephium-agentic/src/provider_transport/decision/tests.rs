@@ -345,8 +345,20 @@ fn located_fixture(
     SemanticExtractionSchema,
     DecisionObservation,
 ) {
+    located_fixture_with(generated, &[])
+}
+
+fn located_fixture_with(
+    generated: bool,
+    extra: &[Value],
+) -> (
+    AgentModelCallRequest,
+    SemanticObservation,
+    SemanticExtractionSchema,
+    DecisionObservation,
+) {
     let (_, call, previous, _) = admitted_fixture();
-    let nodes = json!([
+    let mut nodes = json!([
         {"k":1,"r":"document","fc":true},
         {"k":2,"p":0,"r":"heading","l":1,"n":"Public product","t":"Public product","fc":true},
         {"k":3,"p":0,"r":"paragraph","n":"Price","t":"$349.99","fc":true},
@@ -356,6 +368,7 @@ fn located_fixture(
         {"k":7,"p":0,"r":"paragraph","t":"Personal value","q":"sensitive","fc":true},
         {"k":8,"p":0,"r":"paragraph","t":"Unrelated footer","fc":true}
     ]);
+    nodes.as_array_mut().unwrap().extend(extra.iter().cloned());
     let snapshot = decode_semantic_snapshot(
         SemanticDecodeContext::new(
             SemanticInvocationId::new(1).unwrap(),
@@ -1078,6 +1091,98 @@ fn an_own_address_column_cites_only_the_admitted_document_address() {
         );
         assert_eq!(listing.is_ok(), admitted);
     }
+}
+
+#[test]
+fn an_own_page_read_cites_its_canonical_address() {
+    let canonical = json!({"k":9,"p":0,"r":"link","n":"Page address","u":"https://example.test/rooms/42","fc":true});
+    let schema = SemanticExtractionSchema::try_new(
+        SemanticExtractionSchemaId::new(1).unwrap(),
+        vec![
+            SemanticExtractionFieldSchema::try_text("name".into(), true, 512)
+                .unwrap()
+                .with_verbatim_text()
+                .unwrap(),
+            SemanticExtractionFieldSchema::try_url("listing_url".into(), true, 2048)
+                .unwrap()
+                .with_document_address()
+                .unwrap(),
+        ],
+    )
+    .unwrap();
+    let admitted = ContextNavigationTarget::parse(
+        "https://example.test/rooms/42?adults=1&source_impression_id=p3_x&utm_source=openai",
+    )
+    .unwrap();
+    let untracked = untracked_document_address(&admitted);
+    assert_eq!(untracked.as_url().as_str(), "https://example.test/rooms/42?adults=1");
+    let read = |extra: &[Value]| {
+        let (call, observation, _, _) = located_fixture_with(false, extra);
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Read this listing".into(),
+            &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
+        )
+        .unwrap();
+        let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        let projection = DecisionObservation::try_for_read(
+            &observation,
+            &objective,
+            &authority,
+            call.account(),
+            Some(&schema),
+        )
+        .unwrap();
+        let mut output = located_answers(&projection);
+        output["answers"]["done"]["noul"] = json!(0.5);
+        let response = projection
+            .request()
+            .decode_emulation(
+                &serde_json::to_vec(&output).unwrap(),
+                DecisionUsage::default(),
+            )
+            .unwrap();
+        let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+        let (selection, ready) = answers
+            .take_read_progress_retaining_evidence(
+                &observation,
+                call.account(),
+                &schema,
+                SemanticCaptureInstant::from_millis(101),
+                &mut SemanticRetainedReadEvidence::default(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(ready);
+        let result = selection
+            .prepare(
+                &observation,
+                call.account(),
+                SemanticCaptureInstant::from_millis(101),
+                Some(&untracked),
+            )
+            .unwrap()
+            .finish(None)
+            .unwrap();
+        result
+            .fields()
+            .iter()
+            .map(|field| match field.value() {
+                SemanticExtractedValue::Url(value) | SemanticExtractedValue::ImageUrl(value) => {
+                    (field.name().to_owned(), value.as_str().to_owned())
+                }
+                _ => (field.name().to_owned(), String::new()),
+            })
+            .collect::<Vec<_>>()
+    };
+    // Canonical head metadata answers the page's own address.
+    let fields = read(&[canonical]);
+    assert!(fields.contains(&("listing_url".into(), "https://example.test/rooms/42".into())));
+    // Without it, the admitted address with tracking parameters removed.
+    let fields = read(&[]);
+    assert!(fields.contains(&(
+        "listing_url".into(),
+        "https://example.test/rooms/42?adults=1".into()
+    )));
 }
 
 #[test]
