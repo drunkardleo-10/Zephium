@@ -17,6 +17,10 @@
 @source not "../features/tasks";
 @source not "../domain/resources";
 
+/* "blur" is an event name in the chrome's code, never a class: the blur
+   utility is forbidden here, and must not be generated from the word. */
+@source not inline("blur");
+
 /*
  * Zephium's chrome is tonal. Surfaces step by luminance, not by outline;
  * depth exists only where something genuinely floats or is physically moved

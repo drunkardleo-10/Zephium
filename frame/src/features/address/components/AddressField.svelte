@@ -6,7 +6,8 @@
   import { uiCommands as ui } from "$domain/ui-commands";
   import { commands } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
-  import type { Snippet } from "svelte";
+  import { flushSync, type Snippet } from "svelte";
+  import { duration, easing, reducedMotion } from "$shared/lib/motion";
   import { addressSecurity, editingAddress, restingAddress } from "../lib/address-model";
 
   let {
@@ -19,6 +20,7 @@
   } = $props();
 
   let input: HTMLInputElement;
+  let form: HTMLFormElement;
   let editing = $state(false);
   let pending = $state(false);
   let failed = $state(false);
@@ -70,10 +72,69 @@
   function beginEditing() {
     // Keep the resting chrome quiet while preserving the complete location
     // when the user explicitly enters edit mode.
+    const from = textStart();
     draft = editingAddress(activeUrl) || value;
     editing = true;
+    flushSync();
     input.select();
+    slide(from);
   }
+
+  function endEditing() {
+    const from = textStart();
+    editing = false;
+    flushSync();
+    slide(from);
+  }
+
+  let ruler: CanvasRenderingContext2D | null = null;
+
+  /** Where the text visibly begins inside the input, in its current shape. */
+  function textStart(): number {
+    const style = getComputedStyle(input);
+    ruler ??= document.createElement("canvas").getContext("2d");
+    if (!ruler) return 0;
+    ruler.font = style.font;
+    const text = input.value || input.placeholder;
+    const width = ruler.measureText(text).width;
+    const start = Number.parseFloat(style.paddingInlineStart) || 0;
+    const end = Number.parseFloat(style.paddingInlineEnd) || 0;
+    const room = input.clientWidth - start - end;
+    return style.textAlign === "center" ? start + Math.max(0, (room - width) / 2) : start;
+  }
+
+  // Entering and leaving the field is one line of text moving between its
+  // resting place, centred, and its working place at the start. The text is
+  // swapped at the same moment — the host for the whole address — so it
+  // travels half-lit and brightens as it lands. Transform only; the clip
+  // around the input keeps it inside the field while it moves.
+  function slide(from: number) {
+    const offset = from - textStart();
+    if (Math.abs(offset) < 1 || reducedMotion()) return;
+    input.animate(
+      [
+        { transform: `translateX(${offset}px)`, opacity: 0.5 },
+        { transform: "none", opacity: 1 },
+      ],
+      { duration: duration("slow"), easing: easing("emphasized") },
+    );
+  }
+
+  // Editing ends wherever attention goes next: a press anywhere else in the
+  // chrome, or the page itself taking focus away from the chrome entirely.
+  $effect(() => {
+    if (!editing) return;
+    const press = (event: PointerEvent) => {
+      if (!(event.target instanceof Node) || !form.contains(event.target)) input.blur();
+    };
+    const away = () => input.blur();
+    window.addEventListener("pointerdown", press, true);
+    window.addEventListener("blur", away);
+    return () => {
+      window.removeEventListener("pointerdown", press, true);
+      window.removeEventListener("blur", away);
+    };
+  });
 </script>
 
 <!--
@@ -84,13 +145,7 @@
   compact mode it is present and correct but unpainted, and the launcher is the
   visible way to reach it.
 -->
-<form
-  class="shrink-0 !pl-0"
-  class:pe-1.5={!compact}
-  class:pb-2={!compact}
-  onsubmit={submit}
-  role="search"
->
+<form bind:this={form} class="shrink-0" class:pb-2={!compact} onsubmit={submit} role="search">
   <!--
     A refused navigation rings the field, following the shared Field
     convention. The message is announced rather than drawn: a block of text
@@ -100,7 +155,7 @@
     class:sr-only={compact}
     class:flex={!compact}
     class:shadow-[inset_0_0_0_1px_var(--color-danger)]={failed}
-    class="address-field focus-within:shadow-focus h-[34px] items-center gap-2 rounded-row bg-fill ps-2.5 pe-1 shadow-field transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out)] [--address-centering:20px] focus-within:bg-fill-hover hover:bg-fill-hover"
+    class="address-field h-[34px] items-center gap-2 rounded-row bg-fill ps-2.5 pe-1 shadow-field transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out)] [--address-centering:20px] focus-within:bg-fill-hover focus-within:shadow-[var(--shadow-field-focus)] hover:bg-fill-hover"
   >
     {#if !compact && warning}
       <span
@@ -120,37 +175,51 @@
       the leading edge puts it back. Editing drops it and returns to the
       start, where a long URL has to begin.
     -->
-    <input
-      bind:this={input}
-      data-zephium-address
-      type="text"
-      aria-label={m.ui_address_and_search()}
-      autocomplete="off"
-      autocapitalize="off"
-      enterkeyhint="go"
-      placeholder={m.ui_enter_an_address()}
-      spellcheck="false"
-      {value}
-      oninput={handleInput}
-      oncompositionstart={() => (composing = true)}
-      oncompositionend={() => (composing = false)}
-      onkeydown={(event) => {
-        if (event.key === "Escape" && !event.isComposing) {
-          event.preventDefault();
-          failed = false;
-          input.blur();
-        }
-      }}
-      aria-invalid={failed || undefined}
-      aria-describedby={failed ? "address-error" : undefined}
-      onfocus={beginEditing}
-      onblur={() => (editing = false)}
-      style:text-align={editing ? "start" : "center"}
-      style:padding-inline-start={editing ? "0" : "var(--address-centering)"}
-      class="min-w-0 flex-1 bg-transparent text-[13.5px] text-label-secondary outline-none placeholder:text-faint focus:text-text"
-    />
+    <span class="address-clip">
+      <input
+        bind:this={input}
+        data-zephium-address
+        type="text"
+        aria-label={m.ui_address_and_search()}
+        autocomplete="off"
+        autocapitalize="off"
+        enterkeyhint="go"
+        placeholder={m.ui_enter_an_address()}
+        spellcheck="false"
+        {value}
+        oninput={handleInput}
+        oncompositionstart={() => (composing = true)}
+        oncompositionend={() => (composing = false)}
+        onkeydown={(event) => {
+          if (event.key === "Escape" && !event.isComposing) {
+            event.preventDefault();
+            failed = false;
+            input.blur();
+          }
+        }}
+        aria-invalid={failed || undefined}
+        aria-describedby={failed ? "address-error" : undefined}
+        onfocus={beginEditing}
+        onblur={endEditing}
+        style:text-align={editing ? "start" : "center"}
+        style:padding-inline-start={editing ? "0" : "var(--address-centering)"}
+        class="min-w-0 flex-1 bg-transparent text-[13.5px] text-label-secondary outline-none placeholder:text-faint focus:text-text"
+      />
+    </span>
 
     {#if !compact && trailing}{@render trailing()}{/if}
   </div>
   {#if failed}<p id="address-error" role="alert" class="sr-only">{m.browser_nav_failed()}</p>{/if}
 </form>
+
+<style>
+  /* The input's travel is clipped here rather than by the field, whose tray
+     opens a panel below it that must not be cut off. */
+  .address-clip {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    align-self: stretch;
+    overflow: clip;
+  }
+</style>

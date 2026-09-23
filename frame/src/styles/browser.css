@@ -972,13 +972,6 @@
 .folder-chevron[data-expanded="true"] {
   transform: rotate(90deg);
 }
-/* The field keeps its trailing gutter and nothing on the leading edge: the
-   window already holds the chrome off its own edge, and a second margin
-   inside the first only makes the column look inset twice. Every other band
-   measures itself from --sidebar-inset, so none of them is overridden here. */
-.browser-sidebar > .sidebar-columns .sidebar-browser-column > form {
-  padding-inline: 0 4px;
-}
 /* The environment switch, heading the column above the field it governs.
    Flush left like every other band in the column. */
 .sidebar-head {
