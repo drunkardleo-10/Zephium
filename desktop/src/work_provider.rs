@@ -241,7 +241,6 @@ impl WorkProviders {
                     let work = command.work;
                     let started = std::time::Instant::now();
                     let service = WorkAgentService::new(shell);
-                    #[cfg(feature = "work-development-traces")]
                     let service = service.with_diagnostic(|event| {
                         record_diagnostic(format_args!("work: phase=agent loop={event:?}"));
                     });
