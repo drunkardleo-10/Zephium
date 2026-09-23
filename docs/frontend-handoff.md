@@ -66,7 +66,7 @@ production graphs reject fixtures and test modules.
 | `shared/ui/data/DocumentEditor` | Lazy, constrained paragraph/text Tiptap draft editor |
 | `shared/ui/data/Evidence` | Bounded historical excerpts, truncation and original byte counts |
 | `features/notes` | Rich note editor and resource list, available through its lazy loader |
-| `features/tasks` | Task editor, completion, due dates and resource list, available through its lazy loader |
+| `features/tasks` | Inline capture with date/time reading, due-date sections, scheduling, multiple selection, keyboard operation and undo at panel, rail or page density; a full destination with list and board views, available through its lazy loaders |
 
 Svelte XYFlow provides canvas interaction. Inputs are bounded to 500 items and
 2,000 relationships. Identity and arrangement survive unrelated data updates;
@@ -103,10 +103,40 @@ Native IPC supports bounded lists, reads, note-reference resolution and idempote
 revision-checked mutations. Identity, revisions and saved state come from Rust.
 
 Notes contain validated Tiptap data, formatting and same-profile note references.
-Tasks contain title, description, completion, due date and pin state. Search,
-pinning and soft trash/restore are implemented. Notes are deliberate user knowledge
-resources, not agent-system memory. Tasks are user resources, not Work plan nodes
-or execution attempts. Agent-facing resource authorization is not implemented here.
+Tasks contain title, description, due date, an optional due time, and pin state, plus a lifecycle
+(`open`/`active`/`blocked`/`done`), who holds the next move and who created it
+(`user`/`agent`), the page a task came from, and a manual sort key. `completed`
+remains stored alongside `status` as the projection the listing column and query
+filter are built from; validation keeps the two in step, and PROFILE migration 16
+adopts both for tasks written before the lifecycle existed. Listing columns carry
+everything a row draws, so a populated list costs one query rather than a fetch
+per row. Search, pinning and soft trash/restore are implemented.
+
+People and agents share one list: `assignee` says who is expected to act, not who
+is permitted to, and an agent's own plan steps are execution state that never
+enters it. The `work` field is reserved for the Work runtime track, which owns
+Work identity and the rules binding a task to one; this tree assigns it no meaning
+and enforces no reference. Notes are deliberate user knowledge resources, not
+agent-system memory. Tasks are user resources, not Work plan nodes or execution
+attempts. Agent-facing resource authorization is not implemented here.
+
+Tasks no longer use the shared resource panel. `domain/resources/tasks.svelte.ts`
+holds a task-shaped session that draws each row from intent and reconciles it
+against native settlement, serialising writes per task and rebasing a field patch
+onto whatever the record has become; an edit arriving from elsewhere is an update
+to fold in, not a conflict to resolve. `features/tasks` owns the body — inline
+capture, sectioning by due date, scheduling, keyboard operation and undo — at
+`panel`, `rail` or `page` density, and a host supplies the session and the chrome.
+
+A due time is `HH:MM` and only ever exists alongside a day; PROFILE migration 17
+projects it. Manual position is a fixed-width decimal key written by dragging a
+board card, with a resequence when a gap is spent. The board's drag is the shared
+`pointer-drag` primitive, not an HTML5 drag and not a dependency; the sidebar's
+tab gesture has not been migrated onto it and remains its own code.
+
+Not implemented here: reminders (there is no notification plugin in the tree, so
+a due time does not notify), recurrence, any grouping beyond scopes and search,
+and a keyboard equivalent for board reordering — cards move by pointer only.
 
 Resource drafts autosave after one second of inactivity. Writes are single-flight;
 background saves coalesce further edits while explicit navigation drains them.

@@ -1987,6 +1987,71 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 16,
+        up: |tx| {
+            // A task list row draws status, who holds it, where it came from
+            // and its manual position. Projecting those out of the JSON body
+            // keeps a populated list one query instead of one query plus a
+            // fetch per row. The body stays authoritative; these are an index.
+            //
+            // Existing tasks predate the lifecycle, so they adopt the state
+            // their stored `completed` already implies, in the body as well as
+            // the columns: a task whose two representations of done-ness
+            // disagreed would no longer validate, and so would stop loading.
+            // A body that is not JSON was already unreadable and is left alone
+            // rather than aborting every other profile's migration.
+            //
+            // `work` is reserved for the Work runtime track and carries no
+            // reference constraint here.
+            tx.execute_batch(
+                "ALTER TABLE user_resources ADD COLUMN status TEXT;
+                 ALTER TABLE user_resources ADD COLUMN assignee TEXT;
+                 ALTER TABLE user_resources ADD COLUMN origin TEXT;
+                 ALTER TABLE user_resources ADD COLUMN context_url TEXT;
+                 ALTER TABLE user_resources ADD COLUMN context_title TEXT;
+                 ALTER TABLE user_resources ADD COLUMN sort_key TEXT;
+                 ALTER TABLE user_resources ADD COLUMN work TEXT;
+                 UPDATE user_resources SET status=CASE WHEN completed=1 THEN 'done' ELSE 'open' END, assignee='user', origin='user' WHERE kind='task';
+                 UPDATE user_resources SET body=json_set(body,'$.content.status',CASE WHEN completed=1 THEN 'done' ELSE 'open' END,'$.content.assignee','user','$.content.origin','user') WHERE kind='task' AND json_valid(body);",
+            )
+        },
+    },
+    Migration {
+        version: 17,
+        up: |tx| {
+            // A due time is optional and only ever set alongside a day, so there
+            // is nothing to backfill: every existing task simply has none.
+            tx.execute_batch("ALTER TABLE user_resources ADD COLUMN due_time TEXT;")
+        },
+    },
+    Migration {
+        version: 18,
+        up: |tx| {
+            tx.execute_batch(
+            "CREATE TABLE task_lists(id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=26),title TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0,1))) STRICT;
+             CREATE TABLE task_list_receipts(request_id TEXT PRIMARY KEY NOT NULL,digest BLOB NOT NULL CHECK(length(digest)=32),list_id TEXT NOT NULL REFERENCES task_lists(id),retained INTEGER NOT NULL CHECK(retained IN (0,1))) STRICT;
+             ALTER TABLE user_resources ADD COLUMN task_list TEXT;
+             ALTER TABLE user_resources ADD COLUMN task_inbox INTEGER NOT NULL DEFAULT 0 CHECK(task_inbox IN (0,1));
+             ALTER TABLE user_resources ADD COLUMN task_priority TEXT NOT NULL DEFAULT 'none';
+             ALTER TABLE user_resources ADD COLUMN task_steps INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE user_resources ADD COLUMN task_steps_done INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE user_resources ADD COLUMN task_completed_at TEXT;
+             CREATE INDEX user_tasks_list ON user_resources(task_list,trashed,completed);
+             CREATE INDEX user_tasks_date ON user_resources(kind,trashed,completed,due_date);")
+        },
+    },
+    Migration {
+        version: 19,
+        up: |tx| {
+            // Deadline and estimate are new and optional; no task has either yet.
+            tx.execute_batch(
+                "ALTER TABLE user_resources ADD COLUMN task_deadline TEXT;
+                 ALTER TABLE user_resources ADD COLUMN task_duration INTEGER;
+                 CREATE INDEX user_tasks_deadline ON user_resources(kind,trashed,completed,task_deadline);",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -2038,6 +2103,10 @@ mod tests {
         (13, 0x128f_f07d_8b37_6bc9),
         (14, 0x0bb9_e89a_39c2_fb9f),
         (15, 0x2f78_2c71_a646_acaf),
+        (16, 0x119a_472e_4564_25df),
+        (17, 0x8b55_d4bb_445e_7756),
+        (18, 0xa412_5523_e2ac_aef7),
+        (19, 0x321a_2e79_d8d2_77da),
     ];
 
     fn schema_fingerprint(migrations: &[Migration], version: i64) -> u64 {
@@ -3221,7 +3290,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(15));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(19));
     }
 
     #[test]

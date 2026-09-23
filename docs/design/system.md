@@ -72,6 +72,82 @@ migration. Future Work and entity presentations will use the same shared primiti
 with state supplied through the real Rust contracts. No production Work workflow
 is implemented by this UI foundation.
 
+## Tasks
+
+Tasks are a product surface rather than a resource browser. The row is the whole
+interaction: capture happens in a field shaped like a row at the top of the list,
+completion is the kit's checkbox recipe, and scheduling opens a contained popover
+on the row itself. Nothing navigates away from the list, and no editor route
+replaces it.
+
+The list is grouped by when work is due — overdue, today, tomorrow, upcoming,
+anytime, completed — and the segmented control selects a scope rather than a
+filter, opening on Today. A task captured while looking at a scope lands in it.
+Rows carry the sidebar row vocabulary (`--row-hover`, `--row-active`,
+`--shadow-raised`, the mask-faded label), so a task row and a tab row read as one
+product. Colour is spent only on time that has run out and on a delegated task
+that stopped and needs a person; everything else stays quiet.
+
+A completed row holds its place for a moment before leaving, animating opacity
+and transform only. Status indicators are static: a list that animates
+continuously is a list nobody can read. Arrow keys move the selection, Space
+completes, Enter opens the row's detail in place, Cmd-click and Shift-click
+build a selection that Space and Delete then act on together, and the panel owns
+undo so it survives the deletion that emptied the list. Every one of those
+changes is announced in a polite live region, because the row moving is only
+feedback for a reader who can see it.
+
+The capture field reads what was typed before committing it. A date or a time at
+the end of the line — "Call Anna tomorrow at 3pm" — is understood, shown back as
+a chip, and removed from the title; pressing the chip or Escape keeps the words
+instead. Only a phrase at the very end is ever consumed, so "Meet the Friday
+team" keeps its Friday. The vocabulary lives in `features/tasks/lib/task-language.ts`
+and is tested against the false positives that make such a parser hated.
+
+The panel spends one band on chrome. The tool's title is its scope — "Today" —
+and opens a menu holding the others; search is summoned from the overflow rather
+than resident, because in a 336px column a permanent field costs more than it
+returns. Three controls sit beside it: capture, overflow, close.
+
+A row's date appears only when it says something its section has not. Under a
+heading that reads TODAY, every row repeating "Today" is noise wearing the
+costume of information. The chip stays reachable either way — it is how a date
+is changed — but it speaks only for an hour, for being late, or for a day the
+section does not already name.
+
+The list is windowed. Rows declare their height rather than being measured,
+which keeps the window a prefix sum, and the detail's box is fixed for the same
+reason. The finished pile is clipped to the most recent and says how much it is
+hiding. A search widens past the current scope, because a scope must never veto
+the answer to "where is it".
+
+## The tasks destination
+
+`browser.tasks` opens the full page, reached from the tools menu (Show All
+Tasks) and from the panel's own overflow. It follows Settings: the browser
+sidebar becomes its navigation and the main area holds the content. The same
+rows draw there at `page` density, so the panel and the destination cannot drift.
+
+The page states what it is: the scope as a heading, and one line saying what the
+scope amounts to. Given room it is two panes — the list, and the whole task
+beside it with space for its notes. That composition is the reason a full mode
+exists, since a 336px column cannot have it; below 1140px the pane gives way and
+rows open in place again. A listing carries no body, so opening a task reads its
+own — one record, for the one row being looked at.
+
+The board groups by state — To do, In progress, Needs you, Done — rather than by
+day, because that is the axis where dropping a card performs a mutation the model
+already has. Dragging between columns sets the status; dragging within one writes
+the manual position. The gesture is the sidebar's own: a movement threshold so a
+click stays a click, pointer capture, a frame-throttled ghost, and a drop target
+read from the element under the pointer. It lives in `shared/lib/pointer-drag.svelte.ts`
+rather than in a dependency.
+
+Positions are fixed-width decimal keys, so comparing them as text orders them as
+numbers. An insert takes the midpoint of its neighbours — one write, not a
+renumbered column — and when that gap is finally spent `orderBetween` says so
+instead of colliding, and the column is resequenced.
+
 ## Localization and motion
 
 New-tab, navigation, address and tab-action strings use compiled Paraglide

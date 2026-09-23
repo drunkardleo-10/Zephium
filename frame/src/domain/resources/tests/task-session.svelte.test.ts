@@ -1,0 +1,253 @@
+import { expect, test, vi } from "vitest";
+import type { ResourceSummary } from "$shared/ipc/bindings";
+
+const host = vi.hoisted(() => ({ call: vi.fn() }));
+vi.mock("$shared/ipc/bindings", async () => {
+  const { mockBindings } = await import("$shared/testing/bindings");
+  return mockBindings({ resourceCall: host.call });
+});
+vi.mock("$shared/ipc/native-events", () => ({
+  events: { resourceChanged: { listen: async () => () => {} } },
+}));
+
+const profile = "00000000000000000000000001";
+
+function row(id: string): ResourceSummary {
+  return {
+    id,
+    revision: "1",
+    title: "Kept",
+    pinned: false,
+    updated_at: "1",
+    completed: false,
+    due_date: null,
+    due_time: null,
+    status: "open",
+    assignee: "user",
+    origin: "user",
+    context: null,
+    sort_key: null,
+    work: null,
+  };
+}
+
+function serve() {
+  host.call.mockImplementation(async () => ({
+    profile,
+    response: {
+      kind: "task_page",
+      metadata: [],
+      lists: [],
+      items: [row("00000000000000000000000009")],
+      next: null,
+      counts: { inbox: 0, today: 0, overdue: 0, upcoming: 0, all: 1, completed: 0, trash: 0 },
+    },
+  }));
+}
+
+const settled = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+/** A component cleanup cannot await, so stopping must not leave work that
+ *  lands after the next start and tears down what it just built. */
+test("a session restarted straight after being stopped still loads", async () => {
+  const { taskSession } = await import("../tasks.svelte");
+  serve();
+  const session = taskSession(profile, "restart");
+  await session.start();
+  expect(session.items.length).toBe(1);
+
+  // Exactly what a remount does: fire-and-forget cleanup, immediate restart.
+  session.stop();
+  await session.start();
+  await settled();
+
+  expect(session.items.length).toBe(1);
+  expect(session.error).toBeNull();
+});
+
+test("a session that stays stopped lets go of its rows", async () => {
+  const { taskSession } = await import("../tasks.svelte");
+  serve();
+  const session = taskSession(profile, "released");
+  await session.start();
+  expect(session.items.length).toBe(1);
+
+  session.stop();
+  await settled();
+  expect(session.items.length).toBe(0);
+  expect(session.error).toBeNull();
+});
+
+async function editingSession(name: string) {
+  const { resourceTestServer } = await import("$shared/testing/resources/server");
+  const { TaskSession } = await import("../tasks.svelte");
+  const server = resourceTestServer(profile);
+  host.call.mockImplementation(server.call);
+  const session = new TaskSession(profile);
+  await session.start();
+  const id = (await session.create({ title: name }))!;
+  return { server, session, id };
+}
+
+test("undoing a date change consumes history instead of recording its inverse", async () => {
+  const { session, id } = await editingSession("Schedule");
+  await session.schedule(id, "2026-09-25");
+  await session.undo();
+  expect(session.rows.find((row) => row.id === id)?.dueDate).toBeNull();
+  // The next undo reverses creation, not the undo of scheduling.
+  await session.undo();
+  expect(session.rows).toHaveLength(0);
+  expect(session.undoable).toBe(false);
+  session.stop();
+});
+
+test("a lost create reply is recovered by replaying one request", async () => {
+  const { resourceTestServer } = await import("$shared/testing/resources/server");
+  const { TaskSession } = await import("../tasks.svelte");
+  const server = resourceTestServer(profile);
+  let lose = true;
+  host.call.mockImplementation(async (owner, call) => {
+    const result = await server.call(owner, call);
+    if (call.kind === "mutate" && lose) {
+      lose = false;
+      return { profile, response: { kind: "error", error: "outcome_unknown" } };
+    }
+    return result;
+  });
+  const session = new TaskSession(profile);
+  await session.start();
+  session.captureDraft = "Keep this thought";
+  expect(await session.create({ title: session.captureDraft })).toBeNull();
+  expect(session.captureDraft).toBe("Keep this thought");
+  expect(await session.flush()).toBe(false);
+  await session.retry();
+  expect(server.records.size).toBe(1);
+  expect(session.captureDraft).toBe("");
+  expect(session.failure).toBeNull();
+  session.stop();
+});
+
+test("an earlier title save cannot replace newer typing", async () => {
+  const { server, session, id } = await editingSession("Original");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  host.call.mockImplementation(async (owner, call) => {
+    if (call.kind === "mutate" && call.command.intent.kind === "update_task") await gate;
+    return server.call(owner, call);
+  });
+  session.rename(id, "First edit");
+  const first = session.flush();
+  await settled();
+  session.rename(id, "Second edit");
+  release();
+  await first;
+  expect(session.rows.find((row) => row.id === id)?.title).toBe("Second edit");
+  await session.flush();
+  expect(server.records.get(id)?.draft.title).toBe("Second edit");
+  session.stop();
+});
+
+test("failed edits remain visible across reload and host teardown", async () => {
+  const { server, session, id } = await editingSession("Original");
+  host.call.mockImplementation(async (owner, call) =>
+    call.kind === "mutate"
+      ? { profile, response: { kind: "error", error: "unavailable" } }
+      : server.call(owner, call),
+  );
+  session.rename(id, "Retained edit");
+  expect(await session.flush()).toBe(false);
+  await session.reload();
+  expect(session.rows.find((row) => row.id === id)?.title).toBe("Retained edit");
+  expect(session.failure).toBe("unavailable");
+  session.stop();
+  await settled();
+  await session.start();
+  expect(session.rows.find((row) => row.id === id)?.title).toBe("Retained edit");
+  host.call.mockImplementation(server.call);
+  await session.retry();
+  expect(server.records.get(id)?.draft.title).toBe("Retained edit");
+  expect(session.failure).toBeNull();
+  session.stop();
+});
+
+test("external description revisions refresh a selected task", async () => {
+  const { server, session, id } = await editingSession("Shared task");
+  await session.load(id);
+  const record = structuredClone(server.records.get(id)!);
+  record.revision = "2";
+  if (record.draft.content.kind === "task") record.draft.content.description = "Edited elsewhere";
+  server.records.set(id, record);
+  await session.reload();
+  await settled();
+  expect(session.rows.find((row) => row.id === id)?.description).toBe("Edited elsewhere");
+  session.stop();
+});
+
+test("same-field conflict preserves local text until explicit retry", async () => {
+  const { server, session, id } = await editingSession("Original");
+  session.rename(id, "My edit");
+  const record = structuredClone(server.records.get(id)!);
+  record.revision = "2";
+  record.draft.title = "Their edit";
+  server.records.set(id, record);
+  expect(await session.flush()).toBe(false);
+  expect(server.records.get(id)?.draft.title).toBe("Their edit");
+  expect(session.rows.find((row) => row.id === id)?.title).toBe("My edit");
+  expect(session.failure).toBe("conflict");
+  await session.retry();
+  expect(server.records.get(id)?.draft.title).toBe("My edit");
+  session.stop();
+});
+
+test("an edit to one field leaves another actor's change to a different field alone", async () => {
+  const { server, session, id } = await editingSession("Original");
+  const record = structuredClone(server.records.get(id)!);
+  record.revision = "2";
+  if (record.draft.content.kind === "task") record.draft.content.details.priority = "high";
+  server.records.set(id, record);
+  session.rename(id, "Renamed here");
+  expect(await session.flush()).toBe(true);
+  const saved = server.records.get(id)!;
+  expect(saved.draft.title).toBe("Renamed here");
+  expect(saved.draft.content.kind === "task" && saved.draft.content.details.priority).toBe("high");
+  expect(session.failure).toBeNull();
+  session.stop();
+});
+
+test("a settled write refreshes totals without reloading the list", async () => {
+  const { server, session, id } = await editingSession("Count me");
+  await settled();
+  const calls: string[] = [];
+  host.call.mockImplementation(async (owner, call) => {
+    calls.push(call.kind === "mutate" ? call.command.intent.kind : call.kind);
+    return server.call(owner, call);
+  });
+  await session.setStatus(id, "done");
+  // Totals follow on the refresh debounce.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(calls).not.toContain("list_tasks");
+  expect(calls).not.toContain("get");
+  expect(calls).toContain("update_task");
+  expect(calls).toContain("task_overview");
+  expect(session.counts.completed).toBe(1);
+  session.stop();
+});
+
+test("a deadline and an estimate are written and undone like any other field", async () => {
+  const { server, session, id } = await editingSession("Estimate");
+  await session.setDeadline(id, "2026-10-02");
+  await session.setDuration(id, 90);
+  const details = () => {
+    const content = server.records.get(id)!.draft.content;
+    return content.kind === "task" ? [content.details.deadline, content.details.duration] : [];
+  };
+  expect(details()).toEqual(["2026-10-02", 90]);
+  expect(session.rows.find((row) => row.id === id)).toMatchObject({
+    deadline: "2026-10-02",
+    duration: 90,
+  });
+  await session.undo();
+  await session.undo();
+  expect(details()).toEqual([null, null]);
+  session.stop();
+});

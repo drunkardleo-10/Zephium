@@ -96,6 +96,18 @@ export function image(ref: IconRef | null | undefined): ImageData | null {
   return entry?.revision === ref.revision ? entry.image : null;
 }
 
+/** Whatever raster this surface already holds for a page's site, at any
+ *  revision. For a stored address with no live reference of its own, such as a
+ *  task's linked page; it asks native for nothing, so it may be null. */
+export function forPage(url: string): { image: ImageData; tone: IconTone } | null {
+  const parts = /^(https?):\/\/(?:[^@/?#]*@)?([^/?#:]+)(?::(\d+))?/iu.exec(url);
+  if (!parts) return null;
+  const scheme = parts[1]!.toLowerCase();
+  const port = parts[3] && parts[3] !== (scheme === "https" ? "443" : "80") ? `:${parts[3]}` : "";
+  const entry = rasters.get(`${scheme}://${parts[2]!.toLowerCase()}${port}`);
+  return entry ? { image: entry.image, tone: entry.tone } : null;
+}
+
 export function tone(ref: IconRef | null | undefined): IconTone {
   if (!ref) return "mid";
   const entry = rasters.get(ref.origin);

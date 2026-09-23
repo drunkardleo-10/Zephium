@@ -28,6 +28,7 @@
     triggerClass = "",
     side = "bottom",
     align = "start",
+    returnFocus,
     onselect,
   }: {
     label: string;
@@ -36,6 +37,9 @@
     triggerClass?: string;
     side?: "top" | "bottom" | "left" | "right";
     align?: "start" | "center" | "end";
+    /** Asked as the menu closes; false leaves focus where the chosen action put
+     *  it, such as a field the action opened, instead of back on the trigger. */
+    returnFocus?: () => boolean;
     onselect: (id: string) => void;
   } = $props();
   // A menu that can express a choice keeps the mark column on every row, so
@@ -54,6 +58,9 @@
       {align}
       sideOffset={6}
       collisionPadding={10}
+      onCloseAutoFocus={(event) => {
+        if (returnFocus && !returnFocus()) event.preventDefault();
+      }}
     >
       {#each entries as entry, index (index)}
         {#if entry.kind === "separator"}

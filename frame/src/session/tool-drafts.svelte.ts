@@ -27,7 +27,9 @@ export function toolSession(host: string, profile: string, tool: ToolKind): Tool
   if (existing) return existing;
   const state = $state<ToolViewState>({
     query: "",
-    filter: tool === "time" ? "today" : "all",
+    // Tasks opens on what is due now; a list that opens on everything is a
+    // list you have to narrow before you can read it.
+    filter: tool === "time" || tool === "tasks" ? "today" : "all",
     title: "",
     draft: "",
     composing: false,

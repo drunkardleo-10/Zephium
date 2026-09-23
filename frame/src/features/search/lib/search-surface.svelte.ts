@@ -1,5 +1,7 @@
 import { tick } from "svelte";
 import type { IconSvgElement } from "@hugeicons/svelte";
+import { CheckListIcon } from "@hugeicons/core-free-icons";
+import * as m from "$shared/i18n/messages";
 import type { PanelState, SearchResult, ToolKind } from "$shared/ipc/bindings";
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
@@ -33,6 +35,8 @@ export function createSearchSurface(options: {
   context: PanelState | null;
   destinations: Destination[];
   onTool: (tool: ToolKind) => void;
+  /** Saves the typed line as a task; resolves to the title saved, or null. */
+  onCapture?: (text: string) => Promise<string | null>;
 }) {
   const anchored = options.tabId !== null;
 
@@ -60,6 +64,9 @@ export function createSearchSurface(options: {
    *  same length and the completion was immediately re-applied. */
   let displayed = $state("");
   let composing = $state(false);
+  /** The title of a task just saved from this query, while the launcher says so. */
+  let captured = $state<string | null>(null);
+  const CAPTURE_ID = "capture:task";
 
   /** Intent expressed before the answer arrived. Resolved against the settled
    *  result set so a click or Enter is never silently dropped, and never runs
@@ -98,6 +105,20 @@ export function createSearchSurface(options: {
       tool: destination.kind,
       icon: destination.icon,
     })),
+    // Anything typed can become a task, last so it never displaces the page or
+    // search the line most often means.
+    ...(query.trim() && !anchored && options.onCapture
+      ? [
+          {
+            id: CAPTURE_ID,
+            title: m.launcher_capture({ text: query.trim() }),
+            section: "commands" as const,
+            result: null,
+            tool: null,
+            icon: CheckListIcon,
+          },
+        ]
+      : []),
   ]);
 
   /** The row the field is currently showing the user, when a completion has
@@ -112,8 +133,31 @@ export function createSearchSurface(options: {
         : (completed?.id ?? rows[0]!.id),
   );
 
+  async function capture() {
+    const text = query.trim();
+    if (running || !text || !options.onCapture) return;
+    running = true;
+    failed = false;
+    try {
+      const title = await options.onCapture(text);
+      if (disposed) return;
+      running = false;
+      if (title) captured = title;
+      else failed = true;
+    } catch {
+      if (!disposed) {
+        running = false;
+        failed = true;
+      }
+    }
+  }
+
   async function run(row: SurfaceRow) {
     if (running) return;
+    if (row.id === CAPTURE_ID) {
+      await capture();
+      return;
+    }
     if (row.tool) {
       options.onTool(row.tool);
       return;
@@ -177,6 +221,7 @@ export function createSearchSurface(options: {
   }
 
   function changed(value: string) {
+    captured = null;
     deleting = value.length < displayed.length && displayed.startsWith(value);
     displayed = value;
     query = value;
@@ -309,6 +354,7 @@ export function createSearchSurface(options: {
     mount,
     changed,
     submit,
+    capture,
     activate,
     move,
     dismiss,
@@ -358,6 +404,12 @@ export function createSearchSurface(options: {
     },
     get running() {
       return running;
+    },
+    get captured() {
+      return captured;
+    },
+    get capturable() {
+      return !anchored && !!options.onCapture && !!query.trim();
     },
     get failed() {
       return failed;

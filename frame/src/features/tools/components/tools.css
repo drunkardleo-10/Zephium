@@ -26,15 +26,6 @@
   letter-spacing: -0.015em;
 }
 
-.tool-owner {
-  font-size: 11px;
-  color: var(--color-label-secondary);
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .shared-tool-controls {
   display: grid;
   gap: 12px;
@@ -190,4 +181,11 @@
 
 .shared-tool[data-host="floating"] .shared-tool-controls {
   padding-top: 16px;
+}
+
+.shared-tool-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  color: var(--color-muted);
 }

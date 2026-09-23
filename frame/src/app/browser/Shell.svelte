@@ -29,6 +29,7 @@
   import { SettingsNavigation } from "$features/settings";
   import { loadLibraryPage } from "$features/library";
   import { loadHistoryPage } from "$features/history";
+  import { loadTasksPage } from "$features/tasks";
   import { loadNewTabSearch } from "$features/search";
   import { loadNewTab } from "$features/newtab";
   import { ModePicker, ModeTabs, Sidebar, UtilityTray } from "$features/sidebar";
@@ -228,6 +229,13 @@
               failureLabel={m.surface_render_failed()}
               retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
             >{/key}
+        {:else if browserPage.currentPage() === "tasks"}
+          <LazyView
+            loader={loadTasksPage}
+            loadingLabel={m.surface_loading()}
+            failureLabel={m.surface_render_failed()}
+            retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
+          >
         {:else if browserPage.currentPage() === "history"}
           <LazyView
             loader={loadHistoryPage}

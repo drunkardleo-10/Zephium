@@ -643,6 +643,8 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM extension_install_catalog;
          DELETE FROM page_permission_grants;
          DELETE FROM page_permission_catalog;
+         DELETE FROM task_list_receipts;
+         DELETE FROM task_lists;
          DELETE FROM user_resource_receipts;
          DELETE FROM user_resources;
          DELETE FROM user_resource_usage;
@@ -874,14 +876,24 @@ mod tests {
             pinned: false,
             related: vec![],
             content: zephium_core::resources::ResourceContent::Task {
+                details: Default::default(),
                 description: PROFILE_SCRUB_MARKER.into(),
                 completed: false,
                 due_date: None,
+                due_time: None,
+                status: zephium_core::resources::TaskStatus::Open,
+                assignee: zephium_core::resources::TaskActor::User,
+                origin: zephium_core::resources::TaskActor::User,
+                context: None,
+                sort_key: None,
+                work: None,
             },
         })
         .unwrap();
         conn.execute("INSERT INTO user_resources(id,kind,revision,title,pinned,trashed,created_at,updated_at,body,search_text,completed) VALUES('00000000000000000000000001','task',1,?1,0,0,1,1,?2,?1,0)",params![PROFILE_SCRUB_MARKER,body]).unwrap();
         conn.execute("INSERT INTO user_resource_receipts(request_id,digest,resource_id,revision,retained) VALUES(?1,?2,'00000000000000000000000001',1,1)",params![PROFILE_SCRUB_MARKER,vec![1_u8;32]]).unwrap();
+        conn.execute("INSERT INTO task_lists(id,title,revision,deleted) VALUES('00000000000000000000000002',?1,1,0)",[PROFILE_SCRUB_MARKER]).unwrap();
+        conn.execute("INSERT INTO task_list_receipts(request_id,digest,list_id,retained) VALUES(?1,?2,'00000000000000000000000002',1)",params![PROFILE_SCRUB_MARKER,vec![2_u8;32]]).unwrap();
         drop(conn);
 
         scrub_profile_database(&path).unwrap();
@@ -928,6 +940,8 @@ mod tests {
             "settings",
             "spaces",
             "sqlite_sequence",
+            "task_list_receipts",
+            "task_lists",
             "user_resource_receipts",
             "user_resource_usage",
             "user_resources",
@@ -942,6 +956,8 @@ mod tests {
 
         for table in [
             "search_queries",
+            "task_list_receipts",
+            "task_lists",
             "user_resource_receipts",
             "user_resources",
             "user_resource_usage",

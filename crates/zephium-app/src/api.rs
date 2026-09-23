@@ -352,6 +352,7 @@ pub enum BrowserPage {
     Settings,
     History,
     Downloads,
+    Tasks,
 }
 
 impl BrowserPage {
@@ -361,6 +362,7 @@ impl BrowserPage {
             Self::Settings => "browser.settings",
             Self::History => "browser.history",
             Self::Downloads => "browser.downloads",
+            Self::Tasks => "browser.tasks",
         }
     }
 }

@@ -1,7 +1,7 @@
 import { registerCloseTask } from "$shared/lib/close";
 import { SvelteMap } from "svelte/reactivity";
 import { mergePage, newerRevision, noteReferences } from "./resource-model";
-import { commands } from "$shared/ipc/bindings";
+import { resourceCall } from "./transport";
 import type {
   ResourceCall_Deserialize as ResourceCall,
   ResourceKind,
@@ -12,7 +12,6 @@ import type {
   ResourceSummary,
 } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
-import { observe } from "$shared/lib/observe";
 
 const AUTOSAVE_DELAY = 1000;
 
@@ -128,17 +127,8 @@ export class ResourceSession {
       this.draft = null;
     }
   }
-  private async call(call: ResourceCall): Promise<ResourceResponse> {
-    const result = await observe(
-      Promise.resolve().then(() => commands.resourceCall(this.profile, call)),
-      9000,
-      this.lifetime.signal,
-    );
-    if (result.state !== "received") return { kind: "error", error: "outcome_unknown" };
-    const reply = result.value;
-    if (reply.profile !== this.profile && reply.response.kind !== "error")
-      return { kind: "error", error: "unavailable" };
-    return reply.response;
+  private call(call: ResourceCall): Promise<ResourceResponse> {
+    return resourceCall(this.profile, call, this.lifetime.signal);
   }
   async resolveNotes(ids: string[]): Promise<ResourceSummary[]> {
     const result = await this.call({ kind: "resolve_notes", ids: ids.slice(0, 64) });

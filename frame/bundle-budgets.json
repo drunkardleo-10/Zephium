@@ -88,8 +88,8 @@
     "css": 302901
   },
   "lazy:features/tools/components/previews/TasksView.svelte": {
-    "js": 291708,
-    "css": 33750
+    "js": 290000,
+    "css": 18000
   },
   "lazy:features/tools/components/previews/TimeView.svelte": {
     "js": 292728,
@@ -97,7 +97,7 @@
   },
   "lazy:features/tools/components/ToolSlot.svelte": {
     "js": 283200,
-    "css": 1059
+    "css": 3600
   },
   "lazy:features/notes/components/Notes.svelte": {
     "js": 405000,
@@ -108,8 +108,8 @@
     "css": 30000
   },
   "lazy:features/tasks/components/Tasks.svelte": {
-    "js": 315000,
-    "css": 36000
+    "js": 317000,
+    "css": 31000
   },
   "lazy:app/browser/WorkWorkspace.svelte": {
     "js": 975000,
@@ -125,7 +125,7 @@
   },
   "lazy:domain/resources/index.ts": {
     "js": 237000,
-    "css": 0
+    "css": 3300
   },
   "lazy:features/search/components/LauncherPanel.svelte": {
     "js": 376593,
@@ -146,5 +146,21 @@
   "lazy:features/library/components/LibraryPage.svelte": {
     "js": 318567,
     "css": 4500
+  },
+  "lazy:features/tasks/components/TasksPage.svelte": {
+    "js": 371000,
+    "css": 41500
+  },
+  "lazy:features/tasks/components/TaskDetail.svelte": {
+    "js": 332000,
+    "css": 39500
+  },
+  "lazy:features/tasks/components/TaskBoard.svelte": {
+    "js": 327000,
+    "css": 36500
+  },
+  "lazy:features/tasks/lib/capture.ts": {
+    "js": 175000,
+    "css": 1500
   }
 }

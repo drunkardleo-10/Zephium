@@ -13,6 +13,7 @@
   import { acceptPanelState } from "$features/panel";
   import { tools as toolManifest, toolKinds } from "$features/tools";
   import { loadLauncherPanel } from "$features/search";
+  import { loadCapture } from "$features/tasks";
   import * as m from "$shared/i18n/messages";
   const destinations = toolKinds.map((kind) => ({
     kind,
@@ -99,6 +100,16 @@
   function tool(kind: ToolKind) {
     void intent({ type: "tool", tool: kind });
   }
+  /** Long enough to read that it landed, short enough not to wait on. */
+  const CAPTURED_MS = 700;
+  async function capture(text: string): Promise<string | null> {
+    const profile = presentation?.profile_id;
+    if (!profile) return null;
+    const { captureTask } = await loadCapture();
+    const title = await captureTask(profile, text);
+    if (title) setTimeout(() => void intent({ type: "dismiss" }), CAPTURED_MS);
+    return title;
+  }
 </script>
 
 <svelte:window onkeydown={keydown} />
@@ -120,6 +131,7 @@
                 context={owner}
                 {destinations}
                 onTool={tool}
+                onCapture={capture}
                 onDrag={() => void drag()}
               />{/snippet}</LazyView
           >{/key}

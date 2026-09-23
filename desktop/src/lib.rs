@@ -1290,9 +1290,18 @@ struct NoteOpenRequested {
     id: String,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+enum ResourceChangeKind {
+    Note,
+    Task,
+    TaskList,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ResourceChanged {
     profile: String,
+    kind: ResourceChangeKind,
     id: String,
     revision: String,
 }
@@ -3267,6 +3276,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             "settings" => Some(zephium_app::BrowserPage::Settings),
             "history" => Some(zephium_app::BrowserPage::History),
             "downloads" => Some(zephium_app::BrowserPage::Downloads),
+            "tasks" => Some(zephium_app::BrowserPage::Tasks),
             "return" => None,
             _ => return rejected_operation(),
         };
@@ -3729,13 +3739,26 @@ async fn resource_call(
         call: Arc::new(call),
         done: zephium_app::ResourceCompletion::new(move |reply| {
             let _permit = permit;
-            if let (Some(profile), ResourceResponse::Applied { record, .. }) =
-                (&reply.profile, &reply.response)
-            {
+            let changed = match &reply.response {
+                ResourceResponse::Applied { record, .. } => Some((
+                    match record.draft.kind() {
+                        zephium_core::resources::ResourceKind::Note => ResourceChangeKind::Note,
+                        zephium_core::resources::ResourceKind::Task => ResourceChangeKind::Task,
+                    },
+                    &record.id,
+                    &record.revision,
+                )),
+                ResourceResponse::TaskListApplied { list, .. } => {
+                    Some((ResourceChangeKind::TaskList, &list.id, &list.revision))
+                }
+                _ => None,
+            };
+            if let (Some(profile), Some((kind, id, revision))) = (&reply.profile, changed) {
                 let event = ResourceChanged {
                     profile: profile.clone(),
-                    id: record.id.clone(),
-                    revision: record.revision.clone(),
+                    kind,
+                    id: id.clone(),
+                    revision: revision.clone(),
                 };
                 for label in [MAIN_LABEL, overlay::PANEL_LABEL] {
                     emit_to_privileged(&app, label, "zephium:resource-changed", &event);
@@ -4365,13 +4388,19 @@ fn build_tools_menu(
     let history = MenuItemBuilder::with_id("tool.history", "History").build(handle)?;
     let downloads = MenuItemBuilder::with_id("tool.downloads", "Downloads").build(handle)?;
     let second = PredefinedMenuItem::separator(handle)?;
+    // The panel is the quick way in; the full destination is its own entry, the
+    // same shape as Show All History.
+    let all_tasks = MenuItemBuilder::with_id("browser.tasks", "Show All Tasks")
+        .accelerator("CmdOrCtrl+Shift+T")
+        .build(handle)?;
     let settings = MenuItemBuilder::with_id("browser.settings", "Settings…")
         .accelerator("CmdOrCtrl+,")
         .build(handle)?;
     Menu::with_items(
         handle,
         &[
-            &notes, &tasks, &activity, &ai, &first, &history, &downloads, &second, &settings,
+            &notes, &tasks, &activity, &ai, &first, &history, &downloads, &second, &all_tasks,
+            &settings,
         ],
     )
 }

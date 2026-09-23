@@ -5,6 +5,7 @@
   import type { PanelState, ToolKind } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
   import IconButton from "$shared/ui/IconButton";
+  import { IS_MAC } from "$shared/platform";
   import ResultList from "./ResultList.svelte";
   import { createSearchSurface, type Destination } from "../lib/search-surface.svelte";
 
@@ -12,11 +13,14 @@
     context = null,
     onTool = () => {},
     onDrag = () => {},
+    onCapture,
     destinations = [],
   }: {
     context?: PanelState | null;
     onTool?: (tool: ToolKind) => void;
     onDrag?: () => void;
+    /** Saves the typed line as a task; resolves to the saved title, or null. */
+    onCapture?: (text: string) => Promise<string | null>;
     destinations?: Destination[];
   } = $props();
 
@@ -27,6 +31,7 @@
     context: untrack(() => context),
     destinations: untrack(() => destinations),
     onTool: (tool) => onTool(tool),
+    onCapture: untrack(() => onCapture),
   });
 
   let input = $state<HTMLInputElement>();
@@ -45,6 +50,10 @@
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       void surface.move(event.key === "ArrowDown" ? 1 : -1);
+    } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      // The secondary action, from anywhere in the list: keep the words as a task.
+      event.preventDefault();
+      void surface.capture();
     } else if (event.key === "Enter") {
       event.preventDefault();
       surface.submit();
@@ -142,10 +151,16 @@
   </div>
 
   <footer>
-    <span aria-live="polite">{surface.running ? m.panel_opening() : m.panel_search_hint()}</span
-    ><span><kbd>↑↓</kbd> {m.panel_navigate()}</span><span><kbd>↵</kbd> {m.panel_open()}</span><span
-      ><kbd>esc</kbd> {m.panel_close()}</span
-    >
+    <span aria-live="polite"
+      >{surface.captured
+        ? m.launcher_captured({ title: surface.captured })
+        : surface.running
+          ? m.panel_opening()
+          : m.panel_search_hint()}</span
+    ><span><kbd>↑↓</kbd> {m.panel_navigate()}</span><span><kbd>↵</kbd> {m.panel_open()}</span
+    >{#if surface.capturable}<span
+        ><kbd>{IS_MAC ? "⌘↵" : "Ctrl ↵"}</kbd> {m.launcher_capture_hint()}</span
+      >{/if}<span><kbd>esc</kbd> {m.panel_close()}</span>
   </footer>
 </div>
 

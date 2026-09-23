@@ -141,3 +141,20 @@ test("keeps its panel chrome and shows destinations only for an empty field", as
     .elementLocator(screen.container)
     .screenshot({ path: "../../../../../target/search-launcher-light.png" });
 });
+
+test("anything typed can be kept as a task, by its row or by Cmd+Enter", async () => {
+  const onCapture = vi.fn(async (text: string) => text.replace(/ tomorrow$/u, ""));
+  const screen = await render(LauncherPanel, { props: { context, destinations, onCapture } });
+  const input = screen.getByRole("combobox");
+  await input.fill("Call the dentist tomorrow");
+  await reply("Call the dentist tomorrow", [search("Call the dentist tomorrow")]);
+  const row = screen.getByRole("option", { name: /Add “Call the dentist tomorrow” to Tasks/u });
+  await expect.element(row).toBeVisible();
+  await page.screenshot({ path: "../../../../../target/tasks-qa/launcher-capture.png" });
+
+  await userEvent.keyboard("{Meta>}{Enter}{/Meta}");
+  await vi.waitFor(() => expect(onCapture).toHaveBeenCalledWith("Call the dentist tomorrow"));
+  // The page search the line most often means stayed where it was, untouched.
+  expect(native.run).not.toHaveBeenCalled();
+  await expect.element(screen.getByText("Added “Call the dentist” to Tasks")).toBeVisible();
+});

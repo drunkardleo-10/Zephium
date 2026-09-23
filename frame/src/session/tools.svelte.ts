@@ -54,7 +54,11 @@ async function initialize(owner: number) {
       open(next);
     }
     if (payload === "browser.return-failed") queued = null;
-    if (["browser.settings", "browser.history", "browser.downloads"].includes(payload)) {
+    if (
+      ["browser.settings", "browser.history", "browser.downloads", "browser.tasks"].includes(
+        payload,
+      )
+    ) {
       request++;
       cancel();
       tool = null;

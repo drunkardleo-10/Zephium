@@ -28,6 +28,13 @@ test("typing in a large linked note preserves content and does not refetch refer
       updated_at: "1",
       completed: null,
       due_date: null,
+      due_time: null,
+      status: null,
+      assignee: null,
+      origin: null,
+      context: null,
+      sort_key: null,
+      work: null,
     },
   ]);
   const onchange = vi.fn();

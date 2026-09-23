@@ -1,4 +1,5 @@
 import { beforeEach, expect, test, vi } from "vitest";
+import { adoptDraft } from "$shared/testing/resources/server";
 import type {
   ResourceCall_Deserialize as Call,
   ResourceRecord_Serialize as Record,
@@ -36,7 +37,19 @@ const record: Record = {
     title: "Original",
     pinned: false,
     related: [],
-    content: { kind: "task", description: "", completed: false, due_date: null },
+    content: {
+      kind: "task",
+      details: {},
+      description: "",
+      completed: false,
+      due_date: null,
+      status: "open",
+      assignee: "user",
+      origin: "user",
+      context: null,
+      sort_key: null,
+      work: null,
+    },
   },
 };
 function reply(response: Reply["response"]): Reply {
@@ -71,7 +84,7 @@ test("coalesces edits made during a save against the newly committed revision", 
       kind: "applied",
       request_id: call.command.request_id,
       applied_revision: String(writes + 1),
-      record: { ...record, revision: String(writes + 1), draft: intent.draft },
+      record: { ...record, revision: String(writes + 1), draft: adoptDraft(intent.draft) },
     });
     if (writes === 1)
       return new Promise<Reply>((resolve) => {
@@ -170,7 +183,7 @@ test("retrying an unknown save preserves edits made after its original payload",
         kind: "applied",
         request_id: call.command.request_id,
         applied_revision: revision,
-        record: { ...record, revision, draft: intent.draft },
+        record: { ...record, revision, draft: adoptDraft(intent.draft) },
       }),
     );
   });
@@ -205,7 +218,7 @@ test("autosave waits for idle, coalesces notifications, and stops timers when hi
           kind: "applied",
           request_id: call.command.request_id,
           applied_revision: "2",
-          record: { ...record, revision: "2", draft: intent.draft },
+          record: { ...record, revision: "2", draft: adoptDraft(intent.draft) },
         }),
       );
     });
@@ -257,7 +270,7 @@ test("background saving leaves edits made during a slow write for the next idle 
         kind: "applied",
         request_id: call.command.request_id,
         applied_revision: String(writes + 1),
-        record: { ...record, revision: String(writes + 1), draft: intent.draft },
+        record: { ...record, revision: String(writes + 1), draft: adoptDraft(intent.draft) },
       });
     });
     session.edit({ title: "First" });
