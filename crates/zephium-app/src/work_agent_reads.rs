@@ -188,7 +188,18 @@ fn allocations(
     used: WorkUsage,
     count: usize,
 ) -> Option<Vec<WorkExecutionLimits>> {
-    if count == 0 || count > MAX_CONCURRENT_PAGE_READS {
+    if count > MAX_CONCURRENT_PAGE_READS {
+        return None;
+    }
+    budget_shares(limits, used, count)
+}
+
+pub(super) fn budget_shares(
+    limits: WorkExecutionLimits,
+    used: WorkUsage,
+    count: usize,
+) -> Option<Vec<WorkExecutionLimits>> {
+    if count == 0 || count > usize::from(limits.max_workers) {
         return None;
     }
     let remaining = remaining_limits(limits, used)?;
@@ -223,7 +234,10 @@ fn retry_limits(limits: WorkExecutionLimits, used: WorkUsage) -> Option<WorkExec
     )
 }
 
-fn remaining_limits(limits: WorkExecutionLimits, used: WorkUsage) -> Option<WorkExecutionLimits> {
+pub(super) fn remaining_limits(
+    limits: WorkExecutionLimits,
+    used: WorkUsage,
+) -> Option<WorkExecutionLimits> {
     let limits = WorkExecutionLimits {
         model_tokens: limits.model_tokens.checked_sub(used.model_tokens)?,
         cost_micro_usd: limits.cost_micro_usd.checked_sub(used.cost_micro_usd)?,

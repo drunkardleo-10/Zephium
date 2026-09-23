@@ -824,19 +824,54 @@ impl Driver {
         let (searches, browses): (Vec<_>, Vec<_>) = fetches
             .into_iter()
             .partition(|kind| matches!(kind, WorkStepKindV1::Search { .. }));
-        let per_search = WorkExecutionLimits {
-            max_workers: 1,
-            ..self.remaining()
-        };
-        // Searches run together up to the worker cap; each batch settles before
-        // the next begins, so the durable running count never exceeds the cap.
-        for batch in searches.chunks(cap) {
+        let mut offset = 0;
+        while offset < searches.len() {
+            let steps = usize::from(self.grant.max_steps).saturating_sub(self.steps as usize + 1);
+            if steps == 0 {
+                self.notice(STEPS_EXHAUSTED);
+                break;
+            }
+            let Some(remaining) = reads::remaining_limits(self.limits, self.used) else {
+                break;
+            };
+            let mut count = cap
+                .min(searches.len() - offset)
+                .min(steps)
+                .min(remaining.model_tokens as usize)
+                .min(remaining.cost_micro_usd as usize)
+                .min(remaining.operations as usize);
+            let shares =
+                loop {
+                    let Some(shares) = reads::budget_shares(self.limits, self.used, count) else {
+                        break None;
+                    };
+                    let fits = searches[offset..offset + count].iter().zip(&shares).all(
+                        |(kind, limits)| {
+                            let WorkStepKindV1::Search { query } = kind else {
+                                return false;
+                            };
+                            let scope = WorkPublicSearchScope {
+                                provider: self.grant.provider,
+                                model: self.grant.model.clone(),
+                                query: query.clone(),
+                            };
+                            providers
+                                .search
+                                .minimum_reservation(&scope, &[])
+                                .is_none_or(|usage| usage.within(*limits))
+                        },
+                    );
+                    if fits || count == 1 {
+                        break Some(shares);
+                    }
+                    count -= 1;
+                };
+            let Some(shares) = shares else {
+                break;
+            };
+            let batch = &searches[offset..offset + count];
             let mut running = Vec::new();
-            for kind in batch {
-                if self.steps + 2 > u32::from(self.grant.max_steps) {
-                    self.notice(STEPS_EXHAUSTED);
-                    break;
-                }
+            for (kind, limits) in batch.iter().zip(shares) {
                 let WorkStepKindV1::Search { query } = kind else {
                     continue;
                 };
@@ -849,15 +884,16 @@ impl Driver {
                         model: self.grant.model.clone(),
                         query: query.clone(),
                     },
+                    limits,
                 ));
             }
             let futures: Vec<Pin<Box<dyn Future<Output = Fetched> + Send + '_>>> = running
                 .into_iter()
-                .map(|(id, scope)| {
+                .map(|(id, scope, limits)| {
                     let probe = self.probe.clone();
                     let search = providers.search;
                     Box::pin(async move {
-                        let outcome = probe.run_search(search, &scope, &[], per_search).await;
+                        let outcome = probe.run_search(search, &scope, &[], limits).await;
                         Fetched::Search(
                             id,
                             match outcome {
@@ -886,6 +922,7 @@ impl Driver {
             if terminal.is_some() {
                 return Ok(terminal);
             }
+            offset += count;
         }
         let (file_steps, browses): (Vec<_>, Vec<_>) =
             browses.into_iter().partition(WorkStepKindV1::files);

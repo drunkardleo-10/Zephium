@@ -550,3 +550,44 @@ fn unicode_query_boundary_matches_core_and_preserves_exact_serialized_input() {
         assert!(request(&cfg, &over, &[]).is_err());
     }
 }
+
+#[tokio::test]
+async fn scheduling_hint_matches_the_unchanged_search_admission_ceiling() {
+    for model in ["gpt-4.1-mini", "gpt-5.6-luna"] {
+        let transport =
+            AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD).unwrap();
+        let client = OpenAiPublicSearch::try_new(
+            transport.clone(),
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "fixture-key".into(),
+            )
+            .unwrap(),
+            config_for(model),
+        )
+        .unwrap();
+        let scope = WorkPublicSearchScope {
+            provider: zephium_core::work::search::WorkSearchProvider::OpenAi,
+            model: model.into(),
+            query: "public query".into(),
+        };
+        let hint = client.minimum_reservation(&scope, &[]).unwrap();
+        assert!(hint.within(limits()));
+        for dimension in 0..3 {
+            let mut budget = limits();
+            match dimension {
+                0 => budget.model_tokens = hint.model_tokens - 1,
+                1 => budget.cost_micro_usd = hint.cost_micro_usd - 1,
+                _ => budget.operations = 0,
+            }
+            assert!(matches!(
+                client.search(&scope.query, &[], budget).await,
+                Err(WorkPublicSearchError::NotDispatched(_))
+            ));
+            assert!(transport.snapshot().unwrap().is_idle());
+        }
+        let mut invalid = scope.clone();
+        invalid.model = "different-model".into();
+        assert!(client.minimum_reservation(&invalid, &[]).is_none());
+    }
+}

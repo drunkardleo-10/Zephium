@@ -587,6 +587,21 @@ fn search_input(
 }
 
 impl WorkPublicSearchProvider for OpenAiPublicSearch {
+    fn minimum_reservation(
+        &self,
+        scope: &WorkPublicSearchScope,
+        context: &[zephium_core::work::context::WorkContextBody],
+    ) -> Option<WorkUsage> {
+        scope.validate().ok()?;
+        if scope.model != self.config.call.model().as_str() {
+            return None;
+        }
+        let body = request(&self.config, &scope.query, context).ok()?;
+        self.config
+            .reservation(u32::try_from(body.len()).ok()?)
+            .ok()
+    }
+
     fn search<'a>(
         &'a self,
         scope: &'a WorkPublicSearchScope,

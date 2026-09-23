@@ -197,6 +197,16 @@ pub type WorkPublicSearchFuture<'a> = Pin<
     Box<dyn Future<Output = Result<WorkPublicSearchResult, WorkPublicSearchError>> + Send + 'a>,
 >;
 pub trait WorkPublicSearchProvider: Send + Sync {
+    /// Pure scheduling hint, with no dispatch or disclosure. Unknown providers
+    /// may omit it; every search still enforces its supplied limits independently.
+    fn minimum_reservation(
+        &self,
+        _scope: &WorkPublicSearchScope,
+        _context: &[super::context::WorkContextBody],
+    ) -> Option<WorkUsage> {
+        None
+    }
+
     /// `context` carries only Rust-admitted public bodies for this attempt.
     fn search<'a>(
         &'a self,
