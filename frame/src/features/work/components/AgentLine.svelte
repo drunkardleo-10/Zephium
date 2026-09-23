@@ -3,6 +3,7 @@
   import type { WorkSession } from "$domain/work";
   import { currentActivity } from "$domain/work";
   import { agentLine } from "../lib/agent-steps";
+  import { cardCountdown } from "../lib/work-human";
   import { preparationFailure } from "../lib/preparation-failure";
   import { fileName } from "../lib/work-files";
   import type { CanvasItem } from "../lib/canvas-model";
@@ -14,7 +15,9 @@
     session,
     agents = [],
     draft = "",
+    waiting = null,
     onfocusagent,
+    onwaitingpage,
     onopenpage,
     onreview,
     onsteered,
@@ -24,7 +27,11 @@
     agents?: readonly CanvasItem[];
     /** What the person is typing while the agent runs. */
     draft?: string;
+    /** The page card this run is held on, while a person is needed there. */
+    waiting?: { card: string; host: string; remaining: number } | null;
     onfocusagent?: (id: string) => void;
+    /** Pans to the waiting page card and focuses it. */
+    onwaitingpage?: (card: string) => void;
     /** Presents the signed-in page for sign-in handoff or takeover. */
     onopenpage?: (tab: string) => void;
     /** Opens the change the run is proposing, so the person can read it whole. */
@@ -170,6 +177,7 @@
   const gaveUp = $derived((execution?.steps ?? []).at(-1)?.note?.trim() || m.work_line_failed());
   /** Two or three words while it works; one quiet sentence once it stops. */
   const headline = $derived.by(() => {
+    if (waiting) return m.work_line_waiting_on_page({ host: waiting.host });
     if (intervention) return interventionLabel;
     if (failure || session.failure) return gaveUp;
     if (interrupted) return m.work_line_stopped();
@@ -334,7 +342,15 @@
         <AgentAvatar seed={agents[0]?.agent?.seed ?? 0} size={22} active={live} />
       </button>
       <div class="state">
-        {#key headline}<span class="words">{headline}</span>{/key}
+        {#if waiting}
+          <button type="button" class="words waiting" onclick={() => onwaitingpage?.(waiting.card)}>
+            {headline}{#if cardCountdown(waiting.remaining)}<span class="left"
+                >{cardCountdown(waiting.remaining)}</span
+              >{/if}
+          </button>
+        {:else}
+          {#key headline}<span class="words">{headline}</span>{/key}
+        {/if}
         {#if live && preview}<span class="draft">{preview}</span>{/if}
       </div>
       <div class="controls">
@@ -467,6 +483,33 @@
 
   .settled .words {
     color: var(--color-muted);
+  }
+
+  /* A line that points somewhere reads as a link, not as another button. */
+  button.waiting {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    font-size: var(--text-label);
+    text-decoration: underline;
+    text-decoration-color: var(--color-border-strong);
+    text-underline-offset: 3px;
+    cursor: default;
+  }
+
+  button.waiting:hover {
+    text-decoration-color: var(--color-accent);
+  }
+
+  button.waiting .left {
+    color: var(--color-muted);
+    font-variant-numeric: tabular-nums;
+    text-decoration: none;
   }
 
   .draft {

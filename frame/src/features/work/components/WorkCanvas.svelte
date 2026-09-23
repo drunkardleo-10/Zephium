@@ -1,7 +1,7 @@
 <script lang="ts">
   import "@xyflow/svelte/dist/base.css";
   import { SvelteFlow, Background, type Edge } from "@xyflow/svelte";
-  import { untrack, setContext } from "svelte";
+  import { untrack, setContext, tick } from "svelte";
   import {
     canvasInspection,
     canvasResize,
@@ -264,6 +264,7 @@
     flowPosition: (clientX: number, clientY: number) => CanvasPosition | null;
     selectionBounds: () => (CanvasPosition & CanvasSize & { ids: string[] }) | null;
     center: (id: string) => void;
+    focusCard: (id: string) => void;
   };
   function selectionBounds() {
     const ids = selection.filter((id) => nodes.some((node) => node.id === id && !isAreaNode(node)));
@@ -283,6 +284,14 @@
       (node.height ?? 160) * z,
     );
   }
+  /** Pans to a card and puts the keyboard on it; the node itself is the stop. */
+  async function focusCard(id: string) {
+    center(id);
+    await tick();
+    host
+      ?.querySelector<HTMLElement>(`.svelte-flow__node[data-id="${CSS.escape(id)}"]`)
+      ?.focus({ preventScroll: true });
+  }
   /** Where a client point lands on the canvas, so a drop keeps its place. */
   function flowPosition(clientX: number, clientY: number): CanvasPosition | null {
     const origin = host?.getBoundingClientRect();
@@ -293,7 +302,13 @@
     };
   }
   $effect(() => {
-    expose?.({ screenRect, flowPosition, selectionBounds, center });
+    expose?.({
+      screenRect,
+      flowPosition,
+      selectionBounds,
+      center,
+      focusCard: (id: string) => void focusCard(id),
+    });
   });
   let lastClick = { id: "", at: 0 };
 </script>

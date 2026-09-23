@@ -150,6 +150,7 @@
       ids: string[];
     } | null;
     center: (id: string) => void;
+    focusCard: (id: string) => void;
   }>();
   let selectionCount = $state(0);
   let selectedIds = $state.raw<string[]>([]);
@@ -708,6 +709,27 @@
         )
       : { items: [], links: [], positions: {} },
   );
+  /** The page this canvas's run is held on, so the line can point at its card. */
+  const agentWaiting = $derived.by(() => {
+    const work = objectiveSession?.projection?.work.id;
+    const opened = work ? (human.pages.get(work) ?? []) : [];
+    if (!opened.length) return null;
+    for (const item of pages.items) {
+      const state = item.page?.human;
+      if (state?.phase !== "waiting_for_human") continue;
+      if (
+        !opened.some(
+          (candidate) =>
+            candidate.id.attempt === state.attempt &&
+            candidate.id.step === state.step &&
+            candidate.id.generation === state.generation,
+        )
+      )
+        continue;
+      return { card: item.id, host: item.page?.host ?? "", remaining: state.remaining };
+    }
+    return null;
+  });
   const requests = $derived(
     snapshot
       ? environmentRequests(snapshot, stages, new Set(sources.items.map((item) => item.id)))
@@ -1769,6 +1791,11 @@
             inspected = null;
             liftFile = null;
             lifted = { id: "", origin: null, proposal: step };
+          }}
+          waiting={agentWaiting}
+          onwaitingpage={(card: string) => {
+            chrome?.close();
+            canvasRef?.focusCard(card);
           }}
           onfocusagent={(id) => canvasRef?.center(id)}
           onsteered={() => (session.composer = "")}

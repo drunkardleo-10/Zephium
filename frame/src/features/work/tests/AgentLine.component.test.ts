@@ -252,3 +252,39 @@ test("a failed run says why it gave up, and a stopped one just stops", async () 
   session.dispose();
   stopped.dispose();
 });
+
+test("the line says which page is waiting for you and links to its card", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  const execution = agentRun("running");
+  execution.steps = [
+    ...execution.steps!,
+    {
+      id: "read-1",
+      turn: 2,
+      kind: { kind: "read", url: "https://ferry.example/book" },
+      status: "running",
+    },
+  ];
+  session.projection = { ...structuredClone(projection), executions: [execution] };
+  const onwaitingpage = vi.fn();
+  const screen = await render(AgentLine, {
+    session,
+    waiting: { card: "page:execution:read-1", host: "ferry.example", remaining: 150_000 },
+    onwaitingpage,
+  });
+  const link = screen.getByRole("button", { name: /Waiting for you on ferry.example/ });
+  await expect.element(link).toBeVisible();
+  // A long wait stays quiet; the countdown belongs to the last minute.
+  expect(screen.container.textContent).not.toContain("s left");
+  await screen.rerender({
+    session,
+    waiting: { card: "page:execution:read-1", host: "ferry.example", remaining: 18_000 },
+    onwaitingpage,
+  });
+  await expect.element(screen.getByText("18s left")).toBeVisible();
+  await link.click();
+  expect(onwaitingpage).toHaveBeenCalledExactlyOnceWith("page:execution:read-1");
+  await screen.unmount();
+  session.dispose();
+});
