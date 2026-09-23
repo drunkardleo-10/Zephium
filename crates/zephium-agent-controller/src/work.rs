@@ -1348,7 +1348,7 @@ impl WorkState {
         if self
             .extraction_schema
             .as_ref()
-            .is_some_and(SemanticExtractionSchema::is_whole_page_findings)
+            .is_some_and(SemanticExtractionSchema::reads_whole_page)
         {
             capability.for_whole_page_read()
         } else {
@@ -2513,6 +2513,17 @@ impl AgentWorkController {
             )
             .await
         {
+            // A catalog's records may sit under landmarks the region capture
+            // leaves truncated; it keeps whichever look holds more of the page.
+            Ok(page)
+                if state
+                    .extraction_schema
+                    .as_ref()
+                    .is_some_and(SemanticExtractionSchema::is_row_collection)
+                    && node_count(&page) < node_count(&initial) =>
+            {
+                Ok(initial)
+            }
             Ok(page) => Ok(page),
             Err(AgentWorkFailure::InspectionAnchorLost) => Ok(initial),
             Err(error) => Err(error),
@@ -2525,12 +2536,13 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
     ) -> Result<(), AgentWorkFailure> {
         let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        // A whole-page findings read decides over its whole capture; only the
-        // page planner, if it is needed, sees the fitted prefix.
+        // A whole-page findings or catalog read decides over its whole
+        // capture; only the page planner, if it is needed, sees the fitted
+        // prefix.
         let whole_page = state
             .extraction_schema
             .as_ref()
-            .is_some_and(SemanticExtractionSchema::is_whole_page_findings);
+            .is_some_and(SemanticExtractionSchema::reads_whole_page);
         let observation = Self::observe_initial_ready(state, worker, browser).await?;
         let observation = if whole_page {
             // Boxed: the read loop's future must stay well inside the
@@ -4494,6 +4506,16 @@ pub enum AgentWorkEventKind {
         /// Whether the shared call allowance permits attempting emulation.
         capacity: bool,
     },
+    /// A catalog read found records on the typed path. `refused` is set when
+    /// none could be copied and the page planner reads the page instead.
+    RowRead {
+        /// Records found, at most the requested number.
+        found: u8,
+        /// Whether a cell batch located their text columns.
+        cells: bool,
+        /// Why no record could be copied.
+        refused: Option<SemanticExtractionError>,
+    },
     /// The model proposed a bounded typed tool.
     ToolProposed(AgentBrowserToolKind),
     /// Snapshot scope was incompatible with the delivered baseline. No native
@@ -4948,4 +4970,12 @@ impl fmt::Debug for WorkJournal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("WorkJournal([owned, content-free])")
     }
+}
+
+fn node_count(observation: &SemanticObservation) -> usize {
+    observation
+        .frames()
+        .iter()
+        .map(|frame| frame.nodes().len())
+        .sum()
 }

@@ -80,6 +80,57 @@ impl AgentWorkController {
             let Some(mut answers) = state.decision_answers.take() else {
                 break;
             };
+            // A catalog read finishes from the records it found, after at most
+            // the bounded scrolls when fewer than requested are in view and
+            // more are confidently below. Only finding none leaves the planner.
+            let mut rows_scroll = None;
+            if let Some(schema) = state
+                .extraction_schema
+                .clone()
+                .filter(SemanticExtractionSchema::is_row_collection)
+            {
+                let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                if let Some(discovery) = answers
+                    .take_row_discovery(&observation, session.account, &schema)
+                    .map_err(AgentWorkFailure::DecisionRead)?
+                {
+                    let more_below = answers
+                        .take_more_below(&observation, session.account)
+                        .map_err(AgentWorkFailure::DecisionMoreBelow)?;
+                    if discovery.rows() < discovery.max_items()
+                        && more_below == Some(true)
+                        && reobservations < MAX_READ_REOBSERVATIONS
+                        && state.actions_before_extraction
+                        && session.next_action <= session.max_actions
+                    {
+                        rows_scroll = answers
+                            .take_reobservation_scroll(&observation, session.account)
+                            .map_err(AgentWorkFailure::DecisionOperation)?;
+                    }
+                    if rows_scroll.is_none() {
+                        // Boxed: the read loop's future must stay well inside
+                        // the runtime worker's stack.
+                        if Box::pin(Self::finish_rows(
+                            state,
+                            worker,
+                            browser,
+                            &observation,
+                            captured_at,
+                            discovery,
+                        ))
+                        .await?
+                        {
+                            return Ok((
+                                observation,
+                                captured_at,
+                                AgentWorkTaskProgress::Complete,
+                                false,
+                            ));
+                        }
+                        break;
+                    }
+                }
+            }
             let mut gap: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
             let mut candidate: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
             if let Some(schema) = state.extraction_schema.clone() {
@@ -196,7 +247,18 @@ impl AgentWorkController {
             // Rust's own re-observation is optimistic: if the page refuses it,
             // the read continues on the existing planner path instead of ending.
             let mut reobserving = false;
-            let selection = match proposed {
+            let selection = match rows_scroll.or(proposed) {
+                Some(selection) if matches!(selection.operation(), DecisionOperation::Scroll(_))
+                    && reobservations < MAX_READ_REOBSERVATIONS
+                    && state
+                        .extraction_schema
+                        .as_ref()
+                        .is_some_and(SemanticExtractionSchema::is_row_collection) =>
+                {
+                    reobservations = reobservations.saturating_add(1);
+                    reobserving = true;
+                    selection
+                }
                 Some(selection) => selection,
                 None => {
                     let reobserve = actionable
@@ -337,6 +399,48 @@ impl AgentWorkController {
             }
         }
         Ok((observation, captured_at, progress, false))
+    }
+
+    /// A catalog read's records: one cell batch locates their text columns
+    /// when any are requested, then Rust copies every value from inside its
+    /// record. False when nothing could be copied, leaving the planner.
+    async fn finish_rows(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        observation: &SemanticObservation,
+        captured_at: SemanticCaptureInstant,
+        discovery: zephium_agentic::DecisionRowDiscovery,
+    ) -> Result<bool, AgentWorkFailure> {
+        state.refresh_account(worker, browser)?;
+        let mut cells = if discovery.needs_cells() {
+            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+            Self::provider(
+                &mut state.native,
+                worker,
+                browser,
+                session.cancellation.clone(),
+                session.decide_row_cells(observation, &discovery),
+            )
+            .await?
+        } else {
+            None
+        };
+        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        let found = u8::try_from(discovery.rows()).unwrap_or(u8::MAX);
+        let asked = cells.is_some();
+        let prepared =
+            discovery.prepare(observation, session.account, captured_at, cells.as_mut());
+        state.journal_mut()?.emit(AgentWorkEventKind::RowRead {
+            found,
+            cells: asked,
+            refused: prepared.as_ref().err().copied(),
+        })?;
+        let Ok(located) = prepared else {
+            return Ok(false);
+        };
+        Box::pin(Self::finish_located_read(state, worker, browser, located)).await?;
+        Ok(true)
     }
 
     /// One extraction from located sources. Focused generation is the only

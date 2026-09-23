@@ -153,6 +153,47 @@ impl AgentBrowserSession {
             Err(DecisionProjectionError::Capacity) => return Ok(None),
             Err(_) => return Err(AgentBrowserProviderError::Authority),
         };
+        self.decide_projection(observation, projection).await
+    }
+
+    /// A catalog read's second batch: which node inside each found record
+    /// holds each text column. It discloses only those records.
+    pub(super) async fn decide_row_cells(
+        &mut self,
+        observation: &zephium_agentic::SemanticObservation,
+        discovery: &zephium_agentic::DecisionRowDiscovery,
+    ) -> Result<Option<DecisionObservationAnswers>, AgentBrowserProviderError> {
+        self.check_live()?;
+        if self.decisions.is_none() || !self.has_decision_capacity()? {
+            return Ok(None);
+        }
+        if self.attempt.is_some() || self.retained_terminal.is_some() || self.action.is_some() {
+            return Err(AgentBrowserProviderError::ActionPending);
+        }
+        let objective = self
+            .objective
+            .as_ref()
+            .ok_or(AgentBrowserProviderError::Continuation)?;
+        let projection = match DecisionObservation::try_for_row_cells(
+            observation,
+            objective,
+            self.account,
+            discovery,
+        ) {
+            Ok(projection) => projection,
+            Err(DecisionProjectionError::Capacity) => return Ok(None),
+            Err(_) => return Err(AgentBrowserProviderError::Authority),
+        };
+        self.decide_projection(observation, projection).await
+    }
+
+    async fn decide_projection(
+        &mut self,
+        observation: &zephium_agentic::SemanticObservation,
+        projection: DecisionObservation,
+    ) -> Result<Option<DecisionObservationAnswers>, AgentBrowserProviderError> {
+        #[cfg(feature = "probe-harness")]
+        projection.record_anonymous_eval_request();
         let primary = if self
             .decisions
             .as_ref()
