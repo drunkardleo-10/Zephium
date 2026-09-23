@@ -108,6 +108,18 @@ pub fn fixtures() -> Result<Vec<EvalFixture>, ContractError> {
             "zalando_consent_01",
             include_str!("../evals/zalando_consent_01.json"),
         ),
+        (
+            "lego_catalog_01",
+            include_str!("../evals/lego_catalog_01.json"),
+        ),
+        (
+            "lego_catalog_cells_01",
+            include_str!("../evals/lego_catalog_cells_01.json"),
+        ),
+        (
+            "book_catalog_01",
+            include_str!("../evals/book_catalog_01.json"),
+        ),
     ];
     sources
         .into_iter()
