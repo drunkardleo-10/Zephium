@@ -791,3 +791,52 @@ fn a_recorded_consent_dialog_is_dismissed_by_its_refusing_control_only_by_recipe
         .unwrap()
         .contains(SemanticOperationClass::Click));
 }
+
+#[cfg(feature = "durable-runtime")]
+#[test]
+fn a_recorded_specifications_disclosure_in_view_is_toggled_by_recipe() {
+    use serde_json::json;
+    let policy = read_interactions::ReadingInteractionPolicy;
+    // LEGO's Tower Bridge page as recorded on 2026-09-24: the Specifications
+    // tab in the section navigation, then the collapsed Specifications
+    // disclosure beside Customer Reviews, below the viewport and in view.
+    let page = |ops: u32, y: u32| {
+        reading_observation(
+            json!([
+                {"k":1,"r":"document","fc":true,"o":16,"b":{"x":0,"y":0,"w":800,"h":600}},
+                {"k":2,"p":0,"r":"button","n":"Specifications","ak":1,"fc":true,"b":{"x":10,"y":300,"w":120,"h":40}},
+                {"k":3,"p":0,"r":"button","n":"Specifications","ak":6,"o":ops,"fc":true,"b":{"x":10,"y":y,"w":300,"h":40}},
+                {"k":4,"p":0,"r":"button","n":"Customer Reviews Average rating 4.2 out of 5 stars (5)","ak":6,"o":ops,"fc":true,"b":{"x":10,"y":y + 60,"w":300,"h":40}}
+            ]),
+            "complete",
+        )
+    };
+    assert_eq!(policy.detail_disclosure(&page(16, 2400)), None);
+    let shown = page(9, 300);
+    let disclosure = shown.frames()[0].nodes()[2].reference();
+    assert_eq!(
+        policy.detail_disclosure(&shown),
+        Some(DecisionOperation::Click(disclosure))
+    );
+    let recipe = policy
+        .decision_action_recipe(&DecisionOperation::Click(disclosure), &shown)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recipe.verification(),
+        SemanticVerification::TargetState {
+            state: SemanticState::Expanded,
+            present: true,
+        }
+    );
+    let snapshot = &shown.frames()[0];
+    let batch = SemanticActionBatch::bind(
+        SemanticActionBatchId::new(1).unwrap(),
+        &shown,
+        &[snapshot.frame().clone()],
+        vec![recipe],
+    )
+    .unwrap();
+    let action = batch.actions()[0].prepare(snapshot).unwrap();
+    assert!(policy.assess(&action, &shown).is_ok());
+}

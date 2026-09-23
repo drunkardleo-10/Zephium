@@ -616,6 +616,33 @@ impl DecisionObservationAnswers {
         }))
     }
 
+    /// A code-owned click or scroll the task's own closed recipe picked, such
+    /// as toggling a product's Specifications disclosure. No provider selects
+    /// it; the target must be one this batch disclosed.
+    pub fn take_code_owned(
+        &mut self,
+        observation: &SemanticObservation,
+        account: AgentContextAccountBinding,
+        operation: DecisionOperation,
+    ) -> Result<Option<DecisionActionSelection>, DecisionProjectionError> {
+        if !self.projection.matches(observation, account) {
+            return Err(DecisionProjectionError::Authority);
+        }
+        let target = match &operation {
+            DecisionOperation::Click(target) | DecisionOperation::Scroll(target) => *target,
+            _ => return Ok(None),
+        };
+        if !self.projection.references.contains(&target) {
+            return Err(DecisionProjectionError::Authority);
+        }
+        Ok(Some(DecisionActionSelection {
+            operation,
+            baseline: SemanticObservationAcknowledgement::from_fingerprint(
+                SemanticObservationFingerprint::from_observation(observation),
+            ),
+        }))
+    }
+
     /// Consumes the challenge head once, only for the original document and account.
     pub fn take_challenge(
         &mut self,

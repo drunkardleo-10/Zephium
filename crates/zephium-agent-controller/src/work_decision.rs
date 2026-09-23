@@ -28,6 +28,7 @@ impl AgentWorkController {
         let mut unchanged = 0u8;
         let mut reobservations = 0u8;
         let mut consent_dismissed = false;
+        let mut disclosure_toggled = false;
         let mut pending: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
         // The unfinished look with the most located values before Rust moved
         // the page; a later look may finish the read joined with it.
@@ -288,12 +289,28 @@ impl AgentWorkController {
                     let reobserve = actionable
                         && reobservations < MAX_READ_REOBSERVATIONS
                         && (gap.is_some() || candidate.is_some() || pending.is_some());
-                    let scroll = if reobserve {
-                        answers
-                            .take_reobservation_scroll(&observation, session.account)
-                            .map_err(AgentWorkFailure::DecisionOperation)?
+                    // A value still unlocated may sit in a collapsed
+                    // disclosure the task's closed list names: once it is in
+                    // view, Rust toggles it once before scrolling the page.
+                    let disclosure = if reobserve && !disclosure_toggled {
+                        match state.task.detail_disclosure(&observation) {
+                            Some(operation) => {
+                                disclosure_toggled = true;
+                                answers
+                                    .take_code_owned(&observation, session.account, operation)
+                                    .map_err(AgentWorkFailure::DecisionOperation)?
+                            }
+                            None => None,
+                        }
                     } else {
                         None
+                    };
+                    let scroll = match disclosure {
+                        Some(disclosure) => Some(disclosure),
+                        None if reobserve => answers
+                            .take_reobservation_scroll(&observation, session.account)
+                            .map_err(AgentWorkFailure::DecisionOperation)?,
+                        None => None,
                     };
                     match scroll {
                         Some(scroll) => {

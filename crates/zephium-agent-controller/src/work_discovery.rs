@@ -37,6 +37,13 @@ pub trait AgentWorkLocalActionPolicy: Send {
         None
     }
 
+    /// A collapsed disclosure in view that may hold a read's values, such as
+    /// a product's Specifications, by a closed name list; never a provider's
+    /// choice. The operation toggles it.
+    fn detail_disclosure(&self, _: &SemanticObservation) -> Option<DecisionOperation> {
+        None
+    }
+
     /// Returns the independently approved operation subset for this exact
     /// observed node. This is model-affordance projection only; `assess`
     /// remains the final host classification after semantic action binding.
@@ -154,6 +161,12 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         self.local_actions
             .as_ref()
             .and_then(|policy| policy.consent_dismissal(observation))
+    }
+
+    fn detail_disclosure(&self, observation: &SemanticObservation) -> Option<DecisionOperation> {
+        self.local_actions
+            .as_ref()
+            .and_then(|policy| policy.detail_disclosure(observation))
     }
 
     fn navigation_discovery(&self) -> Option<&AgentNavigationDiscovery> {

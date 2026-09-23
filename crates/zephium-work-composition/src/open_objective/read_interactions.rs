@@ -57,6 +57,19 @@ const CONSENT_SETTINGS: [&str; 8] = [
     "preferencje",
 ];
 
+/// Disclosure names that may hold a read's values, matched as whole words.
+const DETAIL_DISCLOSURES: [&str; 9] = [
+    "specifications",
+    "specification",
+    "specs",
+    "details",
+    "product details",
+    "description",
+    "technical",
+    "dimensions",
+    "features",
+];
+
 fn words(text: &str) -> String {
     let words: Vec<_> = text
         .to_lowercase()
@@ -414,6 +427,26 @@ impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
             .filter_map(|node| Some((consent_rank(node)?, node.reference())))
             .min_by_key(|(rank, _)| *rank)
             .map(|(_, reference)| reference)
+    }
+
+    fn detail_disclosure(&self, observation: &SemanticObservation) -> Option<DecisionOperation> {
+        let snapshot = observation.frames().first()?;
+        snapshot.nodes().iter().find_map(|node| {
+            let named = node.role() == SemanticRole::Button
+                && node.activation() == Some(SemanticActivation::Disclosure)
+                && !node.states().contains(SemanticState::Expanded)
+                && node
+                    .name()
+                    .is_some_and(|name| names_any(&words(name.as_str()), &DETAIL_DISCLOSURES));
+            if !named {
+                return None;
+            }
+            // Only a control in view: bringing one into view was measured to
+            // fail natively when a page's layout still shifts.
+            (interaction(node, observation, SemanticOperationClass::Click)
+                == Some(Interaction::Disclosure))
+            .then(|| DecisionOperation::Click(node.reference()))
+        })
     }
 
     fn model_action_effect(&self) -> Option<SemanticEffectClass> {

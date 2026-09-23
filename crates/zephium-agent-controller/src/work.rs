@@ -291,6 +291,12 @@ pub trait AgentWorkTask: Send {
     fn consent_dismissal(&self, _: &SemanticObservation) -> Option<SemanticReferenceId> {
         None
     }
+
+    /// A collapsed disclosure the task's own closed name list says may hold
+    /// the read's values; toggled once by Rust when a value is unlocated.
+    fn detail_disclosure(&self, _: &SemanticObservation) -> Option<DecisionOperation> {
+        None
+    }
     /// Supplies independently sourced current account facts for this exact
     /// context. Called at startup and before each provider/effect admission,
     /// including nonterminal inspection and extraction mapping. It must be
