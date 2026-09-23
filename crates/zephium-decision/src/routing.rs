@@ -21,6 +21,23 @@ pub enum DecisionPurpose {
 }
 
 impl DecisionPurpose {
+    /// Closed ordinal for content-free per-purpose diagnostics.
+    pub const COUNT: usize = 8;
+
+    /// Stable index matching the declaration order; never a question or option.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Challenge => 0,
+            Self::Action => 1,
+            Self::Locate => 2,
+            Self::Picture => 3,
+            Self::Relevance => 4,
+            Self::Wall => 5,
+            Self::Completion => 6,
+            Self::OrderedScore => 7,
+        }
+    }
+
     fn kind(self) -> QuestionKind {
         match self {
             Self::Challenge | Self::Relevance | Self::Completion => QuestionKind::Noul,
@@ -147,6 +164,11 @@ impl DecisionFallback {
     }
     pub fn reasons(&self) -> &BTreeMap<String, FallbackReason> {
         &self.reasons
+    }
+
+    /// Declared purpose of a routed head, for closed per-purpose diagnostics.
+    pub fn purpose(&self, key: &str) -> Option<DecisionPurpose> {
+        self.purposes.get(key).copied()
     }
 
     /// Inspects an already validated primary head to choose which speculative work is needed.
