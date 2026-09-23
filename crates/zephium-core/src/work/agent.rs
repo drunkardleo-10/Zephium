@@ -259,52 +259,7 @@ impl WorkAgentTurnDisclosure {
             budget,
             notices,
         };
-        let fits = |context: &WorkAgentTurnContext| -> Result<bool, WorkError> {
-            Ok(serde_json::to_vec(context)
-                .map_err(|_| WorkError::Invalid)?
-                .len()
-                <= MAX_AGENT_CONTEXT_BYTES)
-        };
-        if !fits(&context)? {
-            // Older published objects lose their body first: the model keeps
-            // their titles and kinds; the canvas keeps everything.
-            for index in 0..context.artifacts.len() {
-                if fits(&context)? {
-                    break;
-                }
-                context.artifacts[index].data = None;
-                context.artifacts[index].evidence.clear();
-            }
-        }
-        if !fits(&context)? {
-            let original: Vec<_> = context
-                .sources
-                .iter()
-                .map(|item| (item.text.clone(), item.truncated))
-                .collect();
-            let project = |context: &mut WorkAgentTurnContext, characters: usize| {
-                for (item, (text, truncated)) in context.sources.iter_mut().zip(&original) {
-                    item.text = text.chars().take(characters).collect();
-                    item.truncated = *truncated || item.text.len() < text.len();
-                }
-            };
-            project(&mut context, 128);
-            if !fits(&context)? {
-                return Err(WorkError::Capacity);
-            }
-            let mut low = 128usize;
-            let mut high = 8192;
-            while low < high {
-                let middle = low + (high - low).div_ceil(2);
-                project(&mut context, middle);
-                if fits(&context)? {
-                    low = middle;
-                } else {
-                    high = middle - 1;
-                }
-            }
-            project(&mut context, low);
-        }
+        fit(&mut context)?;
         Ok(Self {
             context,
             links,
@@ -332,12 +287,7 @@ impl WorkAgentTurnDisclosure {
             }
         }
         self.context.thread = thread;
-        let bytes = serde_json::to_vec(&self.context)
-            .map_err(|_| WorkError::Invalid)?
-            .len();
-        if bytes > MAX_AGENT_CONTEXT_BYTES {
-            return Err(WorkError::Capacity);
-        }
+        fit(&mut self.context)?;
         Ok(self)
     }
     /// Admits what a turn can do and says what it dropped. Only a turn that
@@ -583,6 +533,58 @@ fn same_page(listed: &str, url: &str) -> bool {
         value.strip_suffix('/').unwrap_or(value).to_owned()
     };
     strip(listed) == strip(url)
+}
+
+/// Older published objects lose their body first, then every source text
+/// shrinks evenly; Capacity only when even the shortest projection overflows.
+fn fit(context: &mut WorkAgentTurnContext) -> Result<(), WorkError> {
+    let fits = |context: &WorkAgentTurnContext| -> Result<bool, WorkError> {
+        Ok(serde_json::to_vec(context)
+            .map_err(|_| WorkError::Invalid)?
+            .len()
+            <= MAX_AGENT_CONTEXT_BYTES)
+    };
+    if fits(context)? {
+        return Ok(());
+    }
+    for index in 0..context.artifacts.len() {
+        if fits(context)? {
+            return Ok(());
+        }
+        context.artifacts[index].data = None;
+        context.artifacts[index].evidence.clear();
+    }
+    if fits(context)? {
+        return Ok(());
+    }
+    let original: Vec<_> = context
+        .sources
+        .iter()
+        .map(|item| (item.text.clone(), item.truncated))
+        .collect();
+    let project = |context: &mut WorkAgentTurnContext, characters: usize| {
+        for (item, (text, truncated)) in context.sources.iter_mut().zip(&original) {
+            item.text = text.chars().take(characters).collect();
+            item.truncated = *truncated || item.text.len() < text.len();
+        }
+    };
+    project(context, 128);
+    if !fits(context)? {
+        return Err(WorkError::Capacity);
+    }
+    let mut low = 128usize;
+    let mut high = 8192;
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        project(context, middle);
+        if fits(context)? {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    project(context, low);
+    Ok(())
 }
 
 fn requested_pages(objective: &str) -> Vec<String> {
