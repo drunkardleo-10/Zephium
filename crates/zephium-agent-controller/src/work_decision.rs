@@ -138,6 +138,9 @@ impl AgentWorkController {
             {
                 break;
             }
+            // Rust's own re-observation is optimistic: if the page refuses it,
+            // the read continues on the existing planner path instead of ending.
+            let mut reobserving = false;
             let selection = match proposed {
                 Some(selection) => selection,
                 None => {
@@ -154,6 +157,7 @@ impl AgentWorkController {
                     match scroll {
                         Some(scroll) => {
                             reobservations = reobservations.saturating_add(1);
+                            reobserving = true;
                             gap = None;
                             scroll
                         }
@@ -230,7 +234,7 @@ impl AgentWorkController {
                 .journal_mut()?
                 .emit(AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Act))?;
             Self::retain_action_read_evidence(state, &proposal, &observation, captured_at)?;
-            let (current, at, transition) = Self::execute_prepared_action(
+            let executed = Self::execute_prepared_action(
                 state,
                 worker,
                 browser,
@@ -238,7 +242,16 @@ impl AgentWorkController {
                 assessment,
                 &observation,
             )
-            .await?;
+            .await;
+            let (current, at, transition) = match executed {
+                Ok(settled) => settled,
+                Err(AgentWorkFailure::Browser(AgentBrowserProviderError::Action(_)))
+                    if reobserving =>
+                {
+                    break
+                }
+                Err(error) => return Err(error),
+            };
             let batch = transition
                 .batch_result()
                 .ok_or(AgentWorkFailure::Contract)?;

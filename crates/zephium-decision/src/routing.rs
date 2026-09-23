@@ -58,6 +58,11 @@ impl DecisionPurpose {
                 Self::Relevance | Self::Picture => 0.80,
             },
             AnswerBackend::Primary => match self {
+                // An action head is the only one that moves the page, and a
+                // refused native effect ends the read. The recorded corpus
+                // labels the selection, not whether the click works live, so
+                // this one keeps its conservative value.
+                Self::Action => 0.98,
                 Self::Relevance => 0.70,
                 _ => 0.80,
             },
