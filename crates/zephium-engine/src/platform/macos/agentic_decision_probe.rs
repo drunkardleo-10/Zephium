@@ -20,6 +20,12 @@ pub enum DecisionObservationSite {
     TestStore,
     /// Public Airbnb listing page without stay dates.
     AirbnbListing,
+    /// LEGO theme catalog as a first visit sees it, with its entry notices.
+    LegoTheme,
+    /// A public page behind a cookie consent dialog.
+    Consent,
+    /// A public page behind a binary entry interstitial.
+    Interstitial,
 }
 
 impl DecisionObservationSite {
@@ -32,13 +38,18 @@ impl DecisionObservationSite {
             Self::BookStore => "https://books.toscrape.com/catalogue/the-black-maria_991/index.html",
             Self::TestStore => "https://www.demoblaze.com/prod.html?idp_=1",
             Self::AirbnbListing => "https://www.airbnb.com/rooms/23813739",
+            Self::LegoTheme => "https://www.lego.com/en-us/themes/architecture",
+            Self::Consent => "https://www.ikea.com/pl/pl/",
+            Self::Interstitial => "https://www.zalando.pl/",
         }
     }
 
     /// A listing rewrites its query during setup, exactly as a Work read admits.
     fn document_policy(self) -> WorkBrowserDocumentPolicy {
         match self {
-            Self::AirbnbListing => WorkBrowserDocumentPolicy::PublicQueryFinalization,
+            Self::AirbnbListing | Self::LegoTheme | Self::Consent | Self::Interstitial => {
+                WorkBrowserDocumentPolicy::PublicQueryFinalization
+            }
             _ => WorkBrowserDocumentPolicy::Exact,
         }
     }
@@ -47,6 +58,7 @@ impl DecisionObservationSite {
     fn settle(self) -> Duration {
         match self {
             Self::AirbnbListing => Duration::from_secs(8),
+            Self::LegoTheme | Self::Consent | Self::Interstitial => Duration::from_secs(5),
             _ => Duration::from_secs(2),
         }
     }

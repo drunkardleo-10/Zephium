@@ -6,7 +6,7 @@ use crate::{
 };
 
 /// Threshold revision is coupled to the pinned model and recorded evaluations.
-pub const CONFIDENCE_POLICY_REVISION: &str = "jev-1.13.0-measured-v3";
+pub const CONFIDENCE_POLICY_REVISION: &str = "jev-1.13.0-measured-v4";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecisionPurpose {
@@ -18,11 +18,14 @@ pub enum DecisionPurpose {
     Wall,
     Completion,
     OrderedScore,
+    /// A read-only navigation choice among at most three offered same-origin
+    /// links or buttons, with no typing, form, download or transaction.
+    Navigation,
 }
 
 impl DecisionPurpose {
     /// Closed ordinal for content-free per-purpose diagnostics.
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
 
     /// Stable index matching the declaration order; never a question or option.
     pub const fn index(self) -> usize {
@@ -35,13 +38,16 @@ impl DecisionPurpose {
             Self::Wall => 5,
             Self::Completion => 6,
             Self::OrderedScore => 7,
+            Self::Navigation => 8,
         }
     }
 
     fn kind(self) -> QuestionKind {
         match self {
             Self::Challenge | Self::Relevance | Self::Completion => QuestionKind::Noul,
-            Self::Action | Self::Locate | Self::Picture | Self::Wall => QuestionKind::Choice,
+            Self::Action | Self::Locate | Self::Picture | Self::Wall | Self::Navigation => {
+                QuestionKind::Choice
+            }
             Self::OrderedScore => QuestionKind::Score,
         }
     }
@@ -52,7 +58,7 @@ impl DecisionPurpose {
     fn threshold(self, backend: AnswerBackend) -> f64 {
         match backend {
             AnswerBackend::Emulation => match self {
-                Self::Action => 0.98,
+                Self::Action | Self::Navigation => 0.98,
                 Self::Challenge | Self::Completion | Self::Locate | Self::Wall => 0.95,
                 Self::OrderedScore => 0.95,
                 Self::Relevance | Self::Picture => 0.80,
@@ -61,9 +67,10 @@ impl DecisionPurpose {
                 // An action head is the only one that moves the page, and a
                 // refused native effect ends the read. The recorded corpus
                 // labels the selection, not whether the click works live, so
-                // this one keeps its conservative value.
+                // this one keeps its conservative value. A binary read-only
+                // navigation (a gate's Continue) is measured separately.
                 Self::Action => 0.98,
-                Self::Relevance | Self::Locate => 0.70,
+                Self::Relevance | Self::Locate | Self::Wall | Self::Navigation => 0.70,
                 _ => 0.80,
             },
         }
@@ -77,7 +84,7 @@ impl DecisionPurpose {
                 AnswerValue::Noul { noul },
             ) => *noul <= 1.0 - threshold || *noul >= threshold,
             (
-                Self::Action | Self::Locate | Self::Wall | Self::Picture,
+                Self::Action | Self::Locate | Self::Wall | Self::Picture | Self::Navigation,
                 AnswerValue::Choice {
                     choice,
                     confidence,
@@ -359,6 +366,7 @@ mod tests {
             DecisionPurpose::Wall,
             DecisionPurpose::Completion,
             DecisionPurpose::OrderedScore,
+            DecisionPurpose::Navigation,
         ] {
             assert!(
                 purpose.threshold(AnswerBackend::Emulation)

@@ -52,6 +52,9 @@ pub(super) fn run_case(case: &std::ffi::OsStr, model: ProbeModel) -> Result<(), 
         Some("jacket-product") => 13,
         Some("phone-product") => 14,
         Some("airbnb-listing") => 15,
+        Some("lego-gate") => 16,
+        Some("ikea-consent") => 17,
+        Some("zalando-consent") => 18,
         _ => return Err(ProbeFailure::Authority),
     };
     run_selected(Some(index), model)
@@ -99,7 +102,7 @@ fn run_with(
     let jev = JevDecisionClient::direct(transport.clone(), jev_key)
         .map_err(|_| ProbeFailure::Authority)?;
     let (config, model_revision) = match model {
-        ProbeModel::Luna => (
+        ProbeModel::Luna | ProbeModel::Gpt6Luna => (
             zephium_agent_model_catalog::try_gpt6_luna_decision_call_config(4096, effort)
                 .map_err(|_| ProbeFailure::Authority)?,
             zephium_agent_model_catalog::GPT6_LUNA_MODEL_REVISION,
@@ -217,6 +220,17 @@ fn report(
         }
     }
     let valid = completed && response.answers.values().all(Result::is_ok);
+    // The projection's navigation rule: at most three offered click targets
+    // and nothing to type. Every recorded target here is a same-origin link
+    // or a dialog button.
+    let navigation = fixture
+        .request
+        .questions()
+        .get("click_target")
+        .is_some_and(|question| {
+            matches!(question, zephium_decision::Question::Choice { criteria, .. } if criteria.len() <= 4)
+        })
+        && !fixture.request.questions().contains_key("type_target");
     let purposes: std::collections::BTreeMap<String, DecisionPurpose> = fixture
         .request
         .questions()
@@ -228,6 +242,7 @@ fn report(
                 "done" => DecisionPurpose::Completion,
                 "picture" | "tower_bridge_picture" => DecisionPurpose::Picture,
                 "wall" => DecisionPurpose::Wall,
+                "operation" | "click_target" if navigation => DecisionPurpose::Navigation,
                 "operation" | "click_target" | "type_target" | "scroll_target"
                 | "dismiss_target" | "tower_bridge_link" => DecisionPurpose::Action,
                 _ => match question.kind() {

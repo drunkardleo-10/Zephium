@@ -13,6 +13,9 @@ pub(super) fn run(site: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
         Some("book-store") => (DecisionObservationSite::BookStore, "book-store"),
         Some("test-store") => (DecisionObservationSite::TestStore, "test-store"),
         Some("airbnb-listing") => (DecisionObservationSite::AirbnbListing, "airbnb-listing"),
+        Some("lego-theme") => (DecisionObservationSite::LegoTheme, "lego-theme"),
+        Some("consent") => (DecisionObservationSite::Consent, "consent"),
+        Some("interstitial") => (DecisionObservationSite::Interstitial, "interstitial"),
         _ => return Err(ProbeFailure::Authority),
     };
     zephium_engine::run_macos_decision_observation_probe(site, move |observation| {
@@ -44,15 +47,33 @@ pub(super) fn run(site: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
             | DecisionObservationSite::BookStore
             | DecisionObservationSite::TestStore => "Read this product page and report the product name, its displayed price and the product picture.",
             DecisionObservationSite::AirbnbListing => "Read this listing and report its name, displayed nightly price, displayed monthly total, stay dates or minimum stay, and picture.",
+            DecisionObservationSite::LegoTheme => "Collect three LEGO Architecture sets from this catalog with their displayed prices, product links and pictures.",
+            DecisionObservationSite::Consent => "List the product categories this store's home page offers.",
+            DecisionObservationSite::Interstitial => "List the clothing categories this store's home page offers.",
         }.into(), &SemanticTokenizerRevision::try_new("public-eval-utf8-upper-bound-v1".into()).map_err(|_| "tokenizer")?)
             .map_err(|_| "objective")?;
         let mut entries = Vec::new();
         for frame in observation.frames() {
+            // As the Work reading policy does: while a dialog is shown, only
+            // its own controls are offered, and a dialog's buttons are.
+            let dialog = frame.nodes().iter().position(|node| node.role() == SemanticRole::Dialog);
+            let inside = |node: &SemanticNode| {
+                let mut parent = node.parent();
+                while let Some(index) = parent {
+                    if Some(usize::from(index)) == dialog { return true; }
+                    parent = frame.nodes().get(usize::from(index)).and_then(SemanticNode::parent);
+                }
+                false
+            };
             for node in frame.nodes() {
+                if dialog.is_some() && !inside(node) { continue; }
                 let mut ops = Vec::new();
                 if node.operations().contains(SemanticOperationClass::Scroll) { ops.push(SemanticOperationClass::Scroll); }
                 if node.role() == SemanticRole::Link && node.operations().contains(SemanticOperationClass::Click)
                     && node.link_destination().is_some_and(|target| target.as_url().host_str() == frame.frame().origin().as_url().host_str()) {
+                    ops.push(SemanticOperationClass::Click);
+                }
+                if dialog.is_some() && node.role() == SemanticRole::Button && node.operations().contains(SemanticOperationClass::Click) {
                     ops.push(SemanticOperationClass::Click);
                 }
                 if !ops.is_empty() { entries.push((node.reference(), SemanticOperations::try_new(&ops).map_err(|_| "operations")?)); }
