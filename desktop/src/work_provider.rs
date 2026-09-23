@@ -213,7 +213,7 @@ impl WorkProviders {
                             WorkSynthesisDiagnostic::TurnRejected { reason } => record_diagnostic(format_args!("work: phase=agent_turn rejected reason={reason:?}")),
                             _ => {}
                         }
-                    });
+                    }).with_wire_diagnostic(|fault| record_diagnostic(format_args!("work: phase=agent_turn wire_error path={} expected={} dropped={}", fault.path, fault.expected, fault.dropped)));
                     let search_transport =
                         AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
                             .map_err(|_| WorkError::Unavailable)?;

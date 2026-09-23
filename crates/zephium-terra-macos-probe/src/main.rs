@@ -105,6 +105,10 @@ fn main() {
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-public-work-product" => work_durable::run_product(),
         #[cfg(feature = "durable-runtime")]
+        [argument, path, count] if argument == "--replay-agent-turn" => {
+            work_durable::replay_agent_turn(path, count)
+        }
+        #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-work" => work_durable::run_agent(),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-read-work" => work_durable::run_agent_read(),

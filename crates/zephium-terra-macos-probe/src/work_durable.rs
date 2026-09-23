@@ -139,6 +139,92 @@ pub(super) fn run_agent_files() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::AgentFiles)
 }
 
+/// Sends one retained public turn request again, four at a time, and keeps
+/// each text with whether the turn wire admitted it.
+pub(super) fn replay_agent_turn(
+    path: &std::ffi::OsStr,
+    count: &std::ffi::OsStr,
+) -> Result<(), super::ProbeFailure> {
+    use super::ProbeFailure as Error;
+    let body: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).map_err(|_| Error::Authority)?)
+            .map_err(|_| Error::Authority)?;
+    let count: usize = count
+        .to_str()
+        .and_then(|count| count.parse().ok())
+        .filter(|count| (1..=64).contains(count))
+        .ok_or(Error::Authority)?;
+    std::fs::create_dir_all("target/work-runtime-proof/replay").map_err(|_| Error::Output)?;
+    let workers = (0..4)
+        .map(|worker| {
+            let body = body.clone();
+            std::thread::spawn(move || -> Result<Vec<(usize, bool)>, Error> {
+                let key = load_macos_probe_openai_credential().map_err(|_| Error::Keychain)?;
+                let transport =
+                    AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
+                        .map_err(|_| Error::Runtime)?;
+                let agent = OpenAiWorkAgent::try_new(
+                    transport,
+                    key,
+                    WorkPlanningConfig::try_new(
+                        zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(8192)
+                            .map_err(|_| Error::Runtime)?,
+                        32_768,
+                        300_000,
+                    )
+                    .map_err(|_| Error::Runtime)?,
+                )
+                .map_err(|_| Error::Runtime)?
+                .with_public_response_retention();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|_| Error::Runtime)?;
+                let mut results = Vec::new();
+                for index in (worker..count).step_by(4) {
+                    let text = runtime.block_on(agent.replay_retained_turn(body.clone()));
+                    let (decoded, faults) = text
+                        .as_deref()
+                        .map(zephium_agentic::agent_turn_wire_faults)
+                        .unwrap_or_default();
+                    for fault in &faults {
+                        let _ = writeln!(
+                            std::io::stdout().lock(),
+                            "replay-agent-turn: index={index} wire_error path={} expected={} dropped={}",
+                            fault.path,
+                            fault.expected,
+                            fault.dropped
+                        );
+                    }
+                    if let Ok(text) = &text {
+                        let _ = std::fs::write(
+                            format!("target/work-runtime-proof/replay/{index}-{decoded}.json"),
+                            text,
+                        );
+                    }
+                    results.push((index, text.is_ok() && decoded));
+                }
+                Ok(results)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut refused = 0;
+    for worker in workers {
+        for (index, decoded) in worker.join().map_err(|_| Error::Runtime)?? {
+            refused += usize::from(!decoded);
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "replay-agent-turn: index={index} decoded={decoded}"
+            );
+        }
+    }
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "replay-agent-turn: runs={count} refused={refused}"
+    );
+    Ok(())
+}
+
 fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
     let coordinated = !matches!(mode, Mode::Public | Mode::MoneyNode);
@@ -1342,6 +1428,15 @@ async fn agent_workflow(
         let _ = writeln!(
             std::io::stdout().lock(),
             "agent-work: turn_diagnostic={event:?}"
+        );
+    })
+    .with_wire_diagnostic(|fault| {
+        let _ = writeln!(
+            std::io::stdout().lock(),
+            "agent-work: phase=agent_turn wire_error path={} expected={} dropped={}",
+            fault.path,
+            fault.expected,
+            fault.dropped
         );
     });
     let link_primary =
