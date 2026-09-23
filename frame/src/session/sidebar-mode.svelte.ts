@@ -1,4 +1,3 @@
-import { transition } from "./motion.svelte";
 import { commands } from "$shared/ipc/bindings";
 
 export type SidebarMode = "default" | "compact";
@@ -40,7 +39,7 @@ export function setPanelExtent(extent: number) {
   const next = Math.max(0, Math.min(MAX_EXPANDED_WIDTH - COMPACT_WIDTH - PANEL_GAP, extent));
   if (next === panelExtent) return;
   panelExtent = next;
-  publish();
+  publish(true);
 }
 
 function clampExpanded(value: number) {
@@ -55,8 +54,13 @@ export function resolveDragWidth(value: number): { mode: SidebarMode; expanded: 
   return { mode: "default", expanded: clampExpanded(value) };
 }
 
-function publish() {
-  void commands.sidebarSetWidth(effectiveWidth());
+/**
+ * Tells native the column's width. `travel` marks a deliberate change of
+ * shape — a toggle, a snap, a tool opening — which the page slides with;
+ * a drag in progress or a restored preference moves it without ceremony.
+ */
+function publish(travel = false) {
+  void commands.sidebarSetWidth(effectiveWidth(), travel);
 }
 
 export function applyDragWidth(value: number) {
@@ -66,7 +70,8 @@ export function applyDragWidth(value: number) {
   const modeChanged = next.mode !== mode;
   mode = next.mode;
   expandedWidth = next.expanded;
-  publish();
+  // Crossing the snap point is a change of shape, not a drag step.
+  publish(modeChanged);
   if (modeChanged) void commands.settingSet(MODE_SETTING, mode);
 }
 
@@ -81,14 +86,13 @@ export function setMode(next: SidebarMode) {
   if (next === mode) return;
   mode = next;
   desiredMode = next;
-  publish();
+  publish(true);
   void commands.settingSet(MODE_SETTING, next);
 }
 
 export function toggleMode() {
   desiredMode = desiredMode === "compact" ? "default" : "compact";
-  const next = desiredMode;
-  transition(() => setMode(next));
+  setMode(desiredMode);
 }
 
 /**

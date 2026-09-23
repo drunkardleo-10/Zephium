@@ -23,6 +23,12 @@ impl Shell {
     }
 
     pub(super) fn relayout(&self) -> NativeDispatch {
+        self.relayout_with(false)
+    }
+
+    /// A relayout that is one step of a deliberate change of shape, which
+    /// the chrome and the content carry out as a journey.
+    pub(super) fn relayout_with(&self, travel: bool) -> NativeDispatch {
         let Some(win) = self.windows.focused() else {
             return NativeDispatch::Rejected;
         };
@@ -79,6 +85,7 @@ impl Shell {
         if !self.chrome.position(ChromeFrame {
             rect: chrome_layout.chrome,
             fill_width: chrome_layout.content.is_none(),
+            travel,
         }) {
             return NativeDispatch::Rejected;
         }

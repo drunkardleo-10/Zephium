@@ -4056,13 +4056,13 @@ fn panel_drag(caller: WebviewWindow) -> bool {
 
 #[tauri::command]
 #[specta::specta]
-fn sidebar_set_width(caller: WebviewWindow, shell: State<'_, Handle>, width: f64) {
+fn sidebar_set_width(caller: WebviewWindow, shell: State<'_, Handle>, width: f64, animate: bool) {
     if !authorize(&caller, CallerPolicy::Main, "sidebar_set_width")
         || !sidebar_width_in_bounds(width)
     {
         return;
     }
-    shell.dispatch(Command::SetSidebarWidth(width));
+    shell.dispatch(Command::SetSidebarWidth(width, animate));
 }
 
 #[tauri::command]

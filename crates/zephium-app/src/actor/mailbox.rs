@@ -1147,7 +1147,7 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
         Command::Engine(event) => CoalescedKey::of(event),
         Command::SetWindowSize(_) => Some(CoalescedKey::WindowSize),
         Command::SetWindowVisible(_) => Some(CoalescedKey::WindowVisible),
-        Command::SetSidebarWidth(_) => Some(CoalescedKey::SidebarWidth),
+        Command::SetSidebarWidth(..) => Some(CoalescedKey::SidebarWidth),
         Command::DragOver { .. } => Some(CoalescedKey::DragOver),
         Command::DividerDrag { .. } => Some(CoalescedKey::DividerDrag),
         Command::Search(_) | Command::SearchScoped { .. } => Some(CoalescedKey::Search),

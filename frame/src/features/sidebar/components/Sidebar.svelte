@@ -75,11 +75,7 @@
   {#if settings}
     {@render settingsNavigation()}
   {:else}
-    <div
-      class="sidebar-columns"
-      data-phase={motion.transitionPhase()}
-      data-launch={motion.launchActive()}
-    >
+    <div class="sidebar-columns" data-launch={motion.launchActive()}>
       <div class="sidebar-browser-column" class:sidebar-tool-rail={tools.activeTool() !== null}>
         {@render browserBody(compact)}
         {@render dock(compact)}

@@ -512,11 +512,16 @@ fn dispatch_chrome_layout(
             .pending
             .take();
         if let Some(frame) = frame {
-            if with_chrome_view(generation, |webview| set_chrome_frame(webview, frame)).is_some() {
+            if let Some(held) =
+                with_chrome_view(generation, |webview| set_chrome_frame(webview, frame))
+            {
                 layout
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .applied = Some(frame);
+                if held {
+                    settle_held_chrome(generation, layout.clone(), frame);
+                }
             }
         }
 
@@ -631,12 +636,42 @@ pub fn content_size(_window: &WebviewWindow) -> Option<Size> {
     })?
 }
 
-fn set_chrome_frame(view: &WKWebView, frame: ChromeFrame) {
+/// How long a narrowing chrome keeps its width: the content's slide
+/// (--motion-page), and a frame of margin so the slide has visibly ended.
+const CHROME_HOLD: std::time::Duration = std::time::Duration::from_millis(420);
+
+/// Narrows a chrome that `set_chrome_frame` held wide for a journey, once the
+/// journey is over — unless a newer frame has been applied in the meantime,
+/// which is then the one that stands.
+fn settle_held_chrome(generation: u64, layout: Arc<Mutex<ChromeLayoutState>>, frame: ChromeFrame) {
+    let Ok(when) = dispatch2::DispatchTime::try_from(CHROME_HOLD) else {
+        return;
+    };
+    let _ = dispatch2::DispatchQueue::main().after(when, move || {
+        let current = {
+            let state = layout
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.pending.is_none() && state.applied == Some(frame)
+        };
+        if current {
+            let settled = ChromeFrame {
+                travel: false,
+                ..frame
+            };
+            let _ = with_chrome_view(generation, |webview| set_chrome_frame(webview, settled));
+        }
+    });
+}
+
+/// Applies `frame`, and reports whether it held the chrome at its current
+/// width because the frame narrows it on a journey.
+fn set_chrome_frame(view: &WKWebView, frame: ChromeFrame) -> bool {
     use objc2_app_kit::NSAutoresizingMaskOptions as Mask;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
 
     let Some(sv) = (unsafe { view.superview() }) else {
-        return;
+        return false;
     };
     let h = sv.bounds().size.height;
     let r = frame.rect;
@@ -647,13 +682,20 @@ fn set_chrome_frame(view: &WKWebView, frame: ChromeFrame) {
     } else {
         Mask::ViewMaxXMargin | Mask::ViewHeightSizable
     };
+    let current = view.frame();
+    // Narrowing on a journey keeps the old width: the page slides over what
+    // the chrome draws there, and cutting it away first shows a cropped frame.
+    let hold = frame.travel
+        && !frame.fill_width
+        && current.origin.x == r.x
+        && current.size.width > r.width;
+    let width = if hold { current.size.width } else { r.width };
     let f = NSRect::new(
         NSPoint::new(r.x, h - r.y - r.height),
-        NSSize::new(r.width, r.height),
+        NSSize::new(width, r.height),
     );
     view.setTranslatesAutoresizingMaskIntoConstraints(true);
     view.setAutoresizingMask(mask);
-    let current = view.frame();
     if current.origin.x != f.origin.x
         || current.origin.y != f.origin.y
         || current.size.width != f.size.width
@@ -661,6 +703,7 @@ fn set_chrome_frame(view: &WKWebView, frame: ChromeFrame) {
     {
         view.setFrame(f);
     }
+    hold
 }
 
 #[cfg(test)]
@@ -682,6 +725,7 @@ mod tests {
         let frame = ChromeFrame {
             rect: zephium_core::geometry::Rect::new(8.0, 8.0, 240.0, 700.0),
             fill_width: false,
+            travel: false,
         };
         let layout = Arc::new(Mutex::new(ChromeLayoutState {
             pending: Some(frame),

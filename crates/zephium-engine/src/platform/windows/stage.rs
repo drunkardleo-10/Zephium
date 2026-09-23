@@ -32,7 +32,11 @@ use wry::WebViewExtWindows;
 
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
+use zephium_core::ports::engine::StageMotion;
 use zephium_core::split::{self, Pane};
+
+use crate::motion_curve::EMPHASIZED;
+use std::time::{Duration, Instant};
 
 use crate::pane_geometry::rounded_native_size;
 
@@ -142,6 +146,40 @@ struct State {
     indicator: Option<HWND>,
     indicator_size: (i32, i32),
     on_placement_failure: PlacementFailureCallback,
+    /// Motion asked of the next `apply`, and the slide it started.
+    pending_motion: Option<StageMotion>,
+    slide: Option<Slide>,
+}
+
+/// The page travelling beside the sidebar. Child windows cannot be moved by
+/// a compositor here, so the stage moves them itself, a little each display
+/// frame, without ever resizing them mid-journey: each pane keeps whichever
+/// of its two sizes is wider for the whole of it, so no page lays itself
+/// out more than once and no edge opens a gap.
+#[derive(Clone, Copy, Debug)]
+struct Slide {
+    started: Instant,
+    /// The logical geometry the panes are laid out in for the journey.
+    origin: (f64, f64),
+    size: (f64, f64),
+    /// Horizontal offset in logical pixels, at the start and at the end.
+    from: f64,
+    to: f64,
+}
+
+/// The chrome's --motion-page, so the page and the sidebar travel together.
+const SLIDE: Duration = Duration::from_millis(400);
+
+impl Slide {
+    /// Where the journey has got to, or `None` once it has arrived.
+    fn offset(&self, now: Instant) -> Option<f64> {
+        let elapsed = now.saturating_duration_since(self.started);
+        if elapsed >= SLIDE {
+            return None;
+        }
+        let progress = EMPHASIZED.at(elapsed.as_secs_f64() / SLIDE.as_secs_f64());
+        Some(self.from + (self.to - self.from) * progress)
+    }
 }
 
 thread_local! {
@@ -194,16 +232,60 @@ impl Stage {
             indicator: None,
             indicator_size: (0, 0),
             on_placement_failure: Rc::new(on_placement_failure),
+            pending_motion: None,
+            slide: None,
         }));
         Self { state }
     }
 
     /// One native pass for frame, tree and visibility; `None` region hides
     /// the whole stage.
+    /// Asks the next `apply` to move rather than jump; consumed by it.
+    pub fn hint_motion(&self, motion: StageMotion) {
+        if let Ok(mut state) = self.state.try_borrow_mut() {
+            state.pending_motion = Some(motion);
+        }
+    }
+
     pub fn apply(&self, region: Option<Rect>, tree: Option<Pane>, visible: &[ItemId]) -> bool {
         let hide_now = {
             let Ok(mut s) = self.state.try_borrow_mut() else {
                 return false;
+            };
+            // A slide is started only by a deliberate change of shape of a
+            // stage already on screen, where nothing but the horizontal
+            // extent changes. Any other layout ends a journey in progress.
+            let motion = s.pending_motion.take();
+            s.slide = match (motion, region) {
+                (Some(StageMotion::Slide), Some(r))
+                    if !s.hidden
+                        && !s.visible.is_empty()
+                        && s.origin.1 == r.y
+                        && s.size.1 == r.height
+                        && s.origin.0 != r.x =>
+                {
+                    let started = Instant::now();
+                    Some(if r.width >= s.size.0 {
+                        // Wider: take the new size now, slide from where it was.
+                        Slide {
+                            started,
+                            origin: (r.x, r.y),
+                            size: (r.width, r.height),
+                            from: s.origin.0 - r.x,
+                            to: 0.0,
+                        }
+                    } else {
+                        // Narrower: keep the old size for the journey.
+                        Slide {
+                            started,
+                            origin: s.origin,
+                            size: s.size,
+                            from: 0.0,
+                            to: r.x - s.origin.0,
+                        }
+                    })
+                }
+                _ => None,
             };
             let next_visible = if region.is_some() {
                 visible.iter().copied().collect::<HashSet<_>>()
@@ -676,19 +758,33 @@ fn placement_may_reveal(state: &Rc<RefCell<State>>, placement: &NativePlacement)
 }
 
 fn sync(state: &Rc<RefCell<State>>) {
-    let (parent, gap, origin, size, hidden, tree, ready, visible, dirty, revision) = {
+    let (parent, gap, origin, size, offset, hidden, tree, ready, visible, dirty, revision) = {
         let Ok(mut state) = state.try_borrow_mut() else {
             return;
         };
+        // Mid-journey, the panes are laid out in the journey's geometry and
+        // shifted by how far it has got; on arrival, the real geometry.
+        let travelling = state
+            .slide
+            .and_then(|slide| slide.offset(Instant::now()).map(|offset| (slide, offset)));
+        if travelling.is_none() && state.slide.take().is_some() {
+            let visible = state.visible.clone();
+            state.dirty.extend(visible);
+        }
         let dirty = std::mem::take(&mut state.dirty);
         if dirty.is_empty() {
             return;
         }
+        let (origin, size, offset) = travelling
+            .map_or((state.origin, state.size, 0.0), |(slide, offset)| {
+                (slide.origin, slide.size, offset)
+            });
         (
             state.parent,
             state.gap,
-            state.origin,
-            state.size,
+            origin,
+            size,
+            offset,
             state.hidden,
             state.tree.clone(),
             state.ready.clone(),
@@ -697,6 +793,7 @@ fn sync(state: &Rc<RefCell<State>>) {
             state.revision,
         )
     };
+    let sliding = offset != 0.0;
 
     let scale = scale_of(parent);
     let local = Rect::new(0.0, 0.0, size.0, size.1);
@@ -708,7 +805,7 @@ fn sync(state: &Rc<RefCell<State>>) {
         .into_iter()
         .filter_map(|(id, rect)| {
             let (width, height) = rounded_native_size(rect.width, rect.height, scale)?;
-            let x = (origin.0 + rect.x) * scale;
+            let x = (origin.0 + rect.x + offset) * scale;
             let y = (origin.1 + rect.y) * scale;
             (x.is_finite() && y.is_finite())
                 .then_some((id, (x.round() as i32, y.round() as i32, width, height)))
@@ -733,6 +830,11 @@ fn sync(state: &Rc<RefCell<State>>) {
                     && view.presentation_permit.load(Ordering::Acquire);
                 let applied = view.applied.get();
                 let mut delta = placement_delta(applied, show, rect, radius, parent_screen_origin);
+                // WebView2 is told where it sits once the journey is over,
+                // not on every step of it.
+                if sliding {
+                    delta.notify_parent_position = false;
+                }
                 if state.visibility_uncertain.contains(&id) {
                     delta.window_visibility = true;
                     delta.controller_visibility = true;
@@ -763,6 +865,15 @@ fn sync(state: &Rc<RefCell<State>>) {
     }
     for placement in placements.iter().filter(|placement| placement.show) {
         apply_native_placement(state, placement);
+    }
+    // The next step of the journey is the next pass: every visible pane is
+    // due to move again, on the stage's own frame-paced timer.
+    if state.try_borrow().is_ok_and(|state| state.slide.is_some()) {
+        if let Ok(mut current) = state.try_borrow_mut() {
+            let visible = current.visible.clone();
+            current.dirty.extend(visible);
+        }
+        schedule_sync(state);
     }
 }
 

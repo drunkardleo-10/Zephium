@@ -124,7 +124,6 @@ export const backActive = onActive((id) => void commands.tabsBack(id));
 export const forwardActive = onActive((id) => void commands.tabsForward(id));
 export const split = (other: string) => void commands.tabsSplit(other);
 export const unsplit = () => void commands.tabsUnsplit();
-export const setSidebarWidth = (width: number) => void commands.sidebarSetWidth(width);
 export const dragOver = (x: number, y: number) => void commands.tabDragOver(x, y);
 export const dropTab = (id: string, x: number, y: number) => void commands.tabDrop(id, x, y);
 

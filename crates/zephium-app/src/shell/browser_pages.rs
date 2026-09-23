@@ -142,6 +142,11 @@ impl Shell {
             return;
         }
         let previous = self.browser_page.take();
+        // The page the browser page covered comes back into view rather
+        // than reappearing in a single frame.
+        if let Some(window) = self.windows.focused().map(|window| window.id) {
+            let _ = self.engine.hint_stage_motion(window, StageMotion::Arrive);
+        }
         if self.relayout() != NativeDispatch::Scheduled {
             self.browser_page = previous;
             let _ = self.relayout();

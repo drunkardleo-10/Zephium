@@ -8,7 +8,7 @@ use wry::WebView;
 
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, WindowId};
-use zephium_core::ports::engine::EngineEvent;
+use zephium_core::ports::engine::{EngineEvent, StageMotion};
 use zephium_core::split::Pane;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -200,6 +200,7 @@ impl EngineHost {
         window: WindowId,
         tree: Option<Pane>,
         region: Option<Rect>,
+        motion: Option<StageMotion>,
     ) -> bool {
         let Some(stage) = self.ensure_stage(window) else {
             return false;
@@ -213,7 +214,7 @@ impl EngineHost {
         let Some(r) = region else {
             return stage.finish_content_update(update_epoch);
         };
-        if !stage_set_frame(&stage, &self.parent, r) {
+        if !stage_set_frame(&stage, &self.parent, r, motion) {
             stage.abort_content_update(update_epoch);
             return false;
         }
@@ -304,6 +305,7 @@ impl EngineHost {
         window: WindowId,
         tree: Option<Pane>,
         region: Option<Rect>,
+        _motion: Option<StageMotion>,
     ) -> bool {
         let Some(stage) = self.ensure_stage(window) else {
             return false;
@@ -350,6 +352,10 @@ impl EngineHost {
         }
         // one native pass: frame, tree and visibility land atomically, so a
         // switch can never flash the previous pane
+        #[cfg(target_os = "windows")]
+        if let Some(motion) = _motion {
+            stage.hint_motion(motion);
+        }
         if !stage.apply(region, tree, &tabs) {
             return false;
         }
@@ -519,7 +525,12 @@ fn webview_nsview(view: &WebView) -> Option<Retained<NSView>> {
 }
 
 #[cfg(target_os = "macos")]
-fn stage_set_frame(stage: &ContentStage, parent: &ParentHandle, r: Rect) -> bool {
+fn stage_set_frame(
+    stage: &ContentStage,
+    parent: &ParentHandle,
+    r: Rect,
+    motion: Option<StageMotion>,
+) -> bool {
     use objc2_foundation::{NSPoint, NSRect, NSSize};
 
     let Some(content) = content_view(parent) else {
@@ -530,13 +541,26 @@ fn stage_set_frame(stage: &ContentStage, parent: &ParentHandle, r: Rect) -> bool
         NSPoint::new(r.x, h - r.y - r.height),
         NSSize::new(r.width, r.height),
     );
-    let current = stage.frame();
-    if current.origin.x != frame.origin.x
-        || current.origin.y != frame.origin.y
-        || current.size.width != frame.size.width
-        || current.size.height != frame.size.height
-    {
-        stage.setFrame(frame);
+    if motion == Some(StageMotion::Slide) && stage.can_slide_to(frame) {
+        stage.slide_to(frame);
+        return true;
+    }
+    let same = |a: NSRect| {
+        a.origin.x == frame.origin.x
+            && a.origin.y == frame.origin.y
+            && a.size.width == frame.size.width
+            && a.size.height == frame.size.height
+    };
+    // A layout that only restates where a slide is already going lets it
+    // finish; anything else ends it where it is and takes over.
+    if !same(stage.motion_target()) {
+        stage.settle_motion();
+        if !same(stage.frame()) {
+            stage.setFrame(frame);
+        }
+    }
+    if motion == Some(StageMotion::Arrive) {
+        stage.arrive();
     }
     true
 }

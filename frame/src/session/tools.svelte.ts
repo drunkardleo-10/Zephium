@@ -1,4 +1,3 @@
-import { transition, cancel } from "./motion.svelte";
 import { surface as browser } from "$domain/surface";
 import { setPanelExtent } from "./sidebar-mode.svelte";
 import { events } from "$shared/ipc/native-events";
@@ -7,13 +6,10 @@ let tool = $state<ToolKind | null>(null);
 let queued: ToolKind | null = null;
 let stop: (() => void) | null = null;
 let generation = 0;
-let request = 0;
 let initialized = false;
 let initializing: Promise<void> | null = null;
 export const activeTool = () => tool;
 export function open(kind: ToolKind) {
-  const action = ++request;
-  const owner = generation;
   if (browser.currentPage() !== null) {
     queued = kind;
     void browser.open(null);
@@ -23,21 +19,14 @@ export function open(kind: ToolKind) {
     tool = kind;
     return;
   }
-  transition(() => {
-    if (owner !== generation || action !== request) return;
-    tool = kind;
-    setPanelExtent(336);
-  });
+  // The column widens at once; native slides the page aside to make room.
+  tool = kind;
+  setPanelExtent(336);
 }
 export function close() {
   queued = null;
-  const action = ++request;
-  const owner = generation;
-  transition(() => {
-    if (owner !== generation || action !== request) return;
-    tool = null;
-    setPanelExtent(0);
-  });
+  tool = null;
+  setPanelExtent(0);
 }
 async function initialize(owner: number) {
   const unsubscribe = await events.uiCommand.listen(({ payload }) => {
@@ -59,8 +48,6 @@ async function initialize(owner: number) {
         payload,
       )
     ) {
-      request++;
-      cancel();
       tool = null;
       setPanelExtent(0);
       queued = null;
@@ -90,7 +77,6 @@ export function init(): Promise<void> {
 }
 export function dispose() {
   generation++;
-  request++;
   initialized = false;
   initializing = null;
   queued = null;

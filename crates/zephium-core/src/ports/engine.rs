@@ -502,6 +502,17 @@ pub struct Shortcut {
     pub key: u32,
 }
 
+/// How a content layout that follows a deliberate change of the window's
+/// shape is carried out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageMotion {
+    /// The content keeps its size for the journey and slides to its new
+    /// place, so a page is laid out at most once.
+    Slide,
+    /// The content was hidden behind a browser page and returns to view.
+    Arrive,
+}
+
 pub trait Engine {
     /// Schedules creation on the native UI thread. `false` means the request
     /// was not admitted at all, so the shell must roll back its live-view bit.
@@ -539,6 +550,13 @@ pub trait Engine {
         region: Option<Rect>,
     ) -> NativeDispatch;
     fn set_drop_indicator(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch;
+    /// Asks the next content layout applied to `window` to move rather than
+    /// jump, because it follows a deliberate change of the window's shape
+    /// and not a resize. Consumed by that layout whether or not it moved
+    /// anything; an engine without native motion ignores it.
+    fn hint_stage_motion(&self, _window: WindowId, _motion: StageMotion) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Requests an exact page zoom for the current native-view generation.
     /// Queue admission is not application: the authoritative native scale
     /// arrives as [`EngineEvent::ZoomSettled`] carrying the same `request`.

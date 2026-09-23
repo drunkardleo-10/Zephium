@@ -1240,6 +1240,14 @@ impl Engine for FakeEngine {
     fn set_drop_indicator(&self, _window: WindowId, _zone: Option<Rect>) -> NativeDispatch {
         self.native_admission()
     }
+    fn hint_stage_motion(
+        &self,
+        window: WindowId,
+        motion: zephium_core::ports::engine::StageMotion,
+    ) -> NativeDispatch {
+        self.log(format!("motion@{window} {motion:?}"));
+        self.native_admission()
+    }
     fn zoom(&self, id: ItemId, scale: f64, request: ZoomRequestId) -> NativeDispatch {
         self.log(format!("zoom {id} {scale}"));
         let admission = self.native_admission();

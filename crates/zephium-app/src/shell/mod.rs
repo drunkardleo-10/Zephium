@@ -102,7 +102,7 @@ use zephium_core::ports::chrome::ChromeFrame;
 use zephium_core::ports::engine::Engine;
 use zephium_core::ports::engine::{
     ContentScope, DiscardProbeId, EngineEvent, NativeAction, NativeDispatch,
-    NavigationPresentationId, Partition, ProfileDataErasureOutcome, ZoomRequestId,
+    NavigationPresentationId, Partition, ProfileDataErasureOutcome, StageMotion, ZoomRequestId,
 };
 use zephium_core::ports::extensions::{
     ExtensionDistributionState, ExtensionDistributionStatus, ExtensionManagementCompatibility,
@@ -753,11 +753,16 @@ impl Shell {
             Command::ShowBrowserPage(page) => {
                 let _ = self.operation_show_browser_page(page);
             }
-            Command::SetSidebarWidth(width) => {
+            Command::SetSidebarWidth(width, animate) => {
                 if let Some(win) = self.windows.focused_mut() {
                     win.metrics.sidebar_width = zephium_core::layout::clamp_sidebar_width(width);
                 }
-                let _ = self.relayout();
+                if animate {
+                    if let Some(win) = self.windows.focused() {
+                        let _ = self.engine.hint_stage_motion(win.id, StageMotion::Slide);
+                    }
+                }
+                let _ = self.relayout_with(animate);
             }
             Command::HistoryCall {
                 expected_profile,

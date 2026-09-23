@@ -432,3 +432,67 @@ fn launcher_includes_essentials_and_folder_tabs_from_the_current_scope() {
     shell.handle(Command::Search(String::new()));
     assert!(shell.search.results.iter().any(|result| matches!(&result.action,SearchAction::ActivateTab{id:found} if *found==id.to_string())));
 }
+
+#[test]
+fn deliberate_sidebar_changes_ask_the_content_to_travel_and_drags_do_not() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "travel.example");
+    let window = shell.windows.focused().unwrap().id;
+    let motion = |engine: &FakeEngine| {
+        engine
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("motion@"))
+            .collect::<Vec<_>>()
+    };
+
+    shell.handle(Command::SetSidebarWidth(300.0, false));
+    assert!(
+        motion(&engine).is_empty(),
+        "a drag step follows the pointer directly"
+    );
+
+    shell.handle(Command::SetSidebarWidth(56.0, true));
+    assert_eq!(motion(&engine), [format!("motion@{window} Slide")]);
+    // The hint precedes the layout it belongs to.
+    let calls = engine.calls();
+    let hinted = calls
+        .iter()
+        .rposition(|call| call.starts_with("motion@"))
+        .unwrap();
+    let laid = calls
+        .iter()
+        .rposition(|call| call.starts_with("layout@"))
+        .unwrap();
+    assert!(hinted < laid);
+}
+
+#[test]
+fn returning_from_a_browser_page_brings_the_content_back_into_view() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "arrive.example");
+    let window = shell.windows.focused().unwrap().id;
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    assert!(
+        !engine
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("motion@")),
+        "leaving for a browser page hides the content at once"
+    );
+    shell.handle_operation(Command::ShowBrowserPage(None));
+    let calls = engine.calls();
+    let arrive = calls
+        .iter()
+        .rposition(|call| call == &format!("motion@{window} Arrive"))
+        .expect("return hints an arrival");
+    let shown = calls
+        .iter()
+        .rposition(|call| call == &format!("layout@{window} {id}"))
+        .unwrap();
+    assert!(arrive < shown);
+}

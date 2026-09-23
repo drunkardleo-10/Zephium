@@ -420,7 +420,10 @@ pub enum Command {
     /// windows hide native content views so the engine can lower their memory
     /// priority and, after the normal idle grace, suspend them.
     SetWindowVisible(bool),
-    SetSidebarWidth(f64),
+    /// The sidebar's width, and whether it changed by a deliberate change of
+    /// shape — a toggle, a snap, a tool opening — that the content should
+    /// travel with, rather than by a drag that it should simply follow.
+    SetSidebarWidth(f64, bool),
     ShowBrowserPage(Option<BrowserPage>),
     BrowserChromeRestored {
         revision: u64,
