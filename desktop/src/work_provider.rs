@@ -485,7 +485,7 @@ impl WorkProviders {
 
 fn planning_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkError> {
     zephium_agentic::WorkPlanningConfig::try_new(
-        zephium_agent_model_catalog::try_luna_provider_exact_call_config(4096)
+        zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(4096)
             .map_err(|_| WorkError::Unavailable)?,
         8192,
         100_000,
@@ -498,7 +498,7 @@ fn planning_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkEr
 fn agent_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkError> {
     const MAX_TURN_INPUT_TOKENS: u32 = 32_768;
     zephium_agentic::WorkPlanningConfig::try_new(
-        zephium_agent_model_catalog::try_luna_provider_exact_call_config(8192)
+        zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(8192)
             .map_err(|_| WorkError::Unavailable)?,
         MAX_TURN_INPUT_TOKENS,
         300_000,
@@ -511,7 +511,7 @@ fn agent_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkError
 fn synthesis_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkError> {
     const MAX_SYNTHESIS_INPUT_TOKENS: u32 = 32_768;
     zephium_agentic::WorkPlanningConfig::try_new(
-        zephium_agent_model_catalog::try_luna_provider_exact_call_config(4096)
+        zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(4096)
             .map_err(|_| WorkError::Unavailable)?,
         MAX_SYNTHESIS_INPUT_TOKENS,
         100_000,
@@ -564,7 +564,7 @@ async fn public_decision_settings(
         None
     };
     let emulation = zephium_agentic::WorkPlanningConfig::try_new(
-        zephium_agent_model_catalog::try_luna_provider_exact_call_config(4096)
+        zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(4096)
             .map_err(|_| WorkError::Unavailable)?,
         32_768,
         100_000,

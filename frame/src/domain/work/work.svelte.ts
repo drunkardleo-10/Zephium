@@ -424,7 +424,7 @@ export class WorkSession {
         command: commandId(),
         intent: {
           kind: "read_public",
-          scope: { provider: "open_ai", model: "gpt-5.6-luna", query: work.objective },
+          scope: { provider: "open_ai", model: "gpt-6-luna", query: work.objective },
           limits: {
             model_tokens: 147456,
             cost_micro_usd: 100000,

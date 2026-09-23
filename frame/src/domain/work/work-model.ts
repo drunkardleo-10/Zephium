@@ -8,7 +8,7 @@ import type {
 /** The routine public envelope shown in the composer; Rust enforces it. */
 export const AGENT_GRANT: WorkAgentGrantV1 = {
   provider: "open_ai",
-  model: "gpt-5.6-luna",
+  model: "gpt-6-luna",
   max_turns: 10,
   max_steps: 32,
   browse_hops: 4,

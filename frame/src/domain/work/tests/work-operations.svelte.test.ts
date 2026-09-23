@@ -102,7 +102,7 @@ test("unknown public research reconciles the same operation without a new comman
       command: "00000000000000000000000003",
       intent: {
         kind: "read_public",
-        scope: { provider: "open_ai", model: "gpt-5.6-luna", query: "Find public sources" },
+        scope: { provider: "open_ai", model: "gpt-6-luna", query: "Find public sources" },
         limits: {
           model_tokens: 147456,
           cost_micro_usd: 100000,
