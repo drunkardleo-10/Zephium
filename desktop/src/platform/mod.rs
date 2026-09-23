@@ -2,6 +2,8 @@
 pub mod macos;
 #[cfg(target_os = "macos")]
 pub use macos as imp;
+#[cfg(target_os = "macos")]
+mod window_controls;
 
 #[cfg(target_os = "windows")]
 pub mod windows;

@@ -277,6 +277,7 @@ pub fn to_window(x: f64, y: f64) -> (f64, f64) {
 
 pub fn init(window: &WebviewWindow) -> bool {
     crate::material::install(window, false);
+    super::window_controls::install(window);
     if !harden_privileged(window) {
         return false;
     }
