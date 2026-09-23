@@ -6,7 +6,7 @@ use crate::{
 };
 
 /// Threshold revision is coupled to the pinned model and recorded evaluations.
-pub const CONFIDENCE_POLICY_REVISION: &str = "jev-1.13.0-measured-v2";
+pub const CONFIDENCE_POLICY_REVISION: &str = "jev-1.13.0-measured-v3";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecisionPurpose {
@@ -63,7 +63,7 @@ impl DecisionPurpose {
                 // labels the selection, not whether the click works live, so
                 // this one keeps its conservative value.
                 Self::Action => 0.98,
-                Self::Relevance => 0.70,
+                Self::Relevance | Self::Locate => 0.70,
                 _ => 0.80,
             },
         }
