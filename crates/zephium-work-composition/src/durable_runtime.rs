@@ -478,6 +478,7 @@ impl MacosWorkComposition {
         let mut verifying_action = false;
         let mut next_cancel_check = Instant::now();
         let mut cleanup_deadline = attempt.deadline() + Duration::from_secs(30);
+        let mut human_wait: Option<Instant> = None;
         let mut disposition = None;
         let mut shown_frame = 0;
         let mut reviews = 0u8;
@@ -754,6 +755,7 @@ impl MacosWorkComposition {
                             diagnostic_sent = false;
                         }
                         trace("human:successor_queued");
+                        human_wait = None;
                         disposition = None;
                         intervention = None;
                         mapping_artifact = false;
@@ -893,7 +895,21 @@ impl MacosWorkComposition {
                         && !guard.0.is_closed()
                         && !requested_close
                     {
-                        attempt.record_activity(zephium_ipc::work::WorkActivityV1::WaitingForHuman);
+                        let human = guard.0.human_snapshot().map(|human| human.phase);
+                        let since = *human_wait.get_or_insert_with(|| {
+                            trace(&format!("human:waiting:{human:?}"));
+                            now
+                        });
+                        if human_wait_expired(now, since, original_deadline, human) {
+                            // Nobody took the page within the wait: release it
+                            // and settle the read with the page's own words.
+                            trace(&format!("close:human_wait:{human:?}"));
+                            requested_close = true;
+                        } else {
+                            attempt.record_activity(
+                                zephium_ipc::work::WorkActivityV1::WaitingForHuman,
+                            );
+                        }
                     } else if disposition != Some(AgentWorkDisposition::Succeeded) {
                         trace(&format!("close:terminal:{disposition:?}"));
                         requested_close = true;
@@ -994,6 +1010,24 @@ impl MacosWorkComposition {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
+}
+
+/// A human request waits at most the human wait cap, within the read's own
+/// deadline. Only a page a person has taken, being presented or continued,
+/// is left to the page's own presented deadline.
+fn human_wait_expired(
+    now: Instant,
+    since: Instant,
+    deadline: Instant,
+    phase: Option<zephium_app::RetainedHumanPhase>,
+) -> bool {
+    use zephium_app::RetainedHumanPhase as Phase;
+    let cap = deadline.min(since + Duration::from_millis(MAX_WORK_HUMAN_WAIT_MILLIS));
+    now >= cap
+        && !matches!(
+            phase,
+            Some(Phase::Presenting | Phase::Presented | Phase::Continuing | Phase::ReadyToResume)
+        )
 }
 
 fn cleanup_expired(now: Instant, local: Instant, group: Instant, locally_retired: bool) -> bool {
@@ -1149,6 +1183,23 @@ mod closed_result_tests {
             construction_note(true, Attempt::SlowPageRetry),
             Some(read_note::SLOW_SITE)
         );
+    }
+
+    #[test]
+    fn a_human_request_nobody_presents_settles_at_the_wait_cap() {
+        use zephium_app::RetainedHumanPhase as Phase;
+        let since = Instant::now();
+        let cap = since + Duration::from_millis(MAX_WORK_HUMAN_WAIT_MILLIS);
+        let late = since + Duration::from_secs(3600);
+        for phase in [None, Some(Phase::WaitingForHuman), Some(Phase::Released)] {
+            assert!(!human_wait_expired(cap - Duration::from_millis(1), since, late, phase));
+            assert!(human_wait_expired(cap, since, late, phase));
+        }
+        let early = since + Duration::from_secs(60);
+        assert!(human_wait_expired(early, since, early, None));
+        for phase in [Phase::Presenting, Phase::Presented, Phase::Continuing, Phase::ReadyToResume] {
+            assert!(!human_wait_expired(cap, since, late, Some(phase)));
+        }
     }
 
     #[test]
