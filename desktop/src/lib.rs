@@ -81,6 +81,7 @@ mod resource_close;
 mod startup_styles;
 #[cfg(feature = "work-product")]
 mod work_activity;
+mod work_decision;
 #[cfg(feature = "work-development-traces")]
 mod work_diagnostics;
 #[cfg(any(feature = "work-product", test))]
@@ -1350,6 +1351,10 @@ struct WorkChanged(zephium_ipc::work::WorkChangedV1);
 struct WorkHumanChanged(zephium_ipc::work::WorkHumanChangedV1);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+#[tauri_specta(event_name = "zephium:work-decision-preference-changed")]
+struct WorkDecisionPreferenceChanged(zephium_ipc::work::WorkDecisionPreferenceChangedV1);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct WorkEnvironmentChanged(zephium_ipc::work::WorkEnvironmentChangedV1);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -1601,6 +1606,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_product::human::work_human_present,
             work_product::human::work_human_continue,
             work_product::human::work_human_release,
+            work_decision::work_decision_preference,
+            work_decision::work_set_decision_preference,
             tabs_bootstrap,
             tabs_open,
             tabs_open_url,
@@ -1668,6 +1675,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             WorkEnvironmentChanged,
             WorkChanged,
             WorkHumanChanged,
+            WorkDecisionPreferenceChanged,
             ItemsChanged,
             ResourceChanged,
             TabChanged,

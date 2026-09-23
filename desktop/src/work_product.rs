@@ -38,6 +38,17 @@ pub(crate) fn install(
     let providers = std::sync::Arc::new(super::work_provider::WorkProviders::new(
         engine, store, frames,
     ));
+    {
+        let app = app.clone();
+        super::work_decision::set_observer(Box::new(move |change| {
+            super::emit_to_privileged(
+                &app,
+                super::MAIN_LABEL,
+                "zephium:work-decision-preference-changed",
+                &change,
+            );
+        }));
+    }
     #[cfg(target_os = "macos")]
     {
         let app = app.clone();

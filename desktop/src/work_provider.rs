@@ -193,14 +193,17 @@ impl WorkProviders {
                         agent_model_config()?,
                     )
                     .map_err(|_| WorkError::Unavailable)?;
-                    let decisions = public_decision_settings(transport).await?;
-                    let agent = agent
-                        .with_link_decisions(
-                            decisions.primary,
-                            decisions.emulation,
-                            decisions.diagnostic,
-                        )
-                        .map_err(|_| WorkError::Unavailable)?;
+                    let decisions = public_decision_settings(profile, transport).await?;
+                    let agent = match decisions {
+                        Some(decisions) => agent
+                            .with_link_decisions(
+                                decisions.primary,
+                                decisions.emulation,
+                                decisions.diagnostic,
+                            )
+                            .map_err(|_| WorkError::Unavailable)?,
+                        None => agent,
+                    };
                     #[cfg(feature = "work-development-traces")]
                     let agent = agent.with_public_response_retention().with_diagnostic(|event| {
                         use zephium_core::work::synthesis::WorkSynthesisDiagnostic;
@@ -226,7 +229,8 @@ impl WorkProviders {
                         credential().await?,
                         search_config,
                     )?;
-                    let search = configure_search_ranking(search, search_transport).await?;
+                    let search =
+                        configure_search_ranking(search, profile, search_transport).await?;
                     #[cfg(feature = "work-development-traces")]
                     let search = search.with_public_response_retention().with_diagnostic(|event| {
                         if let zephium_core::work::synthesis::WorkSynthesisDiagnostic::ProviderTransport { http_status, body_bytes, decoded, elapsed_millis } = event {
@@ -253,7 +257,7 @@ impl WorkProviders {
                             |probe, request| {
                                 let callback = &callback;
                                 async move {
-                                    let settings = zephium_work_composition::durable_runtime::WorkBrowserAdapterSettings::new(
+                                    let mut settings = zephium_work_composition::durable_runtime::WorkBrowserAdapterSettings::new(
                                         binding,
                                         zephium_agent_controller::AgentBrowserModel::Luna,
                                         zephium_app::AgentWorkApplicationConfig::new(
@@ -261,6 +265,9 @@ impl WorkProviders {
                                             AgentProviderTransportConfig::STANDARD,
                                         ),
                                         credential().await?,
+                                    );
+                                    settings.decisions = super::work_decision::composition_preference(
+                                        super::work_decision::selected_choice(profile).await,
                                     );
                                     #[cfg(feature = "work-development-traces")]
                                     let settings = {
@@ -432,7 +439,7 @@ impl WorkProviders {
                                 }
                                 return result;
                             }
-                            let settings = zephium_work_composition::durable_runtime::WorkBrowserAdapterSettings::new(
+                            let mut settings = zephium_work_composition::durable_runtime::WorkBrowserAdapterSettings::new(
                                 binding,
                                 zephium_agent_controller::AgentBrowserModel::Luna,
                                 zephium_app::AgentWorkApplicationConfig::new(
@@ -440,6 +447,9 @@ impl WorkProviders {
                                     AgentProviderTransportConfig::STANDARD,
                                 ),
                                 credential().await?,
+                            );
+                            settings.decisions = super::work_decision::composition_preference(
+                                super::work_decision::selected_choice(profile).await,
                             );
                             #[cfg(feature = "work-development-traces")]
                             let settings = {
@@ -510,9 +520,12 @@ fn synthesis_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkE
 }
 async fn configure_search_ranking(
     search: zephium_agentic::OpenAiPublicSearch,
+    profile: ProfileId,
     transport: zephium_agentic::AgentProviderTransport,
 ) -> Result<zephium_agentic::OpenAiPublicSearch, WorkError> {
-    let settings = public_decision_settings(transport).await?;
+    let Some(settings) = public_decision_settings(profile, transport).await? else {
+        return Ok(search);
+    };
     search.with_decision_ranking(settings.primary, settings.emulation, settings.diagnostic)
 }
 
@@ -522,16 +535,29 @@ struct PublicDecisionSettings {
     diagnostic: Option<fn(zephium_agentic::DecisionCallDiagnostic)>,
 }
 
+/// `None` is the person's Off: no typed decisions are configured at all.
 async fn public_decision_settings(
+    profile: ProfileId,
     transport: zephium_agentic::AgentProviderTransport,
-) -> Result<PublicDecisionSettings, WorkError> {
+) -> Result<Option<PublicDecisionSettings>, WorkError> {
+    use zephium_ipc::work::WorkDecisionChoiceV1;
+    let choice = super::work_decision::selected_choice(profile).await;
+    if choice == WorkDecisionChoiceV1::Off {
+        return Ok(None);
+    }
     #[cfg(target_os = "macos")]
-    let primary =
-        tokio::task::spawn_blocking(zephium_agentic::load_macos_development_typesafe_credential)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .and_then(|key| zephium_agentic::JevDecisionClient::direct(transport, key).ok());
+    let primary = if choice == WorkDecisionChoiceV1::Recommended {
+        let loaded = tokio::task::spawn_blocking(
+            zephium_agentic::load_macos_development_typesafe_credential,
+        )
+        .await
+        .ok()
+        .and_then(Result::ok);
+        super::work_decision::observe_typesafe_key(profile, loaded.is_some());
+        loaded.and_then(|key| zephium_agentic::JevDecisionClient::direct(transport, key).ok())
+    } else {
+        None
+    };
     #[cfg(not(target_os = "macos"))]
     let primary = {
         let _ = transport;
@@ -554,11 +580,11 @@ async fn public_decision_settings(
     );
     #[cfg(not(feature = "work-development-traces"))]
     let diagnostic = None;
-    Ok(PublicDecisionSettings {
+    Ok(Some(PublicDecisionSettings {
         primary,
         emulation,
         diagnostic,
-    })
+    }))
 }
 
 async fn credential() -> Result<zephium_agentic::AgentProviderCredential, WorkError> {

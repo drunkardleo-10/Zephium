@@ -8,6 +8,10 @@ use zephium_core::work::{runtime::*, *};
 mod human;
 pub use human::*;
 
+#[path = "work_decision.rs"]
+mod decision;
+pub use decision::*;
+
 pub type WorkProjectionV1 = WorkRuntimeProjection;
 
 /// Invalidation only. Consumers read current facts; delivery grants no authority

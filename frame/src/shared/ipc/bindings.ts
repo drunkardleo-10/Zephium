@@ -41,6 +41,8 @@ export const commands = {
 	workHumanPresent: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1, region: WorkHumanRegionV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_present", { expectedProfile, work, page, region }),
 	workHumanContinue: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1, account: WorkHumanAccountV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_continue", { expectedProfile, work, page, account }),
 	workHumanRelease: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_release", { expectedProfile, work, page }),
+	workDecisionPreference: (expectedProfile: string) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_decision_preference", { expectedProfile }),
+	workSetDecisionPreference: (expectedProfile: string, choice: WorkDecisionChoiceV1) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_set_decision_preference", { expectedProfile, choice }),
 	tabsBootstrap: () => __TAURI_INVOKE<void>("tabs_bootstrap"),
 	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
 	/**
@@ -187,6 +189,7 @@ export const events = {
 	uiCommand: makeEvent<UiCommand>("ui-command"),
 	workChanged: makeEvent<WorkChanged>("work-changed"),
 	workEnvironmentChanged: makeEvent<WorkEnvironmentChanged>("work-environment-changed"),
+	zephiumWorkDecisionPreferenceChanged: makeEvent<WorkDecisionPreferenceChanged>("zephium:work-decision-preference-changed"),
 	zephiumWorkHumanChanged: makeEvent<WorkHumanChanged>("zephium:work-human-changed"),
 };
 
@@ -1861,6 +1864,25 @@ export type WorkCriterionKind = { kind: "text" } | { kind: "measurement"; unit: 
 export type WorkDecision = {
 	element: WorkElementId,
 	choice: string,
+};
+
+/**  Trusted per-profile choice; page and model output cannot select it. */
+export type WorkDecisionChoiceV1 = "recommended" | "standard" | "off";
+
+export type WorkDecisionPreferenceChanged = WorkDecisionPreferenceChangedV1;
+
+/**  Invalidation only: read the current preference after delivery. */
+export type WorkDecisionPreferenceChangedV1 = {
+	profile: string,
+};
+
+export type WorkDecisionPreferenceV1 = {
+	version: number,
+	profile: string,
+	choice: WorkDecisionChoiceV1,
+	effective: WorkDecisionChoiceV1,
+	typesafe_key_present: boolean,
+	error: WorkFailureV1 | null,
 };
 
 /** One resource representation in a Work environment. */
