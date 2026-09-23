@@ -567,9 +567,51 @@ pub(crate) async fn media_admit_remote(
     let Some(profile) = profile_of(&expected_profile) else {
         return refused(ResourceError::Invalid);
     };
+    let started = std::time::Instant::now();
+    let mut trace = MediaAdmitTrace::default();
+    let result = admit_remote(&app, &shell, profile, environment, element, url, &mut trace).await;
+    let outcome = match &result {
+        Ok(MediaAdmitV1::Admitted { .. }) => "admitted",
+        Ok(MediaAdmitV1::Refused { .. }) => "refused",
+        Err(()) => "unknown",
+    };
+    let error = match &result {
+        Ok(MediaAdmitV1::Refused { error }) => Some(*error),
+        _ => None,
+    };
+    super::work_provider::record_diagnostic(format_args!(
+        "work: phase=media_admit outcome={outcome} error={error:?} fetch={:?} bytes={} elapsed_ms={}",
+        trace.fetch,
+        trace.bytes,
+        started.elapsed().as_millis()
+    ));
+    result
+}
+
+/// Closed facts about one admission, never the URL.
+#[derive(Default)]
+struct MediaAdmitTrace {
+    bytes: usize,
+    #[cfg(feature = "work-product")]
+    fetch: Option<zephium_agentic::public_asset::PublicAssetError>,
+    #[cfg(not(feature = "work-product"))]
+    fetch: Option<()>,
+}
+
+async fn admit_remote(
+    app: &AppHandle,
+    shell: &zephium_app::Handle,
+    profile: ProfileId,
+    environment: String,
+    element: String,
+    url: String,
+    trace: &mut MediaAdmitTrace,
+) -> Result<zephium_ipc::MediaAdmitV1, ()> {
+    use zephium_ipc::MediaAdmitV1;
+    let refused = |error| Ok(MediaAdmitV1::Refused { error });
     #[cfg(not(feature = "work-product"))]
     {
-        let _ = (shell, environment, element, url);
+        let _ = (app, shell, profile, environment, element, url, trace);
         refused(ResourceError::Unavailable)
     }
     #[cfg(feature = "work-product")]
@@ -588,7 +630,7 @@ pub(crate) async fn media_admit_remote(
         if !zephium_agentic::public_asset::public_https(&parsed) {
             return refused(ResourceError::Invalid);
         }
-        let snapshot = match environment_snapshot(&shell, profile, environment).await {
+        let snapshot = match environment_snapshot(shell, profile, environment).await {
             Ok(snapshot) => snapshot,
             Err(error) => return refused(error),
         };
@@ -606,10 +648,7 @@ pub(crate) async fn media_admit_remote(
         let bytes = match zephium_agentic::public_asset::fetch_public_image(parsed.as_str()).await {
             Ok(bytes) => bytes,
             Err(error) => {
-                #[cfg(feature = "work-development-traces")]
-                super::work_provider::record_diagnostic(format_args!(
-                    "work: phase=media fetch={error:?}"
-                ));
+                trace.fetch = Some(error);
                 return refused(match error {
                     zephium_agentic::public_asset::PublicAssetError::TooLarge => {
                         ResourceError::Capacity
@@ -618,6 +657,7 @@ pub(crate) async fn media_admit_remote(
                 });
             }
         };
+        trace.bytes = bytes.len();
         let receiver = shell.import_media(
             profile,
             MediaImport {
@@ -639,7 +679,7 @@ pub(crate) async fn media_admit_remote(
             Ok(ResourceResponse::Error { error }) => return refused(error),
             _ => return refused(ResourceError::OutcomeUnknown),
         };
-        super::emit_resource_changed(&app, &profile.to_string(), &record.id, &record.revision);
+        super::emit_resource_changed(app, &profile.to_string(), &record.id, &record.revision);
         let Some(resource) = ResourceId::parse(&record.id) else {
             return refused(ResourceError::Invalid);
         };
@@ -652,7 +692,7 @@ pub(crate) async fn media_admit_remote(
             Some(existing) => (snapshot.clone(), existing.id),
             None => {
                 let added = match environment_edit(
-                    &shell,
+                    shell,
                     profile,
                     environment,
                     snapshot.revision,
@@ -685,7 +725,7 @@ pub(crate) async fn media_admit_remote(
         });
         if !related
             && environment_edit(
-                &shell,
+                shell,
                 profile,
                 environment,
                 snapshot.revision,
