@@ -37,6 +37,9 @@ pub(super) fn run_case(case: &std::ffi::OsStr, model: ProbeModel) -> Result<(), 
         Some("search-mixed") => 9,
         Some("catalog-link") => 10,
         Some("catalog-absent") => 11,
+        Some("book-product") => 12,
+        Some("jacket-product") => 13,
+        Some("phone-product") => 14,
         _ => return Err(ProbeFailure::Authority),
     };
     run_selected(Some(index), model)
@@ -190,7 +193,7 @@ fn report(
         }
     }
     let valid = completed && response.answers.values().all(Result::is_ok);
-    let purposes = fixture
+    let purposes: std::collections::BTreeMap<String, DecisionPurpose> = fixture
         .request
         .questions()
         .iter()
@@ -212,6 +215,28 @@ fn report(
             (key.clone(), purpose)
         })
         .collect();
+    // One closed line per labeled head: its purpose, the probability policy
+    // reads and whether the answer was correct. No question or option text.
+    for (key, is_correct) in &scored {
+        let Some(Ok(answer)) = response.answers.get(key) else {
+            continue;
+        };
+        let (confidence, selected) = match answer.value() {
+            AnswerValue::Noul { noul } => (noul.max(1.0 - noul), noul.max(1.0 - noul)),
+            AnswerValue::Choice {
+                choice,
+                confidence,
+                probabilities,
+            } => (
+                *confidence,
+                probabilities.get(choice).copied().unwrap_or(0.0),
+            ),
+            AnswerValue::Score { confidence, .. } => (*confidence, *confidence),
+        };
+        writeln!(std::io::stderr(), "decision_eval phase=head fixture={index} repetition={repetition} backend={:?} purpose={:?} kind={:?} confidence={confidence:.6} selected={selected:.6} correct={}",
+            d.backend, purposes.get(key).copied(), answer.kind(), u8::from(*is_correct))
+            .map_err(|_| ProbeFailure::Output)?;
+    }
     let primary = if completed {
         Ok(response)
     } else {

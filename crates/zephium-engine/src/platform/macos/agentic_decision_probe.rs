@@ -12,6 +12,12 @@ pub enum DecisionObservationSite {
     Airbnb,
     Yc,
     Government,
+    /// Public demo storefront product page.
+    DemoStore,
+    /// Public scraping-sandbox book product page.
+    BookStore,
+    /// Public test-site computer product page.
+    TestStore,
 }
 
 impl DecisionObservationSite {
@@ -20,6 +26,9 @@ impl DecisionObservationSite {
             Self::Airbnb => "https://www.airbnb.com/s/San-Francisco--CA/homes",
             Self::Yc => "https://www.ycombinator.com/about",
             Self::Government => "https://travel.state.gov/",
+            Self::DemoStore => "https://www.scrapingcourse.com/ecommerce/product/adrienne-trek-jacket/",
+            Self::BookStore => "https://books.toscrape.com/catalogue/the-black-maria_991/index.html",
+            Self::TestStore => "https://www.demoblaze.com/prod.html?idp_=1",
         }
     }
 }
