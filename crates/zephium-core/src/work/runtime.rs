@@ -720,6 +720,31 @@ pub enum WorkUsageAccounting {
     Exact,
     ConservativeReservation,
 }
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+/// Closed counts for one browser step: durations, call counts and exact
+/// accounting beside the conservative ceiling in `usage`. Never page, model
+/// or provider text.
+pub struct WorkStepMeasurementsV1 {
+    /// Wall time from the step's resource launch to its settled outcome.
+    pub wall_millis: u32,
+    /// Typed decision calls answered by the recommended backend.
+    pub decision_calls: u16,
+    /// Typed decision calls answered by the LLM emulation.
+    pub emulation_calls: u16,
+    /// Page-model calls, including focused generation and extraction.
+    pub planner_calls: u16,
+    /// Native actions the page agent started.
+    pub native_actions: u16,
+    /// Tokens charged by settled provider calls.
+    pub model_tokens: u32,
+    /// Micro-USD charged by settled provider calls.
+    pub cost_micro_usd: u32,
+    /// True only when every settled call reported exact provider accounting.
+    pub cost_exact: bool,
+}
+
 impl WorkUsage {
     pub fn within(self, limits: WorkExecutionLimits) -> bool {
         self.model_tokens <= limits.model_tokens
@@ -870,6 +895,9 @@ pub struct WorkStepFact {
     /// A short line for people: what the agent said or what this step found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Closed measurements of a settled browser step; absent for other kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurements: Option<WorkStepMeasurementsV1>,
 }
 impl WorkStepKindV1 {
     fn validate(&self) -> Result<(), WorkError> {
@@ -1748,6 +1776,7 @@ pub enum WorkRuntimeUpdate {
         evidence: Option<Box<WorkProviderSearchRecordV1>>,
         file: Option<Box<WorkFileRecordV1>>,
         note: Option<String>,
+        measurements: Option<WorkStepMeasurementsV1>,
     },
 }
 

@@ -85,6 +85,69 @@ impl WorkBrowserAdapterSettings {
     }
 }
 
+/// Closed per-read counters. Page, model and provider text never enter them.
+#[derive(Clone, Copy, Debug, Default)]
+struct ReadMeasure {
+    model_calls: u16,
+    decision_calls: u16,
+    emulation_calls: u16,
+    native_actions: u16,
+    model_tokens: u32,
+    cost_micro_usd: u32,
+    inexact: bool,
+}
+
+impl ReadMeasure {
+    fn observe(&mut self, kind: AgentWorkEventKind) {
+        match kind {
+            AgentWorkEventKind::ModelSettled {
+                input_tokens,
+                output_tokens,
+                cost_micro_usd,
+                accounting,
+                ..
+            } => {
+                self.model_calls = self.model_calls.saturating_add(1);
+                self.model_tokens = self.model_tokens.saturating_add(
+                    u32::try_from(input_tokens.saturating_add(output_tokens)).unwrap_or(u32::MAX),
+                );
+                self.cost_micro_usd = self
+                    .cost_micro_usd
+                    .saturating_add(u32::try_from(cost_micro_usd).unwrap_or(u32::MAX));
+                if accounting != AgentModelUsageAccounting::Exact {
+                    self.inexact = true;
+                }
+            }
+            AgentWorkEventKind::DecisionSettled(fact) => {
+                let counter = match fact.backend {
+                    DecisionBackendKind::Emulation => &mut self.emulation_calls,
+                    _ => &mut self.decision_calls,
+                };
+                *counter = counter.saturating_add(1);
+            }
+            AgentWorkEventKind::ActionActive => {
+                self.native_actions = self.native_actions.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+
+    fn settle(self, started: Instant, in_flight: bool) -> WorkStepMeasurementsV1 {
+        WorkStepMeasurementsV1 {
+            wall_millis: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+            decision_calls: self.decision_calls,
+            emulation_calls: self.emulation_calls,
+            planner_calls: self
+                .model_calls
+                .saturating_sub(self.decision_calls.saturating_add(self.emulation_calls)),
+            native_actions: self.native_actions,
+            model_tokens: self.model_tokens,
+            cost_micro_usd: self.cost_micro_usd,
+            cost_exact: !self.inexact && !in_flight,
+        }
+    }
+}
+
 struct NativeGuard(RetainedWorkHandle);
 impl Drop for NativeGuard {
     fn drop(&mut self) {
@@ -242,6 +305,7 @@ impl MacosWorkComposition {
                 artifacts: vec![],
                 intervention: None,
                 note: None,
+                measurements: None,
             });
         }
         let diagnostics = Diagnostics::from(&settings);
@@ -319,6 +383,7 @@ impl MacosWorkComposition {
             artifacts: run.artifacts,
             intervention: run.intervention,
             note: run.note,
+            measurements: Some(run.measurements),
         })
     }
 
@@ -347,6 +412,8 @@ impl MacosWorkComposition {
         let stage_diagnostic = diagnostics.stage;
         #[cfg(not(feature = "public-qualification"))]
         let _ = diagnostics;
+        let started = Instant::now();
+        let mut measure = ReadMeasure::default();
         let original_spec = invocation
             .input
             .retained_resource_spec()
@@ -424,6 +491,7 @@ impl MacosWorkComposition {
             // This loop exists only while an admitted worker/resource is owned.
             // Draining also releases the controller's bounded event backpressure.
             while let Some(event) = guard.0.take_event() {
+                measure.observe(event.kind());
                 match event.kind() {
                     AgentWorkEventKind::ModelActive => model_in_flight = true,
                     AgentWorkEventKind::ModelSettled {
@@ -575,6 +643,7 @@ impl MacosWorkComposition {
                             }
                             .into(),
                         ),
+                        measurements: measure.settle(started, model_in_flight),
                     });
                 }
                 return Err(WorkError::OutcomeUnknown);
@@ -728,6 +797,7 @@ impl MacosWorkComposition {
                         artifacts: vec![],
                         intervention: None,
                         note: Some("The browser was not ready for this page".into()),
+                        measurements: measure.settle(started, model_in_flight),
                     });
                 }
                 RetainedWorkPhase::Uncertain if anonymous => {
@@ -747,6 +817,7 @@ impl MacosWorkComposition {
                             .into(),
                         ),
                         intervention,
+                        measurements: measure.settle(started, model_in_flight),
                     });
                 }
                 RetainedWorkPhase::Uncertain => {
@@ -890,6 +961,7 @@ impl MacosWorkComposition {
                     usage,
                     intervention,
                     note.map(str::to_owned),
+                    measure.settle(started, model_in_flight),
                 ));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -909,6 +981,7 @@ struct BrowserRun {
     artifacts: Vec<WorkArtifactDraft>,
     intervention: Option<WorkInterventionV1>,
     note: Option<String>,
+    measurements: WorkStepMeasurementsV1,
 }
 /// Closed words for why a page needs a person; shown on the step and read by the model.
 fn intervention_note(intervention: Option<&WorkInterventionV1>) -> Option<&'static str> {
@@ -1013,6 +1086,7 @@ impl BrowserRun {
         usage: Option<WorkUsage>,
         intervention: Option<WorkInterventionV1>,
         note: Option<String>,
+        measurements: WorkStepMeasurementsV1,
     ) -> Self {
         let (status, artifacts) = match result {
             Ok(result) => result,
@@ -1025,6 +1099,7 @@ impl BrowserRun {
             artifacts,
             intervention,
             note: note.filter(|_| status != WorkAttemptStatus::Succeeded),
+            measurements,
         }
     }
 }
@@ -1114,7 +1189,7 @@ mod closed_result_tests {
             (WorkError::Capacity, WorkAttemptStatus::Failed),
             (WorkError::OutcomeUnknown, WorkAttemptStatus::OutcomeUnknown),
         ] {
-            let run = BrowserRun::closed(Err(error), Some(usage), None, None);
+            let run = BrowserRun::closed(Err(error), Some(usage), None, None, WorkStepMeasurementsV1::default());
             assert_eq!(run.status, expected);
             assert_eq!(run.usage, Some(usage));
             assert!(run.artifacts.is_empty());

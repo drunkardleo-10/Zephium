@@ -701,6 +701,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         artifacts: vec![],
         evidence: None,
         note: None,
+        measurements: None,
     };
     let usage = WorkUsage {
         model_tokens: 1200,
@@ -1209,6 +1210,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         artifacts: vec![],
         evidence: None,
         note: None,
+        measurements: None,
     };
     let steer = |status| {
         step(
@@ -1283,6 +1285,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         artifacts: vec![],
         evidence: None,
         note: None,
+        measurements: None,
     };
     let proposal = |decision| WorkStepKindV1::WriteFile {
         path: "/Users/me/Documents/project/notes.txt".into(),

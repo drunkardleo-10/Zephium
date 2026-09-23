@@ -479,6 +479,7 @@ pub(super) fn command(
                 artifacts: vec![],
                 evidence: None,
                 note: None,
+                measurements: None,
             });
             row.fact.validate(
                 &read_plan(tx, id, row.fact.spec.plan_revision)?,
@@ -958,6 +959,7 @@ pub(super) fn update(
             evidence,
             file,
             note,
+            measurements,
             ..
         } => {
             if status == WorkStepStatus::Running {
@@ -1004,6 +1006,9 @@ pub(super) fn update(
             settled.evidence = record;
             if note.is_some() {
                 settled.note = note;
+            }
+            if measurements.is_some() {
+                settled.measurements = measurements;
             }
         }
         WorkRuntimeUpdate::FinishCancellation { .. } => {

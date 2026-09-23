@@ -342,7 +342,10 @@ export type WorkBrowseColumn = {
 	name: string,
 	value: WorkBrowseValue,
 	required: boolean,
+	extraction?: WorkBrowseExtraction,
 };
+
+export type WorkBrowseExtraction = "verbatim" | "generate";
 
 export type WorkBrowseRoute = {
 	origin: string,
@@ -899,7 +902,7 @@ export type WorkExecutionFact_Deserialize = {
 	status: WorkExecutionStatus,
 	attempts: WorkAttemptFact[],
 	artifacts: WorkArtifactV1_Deserialize[],
-	provider_evidence?: WorkProviderSearchRecordV1[],
+	provider_evidence?: WorkProviderSearchRecordV1_Deserialize[],
 	/**  What file steps disclosed: listings, excerpts, hits and applied diffs. */
 	file_evidence?: WorkFileRecordV1[],
 	/**  User edits and decisions never overwrite the original agent output. */
@@ -918,7 +921,7 @@ export type WorkExecutionFact_Serialize = {
 	status: WorkExecutionStatus,
 	attempts: WorkAttemptFact[],
 	artifacts: WorkArtifactV1_Serialize[],
-	provider_evidence: WorkProviderSearchRecordV1[],
+	provider_evidence: WorkProviderSearchRecordV1_Serialize[],
 	/**  What file steps disclosed: listings, excerpts, hits and applied diffs. */
 	file_evidence?: WorkFileRecordV1[],
 	/**  User edits and decisions never overwrite the original agent output. */
@@ -1338,17 +1341,42 @@ export type WorkProviderSearchEvidenceV1 = {
  *  Original provider attribution committed with its attempt's outputs. This
  *  carries no native browser reference or authority to open its source URLs.
  */
-export type WorkProviderSearchRecordV1 = {
+export type WorkProviderSearchRecordV1 = WorkProviderSearchRecordV1_Serialize | WorkProviderSearchRecordV1_Deserialize;
+
+/**
+ *  Original provider attribution committed with its attempt's outputs. This
+ *  carries no native browser reference or authority to open its source URLs.
+ */
+export type WorkProviderSearchRecordV1_Deserialize = {
 	id: WorkArtifactId,
 	node: WorkPlanNodeId,
 	attempt: WorkAttemptId,
 	evidence: WorkProviderSearchEvidenceV1,
+	ranking?: WorkPublicSearchRanking | null,
+};
+
+/**
+ *  Original provider attribution committed with its attempt's outputs. This
+ *  carries no native browser reference or authority to open its source URLs.
+ */
+export type WorkProviderSearchRecordV1_Serialize = {
+	id: WorkArtifactId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	evidence: WorkProviderSearchEvidenceV1,
+	ranking?: WorkPublicSearchRanking | null,
 };
 
 export type WorkPublicDiscoveryScope = {
 	/**  Exact initial public search disclosure reviewed before execution. */
 	search_query: string,
 	max_hops: number,
+};
+
+/**  Advisory source priority; IDs are one-based indices into the unchanged citations. */
+export type WorkPublicSearchRanking = {
+	preferred: number[],
+	usage: WorkUsage,
 };
 
 export type WorkPublicSearchScope = {
@@ -1609,6 +1637,8 @@ export type WorkStepFact_Deserialize = {
 	evidence?: WorkArtifactId | null,
 	/**  A short line for people: what the agent said or what this step found. */
 	note?: string | null,
+	/**  Closed measurements of a settled browser step; absent for other kinds. */
+	measurements?: WorkStepMeasurementsV1 | null,
 };
 
 export type WorkStepFact_Serialize = {
@@ -1623,6 +1653,8 @@ export type WorkStepFact_Serialize = {
 	evidence?: WorkArtifactId | null,
 	/**  A short line for people: what the agent said or what this step found. */
 	note?: string | null,
+	/**  Closed measurements of a settled browser step; absent for other kinds. */
+	measurements?: WorkStepMeasurementsV1 | null,
 };
 
 /** One admitted agent operation inside an execution. */
@@ -1667,6 +1699,30 @@ export type WorkStepKindV1_Serialize =
 ({ kind: "edit_file"; path: string; old: string; new: string; decision?: boolean | null }) & { answer?: never; collection?: never; content?: never; followups?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "finish";
 /**  Up to three short next requests the person may choose. */
 followups?: string[] }) & { answer?: never; collection?: never; content?: never; decision?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; text?: never; url?: never };
+
+/**
+ *  Closed counts for one browser step: durations, call counts and exact
+ *  accounting beside the conservative ceiling in `usage`. Never page, model
+ *  or provider text.
+ */
+export type WorkStepMeasurementsV1 = {
+	/**  Wall time from the step's resource launch to its settled outcome. */
+	wall_millis: number,
+	/**  Typed decision calls answered by the recommended backend. */
+	decision_calls: number,
+	/**  Typed decision calls answered by the LLM emulation. */
+	emulation_calls: number,
+	/**  Page-model calls, including focused generation and extraction. */
+	planner_calls: number,
+	/**  Native actions the page agent started. */
+	native_actions: number,
+	/**  Tokens charged by settled provider calls. */
+	model_tokens: number,
+	/**  Micro-USD charged by settled provider calls. */
+	cost_micro_usd: number,
+	/**  True only when every settled call reported exact provider accounting. */
+	cost_exact: boolean,
+};
 
 export type WorkStepStatus = "running" | "succeeded" | "failed" | "cancelled" | "outcome_unknown";
 

@@ -35,6 +35,8 @@ pub struct WorkBrowserOutcome {
     pub intervention: Option<WorkInterventionV1>,
     /// Why the page gave nothing, in closed words the model and the person read.
     pub note: Option<String>,
+    /// Closed wall time, provider call counts and exact accounting for this read.
+    pub measurements: Option<WorkStepMeasurementsV1>,
 }
 pub struct WorkAgentProviders<'a> {
     pub turn: &'a dyn WorkAgentTurnProvider,
@@ -81,6 +83,8 @@ pub enum WorkAgentDiagnostic {
     },
     /// A page whose check may have passed in the background is loaded once more.
     ReadRetried,
+    /// One settled page read, measured: wall time, provider calls and exact cost.
+    ReadMeasured(WorkStepMeasurementsV1),
     /// The loop ended on an error the run reports as interrupted.
     LoopFailed { error: WorkError },
     CommitRefused {
@@ -378,6 +382,7 @@ impl Driver {
             artifacts: vec![],
             evidence: None,
             note: None,
+            measurements: None,
         }
     }
     async fn begin(
@@ -438,6 +443,7 @@ impl Driver {
                 evidence: None,
                 file: file.map(Box::new),
                 note,
+                measurements: None,
             })
             .await
         {
@@ -463,6 +469,7 @@ impl Driver {
         artifacts: Vec<WorkArtifactV1>,
         evidence: Option<WorkProviderSearchRecordV1>,
         note: Option<String>,
+        measurements: Option<WorkStepMeasurementsV1>,
     ) -> Result<(), WorkError> {
         if let Err(error) = self
             .probe
@@ -476,6 +483,7 @@ impl Driver {
                 evidence: evidence.map(Box::new),
                 file: None,
                 note,
+                measurements,
             })
             .await
         {
@@ -1148,6 +1156,7 @@ impl Driver {
                                 artifacts,
                                 Some(record),
                                 note,
+                                None,
                             )
                             .await?;
                         }
@@ -1157,6 +1166,7 @@ impl Driver {
                                 WorkStepStatus::OutcomeUnknown,
                                 None,
                                 vec![],
+                                None,
                                 None,
                                 None,
                             )
@@ -1177,6 +1187,7 @@ impl Driver {
                                 vec![],
                                 None,
                                 outcome.note.map(str::to_owned),
+                                None,
                             )
                             .await?;
                         }
@@ -1187,6 +1198,7 @@ impl Driver {
                         if let Some(usage) = outcome.usage {
                             self.charge(usage);
                         }
+                        let measurements = outcome.measurements;
                         let usage = if outcome.status == WorkStepStatus::OutcomeUnknown {
                             None
                         } else {
@@ -1215,7 +1227,10 @@ impl Driver {
                         }
                         let links = browser_preview_links(&artifacts);
                         let published = artifacts.len();
-                        self.settle(id, status, usage, artifacts, None, note)
+                        if let Some(measured) = measurements {
+                            self.report(WorkAgentDiagnostic::ReadMeasured(measured));
+                        }
+                        self.settle(id, status, usage, artifacts, None, note, measurements)
                             .await?;
                         self.published += published;
                         for link in links {
@@ -1239,8 +1254,16 @@ impl Driver {
                         let _ = outcome.intervention;
                     }
                     Err(WorkError::OutcomeUnknown) => {
-                        self.settle(id, WorkStepStatus::OutcomeUnknown, None, vec![], None, None)
-                            .await?;
+                        self.settle(
+                            id,
+                            WorkStepStatus::OutcomeUnknown,
+                            None,
+                            vec![],
+                            None,
+                            None,
+                            None,
+                        )
+                        .await?;
                         terminal = Some(WorkAttemptStatus::OutcomeUnknown);
                     }
                     Err(_) => {
@@ -1249,6 +1272,7 @@ impl Driver {
                             WorkStepStatus::Failed,
                             prior.or(Some(WorkUsage::default())),
                             vec![],
+                            None,
                             None,
                             None,
                         )
@@ -1307,7 +1331,8 @@ impl Driver {
                 } else {
                     WorkStepStatus::Cancelled
                 };
-                self.settle(id, status, None, vec![], None, None).await?;
+                self.settle(id, status, None, vec![], None, None, None)
+                    .await?;
                 return Ok(Some(if status == WorkStepStatus::Failed {
                     WorkAttemptStatus::Failed
                 } else {
@@ -1690,6 +1715,7 @@ mod tests {
             artifacts: vec![1.into()],
             evidence: None,
             note: None,
+            measurements: None,
         };
         assert!(reuses_completed_read(&request, &step));
         let mut renamed = request.clone();

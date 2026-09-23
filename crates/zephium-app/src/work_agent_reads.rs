@@ -368,6 +368,7 @@ mod tests {
                 artifacts: vec![],
                 intervention: None,
                 note: None,
+                measurements: None,
             };
             assert!(matches!(
                 checked_outcome(Ok(outcome), limits),

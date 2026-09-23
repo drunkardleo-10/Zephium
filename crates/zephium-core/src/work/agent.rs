@@ -433,6 +433,7 @@ impl WorkAgentTurnDisclosure {
                 artifacts: vec![],
                 evidence: None,
                 note: None,
+                measurements: None,
             };
             if probe.validate().is_err() {
                 notices.push(
@@ -469,6 +470,7 @@ impl WorkAgentTurnDisclosure {
                 artifacts: vec![],
                 evidence: None,
                 note: None,
+                measurements: None,
             };
             if probe.validate().is_err() {
                 notices.push("The question was dropped: it needs a prompt.".into());

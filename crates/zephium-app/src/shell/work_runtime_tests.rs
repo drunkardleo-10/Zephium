@@ -802,6 +802,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                     usage: Some(WorkUsage::default()),
                     intervention: None,
                     note: None,
+                    measurements: None,
                     artifacts: vec![WorkArtifactDraft {
                         output: request.output,
                         title: "Earlier partial result".into(),

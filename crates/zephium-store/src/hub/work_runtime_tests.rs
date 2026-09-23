@@ -851,6 +851,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         artifacts: vec![],
         evidence: None,
         note: None,
+        measurements: None,
     };
     // Steps need a live attempt.
     assert!(update(
@@ -970,6 +971,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
             evidence: None,
             file: None,
             note: None,
+            measurements: None,
         }
     )
     .is_err());
@@ -985,6 +987,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
             evidence: Some(Box::new(record)),
             file: None,
             note: Some("Found 1 source".into()),
+            measurements: None,
         },
     )
     .unwrap();
@@ -1127,6 +1130,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
             evidence: None,
             file: Some(Box::new(written.clone())),
             note: Some("Applied".into()),
+            measurements: None,
         },
     )
     .unwrap();
