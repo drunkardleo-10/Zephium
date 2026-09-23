@@ -867,8 +867,9 @@ fn incomplete_reads_retain_only_confident_located_evidence_for_later_mapping() {
         )
         .unwrap()
         .is_none());
-    assert_eq!(retained.retained_items(), 2);
-    assert_eq!(retained.retained_bytes(), 12);
+    // The located price, and the name the page's own heading supplies.
+    assert_eq!(retained.retained_items(), 4);
+    assert_eq!(retained.retained_bytes(), 40);
     assert!(answers
         .take_read_selection(&observation, call.account(), &schema)
         .unwrap()
@@ -1251,6 +1252,219 @@ fn document_metadata_nodes_are_never_name_text_or_evidence_candidates() {
     for index in 0..chunks {
         assert_eq!(offered(&findings, &format!("find_{index}")), [false, false]);
     }
+}
+
+const TITLE: &str = "Tower Bridge 21067 | Architecture | Buy online at the Official LEGO® Shop US";
+
+/// The recorded LEGO Tower Bridge product page (lego_product_01): its
+/// set-number line, level-1 heading and price, with the page's metadata.
+fn product_page(
+    heading: Option<&str>,
+    title: bool,
+) -> (AgentModelCallRequest, SemanticObservation) {
+    let (_, call, previous, _) = admitted_fixture();
+    let mut nodes = vec![
+        json!({"k":1,"r":"document","fc":true}),
+        json!({"k":2,"p":0,"r":"image","n":"Page image","m":"https://www.lego.com/cdn/21067.png","fc":true}),
+        json!({"k":3,"p":0,"r":"link","n":"Page address","u":"https://www.lego.com/en-us/product/tower-bridge-10214","fc":true}),
+        json!({"k":4,"p":0,"r":"paragraph","t":"#21067","fc":true}),
+        json!({"k":6,"p":0,"r":"paragraph","t":"$349.99","fc":true}),
+        json!({"k":7,"p":0,"r":"paragraph","t":"Available now","fc":true}),
+    ];
+    if title {
+        nodes.push(json!({"k":8,"p":0,"r":"paragraph","n":"Page title","t":TITLE,"fc":true}));
+    }
+    if let Some(heading) = heading {
+        nodes.push(json!({"k":5,"p":0,"r":"heading","l":1,"n":heading,"fc":true}));
+    }
+    let snapshot = decode_semantic_snapshot(
+        SemanticDecodeContext::new(
+            SemanticInvocationId::new(1).unwrap(),
+            previous.frames()[0].frame().clone(),
+            SemanticSnapshotGeneration::new(1).unwrap(),
+        ),
+        &serde_json::to_vec(
+            &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":nodes}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let observation = SemanticObservationAssembler::new(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(1).unwrap(),
+            call.account().context(),
+            SemanticObservationBudget::try_new(16, 8192, 1).unwrap(),
+        ),
+        snapshot,
+    )
+    .unwrap()
+    .finish()
+    .unwrap();
+    (call, observation)
+}
+
+/// The name head's offered nodes and the copied name, for one name answer
+/// (None abstains) on a single-record read of the product page.
+fn own_page_name(
+    heading: Option<&str>,
+    title: bool,
+    answer: Option<&str>,
+) -> (Vec<String>, Vec<String>, Option<String>) {
+    let (call, observation) = product_page(heading, title);
+    let schema = SemanticExtractionSchema::try_new(
+        SemanticExtractionSchemaId::new(1).unwrap(),
+        vec![SemanticExtractionFieldSchema::try_rows(
+            "output_0".into(),
+            true,
+            vec![
+                SemanticExtractionFieldSchema::try_text("name".into(), true, 512)
+                    .unwrap()
+                    .with_verbatim_text()
+                    .unwrap(),
+                SemanticExtractionFieldSchema::try_text("price".into(), false, 512)
+                    .unwrap()
+                    .with_verbatim_text()
+                    .unwrap(),
+            ],
+            1,
+        )
+        .unwrap()],
+    )
+    .unwrap();
+    let objective = AgentProviderObjective::try_admit_conservative_utf8(
+        "Read this product page's name and displayed price".into(),
+        &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
+    )
+    .unwrap();
+    let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+    let projection = DecisionObservation::try_for_read(
+        &observation,
+        &objective,
+        &authority,
+        call.account(),
+        Some(&schema),
+    )
+    .unwrap();
+    // Nodes by their visible text, else their name.
+    let label = |node: &SemanticNode| {
+        node.text()
+            .or(node.name())
+            .map(|text| text.as_str().to_owned())
+            .unwrap_or_default()
+    };
+    let nodes: Vec<_> = observation.frames()[0].nodes().iter().collect();
+    let token = |text: &str| {
+        nodes
+            .iter()
+            .find(|node| label(node) == text)
+            .map(|node| node.reference().model_token().to_string())
+            .unwrap()
+    };
+    let offered = |key: &str| {
+        let Question::Choice { criteria, .. } = &projection.request().questions()[key] else {
+            panic!("choice expected");
+        };
+        nodes
+            .iter()
+            .filter(|node| criteria.contains_key(&node.reference().model_token().to_string()))
+            .map(|node| label(node))
+            .collect::<Vec<_>>()
+    };
+    let (name_offered, price_offered) = (offered("locate_0"), offered("locate_1"));
+    let mut output = fixture_answers(projection.request());
+    output["answers"]["done"]["noul"] = json!(0.99);
+    for (key, target) in [("locate_0", answer), ("locate_1", Some("$349.99"))] {
+        let Some(target) = target.map(token) else {
+            continue;
+        };
+        let target = target.as_str();
+        let Question::Choice { criteria, .. } = &projection.request().questions()[key] else {
+            panic!("choice expected");
+        };
+        let probabilities: BTreeMap<_, _> = criteria
+            .keys()
+            .map(|key| (key, if key == target { 1.0 } else { 0.0 }))
+            .collect();
+        output["answers"][key] =
+            json!({"type":"choice","choice":target,"confidence":1.0,"probabilities":probabilities});
+    }
+    let response = projection
+        .request()
+        .decode_emulation(
+            &serde_json::to_vec(&output).unwrap(),
+            DecisionUsage::default(),
+        )
+        .unwrap();
+    let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+    let (selection, ready) = answers
+        .take_read_progress_retaining_evidence(
+            &observation,
+            call.account(),
+            &schema,
+            SemanticCaptureInstant::from_millis(101),
+            &mut SemanticRetainedReadEvidence::default(),
+        )
+        .unwrap()
+        .unwrap();
+    if !ready {
+        return (name_offered, price_offered, None);
+    }
+    let result = selection
+        .prepare(
+            &observation,
+            call.account(),
+            SemanticCaptureInstant::from_millis(101),
+            None,
+        )
+        .unwrap()
+        .finish(None)
+        .unwrap();
+    let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+        panic!("rows expected");
+    };
+    let name = rows.items()[0]
+        .fields()
+        .iter()
+        .find(|field| field.name() == "name")
+        .map(|field| {
+            let SemanticExtractedValue::Text(text) = field.value() else {
+                panic!("text expected");
+            };
+            text.as_str().to_owned()
+        });
+    (name_offered, price_offered, name)
+}
+
+#[test]
+fn an_own_page_names_its_subject_from_its_heading_then_its_title() {
+    let heading = Some("Tower Bridge");
+    // The name head offers only the level-1 heading; price never sees the
+    // page's metadata.
+    let (offered, price, name) = own_page_name(heading, true, Some("Tower Bridge"));
+    assert_eq!(offered, ["Tower Bridge"]);
+    assert_eq!(
+        price,
+        ["#21067", "$349.99", "Available now", "Tower Bridge"]
+    );
+    assert_eq!(name.as_deref(), Some("Tower Bridge"));
+    // An abstaining name head takes the heading.
+    assert_eq!(
+        own_page_name(heading, true, None).2.as_deref(),
+        Some("Tower Bridge")
+    );
+    // Without a heading the page title is offered and taken.
+    let (offered, _, name) = own_page_name(None, true, None);
+    assert_eq!(offered, [TITLE]);
+    assert_eq!(name.as_deref(), Some(TITLE));
+    // A heading that is only the set number yields to the title.
+    let (_, _, name) = own_page_name(Some("21067"), true, Some("21067"));
+    assert_eq!(name.as_deref(), Some(TITLE));
+    // With neither, ordinary text is offered; the set number stands only then.
+    let (offered, _, name) = own_page_name(None, false, Some("#21067"));
+    assert_eq!(offered, ["#21067", "$349.99", "Available now"]);
+    assert_eq!(name.as_deref(), Some("#21067"));
+    // And an abstaining head on such a page leaves the name missing.
+    assert_eq!(own_page_name(None, false, None).2, None);
 }
 
 #[test]

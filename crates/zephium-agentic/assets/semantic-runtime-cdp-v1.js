@@ -130,6 +130,7 @@ const anchorHrefGetter =
 typeof HTMLAnchorElement === "function" ? getter(HTMLAnchorElement.prototype, "href") : null;
 const imageCurrentSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "currentSrc") : null;
 const imageSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "src") : null;
+const titleTextGetter = typeof HTMLTitleElement === "function" ? getter(HTMLTitleElement.prototype, "text") : null;
 const detailsOpenGetter = typeof HTMLDetailsElement === "function" ? getter(HTMLDetailsElement.prototype, "open") : null;
 const buttonTypeGetter = typeof HTMLButtonElement === "function" ? getter(HTMLButtonElement.prototype, "type") : null;
 const buttonFormGetter = typeof HTMLButtonElement === "function" ? getter(HTMLButtonElement.prototype, "form") : null;
@@ -844,6 +845,7 @@ return { role: "image", tag, inputType };
 }
 if (isPageImageMeta(node, tag)) return { role: "image", tag, inputType, pageImage: true, headMeta: true };
 if (isPageAddressMeta(node, tag)) return { role: "link", tag, inputType, pageAddress: true, headMeta: true, noOperations: true };
+if (pageTitleText(node, tag) !== null) return { role: "paragraph", tag, inputType, pageTitle: true, headMeta: true, noOperations: true };
 if (tag === "progress" || tag === "meter") return { role: "progress", tag, inputType };
 if (tag === "output") return { role: "status", tag, inputType };
 return genericTextDescriptor(node, tag, inputType);
@@ -855,8 +857,9 @@ tag === "script" ||
 tag === "style" ||
 tag === "template" ||
 tag === "noscript" ||
-tag === "title" ||
-(tag === "meta" && !isPageImageMeta(element, tag) && !isPageAddressMeta(element, tag)) ||
+(tag === "title" && pageTitleText(element, tag) === null) ||
+(tag === "meta" && !isPageImageMeta(element, tag) && !isPageAddressMeta(element, tag) &&
+pageTitleText(element, tag) === null) ||
 (tag === "link" && !isPageAddressMeta(element, tag)) ||
 has(element, "hidden") ||
 has(element, "inert") ||
@@ -869,6 +872,16 @@ return tag === "meta" && lower(attribute(element, "property", 32) || "") === "og
 function isPageAddressMeta(element, tag) {
 return (tag === "link" && lower(attribute(element, "rel", 32) || "") === "canonical") ||
 (tag === "meta" && lower(attribute(element, "property", 32) || "") === "og:url");
+}
+function pageTitleText(element, tag) {
+let text = null;
+try {
+if (tag === "title") text = read(titleTextGetter, element);
+else if (tag === "meta" && lower(attribute(element, "property", 32) || "") === "og:title") {
+text = attribute(element, "content", 1024);
+}
+} catch (_) { text = null; }
+return typeof text === "string" && apply(stringTrim, text, []) !== "" ? text : null;
 }
 function pushHiddenPhotos(stack, item, state) {
 const node = item.node;
@@ -1645,11 +1658,17 @@ if (!isDocument) {
 const sensitivity = sensitivityFor(element);
 if (sensitivity !== "public") setSensitivity(record, sensitivity);
 let name = descriptor.pageImage === true ? "Page image" :
-descriptor.pageAddress === true ? "Page address" : labelledText(element, descriptor, state);
+descriptor.pageAddress === true ? "Page address" :
+descriptor.pageTitle === true ? "Page title" : labelledText(element, descriptor, state);
 if ((name === null || name === "") && descriptor.role === "image") name = ancestorLabel(element, state);
 if (name !== null && name !== "") addName(record, name, state);
 record.sink = recordSink(descriptor, wire.n !== undefined);
 if (record.sink === "value") record.sinkBytes = 0;
+if (descriptor.pageTitle === true) {
+record.sinkBytes = 0;
+appendSink(record, pageTitleText(element, descriptor.tag) || "", state);
+record.sink = null;
+}
 const imageSource = descriptor.role === "image" && (descriptor.tag === "img" || descriptor.pageImage === true);
 if (((descriptor.role === "link" && (descriptor.tag === "a" || descriptor.pageAddress === true)) || imageSource) &&
 record.sensitivity === "public") {

@@ -875,9 +875,10 @@ fn navigation_control(frame: &SemanticSnapshot, node: &SemanticNode) -> bool {
         })
 }
 
-/// The runtime's head-metadata nodes: the canonical "Page address" link and
-/// the "Page image" picture. Their labels are not page text, so they are never
-/// a name, text or evidence candidate; links and pictures keep their heads.
+/// The runtime's head-metadata nodes: the canonical "Page address" link, the
+/// "Page image" picture and the "Page title" text. None is a text or evidence
+/// candidate; links and pictures keep their heads, and only an own page's
+/// subject name may fall back to its title.
 pub(super) fn document_metadata(node: &SemanticNode) -> bool {
     match node.role() {
         SemanticRole::Link => {
@@ -891,8 +892,18 @@ pub(super) fn document_metadata(node: &SemanticNode) -> bool {
                 .is_some_and(|name| name.as_str() == "Page image")
                 && node.image_source().is_some()
         }
+        SemanticRole::Paragraph => page_title(node),
         _ => false,
     }
+}
+
+pub(super) fn page_title(node: &SemanticNode) -> bool {
+    node.role() == SemanticRole::Paragraph
+        && node
+            .name()
+            .is_some_and(|name| name.as_str() == "Page title")
+        && node.text().is_some_and(|text| !text.is_empty())
+        && node.operations().is_empty()
 }
 
 fn permitted(sensitivity: SemanticSensitivity, account: AgentAccountScope) -> bool {
