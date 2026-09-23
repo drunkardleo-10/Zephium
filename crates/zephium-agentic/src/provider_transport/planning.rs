@@ -520,6 +520,11 @@ fn decode(
         usage,
     }))
 }
+/// Output items one strictly decoded response may carry: several reasoning
+/// items and exactly one assistant message. A second message is still refused
+/// by the shape check, whatever this bound is.
+const MAX_STRICT_OUTPUT_ITEMS: usize = 8;
+
 pub(super) fn decode_response(
     bytes: &[u8],
     reserved: u32,
@@ -647,7 +652,9 @@ fn decode_response_with(
     {
         return Err(Rejection::Identity);
     }
-    if (response.output.len() > 2 && !first_message) || response.output.len() > 32 {
+    if (response.output.len() > MAX_STRICT_OUTPUT_ITEMS && !first_message)
+        || response.output.len() > 32
+    {
         return Err(Rejection::ItemCount);
     }
     let usage = response.usage;
@@ -691,7 +698,10 @@ fn decode_response_with(
             break;
         }
         match output {
-            Output::Reasoning {} if first_message || (!reasoning && text.is_none() && !refused) => {
+            // Reasoning items carry no content here. A model may emit several
+            // before its single answer; anything after the answer, and any
+            // second message, still fails the shape check below.
+            Output::Reasoning {} if first_message || (text.is_none() && !refused) => {
                 reasoning = true
             }
             Output::Message {

@@ -116,19 +116,52 @@ fn planning_refusals_preserve_usage_and_duplicate_messages_are_rejected() {
 fn closed_envelope_diagnostics_preserve_the_output_item_limit() {
     let mut value = response();
     let message = value["output"][1].clone();
-    value["output"].as_array_mut().unwrap().push(message);
+    for _ in 0..8 {
+        value["output"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, json!({"type":"reasoning"}));
+    }
     let bytes = serde_json::to_vec(&value).unwrap();
     assert!(matches!(
         decode_response_checked(&bytes, 100, &config()),
         Err(PlanningResponseRejection::ItemCount)
     ));
     assert!(decode_response(&bytes, 100, &config()).is_none());
-    value["output"].as_array_mut().unwrap().pop();
+    let _ = message;
+    let mut value = response();
     value["usage"]["total_tokens"] = json!(301);
     assert!(matches!(
         decode_response_checked(&serde_json::to_vec(&value).unwrap(), 100, &config()),
         Err(PlanningResponseRejection::Usage)
     ));
+}
+
+#[test]
+fn several_reasoning_items_are_admitted_but_a_second_message_never_is() {
+    let base = response();
+    let message = base["output"][1].clone();
+    let reasoning = json!({"type":"reasoning"});
+    // Two leading reasoning items plus one answer: the exact shape the
+    // recorded emulation rejections carried.
+    let mut admitted = base.clone();
+    admitted["output"] = json!([reasoning, reasoning, message]);
+    assert!(matches!(
+        decode_response_checked(&serde_json::to_vec(&admitted).unwrap(), 100, &config()),
+        Ok(Ok(_))
+    ));
+    for outputs in [
+        json!([reasoning, message, message]),
+        json!([message, reasoning, message]),
+        json!([reasoning, reasoning, message, reasoning]),
+    ] {
+        let mut refused = base.clone();
+        refused["output"] = outputs;
+        assert!(matches!(
+            decode_response_checked(&serde_json::to_vec(&refused).unwrap(), 100, &config()),
+            Err(PlanningResponseRejection::OutputShape)
+        ));
+    }
 }
 struct Server {
     endpoint: String,
