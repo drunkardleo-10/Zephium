@@ -60,6 +60,8 @@ enum Mode {
     AgentDisclosure,
     AgentCollection,
     AgentDetails,
+    AgentTrip,
+    AgentAirbnb,
     AgentMoney,
     MoneyNode,
 }
@@ -94,6 +96,14 @@ pub(super) fn run_agent_money() -> Result<(), super::ProbeFailure> {
 
 pub(super) fn run_agent_collection() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::AgentCollection)
+}
+
+pub(super) fn run_agent_trip() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentTrip)
+}
+
+pub(super) fn run_agent_airbnb() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentAirbnb)
 }
 
 pub(super) fn run_agent_details() -> Result<(), super::ProbeFailure> {
@@ -182,6 +192,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentDisclosure
             | Mode::AgentCollection
             | Mode::AgentDetails
+            | Mode::AgentTrip
+            | Mode::AgentAirbnb
             | Mode::AgentMoney
     ) {
         6
@@ -204,6 +216,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         | Mode::AgentDisclosure
         | Mode::AgentCollection
         | Mode::AgentDetails
+        | Mode::AgentTrip
+        | Mode::AgentAirbnb
         | Mode::AgentMoney => 720,
         Mode::Public => 160,
         _ => 240,
@@ -430,6 +444,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentDisclosure
             | Mode::AgentCollection
             | Mode::AgentDetails
+            | Mode::AgentTrip
+            | Mode::AgentAirbnb
             | Mode::AgentMoney
     ) {
         let execution = &state.executions[0];
@@ -493,6 +509,62 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     let money_accepted = !matches!(mode, Mode::AgentMoney | Mode::MoneyNode) || state.executions[0].artifacts.iter().any(|artifact| {
         artifact.title == "Observed product prices" && matches!(&artifact.data, zephium_core::work::artifact::WorkArtifactDataV1::ComparisonMatrix { subjects, cells, .. } if subjects.len() == 1 && subjects[0].name == "Acme Circles T-Shirt" && !subjects[0].image_candidates.is_empty() && subjects.len() == cells.len() && cells.iter().all(|row| row.first().is_some_and(|cell| matches!(&cell.value, zephium_core::work::artifact::WorkCellValue::Money { currency, observed_at: None, .. } if currency == "USD") && !cell.evidence.is_empty())))
     });
+    let airbnb_target = |value: &str| {
+        zephium_agentic::ContextNavigationTarget::parse(value)
+            .ok()
+            .and_then(|target| {
+                let url = target.as_url();
+                let host = url.host_str()?;
+                let allowed = ["airbnb.com", "airbnb.pl"]
+                    .iter()
+                    .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")));
+                allowed.then(|| url.path().to_owned())
+            })
+    };
+    let airbnb_reads: std::collections::BTreeSet<_> = state.executions[0]
+        .steps
+        .iter()
+        .filter_map(|step| match &step.kind {
+            WorkStepKindV1::Read { url, .. } if step.status == WorkStepStatus::Succeeded => {
+                airbnb_target(url)
+            }
+            _ => None,
+        })
+        .collect();
+    let airbnb_listing_reads = airbnb_reads
+        .iter()
+        .filter(|path| path.starts_with("/rooms/"))
+        .count();
+    let travel_accepted = match mode {
+        Mode::AgentTrip => !airbnb_reads.is_empty(),
+        Mode::AgentAirbnb => {
+            airbnb_listing_reads >= 3
+                && state.executions[0].artifacts.iter().any(|artifact| {
+                    let zephium_core::work::artifact::WorkArtifactDataV1::ComparisonMatrix {
+                        subjects,
+                        ..
+                    } = &artifact.data
+                    else {
+                        return false;
+                    };
+                    let pages: std::collections::BTreeSet<_> = subjects
+                        .iter()
+                        .filter_map(|subject| subject.homepage.as_deref().and_then(&airbnb_target))
+                        .filter(|path| path.starts_with("/rooms/") && airbnb_reads.contains(path))
+                        .collect();
+                    subjects.len() == 3 && pages.len() == 3 && !artifact.evidence.is_empty()
+                })
+        }
+        _ => true,
+    };
+    if matches!(mode, Mode::AgentTrip | Mode::AgentAirbnb) {
+        let _ = writeln!(
+            std::io::stdout().lock(),
+            "travel_qualification airbnb_reads={} listing_reads={} accepted={travel_accepted}",
+            airbnb_reads.len(),
+            airbnb_listing_reads
+        );
+    }
     let mut evidence = Vec::new();
     for link in state.executions[0]
         .artifacts
@@ -537,6 +609,10 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             } else {
                 "agent-money-incomplete.json"
             }
+        } else if mode == Mode::AgentTrip {
+            "agent-trip-run.json"
+        } else if mode == Mode::AgentAirbnb {
+            "agent-airbnb-run.json"
         } else if mode == Mode::AgentDetails {
             if collection_accepted {
                 "agent-details-run.json"
@@ -568,6 +644,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             "fixed_collection_assignment": mode == Mode::AgentMoney,
             "money_accepted": money_accepted,
             "collection_accepted": collection_accepted,
+            "travel_accepted": travel_accepted,
             "projection": state,
             "historical_evidence": evidence,
         }))
@@ -579,7 +656,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     {
         return Err(Error::Runtime);
     }
-    if !collection_accepted || !money_accepted {
+    if !collection_accepted || !money_accepted || !travel_accepted {
         return Err(Error::Runtime);
     }
     writeln!(std::io::stdout().lock(), "durable-work: fixed_collection_assignment={}; native_browser=true; artifacts={}; resource_closed=true; reopened=true; semantic_status={:?}; content=redacted", mode == Mode::AgentMoney, state.executions[0].artifacts.len(), state.executions[0].status).map_err(|_| Error::Output)?;
@@ -632,6 +709,8 @@ async fn workflow(
             | Mode::AgentDisclosure
             | Mode::AgentCollection
             | Mode::AgentDetails
+            | Mode::AgentTrip
+            | Mode::AgentAirbnb
             | Mode::AgentMoney
             | Mode::AgentFiles
     ) {
@@ -1204,6 +1283,8 @@ async fn agent_workflow(
         Mode::AgentFiles => files_objective.as_deref().unwrap_or_default(),
         Mode::AgentCollection => AGENT_COLLECTION_OBJECTIVE,
         Mode::AgentDetails => AGENT_DETAILS_OBJECTIVE,
+        Mode::AgentTrip => "Plan a trip from Poland to San Francisco for a YC batch as a solo founder; for flats check Airbnb. Use public sources for batch timing, travel logistics and practical accommodation tradeoffs, with cited findings. Read Airbnb itself before making any claim about its listings. Dates and budget are unspecified: state planning assumptions and leave live availability and total stay cost unknown unless the pages establish them. Do not book, submit forms, sign in, create accounts, send messages or interact with verification controls. Report blocked pages honestly.",
+        Mode::AgentAirbnb => "Find three good Airbnb options in San Francisco for a solo founder attending a YC batch, compare and recommend one using cited public page evidence. Inspect Airbnb itself and observed listing links. Dates and budget are unspecified: state assumptions, distinguish nightly prices from total stay costs, and leave unavailable details unknown. Include observed pictures when available. Do not book, submit forms, sign in, create accounts, send messages or interact with verification controls. If access prevents three verified options, report that limitation instead of inventing options.",
         Mode::AgentMoney => AGENT_MONEY_OBJECTIVE,
         Mode::AgentRead => AGENT_READ_OBJECTIVE,
         Mode::AgentGovernment | Mode::AgentHumanGovernment => AGENT_GOVERNMENT_OBJECTIVE,
@@ -1393,7 +1474,13 @@ async fn agent_workflow(
                     let key = keys.lock().ok().and_then(|mut keys| keys.pop());
                     let callback = &callback;
                     async move {
-                        let key = key.ok_or(WorkError::Capacity)?;
+                        let key = match key {
+                            Some(key) => key,
+                            None => tokio::task::spawn_blocking(load_macos_probe_openai_credential)
+                                .await
+                                .map_err(|_| WorkError::Unavailable)?
+                                .map_err(|_| WorkError::Unavailable)?,
+                        };
                         let _ = writeln!(
                             std::io::stdout().lock(),
                             "agent-work: browser_step={}; content=redacted",
