@@ -315,6 +315,68 @@ impl DecisionReadSelection {
                 })
     }
 
+    /// This look joined with an earlier look of the same read, when together
+    /// they finish it: every column this look lacks is copied from the earlier
+    /// one's retained evidence, and a column neither look located is optional
+    /// and was confidently absent from both (or is an optional link or
+    /// picture). Once the read has no further look (`last`), an optional
+    /// column neither look located publishes unknown. Finish the join with
+    /// `prepare_confirmed`; a generated column publishes unknown there.
+    pub fn joined_with(&self, earlier: &Self, last: bool) -> Option<Self> {
+        if self.projection.schema != earlier.projection.schema || self.projection.findings {
+            return None;
+        }
+        let mut targets = self.targets.clone();
+        let mut keys = self.keys.clone();
+        let mut gained = false;
+        for (index, field) in self.projection.columns.iter().enumerate() {
+            if targets[index].is_none() && earlier.targets[index].is_some() && copy_only(field) {
+                targets[index] = earlier.targets[index];
+                keys[index] = earlier.keys[index];
+                gained = true;
+            }
+        }
+        let complete = self
+            .projection
+            .columns
+            .iter()
+            .enumerate()
+            .all(|(index, field)| {
+                keys[index].is_some()
+                    || field.document_address()
+                    || (!field.required()
+                        && (last
+                            || matches!(
+                            field.kind(),
+                            SemanticExtractionValueKind::Url | SemanticExtractionValueKind::ImageUrl
+                        ) || (self.absent.contains(&index) && earlier.absent.contains(&index))))
+            });
+        (gained && complete).then(|| Self {
+            projection: self.projection.clone(),
+            baseline: self.baseline.clone(),
+            account: self.account,
+            absent: self
+                .absent
+                .iter()
+                .filter(|index| targets[**index].is_none())
+                .copied()
+                .collect(),
+            unresolved: Vec::new(),
+            targets,
+            keys,
+            evidence: Vec::new(),
+        })
+    }
+
+    /// Whether this later look copies every column `earlier` located: its
+    /// absent and unsettled columns are only ones the earlier look lacked too.
+    pub fn keeps_located(&self, earlier: &Self) -> bool {
+        self.targets
+            .iter()
+            .zip(&earlier.targets)
+            .all(|(current, before)| current.is_some() || before.is_none())
+    }
+
     /// Whether this later look, over the same schema, again finds absent every
     /// column `earlier` is waiting on.
     pub fn confirms_absence(&self, earlier: &Self) -> bool {
@@ -541,6 +603,10 @@ impl DecisionObservationAnswers {
                 },
                 _ => None,
             };
+            // A located "Label:Value" pair publishes its value node.
+            if copy_only(field) && field.kind() == SemanticExtractionValueKind::Text {
+                target = target.map(|target| labeled_value(observation, target).unwrap_or(target));
+            }
             if projection.subject_name(index) {
                 // An uncertain name, or one that is only a set or model
                 // number, yields to the page's own heading or title.
@@ -829,7 +895,8 @@ impl DecisionReadSelection {
     /// later look confirmed. The result is bound to the current observation;
     /// the earlier look's located values are cited from the evidence retained
     /// when it was taken, and absent optional columns publish unknown. Only
-    /// exact copies are supported here: a generated column falls back.
+    /// exact copies are cited: an optional generated column publishes unknown
+    /// and a required one falls back.
     pub fn prepare_confirmed<'a>(
         self,
         current: &'a SemanticObservation,
@@ -846,7 +913,7 @@ impl DecisionReadSelection {
                 .columns
                 .iter()
                 .zip(&self.targets)
-                .any(|(field, target)| target.is_some() && !copy_only(field))
+                .any(|(field, target)| target.is_some() && !copy_only(field) && field.required())
         {
             return Err(SemanticExtractionError::ReadNotDelivered);
         }
@@ -872,6 +939,11 @@ impl DecisionReadSelection {
         .map_err(|_| SemanticExtractionError::ReadNotDelivered)?;
         let mut copied = BTreeMap::new();
         for (field, target) in self.projection.columns.iter().zip(&self.keys) {
+            // An optional generated column needs a generation call over this
+            // look; citing an earlier look publishes it unknown instead.
+            if !copy_only(field) && !field.document_address() {
+                continue;
+            }
             let (sources, required): (&[SemanticReadField], _) = match (target, field.kind()) {
                 (_, _) if field.document_address() => {
                     (&[SemanticReadField::DocumentAddress], None)
@@ -1024,6 +1096,39 @@ fn own_page_titles(
         .map(SemanticNode::reference)
         .collect();
     (headings, titles)
+}
+
+/// The value node of a labeled pair: a node named "Label:Value" whose only
+/// text-bearing child shows exactly the value, as LEGO's "Pieces:3745" group
+/// with its "3745" paragraph.
+fn labeled_value(
+    observation: &SemanticObservation,
+    target: SemanticReferenceId,
+) -> Option<SemanticReferenceId> {
+    let frame = observation
+        .frames()
+        .iter()
+        .find(|frame| frame.nodes().iter().any(|node| node.reference() == target))?;
+    let index = frame.nodes().iter().position(|node| node.reference() == target)?;
+    let node = &frame.nodes()[index];
+    if node.text().is_some_and(|text| !text.as_str().trim().is_empty()) {
+        return None;
+    }
+    let (label, value) = node.name()?.as_str().rsplit_once(':')?;
+    let value = value.trim();
+    if label.trim().is_empty() || value.is_empty() {
+        return None;
+    }
+    let mut children = frame
+        .nodes()
+        .iter()
+        .filter(|child| child.parent().map(usize::from) == Some(index))
+        .filter(|child| copied_text(child).is_some());
+    let child = children.next()?;
+    (children.next().is_none()
+        && child.sensitivity() == SemanticSensitivity::Public
+        && copied_text(child).map(str::trim) == Some(value))
+    .then(|| child.reference())
 }
 
 /// What a verbatim copy takes: visible text, else a text value, else the name.

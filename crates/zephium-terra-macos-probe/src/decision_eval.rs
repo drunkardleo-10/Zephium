@@ -58,6 +58,7 @@ pub(super) fn run_case(case: &std::ffi::OsStr, model: ProbeModel) -> Result<(), 
         Some("lego-catalog") => 19,
         Some("lego-catalog-cells") => 20,
         Some("book-catalog") => 21,
+        Some("lego-product-specs") => 22,
         _ => return Err(ProbeFailure::Authority),
     };
     run_selected(Some(index), model)

@@ -29,6 +29,9 @@ impl AgentWorkController {
         let mut reobservations = 0u8;
         let mut consent_dismissed = false;
         let mut pending: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
+        // The unfinished look with the most located values before Rust moved
+        // the page; a later look may finish the read joined with it.
+        let mut earlier_look: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
         // The address the one-document gate admitted, never one from page text.
         let document = state
             .native
@@ -149,18 +152,39 @@ impl AgentWorkController {
                     // confidently found absent finishes once a later look
                     // confirms each absence; those columns publish unknown.
                     // A required column never settles this way.
-                    let confirmed =
-                        pending.take_if(|earlier| !ready && selection.confirms_absence(earlier));
-                    if ready || confirmed.is_some() {
+                    // A look that lacks values an earlier look located, and
+                    // together with it settles every column, finishes joined:
+                    // a scroll must not lose a value the first look found.
+                    let joined = (!ready)
+                        .then(|| {
+                            [earlier_look.as_deref(), pending.as_deref()]
+                                .into_iter()
+                                .flatten()
+                                .find_map(|earlier| {
+                                    selection.joined_with(
+                                        earlier,
+                                        reobservations >= MAX_READ_REOBSERVATIONS,
+                                    )
+                                })
+                        })
+                        .flatten();
+                    let confirmed = pending.take_if(|earlier| {
+                        !ready && joined.is_none() && selection.confirms_absence(earlier)
+                    });
+                    if ready || confirmed.is_some() || joined.is_some() {
                         state.refresh_account(worker, browser)?;
                         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
                         // The earlier look's values come from the evidence it
                         // retained, cited under the current observation.
                         let evidence = std::mem::take(&mut state.retained_read_evidence);
-                        // A confirming look that itself located the rest is
-                        // read directly, with focused generation if needed;
-                        // otherwise the earlier look's copies are cited.
-                        let prepared = match confirmed.filter(|_| !selection.awaits_absence()) {
+                        // A confirming look that itself located everything the
+                        // earlier look did is read directly, with focused
+                        // generation if needed; otherwise the earlier look's
+                        // copies are cited: a scroll must not lose a value
+                        // the first look found.
+                        let prepared = match joined.or(confirmed.filter(|earlier| {
+                            !selection.awaits_absence() || !selection.keeps_located(earlier)
+                        }).map(|earlier| *earlier)) {
                             Some(earlier) => earlier.prepare_confirmed(
                                 &observation,
                                 session.account,
@@ -275,6 +299,13 @@ impl AgentWorkController {
                         Some(scroll) => {
                             reobservations = reobservations.saturating_add(1);
                             reobserving = true;
+                            if gap.as_ref().is_some_and(|look| {
+                                earlier_look
+                                    .as_ref()
+                                    .is_none_or(|earlier| look.located() >= earlier.located())
+                            }) {
+                                earlier_look = gap.take();
+                            }
                             gap = None;
                             scroll
                         }

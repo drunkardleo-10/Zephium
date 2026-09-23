@@ -3202,3 +3202,45 @@ fn a_catalog_read_copies_each_found_record_from_inside_it_or_leaves_the_planner(
         );
     }
 }
+
+#[test]
+fn a_located_label_value_pair_copies_its_value_node() {
+    let (call, observation, schema, projection) = located_fixture_with(
+        false,
+        &[
+            json!({"k":9,"p":0,"r":"group","n":"Pieces:3745","fc":true}),
+            json!({"k":10,"p":8,"r":"paragraph","t":"3745","fc":true}),
+        ],
+    );
+    let mut output = located_answers(&projection);
+    let Question::Choice { criteria, .. } = &projection.request().questions()["locate_1"] else {
+        panic!("choice expected");
+    };
+    let probabilities: BTreeMap<_, _> = criteria
+        .keys()
+        .map(|key| (key, if key == "@a9" { 1.0 } else { 0.0 }))
+        .collect();
+    output["answers"]["locate_1"] =
+        json!({"type":"choice","choice":"@a9","confidence":1.0,"probabilities":probabilities});
+    let response = projection
+        .request()
+        .decode_emulation(&serde_json::to_vec(&output).unwrap(), DecisionUsage::default())
+        .unwrap();
+    let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+    let selection = answers
+        .take_read_selection(&observation, call.account(), &schema)
+        .unwrap()
+        .unwrap();
+    let result = selection
+        .prepare(&observation, call.account(), SemanticCaptureInstant::from_millis(101), None)
+        .unwrap()
+        .finish(None)
+        .unwrap();
+    let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+        panic!("rows expected");
+    };
+    let SemanticExtractedValue::Text(value) = rows.items()[0].fields()[1].value() else {
+        panic!("text expected");
+    };
+    assert_eq!(value.as_str(), "3745");
+}
