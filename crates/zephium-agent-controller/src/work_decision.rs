@@ -105,7 +105,10 @@ impl AgentWorkController {
                         // The earlier look's values come from the evidence it
                         // retained, cited under the current observation.
                         let evidence = std::mem::take(&mut state.retained_read_evidence);
-                        let prepared = match confirmed {
+                        // A confirming look that itself located the rest is
+                        // read directly, with focused generation if needed;
+                        // otherwise the earlier look's copies are cited.
+                        let prepared = match confirmed.filter(|_| !selection.awaits_absence()) {
                             Some(earlier) => earlier.prepare_confirmed(
                                 &observation,
                                 session.account,
