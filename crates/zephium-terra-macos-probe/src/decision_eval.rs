@@ -77,9 +77,9 @@ fn run_selected(only: Option<usize>, model: ProbeModel) -> Result<(), ProbeFailu
         .map_err(|_| ProbeFailure::Authority)?;
     let (config, model_revision) = match model {
         ProbeModel::Luna => (
-            zephium_agent_model_catalog::try_luna_provider_exact_call_config(4096)
+            zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(4096)
                 .map_err(|_| ProbeFailure::Authority)?,
-            zephium_agent_model_catalog::LUNA_MODEL_REVISION,
+            zephium_agent_model_catalog::GPT6_LUNA_MODEL_REVISION,
         ),
         ProbeModel::Terra => (
             zephium_agent_model_catalog::try_terra_provider_exact_call_config(4096)

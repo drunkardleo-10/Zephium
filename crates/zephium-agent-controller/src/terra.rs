@@ -4322,7 +4322,7 @@ mod tests {
                     bytes.extend_from_slice(&buffer[..read]);
                 }
                 let request: serde_json::Value = serde_json::from_slice(&bytes[header..]).unwrap();
-                assert_eq!(request["model"], "gpt-5.6-terra");
+                assert_eq!(request["model"], "gpt-6-luna");
                 let body = if count {
                     serde_json::json!({"object":"response.input_tokens","input_tokens":100})
                 } else {
@@ -4337,7 +4337,7 @@ mod tests {
                         };
                         (key.clone(), value)
                     }).collect();
-                    serde_json::json!({"object":"response","status":"completed","model":"gpt-5.6-terra","service_tier":"default","error":null,"incomplete_details":null,
+                    serde_json::json!({"object":"response","status":"completed","model":"gpt-6-luna","service_tier":"default","error":null,"incomplete_details":null,
                         "output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":serde_json::json!({"answers":answers}).to_string()}]}],
                         "usage":{"input_tokens":100,"output_tokens":200,"total_tokens":300,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":50}}})
                 }.to_string();

@@ -187,7 +187,7 @@ fn typed_copy_finishes_after_one_decision_without_a_page_model_or_native_action(
                     };
                     (key.clone(), answer)
                 }).collect();
-                json!({"object":"response","status":"completed","model":"gpt-5.6-terra","service_tier":"default","error":null,"incomplete_details":null,
+                json!({"object":"response","status":"completed","model":"gpt-6-luna","service_tier":"default","error":null,"incomplete_details":null,
                     "output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":json!({"answers":answers}).to_string()}]}],
                     "usage":{"input_tokens":100,"output_tokens":200,"total_tokens":300,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":50}}})
             }.to_string();
@@ -262,7 +262,7 @@ fn typed_native_read_verifies_or_closes_without_retry_and_keeps_accounting() {
                         json!({"object":"response.input_tokens","input_tokens":100}),
                     ),
                     1 | 3 => {
-                        assert_eq!(request["model"], "gpt-5.6-terra");
+                        assert_eq!(request["model"], "gpt-6-luna");
                         let schemas = request["text"]["format"]["schema"]["properties"]["answers"]
                             ["properties"]
                             .as_object()
@@ -284,7 +284,7 @@ fn typed_native_read_verifies_or_closes_without_retry_and_keeps_accounting() {
                         }).collect();
                         (
                             200,
-                            json!({"object":"response","status":"completed","model":"gpt-5.6-terra","service_tier":"default","error":null,"incomplete_details":null,
+                            json!({"object":"response","status":"completed","model":"gpt-6-luna","service_tier":"default","error":null,"incomplete_details":null,
                             "output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":json!({"answers":answers}).to_string()}]}],
                             "usage":{"input_tokens":100,"output_tokens":200,"total_tokens":300,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":50}}}),
                         )

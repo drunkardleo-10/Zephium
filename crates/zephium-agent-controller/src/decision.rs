@@ -91,7 +91,9 @@ impl AgentBrowserSession {
             Err(DecisionCallFailure::Unavailable) => None,
             Err(_) => return Err(AgentBrowserProviderError::Transport),
         };
-        let config = try_terra_provider_exact_call_config(EMULATION_OUTPUT_TOKENS)
+        let config = zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(
+            EMULATION_OUTPUT_TOKENS,
+        )
             .map_err(|_| AgentBrowserProviderError::Catalog)?;
         let emulation =
             WorkPlanningConfig::try_new(config, EMULATION_INPUT_TOKENS, EMULATION_COST_MICRO_USD)
