@@ -93,6 +93,7 @@ impl RetainedWorkPorts {
 /// created until the original Shell accepts Engine/Store and selected profile.
 #[must_use]
 pub struct PreparedRetainedWork {
+    construction_attempt: zephium_agentic::WorkBrowserConstructionAttempt,
     anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
     page: Option<RetainedPageAdmission>,
     work: Option<WorkId>,
@@ -105,6 +106,19 @@ pub struct PreparedRetainedWork {
     actor: ActorRequest,
 }
 impl PreparedRetainedWork {
+    pub fn with_construction_attempt(
+        mut self,
+        attempt: zephium_agentic::WorkBrowserConstructionAttempt,
+    ) -> Result<Self, AgentWorkFailure> {
+        if !self.spec.isolated_public
+            && attempt != zephium_agentic::WorkBrowserConstructionAttempt::Initial
+        {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.construction_attempt = attempt;
+        Ok(self)
+    }
+
     pub fn with_page_admission(
         mut self,
         page: RetainedPageAdmission,
@@ -188,6 +202,7 @@ impl PreparedRetainedWork {
             return Err(AgentWorkFailure::Contract);
         }
         Ok(Self {
+            construction_attempt: Default::default(),
             anonymous_session: None,
             page: None,
             work: None,
@@ -268,6 +283,7 @@ pub struct RetainedWorkSnapshot {
     /// Closed original ledger totals, exposed only after exact terminal acknowledgement.
     pub usage: Option<zephium_core::work::runtime::WorkUsage>,
     pub failure: Option<AgentWorkFailure>,
+    pub construction_timed_out: bool,
     pub persistence_failure: Option<AgentWorkJournalError>,
     /// Atomic durable result identity, present only after publication ACK.
     pub artifact: Option<AgentWorkArtifactDescriptor>,
@@ -525,6 +541,7 @@ impl CallbackHandle {
                     record: None,
                     usage: None,
                     failure: None,
+                    construction_timed_out: false,
                     persistence_failure: None,
                     artifact: None,
                     artifact_read: None,
@@ -702,6 +719,7 @@ impl ProductWork {
             prepared.spec.document_policy,
             prepared.spec.isolated_public,
             prepared.anonymous_session,
+            Some((prepared.construction_attempt, prepared.spec.deadline)),
             now,
         ) {
             Ok(pending) => {
@@ -876,6 +894,7 @@ impl ProductWork {
             AdmissionPhase::Terminal => RetainedWorkPhase::Terminal,
             AdmissionPhase::Uncertain => RetainedWorkPhase::Uncertain,
         };
+        projection.snapshot.construction_timed_out |= work.construction_timed_out();
         projection.snapshot.record = work.record();
         projection.snapshot.usage = work.usage();
         projection.snapshot.artifact = work.artifact();

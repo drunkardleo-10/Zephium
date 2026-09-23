@@ -55,7 +55,12 @@ impl WorkPublicSearchProvider for NoSearch {
 
 #[tokio::test]
 async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
-    for unknown in [false, true] {
+    for (unknown, slow, slow_fails) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, true, true),
+    ] {
         let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
         let (mut shell, queue, handle, profile) = fixture(store);
         let create = handle.work_document(WorkIntent::Create {
@@ -138,8 +143,9 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                                 return Err(WorkError::OutcomeUnknown);
                             }
                             let first = ordinal == 0;
+                            let retry_failed = ordinal == 3 && slow_fails;
                             Ok(WorkBrowserOutcome {
-                                status: if first {
+                                status: if first || retry_failed {
                                     WorkStepStatus::Failed
                                 } else {
                                     WorkStepStatus::Succeeded
@@ -160,8 +166,19 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                                     }
                                 }),
                                 intervention: None,
-                                note: first.then(|| read_note::HUMAN_CHECK.into()),
-                                artifacts: if first {
+                                note: if first {
+                                    Some(
+                                        if slow {
+                                            read_note::CONSTRUCTION_TIMEOUT
+                                        } else {
+                                            read_note::HUMAN_CHECK
+                                        }
+                                        .into(),
+                                    )
+                                } else {
+                                    retry_failed.then(|| read_note::SLOW_SITE.into())
+                                },
+                                artifacts: if first || retry_failed {
                                     vec![]
                                 } else {
                                     vec![WorkArtifactDraft {
@@ -249,6 +266,16 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
             assert_eq!(execution.status, WorkExecutionStatus::NeedsReview);
             let retry = &requests[3];
             assert_eq!(retry.id, initial[0].id);
+            assert!(initial.iter().all(|request| request.construction_attempt
+                == zephium_agentic::WorkBrowserConstructionAttempt::Initial));
+            assert_eq!(
+                retry.construction_attempt,
+                if slow {
+                    zephium_agentic::WorkBrowserConstructionAttempt::SlowPageRetry
+                } else {
+                    zephium_agentic::WorkBrowserConstructionAttempt::Initial
+                }
+            );
             assert_eq!(
                 retry.limits.model_tokens + 11,
                 initial[0].limits.model_tokens
@@ -259,6 +286,10 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
             );
             assert_eq!(retry.limits.operations + 2, initial[0].limits.operations);
             let retried = reads.iter().find(|step| step.id == retry.id).unwrap();
+            if slow_fails {
+                assert_eq!(retried.status, WorkStepStatus::Failed);
+                assert_eq!(retried.note.as_deref(), Some(read_note::SLOW_SITE));
+            }
             assert_eq!(
                 retried.usage,
                 Some(WorkUsage {

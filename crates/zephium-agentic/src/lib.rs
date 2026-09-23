@@ -55,6 +55,7 @@ mod work_browser_document;
 mod work_browser_resource;
 mod work_browser_session;
 pub use work_browser_document::WorkBrowserDocumentPolicy;
+pub use work_browser_resource::WorkBrowserConstructionAttempt;
 pub use work_browser_resource::{
     same_work_human_site, WorkBrowserActionCompletion, WorkBrowserActionCompletionCallback,
     WorkBrowserActionCompletionOwner, WorkBrowserActionDeliveryCompletion,

@@ -1520,6 +1520,19 @@ impl RetainedWork {
         }
     }
 
+    pub(super) fn construction_timed_out(&self) -> bool {
+        self.owner
+            .shared
+            .resource(&self.resource)
+            .ok()
+            .is_some_and(|resource| {
+                resource
+                    .health
+                    .lock()
+                    .is_ok_and(|health| health.construction_timed_out())
+            })
+    }
+
     pub(super) fn resource_destroyed(&self) -> bool {
         self.destroyed
     }

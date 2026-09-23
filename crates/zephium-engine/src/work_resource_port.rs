@@ -96,6 +96,7 @@ pub(crate) struct WorkResourceGuard {
     anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
     document: Option<ContextNavigationTarget>,
     document_policy: zephium_agentic::WorkBrowserDocumentPolicy,
+    construction_window: Option<(zephium_agentic::WorkBrowserConstructionAttempt, Instant)>,
     state: Mutex<State>,
     // Drop order is deliberate: the original native reporting owner retires
     // before its counted delivery lane. No audit may overlook a live reporter.
@@ -135,6 +136,7 @@ impl WorkResourceGuard {
             anonymous_session: request.anonymous_session().cloned(),
             document: request.document().cloned(),
             document_policy: request.document_policy(),
+            construction_window: request.construction_window(),
             health: None,
             health_permit: None,
             #[cfg(test)]
@@ -247,6 +249,21 @@ impl WorkResourceGuard {
     }
     pub(crate) fn document(&self) -> Option<&ContextNavigationTarget> {
         self.document.as_ref()
+    }
+    pub(crate) fn construction_deadline(&self, now: Instant) -> Option<Instant> {
+        let (attempt, original) = self.construction_window.unwrap_or((
+            zephium_agentic::WorkBrowserConstructionAttempt::Initial,
+            now.checked_add(zephium_agentic::WorkBrowserConstructionAttempt::Initial.budget())?,
+        ));
+        now.checked_add(attempt.budget())
+            .map(|deadline| deadline.min(original))
+    }
+    pub(crate) fn construction_timed_out(&self) {
+        if self.construction_current() && self.is_healthy() {
+            if let Some(health) = &self.health {
+                health.construction_timed_out();
+            }
+        }
     }
     pub(crate) fn document_policy(&self) -> zephium_agentic::WorkBrowserDocumentPolicy {
         self.document_policy

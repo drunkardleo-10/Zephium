@@ -70,6 +70,7 @@ impl Driver {
                 };
                 self.probe.record_activity(WorkActivityV1::Reading);
                 let request = WorkAgentBrowseRequest {
+                    construction_attempt: Default::default(),
                     id,
                     step: kind.clone(),
                     limits,
@@ -95,7 +96,7 @@ impl Driver {
                             .expect("retry requires known usage");
                         if let Some(limits) = retry_limits(request.limits, first) {
                             self.report(WorkAgentDiagnostic::ReadRetried);
-                            let request = WorkAgentBrowseRequest { limits, ..request };
+                            let request = retry_request(request, &outcome, limits);
                             let future = Box::pin(browser(self.probe.clone(), request.clone()));
                             pending.push(PendingRead {
                                 request,
@@ -114,7 +115,7 @@ impl Driver {
                     && terminal.is_none()
                     && failure.is_none()
                     && matches!(&outcome, Ok(WorkBrowserOutcome { status: WorkStepStatus::Failed, usage: Some(_), note: Some(note), .. })
-                        if note == read_note::HUMAN_CHECK || note == read_note::UNSETTLED);
+                        if note == read_note::HUMAN_CHECK || note == read_note::UNSETTLED || note == read_note::CONSTRUCTION_TIMEOUT);
                 if retry && !pending.is_empty() {
                     retries.push((request, outcome));
                     continue;
@@ -127,7 +128,7 @@ impl Driver {
                         .expect("retry requires known usage");
                     if let Some(limits) = retry_limits(request.limits, first) {
                         self.report(WorkAgentDiagnostic::ReadRetried);
-                        let request = WorkAgentBrowseRequest { limits, ..request };
+                        let request = retry_request(request, &outcome, limits);
                         let future = Box::pin(browser(self.probe.clone(), request.clone()));
                         pending.push(PendingRead {
                             request,
@@ -158,6 +159,24 @@ impl Driver {
             offset += count;
         }
         Ok(None)
+    }
+}
+
+fn retry_request(
+    request: WorkAgentBrowseRequest,
+    outcome: &Result<WorkBrowserOutcome, WorkError>,
+    limits: WorkExecutionLimits,
+) -> WorkAgentBrowseRequest {
+    let construction_attempt = if matches!(outcome, Ok(WorkBrowserOutcome { note: Some(note), .. }) if note == read_note::CONSTRUCTION_TIMEOUT)
+    {
+        zephium_agentic::WorkBrowserConstructionAttempt::SlowPageRetry
+    } else {
+        request.construction_attempt
+    };
+    WorkAgentBrowseRequest {
+        limits,
+        construction_attempt,
+        ..request
     }
 }
 

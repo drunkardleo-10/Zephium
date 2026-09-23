@@ -15,6 +15,7 @@ const UNCERTAIN: u8 = 3;
 
 struct HealthState {
     state: AtomicU8,
+    construction_timed_out: AtomicBool,
     receiver_alive: AtomicBool,
     reporter_retired: AtomicBool,
     pending_wake: AtomicBool,
@@ -75,6 +76,11 @@ pub struct WorkBrowserResourceHealth {
 }
 
 impl WorkBrowserResourceHealth {
+    /// A native construction deadline elapsed while the document was loading.
+    pub fn construction_timed_out(&self) -> bool {
+        self.state.construction_timed_out.load(Ordering::Acquire)
+    }
+
     /// The original native reporting owner's final health publication and wake
     /// have returned. Cleanup polls this separately from health: the final wake
     /// can run before this completion becomes observable. Sticky uncertainty is
@@ -160,6 +166,13 @@ impl WorkBrowserResourceHealthReporter {
         self.state.publish(CURRENT);
         self.is_current(resource)
     }
+    /// Native adapter attests that an in-flight document load exceeded its window.
+    pub fn construction_timed_out(&self) {
+        self.state
+            .construction_timed_out
+            .store(true, Ordering::Release);
+        self.invalidate();
+    }
     /// Publish uncertainty before coalesced wake; no later event can reopen it.
     pub fn invalidate(&self) {
         self.state.publish(UNCERTAIN);
@@ -194,6 +207,7 @@ pub(super) fn track(
 ) -> (WorkBrowserResourceHealth, WorkBrowserResourceHealthReporter) {
     let state = Arc::new(HealthState {
         state: AtomicU8::new(PENDING),
+        construction_timed_out: AtomicBool::new(false),
         receiver_alive: AtomicBool::new(true),
         reporter_retired: AtomicBool::new(false),
         pending_wake: AtomicBool::new(false),
@@ -216,6 +230,41 @@ pub(super) fn track(
 mod tests {
     use super::*;
     use crate::*;
+
+    #[test]
+    fn construction_timeout_survives_retirement_without_reclassifying_other_failures() {
+        struct WakeOnce;
+        impl std::task::Wake for WakeOnce {
+            fn wake(self: Arc<Self>) {}
+        }
+        for timed_out in [false, true] {
+            let mut rows = WorkBrowserResources::new(
+                WorkId::generate(),
+                zephium_core::ids::ProfileId::generate(),
+            );
+            let request = rows
+                .construct(
+                    WorkBrowserResourceId::generate(),
+                    ContextId::generate(),
+                    ContextProfileStorageClass::Ephemeral,
+                    AgentPolicyInstant::from_millis(0),
+                )
+                .unwrap();
+            let (mut health, reporter) = track(request.resource().clone());
+            health.register(Arc::new(WakeOnce).into());
+            assert!(reporter.install(request.resource()));
+            assert!(!health.construction_timed_out());
+            if timed_out {
+                reporter.construction_timed_out();
+            } else {
+                reporter.invalidate();
+            }
+            drop(reporter);
+            assert_eq!(health.poll(), WorkBrowserResourceHealthState::Uncertain);
+            assert_eq!(health.construction_timed_out(), timed_out);
+            assert!(health.reporter_retired());
+        }
+    }
 
     #[test]
     fn poisoned_registration_cannot_remain_current() {

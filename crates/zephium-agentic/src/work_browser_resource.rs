@@ -219,11 +219,36 @@ struct OperationJoin {
     lease: Option<WorkBrowserExecutionLease>,
 }
 
+/// Code-owned retry policy; the original Work deadline always remains binding.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WorkBrowserConstructionAttempt {
+    /// Original page-loading window.
+    #[default]
+    Initial,
+    /// One longer retry after a native page-loading timeout.
+    SlowPageRetry,
+}
+impl WorkBrowserConstructionAttempt {
+    /// Closed per-attempt ceiling, intersected with the original deadline.
+    pub const fn budget(self) -> std::time::Duration {
+        std::time::Duration::from_secs(match self {
+            Self::Initial => 30,
+            Self::SlowPageRetry => 60,
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct ConstructionSettings {
+    anonymous_session: Option<crate::WorkBrowserSession>,
+    window: Option<(WorkBrowserConstructionAttempt, std::time::Instant)>,
+}
+
 /// Move-only exact native request, minted after publishing its pending owner.
 #[must_use]
 #[derive(Debug)]
 pub struct WorkBrowserResourceRequest {
-    anonymous_session: Option<crate::WorkBrowserSession>,
+    construction: Option<Box<ConstructionSettings>>,
     operation: OperationJoin,
     storage: ContextProfileStorageClass,
     isolated_public: bool,
@@ -234,6 +259,33 @@ pub struct WorkBrowserResourceRequest {
     human: Option<Box<human::HumanWindow>>,
 }
 impl WorkBrowserResourceRequest {
+    /// Binds trusted retry policy and the original absolute Work deadline once.
+    pub fn with_construction_window(
+        mut self,
+        attempt: WorkBrowserConstructionAttempt,
+        deadline: std::time::Instant,
+    ) -> Result<Self, Box<Self>> {
+        if self.operation() != WorkBrowserResourceOperation::Construct
+            || self.construction_window().is_some()
+            || deadline <= std::time::Instant::now()
+            || (attempt == WorkBrowserConstructionAttempt::SlowPageRetry && !self.isolated_public)
+        {
+            return Err(Box::new(self));
+        }
+        self.construction
+            .get_or_insert_with(Default::default)
+            .window = Some((attempt, deadline));
+        Ok(self)
+    }
+    /// Exact construction-only policy; ordinary lifecycle successors have none.
+    pub fn construction_window(
+        &self,
+    ) -> Option<(WorkBrowserConstructionAttempt, std::time::Instant)> {
+        self.construction
+            .as_ref()
+            .and_then(|settings| settings.window)
+    }
+
     /// Attaches attempt-owned storage only to exact anonymous construction.
     pub fn with_anonymous_session(
         mut self,
@@ -242,17 +294,21 @@ impl WorkBrowserResourceRequest {
         let identity = self.resource().identity();
         if self.operation() != WorkBrowserResourceOperation::Construct
             || !self.isolated_public
-            || self.anonymous_session.is_some()
+            || self.anonymous_session().is_some()
             || !session.admits(identity.profile(), identity.work())
         {
             return Err(Box::new(self));
         }
-        self.anonymous_session = Some(session);
+        self.construction
+            .get_or_insert_with(Default::default)
+            .anonymous_session = Some(session);
         Ok(self)
     }
     /// Optional anonymous storage scope; never profile authentication.
     pub fn anonymous_session(&self) -> Option<&crate::WorkBrowserSession> {
-        self.anonymous_session.as_ref()
+        self.construction
+            .as_ref()
+            .and_then(|settings| settings.anonymous_session.as_ref())
     }
 
     /// Attaches one stable resource-health observer to original construction.
@@ -726,7 +782,7 @@ impl WorkBrowserResources {
             },
         );
         Ok(WorkBrowserResourceRequest {
-            anonymous_session: None,
+            construction: None,
             operation,
             storage,
             isolated_public,
@@ -787,7 +843,7 @@ impl WorkBrowserResources {
         row.phase = WorkBrowserResourcePhase::Acquiring;
         row.pending = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
-            anonymous_session: None,
+            construction: None,
             operation,
             storage: row.storage,
             isolated_public: row.isolated_public,
@@ -850,7 +906,7 @@ impl WorkBrowserResources {
         row.phase = WorkBrowserResourcePhase::Revoking;
         row.pending = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
-            anonymous_session: None,
+            construction: None,
             operation,
             storage: row.storage,
             isolated_public: row.isolated_public,
@@ -921,7 +977,7 @@ impl WorkBrowserResources {
         row.destruction_attempted = true;
         row.destruction = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
-            anonymous_session: None,
+            construction: None,
             operation,
             storage: row.storage,
             isolated_public: row.isolated_public,

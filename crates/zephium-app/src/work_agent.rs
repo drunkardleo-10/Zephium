@@ -20,6 +20,7 @@ mod reads;
 /// compiles it into an anonymous, read-only public browsing task.
 #[derive(Clone)]
 pub struct WorkAgentBrowseRequest {
+    pub construction_attempt: zephium_agentic::WorkBrowserConstructionAttempt,
     pub id: WorkStepId,
     pub step: WorkStepKindV1,
     pub hops: u8,

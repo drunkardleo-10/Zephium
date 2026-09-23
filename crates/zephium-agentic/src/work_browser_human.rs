@@ -213,7 +213,7 @@ fn request(
     };
     row.pending = Some(operation.clone());
     WorkBrowserResourceRequest {
-        anonymous_session: None,
+        construction: None,
         operation,
         storage: row.storage,
         isolated_public: row.isolated_public,

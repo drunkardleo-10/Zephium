@@ -29,7 +29,6 @@ use zephium_agentic::{
 };
 use zephium_core::{ids::ProfileId, ports::engine::Partition};
 
-const CONSTRUCTION_BUDGET: Duration = Duration::from_secs(30);
 const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 // Web pages may perform a bounded same-document URL finalization shortly after
 // their exact native navigation finishes. Only an explicitly trusted document
@@ -818,7 +817,11 @@ impl EngineHost {
 
     fn construct_work_resource(&mut self, task: WorkLifecycleTask) {
         let guard = task.guard();
-        let original_deadline = Instant::now().checked_add(CONSTRUCTION_BUDGET);
+        let original_deadline = guard.construction_deadline(Instant::now());
+        if original_deadline.is_none_or(|deadline| deadline <= Instant::now()) {
+            task.complete(Outcome::Refused);
+            return;
+        }
         let result = self.build_work_resource(guard.clone());
         let Ok(mut resource) = result else {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -846,8 +849,15 @@ impl EngineHost {
         resource.construction = Some(task);
         resource.lifecycle_deadline =
             original_deadline.map(|deadline| (deadline, Operation::Construct));
-        resource.watchdog =
-            deadline.and_then(|deadline| timeout(guard.clone(), deadline, CONSTRUCTION_BUDGET));
+        resource.watchdog = deadline.and_then(|ticket| {
+            original_deadline.and_then(|deadline| {
+                timeout(
+                    guard.clone(),
+                    ticket,
+                    deadline.saturating_duration_since(Instant::now()),
+                )
+            })
+        });
         if resource.watchdog.is_none() || resource.lifecycle_deadline.is_none() {
             resource.deadline_expired = true;
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -1075,6 +1085,9 @@ impl EngineHost {
             .lifecycle_deadline
             .and_then(|(deadline, operation)| (Instant::now() >= deadline).then_some(operation));
         if let Some(_operation) = expired_lifecycle {
+            if _operation == Operation::Construct && resource.document_started {
+                guard.construction_timed_out();
+            }
             resource.deadline_expired = true;
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             guard.record_failure_cause(resource.deadline_failure_cause(_operation));
@@ -1371,6 +1384,9 @@ impl EngineHost {
                 .as_ref()
                 .is_some_and(|task| deadline.matches(task))
         {
+            if deadline.operation == Operation::Construct && resource.document_started {
+                guard.construction_timed_out();
+            }
             resource.deadline_expired = true;
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             guard.record_failure_cause(resource.deadline_failure_cause(deadline.operation));

@@ -14,6 +14,7 @@ use zephium_store::SqliteStore;
 /// effect assessment, account attestation, manifest or profile assignment.
 /// This layer intentionally has no default task or implicit effect permission.
 pub struct TrustedWorkRequest {
+    pub(crate) construction_attempt: zephium_agentic::WorkBrowserConstructionAttempt,
     page: Option<zephium_app::RetainedPageAdmission>,
     anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
     work: Option<zephium_agentic::WorkId>,
@@ -35,6 +36,7 @@ impl TrustedWorkRequest {
         task: Box<dyn AgentWorkTask>,
     ) -> Self {
         Self {
+            construction_attempt: Default::default(),
             page: None,
             anonymous_session: None,
             work: None,
@@ -46,6 +48,14 @@ impl TrustedWorkRequest {
             #[cfg(feature = "public-qualification")]
             public_qualification: false,
         }
+    }
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) fn with_construction_attempt(
+        mut self,
+        attempt: zephium_agentic::WorkBrowserConstructionAttempt,
+    ) -> Self {
+        self.construction_attempt = attempt;
+        self
     }
     #[cfg(feature = "durable-runtime")]
     pub(crate) fn with_page_admission(mut self, page: zephium_app::RetainedPageAdmission) -> Self {
@@ -141,6 +151,7 @@ impl MacosWorkComposition {
             request.task,
             ports,
         )?;
+        let prepared = prepared.with_construction_attempt(request.construction_attempt)?;
         let prepared = match request.work {
             Some(work) => prepared.with_work_identity(work),
             None => prepared,

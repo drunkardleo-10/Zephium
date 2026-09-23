@@ -352,6 +352,9 @@ impl MacosWorkComposition {
             .retained_resource_spec()
             .map_err(|_| WorkError::Invalid)?;
         let original_deadline = original_spec.deadline;
+        let construction_attempt = invocation.construction_attempt;
+        let ready_deadline = original_deadline
+            .min(Instant::now() + construction_attempt.budget() + Duration::from_secs(15));
         configure_decisions(&mut invocation, decisions, original_deadline).await?;
         let view = self
             .launch_retained(shell, invocation)
@@ -392,7 +395,6 @@ impl MacosWorkComposition {
         let mut model_in_flight = false;
         let mut paused = false;
         // A page that never reaches its loop is failed, not waited on.
-        let ready_deadline = Instant::now() + Duration::from_secs(45);
         let mut running_seen = false;
         let mut not_ready = false;
         let mut last_phase: Option<RetainedWorkPhase> = None;
@@ -735,10 +737,14 @@ impl MacosWorkComposition {
                         usage: Some(uncertain_usage(settled, model_in_flight, limits)),
                         artifacts: vec![],
                         note: Some(
-                            intervention_note(intervention.as_ref())
-                                .or_else(|| snapshot.failure.map(failure_note))
-                                .unwrap_or("The page could not be read reliably")
-                                .into(),
+                            construction_note(
+                                snapshot.construction_timed_out,
+                                construction_attempt,
+                            )
+                            .or_else(|| intervention_note(intervention.as_ref()))
+                            .or_else(|| snapshot.failure.map(failure_note))
+                            .unwrap_or("The page could not be read reliably")
+                            .into(),
                         ),
                         intervention,
                     });
@@ -864,6 +870,9 @@ impl MacosWorkComposition {
                     _ => Err(WorkError::OutcomeUnknown),
                 };
                 let note = match disposition {
+                    _ if snapshot.construction_timed_out => {
+                        construction_note(true, construction_attempt)
+                    }
                     _ if not_ready => Some("The browser was not ready for this page"),
                     Some(AgentWorkDisposition::Succeeded | AgentWorkDisposition::Cancelled) => None,
                     Some(AgentWorkDisposition::WaitingForHuman) => Some(
@@ -914,6 +923,20 @@ fn intervention_note(intervention: Option<&WorkInterventionV1>) -> Option<&'stat
     })
 }
 /// Closed words for a page read that ended in failure; never page or model text.
+fn construction_note(
+    timed_out: bool,
+    attempt: zephium_agentic::WorkBrowserConstructionAttempt,
+) -> Option<&'static str> {
+    timed_out.then_some(match attempt {
+        zephium_agentic::WorkBrowserConstructionAttempt::Initial => {
+            zephium_core::work::runtime::read_note::CONSTRUCTION_TIMEOUT
+        }
+        zephium_agentic::WorkBrowserConstructionAttempt::SlowPageRetry => {
+            zephium_core::work::runtime::read_note::SLOW_SITE
+        }
+    })
+}
+
 fn failure_note(failure: AgentWorkFailure) -> &'static str {
     use zephium_agent_controller::AgentBrowserProviderError as Browser;
     match failure {
@@ -1009,6 +1032,22 @@ impl BrowserRun {
 #[cfg(test)]
 mod closed_result_tests {
     use super::*;
+
+    #[test]
+    fn construction_notes_require_native_timeout_and_distinguish_the_retry() {
+        use zephium_agentic::WorkBrowserConstructionAttempt as Attempt;
+        use zephium_core::work::runtime::read_note;
+        assert_eq!(construction_note(false, Attempt::Initial), None);
+        assert_eq!(construction_note(false, Attempt::SlowPageRetry), None);
+        assert_eq!(
+            construction_note(true, Attempt::Initial),
+            Some(read_note::CONSTRUCTION_TIMEOUT)
+        );
+        assert_eq!(
+            construction_note(true, Attempt::SlowPageRetry),
+            Some(read_note::SLOW_SITE)
+        );
+    }
 
     #[test]
     fn group_join_never_extends_pending_resource_cleanup_or_the_original_deadline() {
@@ -1296,6 +1335,7 @@ fn compile_step(
             .map_err(|error| refused(&settings, "extraction", error))?,
         None => findings::field_schema().map_err(|error| refused(&settings, "findings", error))?,
     }];
+    let construction_attempt = request.construction_attempt;
     let continuing = resume.is_some();
     let (context, max_actions, account, max_model_calls, deadline) = match resume {
         Some(resume) => (
@@ -1359,6 +1399,7 @@ fn compile_step(
         request.input = request.input.with_isolated_website_data();
     }
     Ok(request
+        .with_construction_attempt(construction_attempt)
         .with_work_identity(probe.work())
         .with_anonymous_session(probe.browser_session().clone()))
 }

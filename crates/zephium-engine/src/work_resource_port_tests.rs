@@ -1918,3 +1918,53 @@ fn closed_anonymous_session_refuses_execution_but_preserves_native_drain() {
         }
     }
 }
+
+#[test]
+fn work_construction_retry_is_closed_and_preserves_the_original_deadline() {
+    use zephium_agentic::{WorkBrowserConstructionAttempt as Attempt, WorkBrowserDocumentPolicy};
+    use std::time::Duration;
+    let now = Instant::now();
+    let admission = admission();
+    let (_, ordinary) = source();
+    assert_eq!(
+        WorkResourceGuard::new(&ordinary, &admission).construction_deadline(now),
+        Some(now + Duration::from_secs(30))
+    );
+    assert!(ordinary
+        .with_construction_window(Attempt::SlowPageRetry, now + Duration::from_secs(120))
+        .is_err());
+    for (attempt, remaining, expected) in [
+        (Attempt::Initial, 120, 30),
+        (Attempt::SlowPageRetry, 120, 60),
+        (Attempt::Initial, 12, 12),
+        (Attempt::SlowPageRetry, 12, 12),
+    ] {
+        let mut rows =
+            WorkBrowserResources::new(WorkId::generate(), zephium_core::ids::ProfileId::generate());
+        let request = rows
+            .construct_document_with_isolation(
+                WorkBrowserResourceId::generate(),
+                ContextId::generate(),
+                ContextProfileStorageClass::Ephemeral,
+                ContextNavigationTarget::parse("https://example.test/").unwrap(),
+                WorkBrowserDocumentPolicy::Exact,
+                true,
+                tick(0),
+            )
+            .unwrap()
+            .with_construction_window(attempt, now + Duration::from_secs(remaining))
+            .unwrap();
+        let guard = WorkResourceGuard::new(&request, &admission);
+        assert_eq!(
+            guard.construction_deadline(now),
+            Some(now + Duration::from_secs(expected))
+        );
+        assert!(request
+            .with_construction_window(attempt, now + Duration::from_secs(120))
+            .is_err());
+    }
+    let (_, expired) = source();
+    assert!(expired
+        .with_construction_window(Attempt::Initial, now)
+        .is_err());
+}
