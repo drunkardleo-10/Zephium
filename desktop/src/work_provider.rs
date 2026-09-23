@@ -564,8 +564,11 @@ async fn public_decision_settings(
         None
     };
     let emulation = zephium_agentic::WorkPlanningConfig::try_new(
-        zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(4096)
-            .map_err(|_| WorkError::Unavailable)?,
+        zephium_agent_model_catalog::try_gpt6_luna_decision_call_config(
+            4096,
+            zephium_agent_model_catalog::Gpt6LunaDecisionEffort::Low,
+        )
+        .map_err(|_| WorkError::Unavailable)?,
         32_768,
         100_000,
     )
