@@ -7,6 +7,7 @@
 @import "./axes/material.css";
 @import "./axes/motion.css";
 @import "./controls.css";
+@import "./favicon.css";
 @source "../features/panel";
 @source "../app/panel/PanelApp.svelte";
 @source "../features/search";

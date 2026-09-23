@@ -3,6 +3,7 @@ import { render } from "vitest-browser-svelte";
 import primitives from "../../../styles/tokens/primitive.css?raw";
 import tokens from "../../../styles/tokens.css?raw";
 import globals from "../../../styles/global.css?raw";
+import favicon from "../../../styles/favicon.css?raw";
 import { favicons } from "..";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import IconStrip from "./IconStrip.svelte";
@@ -18,7 +19,7 @@ function solid(red: number, green: number, blue: number): string {
 }
 
 const style = document.createElement("style");
-style.textContent = primitives + tokens.replace("@theme static", ":root") + globals;
+style.textContent = primitives + tokens.replace("@theme static", ":root") + globals + favicon;
 document.head.append(style);
 
 const SIZE = 17;

@@ -7,6 +7,7 @@
 @import "./axes/material.css";
 @import "./axes/motion.css";
 @import "./controls.css";
+@import "./favicon.css";
 @import "./browser.css";
 @source not "../**/*.test.ts";
 @source not "../**/tests";
@@ -96,50 +97,6 @@ button {
 .content-pane {
   border-radius: var(--content-radius);
   background: var(--color-page);
-}
-
-/* Site icons are arbitrary third-party artwork. Resting rows dim and
-   desaturate them so the column reads as one surface. */
-.favicon-plate {
-  display: block;
-  box-sizing: border-box;
-  padding: 0;
-  opacity: var(--favicon-rest-opacity);
-  filter: saturate(var(--favicon-rest-saturation));
-  transition:
-    opacity var(--motion-fast) var(--ease-out),
-    filter var(--motion-fast) var(--ease-out);
-}
-
-.favicon-plate > canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
-  border-radius: 3px;
-}
-
-.favicon-plate-lit {
-  opacity: 1;
-  filter: none;
-}
-
-/* A near-neutral mark the colour of the surface behind it reads as an empty
-   square. Give it the opposite ground, the way a sticker carries its own.
-   Only neutral icons qualify: a coloured mark stays legible however dark it
-   is, and a plate behind it would misrepresent the brand. */
-.favicon-plate[data-tone="dark"] {
-  padding: var(--favicon-inset);
-  background: var(--favicon-plate);
-}
-
-:root[data-theme="light"] .favicon-plate[data-tone="dark"] {
-  padding: 0;
-  background: none;
-}
-
-:root[data-theme="light"] .favicon-plate[data-tone="light"] {
-  padding: var(--favicon-inset);
-  background: var(--favicon-plate);
 }
 
 ::selection {

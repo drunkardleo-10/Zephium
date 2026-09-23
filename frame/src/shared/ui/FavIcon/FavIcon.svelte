@@ -36,36 +36,28 @@
   Privileged chrome receives one fixed-size RGBA buffer and paints it directly;
   this process never exposes an image decoder or a custom favicon protocol.
 -->
-{#if image}
-  <!-- The inset belongs to the plate, and only CSS knows whether this theme
-       draws one: insetting by tone alone shrank marks that were never plated. -->
-  <span
-    data-tone={tone}
-    style:width={`${size}px`}
-    style:height={`${size}px`}
-    style:border-radius={`${radius}px`}
-    style:--favicon-inset={`${inset}px`}
-    class:favicon-plate-lit={lit}
-    class:animate-pulse={loading}
-    class="favicon-plate shrink-0"
-    aria-hidden="true"
-    ><canvas bind:this={canvas} width={image.width} height={image.height}></canvas></span
-  >
-{:else if fallback}
-  <span
-    style:width={`${size}px`}
-    style:height={`${size}px`}
-    class="flex shrink-0 items-center justify-center text-faint"
-    class:animate-pulse={loading}
-    aria-hidden="true"
-  >
-    <Icon icon={fallback} size={Math.round(size * 0.85)} />
-  </span>
-{:else}
-  <span
-    style:width={`${size}px`}
-    style:height={`${size}px`}
-    class={`shrink-0 rounded-full ${loading ? "animate-pulse bg-accent/70" : "bg-faint/30"}`}
-    aria-hidden="true"
-  ></span>
-{/if}
+<span
+  class="favicon"
+  data-favicon
+  data-loading={loading}
+  style:width={`${size}px`}
+  style:height={`${size}px`}
+  aria-hidden="true"
+>
+  {#if image}
+    <!-- The inset belongs to the plate, and only CSS knows whether this theme
+         draws one: insetting by tone alone shrank marks that were never plated. -->
+    <span
+      data-tone={tone}
+      style:border-radius={`${radius}px`}
+      style:--favicon-inset={`${inset}px`}
+      class:favicon-plate-lit={lit}
+      class="favicon-plate"
+      ><canvas bind:this={canvas} width={image.width} height={image.height}></canvas></span
+    >
+  {:else if fallback}
+    <span class="favicon-fallback"><Icon icon={fallback} size={Math.round(size * 0.85)} /></span>
+  {:else}
+    <span class="favicon-blank"></span>
+  {/if}
+</span>
