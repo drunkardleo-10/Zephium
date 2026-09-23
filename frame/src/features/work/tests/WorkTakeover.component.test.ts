@@ -153,10 +153,12 @@ test("a page waiting for a person is taken over in the pane, handed back, and re
   help().click();
   await expect.poll(() => native.present.mock.calls.length).toBe(1);
   const region = native.present.mock.lastCall![3];
-  expect(region.x).toBeGreaterThanOrEqual(64);
-  expect(region.y).toBeGreaterThanOrEqual(64);
+  expect(region.x).toBeGreaterThanOrEqual(0);
+  expect(region.y).toBeGreaterThanOrEqual(0);
   expect(region.width).toBeGreaterThanOrEqual(64);
   expect(region.height).toBeGreaterThanOrEqual(64);
+  expect(region.x + region.width).toBeLessThanOrEqual(8192);
+  expect(region.y + region.height).toBeLessThanOrEqual(8192);
   expect(region.x + region.width).toBeLessThanOrEqual(window.innerWidth);
   expect(region.y + region.height).toBeLessThanOrEqual(window.innerHeight);
   expect(native.present.mock.lastCall![2]).toEqual({

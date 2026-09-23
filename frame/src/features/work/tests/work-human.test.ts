@@ -24,7 +24,7 @@ test("the countdown appears only near the end of the wait", () => {
   expect(cardCountdown(0)).toBeNull();
 });
 
-test("a region is whole logical points inside the real parent, never below the floor", () => {
+test("a region floors its size, keeps the 8192 extents, and stays inside the parent", () => {
   const parent = { width: 1200, height: 800 };
   expect(regionOf({ x: 300.4, y: 120.6, width: 640.2, height: 420.8 }, parent)).toEqual({
     x: 300,
@@ -32,8 +32,25 @@ test("a region is whole logical points inside the real parent, never below the f
     width: 640,
     height: 421,
   });
+  // The corner may sit at the content view's origin: Rust floors size alone.
+  expect(regionOf({ x: 0, y: 0, width: MIN_REGION, height: MIN_REGION }, parent)).toEqual({
+    x: 0,
+    y: 0,
+    width: MIN_REGION,
+    height: MIN_REGION,
+  });
   expect(regionOf({ x: 300, y: 120, width: MIN_REGION - 1, height: 400 }, parent)).toBeNull();
-  expect(regionOf({ x: 8, y: 120, width: 400, height: 400 }, parent)).toBeNull();
+  expect(regionOf({ x: 300, y: 120, width: 400, height: MIN_REGION - 1 }, parent)).toBeNull();
+  expect(regionOf({ x: -1, y: 120, width: 400, height: 400 }, parent)).toBeNull();
+  const wide = { width: 10_000, height: 10_000 };
+  expect(regionOf({ x: 7900, y: 120, width: 400, height: 400 }, wide)).toBeNull();
+  expect(regionOf({ x: 120, y: 7900, width: 400, height: 400 }, wide)).toBeNull();
+  expect(regionOf({ x: 7700, y: 7700, width: 400, height: 400 }, wide)).toEqual({
+    x: 7700,
+    y: 7700,
+    width: 400,
+    height: 400,
+  });
   expect(regionOf({ x: 300, y: 120, width: 400, height: 720 }, parent)).toBeNull();
   expect(regionOf({ x: 300, y: 120, width: Number.NaN, height: 400 }, parent)).toBeNull();
 });

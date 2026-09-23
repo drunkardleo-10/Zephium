@@ -6,7 +6,7 @@
   import IconButton from "$shared/ui/IconButton";
   import { Cancel01Icon } from "../../lib/icons";
   import { paneGeometry, remember, type PaneRect } from "../../lib/pane-geometry";
-  import { countdownLabel, reasonSentence, MIN_REGION, type HumanPage } from "../../lib/work-human";
+  import { countdownLabel, reasonSentence, type HumanPage } from "../../lib/work-human";
   import * as m from "$shared/i18n/messages";
   let {
     host,
@@ -43,15 +43,12 @@
     { value: "anonymous", label: m.work_human_account_anonymous() },
     { value: "signed_in_public_only", label: m.work_human_account_signed_in() },
   ]);
-  /** A region Rust will accept starts at least 64 points into the content view. */
   function clamp(next: PaneRect): PaneRect {
     const width = Math.max(MIN.width, Math.min(next.width, bounds.width));
     const height = Math.max(MIN.height, Math.min(next.height, bounds.height));
-    const left = Math.max(bounds.left, MIN_REGION);
-    const top = Math.max(bounds.top, MIN_REGION);
     return {
-      x: Math.min(Math.max(next.x, left), Math.max(left, bounds.right - width)),
-      y: Math.min(Math.max(next.y, top), Math.max(top, bounds.bottom - height)),
+      x: Math.min(Math.max(next.x, bounds.left), Math.max(bounds.left, bounds.right - width)),
+      y: Math.min(Math.max(next.y, bounds.top), Math.max(bounds.top, bounds.bottom - height)),
       width,
       height,
     };

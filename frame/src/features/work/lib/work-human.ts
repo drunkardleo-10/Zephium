@@ -118,8 +118,9 @@ export const humanPage = (page: WorkHumanPageV1): HumanPage => ({
   canContinue: page.can_continue,
 });
 
+/** Rust floors the size only; the corner may sit at the content view's origin. */
 export const MIN_REGION = 64;
-const MAX_REGION = 8192;
+const MAX_EXTENT = 8192;
 
 /**
  * The native view is placed the way a Work pane hole is: the measured DOM box
@@ -135,9 +136,9 @@ export function regionOf(
   const width = Math.round(box.width);
   const height = Math.round(box.height);
   if (![x, y, width, height, parent.width, parent.height].every(Number.isFinite)) return null;
-  if (x < MIN_REGION || y < MIN_REGION) return null;
+  if (x < 0 || y < 0) return null;
   if (width < MIN_REGION || height < MIN_REGION) return null;
-  if (width > MAX_REGION || height > MAX_REGION) return null;
+  if (x + width > MAX_EXTENT || y + height > MAX_EXTENT) return null;
   if (x + width > Math.floor(parent.width) || y + height > Math.floor(parent.height)) return null;
   return { x, y, width, height };
 }
