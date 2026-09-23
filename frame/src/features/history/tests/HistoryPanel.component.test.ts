@@ -2,7 +2,6 @@ import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import "$styles/global.css";
-import "@fontsource-variable/inter";
 import type { HistoryCall, HistoryResponse, HistoryVisitView } from "$shared/ipc/bindings";
 import HistoryPanel from "../components/HistoryPanel.svelte";
 

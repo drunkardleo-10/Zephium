@@ -2,7 +2,6 @@ import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import "$styles/global.css";
-import "@fontsource-variable/inter";
 import primitives from "../../../styles/tokens/primitive.css?raw";
 import tokens from "../../../styles/tokens.css?raw";
 import browserCSS from "../../../styles/browser.css?raw";

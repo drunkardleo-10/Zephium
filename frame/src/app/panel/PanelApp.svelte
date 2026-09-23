@@ -3,7 +3,6 @@
   import LazyView from "$shared/ui/LazyView";
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import { loadToolSlot } from "$features/tools";
-  import "@fontsource-variable/inter";
   import "$styles/panel.css";
   import { onMount, flushSync } from "svelte";
   import type { PanelState, PanelIntent, ToolKind } from "$shared/ipc/bindings";

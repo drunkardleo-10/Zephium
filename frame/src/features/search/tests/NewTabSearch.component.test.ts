@@ -2,7 +2,6 @@ import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import "$styles/global.css";
-import "@fontsource-variable/inter";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import type { SearchResult } from "$shared/ipc/bindings";
 import NewTabSearch from "../components/NewTabSearch.svelte";

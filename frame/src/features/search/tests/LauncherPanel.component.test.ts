@@ -3,7 +3,6 @@ import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import { Note01Icon, Clock01Icon } from "@hugeicons/core-free-icons";
 import "$styles/panel.css";
-import "@fontsource-variable/inter";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import type { PanelState, SearchResult } from "$shared/ipc/bindings";
 import LauncherPanel from "../components/LauncherPanel.svelte";

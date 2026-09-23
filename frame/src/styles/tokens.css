@@ -138,10 +138,14 @@
   --shadow-overlay:
     inset 0 1px 0 rgb(255 255 255 / 0.08), 0 20px 48px rgb(0 0 0 / 0.4), 0 2px 8px rgb(0 0 0 / 0.2);
 
-  /* Inter, with the platform face as the fallback chain. */
+  /* The platform face, and only the platform face. Native menus, alerts and
+     file dialogs open out of this chrome in SF and cannot be told otherwise,
+     so a webfont here changes typeface under the user's cursor. SF also
+     carries a real optical size axis, which `font-optical-sizing` needs to
+     mean anything at the 11px end of the scale. */
   --font-sans:
-    "Inter Variable", -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI Variable Text",
-    "Segoe UI", "Noto Sans", "Cantarell", sans-serif;
+    -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI Variable Text", "Segoe UI", "Noto Sans",
+    "Cantarell", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Menlo", "Consolas", monospace;
 
   --text-caption: 11px;
