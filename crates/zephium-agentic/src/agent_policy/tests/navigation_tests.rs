@@ -716,7 +716,7 @@ fn initial_effective_metadata_requires_original_retained_binding_before_model_ca
                     AgentPolicyInstant::from_millis(500),
                 )
                 .unwrap();
-            rows.settle_at(
+            let _ = rows.settle_at(
                 present.complete(WorkBrowserResourceNativeOutcome::HumanPresented),
                 AgentPolicyInstant::from_millis(0),
             )
@@ -725,7 +725,7 @@ fn initial_effective_metadata_requires_original_retained_binding_before_model_ca
                 .continue_after_human(&resource, AgentPolicyInstant::from_millis(0))
                 .unwrap();
             effective = requested.clone();
-            rows.settle_at(
+            let _ = rows.settle_at(
                 resume.complete_human_document(effective.clone()),
                 AgentPolicyInstant::from_millis(0),
             )
