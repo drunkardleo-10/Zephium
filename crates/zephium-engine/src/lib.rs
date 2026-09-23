@@ -2653,6 +2653,13 @@ impl Engine for WebviewEngine {
     }
 }
 
+/// Native anonymous-session qualification; excluded from release builds.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_macos_anonymous_work_session_probe() -> Result<(), &'static str> {
+    host::anonymous_session_probe::run()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4042,11 +4049,4 @@ mod tests {
             zephium_core::session::MAX_SESSION_PROFILES
         );
     }
-}
-
-/// Native anonymous-session qualification; excluded from release builds.
-#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
-#[doc(hidden)]
-pub fn run_macos_anonymous_work_session_probe() -> Result<(), &'static str> {
-    host::anonymous_session_probe::run()
 }

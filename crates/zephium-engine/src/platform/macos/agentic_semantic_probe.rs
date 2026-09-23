@@ -238,6 +238,14 @@ impl ProbeNativeState<'_> {
     }
 }
 
+/// The fixture one probe case runs against, with the run's capture counters.
+struct ProbeCase<'a> {
+    url: &'a str,
+    case: &'a str,
+    next_invocation: &'a mut u64,
+    successful_snapshots: &'a mut u8,
+}
+
 struct ProbeRuntime<'a, 'native> {
     callbacks: &'a CallbackState,
     run_loop: &'a NSRunLoop,
@@ -940,11 +948,13 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                     &window,
                     &store,
                     first_capture,
-                    &first_url,
-                    case,
+                    ProbeCase {
+                        url: &first_url,
+                        case,
+                        next_invocation: &mut next_invocation,
+                        successful_snapshots: &mut successful_snapshots,
+                    },
                     presented,
-                    &mut next_invocation,
-                    &mut successful_snapshots,
                 )
             })?;
             return Ok(None);
@@ -958,11 +968,13 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                     &window,
                     &store,
                     first_capture,
-                    &first_url,
-                    case,
+                    ProbeCase {
+                        url: &first_url,
+                        case,
+                        next_invocation: &mut next_invocation,
+                        successful_snapshots: &mut successful_snapshots,
+                    },
                     presented,
-                    &mut next_invocation,
-                    &mut successful_snapshots,
                 )
             })?;
             return Ok(None);
@@ -973,11 +985,13 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                     &view,
                     &window,
                     first_capture,
-                    &first_url,
-                    case,
+                    ProbeCase {
+                        url: &first_url,
+                        case,
+                        next_invocation: &mut next_invocation,
+                        successful_snapshots: &mut successful_snapshots,
+                    },
                     presented,
-                    &mut next_invocation,
-                    &mut successful_snapshots,
                 )
             })?;
             return Ok(None);

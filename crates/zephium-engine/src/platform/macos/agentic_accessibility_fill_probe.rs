@@ -9,6 +9,18 @@ use objc2_web_kit::WKWebView;
 
 use super::*;
 
+/// Role, value, label, frame, and the enabled, protected and settable flags
+/// read through the public accessibility methods.
+type PublicAccessibility = (
+    Option<Retained<NSString>>,
+    Option<Retained<AnyObject>>,
+    Option<Retained<NSString>>,
+    NSRect,
+    bool,
+    bool,
+    bool,
+);
+
 pub(super) const ENV: &str = "ZEPHIUM_LOCAL_AX_FILL_PROBE";
 
 struct Target {
@@ -205,10 +217,7 @@ fn inspect(
         eprintln!("ax-fill-public-methods: supported={supported:08b} content=redacted");
         if supported != 255 { return inspect_legacy(element, point, frame, name, expected); }
         // SAFETY: every public method was checked above on this retained object.
-        let (role, value, label, actual, enabled, protected, settable): (
-            Option<Retained<NSString>>, Option<Retained<AnyObject>>, Option<Retained<NSString>>,
-            NSRect, bool, bool, bool,
-        ) = unsafe { (
+        let (role, value, label, actual, enabled, protected, settable): PublicAccessibility = unsafe { (
             msg_send![&*element, accessibilityRole], msg_send![&*element, accessibilityValue],
             msg_send![&*element, accessibilityLabel], msg_send![&*element, accessibilityFrame],
             msg_send![&*element, isAccessibilityEnabled], msg_send![&*element, isAccessibilityProtectedContent],

@@ -168,6 +168,39 @@ impl HumanParentGeometry {
     }
 }
 
+impl Drop for WorkHumanPresentation {
+    fn drop(&mut self) {
+        self.retire();
+        super::passive_page::unregister(&self.page);
+    }
+}
+
+#[cfg(feature = "agentic-browser-qa")]
+fn record_cookie_facts(page: &WKWebView, phase: &'static str) {
+    use objc2_foundation::{NSArray, NSHTTPCookie};
+    use std::{io::Write, ptr::NonNull};
+    let callback = block2::RcBlock::new(move |values: NonNull<NSArray<NSHTTPCookie>>| {
+        // SAFETY: WebKit owns the cookie array for the duration of its callback.
+        let values = unsafe { values.as_ref() };
+        let mut clearance = false;
+        let mut bot_management = false;
+        for cookie in values.iter().take(4096) {
+            let name = cookie.name();
+            clearance |= name.isEqualToString(objc2_foundation::ns_string!("cf_clearance"));
+            bot_management |= name.isEqualToString(objc2_foundation::ns_string!("__cf_bm"));
+        }
+        let _ = writeln!(std::io::stderr(),
+            "agent_view human_phase={phase} cookies={} clearance={clearance} bot_management={bot_management}", values.len());
+    });
+    // SAFETY: the retained page is on the AppKit thread; WebKit copies the callback.
+    unsafe {
+        page.configuration()
+            .websiteDataStore()
+            .httpCookieStore()
+            .getAllCookies(&callback);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,37 +237,5 @@ mod tests {
             };
             assert!(changed.region(region).is_none());
         }
-    }
-}
-impl Drop for WorkHumanPresentation {
-    fn drop(&mut self) {
-        self.retire();
-        super::passive_page::unregister(&self.page);
-    }
-}
-
-#[cfg(feature = "agentic-browser-qa")]
-fn record_cookie_facts(page: &WKWebView, phase: &'static str) {
-    use objc2_foundation::{NSArray, NSHTTPCookie};
-    use std::{io::Write, ptr::NonNull};
-    let callback = block2::RcBlock::new(move |values: NonNull<NSArray<NSHTTPCookie>>| {
-        // SAFETY: WebKit owns the cookie array for the duration of its callback.
-        let values = unsafe { values.as_ref() };
-        let mut clearance = false;
-        let mut bot_management = false;
-        for cookie in values.iter().take(4096) {
-            let name = cookie.name();
-            clearance |= name.isEqualToString(objc2_foundation::ns_string!("cf_clearance"));
-            bot_management |= name.isEqualToString(objc2_foundation::ns_string!("__cf_bm"));
-        }
-        let _ = writeln!(std::io::stderr(),
-            "agent_view human_phase={phase} cookies={} clearance={clearance} bot_management={bot_management}", values.len());
-    });
-    // SAFETY: the retained page is on the AppKit thread; WebKit copies the callback.
-    unsafe {
-        page.configuration()
-            .websiteDataStore()
-            .httpCookieStore()
-            .getAllCookies(&callback);
     }
 }

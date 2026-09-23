@@ -67,12 +67,15 @@ pub(super) fn run(
     view: &AgentOwnedView,
     window: &NSWindow,
     initial: CapturedSnapshot,
-    url: &str,
-    case: &str,
+    fixture: ProbeCase<'_>,
     runtime: &ProbeRuntime<'_, '_>,
-    next_invocation: &mut u64,
-    successful_snapshots: &mut u8,
 ) -> Result<(), &'static str> {
+    let ProbeCase {
+        url,
+        case,
+        next_invocation,
+        successful_snapshots,
+    } = fixture;
     let context = initial.snapshot.frame().context();
     // Presentation changed geometry. Capture a fresh ref before the one-shot
     // fixture setup click, which itself is observable and is never retried.

@@ -48,12 +48,15 @@ pub(super) fn run(
     window: &NSWindow,
     store: &Retained<WKWebsiteDataStore>,
     initial: CapturedSnapshot,
-    url: &str,
-    case: &str,
+    fixture: ProbeCase<'_>,
     runtime: &ProbeRuntime<'_, '_>,
-    next_invocation: &mut u64,
-    successful_snapshots: &mut u8,
 ) -> Result<(), &'static str> {
+    let ProbeCase {
+        url,
+        case,
+        next_invocation,
+        successful_snapshots,
+    } = fixture;
     let context = initial.snapshot.frame().context();
     let generation = initial.snapshot.generation();
     // Hidden snapshots carry the old presentation geometry; refresh after show.
