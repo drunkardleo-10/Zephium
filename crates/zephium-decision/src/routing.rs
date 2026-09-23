@@ -6,7 +6,7 @@ use crate::{
 };
 
 /// Threshold revision is coupled to the pinned model and recorded evaluations.
-pub const CONFIDENCE_POLICY_REVISION: &str = "jev-1.13.0-conservative-v1";
+pub const CONFIDENCE_POLICY_REVISION: &str = "jev-1.13.0-measured-v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecisionPurpose {
@@ -46,29 +46,45 @@ impl DecisionPurpose {
         }
     }
 
-    fn confident(self, answer: &Answer) -> bool {
+    /// Thresholds are measured per backend against the recorded corpus: the
+    /// recommended backend's probabilities separate correct from incorrect
+    /// answers, the emulation's do not, so its conservative values stand.
+    fn threshold(self, backend: AnswerBackend) -> f64 {
+        match backend {
+            AnswerBackend::Emulation => match self {
+                Self::Action => 0.98,
+                Self::Challenge | Self::Completion | Self::Locate | Self::Wall => 0.95,
+                Self::OrderedScore => 0.95,
+                Self::Relevance | Self::Picture => 0.80,
+            },
+            AnswerBackend::Primary => match self {
+                Self::Relevance => 0.70,
+                _ => 0.80,
+            },
+        }
+    }
+
+    fn confident(self, answer: &Answer, backend: AnswerBackend) -> bool {
+        let threshold = self.threshold(backend);
         match (self, answer.value()) {
-            (Self::Challenge, AnswerValue::Noul { noul }) => *noul <= 0.05 || *noul >= 0.95,
-            (Self::Relevance, AnswerValue::Noul { noul }) => *noul <= 0.20 || *noul >= 0.80,
-            (Self::Completion, AnswerValue::Noul { noul }) => *noul <= 0.05 || *noul >= 0.95,
             (
-                purpose,
+                Self::Challenge | Self::Relevance | Self::Completion,
+                AnswerValue::Noul { noul },
+            ) => *noul <= 1.0 - threshold || *noul >= threshold,
+            (
+                Self::Action | Self::Locate | Self::Wall | Self::Picture,
                 AnswerValue::Choice {
                     choice,
                     confidence,
                     probabilities,
                 },
             ) => {
-                let threshold = match purpose {
-                    Self::Action => 0.98,
-                    Self::Locate | Self::Wall => 0.95,
-                    Self::Picture => 0.80,
-                    _ => return false,
-                };
                 *confidence >= threshold
                     && probabilities.get(choice).is_some_and(|p| *p >= threshold)
             }
-            (Self::OrderedScore, AnswerValue::Score { confidence, .. }) => *confidence >= 0.95,
+            (Self::OrderedScore, AnswerValue::Score { confidence, .. }) => {
+                *confidence >= threshold
+            }
             _ => false,
         }
     }
@@ -249,7 +265,7 @@ fn assess_answer(
     if !request.accepts(key, &answer) {
         return Err(FallbackReason::InvalidAnswer);
     }
-    if !purpose.confident(&answer) {
+    if !purpose.confident(&answer, backend) {
         return Err(FallbackReason::LowConfidence);
     }
     if matches!(answer.value(), AnswerValue::Choice { choice, .. } if choice == NONE_OPTION) {
@@ -325,6 +341,59 @@ mod tests {
             })
         ));
         assert!(results.take("target").is_none());
+    }
+
+    #[test]
+    fn measured_primary_thresholds_never_relax_the_emulation() {
+        for purpose in [
+            DecisionPurpose::Challenge,
+            DecisionPurpose::Action,
+            DecisionPurpose::Locate,
+            DecisionPurpose::Picture,
+            DecisionPurpose::Relevance,
+            DecisionPurpose::Wall,
+            DecisionPurpose::Completion,
+            DecisionPurpose::OrderedScore,
+        ] {
+            assert!(
+                purpose.threshold(AnswerBackend::Emulation)
+                    >= purpose.threshold(AnswerBackend::Primary),
+                "{purpose:?}"
+            );
+            assert!(purpose.threshold(AnswerBackend::Primary) >= 0.70);
+        }
+        // A locate answer the recommended backend reports at 0.90 is accepted;
+        // the same answer from the emulation still is not.
+        let request = request();
+        let answers = |value| {
+            request
+                .decode_emulation(
+                    &serde_json::to_vec(&json!({ "answers": value })).unwrap(),
+                    DecisionUsage::default(),
+                )
+                .unwrap()
+        };
+        let uncertain = answers(json!({
+            "challenge":{"type":"noul","noul":0.01},
+            "target":{"type":"choice","choice":"@a1","confidence":0.9,"probabilities":{"@a1":0.9,"none":0.1}}
+        }));
+        let mut purposes = purposes();
+        purposes.insert("target".into(), DecisionPurpose::Locate);
+        let routed = DecisionFallback::assess(&request, purposes.clone(), Ok(uncertain)).unwrap();
+        assert!(routed.reasons().is_empty());
+        let emulated = answers(json!({
+            "challenge":{"type":"noul","noul":0.01},
+            "target":{"type":"choice","choice":"@a1","confidence":0.9,"probabilities":{"@a1":0.9,"none":0.1}}
+        }));
+        let mut routed = DecisionFallback::assess(&request, purposes, Err(FallbackReason::Unavailable))
+            .unwrap()
+            .finish(Some(emulated));
+        assert!(matches!(
+            routed.take("target"),
+            Some(ResolvedDecision::Unresolved {
+                reason: FallbackReason::LowConfidence
+            })
+        ));
     }
 
     #[test]

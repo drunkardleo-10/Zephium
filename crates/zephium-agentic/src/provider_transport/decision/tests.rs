@@ -1183,9 +1183,10 @@ async fn borrowed_emulation_admits_disclosure_and_conservatively_settles_bad_env
         );
         if extra_item {
             assert!(output.call.response.is_err());
+            // Reasoning after the answer is a shape violation, not a count one.
             assert_eq!(
                 output.call.diagnostic.envelope_failure,
-                Some(DecisionEnvelopeFailure::ItemCount)
+                Some(DecisionEnvelopeFailure::OutputShape)
             );
             assert_eq!(
                 output.receipt.usage_accounting(),
