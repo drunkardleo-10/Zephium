@@ -81,49 +81,54 @@
 
   <div class="content">
     <div class="controls">
-      <SearchField
-        label={m.history_search()}
-        placeholder={m.history_search()}
-        size="chrome"
-        value={query}
-        oninput={(value) => {
-          query = value;
-          session.search(value);
-        }}
-      />
-      <Select
-        label={m.history_range()}
-        labelHidden
-        options={ranges}
-        value={session.range}
-        onchange={(value) => {
-          armed = false;
-          session.scope(value as HistoryRange);
-        }}
-      />
-      <Button
-        variant={armed ? "danger" : "secondary"}
-        size="compact"
-        disabled={session.busy || session.empty}
-        onblur={() => (armed = false)}
-        onclick={clear}>{armed ? confirmLabel : m.history_clear()}</Button
-      >
+      <div class="bar">
+        <SearchField
+          label={m.history_search()}
+          placeholder={m.history_search()}
+          size="chrome"
+          value={query}
+          oninput={(value) => {
+            query = value;
+            session.search(value);
+          }}
+        />
+        <Select
+          label={m.history_range()}
+          labelHidden
+          options={ranges}
+          value={session.range}
+          onchange={(value) => {
+            armed = false;
+            session.scope(value as HistoryRange);
+          }}
+        />
+        <Button
+          variant={armed ? "danger" : "secondary"}
+          disabled={session.busy || session.empty}
+          onblur={() => (armed = false)}
+          onclick={clear}>{armed ? confirmLabel : m.history_clear()}</Button
+        >
+      </div>
     </div>
 
     {#if session.error}
-      <EmptyState title={m.history_unavailable()} description={m.history_unavailable_help()}>
-        {#snippet icon()}<Icon icon={Clock01Icon} size={28} />{/snippet}
-        {#snippet action()}
-          <Button onclick={() => session.retry()}>{m.surface_retry()}</Button>
-        {/snippet}
-      </EmptyState>
+      <div class="empty">
+        <EmptyState title={m.history_unavailable()} description={m.history_unavailable_help()}>
+          {#snippet icon()}<Icon icon={Clock01Icon} size={28} />{/snippet}
+          {#snippet action()}
+            <Button onclick={() => session.retry()}>{m.surface_retry()}</Button>
+          {/snippet}
+        </EmptyState>
+      </div>
     {:else if session.empty}
-      <EmptyState
-        title={query.trim() ? m.history_no_matches() : m.browser_history_empty()}
-        description={query.trim() ? m.history_no_matches_help() : m.history_empty_help()}
-      >
-        {#snippet icon()}<Icon icon={Clock01Icon} size={28} />{/snippet}
-      </EmptyState>
+      <div class="empty">
+        <EmptyState
+          title={query.trim() ? m.history_no_matches() : m.browser_history_empty()}
+          description={query.trim() ? m.history_no_matches_help() : m.history_empty_help()}
+        >
+          {#snippet icon()}<Icon icon={Clock01Icon} size={28} />{/snippet}
+        </EmptyState>
+      </div>
     {:else}
       <HistoryList {session} onopen={(url, newTab) => void open(url, newTab)} />
     {/if}
@@ -131,31 +136,43 @@
 </section>
 
 <style>
+  /* The reading column, published for the list as well: the controls and the
+     rows they act on have to sit on the same two edges, and the list makes its
+     column out of the scroller's padding rather than a wrapper. */
   .content {
+    --library-gutter: clamp(16px, 4vw, 48px);
+    --library-column: 820px;
+
     display: flex;
     flex-direction: column;
     flex: 1;
+    min-width: 0;
     min-height: 0;
-    width: 100%;
-    max-width: 820px;
-    margin-inline: auto;
-    padding-inline: clamp(12px, 4vw, 48px);
-    padding-block-end: 24px;
   }
 
-  /* The controls line up with the list they act on rather than floating in
-     the window chrome above it. */
   .controls {
+    flex: none;
+    padding-inline: max(var(--library-gutter), calc((100% - var(--library-column)) / 2));
+
+    /* The scroller below reserves a 12px gutter for its bar, so the bar over
+       it has to give up the same 12px or the two columns sit 6px apart. */
+    padding-inline-end: max(var(--library-gutter), calc((100% - var(--library-column)) / 2 + 12px));
+  }
+
+  .bar {
     display: flex;
     align-items: center;
     gap: 8px;
-    flex: none;
     min-width: 0;
     padding-block: 4px 14px;
   }
 
-  .controls :global(.ui-search) {
+  .bar :global(.ui-search) {
     flex: 1;
     min-width: 0;
+  }
+
+  .empty {
+    padding-inline: var(--library-gutter);
   }
 </style>

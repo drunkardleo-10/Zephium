@@ -18,7 +18,7 @@
     onopen: (url: string, newTab: boolean) => void;
   } = $props();
 
-  const heights = $derived(density === "page" ? { day: 44, visit: 46 } : { day: 32, visit: 34 });
+  const heights = $derived(density === "page" ? { day: 38, visit: 44 } : { day: 32, visit: 34 });
 
   let scroller: HTMLElement | undefined = $state();
   let selected = $state<string | null>(null);
@@ -102,6 +102,7 @@
 
 <div
   class="scroller"
+  class:scrolls={density === "page"}
   bind:this={scroller}
   data-density={density}
   use:virtual.attach
@@ -184,12 +185,20 @@
 </div>
 
 <style>
+  /* The scroller is the pane, not the column inside it: when the column itself
+     scrolled, the bar came up the middle of the window instead of down its
+     edge. The reading column is made by padding rather than by a wrapper, so
+     the virtual list keeps its rows as direct children. */
   .scroller {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
     outline: none;
-    scrollbar-width: thin;
+  }
+
+  .scroller[data-density="page"] {
+    padding-inline: max(var(--library-gutter), calc((100% - var(--library-column)) / 2));
+    padding-block-end: 24px;
   }
 
   .scroller[data-density="panel"] {
@@ -202,7 +211,7 @@
     gap: 8px;
     margin: 0;
     padding: 0 10px 6px;
-    font-size: 12px;
+    font-size: var(--text-label);
     font-weight: 550;
     letter-spacing: 0.01em;
     color: var(--color-muted);
@@ -224,8 +233,14 @@
     color: var(--color-faint);
   }
 
+  /* A table, not a row of floated parts: the host, the time and the delete
+     button each hold a column of their own, so every title truncates at the
+     same x and the three trailing columns line up down the page. As flex
+     siblings the host slid left and right with its own length and a long
+     title ran into it. */
   .visit {
-    display: flex;
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) auto 62px 22px;
     align-items: center;
     gap: 10px;
     padding: 0 10px;
@@ -234,21 +249,18 @@
     transition: background-color var(--motion-instant) var(--ease-smooth);
   }
 
+  /* The pointer and the caret land on the same plate every other list in the
+     product uses for the row it is on. */
   .visit.selected {
-    background: var(--color-fill-active);
-  }
-
-  :global(:root[data-theme="light"]) .visit.selected {
-    background: var(--color-fill-pressed);
+    background: var(--row-active);
   }
 
   .title {
-    flex: 1;
     min-width: 0;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    font-size: 13.5px;
+    font-size: var(--text-body);
     color: var(--color-text);
   }
 
@@ -260,27 +272,25 @@
   }
 
   .host {
-    flex: none;
-    max-width: 34%;
+    max-width: 180px;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    font-size: 11.5px;
+    text-align: end;
+    font-size: var(--text-label);
     color: var(--color-faint);
   }
 
   time {
-    flex: none;
-    width: 62px;
     text-align: end;
-    font-size: 11.5px;
+    font-size: var(--text-label);
     font-variant-numeric: tabular-nums;
     color: var(--color-faint);
   }
 
-  /* Reserved so revealing it never shifts the row beneath the pointer. */
+  /* Its column is always there, so revealing it never shifts the row under
+     the pointer. */
   .forget {
-    flex: none;
     visibility: hidden;
   }
 
@@ -318,8 +328,12 @@
     background: var(--color-fill-hover);
   }
 
+  .scroller[data-density="panel"] .visit {
+    grid-template-columns: 16px minmax(0, 1fr) 22px;
+  }
+
   .scroller[data-density="panel"] .title {
-    font-size: 12.5px;
+    font-size: var(--text-label);
   }
 
   .scroller[data-density="panel"] .host,
