@@ -49,7 +49,9 @@ export default defineConfig({
             enabled: true,
             headless: true,
             screenshotFailures: false,
-            provider: playwright(),
+            // Retina is the display this chrome is drawn for, and the one
+            // where a radius or a hairline can actually be judged.
+            provider: playwright({ contextOptions: { deviceScaleFactor: 2 } }),
             instances: [{ browser: process.platform === "darwin" ? "webkit" : "chromium" }],
           },
         },
