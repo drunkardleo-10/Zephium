@@ -474,6 +474,8 @@ enum Output {
         role: String,
         status: String,
         content: Vec<Content>,
+        #[serde(default)]
+        phase: Option<String>,
     },
 }
 #[derive(Deserialize)]
@@ -702,10 +704,25 @@ fn decode_response_with(
             // before its single answer; anything after the answer, and any
             // second message, still fails the shape check below.
             Output::Reasoning {} if first_message || (text.is_none() && !refused) => {}
+            // A prose commentary message before the answer is narration, never
+            // a proposal: every answer is one JSON object. It is charged with
+            // the response and skipped; a second answer still fails the shape.
+            Output::Message {
+                role,
+                status,
+                content,
+                phase,
+            } if text.is_none()
+                && !refused
+                && role == "assistant"
+                && status == "completed"
+                && phase.as_deref() == Some("commentary")
+                && matches!(content.as_slice(), [Content::OutputText { text }] if !text.trim_start().starts_with('{')) => {}
             Output::Message {
                 role,
                 status,
                 mut content,
+                ..
             } if text.is_none()
                 && !refused
                 && role == "assistant"

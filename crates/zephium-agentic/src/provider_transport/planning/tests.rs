@@ -163,6 +163,48 @@ fn several_reasoning_items_are_admitted_but_a_second_message_never_is() {
         ));
     }
 }
+#[test]
+fn a_prose_commentary_before_the_answer_is_skipped_but_never_a_second_answer() {
+    let base = response();
+    let mut message = base["output"][1].clone();
+    message["phase"] = json!("final_answer");
+    let reasoning = json!({"type":"reasoning"});
+    // gpt-6-luna's recorded agent turns: a one-sentence preamble in the
+    // commentary phase, then the JSON answer.
+    let commentary = json!({"type":"message","role":"assistant","status":"completed","phase":"commentary",
+        "content":[{"type":"output_text","text":"I will check the listed pages directly, then compare them."}]});
+    let answer = |outputs: Value| {
+        let mut value = base.clone();
+        value["output"] = outputs;
+        serde_json::to_vec(&value).unwrap()
+    };
+    for first in [false, true] {
+        let decoded = decode_response_with(
+            &answer(json!([reasoning, commentary, reasoning, message])),
+            100,
+            &config(),
+            first,
+        );
+        assert!(matches!(decoded, Ok(Ok((text, _))) if text == message["content"][0]["text"]));
+    }
+    let mut json_commentary = commentary.clone();
+    json_commentary["content"][0]["text"] = json!("{\"narrated\":true}");
+    assert!(matches!(
+        decode_response_checked(&answer(json!([json_commentary, message])), 100, &config()),
+        Err(PlanningResponseRejection::OutputShape)
+    ));
+    assert!(matches!(
+        decode_response_with(&answer(json!([json_commentary, message])), 100, &config(), true),
+        Ok(Ok((text, _))) if text == "{\"narrated\":true}"
+    ));
+    for outputs in [
+        json!([commentary, message, message]),
+        json!([message, commentary]),
+        json!([commentary, commentary]),
+    ] {
+        assert!(decode_response_checked(&answer(outputs), 100, &config()).is_err());
+    }
+}
 struct Server {
     endpoint: String,
     thread: std::thread::JoinHandle<Vec<(String, Value, Vec<u8>)>>,
