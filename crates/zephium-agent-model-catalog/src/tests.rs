@@ -206,6 +206,11 @@ fn gpt6_luna_is_a_separate_exact_entry_with_its_published_prices() {
         assert_eq!(decision.model().as_str(), "gpt-6-luna");
         assert_eq!(decision.pricing_profile(), config.pricing_profile());
     }
+    let _: fn(
+        AgentProviderPricingSettlement,
+        &mut AgentRunPolicy,
+    ) -> Result<LunaProviderTerminalSettlement, LunaProviderTerminalSettlementError> =
+        settle_gpt6_luna_provider_terminal;
 }
 
 fn independently_constructed_guard() -> [u8; 32] {

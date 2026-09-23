@@ -604,7 +604,24 @@ pub fn settle_luna_provider_terminal(
     settlement: AgentProviderPricingSettlement,
     policy: &mut AgentRunPolicy,
 ) -> Result<LunaProviderTerminalSettlement, LunaProviderTerminalSettlementError> {
-    let schedule = match luna_pricing_schedule() {
+    settle_luna_entry_terminal(luna_pricing_schedule(), settlement, policy)
+}
+
+/// Prices and settles one exact GPT-6 Luna provider EOF terminal against the
+/// pinned GPT-6 Luna schedule, with the same reservation-ceiling fallback.
+pub fn settle_gpt6_luna_provider_terminal(
+    settlement: AgentProviderPricingSettlement,
+    policy: &mut AgentRunPolicy,
+) -> Result<LunaProviderTerminalSettlement, LunaProviderTerminalSettlementError> {
+    settle_luna_entry_terminal(gpt6_luna_pricing_schedule(), settlement, policy)
+}
+
+fn settle_luna_entry_terminal(
+    schedule: Result<&'static AgentProviderPricingSchedule, LunaModelCatalogError>,
+    settlement: AgentProviderPricingSettlement,
+    policy: &mut AgentRunPolicy,
+) -> Result<LunaProviderTerminalSettlement, LunaProviderTerminalSettlementError> {
+    let schedule = match schedule {
         Ok(schedule) => schedule,
         Err(_) => return settle_luna_at_reservation_ceiling(settlement, policy),
     };
