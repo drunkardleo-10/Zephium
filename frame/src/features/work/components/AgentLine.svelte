@@ -122,7 +122,18 @@
         )
       : [],
   );
-  const question = $derived(questions.at(-1));
+  /**
+   * A run that stopped on its question still asks it: the answer, or any
+   * next message, resumes the work as its next request.
+   */
+  const stoppedQuestion = $derived.by(() => {
+    if (live || !execution || !["cancelled", "failed"].includes(execution.status)) return undefined;
+    const step = (execution.steps ?? []).at(-1);
+    if (step?.kind.kind !== "ask" || step.kind.answer || step.status === "succeeded")
+      return undefined;
+    return { id: step.id, prompt: step.kind.prompt, options: step.kind.options };
+  });
+  const question = $derived(questions.at(-1) ?? stoppedQuestion);
   const failure = $derived(
     preparationFailure(run?.state) ??
       (run?.state.kind === "settled" && run.state.response.reply.kind === "error"
@@ -181,6 +192,7 @@
     if (intervention) return interventionLabel;
     if (failure || session.failure) return gaveUp;
     if (interrupted) return m.work_line_stopped();
+    if (stoppedQuestion) return m.work_line_waiting_for_you();
     if (live) {
       if (fileState) return fileState;
       if (activity === "reading" && readingHost) return m.work_line_reading({ host: readingHost });
@@ -226,7 +238,10 @@
   async function submitAnswer() {
     const text = answer.trim();
     if (!text || !execution || !question || blocked) return;
-    if (await session.answerStep(execution.id, question.id, text)) {
+    const sent = stoppedQuestion
+      ? await session.continueWith(text)
+      : await session.answerStep(execution.id, question.id, text);
+    if (sent) {
       answer = "";
       expanded = false;
     }

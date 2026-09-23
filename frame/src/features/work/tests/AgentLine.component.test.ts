@@ -145,6 +145,39 @@ test("a finished run closes on its own sentence and a follow-up continues the wo
   session.dispose();
 });
 
+test("a run stopped on its question keeps asking it, and the answer continues the work", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  const stopped = agentRun("cancelled");
+  stopped.steps = [
+    ...stopped.steps!,
+    {
+      id: "ask-1",
+      turn: 2,
+      kind: {
+        kind: "ask",
+        prompt: "No monthly totals without dates. What next?",
+        options: ["Use sample dates", "Skip totals"],
+      },
+      status: "cancelled",
+      note: "Waiting for your answer",
+    },
+  ];
+  session.projection = { ...structuredClone(projection), executions: [stopped] };
+  const continueWith = vi.spyOn(session, "continueWith").mockResolvedValue(true);
+  const execute = vi.spyOn(session, "execute").mockResolvedValue(true);
+  const screen = await render(AgentLine, { session });
+  await expect.element(screen.getByText("Waiting for you", { exact: true })).toBeVisible();
+  expect(screen.container.textContent).not.toContain("Something went wrong");
+  await screen.getByRole("button", { name: "Answer", exact: true }).click();
+  await screen.getByRole("button", { name: "Use sample dates", exact: true }).click();
+  await screen.getByRole("button", { name: "Send answer", exact: true }).click();
+  expect(continueWith).toHaveBeenCalledExactlyOnceWith("Use sample dates");
+  expect(execute).not.toHaveBeenCalled();
+  await screen.unmount();
+  session.dispose();
+});
+
 test("an accepted steer reaches the running execution without queueing", async () => {
   const session = new WorkSession("profile");
   session.selected = "objective";
