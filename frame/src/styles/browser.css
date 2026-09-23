@@ -18,7 +18,6 @@
   overflow: hidden;
   border-radius: var(--content-radius);
   background: var(--color-page);
-  box-shadow: inset 0 0 0 1px var(--color-border);
 }
 .internal-toolbar {
   display: flex;
@@ -36,7 +35,6 @@
 .settings-navigation-list {
   overflow-y: auto;
   min-height: 0;
-  scrollbar-width: none;
 }
 .settings-nav-group {
   margin-block: 10px 16px;
@@ -57,7 +55,7 @@
   padding: 9px 10px;
   margin-block: 2px;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-row);
   text-align: start;
   background: transparent;
   color: var(--color-muted);
@@ -71,9 +69,9 @@
 .settings-nav-item,
 .settings-back {
   transition:
-    background-color var(--motion-base) var(--ease-smooth),
-    color var(--motion-base) var(--ease-smooth),
-    scale var(--motion-slow) var(--ease-smooth);
+    background-color var(--motion-instant) var(--ease-smooth),
+    color var(--motion-instant) var(--ease-smooth),
+    scale var(--motion-fast) var(--ease-smooth);
 }
 .settings-nav-item,
 .settings-back,
@@ -91,7 +89,7 @@
 /* A section change lands like a native settings pane: the new content rises
    into place while it fades in, on the same curve as the menus. */
 .settings-view {
-  animation: settings-view-in var(--motion-page) var(--ease-smooth) both;
+  animation: settings-view-in var(--motion-page) var(--ease-emphasized) both;
 }
 @keyframes settings-view-in {
   from {
@@ -100,44 +98,38 @@
   }
 }
 .browse-tab {
-  transition: scale var(--motion-slow) var(--ease-smooth);
+  transition: scale var(--motion-fast) var(--ease-smooth);
 }
 .browse-tab:active {
   scale: 0.985;
   transition-duration: var(--motion-fast);
 }
+/* The same row vocabulary the sidebar uses. A ring around the current item
+   makes a selection read as a button that happens to be stuck down; every
+   selected row in the product is a plate of light and nothing else, so the
+   two columns of this window finally agree with each other. */
 .settings-nav-item:hover {
-  background: var(--color-fill);
+  background: var(--row-hover);
   color: var(--color-text);
 }
 .settings-nav-item[aria-current="page"] {
-  background: var(--color-fill-active);
+  background: var(--row-active);
+  box-shadow: var(--row-rim);
   color: var(--color-text);
-  box-shadow: var(--shadow-control);
 }
+/* The shell owns the page ground for both of its columns, so the content
+   column adds nothing but its own edge. */
 .settings-content {
   min-width: 0;
   flex: 1;
   overflow-y: auto;
-  border-radius: 14px 0 0 0;
-  background: var(--color-page);
+  border-radius: var(--radius-control) 0 0 0;
+  background: transparent;
   box-shadow: -1px 0 0 var(--color-border);
   container-type: inline-size;
 }
 
 /* Pages read at the roomier scale; every primitive inside follows. */
-/* Over a native material the internal pages let a little of the glass
-   through; solid hosts keep the opaque page. */
-:root[data-material="vibrancy"] :is(.settings-shell, .library-shell),
-:root[data-material="liquid_glass"] :is(.settings-shell, .library-shell),
-:root[data-material="acrylic"] :is(.settings-shell, .library-shell) {
-  background: color-mix(in srgb, var(--color-page) 86%, transparent);
-}
-:root[data-material="vibrancy"] .settings-content,
-:root[data-material="liquid_glass"] .settings-content,
-:root[data-material="acrylic"] .settings-content {
-  background: transparent;
-}
 .settings-page {
   --text-body: var(--text-page-body);
   --text-label: 12px;
@@ -161,7 +153,6 @@
   margin: 8px 0 0;
   font-size: 13px;
   line-height: 1.6;
-  color: var(--color-muted);
 }
 .settings-page .ui-settings-copy p {
   max-width: 440px;
@@ -173,7 +164,7 @@
 .settings-feedback {
   padding: 12px 16px;
   margin-block-end: 20px;
-  border-radius: 12px;
+  border-radius: var(--radius-control);
   background: var(--color-fill);
   color: var(--color-danger);
   font-size: 12px;
@@ -187,7 +178,7 @@
   flex: 1;
   min-width: 0;
   padding: 3px;
-  border-radius: 13px;
+  border-radius: var(--radius-control);
   border: 1px solid transparent;
 }
 .appearance-preview[data-selected="true"] {
@@ -199,7 +190,7 @@
   padding: 6px;
   gap: 6px;
   background: #e2e3e8;
-  border-radius: 10px;
+  border-radius: var(--radius-row);
   overflow: hidden;
 }
 .mini-sidebar {
@@ -295,7 +286,7 @@
   border: 0;
   background: var(--color-surface);
   color: var(--color-muted);
-  border-radius: 13px;
+  border-radius: var(--radius-control);
   padding: 18px;
   cursor: default;
 }
@@ -411,9 +402,9 @@
   align-items: center;
   justify-content: center;
   gap: 14px;
-  background: var(--color-page);
+  background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: 14px;
+  border-radius: var(--radius-control);
   margin-block-end: 28px;
 }
 .newtab-preview .zephium-wordmark {
@@ -423,7 +414,7 @@
 .preview-search {
   padding: 10px 20px;
   width: 65%;
-  border-radius: 24px;
+  border-radius: var(--radius-card);
   background: var(--color-fill);
   font-size: 10px;
   color: var(--color-faint);
@@ -436,7 +427,7 @@
 .preview-favorites i {
   width: 22px;
   height: 22px;
-  border-radius: 8px;
+  border-radius: var(--radius-row);
   background: var(--color-fill);
 }
 .essentials-hint {
@@ -448,7 +439,7 @@
   padding: 8px;
   margin: 4px 0 8px;
   border: 1px dashed var(--color-border-strong);
-  border-radius: 12px;
+  border-radius: var(--radius-control);
   color: var(--color-faint);
   font-size: 11px;
 }
@@ -475,7 +466,7 @@
   place-items: center;
   height: 64px;
   width: 64px;
-  border-radius: 22px;
+  border-radius: var(--radius-card);
   background: var(--color-fill);
   color: var(--color-muted);
   margin-block-end: 20px;
@@ -490,12 +481,6 @@
   line-height: 1.7;
   color: var(--color-muted);
   max-width: 340px;
-}
-:root[data-theme="dark"] .content-pane {
-  background: color-mix(in srgb, var(--color-canvas) 90%, transparent);
-}
-:root[data-theme="light"] .content-pane {
-  background: color-mix(in srgb, var(--color-canvas) 94%, transparent);
 }
 @container (max-width: 450px) {
   .settings-page .ui-settings-row {
@@ -553,7 +538,7 @@
   inset-inline: 16px;
   bottom: 60px;
   padding: 12px;
-  border-radius: 12px;
+  border-radius: var(--radius-control);
   background: var(--color-raised);
   color: var(--color-danger);
   font-size: 12px;
@@ -595,7 +580,7 @@
   padding: 8px;
   margin-bottom: 10px;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-row);
   color: var(--color-muted);
   background: transparent;
   font-size: 12px;
@@ -613,7 +598,7 @@
   min-height: 34px;
   padding-inline: 10px;
   background: var(--color-fill);
-  border-radius: 12px;
+  border-radius: var(--radius-row);
   box-shadow: var(--shadow-field);
   margin-bottom: 12px;
   color: var(--color-faint);
@@ -651,7 +636,7 @@
   border-top: 1px solid var(--color-border);
 }
 [data-setting] {
-  border-radius: 12px;
+  border-radius: var(--radius-control);
   scroll-margin-block: 32px;
 }
 [data-setting][data-highlighted="true"] {
@@ -701,7 +686,7 @@
 }
 .collection-empty {
   border: 1px dashed var(--color-border-strong);
-  border-radius: 13px;
+  border-radius: var(--radius-control);
   padding: 24px 16px;
   font-size: 12px;
   text-align: center;
@@ -712,7 +697,7 @@
   padding: 0;
   margin: 0;
   background: var(--color-surface);
-  border-radius: 13px;
+  border-radius: var(--radius-control);
   overflow: hidden;
 }
 .settings-collection li {
@@ -764,7 +749,7 @@
   gap: 16px;
   padding: 18px;
   background: var(--color-surface);
-  border-radius: 13px;
+  border-radius: var(--radius-control);
   margin-bottom: 26px;
 }
 .settings-dialog-overlay {
@@ -772,7 +757,7 @@
   inset: 0;
   z-index: 80;
   background: rgb(0 0 0 / 0.3);
-  animation: interface-fade 160ms var(--ease-out-quiet);
+  animation: interface-fade var(--motion-base) var(--ease-out);
 }
 .settings-dialog {
   position: fixed;
@@ -783,14 +768,14 @@
   width: min(480px, calc(100vw - 48px));
   max-height: calc(100vh - 48px);
   overflow-y: auto;
-  border-radius: 20px;
+  border-radius: var(--radius-card);
   padding: 26px;
   color: var(--color-text);
-  background: var(--color-page);
+  background: var(--color-raised);
   box-shadow: var(--shadow-overlay);
   border: 1px solid var(--color-border-strong);
   outline: none;
-  animation: interface-fade 160ms var(--ease-out-quiet);
+  animation: interface-fade var(--motion-base) var(--ease-out);
 }
 .settings-dialog-title {
   margin: 0;
@@ -867,7 +852,7 @@
   place-items: center;
   background: var(--color-fill);
   border: 1px solid transparent;
-  border-radius: 14px;
+  border-radius: var(--radius-control);
   color: var(--color-muted);
 }
 .profile-icon-choices button[aria-pressed="true"] {
@@ -880,7 +865,7 @@
 }
 .diagnostic-preview {
   background: var(--color-fill);
-  border-radius: 12px;
+  border-radius: var(--radius-control);
   padding: 16px;
   color: var(--color-muted);
 }
@@ -906,12 +891,6 @@
   color: var(--color-muted);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
-}
-:root[data-theme="dark"] .content-pane {
-  background: color-mix(in srgb, var(--color-canvas) 78%, transparent);
-}
-:root[data-theme="light"] .content-pane {
-  background: color-mix(in srgb, var(--color-canvas) 84%, transparent);
 }
 @keyframes interface-fade {
   from {
@@ -945,7 +924,7 @@
 }
 .sidebar-columns[data-phase="enter"] .sidebar-browser-column,
 .sidebar-columns[data-phase="enter"] .tool-panel {
-  animation: sidebar-enter 140ms var(--ease-out-quiet);
+  animation: sidebar-enter 140ms var(--ease-out);
 }
 @keyframes sidebar-enter {
   from {
@@ -958,7 +937,7 @@
   }
 }
 .sidebar-columns[data-launch="true"] .browse-tab[data-entrance="true"]:not([data-selected="true"]) {
-  animation: tab-enter 140ms var(--ease-out-quiet) var(--entrance-delay) both;
+  animation: tab-enter 140ms var(--ease-out) var(--entrance-delay) both;
 }
 @keyframes tab-enter {
   from {
@@ -987,7 +966,7 @@
   gap: 10px;
   background: transparent;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-row);
   color: var(--color-muted);
   font: inherit;
   font-size: 12px;
@@ -1008,7 +987,7 @@
 }
 .folder-chevron {
   display: flex;
-  transition: transform 160ms var(--ease-out-quiet);
+  transition: transform var(--motion-base) var(--ease-out);
 }
 .folder-chevron[data-expanded="true"] {
   transform: rotate(90deg);
@@ -1032,10 +1011,10 @@
 
 /* The dock's site row. */
 .dock-sites {
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-card);
   transition:
-    background-color var(--motion-fast) var(--ease-out-quiet),
-    box-shadow var(--motion-fast) var(--ease-out-quiet);
+    background-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
 }
 /* With nothing kept, the row still holds a tile's worth of space and draws
    the outline of the tile that would go there. An empty band with a line of
@@ -1073,7 +1052,7 @@
   padding: 22px;
   margin-bottom: 26px;
   border: 1px solid var(--color-border);
-  border-radius: 16px;
+  border-radius: var(--radius-card);
   background: var(--color-surface);
 }
 .settings-callout-icon {
@@ -1082,7 +1061,7 @@
   flex: 0 0 48px;
   width: 48px;
   height: 48px;
-  border-radius: 16px;
+  border-radius: var(--radius-card);
   background: var(--color-fill);
   color: var(--color-text);
 }
@@ -1127,7 +1106,7 @@
   padding: 0;
   margin: 0;
   background: var(--color-surface);
-  border-radius: 14px;
+  border-radius: var(--radius-control);
   overflow: hidden;
 }
 .language-order li {
@@ -1239,7 +1218,7 @@
   text-align: start;
   padding: 22px;
   border: 1px solid var(--color-border);
-  border-radius: 14px;
+  border-radius: var(--radius-control);
   background: var(--color-surface);
   color: var(--color-text);
   cursor: default;
@@ -1252,7 +1231,7 @@
   place-items: center;
   width: 38px;
   height: 38px;
-  border-radius: 13px;
+  border-radius: var(--radius-control);
   background: var(--color-fill);
   color: var(--color-muted);
 }
@@ -1363,6 +1342,6 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border-radius: 13px;
+  border-radius: var(--radius-control);
   background: var(--color-fill);
 }

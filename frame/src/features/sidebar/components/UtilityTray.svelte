@@ -30,7 +30,7 @@
   */
   .utilities {
     opacity: 0;
-    transition: opacity var(--motion-base) var(--ease-out-quiet);
+    transition: opacity var(--motion-fast) var(--ease-out);
   }
 
   .utilities:has(:global([data-state="open"])),
@@ -45,14 +45,14 @@
     width: 26px;
     height: 26px;
     border: 0;
-    border-radius: var(--radius-xs);
+    border-radius: var(--radius-inset);
     background: transparent;
     color: var(--color-faint);
     cursor: default;
     outline: none;
     transition:
-      background-color var(--motion-fast) var(--ease-out-quiet),
-      color var(--motion-fast) var(--ease-out-quiet);
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out);
   }
 
   .utilities :global(.utilities-trigger:hover),

@@ -113,7 +113,7 @@
       <p
         role="status"
         aria-live="polite"
-        class="absolute top-full right-1.5 left-1.5 z-20 rounded-md border border-border-strong bg-raised px-2.5 py-2 text-[11.5px] leading-4 text-text shadow-[var(--shadow-overlay)]"
+        class="absolute top-full right-1.5 left-1.5 z-20 rounded-control border border-border-strong bg-raised px-2.5 py-2 text-[11.5px] leading-4 text-text shadow-[var(--shadow-overlay)]"
       >
         {failureMessage(failure)}
       </p>

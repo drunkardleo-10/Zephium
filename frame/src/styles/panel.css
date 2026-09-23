@@ -4,6 +4,7 @@
 @import "./axes/tint.css";
 @import "./axes/density.css";
 @import "./axes/contrast.css";
+@import "./axes/material.css";
 @import "./axes/motion.css";
 @import "./controls.css";
 @source "../features/panel";
@@ -37,11 +38,6 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
-:root:not([data-material="none"])[data-material],
-:root:not([data-material="none"])[data-material] body,
-:root:not([data-material="none"])[data-material] #root {
-  background: transparent;
-}
 button,
 input,
 textarea {
@@ -54,20 +50,24 @@ button:focus-visible {
   outline: 2px solid var(--color-ring);
   outline-offset: 2px;
 }
+
+/* The launcher floats over arbitrary desktop content rather than over a page
+   of ours, so it carries its own wash: bare material leaves it unreadable
+   against a bright wallpaper and tinted by whatever happens to be behind. */
 .panel-root {
   height: 100%;
   width: 100%;
   overflow: hidden;
-  border-radius: var(--panel-radius, 20px);
+
+  /* The native window's own corner, handed down by the host; the role token
+     only covers the frame before that value arrives. */
+  border-radius: var(--panel-radius, var(--radius-panel));
   box-sizing: border-box;
   border: 1px solid var(--color-border-strong);
-  background: transparent;
-}
-:root[data-material="none"] .panel-root {
-  background: var(--color-canvas);
+  background: color-mix(in srgb, var(--color-chrome) var(--wash-launcher), transparent);
 }
 .panel-root[data-visible="true"] > .launcher-view {
-  animation: panel-enter 160ms var(--ease-out-quiet);
+  animation: panel-enter var(--motion-base) var(--ease-emphasized);
 }
 @keyframes panel-enter {
   from {

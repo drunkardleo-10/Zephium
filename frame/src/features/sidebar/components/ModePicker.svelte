@@ -79,8 +79,8 @@
     cursor: default;
     outline: none;
     transition:
-      background-color var(--motion-fast) var(--ease-out-quiet),
-      color var(--motion-fast) var(--ease-out-quiet);
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out);
   }
 
   .mode-trigger-rail:hover {

@@ -45,7 +45,7 @@
     display: flex;
     flex-direction: column;
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     background: var(--color-surface);
     color: var(--color-text);
     overflow: hidden;
@@ -95,7 +95,7 @@
     background: var(--color-fill);
     color: var(--color-text);
     border: 0;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     padding: 4px 8px;
     cursor: pointer;
   }

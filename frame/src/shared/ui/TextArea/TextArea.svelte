@@ -31,7 +31,9 @@
 </div>
 
 <style>
-  /* Fields sit level with the surface; a ring appears only while editing. */
+  /* A field is fill at rest and fill plus a ring while editing: the ring is
+     what says the caret is in here, so it cannot also be the thing that says
+     the field exists. */
   .ui-field {
     display: grid;
     gap: 6px;
@@ -49,7 +51,7 @@
     width: 100%;
     min-width: 0;
     min-height: 88px;
-    padding: 8px 12px;
+    padding: 8px 14px;
     resize: vertical;
     border: 0;
     border-radius: var(--radius-control);
@@ -58,10 +60,9 @@
     font: inherit;
     font-size: var(--text-body);
     line-height: 1.5;
-    box-shadow: var(--shadow-field);
     transition:
-      background-color var(--motion-base) var(--ease-smooth),
-      box-shadow var(--motion-base) var(--ease-smooth);
+      background-color var(--motion-instant) var(--ease-smooth),
+      box-shadow var(--motion-instant) var(--ease-smooth);
   }
 
   .ui-input::placeholder {
@@ -70,6 +71,7 @@
 
   .ui-input:focus {
     outline: none;
+    background: var(--color-field-hover);
     box-shadow: var(--shadow-field-focus);
   }
 

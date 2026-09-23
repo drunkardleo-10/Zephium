@@ -213,7 +213,7 @@
     background: var(--color-fill);
     color: var(--color-text);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-control);
     cursor: pointer;
   }
 

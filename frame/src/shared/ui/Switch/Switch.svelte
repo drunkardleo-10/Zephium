@@ -17,8 +17,11 @@
   } = $props();
   const uid = $props.id();
 
-  const track = { width: 40, height: 22, padding: 2 };
-  const thumb = { width: 22, height: 18, stretchX: 6, stretchY: 0 };
+  // Apple's proportions: a long, low track with the thumb at four fifths of
+  // its height and half again as wide as it is tall. Ours was too square in
+  // both places, which is what made it read as a web toggle.
+  const track = { width: 45, height: 20, padding: 2 };
+  const thumb = { width: 26, height: 16, stretchX: 6, stretchY: 0 };
   const travel = track.width - thumb.width - track.padding * 2;
 
   // Two springs: where the thumb is, and how hard it is being held. Both
@@ -175,7 +178,7 @@
     border: 0;
     border-radius: var(--radius-capsule);
     background: var(--color-track);
-    box-shadow: var(--shadow-track);
+    box-shadow: var(--shadow-switch-track);
     cursor: default;
     touch-action: pan-y;
     /* stylelint-disable-next-line property-no-vendor-prefix */
@@ -183,7 +186,7 @@
     user-select: none;
     contain: layout;
     overflow: hidden;
-    transition: background-color var(--motion-fast) ease;
+    transition: background-color var(--motion-fast) var(--ease-smooth);
   }
 
   .switch:disabled {

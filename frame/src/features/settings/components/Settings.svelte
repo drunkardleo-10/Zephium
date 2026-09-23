@@ -80,7 +80,7 @@
 </script>
 
 <section class="settings-shell" aria-label={m.settings_title()}>
-  <div class="settings-content scroll-quiet" bind:this={content}>
+  <div class="settings-content scrolls" bind:this={content}>
     <div class="settings-page">
       {#key state.query() ? "search" : current.id}<div class="settings-view">
           <header class="settings-page-heading">

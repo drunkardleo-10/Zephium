@@ -112,16 +112,16 @@
     width: var(--dock-tile);
     height: var(--dock-tile);
     border: 0;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     background: var(--color-fill);
     box-shadow: var(--shadow-track);
     color: var(--color-muted);
     cursor: default;
     outline: none;
     transition:
-      background-color var(--motion-fast) var(--ease-out-quiet),
-      color var(--motion-fast) var(--ease-out-quiet),
-      box-shadow var(--motion-fast) var(--ease-out-quiet),
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out),
+      box-shadow var(--motion-fast) var(--ease-out),
       scale var(--motion-slow) var(--ease-spring);
   }
 
@@ -188,7 +188,7 @@
     height: 30px;
     padding-inline: 9px 12px;
     border: 0;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-row);
     background: linear-gradient(var(--color-card), var(--color-card)), var(--color-chrome);
     box-shadow:
       inset 0 0 0 1px var(--color-border),
@@ -207,9 +207,9 @@
     scale: 0.9;
     translate: 0 8px;
     transition:
-      background-color var(--motion-fast) var(--ease-out-quiet),
-      box-shadow var(--motion-fast) var(--ease-out-quiet),
-      color var(--motion-fast) var(--ease-out-quiet),
+      background-color var(--motion-fast) var(--ease-out),
+      box-shadow var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out),
       opacity var(--motion-fast) var(--ease-exit),
       scale var(--motion-fast) var(--ease-exit),
       translate var(--motion-fast) var(--ease-exit);
@@ -243,9 +243,9 @@
     scale: 1;
     translate: 0 0;
     transition:
-      background-color var(--motion-fast) var(--ease-out-quiet),
-      box-shadow var(--motion-fast) var(--ease-out-quiet),
-      color var(--motion-fast) var(--ease-out-quiet),
+      background-color var(--motion-fast) var(--ease-out),
+      box-shadow var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out),
       opacity var(--motion-base) var(--ease-smooth) calc(var(--step) * 30ms),
       scale var(--motion-slow) var(--ease-spring) calc(var(--step) * 30ms),
       translate var(--motion-slow) var(--ease-spring) calc(var(--step) * 30ms);

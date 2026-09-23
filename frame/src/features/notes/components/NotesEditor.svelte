@@ -409,14 +409,14 @@
   .note-document :global(pre) {
     padding: 16px;
     background: var(--color-fill);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-control);
     overflow: auto;
   }
 
   .note-document :global([data-note-reference]) {
     display: inline;
     padding: 2px 6px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     background: var(--color-accent-soft);
     color: var(--color-accent);
     cursor: pointer;
@@ -425,7 +425,7 @@
   .note-links {
     padding: 12px;
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-control);
   }
 
   .note-links label {
@@ -440,7 +440,7 @@
     color: var(--color-text);
     border: 1px solid var(--color-border);
     padding: 8px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     font: inherit;
   }
 
@@ -479,7 +479,7 @@
     height: 30px;
     padding: 0;
     border: 0;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     font: inherit;
     font-weight: 600;
     color: var(--color-muted);

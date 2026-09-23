@@ -229,7 +229,7 @@
     align-items: center;
     gap: 10px;
     padding: 0 10px;
-    border-radius: 9px;
+    border-radius: var(--radius-row);
     cursor: default;
     transition: background-color var(--motion-instant) var(--ease-smooth);
   }
@@ -311,7 +311,7 @@
 
   .more {
     cursor: default;
-    border-radius: 9px;
+    border-radius: var(--radius-row);
   }
 
   .more:hover {

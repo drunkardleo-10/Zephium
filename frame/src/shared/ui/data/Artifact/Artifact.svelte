@@ -153,7 +153,7 @@
   .resource {
     padding: 20px;
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     background: var(--color-fill);
   }
 

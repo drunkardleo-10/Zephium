@@ -86,7 +86,7 @@
     background: var(--color-surface);
     color: var(--color-text);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     font: inherit;
   }
 

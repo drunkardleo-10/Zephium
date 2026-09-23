@@ -25,13 +25,16 @@
     gap: 24px;
     box-sizing: border-box;
     min-height: var(--row-page);
-    padding: 10px 16px;
+    padding: 14px 18px;
   }
 
+  /* Inset at the label, flush at the card's edge. A divider inset on both
+     sides floats inside the card and breaks it into stacked tiles; held to
+     the edge on one side it reads as one card with rows in it. */
   :global(.ui-settings-row) + .ui-settings-row::before {
     content: "";
     position: absolute;
-    inset-inline: 16px;
+    inset-inline: 16px 0;
     top: 0;
     height: 1px;
     background: var(--color-border);

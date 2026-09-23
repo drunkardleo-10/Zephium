@@ -51,7 +51,7 @@
     display: flex;
     align-items: center;
     border: 1px solid transparent;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-control);
   }
 
   .task-card.selected {
@@ -79,7 +79,7 @@
     padding: 12px;
     font: inherit;
     border: 1px solid transparent;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-control);
     background: transparent;
     color: var(--color-text);
     cursor: pointer;

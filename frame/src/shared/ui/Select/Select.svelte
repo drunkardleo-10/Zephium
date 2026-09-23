@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Select } from "bits-ui";
+  import Mark from "../Menu/Mark.svelte";
   import "../Menu/popover.css";
   let {
     label,
@@ -7,7 +8,6 @@
     options,
     value = $bindable(""),
     disabled = false,
-    align = "end",
     onchange,
   }: {
     label: string;
@@ -15,7 +15,6 @@
     options: ReadonlyArray<{ value: string; label: string; disabled?: boolean }>;
     value?: string;
     disabled?: boolean;
-    align?: "start" | "center" | "end";
     onchange?: (value: string) => void;
   } = $props();
   const uid = $props.id();
@@ -36,22 +35,26 @@
       <svg
         class="chevron"
         aria-hidden="true"
-        viewBox="0 0 12 12"
+        viewBox="0 0 12 16"
         width="12"
-        height="12"
+        height="16"
         fill="none"
         stroke="currentColor"
+        stroke-width="1.6"
+        stroke-linecap="round"
+        stroke-linejoin="round"
       >
-        <path
-          d="M3 4.5l3 3 3-3"
-          stroke-width="1.5"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        />
+        <path d="M3 6.5L6 3.5l3 3" />
+        <path d="M3 9.5l3 3 3-3" />
       </svg>
     </Select.Trigger>
     <Select.Portal>
-      <Select.Content class="ui-menu" {align} sideOffset={6}>
+      <Select.Content
+        class="ui-menu ui-select-menu"
+        align="start"
+        sideOffset={6}
+        collisionPadding={12}
+      >
         <Select.Viewport class="ui-menu-viewport">
           {#each options as option (option.value)}
             <Select.Item
@@ -62,21 +65,7 @@
             >
               {#snippet children({ selected })}
                 {option.label}
-                <span class="ui-menu-check" aria-hidden="true"
-                  >{#if selected}<svg
-                      viewBox="0 0 12 12"
-                      width="12"
-                      height="12"
-                      fill="none"
-                      stroke="currentColor"
-                      ><path
-                        d="M2.5 6.5l2.5 2.5 4.5-5"
-                        stroke-width="1.8"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                      /></svg
-                    >{/if}</span
-                >
+                <Mark on={selected} />
               {/snippet}
             </Select.Item>
           {/each}
@@ -87,8 +76,6 @@
 </div>
 
 <style>
-  /* A pop-up button: the current value on a quiet field, one chevron at the
-     end. The menu carries the weight. */
   .field {
     display: grid;
     gap: 6px;
@@ -109,30 +96,39 @@
     box-sizing: border-box;
     min-width: 120px;
     min-height: var(--field-height);
-    padding: 5px 10px 5px 13px;
+    padding: 5px 8px 5px 14px;
     border: 0;
-    border-radius: var(--radius-capsule);
+
+    /* Almost round, and no ring. A hairline around a control this small draws
+       a shape the fill has already drawn, and two edges a pixel apart is what
+       makes a field look like a widget rather than a surface. The text inset
+       matches the menu's own, so the label does not move when it opens. */
+    border-radius: var(--radius-field);
     background: var(--color-field);
     color: var(--color-text);
     font: inherit;
     font-size: var(--text-body);
     font-weight: 450;
     line-height: 16px;
-    box-shadow: var(--shadow-field);
     cursor: default;
     /* stylelint-disable-next-line property-no-vendor-prefix */
     -webkit-user-select: none;
     user-select: none;
     transition:
-      background-color var(--motion-base) var(--ease-smooth),
-      box-shadow var(--motion-base) var(--ease-smooth);
+      background-color var(--motion-instant) var(--ease-smooth),
+      box-shadow var(--motion-instant) var(--ease-smooth);
   }
 
   .field :global(.ui-select:disabled) {
     opacity: 0.5;
   }
 
-  .field :global(.ui-select:hover:not(:disabled)),
+  .field :global(.ui-select:hover:not(:disabled)) {
+    background: var(--color-field-hover);
+  }
+
+  /* While its menu is up the trigger is held rather than hovered — and it is
+     usually underneath the panel anyway, since the chosen row opens over it. */
   .field :global(.ui-select[data-state="open"]) {
     background: var(--color-field-hover);
   }
@@ -146,9 +142,18 @@
     white-space: nowrap;
   }
 
+  /* Two chevrons, because this one picks from a set rather than opening a
+     list of commands — the platform's own distinction, and the fastest way to
+     tell the two apart without reading either. */
   .chevron {
     flex: none;
     color: var(--color-muted);
+  }
+
+  /* At least the trigger's width, so the label it is covering never has to
+     move sideways to fit. */
+  :global(.ui-select-menu) {
+    min-width: var(--bits-floating-anchor-width, 0);
   }
 
   @media (forced-colors: active) {

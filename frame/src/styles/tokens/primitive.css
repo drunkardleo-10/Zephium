@@ -1,20 +1,23 @@
-/* Raw material. Components never read these; semantic tokens do. */
+/* Raw material. Components never read these; semantic tokens do.
+   Graphite, not slate: every rung holds its blue within three points of its
+   red. At these luminances a wider spread stops reading as a neutral and
+   starts reading as a colour the interface never chose. */
 :root {
   --gray-0: #fff;
-  --gray-50: #f8f9fb;
-  --gray-100: #eceef3;
-  --gray-150: #e4e6ec;
-  --gray-200: #d8dae1;
-  --gray-300: #c2c4cc;
-  --gray-400: #9a9ea8;
-  --gray-500: #6f737d;
-  --gray-600: #4a4d56;
-  --gray-700: #2d2e36;
-  --gray-750: #26272e;
-  --gray-800: #212229;
-  --gray-850: #1a1b20;
-  --gray-900: #16171c;
-  --gray-950: #101115;
+  --gray-50: #f9f9fa;
+  --gray-100: #eeeef1;
+  --gray-150: #e6e6e9;
+  --gray-200: #dadadd;
+  --gray-300: #c3c3c7;
+  --gray-400: #9c9ca1;
+  --gray-500: #717176;
+  --gray-600: #4c4c51;
+  --gray-700: #2e2e33;
+  --gray-750: #26262a;
+  --gray-800: #1f1f22;
+  --gray-850: #1a1a1d;
+  --gray-900: #161619;
+  --gray-950: #101012;
   --white-a4: rgb(255 255 255 / 4%);
   --white-a6: rgb(255 255 255 / 6%);
   --white-a8: rgb(255 255 255 / 8%);
@@ -35,11 +38,11 @@
   --black-a28: rgb(0 0 0 / 28%);
   --black-a35: rgb(0 0 0 / 35%);
   --black-a45: rgb(0 0 0 / 45%);
-  --ink-a5: rgb(20 22 30 / 5%);
-  --ink-a7: rgb(20 22 30 / 7%);
-  --ink-a9: rgb(20 22 30 / 9%);
-  --ink-a12: rgb(20 22 30 / 12%);
-  --ink-a16: rgb(20 22 30 / 16%);
-  --ink-a22: rgb(20 22 30 / 22%);
-  --ink-a40: rgb(20 22 30 / 40%);
+  --ink-a5: rgb(24 24 27 / 5%);
+  --ink-a7: rgb(24 24 27 / 7%);
+  --ink-a9: rgb(24 24 27 / 9%);
+  --ink-a12: rgb(24 24 27 / 12%);
+  --ink-a16: rgb(24 24 27 / 16%);
+  --ink-a22: rgb(24 24 27 / 22%);
+  --ink-a40: rgb(24 24 27 / 40%);
 }

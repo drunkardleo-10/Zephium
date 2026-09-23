@@ -252,7 +252,7 @@
 
 {#if ghost !== null}
   <div
-    class="pointer-events-none fixed z-50 max-w-52 truncate rounded-md bg-raised px-3 py-2 text-[13px] text-text shadow-overlay"
+    class="pointer-events-none fixed z-50 max-w-52 truncate rounded-row bg-raised px-3 py-2 text-[13px] text-text shadow-overlay"
     style:left={`${ghost.x + 12}px`}
     style:top={`${ghost.y + 8}px`}
     aria-hidden="true"

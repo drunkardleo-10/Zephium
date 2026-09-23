@@ -108,14 +108,14 @@
     display: flex;
     align-items: center;
     height: var(--row-sidebar);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     color: var(--color-label-secondary);
     font-size: var(--sidebar-row-text);
     font-weight: var(--sidebar-row-weight);
     letter-spacing: -0.005em;
     transition:
-      background-color var(--motion-fast) var(--ease-out-quiet),
-      box-shadow var(--motion-fast) var(--ease-out-quiet);
+      background-color var(--motion-fast) var(--ease-out),
+      box-shadow var(--motion-fast) var(--ease-out);
   }
 
   .browse-tab-grouped {
@@ -188,16 +188,16 @@
     width: 21px;
     height: 21px;
     border: 0;
-    border-radius: var(--radius-xs);
+    border-radius: var(--radius-inset);
     background: transparent;
     color: var(--color-faint);
     opacity: 0;
     cursor: default;
     outline: none;
     transition:
-      opacity var(--motion-fast) var(--ease-out-quiet),
-      background-color var(--motion-fast) var(--ease-out-quiet),
-      color var(--motion-fast) var(--ease-out-quiet);
+      opacity var(--motion-fast) var(--ease-out),
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out);
   }
 
   .tab-close:hover {

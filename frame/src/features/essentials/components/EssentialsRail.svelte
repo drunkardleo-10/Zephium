@@ -33,7 +33,7 @@
           title={tab.title || "Untitled essential"}
           aria-current={active ? "page" : undefined}
           aria-label={tab.title || "Untitled essential"}
-          class="essential-rail-tile flex h-10 w-10 cursor-default items-center justify-center rounded-full transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] outline-none"
+          class="essential-rail-tile flex h-10 w-10 cursor-default items-center justify-center rounded-full transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out)] outline-none"
           class:essential-rail-current={active}
           oncontextmenu={(event) => handleContextMenu(event, tab)}
           onclick={() => onSelect(tab.id)}

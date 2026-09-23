@@ -23,8 +23,13 @@ filters, decorative color gradients, or glow.
 
 The rhythm is 8 px with 4 px subdivisions. Chrome controls are 28–36 px; general
 buttons also have a 40 px large size. Icons are optically consistent at 16 px in
-control clusters. Radius tokens span 5, 7, 9, 12, and 16 px. The native content
-radius and startup canvas colors remain shared contracts, not freely adjustable
+control clusters. Radius is named by role, never by size: `--radius-inset` (8),
+`--radius-row` (12, a row in a column and any field sharing that column),
+`--radius-control-compact` (10), `--radius-control` (14), `--radius-control-large`
+and `--radius-card` (18), `--radius-panel` (22) and `--radius-capsule`. Tailwind's
+size-named radius scale is removed from the theme, and `check-styles` fails on a
+`rounded-md`-style class, which would otherwise compile to a square corner. The
+native content radius and startup canvas colors remain shared contracts, not freely adjustable
 theme knobs. Body type is 13 px, labels 12 px, captions 11 px; page titles and
 specimen display sizes are intentionally larger.
 

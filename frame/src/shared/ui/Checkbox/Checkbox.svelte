@@ -51,8 +51,10 @@
 </div>
 
 <style>
-  /* Unchecked is a quiet field; checked lifts to a near-white tile and the
-     mark springs in. */
+  /* Unchecked is the control fill. Checked is the lit rung, flat: in a product
+     with no accent hue the box that is on is simply the brightest thing on the
+     row, and a gradient inside a 16px square is detail nobody can see that
+     still costs the shape its crispness. */
   .control {
     display: flex;
     align-items: center;
@@ -77,21 +79,22 @@
     place-items: center;
     flex: none;
     box-sizing: border-box;
-    width: 17px;
-    height: 17px;
+    width: 16px;
+    height: 16px;
     padding: 0;
     border: 0;
-    border-radius: 6px;
+
+    /* A quarter of its own side. The radius roles start at 24px controls;
+       nothing else in the product is this small. */
+    border-radius: 5px;
     overflow: hidden;
     background: var(--color-control);
-    color: var(--color-on-primary);
-    box-shadow:
-      inset 0 0 0 1px var(--color-border-strong),
-      var(--shadow-control);
+    color: var(--color-on-lit);
+    box-shadow: var(--shadow-control);
     cursor: default;
     transition:
-      background-color var(--motion-base) var(--ease-smooth),
-      box-shadow var(--motion-base) var(--ease-smooth),
+      background-color var(--motion-instant) var(--ease-smooth),
+      box-shadow var(--motion-instant) var(--ease-smooth),
       scale var(--motion-slow) var(--ease-smooth);
   }
 
@@ -106,8 +109,8 @@
 
   .control :global(.ui-checkbox[data-state="checked"]),
   .control :global(.ui-checkbox[data-state="indeterminate"]) {
-    background: linear-gradient(180deg, var(--color-primary-top), var(--color-primary-bottom));
-    box-shadow: var(--shadow-primary);
+    background: var(--color-lit);
+    box-shadow: none;
   }
 
   .mark {

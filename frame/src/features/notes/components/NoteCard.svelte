@@ -25,7 +25,7 @@
     padding: 12px;
     font: inherit;
     border: 1px solid transparent;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-control);
     background: transparent;
     color: var(--color-text);
     cursor: pointer;

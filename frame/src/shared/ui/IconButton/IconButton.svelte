@@ -55,17 +55,18 @@
 </button>
 
 <style>
-  /* Glass icon buttons are the raised siblings of the flat chrome buttons:
-     same footprint, the shared control recipe on top. */
+  /* The raised sibling of the flat chrome button: same footprint, the shared
+     control fill on top, and the same plate as every other active thing when
+     it is the one that is on. */
   .icon-button[data-variant="glass"] {
     border-radius: var(--radius-control);
     background: var(--color-control);
     color: var(--color-on-control);
     box-shadow: var(--shadow-control);
     transition:
-      background-color var(--motion-base) var(--ease-smooth),
-      color var(--motion-base) var(--ease-smooth),
-      box-shadow var(--motion-base) var(--ease-smooth),
+      background-color var(--motion-instant) var(--ease-smooth),
+      color var(--motion-instant) var(--ease-smooth),
+      box-shadow var(--motion-instant) var(--ease-smooth),
       scale var(--motion-slow) var(--ease-smooth);
   }
 
@@ -86,8 +87,9 @@
   }
 
   .icon-button[data-variant="glass"].icon-button-active {
-    background: var(--color-control-pressed);
-    color: var(--color-on-control-strong);
+    background: var(--row-active);
+    box-shadow: var(--row-rim);
+    color: var(--color-text);
   }
 
   @media (forced-colors: active) {

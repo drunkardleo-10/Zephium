@@ -321,7 +321,7 @@
   .confirmation {
     padding: 16px 20px;
     border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     background: var(--color-surface);
   }
 
@@ -393,7 +393,7 @@
 
   .work-resources {
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     background: var(--color-surface);
     overflow: auto;
     max-height: 700px;
@@ -411,7 +411,7 @@
     min-height: 420px;
     flex: 1 0 420px;
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     overflow: hidden;
   }
 
@@ -463,7 +463,7 @@
     color: var(--color-text);
     background: var(--color-fill);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-control);
     font: inherit;
     cursor: pointer;
   }

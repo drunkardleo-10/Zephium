@@ -5,7 +5,7 @@
     children,
     variant = "secondary",
     size = "regular",
-    shape = "capsule",
+    shape = "rounded",
     pending = false,
     disabled = false,
     ref = $bindable(),
@@ -37,8 +37,12 @@
 </button>
 
 <style>
-  /* A whisper of fill, a hairline ring and a one-pixel drop. State changes
-     are flat color fades; the only movement is a 4% press. */
+  /* Fill, and only fill. The ring-and-top-light recipe this used to wear made
+     the button read as an outline of a button: on a dark card the hairline was
+     the loudest thing in it, and the label sat at 80% so it looked switched
+     off. A button is the most actionable thing on a settings row and should be
+     the most solid — same fill, height and shape as the select beside it, so
+     the two read as one family. The only movement is the press. */
   .ui-button {
     display: inline-flex;
     align-items: center;
@@ -49,24 +53,23 @@
     padding: 0 14px;
     border: 0;
     border-radius: var(--radius-control);
-    background: var(--color-control);
-    color: var(--color-on-control);
+    background: var(--color-field);
+    color: var(--color-text);
     font: inherit;
     font-size: var(--text-body);
     font-weight: 500;
     line-height: 16px;
     white-space: nowrap;
-    box-shadow: var(--shadow-control);
     cursor: default;
     /* stylelint-disable-next-line property-no-vendor-prefix */
     -webkit-user-select: none;
     user-select: none;
     transition:
-      background-color var(--motion-base) var(--ease-smooth),
-      color var(--motion-base) var(--ease-smooth),
-      box-shadow var(--motion-base) var(--ease-smooth),
-      scale var(--motion-slow) var(--ease-smooth),
-      opacity var(--motion-base) var(--ease-smooth);
+      background-color var(--motion-instant) var(--ease-smooth),
+      color var(--motion-instant) var(--ease-smooth),
+      box-shadow var(--motion-instant) var(--ease-smooth),
+      scale var(--motion-fast) var(--ease-smooth),
+      opacity var(--motion-fast) var(--ease-smooth);
   }
 
   .ui-button:disabled {
@@ -74,51 +77,49 @@
   }
 
   .ui-button:hover:not(:disabled) {
-    background: var(--color-control-hover);
-    color: var(--color-on-control-strong);
+    background: var(--color-field-hover);
   }
 
   .ui-button:active:not(:disabled) {
-    background: var(--color-control-pressed);
+    background: var(--color-fill-pressed);
     scale: 0.97;
     transition-duration: var(--motion-fast);
   }
 
-  /* Primary is the tinted, layered button: the accent at 6% under a ring of
-     the same accent. Graphite keeps it neutral; a space tint colors it. */
+  /* Primary is the lit rung, solid: in a product with no accent hue the thing
+     you are meant to press is simply the brightest thing on the row. Tinting
+     8% of an accent behind a ring said "secondary, but coloured", which is
+     why nothing in here ever looked like the obvious action. */
   .ui-button[data-variant="primary"] {
-    background: color-mix(in srgb, var(--color-accent) 8%, transparent);
-    color: var(--color-accent);
-    box-shadow: var(--shadow-accent);
+    background: var(--color-lit);
+    color: var(--color-on-lit);
   }
 
   .ui-button[data-variant="primary"]:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
-    color: var(--color-accent);
+    background: var(--color-lit-hover);
   }
 
   .ui-button[data-variant="primary"]:active:not(:disabled) {
-    background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+    background: var(--color-lit);
   }
 
   .ui-button[data-variant="ghost"] {
     background: transparent;
-    color: var(--color-on-control);
-    box-shadow: none;
+    color: var(--color-muted);
   }
 
   .ui-button[data-variant="ghost"]:hover:not(:disabled) {
-    background: var(--color-control-hover);
+    background: var(--color-fill-hover);
+    color: var(--color-text);
   }
 
   .ui-button[data-variant="ghost"]:active:not(:disabled) {
-    background: var(--color-control-pressed);
+    background: var(--color-fill-pressed);
   }
 
   .ui-button[data-variant="danger"] {
-    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+    background: color-mix(in srgb, var(--color-danger) 14%, transparent);
     color: var(--color-danger);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-danger) 14%, transparent);
   }
 
   .ui-button[data-variant="danger"]:hover:not(:disabled) {
@@ -143,6 +144,9 @@
     border-radius: var(--radius-control-large);
   }
 
+  /* Kept for the one place a pill is the right answer — a tag, a filter — and
+     no longer the default, which is how every button in settings ended up a
+     pill in a column of rounded rectangles. */
   .ui-button[data-shape="capsule"] {
     border-radius: var(--radius-capsule);
     padding-inline: 16px;

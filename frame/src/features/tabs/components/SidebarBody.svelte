@@ -77,7 +77,7 @@
     height: var(--row-sidebar);
     padding-inline: 8px;
     border: 0;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     background: transparent;
     color: var(--color-faint);
     font: inherit;
@@ -88,8 +88,8 @@
     cursor: default;
     outline: none;
     transition:
-      background-color var(--motion-fast) var(--ease-out-quiet),
-      color var(--motion-fast) var(--ease-out-quiet);
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out);
   }
 
   .new-tab:hover {

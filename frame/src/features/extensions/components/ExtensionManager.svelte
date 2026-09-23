@@ -423,7 +423,7 @@
       role="dialog"
       aria-modal="true"
       aria-labelledby="extension-manager-title"
-      class="fixed top-1/2 left-1/2 z-50 max-h-[min(680px,calc(100vh-24px))] w-[min(760px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-border-strong bg-raised p-4 text-start shadow-[var(--shadow-overlay)]"
+      class="fixed top-1/2 left-1/2 z-50 max-h-[min(680px,calc(100vh-24px))] w-[min(760px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-panel border border-border-strong bg-raised p-4 text-start shadow-[var(--shadow-overlay)]"
       class:min-h-[min(520px,calc(100vh-24px))]={management?.phase === "ready"}
     >
       <div class="mb-3 flex items-center justify-between gap-3 border-b border-border pb-3">
@@ -440,7 +440,7 @@
               aria-label="Check for extension updates"
               title="Check for extension updates"
               disabled={distributionRefreshDisabled}
-              class="inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-medium text-muted hover:bg-fill-strong hover:text-text disabled:opacity-45"
+              class="inline-flex h-8 items-center gap-1.5 rounded-control-compact px-2.5 text-[11px] font-medium text-muted hover:bg-fill-strong hover:text-text disabled:opacity-45"
               onclick={refreshDistribution}
             >
               <Icon
@@ -466,7 +466,7 @@
 
       {#if distributionNotice !== null}
         <p
-          class="mb-2 rounded-md bg-fill px-2.5 py-2 text-[10.5px] leading-4 text-muted"
+          class="mb-2 rounded-row bg-fill px-2.5 py-2 text-[10.5px] leading-4 text-muted"
           class:text-warning={distributionNotice.tone === "warning"}
           role={distributionNotice.tone === "warning" ? "alert" : "status"}
           aria-live={distributionNotice.tone === "warning" ? "assertive" : "polite"}
@@ -475,7 +475,7 @@
         </p>
       {:else if distributionRefreshFailure !== null}
         <p
-          class="mb-2 rounded-md bg-fill px-2.5 py-2 text-[10.5px] leading-4 text-warning"
+          class="mb-2 rounded-row bg-fill px-2.5 py-2 text-[10.5px] leading-4 text-warning"
           role="alert"
           aria-live="assertive"
         >
@@ -485,7 +485,7 @@
 
       {#if management?.phase === "ready"}
         <div
-          class="mb-3 flex w-fit items-center gap-1 rounded-lg bg-fill p-1"
+          class="mb-3 flex w-fit items-center gap-1 rounded-control bg-fill p-1"
           role="tablist"
           aria-label="Extension sections"
         >
@@ -496,7 +496,7 @@
             aria-controls="extensions-installed-panel"
             aria-selected={section === "installed"}
             tabindex={section === "installed" ? 0 : -1}
-            class="h-7 rounded-md px-2.5 text-[11px] font-medium text-muted transition-colors hover:text-text"
+            class="h-7 rounded-control-compact px-2.5 text-[11px] font-medium text-muted transition-colors hover:text-text"
             class:bg-raised={section === "installed"}
             class:text-text={section === "installed"}
             onclick={() => selectSection("installed")}
@@ -511,7 +511,7 @@
             aria-controls="extensions-verified-panel"
             aria-selected={section === "verified"}
             tabindex={section === "verified" ? 0 : -1}
-            class="h-7 rounded-md px-2.5 text-[11px] font-medium text-muted transition-colors hover:text-text"
+            class="h-7 rounded-control-compact px-2.5 text-[11px] font-medium text-muted transition-colors hover:text-text"
             class:bg-raised={section === "verified"}
             class:text-text={section === "verified"}
             onclick={() => selectSection("verified")}
@@ -522,7 +522,7 @@
           </button>
         </div>
         {#if profilePolicy !== null}
-          <div class="mb-3 grid gap-1 rounded-lg bg-fill px-2.5 py-2 text-[10.5px] leading-4">
+          <div class="mb-3 grid gap-1 rounded-row bg-fill px-2.5 py-2 text-[10.5px] leading-4">
             <div class="flex min-h-7 items-center justify-between gap-3">
               <div class="min-w-0">
                 <p class="font-medium text-text">Pause extensions</p>
@@ -589,10 +589,10 @@
       {/if}
 
       {#if !requestFailed && pendingUpdate !== null}
-        <article class="rounded-md bg-fill px-3 py-3">
+        <article class="rounded-row bg-fill px-3 py-3">
           <div class="flex items-start gap-2.5">
             <span
-              class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-raised text-muted"
+              class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-inset bg-raised text-muted"
               aria-hidden="true"
             >
               <Icon icon={PuzzleIcon} size={16} />
@@ -620,7 +620,7 @@
           </div>
 
           {#if pendingUpdate.added_required_api.length + pendingUpdate.added_required_hosts.length > 0}
-            <div class="mt-3 rounded-md bg-raised px-2.5 py-2">
+            <div class="mt-3 rounded-row bg-raised px-2.5 py-2">
               <p class="text-[10.5px] leading-4 font-medium text-text">New required access</p>
               <ul class="mt-1 text-[10.5px] leading-4 text-muted">
                 {#each pendingUpdate.added_required_api as permission (permission)}
@@ -634,7 +634,9 @@
           {/if}
 
           {#if pendingUpdate.compatibility === "degraded"}
-            <div class="mt-2 rounded-md bg-raised px-2.5 py-2 text-[10.5px] leading-4 text-warning">
+            <div
+              class="mt-2 rounded-row bg-raised px-2.5 py-2 text-[10.5px] leading-4 text-warning"
+            >
               <p class="font-medium">New compatibility limitations</p>
               <ul class="mt-1">
                 {#each pendingUpdate.limitations as limitation (limitationKey(limitation))}
@@ -658,7 +660,7 @@
           </div>
         </article>
       {:else if requestFailed || management === null || management.phase !== "ready"}
-        <div class="rounded-md bg-fill px-2.5 py-3 text-[11.5px] leading-4 text-muted">
+        <div class="rounded-row bg-fill px-2.5 py-3 text-[11.5px] leading-4 text-muted">
           {#if !requestFailed && (management === null || management.phase === "loading")}
             <p role="status">Loading installed extensions…</p>
           {:else}
@@ -680,7 +682,7 @@
             {#if management?.phase !== "not_configured" && management?.phase !== "catalog_not_synchronized" && management?.phase !== "update_consent_required"}
               <button
                 type="button"
-                class="mt-2 inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[11.5px] font-medium text-text hover:bg-fill-strong"
+                class="mt-2 inline-flex h-7 items-center gap-1.5 rounded-control-compact px-2 text-[11.5px] font-medium text-text hover:bg-fill-strong"
                 onclick={retry}
               >
                 <Icon icon={Refresh01Icon} size={13} />
@@ -699,10 +701,10 @@
         >
           {#if section === "installed"}
             {#if credentialCapability !== null && (credentialCapability.system_password_autofill || credentialCapability.passkey_authorization !== "unsupported")}
-              <article class="mb-2 rounded-md bg-fill px-2.5 py-2">
+              <article class="mb-2 rounded-row bg-fill px-2.5 py-2">
                 <div class="flex items-start gap-2">
                   <span
-                    class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-raised text-muted"
+                    class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-inset bg-raised text-muted"
                     aria-hidden="true"
                   >
                     <Icon icon={Key01Icon} size={15} />
@@ -733,7 +735,7 @@
                       {#if credentialCapability.can_request_passkey_authorization}
                         <button
                           type="button"
-                          class="h-7 shrink-0 rounded-md px-2 text-[11px] font-medium text-text hover:bg-fill-strong disabled:opacity-45"
+                          class="h-7 shrink-0 rounded-control-compact px-2 text-[11px] font-medium text-text hover:bg-fill-strong disabled:opacity-45"
                           disabled={passkeyRequestBusy}
                           onclick={() => void browserCredentials.requestPasskeyAuthorization()}
                         >
@@ -746,16 +748,16 @@
               </article>
             {/if}
             {#if management.entries.length === 0}
-              <p class="rounded-md bg-fill px-2.5 py-3 text-[11.5px] leading-4 text-muted">
+              <p class="rounded-row bg-fill px-2.5 py-3 text-[11.5px] leading-4 text-muted">
                 No extensions are installed in this profile.
               </p>
             {:else}
               <div class="space-y-1.5">
                 {#each management.entries as entry (entry.install_id)}
-                  <article class="rounded-md bg-fill px-2.5 py-2">
+                  <article class="rounded-row bg-fill px-2.5 py-2">
                     <div class="flex items-start gap-2">
                       <span
-                        class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-raised text-muted"
+                        class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-inset bg-raised text-muted"
                         aria-hidden="true"
                       >
                         <Icon icon={PuzzleIcon} size={15} />
@@ -841,7 +843,7 @@
                     {#if expandedPermissions === entry.install_id}
                       <div
                         id={`extension-permissions-${entry.install_id}`}
-                        class="mt-2 rounded-md bg-raised px-2.5 py-2 text-[10.5px] leading-4"
+                        class="mt-2 rounded-row bg-raised px-2.5 py-2 text-[10.5px] leading-4"
                       >
                         {#if requiredApiPermissions(entry).length > 0}
                           <p class="font-medium text-text">Required browser access</p>
@@ -953,7 +955,7 @@
                         >
                         <button
                           type="button"
-                          class="h-7 rounded-md px-2 text-[11px] text-muted hover:bg-fill-strong hover:text-text"
+                          class="h-7 rounded-control-compact px-2 text-[11px] text-muted hover:bg-fill-strong hover:text-text"
                           disabled={mutation !== null}
                           onclick={() => (confirming = null)}
                         >
@@ -961,7 +963,7 @@
                         </button>
                         <button
                           type="button"
-                          class="h-7 rounded-md px-2 text-[11px] font-medium text-warning hover:bg-fill-strong"
+                          class="h-7 rounded-control-compact px-2 text-[11px] font-medium text-warning hover:bg-fill-strong"
                           disabled={mutation !== null}
                           onclick={() => remove(entry)}
                         >
@@ -973,7 +975,7 @@
                             type="button"
                             aria-expanded={expandedPermissions === entry.install_id}
                             aria-controls={`extension-permissions-${entry.install_id}`}
-                            class="mr-auto h-7 rounded-md px-2 text-[11px] font-medium text-muted hover:bg-fill-strong hover:text-text"
+                            class="mr-auto h-7 rounded-control-compact px-2 text-[11px] font-medium text-muted hover:bg-fill-strong hover:text-text"
                             onclick={() =>
                               (expandedPermissions =
                                 expandedPermissions === entry.install_id ? null : entry.install_id)}
@@ -984,7 +986,7 @@
                         {#if entry.has_options_page && entry.runtime === "active"}
                           <button
                             type="button"
-                            class="h-7 rounded-md px-2 text-[11px] font-medium text-muted hover:bg-fill-strong hover:text-text"
+                            class="h-7 rounded-control-compact px-2 text-[11px] font-medium text-muted hover:bg-fill-strong hover:text-text"
                             disabled={mutation !== null}
                             onclick={() => openOptions(entry)}
                           >
@@ -1010,7 +1012,7 @@
             {/if}
           {:else}
             {#if management.candidates.length === 0}
-              <p class="rounded-md bg-fill px-2.5 py-3 text-[11.5px] leading-4 text-muted">
+              <p class="rounded-row bg-fill px-2.5 py-3 text-[11.5px] leading-4 text-muted">
                 {management.entries.some((entry) => entry.source === "zephium_verified")
                   ? "All verified extensions in this catalog are installed."
                   : "No compatible extensions are available in this catalog."}
@@ -1029,10 +1031,10 @@
                 </div>
                 <div class="space-y-1.5">
                   {#each management.candidates as candidate (candidate.candidate_index)}
-                    <article class="rounded-md bg-fill px-2.5 py-2">
+                    <article class="rounded-row bg-fill px-2.5 py-2">
                       <div class="flex items-start gap-2">
                         <span
-                          class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-raised text-muted"
+                          class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-inset bg-raised text-muted"
                           aria-hidden="true"
                         >
                           <Icon icon={PuzzleIcon} size={15} />
@@ -1082,7 +1084,7 @@
                       {#if reviewingCandidate === candidate.candidate_index}
                         <div class="mt-2 border-t border-border pt-2">
                           {#if candidate.limitations.length > 0}
-                            <div class="mb-2 rounded-md bg-warning/10 px-2 py-1.5">
+                            <div class="mb-2 rounded-row bg-warning/10 px-2 py-1.5">
                               <p class="text-[11px] leading-4 font-medium text-warning">
                                 Platform limitations
                               </p>
@@ -1110,7 +1112,7 @@
                             {#if candidate.required_hosts.length > COLLAPSED_REQUIRED_HOST_COUNT}
                               <button
                                 type="button"
-                                class="mt-1 h-6 rounded-md px-1.5 text-[10.5px] font-medium text-muted hover:bg-fill-strong hover:text-text"
+                                class="mt-1 h-6 rounded-control-compact px-1.5 text-[10.5px] font-medium text-muted hover:bg-fill-strong hover:text-text"
                                 onclick={() => (showAllRequiredHosts = !showAllRequiredHosts)}
                               >
                                 {showAllRequiredHosts
@@ -1205,7 +1207,7 @@
                           <div class="mt-2 flex justify-end gap-1">
                             <button
                               type="button"
-                              class="h-7 rounded-md px-2 text-[11px] text-muted hover:bg-fill-strong hover:text-text"
+                              class="h-7 rounded-control-compact px-2 text-[11px] text-muted hover:bg-fill-strong hover:text-text"
                               disabled={mutation !== null}
                               onclick={() => (reviewingCandidate = null)}
                             >
@@ -1213,7 +1215,7 @@
                             </button>
                             <button
                               type="button"
-                              class="h-7 rounded-md bg-accent px-2.5 text-[11px] font-medium text-white disabled:opacity-45"
+                              class="h-7 rounded-control-compact bg-accent px-2.5 text-[11px] font-medium text-white disabled:opacity-45"
                               disabled={mutation !== null}
                               onclick={() => install(candidate)}
                             >
@@ -1225,7 +1227,7 @@
                         <div class="mt-1.5 flex justify-end">
                           <button
                             type="button"
-                            class="h-7 rounded-md px-2 text-[11px] font-medium text-text hover:bg-fill-strong"
+                            class="h-7 rounded-control-compact px-2 text-[11px] font-medium text-text hover:bg-fill-strong"
                             disabled={mutation !== null}
                             onclick={() => reviewInstall(candidate)}
                           >

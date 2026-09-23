@@ -120,7 +120,7 @@
             type="button"
             title={tab.title || m.untitled_tab()}
             aria-label={tab.title || m.untitled_tab()}
-            class="press flex h-11 w-11 cursor-default items-center justify-center rounded-lg bg-fill outline-none hover:bg-fill-hover"
+            class="press flex h-11 w-11 cursor-default items-center justify-center rounded-control-large bg-fill outline-none hover:bg-fill-hover"
             onclick={() => tabs.activate(tab.id)}
           >
             <FavIcon

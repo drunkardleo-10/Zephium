@@ -39,7 +39,7 @@
 -->
 <li
   class={[
-    "overflow-hidden rounded-md transition-[box-shadow] duration-[var(--motion-fast)]",
+    "overflow-hidden rounded-row transition-[box-shadow] duration-[var(--motion-fast)]",
     className,
   ]}
   class:bg-fill={!holdsActive}

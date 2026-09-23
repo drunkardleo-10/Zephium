@@ -25,6 +25,7 @@ for (const file of files) {
     if (
       [
         "--shadow-popover",
+        "--shadow-menu",
         "--shadow-overlay",
         "--shadow-float",
         "--shadow-thumb",
@@ -43,6 +44,21 @@ for (const file of files) {
       if (magnitude > 3)
         failures.push(`${file}: ${prop} exceeds 3px contact-shadow blur: ${value}`);
     }
+  });
+}
+
+// Tailwind's size-named radius scale is removed from the theme, so a class
+// such as `rounded-md` compiles to nothing and the element silently goes
+// square. Only the role-named radii in tokens.css exist.
+const source = new URL("../src/", import.meta.url);
+const sizeRadius =
+  /(?<![\w-])rounded(?:-(?:[trblse]|tl|tr|bl|br|ss|se|es|ee))?-(?:xs|sm|md|lg|xl|[2-4]xl)(?![\w-])/u;
+for (const file of await readdir(source, { recursive: true })) {
+  if (!/\.(?:svelte|ts)$/u.test(file) || /(?:^|\/)tests\//u.test(file)) continue;
+  const lines = (await readFile(new URL(file, source), "utf8")).split("\n");
+  lines.forEach((line, index) => {
+    const match = line.match(sizeRadius);
+    if (match) failures.push(`src/${file}:${index + 1}: size-named radius ${match[0]}`);
   });
 }
 if (failures.length) throw new Error(failures.join("\n"));

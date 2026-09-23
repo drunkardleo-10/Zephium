@@ -270,7 +270,7 @@
   .failure button {
     padding: 5px 10px;
     border: 0;
-    border-radius: 7px;
+    border-radius: var(--radius-inset);
     background: var(--color-fill);
     color: var(--color-text);
     cursor: default;
@@ -303,7 +303,7 @@
     text-align: start;
     padding: 6px 10px;
     border: 0;
-    border-radius: 9px;
+    border-radius: var(--radius-row);
     background: transparent;
     color: var(--color-text);
     font-size: 13px;
@@ -316,7 +316,7 @@
     place-items: center;
     width: 26px;
     height: 26px;
-    border-radius: 7px;
+    border-radius: var(--radius-inset);
     background: var(--color-fill);
   }
 

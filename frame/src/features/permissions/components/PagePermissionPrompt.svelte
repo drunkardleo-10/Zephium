@@ -78,12 +78,12 @@
     aria-modal="true"
     aria-labelledby="page-permission-title"
     aria-describedby="page-permission-origin page-permission-detail"
-    class="w-[min(390px,calc(100vw-32px))] rounded-xl border border-border-strong bg-raised p-4 text-start shadow-[var(--shadow-overlay)]"
+    class="w-[min(390px,calc(100vw-32px))] rounded-panel border border-border-strong bg-raised p-4 text-start shadow-[var(--shadow-overlay)]"
     data-zephium-page-permission-prompt
   >
     <div class="flex items-start gap-3">
       <span
-        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent"
+        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control-compact bg-accent-soft text-accent"
         aria-hidden="true"
       >
         <Icon icon={camera ? Camera01Icon : Mic01Icon} size={19} />
@@ -115,7 +115,7 @@
         Remember for this site
       </label>
     {:else}
-      <p class="mt-3 rounded-md bg-fill px-2.5 py-2 text-[10.5px] leading-4 text-muted">
+      <p class="mt-3 rounded-row bg-fill px-2.5 py-2 text-[10.5px] leading-4 text-muted">
         Private Browsing won't remember this decision.
       </p>
     {/if}

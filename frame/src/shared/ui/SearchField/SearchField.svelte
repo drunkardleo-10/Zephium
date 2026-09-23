@@ -52,16 +52,15 @@
     gap: 8px;
     box-sizing: border-box;
     min-height: var(--field-height);
-    padding: 0 12px;
+    padding: 0 14px;
     border: 0;
     border-radius: var(--radius-control);
     color: var(--color-faint);
     background: var(--color-field);
-    box-shadow: var(--shadow-field);
     transition:
-      background-color var(--motion-base) var(--ease-smooth),
-      color var(--motion-base) var(--ease-smooth),
-      box-shadow var(--motion-base) var(--ease-smooth);
+      background-color var(--motion-instant) var(--ease-smooth),
+      color var(--motion-instant) var(--ease-smooth),
+      box-shadow var(--motion-instant) var(--ease-smooth);
   }
 
   .ui-search:hover {
@@ -97,20 +96,14 @@
     appearance: none;
   }
 
-  /* The page-size search is a capsule with the control recipe. */
+  /* The page-size search is the same field, larger. Almost round at 46px
+     rather than a capsule: a pill in a column of rounded rectangles is the one
+     shape that never belongs to the set. */
   .ui-search[data-size="page"] {
     min-height: 46px;
     padding-inline: 18px;
     gap: 12px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-control);
-    box-shadow: var(--shadow-control);
-  }
-
-  .ui-search[data-size="page"]:hover,
-  .ui-search[data-size="page"]:focus-within {
-    background: var(--color-control-hover);
-    box-shadow: var(--shadow-control-strong);
+    border-radius: var(--radius-panel);
   }
 
   .ui-search[data-size="page"] input {

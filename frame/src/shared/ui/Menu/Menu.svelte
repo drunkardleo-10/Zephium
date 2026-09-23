@@ -19,6 +19,7 @@
   import { DropdownMenu } from "bits-ui";
   import type { Snippet } from "svelte";
   import Icon from "../Icon/Icon.svelte";
+  import Mark from "./Mark.svelte";
   import "./popover.css";
   let {
     label,
@@ -37,7 +38,9 @@
     align?: "start" | "center" | "end";
     onselect: (id: string) => void;
   } = $props();
-  let hasChecks = $derived(entries.some((entry) => entry.kind === "item" && entry.checked));
+  // A menu that can express a choice keeps the mark column on every row, so
+  // the labels do not step sideways as the choice moves.
+  let choice = $derived(entries.some((entry) => entry.kind === "item" && "checked" in entry));
 </script>
 
 <DropdownMenu.Root>
@@ -45,7 +48,13 @@
     {@render trigger()}
   </DropdownMenu.Trigger>
   <DropdownMenu.Portal>
-    <DropdownMenu.Content class="ui-menu" {side} {align} sideOffset={6}>
+    <DropdownMenu.Content
+      class="ui-menu ui-menu-scroll"
+      {side}
+      {align}
+      sideOffset={6}
+      collisionPadding={10}
+    >
       {#each entries as entry, index (index)}
         {#if entry.kind === "separator"}
           <DropdownMenu.Separator class="ui-menu-separator" />
@@ -65,26 +74,8 @@
               >
             {/if}
             {entry.label}
-            {#if entry.hint}<span class="ui-menu-hint" aria-hidden="true"
-                >{#each entry.hint.split(" ") as key, i (i)}<kbd>{key}</kbd>{/each}</span
-              >{/if}
-            {#if hasChecks}
-              <span class="ui-menu-check" aria-hidden="true"
-                >{#if entry.checked}<svg
-                    viewBox="0 0 12 12"
-                    width="12"
-                    height="12"
-                    fill="none"
-                    stroke="currentColor"
-                    ><path
-                      d="M2.5 6.5l2.5 2.5 4.5-5"
-                      stroke-width="1.8"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                    /></svg
-                  >{/if}</span
-              >
-            {/if}
+            {#if entry.hint}<span class="ui-menu-hint" aria-hidden="true">{entry.hint}</span>{/if}
+            {#if choice}<Mark on={entry.checked === true} />{/if}
           </DropdownMenu.Item>
         {/if}
       {/each}

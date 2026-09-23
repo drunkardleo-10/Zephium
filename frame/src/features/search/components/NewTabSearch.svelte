@@ -258,7 +258,7 @@
   .failure button {
     padding: 5px 10px;
     border: 0;
-    border-radius: 7px;
+    border-radius: var(--radius-inset);
     background: var(--color-fill);
     color: var(--color-text);
     cursor: default;

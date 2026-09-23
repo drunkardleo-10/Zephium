@@ -7,16 +7,16 @@
   align-items: center;
   justify-content: center;
   flex: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-control-compact);
   color: var(--color-muted);
   outline: none;
   /* stylelint-disable-next-line property-no-vendor-prefix */
   -webkit-user-select: none;
   user-select: none;
   transition:
-    color var(--motion-base) var(--ease-smooth),
-    background-color var(--motion-base) var(--ease-smooth),
-    transform var(--motion-slow) var(--ease-smooth);
+    color var(--motion-instant) var(--ease-smooth),
+    background-color var(--motion-instant) var(--ease-smooth),
+    transform var(--motion-fast) var(--ease-smooth);
 }
 
 .chrome-button:active:not(:disabled),
@@ -71,7 +71,8 @@
 }
 
 .icon-button-active {
-  background: var(--color-fill-active);
+  background: var(--row-active);
+  box-shadow: var(--row-rim);
   color: var(--color-text);
 }
 

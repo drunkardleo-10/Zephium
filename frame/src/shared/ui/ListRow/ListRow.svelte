@@ -35,7 +35,7 @@
     min-height: 32px;
     padding: 5px 8px;
     border: 0;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-control);
     background: transparent;
     color: var(--color-muted);
     text-align: start;

@@ -26,7 +26,9 @@
 </button>
 
 <style>
-  /* A capsule with the control recipe; selected lifts to the raised fill. */
+  /* A chip is one of the few things that genuinely is a pill — it is a tag,
+     not a control in a column. Selected takes the same soft plate and rim as
+     every other chosen thing in the product. */
   .ui-chip {
     display: inline-flex;
     align-items: center;
@@ -49,9 +51,9 @@
     -webkit-user-select: none;
     user-select: none;
     transition:
-      color var(--motion-base) var(--ease-smooth),
-      background-color var(--motion-base) var(--ease-smooth),
-      box-shadow var(--motion-base) var(--ease-smooth),
+      color var(--motion-instant) var(--ease-smooth),
+      background-color var(--motion-instant) var(--ease-smooth),
+      box-shadow var(--motion-instant) var(--ease-smooth),
       scale var(--motion-slow) var(--ease-smooth);
   }
 
@@ -71,9 +73,9 @@
   }
 
   .ui-chip[aria-pressed="true"] {
-    background: var(--color-raise);
+    background: var(--row-active);
     color: var(--color-text);
-    box-shadow: var(--shadow-raise);
+    box-shadow: var(--row-rim);
   }
 
   @media (forced-colors: active) {

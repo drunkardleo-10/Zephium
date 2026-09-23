@@ -21,9 +21,8 @@
     min-width: 18px;
     height: 18px;
     padding: 0 5px;
-    border-radius: var(--radius-xs);
+    border-radius: var(--radius-inset);
     background: var(--color-control);
-    box-shadow: inset 0 0 0 1px var(--color-border);
     color: var(--color-muted);
     font-family: var(--font-mono);
     font-size: 11px;

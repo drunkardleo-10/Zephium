@@ -76,7 +76,7 @@
     max-width: 100%;
     overflow: auto;
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     background: var(--color-surface);
   }
 
@@ -138,7 +138,7 @@
   button {
     padding: 6px 10px;
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     background: var(--color-fill);
     color: var(--color-text);
     font: inherit;

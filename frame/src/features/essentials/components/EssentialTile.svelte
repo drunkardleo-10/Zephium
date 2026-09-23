@@ -87,15 +87,15 @@
     width: 100%;
     height: var(--dock-tile);
     border: 0;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     background: var(--color-card);
     box-shadow: inset 0 0 0 1px var(--color-border);
     cursor: default;
     outline: none;
     transition:
-      background-color var(--motion-fast) var(--ease-out-quiet),
-      box-shadow var(--motion-fast) var(--ease-out-quiet),
-      scale var(--motion-slow) var(--ease-out-quiet);
+      background-color var(--motion-fast) var(--ease-out),
+      box-shadow var(--motion-fast) var(--ease-out),
+      scale var(--motion-slow) var(--ease-out);
   }
 
   .essential > button:hover {

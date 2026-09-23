@@ -24,7 +24,6 @@
     padding: 2px 8px;
     border-radius: var(--radius-capsule);
     background: var(--color-fill);
-    box-shadow: inset 0 0 0 1px var(--color-border);
     color: var(--color-muted);
     font-size: var(--text-caption);
     font-weight: 500;

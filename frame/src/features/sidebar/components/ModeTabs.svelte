@@ -52,7 +52,7 @@
     box-shadow: var(--shadow-control);
     transition:
       translate var(--motion-base) var(--ease-spring),
-      scale var(--motion-fast) var(--ease-out-quiet),
+      scale var(--motion-fast) var(--ease-out),
       background-color var(--motion-base) var(--ease-smooth),
       box-shadow var(--motion-base) var(--ease-smooth);
   }
@@ -60,7 +60,7 @@
   .thumb-work {
     translate: 100% 0;
     background: var(--color-accent);
-    box-shadow: var(--shadow-accent);
+    box-shadow: none;
   }
 
   .modes:active .thumb {

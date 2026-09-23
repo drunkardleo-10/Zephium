@@ -100,7 +100,7 @@
     class:sr-only={compact}
     class:flex={!compact}
     class:shadow-[inset_0_0_0_1px_var(--color-danger)]={failed}
-    class="address-field focus-within:shadow-focus h-[34px] items-center gap-2 rounded-md bg-fill ps-2.5 pe-1 shadow-field transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out-quiet)] [--address-centering:20px] focus-within:bg-fill-hover hover:bg-fill-hover"
+    class="address-field focus-within:shadow-focus h-[34px] items-center gap-2 rounded-row bg-fill ps-2.5 pe-1 shadow-field transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out)] [--address-centering:20px] focus-within:bg-fill-hover hover:bg-fill-hover"
   >
     {#if !compact && warning}
       <span

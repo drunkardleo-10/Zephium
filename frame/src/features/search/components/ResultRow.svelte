@@ -117,7 +117,7 @@
     height: 36px;
     padding: 0 10px;
     border: 0;
-    border-radius: 9px;
+    border-radius: var(--radius-row);
     background: transparent;
     color: var(--color-text);
     text-align: start;
