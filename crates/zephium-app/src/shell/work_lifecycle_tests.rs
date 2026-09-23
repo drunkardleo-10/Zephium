@@ -853,20 +853,21 @@ async fn work_sixteen_runs_keep_working_within_their_limits() {
         );
         assert_eq!(state.executions.len(), run);
     }
-    let seen = script.seen.lock().unwrap();
-    assert!(seen
-        .iter()
-        .all(|turn| turn.bytes <= MAX_AGENT_CONTEXT_BYTES));
-    for (objective, earlier) in [("check the visa stuff as well", 14), ("Continue", 15)] {
-        let turn = seen
+    {
+        let seen = script.seen.lock().unwrap();
+        assert!(seen
             .iter()
-            .find(|turn| turn.objective == objective)
-            .unwrap();
-        assert_eq!(turn.thread.len(), earlier, "{objective}");
-        assert_eq!(turn.thread[0].0, first);
-        assert!(turn.artifacts > 0, "{objective} still sees the canvas");
+            .all(|turn| turn.bytes <= MAX_AGENT_CONTEXT_BYTES));
+        for (objective, earlier) in [("check the visa stuff as well", 14), ("Continue", 15)] {
+            let turn = seen
+                .iter()
+                .find(|turn| turn.objective == objective)
+                .unwrap();
+            assert_eq!(turn.thread.len(), earlier, "{objective}");
+            assert_eq!(turn.thread[0].0, first);
+            assert!(turn.artifacts > 0, "{objective} still sees the canvas");
+        }
     }
-    drop(seen);
     let state = drive(&mut shell, &queue, projection(&handle, profile, work)).await;
     let bodies: Vec<usize> = state
         .executions

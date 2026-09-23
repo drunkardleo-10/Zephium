@@ -36,6 +36,7 @@ impl Driver {
                 break;
             }
             let Some(remaining) = remaining_limits(self.limits, self.used) else {
+                self.notice(BUDGET_EXHAUSTED);
                 break;
             };
             let count = cap
@@ -45,6 +46,7 @@ impl Driver {
                 .min(remaining.cost_micro_usd as usize)
                 .min(remaining.operations as usize);
             let Some(limits) = allocations(self.limits, self.used, count) else {
+                self.notice(BUDGET_EXHAUSTED);
                 break;
             };
             let batch = &reads[offset..offset + count];
