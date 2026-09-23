@@ -321,3 +321,90 @@ test("the line says which page is waiting for you and links to its card", async 
   await screen.unmount();
   session.dispose();
 });
+
+test("every run that ended early says why in Rust's words, never a generic failure", async () => {
+  const ended = (
+    status: WorkExecutionFact["status"],
+    kind: NonNullable<WorkExecutionFact["steps"]>[number]["kind"],
+    settled: NonNullable<WorkExecutionFact["steps"]>[number]["status"],
+    note: string,
+  ) => {
+    const execution = agentRun(status);
+    execution.steps = [...execution.steps!, { id: "last", turn: 3, kind, status: settled, note }];
+    return execution;
+  };
+  const read = { kind: "read", url: "https://lego.com/sets" } as const;
+  const cases: [WorkExecutionFact, string][] = [
+    [
+      ended("failed", read, "outcome_unknown", "The run ran out of time"),
+      "The run ran out of time",
+    ],
+    [ended("cancelled", read, "outcome_unknown", "Stopped by you"), "Stopped by you"],
+    [
+      ended("failed", { kind: "turn" }, "failed", "The work has grown too large for one turn"),
+      "The work has grown too large for one turn",
+    ],
+    [
+      ended("failed", { kind: "turn" }, "failed", "The model's turn could not be used"),
+      "The model's turn could not be used",
+    ],
+    [
+      ended("failed", { kind: "search", query: "visa" }, "failed", "The search could not be sent"),
+      "The search could not be sent",
+    ],
+    [
+      ended("interrupted", read, "outcome_unknown", "Zephium closed during this step"),
+      "Zephium closed during this step",
+    ],
+    [agentRun("failed"), "Something went wrong; try again."],
+  ];
+  for (const [execution, line] of cases) {
+    const session = new WorkSession("profile");
+    session.selected = "objective";
+    session.projection = { ...structuredClone(projection), executions: [execution] };
+    const screen = await render(AgentLine, { session });
+    await expect.element(screen.getByText(line, { exact: true })).toBeVisible();
+    await screen.unmount();
+    session.dispose();
+  }
+
+  // A run an earlier launch left behind, and a request refused before it ran.
+  const left = new WorkSession("profile");
+  left.selected = "objective";
+  const running = agentRun("running");
+  left.projection = {
+    ...structuredClone(projection),
+    executions: [running],
+    interrupted: [running.id],
+  };
+  const interrupted = await render(AgentLine, { session: left });
+  await expect
+    .element(interrupted.getByText("Zephium closed during this run.", { exact: true }))
+    .toBeVisible();
+  await interrupted.unmount();
+  left.dispose();
+  const full = new WorkSession("profile");
+  full.selected = "objective";
+  const done = agentRun("needs_review");
+  done.steps = [
+    ...done.steps!,
+    {
+      id: "finish",
+      turn: 2,
+      kind: { kind: "finish", followups: [] },
+      status: "succeeded",
+      note: "Compared three keyboards.",
+    },
+  ];
+  full.projection = { ...structuredClone(projection), executions: [done] };
+  vi.spyOn(full.operations, "latest").mockReturnValue({
+    state: { kind: "refused", error: "capacity" },
+  } as ReturnType<typeof full.operations.latest>);
+  const refused = await render(AgentLine, { session: full });
+  await expect
+    .element(refused.getByText("This work is full; start a new work to go on.", { exact: true }))
+    .toBeVisible();
+  expect(refused.container.textContent).not.toContain("Compared three keyboards.");
+  await refused.unmount();
+  full.dispose();
+});

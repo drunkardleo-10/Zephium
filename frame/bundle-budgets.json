@@ -149,9 +149,9 @@
     "description": "Measured 580135 JS and 109980 CSS bytes: subject pictures admit through a per-canvas queue with fallback and one retry."
   },
   "lazy:features/work/components/AgentLine.svelte": {
-    "js": 111000,
+    "js": 112000,
     "css": 7000,
-    "description": "Measured 110241 JS and 6813 CSS bytes: the regenerated decision-preference IPC surface enters every entry that reaches the bindings."
+    "description": "Measured 111646 JS and 6813 CSS bytes: every ending of a run and every refused request now has its own line instead of a generic failure."
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
     "js": 162000,

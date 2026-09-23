@@ -22,6 +22,20 @@ export function agentLine(execution: WorkExecutionFact): string | null {
   return null;
 }
 
+/**
+ * Why a run that did not finish ended, in Rust's words: the note of the last
+ * settled step that did not succeed. Null when no such step said anything.
+ */
+export function endingNote(execution: WorkExecutionFact): string | null {
+  const steps = execution.steps ?? [];
+  for (let index = steps.length - 1; index >= 0; index--) {
+    const step = steps[index]!;
+    const note = step.note?.trim();
+    if (note && step.status !== "succeeded" && step.status !== "running") return note;
+  }
+  return null;
+}
+
 /** Steps that work inside a granted folder; each settles onto a file record. */
 export const FILE_STEPS = ["list", "read_file", "search_files", "write_file", "edit_file"];
 

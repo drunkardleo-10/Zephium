@@ -2,7 +2,7 @@
   import { untrack } from "svelte";
   import type { WorkSession } from "$domain/work";
   import { currentActivity } from "$domain/work";
-  import { agentLine, isLive } from "../lib/agent-steps";
+  import { agentLine, endingNote, isLive } from "../lib/agent-steps";
   import { cardCountdown } from "../lib/work-human";
   import { preparationFailure } from "../lib/preparation-failure";
   import { fileName } from "../lib/work-files";
@@ -123,7 +123,8 @@
    * next message, resumes the work as its next request.
    */
   const stoppedQuestion = $derived.by(() => {
-    if (live || !execution || !["cancelled", "failed"].includes(execution.status)) return undefined;
+    if (live || !execution || !["cancelled", "failed", "interrupted"].includes(execution.status))
+      return undefined;
     const step = (execution.steps ?? []).at(-1);
     if (step?.kind.kind !== "ask" || step.kind.answer || step.status === "succeeded")
       return undefined;
@@ -180,14 +181,24 @@
   /** A signed-in page the person may need: to finish a challenge, or to take over. */
   const pageHandoff = $derived(!!accountScope && !!onopenpage && (live || !!intervention));
   const closing = $derived(execution ? agentLine(execution) : null);
-  /** Why the run gave up, in Rust's words: the note the last step left. */
-  const gaveUp = $derived((execution?.steps ?? []).at(-1)?.note?.trim() || m.work_line_failed());
+  /** Why the run ended early, in Rust's words: the note its last unfinished step left. */
+  const ending = $derived(execution ? endingNote(execution) : null);
+  /** A request refused before it ran says why, never an older run's words. */
+  const refusals: Record<string, () => string> = {
+    capacity: m.work_line_full,
+    conflict: m.work_line_busy,
+    unavailable: m.work_line_unavailable,
+    shutdown: m.work_line_unavailable,
+    profile_unavailable: m.work_line_unavailable,
+    outcome_unknown: m.work_line_unknown,
+  };
   /** Two or three words while it works; one quiet sentence once it stops. */
   const headline = $derived.by(() => {
     if (waiting) return m.work_line_waiting_on_page({ host: waiting.host });
     if (intervention) return interventionLabel;
-    if (failure || session.failure) return gaveUp;
-    if (interrupted) return m.work_line_stopped();
+    const refused = failure ?? session.failure;
+    if (refused) return refusals[refused]?.() ?? m.work_line_failed();
+    if (interrupted) return m.work_line_interrupted();
     if (stoppedQuestion) return m.work_line_waiting_for_you();
     if (live) {
       if (fileState) return fileState;
@@ -202,10 +213,11 @@
       case "needs_review":
         return closing ?? m.work_env_status_done();
       case "cancelled":
+        return ending ?? m.work_line_stopped();
       case "interrupted":
-        return m.work_line_stopped();
+        return ending ?? m.work_line_interrupted();
       case "failed":
-        return gaveUp;
+        return ending ?? m.work_line_failed();
       default:
         return run?.state.kind === "pending" ? m.work_line_thinking() : m.work_line_ready();
     }

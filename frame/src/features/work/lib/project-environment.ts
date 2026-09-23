@@ -715,11 +715,8 @@ export function environmentPages(
         const pageHost = host(url);
         const live = entry.running;
         const succeeded = entry.steps.some((step) => step.status === "succeeded");
-        // Rust says why a read gave up; the card says it instead of "Failed".
-        const refused =
-          !succeeded && entry.steps.every((step) => step.status === "failed")
-            ? (entry.steps.at(-1)?.note?.trim() ?? "")
-            : "";
+        // Rust says why a read gave up or was cut off; the card says it instead of "Failed".
+        const refused = !succeeded && !live ? (entry.steps.at(-1)?.note?.trim() ?? "") : "";
         const frame = entry.page?.frame
           ? pageFrameUrl(entry.page.attempt, entry.page.step, entry.page.frame.generation)
           : null;
