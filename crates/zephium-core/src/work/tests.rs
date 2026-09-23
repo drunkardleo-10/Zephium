@@ -1346,3 +1346,23 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         vec!["Add to cart", "Watch the price", "Compare two"]
     );
 }
+
+#[test]
+fn step_measurements_name_their_cost_basis_and_read_older_records() {
+    use super::runtime::{WorkCostBasis, WorkStepMeasurementsV1};
+    let fields = r#""wall_millis":1,"decision_calls":0,"emulation_calls":0,"planner_calls":1,"native_actions":0,"model_tokens":10,"cost_micro_usd":2"#;
+    let read = |extra: &str| -> WorkStepMeasurementsV1 {
+        serde_json::from_str(&format!("{{{fields}{extra}}}")).unwrap()
+    };
+    assert_eq!(read(r#","cost_exact":true"#).cost_basis, WorkCostBasis::Exact);
+    assert_eq!(read(r#","cost_exact":false"#).cost_basis, WorkCostBasis::Reserved);
+    let priced = read(r#","cost_basis":"priced""#);
+    assert_eq!(priced.cost_basis, WorkCostBasis::Priced);
+    let written = serde_json::to_string(&priced).unwrap();
+    assert!(written.contains(r#""cost_basis":"priced""#) && !written.contains("cost_exact"));
+    assert_eq!(serde_json::from_str::<WorkStepMeasurementsV1>(&written).unwrap(), priced);
+    assert!(serde_json::from_str::<WorkStepMeasurementsV1>(&format!(
+        "{{{fields},\"cost_basis\":\"priced\",\"other\":1}}"
+    ))
+    .is_err());
+}

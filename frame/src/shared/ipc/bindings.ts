@@ -1849,6 +1849,15 @@ export type WorkContextSelectionV1 = {
  */
 export type WorkContextVisibility = "public" | "private";
 
+/**  How exactly a measured cost is known, weakest call first. */
+export type WorkCostBasis = 
+/**  Every settled call reported exact provider cost. */
+"exact" | 
+/**  Exact tokens, and at least one cost priced from the trusted catalog. */
+"priced" | 
+/**  At least one call charged its reservation ceiling or was in flight. */
+"reserved";
+
 export type WorkCriterion = {
 	name: string,
 	kind: WorkCriterionKind,
@@ -3025,8 +3034,8 @@ export type WorkStepMeasurementsV1 = {
 	model_tokens: number,
 	/**  Micro-USD charged by settled provider calls. */
 	cost_micro_usd: number,
-	/**  True only when every settled call reported exact provider accounting. */
-	cost_exact: boolean,
+	/**  How exactly `cost_micro_usd` is known. */
+	cost_basis: WorkCostBasis,
 };
 
 export type WorkStepStatus = "running" | "succeeded" | "failed" | "cancelled" | "outcome_unknown";

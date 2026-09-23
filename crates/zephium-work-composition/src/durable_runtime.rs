@@ -86,7 +86,7 @@ impl WorkBrowserAdapterSettings {
 }
 
 /// Closed per-read counters. Page, model and provider text never enter them.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 struct ReadMeasure {
     model_calls: u16,
     decision_calls: u16,
@@ -94,7 +94,22 @@ struct ReadMeasure {
     native_actions: u16,
     model_tokens: u32,
     cost_micro_usd: u32,
-    inexact: bool,
+    basis: WorkCostBasis,
+}
+
+impl Default for ReadMeasure {
+    /// No call yet: nothing charged, so nothing inexact.
+    fn default() -> Self {
+        Self {
+            model_calls: 0,
+            decision_calls: 0,
+            emulation_calls: 0,
+            native_actions: 0,
+            model_tokens: 0,
+            cost_micro_usd: 0,
+            basis: WorkCostBasis::Exact,
+        }
+    }
 }
 
 impl ReadMeasure {
@@ -114,9 +129,7 @@ impl ReadMeasure {
                 self.cost_micro_usd = self
                     .cost_micro_usd
                     .saturating_add(u32::try_from(cost_micro_usd).unwrap_or(u32::MAX));
-                if accounting != AgentModelUsageAccounting::Exact {
-                    self.inexact = true;
-                }
+                self.account(accounting);
             }
             AgentWorkEventKind::DecisionSettled(fact) => {
                 let counter = match fact.backend {
@@ -132,6 +145,15 @@ impl ReadMeasure {
         }
     }
 
+    /// The weakest accounting of any settled call decides the read's basis.
+    fn account(&mut self, accounting: AgentModelUsageAccounting) {
+        self.basis = self.basis.max(match accounting {
+            AgentModelUsageAccounting::Exact => WorkCostBasis::Exact,
+            AgentModelUsageAccounting::PricedCeiling => WorkCostBasis::Priced,
+            AgentModelUsageAccounting::ReservationCeiling => WorkCostBasis::Reserved,
+        });
+    }
+
     fn settle(self, started: Instant, in_flight: bool) -> WorkStepMeasurementsV1 {
         WorkStepMeasurementsV1 {
             wall_millis: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
@@ -143,7 +165,11 @@ impl ReadMeasure {
             native_actions: self.native_actions,
             model_tokens: self.model_tokens,
             cost_micro_usd: self.cost_micro_usd,
-            cost_exact: !self.inexact && !in_flight,
+            cost_basis: if in_flight {
+                WorkCostBasis::Reserved
+            } else {
+                self.basis
+            },
         }
     }
 }
@@ -1139,6 +1165,27 @@ mod closed_result_tests {
         assert!(!cleanup_expired(local, local, group, true));
         assert!(cleanup_expired(group, local, group, true));
         assert!(cleanup_expired(group, local, group, false));
+    }
+
+    #[test]
+    fn a_read_names_how_exactly_its_cost_is_known() {
+        let started = Instant::now();
+        let basis = |calls: &[AgentModelUsageAccounting], in_flight: bool| {
+            let mut measure = ReadMeasure::default();
+            for accounting in calls {
+                measure.account(*accounting);
+            }
+            measure.settle(started, in_flight).cost_basis
+        };
+        use AgentModelUsageAccounting::*;
+        assert_eq!(basis(&[], false), WorkCostBasis::Exact);
+        assert_eq!(basis(&[Exact, Exact], false), WorkCostBasis::Exact);
+        assert_eq!(basis(&[Exact, PricedCeiling], false), WorkCostBasis::Priced);
+        assert_eq!(
+            basis(&[PricedCeiling, ReservationCeiling, Exact], false),
+            WorkCostBasis::Reserved
+        );
+        assert_eq!(basis(&[Exact], true), WorkCostBasis::Reserved);
     }
 
     #[test]

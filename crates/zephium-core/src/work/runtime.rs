@@ -720,8 +720,22 @@ pub enum WorkUsageAccounting {
     Exact,
     ConservativeReservation,
 }
+/// How exactly a measured cost is known, weakest call first.
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkCostBasis {
+    /// Every settled call reported exact provider cost.
+    Exact,
+    /// Exact tokens, and at least one cost priced from the trusted catalog.
+    Priced,
+    /// At least one call charged its reservation ceiling or was in flight.
+    #[default]
+    Reserved,
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Default, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 /// Closed counts for one browser step: durations, call counts and exact
 /// accounting beside the conservative ceiling in `usage`. Never page, model
@@ -741,8 +755,44 @@ pub struct WorkStepMeasurementsV1 {
     pub model_tokens: u32,
     /// Micro-USD charged by settled provider calls.
     pub cost_micro_usd: u32,
-    /// True only when every settled call reported exact provider accounting.
-    pub cost_exact: bool,
+    /// How exactly `cost_micro_usd` is known.
+    pub cost_basis: WorkCostBasis,
+}
+/// Steps recorded before `cost_basis` carry `cost_exact`; a false one could
+/// have been priced or reserved, so it reads as reserved.
+impl<'de> Deserialize<'de> for WorkStepMeasurementsV1 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            wall_millis: u32,
+            decision_calls: u16,
+            emulation_calls: u16,
+            planner_calls: u16,
+            native_actions: u16,
+            model_tokens: u32,
+            cost_micro_usd: u32,
+            #[serde(default)]
+            cost_basis: Option<WorkCostBasis>,
+            #[serde(default)]
+            cost_exact: Option<bool>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            wall_millis: wire.wall_millis,
+            decision_calls: wire.decision_calls,
+            emulation_calls: wire.emulation_calls,
+            planner_calls: wire.planner_calls,
+            native_actions: wire.native_actions,
+            model_tokens: wire.model_tokens,
+            cost_micro_usd: wire.cost_micro_usd,
+            cost_basis: wire.cost_basis.unwrap_or(if wire.cost_exact == Some(true) {
+                WorkCostBasis::Exact
+            } else {
+                WorkCostBasis::Reserved
+            }),
+        })
+    }
 }
 
 impl WorkUsage {
