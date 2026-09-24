@@ -594,3 +594,63 @@ async fn scheduling_hint_matches_the_unchanged_search_admission_ceiling() {
         assert!(client.minimum_reservation(&invalid, &[]).is_none());
     }
 }
+#[test]
+fn a_recorded_answer_cites_its_pages_without_provider_tracking() {
+    let recorded: Value = serde_json::from_str(include_str!(
+        "../../../../zephium-decision/evals/search_flow_source_01.json"
+    ))
+    .unwrap();
+    let evidence = &recorded["evidence"];
+    let answer = evidence["answer"].as_str().unwrap();
+    let mut annotations: Vec<Value> = evidence["citations"].as_array().unwrap().clone();
+    for annotation in &mut annotations {
+        annotation["type"] = json!("url_citation");
+    }
+    let mut body = response();
+    body["output"][1]["content"][0] =
+        json!({"type":"output_text","text":answer,"annotations":annotations});
+    let got = decode(&serde_json::to_vec(&body).unwrap(), &config(), 1000)
+        .unwrap()
+        .unwrap();
+    assert!(!got.text.contains("utm_"));
+    let urls: Vec<&str> = got.citations.iter().map(|c| c.url.as_str()).collect();
+    assert_eq!(
+        urls,
+        [
+            "https://www.npmjs.com/package/%40xyflow/svelte",
+            "https://www.npmjs.com/package/%40xyflow/svelte?activeTab=dependencies",
+            "https://svelteflow.dev/",
+            "https://github.com/xyflow/xyflow",
+        ]
+    );
+    let chars: Vec<char> = got.text.chars().collect();
+    for (citation, recorded) in got
+        .citations
+        .iter()
+        .zip(evidence["citations"].as_array().unwrap())
+    {
+        let span: String = chars[citation.start_index as usize..citation.end_index as usize]
+            .iter()
+            .collect();
+        let tracked: String = answer
+            .chars()
+            .skip(recorded["start_index"].as_u64().unwrap() as usize)
+            .take(
+                (recorded["end_index"].as_u64().unwrap()
+                    - recorded["start_index"].as_u64().unwrap()) as usize,
+            )
+            .collect();
+        assert_eq!(
+            span,
+            tracked.replace(recorded["url"].as_str().unwrap(), &citation.url)
+        );
+    }
+    assert_eq!(
+        untracked_citation("https://a.test/p?utm_term=x&utm_content=y"),
+        None
+    );
+    assert_eq!(
+        untracked_citation("https://a.test/p?q=1&utm_medium=m&utm_campaign=c#top").as_deref(),
+        Some("https://a.test/p?q=1#top")
+    );
+}

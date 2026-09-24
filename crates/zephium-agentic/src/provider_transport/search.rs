@@ -565,7 +565,102 @@ fn usable_answer(
         }
         citations.push(c);
     }
-    Some((text, citations))
+    Some(untrack_answer(text, citations))
+}
+
+/// Provider tracking parameters; a citation names the page without them.
+const PROVIDER_TRACKING: [&str; 3] = ["utm_source", "utm_medium", "utm_campaign"];
+
+/// The citation address without provider tracking parameters, if it had any.
+/// Every other query pair and the fragment are kept byte for byte.
+fn untracked_citation(url: &str) -> Option<String> {
+    let (head, fragment) = match url.split_once('#') {
+        Some((head, fragment)) => (head, Some(fragment)),
+        None => (url, None),
+    };
+    let (base, query) = head.split_once('?')?;
+    let pairs = query.split('&');
+    let kept: Vec<&str> = pairs
+        .clone()
+        .filter(|pair| !PROVIDER_TRACKING.contains(&pair.split('=').next().unwrap_or_default()))
+        .collect();
+    if kept.len() == pairs.count() {
+        return None;
+    }
+    let mut untracked = base.to_owned();
+    if !kept.is_empty() {
+        untracked.push('?');
+        untracked.push_str(&kept.join("&"));
+    }
+    if let Some(fragment) = fragment {
+        untracked.push('#');
+        untracked.push_str(fragment);
+    }
+    Some(untracked)
+}
+
+/// Rewrites tracked citation addresses in the citations and in the answer's
+/// own links, moving every citation span with the text it covers.
+fn untrack_answer(
+    text: String,
+    mut citations: Vec<OpenAiPublicSearchCitation>,
+) -> (String, Vec<OpenAiPublicSearchCitation>) {
+    let mut rewrites: Vec<(String, String)> = Vec::new();
+    for citation in &mut citations {
+        if let Some(untracked) = untracked_citation(&citation.url) {
+            let tracked = std::mem::replace(&mut citation.url, untracked.clone());
+            if !rewrites.iter().any(|(from, _)| *from == tracked) {
+                rewrites.push((tracked, untracked));
+            }
+        }
+    }
+    if rewrites.is_empty() {
+        return (text, citations);
+    }
+    // Longest first, so a tracked address never matches inside a longer one.
+    rewrites.sort_by_key(|(from, _)| std::cmp::Reverse(from.len()));
+    let mut out = String::with_capacity(text.len());
+    // (old char start, old char end, new char start, new char length)
+    let mut moved: Vec<(u32, u32, u32, u32)> = Vec::new();
+    let (mut old_chars, mut new_chars) = (0u32, 0u32);
+    let mut rest = text.as_str();
+    while let Some(c) = rest.chars().next() {
+        let hit = rewrites
+            .iter()
+            .find(|(from, _)| rest.starts_with(from.as_str()));
+        let (consumed, emitted) = match hit {
+            Some((from, to)) => {
+                let (from_len, to_len) = (from.chars().count() as u32, to.chars().count() as u32);
+                moved.push((old_chars, old_chars + from_len, new_chars, to_len));
+                out.push_str(to);
+                rest = &rest[from.len()..];
+                (from_len, to_len)
+            }
+            None => {
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+                (1, 1)
+            }
+        };
+        old_chars += consumed;
+        new_chars += emitted;
+    }
+    let map = |index: u32| {
+        let mut shift = 0i64;
+        for &(start, end, new_start, new_len) in &moved {
+            if index >= end {
+                shift += i64::from(new_len) - i64::from(end - start);
+            } else if index > start {
+                return new_start + (index - start).min(new_len);
+            }
+        }
+        (i64::from(index) + shift) as u32
+    };
+    for citation in &mut citations {
+        citation.start_index = map(citation.start_index);
+        citation.end_index = map(citation.end_index);
+    }
+    (out, citations)
 }
 
 fn identity(value: &str, prefix: &str) -> bool {
