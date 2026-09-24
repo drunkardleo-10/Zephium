@@ -61,6 +61,18 @@ describe("contextSelection", () => {
     });
   });
 
+  test("an image or a document is context by its media record's revision", () => {
+    const selection = contextSelection(snapshot, ["e-unknown"], [], {
+      notes: [],
+      objectives: new Map(),
+      media: new Map([["note-missing", "4"]]),
+    });
+    expect(selection).toEqual({
+      environment: "env",
+      items: [{ element: "e-unknown", revision: "4" }],
+    });
+  });
+
   test("is null without a snapshot, a selection, or any resolvable token", () => {
     expect(contextSelection(null, ["e-note"], [], { notes: [], objectives: new Map() })).toBeNull();
     expect(contextSelection(snapshot, [], [], { notes: [], objectives: new Map() })).toBeNull();

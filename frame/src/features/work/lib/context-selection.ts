@@ -20,6 +20,8 @@ export function contextSelection(
   known: {
     notes: readonly ResourceSummary[];
     objectives: ReadonlyMap<string, WorkRuntimeProjection>;
+    /** Media record revisions: an image or a document is context like a note. */
+    media?: ReadonlyMap<string, string>;
   },
 ): WorkContextSelectionV1 | null {
   if (!snapshot || !selected.length) return null;
@@ -32,7 +34,10 @@ export function contextSelection(
     let revision: string | null = null;
     switch (reference.kind) {
       case "resource":
-        revision = known.notes.find((note) => note.id === reference.resource)?.revision ?? null;
+        revision =
+          known.notes.find((note) => note.id === reference.resource)?.revision ??
+          known.media?.get(reference.resource) ??
+          null;
         break;
       case "browser": {
         const tab = tabs.find((tab) => tab.id === reference.tab);

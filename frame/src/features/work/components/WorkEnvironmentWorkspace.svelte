@@ -171,6 +171,7 @@
     contextSelection(session.snapshot, selectedIds, tabs, {
       notes: context.notes,
       objectives: context.objectives,
+      media: context.mediaRevisions,
     }),
   );
   let cardHost = $state<HTMLElement>();

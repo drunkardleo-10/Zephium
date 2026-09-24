@@ -27,6 +27,8 @@ export class WorkEnvironmentContext {
   notes = $state.raw<ResourceSummary[]>([]);
   /** Admitted media assets for resource elements that are not notes. */
   readonly media = new SvelteMap<string, MediaAssetV1>();
+  /** Each media record's revision: the identity Rust checks when one is context. */
+  readonly mediaRevisions = new SvelteMap<string, string>();
   readonly unavailable = new SvelteMap<string, boolean>();
   private wanted: string[] = [];
   private noteIds: string[] = [];
@@ -234,7 +236,11 @@ export class WorkEnvironmentContext {
     }
     if (!this.active || read !== this.noteRead) return;
     this.notes = rows;
-    for (const id of [...this.media.keys()]) if (!ids.includes(id)) this.media.delete(id);
+    for (const id of [...this.media.keys()])
+      if (!ids.includes(id)) {
+        this.media.delete(id);
+        this.mediaRevisions.delete(id);
+      }
     const others = ids.filter((id) => !rows.some((row) => row.id === id)).slice(0, 32);
     for (const id of others) {
       if (this.media.has(id)) continue;
@@ -250,8 +256,10 @@ export class WorkEnvironmentContext {
         response.value.response.kind === "record" &&
         response.value.response.record.draft.content.kind === "media" &&
         !response.value.response.record.trashed
-      )
+      ) {
         this.media.set(id, response.value.response.record.draft.content.asset);
+        this.mediaRevisions.set(id, response.value.response.record.revision);
+      }
     }
   }
   dispose() {
@@ -264,6 +272,7 @@ export class WorkEnvironmentContext {
     this.pending.clear();
     this.objectives.clear();
     this.media.clear();
+    this.mediaRevisions.clear();
     this.plans.clear();
     this.pages.clear();
     this.unavailable.clear();
