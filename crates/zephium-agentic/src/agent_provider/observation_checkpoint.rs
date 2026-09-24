@@ -427,6 +427,8 @@ impl AgentProviderObservationCheckpoint {
     }
 
     /// Construct the exact expected request without scripts, URLs or selectors.
+    /// A successor repeats its predecessor's host-selected observation budget;
+    /// it never widens it.
     pub fn request(
         &self,
         previous: &SemanticObservation,
@@ -445,13 +447,13 @@ impl AgentProviderObservationCheckpoint {
                     target,
                     self.frame(previous, target)?,
                     kind,
-                    SemanticObservationBudget::INITIAL_FILTERED,
+                    previous.request().budget(),
                 )
                 .map_err(|_| AgentProviderContinuationError::Scope),
             None => Ok(SemanticObservationRequest::initial(
                 id,
                 previous.request().context(),
-                SemanticObservationBudget::INITIAL_FILTERED,
+                previous.request().budget(),
             )),
         }
     }

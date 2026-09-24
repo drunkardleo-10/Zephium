@@ -2564,7 +2564,7 @@ mod tests {
             SemanticObservationRequest::initial(
                 SemanticObservationId::new(observation).expect("observation"),
                 context,
-                SemanticObservationBudget::try_new(8, 4_096, 1).expect("budget"),
+                SemanticObservationBudget::INITIAL_FILTERED,
             ),
             snapshot,
         )

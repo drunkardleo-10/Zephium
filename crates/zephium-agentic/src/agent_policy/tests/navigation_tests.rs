@@ -508,6 +508,130 @@ fn final_target() -> ContextNavigationTarget {
 }
 
 #[test]
+fn a_whole_page_snapshot_refresh_keeps_its_predecessor_budget() {
+    // Recorded shape: a whole-page findings read on Airbnb asked for a plain
+    // snapshot; the retained successor used the whole-page budget and the
+    // checkpoint expected the filtered one, refusing the read for Authority.
+    let (mut f, _, initial) = navigation_fixture(6, 200_000, vec![target(), final_target()], true);
+    let context = initial.request().context();
+    let make = |request: SemanticObservationRequest, generation| {
+        let wire = serde_json::to_vec(&json!({
+            "v":1,"i":generation,"g":generation,"c":"complete",
+            "n":[{"k":1,"r":"heading","l":1,"n":"Vacation rentals"},{"k":2,"r":"paragraph","t":"Quick stats"}]
+        }))
+        .unwrap();
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(generation).unwrap(),
+                initial.frames()[0].frame().clone(),
+                SemanticSnapshotGeneration::new(generation).unwrap(),
+            ),
+            &wire,
+        )
+        .unwrap();
+        SemanticObservationAssembler::new(request, snapshot)
+            .unwrap()
+            .finish()
+            .unwrap()
+    };
+    let previous = make(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(2).unwrap(),
+            context,
+            SemanticObservationBudget::WHOLE_PAGE,
+        ),
+        12,
+    );
+    let selected = tokenizer();
+    let config = provider_exact_config(selected.clone(), 128, 64_000)
+        .restrict_to_navigation_and_extraction()
+        .with_baseline_read()
+        .with_progressive_observation();
+    let objective = AgentProviderObjective::try_admit_conservative_utf8(
+        "Report the places to stay this page shows".into(),
+        &selected,
+    )
+    .unwrap();
+    let payload = |observation: &SemanticObservation| {
+        encode_semantic_observation(
+            observation,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap()
+        .admit_conservative_utf8(&selected)
+        .unwrap()
+    };
+    let binding = account(context, NOW);
+    let committed = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+        &mut f.policy,
+        call_request(2, f.lease, binding, 64_000, 128, 1_000, NOW),
+        &previous,
+        payload(&previous),
+        &objective,
+        config.clone(),
+    )
+    .unwrap()
+    .into_transport_input()
+    .commit(&mut f.policy)
+    .unwrap();
+    let (second, input, seed) = committed.into_parts();
+    let (active, _) = input.into_parts();
+    f.policy
+        .settle_model_call(active, AgentModelCallSettlement::Completed, 10_000, 4, 80)
+        .unwrap();
+    let arguments = r#"{"scope":{"kind":"initial"}}"#;
+    let tool = crate::AgentBrowserToolCall::decode_openai(
+        second.call(),
+        "fc_refresh".into(),
+        "call_refresh".into(),
+        "snapshot",
+        arguments.into(),
+    )
+    .unwrap();
+    let completion = crate::AgentProviderCompletion::new(
+        second.call(),
+        crate::AgentProviderStopReason::ToolCalls,
+        crate::AgentProviderUsage::try_new(10_000, 4, 0, 0, 0).unwrap(),
+        crate::AgentProviderStreamStats::new(200, 8, 0, 1, arguments.len() as u32),
+        true,
+    );
+    let checkpoint = seed
+        .unwrap()
+        .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
+        .unwrap()
+        .retire_for_observation(&previous, &config)
+        .unwrap();
+    let request = checkpoint
+        .request(&previous, SemanticObservationId::new(3).unwrap())
+        .unwrap();
+    assert_eq!(request.budget(), SemanticObservationBudget::WHOLE_PAGE);
+    // The retained resource observes under the same host capability.
+    let current = make(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(3).unwrap(),
+            context,
+            SemanticObservationBudget::WHOLE_PAGE,
+        ),
+        13,
+    );
+    let prepared = checkpoint
+        .prepare_successor(
+            &mut f.policy,
+            &previous,
+            &current,
+            call_request(3, f.lease, binding, 64_000, 128, 1_000, NOW),
+            config,
+            payload(&current),
+            &objective,
+        )
+        .expect("a whole-page refresh reaches the third call");
+    assert_eq!(
+        prepared.request().call().call(),
+        AgentModelCallId::new(3).unwrap()
+    );
+}
+
+#[test]
 fn structured_product_window_reaches_third_provider_request_with_original_policy() {
     // Shape/route regression from retained commerce run twenty-second:
     // 128 / NodeLimit -> @a122 window(1000,5000) -> 87 / ScopeBoundary.
