@@ -46,7 +46,14 @@
               <SubjectPicture picture={column.picture} name={column.name} large />
             </span>
             <span class="name">{column.name}</span>
-            {#if column.price}<span class="price">{column.price}</span>{/if}
+            {#if column.price}<span class="price"
+                >{#if column.best}<span
+                    class="best"
+                    role="img"
+                    title={m.work_compare_lowest()}
+                    aria-label={m.work_compare_lowest()}
+                  ></span>{/if}<span>{column.price}</span></span
+              >{/if}
             {#if column.descriptor}<span class="descriptor">{column.descriptor}</span>{/if}
           </th>
         {/each}
@@ -60,7 +67,11 @@
             {#if row.meta}<span class="meta">{row.meta}</span>{/if}
           </th>
           {#each row.cells as cell (cell.subject)}
-            <td class:numeric={row.numeric} class:unknown={cell.value.kind === "unknown"}>
+            <td
+              class:numeric={row.numeric}
+              class:check={row.check}
+              class:unknown={cell.value.kind === "unknown"}
+            >
               <span class="cell">
                 {#if editing === at(cell)}
                   <!-- svelte-ignore a11y_autofocus -->
@@ -90,7 +101,12 @@
                     aria-label={cell.value.yes ? m.work_yes() : m.work_no()}
                     ><Icon icon={cell.value.yes ? Tick02Icon : Cancel01Icon} size={15} /></span
                   >
-                {:else}<span class="text">{cell.value.text}</span>{/if}
+                {:else}{#if cell.best}<span
+                      class="best"
+                      role="img"
+                      title={m.work_compare_best()}
+                      aria-label={m.work_compare_best()}
+                    ></span>{/if}<span class="text">{cell.value.text}</span>{/if}
                 {#if cell.share !== undefined && editing !== at(cell)}<span
                     class="bar"
                     aria-hidden="true"
@@ -164,8 +180,25 @@
   }
 
   .corner {
+    inset-inline-start: 0;
+    z-index: 3;
     inline-size: 150px;
     min-inline-size: 150px;
+  }
+
+  /* The row under the pointer reads across; the sticky column keeps its surface under the tint. */
+  tbody tr:hover > * {
+    background-image: linear-gradient(var(--color-fill), var(--color-fill));
+  }
+
+  .best {
+    display: inline-block;
+    inline-size: 6px;
+    block-size: 6px;
+    margin-inline-end: 6px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    vertical-align: 0.1em;
   }
 
   .subject {
@@ -281,6 +314,18 @@
   td:hover .aside,
   td:focus-within .aside {
     opacity: 1;
+  }
+
+  td.numeric .text {
+    display: inline;
+  }
+
+  td.check .cell {
+    text-align: center;
+  }
+
+  td.check .aside {
+    justify-content: center;
   }
 
   .chip {

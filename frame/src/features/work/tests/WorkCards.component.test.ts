@@ -173,6 +173,54 @@ test("a comparison card shows three subjects and a stub for the rest", async () 
   await screen.unmount();
 });
 
+test("a yes/no row reads as a check or a faint cross, centred; unknown stays a dash", async () => {
+  await page.viewport(1200, 800);
+  const cell = (value: object) => ({ value, evidence: [], generalKnowledge: false });
+  const item: CanvasItem = {
+    ...base,
+    id: "compare",
+    type: "result",
+    title: "Stays compared",
+    artifact: {
+      key: "artifact",
+      title: "Stays compared",
+      reviewLabel: "Done",
+      evidence: [],
+      content: {
+        kind: "matrix",
+        subjects: [{ name: "Cole Valley" }, { name: "Potrero" }, { name: "Mission" }],
+        criteria: [
+          { name: "Workspace", kind: "presence" },
+          { name: "Wi-Fi", kind: "text" },
+        ],
+        cells: [
+          [cell({ kind: "presence", present: true }), cell({ kind: "text", text: "Yes" })],
+          [cell({ kind: "presence", present: false }), cell({ kind: "text", text: "No" })],
+          [cell({ kind: "unknown" }), cell({ kind: "unknown" })],
+        ] as never,
+        notes: [],
+      },
+    },
+  };
+  const screen = await render(CompareCard, { item, selected: false });
+  const rows = [...screen.container.querySelectorAll(".row")];
+  expect(rows).toHaveLength(2);
+  for (const row of rows) {
+    const cells = [...row.querySelectorAll("dd")];
+    expect(cells.every((cell) => cell.classList.contains("check"))).toBe(true);
+    expect(getComputedStyle(cells[0]!).textAlign).toBe("center");
+    expect(cells[0]!.querySelector(".glyph.yes")?.getAttribute("aria-label")).toBe("Yes");
+    const no = cells[1]!.querySelector(".glyph")!;
+    expect(no.classList.contains("yes")).toBe(false);
+    expect(no.getAttribute("aria-label")).toBe("No");
+    expect(getComputedStyle(no).color).not.toBe(
+      getComputedStyle(cells[0]!.querySelector(".glyph")!).color,
+    );
+    expect(cells[2]!.querySelector(".dash")).not.toBeNull();
+  }
+  await screen.unmount();
+});
+
 test("a changed file shows its line counts", async () => {
   await page.viewport(1200, 800);
   const item: CanvasItem = {

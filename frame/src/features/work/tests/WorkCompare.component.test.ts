@@ -205,3 +205,46 @@ test("a subject opens as a product view with its facts, their sources, and its p
   expect(onopen).toHaveBeenLastCalledWith("https://lego.com/tower-bridge");
   await screen.unmount();
 });
+
+test("the open compare keeps its header and first column in view and marks the best value", async () => {
+  await page.viewport(1200, 800);
+  const { default: Compare } = await import("../components/compare/Compare.svelte");
+  const { compareModel } = await import("../lib/compare");
+  const cell = (value: object) => ({ value, evidence: [], generalKnowledge: false });
+  const model = compareModel({
+    subjects: [{ name: "Tower Bridge" }, { name: "Eiffel Tower" }],
+    criteria: [
+      { name: "Price", kind: "text" },
+      { name: "Rating", kind: "rating", scaleMax: 5 },
+      { name: "Minifigures", kind: "presence" },
+    ],
+    cells: [
+      [
+        cell({ kind: "money", amount: "239.99", currency: "USD" }),
+        cell({ kind: "rating", value: 4.2 }),
+        cell({ kind: "presence", present: true }),
+      ],
+      [
+        cell({ kind: "money", amount: "629.99", currency: "USD" }),
+        cell({ kind: "rating", value: 4.8 }),
+        cell({ kind: "presence", present: false }),
+      ],
+    ] as never,
+    notes: [],
+  });
+  const screen = await render(Compare, { model });
+  const corner = screen.container.querySelector<HTMLElement>("th.corner")!;
+  expect(getComputedStyle(corner).position).toBe("sticky");
+  expect(getComputedStyle(corner).insetInlineStart).toBe("0px");
+  const criterion = screen.container.querySelector<HTMLElement>("th.criterion")!;
+  expect(getComputedStyle(criterion).position).toBe("sticky");
+  const picture = screen.container.querySelector<HTMLElement>(".picture")!;
+  expect(picture.getBoundingClientRect().width).toBe(96);
+  // The lower price and the higher rating each carry one quiet dot.
+  expect(screen.container.querySelectorAll(".best")).toHaveLength(2);
+  const check = screen.container.querySelector<HTMLElement>("td.check .cell")!;
+  expect(getComputedStyle(check).textAlign).toBe("center");
+  await expect.element(screen.getByLabelText("Yes")).toBeVisible();
+  await expect.element(screen.getByLabelText("No")).toBeVisible();
+  await screen.unmount();
+});

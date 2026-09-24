@@ -71,3 +71,22 @@ test("a subject's admitted picture reaches its column", () => {
   expect(model.columns[0]?.picture).toEqual({ profile: "profile", digest: "digest" });
   expect(model.columns[1]?.picture).toBeUndefined();
 });
+
+test("a yes/no row is a check row, and the best value stands out only where the criterion says which way", () => {
+  const model = compareModel({ subjects, criteria, cells, notes: [] });
+  expect(model.rows.map((row) => [row.label, row.check])).toEqual([
+    ["Piece count", false],
+    ["Minifigures included", true],
+    ["Notes", false],
+  ]);
+  // The lower price is better; a piece count has no direction, so nothing is marked.
+  expect(model.columns.map((column) => !!column.best)).toEqual([true, false]);
+  expect(model.rows[0]!.cells.some((entry) => entry.best)).toBe(false);
+  const rated = compareModel({
+    subjects,
+    criteria: [{ name: "Rating", kind: "rating", scaleMax: 5 }],
+    cells: [[cell({ kind: "rating", value: 4.2 })], [cell({ kind: "rating", value: 4.8 })]],
+    notes: [],
+  });
+  expect(rated.rows[0]!.cells.map((entry) => !!entry.best)).toEqual([false, true]);
+});

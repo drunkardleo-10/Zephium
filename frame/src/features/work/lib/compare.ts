@@ -15,6 +15,8 @@ type CompareColumn = {
   picture?: ComparePicture;
   /** What a person looks at first: the price, taken out of the rows. */
   price?: string;
+  /** The lowest price among the columns, when prices differ. */
+  best?: boolean;
 };
 type CompareValue =
   | { kind: "text"; text: string }
@@ -31,12 +33,16 @@ export type CompareCell = {
   criterion: number;
   /** In a row of numbers, this value as a share of the row's largest: a bar. */
   share?: number;
+  /** The best value of its row, where the criterion says which way is better. */
+  best?: boolean;
 };
 type CompareRow = {
   key: string;
   label: string;
   meta?: string;
   numeric: boolean;
+  /** Every known value is a yes or a no: the row reads as marks, never as bars. */
+  check: boolean;
   cells: readonly CompareCell[];
 };
 export type CompareModel = {
@@ -120,6 +126,33 @@ function shares(cells: readonly (CellView | undefined)[]): (number | undefined)[
   if (known.every((entry) => entry === known[0])) return null;
   return values.map((entry) => (entry === null ? undefined : entry / max));
 }
+/**
+ * Which way is better, only where the criterion says so: a price or cost is
+ * better lower, a rating higher. A plain measurement has no direction.
+ */
+function direction(criterion: CriterionView | undefined, cells: readonly (CellView | undefined)[]) {
+  if (!criterion) return null;
+  if (criterion.kind === "rating") return "high" as const;
+  if (PRICE.test(plain(criterion.name)) || cells.some((cell) => cell?.value.kind === "money"))
+    return "low" as const;
+  return null;
+}
+/** Where the best value stands: every column holding it, when the known values differ. */
+function bestOf(
+  criterion: CriterionView | undefined,
+  cells: readonly (CellView | undefined)[],
+): Set<number> {
+  const way = direction(criterion, cells);
+  const currencies = new Set(
+    cells.flatMap((cell) => (cell?.value.kind === "money" ? [cell.value.currency] : [])),
+  );
+  if (!way || currencies.size > 1) return new Set();
+  const values = cells.map(magnitude);
+  const known = values.filter((entry): entry is number => entry !== null);
+  if (known.length < 2 || known.every((entry) => entry === known[0])) return new Set();
+  const target = way === "low" ? Math.min(...known) : Math.max(...known);
+  return new Set(values.flatMap((entry, index) => (entry === target ? [index] : [])));
+}
 function value(cell: CellView | undefined, criterion: CriterionView): CompareValue {
   if (!cell || cell.value.kind === "unknown") return { kind: "unknown" };
   switch (cell.value.kind) {
@@ -174,6 +207,13 @@ export function compareModel(
   pictures: ReadonlyMap<string, ComparePicture> = new Map(),
 ): CompareModel {
   const price = priceColumn(matrix);
+  const cheapest =
+    price >= 0
+      ? bestOf(
+          matrix.criteria[price],
+          matrix.subjects.map((_, index) => matrix.cells[index]?.[price]),
+        )
+      : new Set<number>();
   const columns = matrix.subjects.map((subject, index) => {
     const cell = price >= 0 ? matrix.cells[index]?.[price] : undefined;
     const criterion = price >= 0 ? matrix.criteria[price] : undefined;
@@ -185,6 +225,7 @@ export function compareModel(
       ...(subject.homepage ? { homepage: subject.homepage } : {}),
       ...(pictures.get(subjectKey(subject)) ? { picture: pictures.get(subjectKey(subject))! } : {}),
       ...(money && money.kind !== "unknown" && money.kind !== "mark" ? { price: money.text } : {}),
+      ...(cheapest.has(index) ? { best: true } : {}),
     };
   });
   const rows = matrix.criteria.flatMap((criterion, column) => {
@@ -192,13 +233,19 @@ export function compareModel(
     const raw = matrix.subjects.map((_, index) => value(matrix.cells[index]?.[column], criterion));
     const values = marked(raw) ?? raw;
     const meta = measurementMeta(criterion);
-    const bars = shares(matrix.subjects.map((_, index) => matrix.cells[index]?.[column]));
+    const row = matrix.subjects.map((_, index) => matrix.cells[index]?.[column]);
+    const check =
+      values.some((entry) => entry.kind === "mark") &&
+      values.every((entry) => entry.kind === "mark" || entry.kind === "unknown");
+    const bars = check ? null : shares(row);
+    const best = check ? new Set<number>() : bestOf(criterion, row);
     return [
       {
         key: `${column}:${criterion.name}`,
         label: label(criterion.name),
         ...(meta ? { meta } : {}),
         numeric: values.every((entry) => entry.kind === "number" || entry.kind === "unknown"),
+        check,
         cells: matrix.subjects.map((_, index) => {
           const cell = matrix.cells[index]?.[column];
           return {
@@ -209,6 +256,7 @@ export function compareModel(
             subject: index,
             criterion: column,
             ...(bars?.[index] !== undefined ? { share: bars[index] } : {}),
+            ...(best.has(index) ? { best: true } : {}),
           };
         }),
       },

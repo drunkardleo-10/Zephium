@@ -35,7 +35,14 @@
               ><SubjectPicture picture={column.picture} name={column.name} /></span
             >
             <span class="name" title={column.name}>{column.name}</span>
-            <span class="price">{column.price ?? ""}</span>
+            <span class="price"
+              >{#if column.best}<span
+                  class="best"
+                  role="img"
+                  title={m.work_compare_lowest()}
+                  aria-label={m.work_compare_lowest()}
+                ></span>{/if}<span>{column.price ?? ""}</span></span
+            >
           </div>
         {/each}
         {#if rest}<span class="more" title={m.work_card_more({ count: rest })}>+{rest}</span>{/if}
@@ -45,7 +52,7 @@
           <div class="row">
             <dt title={row.label}>{row.label}</dt>
             {#each row.cells.slice(0, COLUMNS) as cell (cell.subject)}
-              <dd class:numeric={row.numeric}>
+              <dd class:numeric={row.numeric} class:check={row.check}>
                 {#if cell.value.kind === "unknown"}<span class="dash">—</span>
                 {:else if cell.value.kind === "mark"}<span
                     class="glyph"
@@ -53,7 +60,12 @@
                     aria-label={cell.value.yes ? m.work_yes() : m.work_no()}
                     ><Icon icon={cell.value.yes ? Tick02Icon : Cancel01Icon} size={13} /></span
                   >
-                {:else}<span title={cell.value.text}>{cell.value.text}</span>{/if}
+                {:else}{#if cell.best}<span
+                      class="best"
+                      role="img"
+                      title={m.work_compare_best()}
+                      aria-label={m.work_compare_best()}
+                    ></span>{/if}<span title={cell.value.text}>{cell.value.text}</span>{/if}
               </dd>
             {/each}
             {#if rest}<span></span>{/if}
@@ -169,6 +181,20 @@
 
   dd.numeric {
     font-variant-numeric: tabular-nums;
+  }
+
+  dd.check {
+    text-align: center;
+  }
+
+  .best {
+    display: inline-block;
+    inline-size: 5px;
+    block-size: 5px;
+    margin-inline-end: 5px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    vertical-align: 0.15em;
   }
 
   .dash {

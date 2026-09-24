@@ -1151,6 +1151,8 @@
   "work_env_source_one": "1 source",
   "work_card_more": "+{count} more",
   "work_card_findings": "Findings",
+  "work_compare_best": "Best in this row",
+  "work_compare_lowest": "Lowest price",
   "work_card_step_one": "1 step",
   "work_card_steps": "{count} steps",
   "work_card_file_read": "Read",
