@@ -6,6 +6,7 @@ import { WorkSession } from "$domain/work";
 import type { WorkExecutionFact, WorkRuntimeProjection } from "$shared/ipc/bindings";
 import WorkResultInspector from "../components/WorkResultInspector.svelte";
 import WorkObjectiveInspector from "../components/WorkObjectiveInspector.svelte";
+import TabCard from "../components/cards/TabCard.svelte";
 import { projection as base } from "./environment-fixtures";
 
 const native = vi.hoisted(() => ({ call: vi.fn() }));
@@ -162,4 +163,28 @@ test("a request lifts whole with its run as a quiet timeline", async () => {
   expect(screen.container.querySelector("details.planning")?.hasAttribute("open")).toBe(false);
   await screen.unmount();
   session.dispose();
+});
+
+test("a video link shows its admitted thumbnail with a play mark and plays in the pane", async () => {
+  await page.viewport(900, 700);
+  const onplay = vi.fn();
+  const screen = await render(TabCard, {
+    item: {
+      id: "link",
+      type: "link",
+      title: "youtube.com",
+      kind: "Link",
+      detail: "https://www.youtube.com",
+      status: "",
+      image: { profile: "profile", digest: "d".repeat(64) },
+    },
+    selected: false,
+    onplay,
+  });
+  // The admitted picture fills a 16:9 hero; the play mark sits on it.
+  expect(screen.container.querySelector(".hero .thumbnail")).not.toBeNull();
+  expect(screen.container.querySelector(".thumbnail .play-mark")).not.toBeNull();
+  await screen.getByRole("button", { name: "Play here" }).click();
+  expect(onplay).toHaveBeenCalledOnce();
+  await screen.unmount();
 });

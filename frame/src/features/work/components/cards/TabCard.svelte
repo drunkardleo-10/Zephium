@@ -7,7 +7,8 @@
   import { PlayIcon } from "../../lib/icons";
   import type { CanvasItem } from "../../lib/canvas-model";
   import * as m from "$shared/i18n/messages";
-  let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
+  let { item, selected, onplay }: { item: CanvasItem; selected: boolean; onplay?: () => void } =
+    $props();
   // The webview forbids frames, so a video reads as a link with a play mark and
   // plays where every page plays: in the pane.
   const playable = $derived(
@@ -32,8 +33,13 @@
 >
   {#snippet leading()}<FavIcon favicon={item.favicon ?? null} />{/snippet}
   {#snippet footer()}<span class="host" title={item.detail}>{host || item.status}</span
-    >{#if playable}<span class="play"
-        ><Icon icon={PlayIcon} size={11} />{m.work_env_play_here()}</span
+    >{#if playable}<button
+        type="button"
+        class="play nodrag nopan"
+        onclick={(event) => {
+          event.stopPropagation();
+          onplay?.();
+        }}><Icon icon={PlayIcon} size={11} />{m.work_env_play_here()}</button
       >{/if}{/snippet}
 </CardFrame>
 
@@ -69,8 +75,24 @@
     gap: 4px;
     flex: none;
     padding: 1px 8px 1px 6px;
+    border: 0;
     border-radius: var(--radius-capsule);
     background: var(--color-fill);
     color: var(--color-muted);
+    font: inherit;
+    cursor: default;
+    transition:
+      background-color var(--motion-fast) var(--ease-smooth),
+      color var(--motion-fast) var(--ease-smooth);
+  }
+
+  .play:hover {
+    background: var(--color-fill-hover);
+    color: var(--color-text);
+  }
+
+  .play:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 1px;
   }
 </style>

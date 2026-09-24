@@ -43,15 +43,16 @@ import type { MediaAssetV1 } from "$domain/resources";
 import * as m from "$shared/i18n/messages";
 
 /**
- * Media elements a subject admitted its picture into: Rust records the origin
- * as a `uses` relation from the subject to the media element. The picture
- * belongs to that subject card and never becomes a card of its own.
+ * Media elements a subject or a link admitted its picture into: Rust records
+ * the origin as a `uses` relation from that element to the media element. The
+ * picture belongs to its card and never becomes a card of its own.
  */
 function subjectPictures(snapshot: WorkEnvironmentSnapshot): Set<string> {
   const subjects = new Set<string>();
   const resources = new Set<string>();
   for (const element of snapshot.elements) {
-    if (element.reference.kind === "subject") subjects.add(element.id);
+    if (element.reference.kind === "subject" || element.reference.kind === "link")
+      subjects.add(element.id);
     else if (element.reference.kind === "resource") resources.add(element.id);
   }
   const pictures = new Set<string>();

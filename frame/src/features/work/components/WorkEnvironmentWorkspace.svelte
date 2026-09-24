@@ -61,6 +61,7 @@
   import HostGlyph from "./cards/HostGlyph.svelte";
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
+  import { youtubeThumbnail } from "../lib/link-media";
   import { isAgentExecution, isLive } from "../lib/agent-steps";
   import { environmentPlan } from "../lib/project-environment-plan";
   import {
@@ -81,7 +82,7 @@
     type WorkStage,
   } from "../lib/project-environment-thread";
   import { failureLine, humanPage, regionOf, sameRegion } from "../lib/work-human";
-  import type { PaneRect } from "../lib/pane-geometry";
+  import { openOver, type PaneRect } from "../lib/pane-geometry";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
   import { subjectImageCandidates, subjectsOf } from "../lib/subjects";
   import { environmentResults, type ResultReference } from "../lib/project-environment-results";
@@ -205,7 +206,8 @@
     }
     const reference = session.snapshot?.elements.find((element) => element.id === id)?.reference;
     if (reference?.kind === "link") {
-      openPane({ kind: "url", url: reference.url }, id);
+      if (youtubeThumbnail(reference.url)) playHere(id);
+      else openPane({ kind: "url", url: reference.url }, id);
       return;
     }
     if (reference?.kind === "browser") {
@@ -214,6 +216,14 @@
       return;
     }
     lift(id);
+  }
+  /** A video plays in the pane, opened over its card and at least the pane's minimum. */
+  function playHere(id: string) {
+    const reference = snapshot?.elements.find((element) => element.id === id)?.reference;
+    if (reference?.kind !== "link") return;
+    const card = canvasRef?.screenRect(id);
+    if (card && !pane) openOver(card);
+    openPane({ kind: "url", url: reference.url }, id);
   }
   function lift(id: string) {
     chrome?.close();
@@ -911,10 +921,17 @@
       (relation) => relation.from === element && relation.kind === "uses",
     );
   }
-  /** Subjects on this canvas still without a picture, with their candidates in order. */
+  /** Subjects and video links on this canvas still without a picture, with their candidates in order. */
   function unpictured(current: WorkEnvironmentSnapshot) {
     return current.elements.flatMap((element) => {
       const reference = element.reference;
+      if (reference.kind === "link") {
+        // A video link's picture is its thumbnail, admitted like a subject's.
+        const thumbnail = youtubeThumbnail(reference.url);
+        if (!thumbnail || pictured(current, element.id)) return [];
+        if (admittedFor.has(`${current.id} ${element.id}`)) return [];
+        return [{ element: element.id, candidates: [thumbnail] }];
+      }
       if (reference.kind !== "subject" || pictured(current, element.id)) return [];
       if (admittedFor.has(`${current.id} ${element.id}`)) return [];
       const run = context.objectives
@@ -939,7 +956,8 @@
     const current = snapshot;
     // A projection update can bring candidates for subjects already placed.
     const runs = [...context.objectives.values()];
-    if (!current || !runs.length || session.pending || session.loading) return;
+    const links = current?.elements.some((element) => element.reference.kind === "link");
+    if (!current || (!runs.length && !links) || session.pending || session.loading) return;
     untrack(() => void pictureSubjects());
   });
   $effect(() => () => clearTimeout(pictureTimer));
@@ -2021,6 +2039,10 @@
                 }
                 if (action === "help") {
                   openTakeover(id);
+                  return;
+                }
+                if (action === "play") {
+                  playHere(id);
                   return;
                 }
                 if (action === "ask") {
