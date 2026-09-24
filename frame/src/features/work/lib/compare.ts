@@ -29,6 +29,8 @@ export type CompareCell = {
   /** Where the cell sits in the artifact, so a correction reaches it. */
   subject: number;
   criterion: number;
+  /** In a row of numbers, this value as a share of the row's largest: a bar. */
+  share?: number;
 };
 type CompareRow = {
   key: string;
@@ -89,6 +91,34 @@ function measurementMeta(criterion: CriterionView): string | undefined {
   if (criterion.kind === "measurement") return criterion.basis || undefined;
   if (criterion.kind === "rating") return criterion.rubric || undefined;
   return undefined;
+}
+/** The number a measured cell holds, when it holds exactly one. */
+function magnitude(cell: CellView | undefined): number | null {
+  if (!cell) return null;
+  const raw =
+    cell.value.kind === "money"
+      ? cell.value.amount
+      : cell.value.kind === "measurement"
+        ? cell.value.value
+        : cell.value.kind === "rating"
+          ? String(cell.value.value)
+          : null;
+  if (raw === null || !/^\s*[\d.,]+\s*$/u.test(raw)) return null;
+  const number = Number(raw.replace(/,/gu, ""));
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+/** Bars only when every known value is a comparable number and two differ. */
+function shares(cells: readonly (CellView | undefined)[]): (number | undefined)[] | null {
+  const currencies = new Set(
+    cells.flatMap((cell) => (cell?.value.kind === "money" ? [cell.value.currency] : [])),
+  );
+  if (currencies.size > 1) return null;
+  const values = cells.map(magnitude);
+  const known = values.filter((entry): entry is number => entry !== null);
+  const max = Math.max(...known);
+  if (known.length < 2 || known.length !== cells.filter(Boolean).length || max <= 0) return null;
+  if (known.every((entry) => entry === known[0])) return null;
+  return values.map((entry) => (entry === null ? undefined : entry / max));
 }
 function value(cell: CellView | undefined, criterion: CriterionView): CompareValue {
   if (!cell || cell.value.kind === "unknown") return { kind: "unknown" };
@@ -162,6 +192,7 @@ export function compareModel(
     const raw = matrix.subjects.map((_, index) => value(matrix.cells[index]?.[column], criterion));
     const values = marked(raw) ?? raw;
     const meta = measurementMeta(criterion);
+    const bars = shares(matrix.subjects.map((_, index) => matrix.cells[index]?.[column]));
     return [
       {
         key: `${column}:${criterion.name}`,
@@ -177,6 +208,7 @@ export function compareModel(
             generalKnowledge: !!cell?.generalKnowledge,
             subject: index,
             criterion: column,
+            ...(bars?.[index] !== undefined ? { share: bars[index] } : {}),
           };
         }),
       },

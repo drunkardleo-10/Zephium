@@ -36,7 +36,7 @@
 </script>
 
 <div class="compare" tabindex="-1">
-  <table>
+  <table style:--subjects={model.columns.length}>
     <thead>
       <tr>
         <th scope="col" class="corner"><span class="sr-only">{m.work_matrix_criterion()}</span></th>
@@ -91,6 +91,11 @@
                     ><Icon icon={cell.value.yes ? Tick02Icon : Cancel01Icon} size={15} /></span
                   >
                 {:else}<span class="text">{cell.value.text}</span>{/if}
+                {#if cell.share !== undefined && editing !== at(cell)}<span
+                    class="bar"
+                    aria-hidden="true"
+                    ><i style:inline-size={`${Math.round(cell.share * 100)}%`}></i></span
+                  >{/if}
                 {#if cell.note}<span class="note">{cell.note}</span>{/if}
                 <span class="aside">
                   {#if cell.generalKnowledge}<span class="general"
@@ -133,10 +138,12 @@
     overflow: auto;
   }
 
+  /* Even columns, never narrower than a name and a price; the lift scrolls sideways. */
   table {
+    table-layout: fixed;
     border-collapse: separate;
     border-spacing: 0;
-    min-inline-size: 100%;
+    inline-size: max(100%, calc(150px + var(--subjects) * 160px));
     font-size: var(--text-label);
   }
 
@@ -162,14 +169,13 @@
   }
 
   .subject {
-    min-inline-size: 168px;
-    max-inline-size: 240px;
+    min-inline-size: 160px;
   }
 
   .picture {
     display: block;
-    inline-size: 84px;
-    block-size: 84px;
+    inline-size: 96px;
+    block-size: 96px;
     margin-block-end: 8px;
     border-radius: var(--radius-sm);
     background: var(--color-fill);
@@ -232,6 +238,23 @@
 
   .dash {
     color: var(--color-faint);
+  }
+
+  .bar {
+    display: block;
+    block-size: 4px;
+    margin-block-start: 6px;
+    border-radius: 2px;
+    background: var(--color-track);
+    overflow: hidden;
+  }
+
+  .bar i {
+    display: block;
+    block-size: 100%;
+    margin-inline-start: auto;
+    border-radius: inherit;
+    background: var(--color-label-secondary);
   }
 
   .glyph {
