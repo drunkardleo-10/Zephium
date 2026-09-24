@@ -31,6 +31,7 @@
     Archive01Icon,
     ArrowLeft02Icon,
     ChartColumnIcon,
+    ComputerTerminal01Icon,
     File01Icon,
     FolderAddIcon,
     GlobalIcon,
@@ -57,7 +58,7 @@
   import BrowserPane from "./pane/BrowserPane.svelte";
   import Lift from "./Lift.svelte";
   import LiftHeader from "./LiftHeader.svelte";
-  import { pageGroups } from "../lib/project-environment-stage";
+  import { commandRecord, pageGroups } from "../lib/project-environment-stage";
   import HostGlyph from "./cards/HostGlyph.svelte";
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
@@ -1027,6 +1028,11 @@
     }
   }
   const liftedItem = $derived(items.find((item) => item.id === lifted?.id));
+  const liftedCommand = $derived(
+    liftedItem?.command?.record
+      ? commandRecord(context.objectives, liftedItem.command.record)
+      : undefined,
+  );
   const liftedElement = $derived(snapshot?.elements.find((element) => element.id === lifted?.id));
   /** Every admitted picture of one subject element, in the order it admitted them. */
   function picturesOf(element: string) {
@@ -2317,6 +2323,18 @@
                 />{/snippet}</LazyView
             >
           {:else}<LiftHeader kind={liftedItem.kind} title={liftedItem.title} />{/if}
+        </div>
+      {:else if liftedItem && liftedCommand}
+        <div class="lift-body">
+          <LiftHeader
+            kind={liftedItem.kind}
+            title={liftedItem.title}
+            meta={liftedItem.command?.reason ?? ""}
+            icon={ComputerTerminal01Icon}
+          />
+          {#await import("./local/CommandRecord.svelte") then module}
+            <module.default record={liftedCommand} />
+          {/await}
         </div>
       {:else if liftedItem}
         <div class="lift-body lift-plain">

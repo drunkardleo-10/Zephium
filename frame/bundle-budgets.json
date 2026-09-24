@@ -144,9 +144,9 @@
     "description": "Measured 65242 JS and 2553 CSS bytes: a hand-written SVG plot with no chart library."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 595200,
+    "js": 598000,
     "css": 113000,
-    "description": "Measured 588440 JS and 110023 CSS bytes: the agent stands beside what it acts on; one stage layout places the run's cards and the projected ones in clusters, with the Work cluster's file and command cards; subject pictures admit through a per-canvas queue with fallback and one retry. Selection bar and area actions add 1.1 KB JS (589516 measured). One lift header for every kind, the folded pages under Sources, video thumbnails through the picture queue and Play here over the card add 4.6 KB JS and 0.8 KB CSS (594774 and 110792 measured)."
+    "description": "Measured 588440 JS and 110023 CSS bytes: the agent stands beside what it acts on; one stage layout places the run's cards and the projected ones in clusters, with the Work cluster's file and command cards; subject pictures admit through a per-canvas queue with fallback and one retry. Selection bar and area actions add 1.1 KB JS (589516 measured). One lift header for every kind, the folded pages under Sources, video thumbnails through the picture queue and Play here over the card add 4.6 KB JS and 0.8 KB CSS (594774 and 110792 measured). Live command cards with their policy reason, observed link titles and the command lift add 2.8 KB JS (597603 measured)."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 114800,
@@ -162,6 +162,11 @@
     "js": 68000,
     "css": 6000,
     "description": "Local command review and result, loaded only when inspecting a command; measured 64877 JS and 5070 CSS bytes including shared controls and runtime. Existing entry budgets are unchanged."
+  },
+  "lazy:features/work/components/local/CommandRecord.svelte": {
+    "js": 62000,
+    "css": 4800,
+    "description": "A settled command's full record in the canvas lift, loaded only when a command card opens; measured 60819 JS and 4333 CSS bytes including shared controls and runtime."
   },
   "lazy:features/work/components/WorkFileInspector.svelte": {
     "js": 66000,
