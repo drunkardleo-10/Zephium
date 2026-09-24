@@ -351,7 +351,7 @@ test("a failed run says why it gave up, and a stopped one just stops", async () 
   stopped.dispose();
 });
 
-test("the line says which page is waiting for you and links to its card", async () => {
+test("the line says why a page waits for you, in one sentence, and links to its card", async () => {
   const session = new WorkSession("profile");
   session.selected = "objective";
   const execution = agentRun("running");
@@ -368,16 +368,28 @@ test("the line says which page is waiting for you and links to its card", async 
   const onwaitingpage = vi.fn();
   const screen = await render(AgentLine, {
     session,
-    waiting: { card: "page:execution:read-1", host: "ferry.example", remaining: 150_000 },
+    waiting: {
+      card: "page:execution:read-1",
+      host: "ferry.example",
+      reason: "sign_in",
+      remaining: 150_000,
+    },
     onwaitingpage,
   });
-  const link = screen.getByRole("button", { name: /Waiting for you on ferry.example/ });
+  const link = screen.getByRole("button", {
+    name: /Sign in to ferry.example so the agent can continue/,
+  });
   await expect.element(link).toBeVisible();
   // A long wait stays quiet; the countdown belongs to the last minute.
   expect(screen.container.textContent).not.toContain("s left");
   await screen.rerender({
     session,
-    waiting: { card: "page:execution:read-1", host: "ferry.example", remaining: 18_000 },
+    waiting: {
+      card: "page:execution:read-1",
+      host: "ferry.example",
+      reason: "sign_in",
+      remaining: 18_000,
+    },
     onwaitingpage,
   });
   await expect.element(screen.getByText("18s left")).toBeVisible();

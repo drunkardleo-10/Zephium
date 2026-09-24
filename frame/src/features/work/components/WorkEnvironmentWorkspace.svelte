@@ -761,7 +761,12 @@
         )
       )
         continue;
-      return { card: item.id, host: item.page?.host ?? "", remaining: state.remaining };
+      return {
+        card: item.id,
+        host: item.page?.host ?? "",
+        reason: state.reason,
+        remaining: state.remaining,
+      };
     }
     return null;
   });

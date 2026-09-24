@@ -28,10 +28,10 @@ const REASONS: Record<WorkHumanReasonV1, () => string> = {
   unsupported_interaction: m.work_human_unsupported_interaction,
 };
 
-/** The badge on a waiting card: why a person is needed, in plain words. */
+/** The short label on a waiting card: what the person is asked for. */
 export const reasonBadge = (reason: WorkHumanReasonV1) => REASONS[reason]();
 
-/** One sentence in the pane; the host is named where naming it helps. */
+/** Why the page waits, in one sentence, person first: the card, the line and the pane say it alike. */
 export function reasonSentence(reason: WorkHumanReasonV1, host: string): string {
   switch (reason) {
     case "sign_in":
@@ -39,7 +39,7 @@ export function reasonSentence(reason: WorkHumanReasonV1, host: string): string 
     case "challenge":
       return m.work_human_why_challenge({ host });
     case "permission":
-      return m.work_human_why_permission();
+      return m.work_human_why_permission({ host });
     case "verification":
       return m.work_human_why_verification({ host });
     case "user_decision":

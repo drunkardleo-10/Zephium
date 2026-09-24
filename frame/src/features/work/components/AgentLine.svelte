@@ -1,9 +1,10 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import type { WorkSession } from "$domain/work";
+  import type { WorkHumanReasonV1 } from "$shared/ipc/bindings";
   import { currentActivity } from "$domain/work";
   import { agentLine, endingNote, isLive } from "../lib/agent-steps";
-  import { cardCountdown } from "../lib/work-human";
+  import { cardCountdown, reasonSentence } from "../lib/work-human";
   import { preparationFailure } from "../lib/preparation-failure";
   import { fileName } from "../lib/work-files";
   import type { CanvasItem } from "../lib/canvas-model";
@@ -28,7 +29,12 @@
     /** What the person is typing while the agent runs. */
     draft?: string;
     /** The page card this run is held on, while a person is needed there. */
-    waiting?: { card: string; host: string; remaining: number } | null;
+    waiting?: {
+      card: string;
+      host: string;
+      reason: WorkHumanReasonV1;
+      remaining: number;
+    } | null;
     onfocusagent?: (id: string) => void;
     /** Pans to the waiting page card and focuses it. */
     onwaitingpage?: (card: string) => void;
@@ -194,7 +200,7 @@
   };
   /** Two or three words while it works; one quiet sentence once it stops. */
   const headline = $derived.by(() => {
-    if (waiting) return m.work_line_waiting_on_page({ host: waiting.host });
+    if (waiting) return reasonSentence(waiting.reason, waiting.host);
     if (intervention) return interventionLabel;
     const refused = failure ?? session.failure;
     if (refused) return refusals[refused]?.() ?? m.work_line_failed();

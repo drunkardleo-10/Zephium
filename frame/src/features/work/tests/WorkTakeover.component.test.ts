@@ -147,7 +147,7 @@ test("a page waiting for a person is taken over in the pane, handed back, and re
   root.style.height = "720px";
   root.style.width = "1100px";
 
-  await expect.element(screen.getByText("Needs you to sign in")).toBeVisible();
+  await expect.element(screen.getByText("Sign in", { exact: true })).toBeVisible();
   // The card sits under the canvas chrome; the control is driven where it lives.
   const help = () => screen.container.querySelector<HTMLElement>(".page .help")!;
   help().click();
@@ -168,13 +168,12 @@ test("a page waiting for a person is taken over in the pane, handed back, and re
   });
   const pane = screen.getByRole("region", { name: "Help the agent", exact: true });
   await expect.element(pane).toBeVisible();
+  // The header says who, why in one sentence, and how long; the choice of account is a sign-in's.
   await expect
-    .element(
-      pane.getByText(
-        "The agent needs you to sign in to ferry.example before it can read this page.",
-      ),
-    )
+    .element(pane.getByText("Sign in to ferry.example so the agent can continue", { exact: true }))
     .toBeVisible();
+  await expect.element(pane.getByRole("button", { name: "Skip this page" })).toBeVisible();
+  await expect.element(pane.getByText("The agent goes on without this page")).toBeVisible();
 
   // Escape gives the page straight back; nothing is left presented.
   await userEvent.keyboard("{Escape}");
@@ -189,7 +188,7 @@ test("a page waiting for a person is taken over in the pane, handed back, and re
   // The segmented control hides its radio behind the label it draws.
   await pane.getByText("Keep the sign-in").click();
   await expect.element(screen.getByRole("radio", { name: "Keep the sign-in" })).toBeChecked();
-  await screen.getByRole("button", { name: "Continue", exact: true }).click();
+  await screen.getByRole("button", { name: "I’m done, continue", exact: true }).click();
   await expect.poll(() => native.continue.mock.calls.length).toBe(1);
   expect(native.continue.mock.lastCall![3]).toBe("signed_in_public_only");
 
@@ -207,4 +206,45 @@ test("a page waiting for a person is taken over in the pane, handed back, and re
   expect(native.release.mock.calls.length).toBe(released);
   await screen.unmount();
   session.dispose();
+});
+
+test("a page that needs no sign-in asks for no account and hands back anonymously", async () => {
+  await page.viewport(1200, 800);
+  const { default: TakeoverPane } = await import("../components/pane/TakeoverPane.svelte");
+  const oncontinue = vi.fn();
+  const onclose = vi.fn();
+  const human = {
+    attempt: "attempt",
+    step: "read",
+    generation: 4,
+    phase: "presented" as const,
+    reason: "challenge" as const,
+    remaining: 30_000,
+    canContinue: true,
+  };
+  const screen = await render(TakeoverPane, {
+    host: "ferry.example",
+    url: "https://ferry.example/book",
+    bounds: new DOMRect(0, 0, 1200, 800),
+    page: human,
+    onregion: vi.fn(),
+    oncontinue,
+    onclose,
+  });
+  const header = screen.container.querySelector<HTMLElement>(".head")!;
+  // The header: the host, why in one sentence, and the time left; nothing else.
+  expect(header.querySelector(".who")?.textContent).toBe("ferry.example");
+  expect(header.querySelector(".why")?.textContent).toBe(
+    "ferry.example wants a person to prove they are not a robot",
+  );
+  expect(header.querySelector(".left")?.textContent).toBe("30s left");
+  expect(header.querySelector("button")).toBeNull();
+  expect(screen.container.querySelector('[role="radio"], input[type="radio"]')).toBeNull();
+  expect(screen.container.textContent).not.toContain("Stay anonymous");
+  await screen.getByRole("button", { name: "I’m done, continue" }).click();
+  expect(oncontinue).toHaveBeenCalledExactlyOnceWith("anonymous");
+  await expect.element(screen.getByText("The agent goes on without this page")).toBeVisible();
+  await screen.getByRole("button", { name: "Skip this page" }).click();
+  expect(onclose).toHaveBeenCalledOnce();
+  await screen.unmount();
 });

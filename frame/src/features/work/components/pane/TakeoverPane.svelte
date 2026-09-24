@@ -3,8 +3,6 @@
   import type { WorkHumanAccountV1 } from "$shared/ipc/bindings";
   import Button from "$shared/ui/Button";
   import ChoiceGroup from "$shared/ui/ChoiceGroup";
-  import IconButton from "$shared/ui/IconButton";
-  import { Cancel01Icon } from "../../lib/icons";
   import { paneGeometry, remember, type PaneRect } from "../../lib/pane-geometry";
   import { countdownLabel, reasonSentence, type HumanPage } from "../../lib/work-human";
   import * as m from "$shared/i18n/messages";
@@ -29,7 +27,6 @@
     oncontinue: (account: WorkHumanAccountV1) => void;
     onclose: () => void;
   } = $props();
-  const HEADER = 40;
   const MIN = { width: 520, height: 420 };
   let rect = $state.raw<PaneRect>(untrack(() => paneGeometry(bounds)));
   let heading = $state<HTMLElement>();
@@ -39,6 +36,8 @@
   const handingBack = $derived(page.phase === "continuing");
   const presented = $derived(page.phase === "presented");
   const countdown = $derived(countdownLabel(page.remaining));
+  /** Only a sign-in has an account to keep; every other page hands back anonymously. */
+  const signIn = $derived(page.reason === "sign_in");
   const accounts = $derived([
     { value: "anonymous", label: m.work_human_account_anonymous() },
     { value: "signed_in_public_only", label: m.work_human_account_signed_in() },
@@ -172,7 +171,6 @@
   style:top={`${rect.y}px`}
   style:inline-size={`${rect.width}px`}
   style:block-size={`${rect.height}px`}
-  style:--takeover-header={`${HEADER}px`}
 >
   <header
     bind:this={heading}
@@ -185,36 +183,39 @@
     onpointerup={end}
     onpointercancel={end}
   >
-    <span class="who" title={url}>{host}</span>
-    <IconButton icon={Cancel01Icon} label={m.work_pane_close()} onclick={close} />
+    <span class="titles">
+      <span class="who" title={url}>{host}</span>
+      <span class="why">{reasonSentence(page.reason, host)}</span>
+    </span>
+    {#if countdown}<span class="left">{countdown}</span>{/if}
   </header>
   <div class="prompt">
-    <p class="why">
-      <span>{reasonSentence(page.reason, host)}</span>
-      {#if countdown}<span class="left">{countdown}</span>{/if}
-    </p>
     {#if handingBack}
       <p class="handing" role="status">{m.work_human_handing_back()}</p>
     {:else}
-      <ChoiceGroup
-        label={m.work_human_account()}
-        segmented
-        options={accounts}
-        bind:value={() => account, (next) => (account = next as WorkHumanAccountV1)}
-      />
-      <p class="help">
-        {account === "anonymous"
-          ? m.work_human_account_anonymous_help()
-          : m.work_human_account_signed_in_help()}
-      </p>
+      {#if signIn}
+        <ChoiceGroup
+          label={m.work_human_account()}
+          segmented
+          options={accounts}
+          bind:value={() => account, (next) => (account = next as WorkHumanAccountV1)}
+        />
+        <p class="help">
+          {account === "anonymous"
+            ? m.work_human_account_anonymous_help()
+            : m.work_human_account_signed_in_help()}
+        </p>
+      {/if}
       <div class="actions">
         <Button
           variant="primary"
           size="compact"
           disabled={!page.canContinue}
-          onclick={() => oncontinue(account)}>{m.work_human_continue()}</Button
+          onclick={() => oncontinue(signIn ? account : "anonymous")}
+          >{m.work_human_continue()}</Button
         >
         <Button size="compact" onclick={close}>{m.work_human_release()}</Button>
+        <span class="skip">{m.work_human_release_help()}</span>
       </div>
     {/if}
     {#if error}<p class="failed" role="alert">{error}</p>{/if}
@@ -261,12 +262,13 @@
 
   .head {
     display: flex;
-    flex: 0 0 var(--takeover-header);
+    flex: none;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
+    gap: 12px;
     box-sizing: border-box;
-    padding: 0 8px 0 14px;
+    min-block-size: 44px;
+    padding: 8px 14px;
     background: color-mix(in srgb, var(--color-raised) 70%, var(--color-surface));
     cursor: grab;
     /* stylelint-disable-next-line property-no-vendor-prefix */
@@ -280,12 +282,28 @@
     cursor: grabbing;
   }
 
+  .titles {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-inline-size: 0;
+  }
+
   .who {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: var(--text-label);
+    color: var(--color-muted);
+    font-size: var(--text-caption);
     font-weight: 600;
+    line-height: 13px;
+  }
+
+  .why {
+    font-size: var(--text-body);
+    font-weight: 500;
+    line-height: 17px;
+    text-wrap: pretty;
   }
 
   .prompt {
@@ -297,16 +315,6 @@
     animation: takeover-chrome var(--motion-base) var(--ease-smooth) 40ms both;
   }
 
-  .why {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
-    margin: 0;
-    font-size: var(--text-body);
-    text-wrap: pretty;
-  }
-
   .left {
     flex: none;
     color: var(--color-muted);
@@ -314,14 +322,11 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* Two lines are reserved so choosing an account never reflows the well. */
   .help {
-    min-block-size: 32px;
     margin: 0;
     color: var(--color-muted);
     font-size: var(--text-label);
     line-height: 16px;
-    text-wrap: pretty;
   }
 
   .handing,
@@ -340,7 +345,14 @@
 
   .actions {
     display: flex;
+    align-items: center;
     gap: 8px;
+  }
+
+  .skip {
+    min-inline-size: 0;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
   }
 
   .well {

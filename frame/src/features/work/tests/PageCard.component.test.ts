@@ -52,7 +52,9 @@ test("a page the run is holding says why it needs you, and the countdown only ne
     canContinue: false,
   };
   const screen = await render(PageCard, { item: waiting, selected: false });
-  await expect.element(screen.getByText("Needs you to sign in")).toBeVisible();
+  // A short label and one sentence, person first.
+  await expect.element(screen.getByText("Sign in", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText(/so the agent can continue/)).toBeVisible();
   expect(screen.container.querySelector(".needs .left")).toBeNull();
   await screen.rerender({
     item: {

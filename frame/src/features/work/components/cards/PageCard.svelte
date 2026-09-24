@@ -2,7 +2,7 @@
   import { untrack } from "svelte";
   import AgentAvatar from "./AgentAvatar.svelte";
   import type { CanvasItem } from "../../lib/canvas-model";
-  import { cardCountdown, reasonBadge } from "../../lib/work-human";
+  import { cardCountdown, reasonBadge, reasonSentence } from "../../lib/work-human";
   import * as m from "$shared/i18n/messages";
   let { item, selected, onhelp }: { item: CanvasItem; selected: boolean; onhelp?: () => void } =
     $props();
@@ -47,20 +47,23 @@
       <span class="placeholder" aria-hidden="true">{(item.page?.host || "?").slice(0, 1)}</span>
     {/if}
     {#if waiting && human}
-      <p class="needs">
-        <span class="why">{reasonBadge(human.reason)}</span>
-        <span class="act">
-          {#if countdown}<span class="left">{countdown}</span>{/if}
-          {#if onhelp}<button
-              type="button"
-              class="help nodrag nopan"
-              onclick={(event) => {
-                event.stopPropagation();
-                onhelp?.();
-              }}>{m.work_human_help()}</button
-            >{/if}
-        </span>
-      </p>
+      <div class="needs">
+        <p class="sentence">{reasonSentence(human.reason, item.page?.host ?? "")}</p>
+        <p class="ask">
+          <span class="why">{reasonBadge(human.reason)}</span>
+          <span class="act">
+            {#if countdown}<span class="left">{countdown}</span>{/if}
+            {#if onhelp}<button
+                type="button"
+                class="help nodrag nopan"
+                onclick={(event) => {
+                  event.stopPropagation();
+                  onhelp?.();
+                }}>{m.work_human_help()}</button
+              >{/if}
+          </span>
+        </p>
+      </div>
     {/if}
   </div>
   <!-- A read that gave up says so in Rust's words, not with a shrug. -->
@@ -153,14 +156,33 @@
     inset-inline: 0;
     inset-block-end: 0;
     display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 22px 8px 8px;
+    background: linear-gradient(to top, var(--color-surface) 62%, transparent);
+    font-size: var(--text-caption);
+    line-height: 16px;
+  }
+
+  .sentence {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    margin: 0;
+    overflow: hidden;
+    color: var(--color-text);
+    font-weight: 500;
+    line-height: 14px;
+    text-wrap: pretty;
+  }
+
+  .ask {
+    display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
     margin: 0;
-    padding: 18px 8px 8px;
-    background: linear-gradient(to top, var(--color-surface) 46%, transparent);
-    font-size: var(--text-caption);
-    line-height: 16px;
   }
 
   .why {
