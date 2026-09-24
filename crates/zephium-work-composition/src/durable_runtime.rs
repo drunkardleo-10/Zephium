@@ -480,6 +480,8 @@ impl MacosWorkComposition {
         let mut verifying_action = false;
         let mut next_cancel_check = Instant::now();
         let mut cleanup_deadline = attempt.deadline() + Duration::from_secs(30);
+        let mut close_grace: Option<Instant> = None;
+        let mut retired_at: Option<Instant> = None;
         let mut human_wait: Option<Instant> = None;
         let mut disposition = None;
         let mut shown_frame = 0;
@@ -499,8 +501,10 @@ impl MacosWorkComposition {
         // While a person holds the page, the run's own deadline stands still.
         let mut person_hold = None;
         #[cfg(feature = "public-qualification")]
+        let stages = StageOnce::default();
+        #[cfg(feature = "public-qualification")]
         let trace = |label: &str| {
-            if let Some(diagnostic) = stage_diagnostic {
+            if let Some(diagnostic) = stage_diagnostic.filter(|_| stages.first(label)) {
                 diagnostic(label);
             }
         };
@@ -654,12 +658,26 @@ impl MacosWorkComposition {
                 trace("close:attempt_deadline");
                 requested_close = true;
             }
-            if cleanup_expired(
-                now,
-                cleanup_deadline,
-                attempt.deadline() + Duration::from_secs(30),
-                guard.0.is_group_locally_retired(),
-            ) {
+            let retired = guard.0.is_group_locally_retired();
+            if retired {
+                retired_at.get_or_insert(now);
+            }
+            let settle_retired = anonymous
+                && settles_retired(
+                    now,
+                    close_grace,
+                    retired_at,
+                    disposition,
+                    archived.is_some(),
+                );
+            if !settle_retired
+                && cleanup_expired(
+                    now,
+                    cleanup_deadline,
+                    close_grace.unwrap_or(attempt.deadline() + Duration::from_secs(30)),
+                    retired,
+                )
+            {
                 if anonymous {
                     // Nothing was written anywhere: a resource that cannot
                     // close is one failed page, charged with what settled.
@@ -960,6 +978,7 @@ impl MacosWorkComposition {
                 // Failure/cancellation starts cleanup immediately. It cannot
                 // spend the unused execution budget waiting for terminal debt.
                 cleanup_deadline = cleanup_deadline.min(now + Duration::from_secs(30));
+                close_grace.get_or_insert(cleanup_deadline);
                 attempt.record_activity(match disposition {
                     _ if user_cancelled => zephium_ipc::work::WorkActivityV1::Cancelling,
                     Some(AgentWorkDisposition::Succeeded) => {
@@ -972,7 +991,10 @@ impl MacosWorkComposition {
                 });
                 guard.0.close();
             }
-            if guard.0.is_closed() {
+            if settle_retired {
+                trace("close:retired");
+            }
+            if guard.0.is_closed() || settle_retired {
                 let snapshot = guard.0.snapshot();
                 // Closed usage comes from the original policy/drain/resource and
                 // terminal ACK join, never the lossy public progress stream.
@@ -1071,9 +1093,56 @@ fn human_wait_expired(
         )
 }
 
+/// A page asked to close settles within its grace. Once its own cleanup is
+/// retired, a page with nothing to publish settles at once with its own
+/// outcome; a page with a result waits for the group's native proof only
+/// until the grace ends. The group's audit stays with the Shell.
+fn settles_retired(
+    now: Instant,
+    grace: Option<Instant>,
+    retired_at: Option<Instant>,
+    disposition: Option<AgentWorkDisposition>,
+    archived: bool,
+) -> bool {
+    let (Some(grace), Some(retired_at)) = (grace, retired_at) else {
+        return false;
+    };
+    // The projection is refreshed after retirement is published.
+    now > retired_at
+        && match disposition {
+            Some(
+                AgentWorkDisposition::Failed
+                | AgentWorkDisposition::Cancelled
+                | AgentWorkDisposition::WaitingForHuman,
+            ) => true,
+            Some(AgentWorkDisposition::Succeeded) => archived && now >= grace,
+            _ => false,
+        }
+}
+
+/// Close stages repeat on every settle pass; each is logged once per page.
+#[cfg(any(test, feature = "public-qualification"))]
+#[derive(Default)]
+struct StageOnce(std::cell::RefCell<Vec<String>>);
+#[cfg(any(test, feature = "public-qualification"))]
+impl StageOnce {
+    fn first(&self, label: &str) -> bool {
+        if !label.starts_with("close:") {
+            return true;
+        }
+        let mut seen = self.0.borrow_mut();
+        if seen.iter().any(|stage| stage == label) {
+            return false;
+        }
+        seen.push(label.to_owned());
+        true
+    }
+}
+
 fn cleanup_expired(now: Instant, local: Instant, group: Instant, locally_retired: bool) -> bool {
-    // A retired page has no local cleanup debt. Its original attempt still
-    // bounds waiting for peer reads and the Shell's global native proof.
+    // A retired page has no local cleanup debt. Until close, its original
+    // attempt bounds waiting for peer reads and the Shell's global native
+    // proof; once asked to close, the grace does.
     now >= group || (now >= local && !locally_retired)
 }
 
@@ -1271,6 +1340,92 @@ mod closed_result_tests {
         assert!(!cleanup_expired(local, local, group, true));
         assert!(cleanup_expired(group, local, group, true));
         assert!(cleanup_expired(group, local, group, false));
+    }
+
+    #[test]
+    fn a_failed_page_past_its_deadline_settles_in_one_bounded_close() {
+        // The recorded spin: the attempt deadline had passed, the page was
+        // Failed and locally retired, and a stuck peer held the group open.
+        let start = Instant::now();
+        let deadline = start - Duration::from_secs(1);
+        let stages = StageOnce::default();
+        let mut logged = 0;
+        let mut cleanup_deadline = deadline + Duration::from_secs(30);
+        let mut grace = None;
+        let mut retired_at = None;
+        let mut passes = 0;
+        let settled = loop {
+            let now = start + Duration::from_millis(50) * passes;
+            passes += 1;
+            retired_at.get_or_insert(now);
+            for label in ["close:terminal:Some(Failed)", "close:attempt_deadline"] {
+                logged += usize::from(stages.first(label));
+            }
+            let disposition = Some(AgentWorkDisposition::Failed);
+            if settles_retired(now, grace, retired_at, disposition, false) {
+                break Some(now);
+            }
+            let group = grace.unwrap_or(deadline + Duration::from_secs(30));
+            if cleanup_expired(now, cleanup_deadline, group, true) {
+                break None;
+            }
+            cleanup_deadline = cleanup_deadline.min(now + Duration::from_secs(30));
+            grace.get_or_insert(cleanup_deadline);
+        };
+        assert_eq!(settled, Some(start + Duration::from_millis(50)));
+        assert_eq!(logged, 2);
+
+        // A published result waits for the group proof only within the grace.
+        let close = start + Duration::from_secs(30);
+        let succeeded = Some(AgentWorkDisposition::Succeeded);
+        let before = close - Duration::from_millis(1);
+        assert!(!settles_retired(
+            before,
+            Some(close),
+            Some(start),
+            succeeded,
+            true
+        ));
+        assert!(settles_retired(
+            close,
+            Some(close),
+            Some(start),
+            succeeded,
+            true
+        ));
+        assert!(!settles_retired(
+            close,
+            Some(close),
+            Some(start),
+            succeeded,
+            false
+        ));
+        assert!(!settles_retired(
+            close,
+            None,
+            Some(start),
+            disposition_failed(),
+            false
+        ));
+        assert!(!settles_retired(
+            close,
+            Some(close),
+            None,
+            disposition_failed(),
+            false
+        ));
+        assert!(!settles_retired(
+            start,
+            Some(close),
+            Some(start),
+            disposition_failed(),
+            false
+        ));
+        assert!(stages.first("phase:Terminal") && stages.first("phase:Terminal"));
+    }
+
+    fn disposition_failed() -> Option<AgentWorkDisposition> {
+        Some(AgentWorkDisposition::Failed)
     }
 
     #[test]
