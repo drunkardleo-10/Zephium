@@ -24,6 +24,11 @@ use std::{
 };
 use wry::WebViewBuilder;
 
+/// QA-only stderr sink for owned agent-view traces; production modules never print.
+pub(crate) fn trace(line: std::fmt::Arguments<'_>) {
+    eprintln!("{line}");
+}
+
 const OBSERVATION_WINDOW: Duration = Duration::from_secs(30);
 const SAMPLE_DEADLINE: Duration = Duration::from_secs(5);
 const INTERACTIVE_OBSERVATION_WINDOW: Duration = Duration::from_secs(120);

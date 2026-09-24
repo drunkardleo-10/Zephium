@@ -589,16 +589,16 @@ where
             );
             #[cfg(feature = "agentic-browser-qa")]
             if action.target_is_main_frame != Some(false) {
-                use std::io::Write as _;
-                let _ = writeln!(std::io::stderr(),
+                super::agentic_liveness_probe::trace(format_args!(
                     "agent_view frame=main requested=true allowed={allowed} human_prepare={prepare_human} cause={:?} get={}",
-                    action.navigation_type, action.is_get);
+                    action.navigation_type, action.is_get));
             }
             if allowed && prepare_human && !human_semantic_prepare() {
                 #[cfg(feature = "agentic-browser-qa")]
                 {
-                    use std::io::Write as _;
-                    let _ = writeln!(std::io::stderr(), "agent_view human_prepare_failed=true");
+                    super::agentic_liveness_probe::trace(format_args!(
+                        "agent_view human_prepare_failed=true"
+                    ));
                 }
                 if let Some(gate) = &work_policy {
                     gate.retire();
@@ -609,24 +609,20 @@ where
             if url::Url::parse(&target)
                 .is_ok_and(|url| url.host_str() == Some("challenges.cloudflare.com"))
             {
-                use std::io::Write as _;
-                let _ = writeln!(
-                    std::io::stderr(),
+                super::agentic_liveness_probe::trace(format_args!(
                     "agent_view frame=challenge requested=true allowed={allowed} main={:?}",
                     action.target_is_main_frame
-                );
+                ));
             }
             allowed
         })
         .with_navigation_event_handler(move |event| {
             #[cfg(feature = "agentic-browser-qa")]
             {
-                use std::io::Write as _;
-                let _ = writeln!(
-                    std::io::stderr(),
+                super::agentic_liveness_probe::trace(format_args!(
                     "agent_view frame=main phase={:?}",
                     event.phase
-                );
+                ));
             }
             if let Some(gate) = &work_events {
                 match gate.observe(event) {
