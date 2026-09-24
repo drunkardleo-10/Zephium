@@ -6,3 +6,7 @@ src/shared/i18n
 project.inlang/cache
 
 dist-work-preview/
+
+# Inlang compiler-generated project metadata.
+project.inlang/.meta.json
+project.inlang/README.md

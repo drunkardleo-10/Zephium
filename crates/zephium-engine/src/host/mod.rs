@@ -7,6 +7,10 @@ mod content_rules;
 mod discard;
 mod dispatch;
 #[cfg(target_os = "macos")]
+mod download_files;
+#[cfg(target_os = "macos")]
+pub(crate) mod downloads;
+#[cfg(target_os = "macos")]
 mod extension_action;
 mod extension_browser_surface;
 #[cfg(target_os = "macos")]
@@ -15,6 +19,8 @@ mod extension_commands;
 mod extension_context_menu;
 pub(crate) mod extension_runtime;
 mod extensions;
+#[cfg(target_os = "macos")]
+mod file_uploads;
 mod lifecycle;
 mod navigation;
 mod page_ops;
@@ -117,6 +123,13 @@ struct Spare {
 // Keep native observer registrations adjacent to their WebView and drop them
 // first. Platform observers never strongly capture this wrapper or WebView.
 struct ObservedView {
+    #[cfg(target_os = "macos")]
+    file_uploads: Rc<file_uploads::FileUploadBroker>,
+    // A current layout may request a view before its first document commits
+    // (for example a download URL entered in a new tab). This permits only a
+    // native download decision, never document presentation or file access.
+    #[cfg(target_os = "macos")]
+    download_surface_intent: Arc<AtomicBool>,
     event_permit: EventPermit,
     navigation: NavigationEpochTracker,
     // Shared with every stage that can reveal this exact physical view.
@@ -232,6 +245,8 @@ impl Drop for ObservedView {
         // rejected even if the shell reuses the same logical ItemId.
         self.event_permit.revoke();
         self.navigation.revoke();
+        #[cfg(target_os = "macos")]
+        self.file_uploads.cancel();
         let policy_cleanup_failed = self
             .content_policy_registration
             .take()
@@ -682,6 +697,8 @@ pub(crate) struct EngineHost {
     extension_browser_surfaces: HashMap<ProfileId, ExtensionBrowserSurface>,
     #[cfg(target_os = "macos")]
     page_permissions: page_permissions::PagePermissionBroker,
+    #[cfg(target_os = "macos")]
+    pub(crate) downloads: Option<Rc<downloads::Downloads>>,
     native_resource_accounting_failed: bool,
     navigation_snapshots: HashMap<ItemId, NavigationSnapshot>,
     partitions: HashMap<ItemId, Partition>,

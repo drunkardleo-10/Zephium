@@ -759,6 +759,44 @@ impl Shell {
                 }
                 let _ = self.relayout();
             }
+            Command::DownloadCall {
+                expected_profile,
+                call,
+                done,
+            } => {
+                use zephium_core::downloads::{DownloadError, DownloadResponse};
+                let authorized = self
+                    .windows
+                    .focused()
+                    .is_some_and(|window| window.profile == expected_profile)
+                    && !self.profile_deletion_quarantines(expected_profile)
+                    && call.validate();
+                if !authorized {
+                    done.finish(DownloadResponse::Error {
+                        error: DownloadError::Invalid,
+                    });
+                } else {
+                    let partition = match self
+                        .profiles
+                        .get(expected_profile)
+                        .map(|profile| profile.kind)
+                    {
+                        Some(zephium_core::profiles::ProfileKind::Incognito) => {
+                            zephium_core::ports::engine::Partition::Ephemeral(expected_profile)
+                        }
+                        Some(_) => {
+                            zephium_core::ports::engine::Partition::Persistent(expected_profile)
+                        }
+                        None => {
+                            done.finish(DownloadResponse::Error {
+                                error: DownloadError::Invalid,
+                            });
+                            return;
+                        }
+                    };
+                    self.engine.download_call(partition, *call, done);
+                }
+            }
             Command::HistoryCall {
                 expected_profile,
                 call,

@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use zephium_agentic::{AgentAuditCompletion, AgentAuditDelivery};
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
+use zephium_core::downloads::{DownloadStoreCall, DownloadStoreReply};
 use zephium_core::extensions::{
     ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantAuthority, ExtensionGrantDigest,
     ExtensionGrantManifestBindings, ExtensionGrantPatch, ExtensionGrantRevision,
@@ -753,6 +754,11 @@ enum Cmd {
         ExtensionGrantRequestPermit,
         ExtensionNativeOwnershipMutationPermit,
         ExtensionNativeOwnershipJournalMutationDone,
+    ),
+    DownloadCall(
+        ProfileId,
+        DownloadStoreCall,
+        Box<dyn FnOnce(DownloadStoreReply) + Send>,
     ),
     GetSetting(String, Sender<Option<String>>),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
@@ -2954,6 +2960,22 @@ impl Store for SqliteStore {
         rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
     }
 
+    fn download_call(
+        &self,
+        profile: ProfileId,
+        call: DownloadStoreCall,
+        done: Box<dyn FnOnce(DownloadStoreReply) + Send>,
+    ) -> bool {
+        if let DownloadStoreCall::Save(record) = &call {
+            if !record.validate() {
+                return false;
+            }
+        }
+        self.tx
+            .try_send(Cmd::DownloadCall(profile, call, done))
+            .is_ok()
+    }
+
     fn history_page(
         &self,
         profile: ProfileId,
@@ -3643,6 +3665,9 @@ fn actor(
                 };
                 drop(admission);
                 done(response);
+            }
+            Some(Cmd::DownloadCall(profile, call, done)) => {
+                done(hub.download_call(profile, call));
             }
             Some(Cmd::RecordSearch(profile, query, url)) => {
                 hub.record_search(profile, &query, &url);

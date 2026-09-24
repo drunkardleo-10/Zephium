@@ -810,6 +810,16 @@ pub trait Store {
     ) -> bool {
         false
     }
+    /// Bounded asynchronous download persistence on the existing Store actor.
+    /// Private profiles must never call this port. False means no callback is retained.
+    fn download_call(
+        &self,
+        _profile: ProfileId,
+        _call: crate::downloads::DownloadStoreCall,
+        _done: Box<dyn FnOnce(crate::downloads::DownloadStoreReply) + Send>,
+    ) -> bool {
+        false
+    }
     /// History is per-profile; the adapter must ignore profiles it does not
     /// persist (incognito never reaches disk).
     fn record_visit(&self, profile: ProfileId, url: String, title: String);

@@ -44,13 +44,17 @@
     event.preventDefault();
     if (composing || pending || !value.trim()) return;
     const id = tabs.activeId();
-    if (id === null) return;
+    const profile = tabs.profile()?.id;
     const submitted = value;
     pending = true;
     failed = false;
     try {
-      const result = await settle(commands.tabsNavigate(id, submitted));
-      if (tabs.activeId() !== id) return;
+      const result = await settle(
+        id === null
+          ? commands.browserOpenUrl(submitted, false)
+          : commands.tabsNavigate(id, submitted),
+      );
+      if (tabs.profile()?.id !== profile || (id !== null && tabs.activeId() !== id)) return;
       if (result.outcome === "failed" || result.outcome === "rejected") failed = true;
       else if (value === submitted) input.blur();
     } catch {

@@ -158,6 +158,8 @@ pub struct WryWebViewUIDelegateIvars {
     Option<Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>>,
   #[cfg(target_os = "macos")]
   pending_permission_requests: RefCell<BoundedPendingPermissionRequests<PendingPermissionRequest>>,
+  #[cfg(target_os = "macos")]
+  file_upload_handler: Option<Box<crate::file_upload::FileUploadHandler>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -219,15 +221,32 @@ define_class!(
     #[unsafe(method(webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:))]
     fn run_file_upload_panel(
       &self,
-      _webview: &WryWebView,
-      _open_panel_params: &WKOpenPanelParameters,
-      _frame: &WKFrameInfo,
+      webview: &WryWebView,
+      parameters: &WKOpenPanelParameters,
+      frame: &WKFrameInfo,
       handler: &block2::Block<dyn Fn(*const NSArray<NSURL>)>,
     ) {
-      // Wry has no origin-labelled, gesture-bound file-selection broker.
-      // Opening NSOpenPanel here lets arbitrary page content own privileged
-      // native UI, so deny until the embedder supplies an explicit broker.
-      handler.call((null_mut(),));
+      let Some(broker) = &self.ivars().file_upload_handler else {
+        handler.call((std::ptr::null(),));
+        return;
+      };
+      let native_origin = unsafe { frame.securityOrigin() };
+      let Some(origin) = Self::permission_origin(&native_origin) else {
+        handler.call((std::ptr::null(),));
+        return;
+      };
+      let request = crate::FileUploadRequest {
+        origin,
+        allows_multiple_selection: unsafe { parameters.allowsMultipleSelection() },
+        allows_directories: unsafe { parameters.allowsDirectories() },
+      };
+      let completion = handler.copy();
+      let responder = crate::FileUploadResponder::new(move |urls| {
+        completion.call((urls.map_or(std::ptr::null(), |urls| urls as *const _),));
+      });
+      // Unwinding drops the responder and denies once. The native block and
+      // selected URLs remain on the owning main thread throughout.
+      let _ = catch_unwind(AssertUnwindSafe(|| broker(webview, request, responder)));
     }
 
     #[unsafe(method(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:))]
@@ -552,6 +571,9 @@ impl WryWebViewUIDelegate {
     #[cfg(target_os = "macos")] permission_request_handler: Option<
       Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>,
     >,
+    #[cfg(target_os = "macos")] file_upload_handler: Option<
+      Box<crate::file_upload::FileUploadHandler>,
+    >,
   ) -> Retained<Self> {
     #[cfg(target_os = "ios")]
     let _new_window_req_handler = new_window_req_handler;
@@ -568,6 +590,8 @@ impl WryWebViewUIDelegate {
         permission_request_handler,
         #[cfg(target_os = "macos")]
         pending_permission_requests: RefCell::new(BoundedPendingPermissionRequests::new()),
+        #[cfg(target_os = "macos")]
+        file_upload_handler,
       });
     unsafe { msg_send![super(delegate), init] }
   }

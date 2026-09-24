@@ -656,15 +656,23 @@ impl InnerWebView {
 
       let pending_scripts = Arc::new(Mutex::new(Some(Vec::new())));
       let downloads_denied = attributes.download_policy.inspect_metadata(|| ()).is_none();
-      let has_download_handler = !downloads_denied && attributes.download_started_handler.is_some();
+      #[cfg(target_os = "macos")]
+      let native_downloads = pl_attrs.native_download_handler.is_some();
+      #[cfg(not(target_os = "macos"))]
+      let native_downloads = false;
+      let has_download_handler =
+        !downloads_denied && (native_downloads || attributes.download_started_handler.is_some());
       // Download handler
       let download_delegate = if !downloads_denied
-        && (attributes.download_started_handler.is_some()
+        && (native_downloads
+          || attributes.download_started_handler.is_some()
           || attributes.download_completed_handler.is_some())
       {
         let delegate = WryDownloadDelegate::new(
           attributes.download_started_handler,
           attributes.download_completed_handler,
+          #[cfg(target_os = "macos")]
+          pl_attrs.native_download_handler,
           mtm,
         );
         Some(delegate)
@@ -694,6 +702,8 @@ impl InnerWebView {
         attributes.permission_handler,
         #[cfg(target_os = "macos")]
         pl_attrs.permission_request_handler,
+        #[cfg(target_os = "macos")]
+        pl_attrs.file_upload_handler,
       );
       let proto_ui_delegate = ProtocolObject::from_ref(&*ui_delegate);
       webview.setUIDelegate(Some(proto_ui_delegate));

@@ -6433,6 +6433,7 @@ name = "zephium-engine"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "dirs",
  "dispatch2",
  "gtk",
  "libc",

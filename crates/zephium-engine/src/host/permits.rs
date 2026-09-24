@@ -264,6 +264,7 @@ pub(super) fn queue_navigation_failure(
     navigation: &NavigationEpochTracker,
     failed: NavigationEpoch,
     restored: Option<NavigationEpoch>,
+    cancelled: bool,
 ) {
     if permit.active_token().is_none() {
         return;
@@ -271,7 +272,14 @@ pub(super) fn queue_navigation_failure(
     let queued_permit = permit.clone();
     let queued_navigation = navigation.clone();
     with_navigation_settlement(id, move |host| {
-        host.settle_navigation_failure(id, &queued_permit, &queued_navigation, failed, restored);
+        host.settle_navigation_failure(
+            id,
+            &queued_permit,
+            &queued_navigation,
+            failed,
+            restored,
+            cancelled,
+        );
     });
 }
 

@@ -76,6 +76,11 @@ export function bootstrapReport(): Plugin {
             css.add(style);
         };
         walk(root.file);
+        if (root.surface && visited.size + css.size > 24) {
+          this.error(
+            `${name} startup requests exceed the native asset budget: ${visited.size + css.size} (limit 24)`,
+          );
+        }
         if (root.surface) surfaceStyles.set(name, css);
         const forbidden = [...modules].filter(
           (id) =>

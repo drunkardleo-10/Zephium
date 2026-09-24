@@ -101,7 +101,7 @@ impl Hub {
                 list(conn, query).unwrap_or_else(|_| error(ResourceError::Unavailable))
             }
             ResourceCall::Mutate { command } => {
-                mutate(conn, command).unwrap_or_else(|_| error(ResourceError::OutcomeUnknown))
+                mutate(conn, *command).unwrap_or_else(|_| error(ResourceError::OutcomeUnknown))
             }
         }
     }

@@ -98,6 +98,12 @@ impl EngineHost {
         let Some(view) = self.views.get(&id) else {
             return false;
         };
+        view.download_surface_intent.store(
+            expected
+                .iter()
+                .any(|stage| stage.allows_download_decision(id)),
+            Ordering::Release,
+        );
         let Some(native_view) = webview_nsview(view) else {
             return false;
         };
@@ -210,6 +216,24 @@ impl EngineHost {
         let Some(update_epoch) = stage.begin_content_update(region.is_some()) else {
             return false;
         };
+        let next_tabs = tree.as_ref().map(Pane::tabs).unwrap_or_default();
+        // Revoke every old source before cancelling a panel can reenter AppKit.
+        for (id, view) in &self.views {
+            if stage.has_view(*id) || next_tabs.contains(id) {
+                view.download_surface_intent.store(
+                    region.is_some() && next_tabs.contains(id),
+                    Ordering::Release,
+                );
+            }
+        }
+        for (id, view) in &self.views {
+            if stage.has_view(*id) && (region.is_none() || !next_tabs.contains(id)) {
+                view.file_uploads.cancel();
+            }
+        }
+        if !stage.content_update_is_current(update_epoch) {
+            return !stage.has_terminal_failure();
+        }
         let Some(r) = region else {
             return stage.finish_content_update(update_epoch);
         };

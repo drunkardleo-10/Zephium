@@ -490,6 +490,8 @@ pub(crate) fn install(
             extension_browser_surfaces: HashMap::new(),
             #[cfg(target_os = "macos")]
             page_permissions: super::page_permissions::PagePermissionBroker::default(),
+            #[cfg(target_os = "macos")]
+            downloads: None,
             native_resource_accounting_failed: false,
             navigation_snapshots: HashMap::new(),
             partitions: HashMap::new(),

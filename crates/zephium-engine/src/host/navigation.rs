@@ -590,6 +590,7 @@ impl EngineHost {
         source_navigation: &NavigationEpochTracker,
         failed: NavigationEpoch,
         restored: Option<NavigationEpoch>,
+        cancelled: bool,
     ) {
         let Some((same_generation, current, current_committed, presentable, bootstrap, token)) =
             self.views.get(&id).map(|view| {
@@ -644,6 +645,13 @@ impl EngineHost {
             return;
         }
 
+        if cancelled {
+            // A policy cancellation (including conversion to WKDownload) did
+            // not fail controller construction. Keep its uncommitted view
+            // hidden and reusable. Closing here would revoke a pending native
+            // download save panel before the user can choose its destination.
+            return;
+        }
         self.close(id);
         if let Some(token) = token {
             self.sink

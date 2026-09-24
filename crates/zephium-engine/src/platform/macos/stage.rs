@@ -355,6 +355,12 @@ impl ContentStage {
     /// A view can be constructed after that layout task ran, so creation uses
     /// this retained model to attach the late native child without waiting for
     /// another resize or user interaction.
+    pub fn allows_download_decision(&self, id: ItemId) -> bool {
+        !self.ivars().stage_retry_terminal.get()
+            && self.ivars().desired_container_visible.get()
+            && self.contains_item(id)
+    }
+
     pub fn contains_item(&self, id: ItemId) -> bool {
         self.ivars()
             .tree

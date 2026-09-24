@@ -2,6 +2,12 @@
 //! (window -> chrome positioning, engine, shell) and the command surface.
 
 #[cfg(all(
+    feature = "file-workflows-qa",
+    any(not(debug_assertions), not(target_os = "macos"))
+))]
+compile_error!("file workflows QA is macOS debug-only");
+
+#[cfg(all(
     feature = "resource-ui-qa",
     any(not(debug_assertions), not(target_os = "macos"))
 ))]
@@ -1291,6 +1297,11 @@ struct NoteOpenRequested {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct DownloadsChanged {
+    profile: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ResourceChanged {
     profile: String,
     id: String,
@@ -1586,6 +1597,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tab_drag_over,
             resource_call,
             history_call,
+            download_call,
             browser_open_url,
             resource_close_ready,
             tab_drop,
@@ -1597,6 +1609,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ItemsChanged,
             FaviconsChanged,
             ResourceChanged,
+            DownloadsChanged,
             NoteOpenRequested,
             TabChanged,
             ExtensionActionsChanged,
@@ -3780,6 +3793,55 @@ fn browser_open_url(
 
 #[tauri::command]
 #[specta::specta]
+async fn download_call(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    call: zephium_core::downloads::DownloadCall,
+) -> zephium_core::downloads::DownloadResponse {
+    use zephium_core::downloads::{DownloadCompletion, DownloadError, DownloadResponse};
+    let failed = |error| DownloadResponse::Error { error };
+    if !authorize(&caller, CallerPolicy::Both, "download_call") || shutdown_started(&app) {
+        return failed(DownloadError::Unavailable);
+    }
+    if !call.validate() {
+        return failed(DownloadError::Invalid);
+    }
+    let Some(profile) =
+        ProfileId::parse(&expected_profile).filter(|id| id.to_string() == expected_profile)
+    else {
+        return failed(DownloadError::Invalid);
+    };
+    static ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+    let Ok(permit) = ADMISSION.try_acquire() else {
+        return failed(DownloadError::Capacity);
+    };
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let interactive = matches!(call, zephium_core::downloads::DownloadCall::ChooseDirectory);
+    let shell = app.state::<Handle>().inner().clone();
+    if !shell.dispatch(Command::DownloadCall {
+        expected_profile: profile,
+        call: Box::new(call),
+        done: DownloadCompletion::new(move |response| {
+            let _permit = permit;
+            let _ = send.send(response);
+        }),
+    }) {
+        return failed(DownloadError::Unavailable);
+    }
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(if interactive { 24 * 60 * 60 } else { 15 }),
+        receive,
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        _ => failed(DownloadError::Unavailable),
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
 async fn history_call(
     caller: WebviewWindow,
     app: tauri::AppHandle,
@@ -3846,6 +3908,11 @@ fn setting_set(
         return rejected_operation();
     }
     if shutdown_started(&app) {
+        return rejected_operation();
+    }
+    #[cfg(feature = "file-workflows-qa")]
+    if key == "__files_qa_diagnostic" && value.len() <= 4096 {
+        eprintln!("files-qa: {value}");
         return rejected_operation();
     }
     if SETTING_KEYS.contains(&key.as_str()) && setting_value_allowed(&key, &value) {
@@ -4689,6 +4756,17 @@ pub fn run() {
                 .additional_browser_args(PRIVILEGED_WEBVIEW2_BROWSER_ARGS);
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             let main_builder = main_builder.on_download(|_, _| false);
+            #[cfg(feature = "file-workflows-qa")]
+            let main_builder = main_builder.initialization_script(r#"
+              (() => {
+                const report = value => {
+                  try { window.__TAURI_INTERNALS__.invoke('setting_set', {key:'__files_qa_diagnostic',value:String(value).slice(0,4096)}).catch(()=>{}); } catch {}
+                };
+                window.addEventListener('error', event => report(`error: ${event.message || event.target?.src || event.target?.href || 'resource'} ${event.filename || ''}:${event.lineno || ''}`), true);
+                window.addEventListener('unhandledrejection', event => report(`rejection: ${event.reason?.stack || event.reason?.message || event.reason}`));
+                window.addEventListener('DOMContentLoaded', () => report('document ready'));
+              })();
+            "#);
             let ui_startup_gate = UiStartupGate::new(app_url.clone());
             app.manage(ui_startup_gate.clone());
             let page_gate = ui_startup_gate.clone();
@@ -4847,6 +4925,13 @@ pub fn run() {
                     request_unrecoverable_native_failure(&terminal_failure_app, reason);
                 },
             )?);
+            let downloads_app = handle.clone();
+            if !engine.initialize_downloads(store.clone(), move |profile| {
+                let event = DownloadsChanged { profile: profile.to_string() };
+                for label in [MAIN_LABEL, overlay::PANEL_LABEL] {
+                    emit_to_privileged(&downloads_app, label, "zephium:downloads-changed", &event);
+                }
+            }) { return Err(std::io::Error::other("download service initialization was not admitted").into()); }
             let startup_engine = app.try_state::<StartupEngine>().ok_or_else(|| {
                 std::io::Error::other("startup engine cleanup owner is unavailable")
             })?;

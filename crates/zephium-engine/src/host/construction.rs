@@ -579,6 +579,16 @@ impl EngineHost {
         let extension_document_permits_pending =
             self.extension_document_authority.pending_presence();
         let presentation_permit = Arc::new(AtomicBool::new(false));
+        #[cfg(target_os = "macos")]
+        let file_uploads = super::file_uploads::FileUploadBroker::new(
+            event_permit.clone(),
+            navigation.clone(),
+            presentation_permit.clone(),
+        );
+        #[cfg(target_os = "macos")]
+        let load_file_uploads = Rc::downgrade(&file_uploads);
+        #[cfg(target_os = "macos")]
+        let download_surface_intent = Arc::new(AtomicBool::new(false));
         let guard_presentation_permit = presentation_permit.clone();
         let load_presentation_permit = presentation_permit.clone();
         let crash_permit = event_permit.clone();
@@ -1000,6 +1010,12 @@ impl EngineHost {
         {
             use wry::{WebViewBuilderExtDarwin, WebViewBuilderExtMacos};
             let permit = crash_permit.clone();
+            let upload_broker = Rc::downgrade(&file_uploads);
+            let crash_upload_broker = Rc::downgrade(&file_uploads);
+            let drop_permit = event_permit.clone();
+            let drop_navigation = navigation.clone();
+            let drop_presentation = presentation_permit.clone();
+            let drop_epoch = std::cell::Cell::new(None);
             let page_permission_item = id.clone();
             let page_permission_permit = event_permit.clone();
             let page_permission_navigation = navigation.clone();
@@ -1012,6 +1028,35 @@ impl EngineHost {
                 // the popup broker. Keep it disabled until chrome can label
                 // the origin and verify the initiating gesture.
                 .with_allow_link_preview(false)
+                .with_drag_drop_handler(move |event| {
+                    let permitted = drop_permit.active_token().is_some()
+                        && drop_presentation.load(Ordering::Acquire);
+                    match event {
+                        wry::DragDropEvent::Enter { .. } => {
+                            let epoch = drop_navigation
+                                .current_committed()
+                                .filter(|epoch| permitted && drop_navigation.is_current(*epoch));
+                            drop_epoch.set(epoch);
+                            epoch.is_none()
+                        }
+                        wry::DragDropEvent::Drop { .. } => !drop_epoch
+                            .take()
+                            .is_some_and(|epoch| permitted && drop_navigation.is_current(epoch)),
+                        wry::DragDropEvent::Over { .. } => !drop_epoch
+                            .get()
+                            .is_some_and(|epoch| permitted && drop_navigation.is_current(epoch)),
+                        wry::DragDropEvent::Leave => {
+                            drop_epoch.set(None);
+                            false
+                        }
+                        _ => true,
+                    }
+                })
+                .with_file_upload_handler(move |view, request, responder| {
+                    if let Some(broker) = upload_broker.upgrade() {
+                        broker.present(view, request, responder);
+                    }
+                })
                 .with_permission_request_handler(move |request| {
                     super::page_permissions::admit_native_request(
                         profile,
@@ -1023,12 +1068,36 @@ impl EngineHost {
                     )
                 })
                 .with_on_web_content_process_terminate_handler(move || {
+                    if let Some(broker) = crash_upload_broker.upgrade() {
+                        broker.cancel();
+                    }
                     let id = crash_id.get();
                     let queued_permit = permit.clone();
                     with_renderer_exit(id, move |host| {
                         host.on_renderer_process_exit(id, &queued_permit)
                     });
                 });
+            if let Some(downloads) = &self.downloads {
+                let downloads = Rc::downgrade(downloads);
+                let download_permit = event_permit.clone();
+                let download_intent = download_surface_intent.clone();
+                let download_navigation = navigation.clone();
+                builder = builder
+                    .with_download_policy(DownloadPolicy::UseHandlers)
+                    .with_native_download_handler(move |native| {
+                        if let Some(downloads) = downloads.upgrade() {
+                            downloads.admit(
+                                partition,
+                                download_permit.clone(),
+                                download_intent.clone(),
+                                download_navigation.clone(),
+                                native,
+                            );
+                        } else {
+                            unsafe { native.cancel(None) };
+                        }
+                    });
+            }
             if prepared_extension_controller.is_some() {
                 builder = builder.with_context_menu_handler(move |_event, default_menu| {
                     super::dispatch::try_macos_extension_context_menu(
@@ -1078,6 +1147,10 @@ impl EngineHost {
             };
             match transition {
                 NavigationTransition::Started(epoch) => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(broker) = load_file_uploads.upgrade() {
+                        broker.cancel();
+                    }
                     #[cfg(target_os = "macos")]
                     queue_extension_background_wake(
                         id,
@@ -1146,7 +1219,14 @@ impl EngineHost {
                     if let Some(request) = request {
                         load_permit.emit(&on_load, EngineEvent::NavigationFailed { id, request });
                     }
-                    queue_navigation_failure(id, &load_permit, &load_navigation, failed, restored);
+                    queue_navigation_failure(
+                        id,
+                        &load_permit,
+                        &load_navigation,
+                        failed,
+                        restored,
+                        event.phase == wry::NavigationEventPhase::Cancelled,
+                    );
                 }
             }
         });
@@ -1575,6 +1655,10 @@ impl EngineHost {
             return None;
         }
         Some(ObservedView {
+            #[cfg(target_os = "macos")]
+            file_uploads,
+            #[cfg(target_os = "macos")]
+            download_surface_intent,
             event_permit,
             navigation,
             presentation_permit,

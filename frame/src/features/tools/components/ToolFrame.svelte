@@ -29,6 +29,7 @@
     scrolls = true,
     children,
     footer,
+    preview = true,
   }: ToolHostProps & {
     searchLabel?: string;
     filters?: { value: string; label: string }[];
@@ -38,6 +39,7 @@
     scrolls?: boolean;
     children?: Snippet;
     footer?: Snippet;
+    preview?: boolean;
   } = $props();
   let meta = $derived(tools[tool]);
   let content: HTMLElement;
@@ -108,5 +110,5 @@
       </div>{/if}
   </div>
   {#if footer}{@render footer()}{/if}
-  <footer class="shared-tool-caption">{m.tool_preview()}</footer>
+  {#if preview}<footer class="shared-tool-caption">{m.tool_preview()}</footer>{/if}
 </section>

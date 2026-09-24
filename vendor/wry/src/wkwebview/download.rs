@@ -24,6 +24,13 @@ pub(crate) fn navigation_download_action(
 ) {
   unsafe {
     if let Some(delegate) = &this.ivars().download_delegate {
+      #[cfg(target_os = "macos")]
+      if let Some(native) = &delegate.ivars().native {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| native(download))).is_err() {
+          download.cancel(None);
+        }
+        return;
+      }
       let proto_delegate = ProtocolObject::from_ref(&**delegate);
       download.setDelegate(Some(proto_delegate));
     }
@@ -39,6 +46,13 @@ pub(crate) fn navigation_download_response(
 ) {
   unsafe {
     if let Some(delegate) = &this.ivars().download_delegate {
+      #[cfg(target_os = "macos")]
+      if let Some(native) = &delegate.ivars().native {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| native(download))).is_err() {
+          download.cancel(None);
+        }
+        return;
+      }
       let proto_delegate = ProtocolObject::from_ref(&**delegate);
       download.setDelegate(Some(proto_delegate));
     }
@@ -125,7 +139,7 @@ pub(crate) fn download_did_fail(
   this: &WryDownloadDelegate,
   download: &WKDownload,
   _error: &NSError,
-  _resume_data: &NSData,
+  _resume_data: Option<&NSData>,
 ) {
   #[cfg(debug_assertions)]
   {

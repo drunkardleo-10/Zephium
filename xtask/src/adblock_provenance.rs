@@ -2181,6 +2181,37 @@ fn verify_desktop_feature_graphs(repository: &Path) -> Result<(), String> {
             ],
         )?;
         verify_desktop_feature_graph(target, &output, blocker_features, adblock_features)?;
+        // The desktop now owns a lazy HTTPS search-suggestion client. Keep
+        // the blocker network-free by checking its own normal dependency graph,
+        // rather than rejecting every HTTP dependency in the entire browser.
+        let blocker = cargo_tree(
+            repository,
+            &[
+                "tree",
+                "-p",
+                "zephium-blocker-service",
+                "--locked",
+                "--offline",
+                "--target",
+                target,
+                "--edges",
+                "normal,build",
+                "--prefix",
+                "depth",
+                "--format",
+                "{p}|{f}",
+            ],
+        )?;
+        let blocker = parse_feature_tree(&blocker)?;
+        for package in [
+            "reqwest",
+            "aws-lc-rs",
+            "rustls-platform-verifier",
+            "tough",
+            "zephium-update-transport",
+        ] {
+            reject_package(&blocker, target, package)?;
+        }
     }
     Ok(())
 }
@@ -2210,10 +2241,8 @@ fn verify_desktop_feature_graph(
     )?;
     require_package_features(&tree, target, "zephium-blocker-service", "0.1.0", &[])?;
     require_package_features(&tree, target, "zephium-blocker-update", "0.1.0", &[])?;
+    require_direct_product_package(&tree, target, "reqwest", "0.13.4")?;
     for package in [
-        "aws-lc-rs",
-        "reqwest",
-        "rustls-platform-verifier",
         "tough",
         "zephium-extension-distribution",
         "zephium-update-transport",

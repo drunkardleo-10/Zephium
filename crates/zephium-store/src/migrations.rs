@@ -1987,6 +1987,16 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 16,
+        up: |tx| {
+            tx.execute_batch(
+            "CREATE TABLE downloads (id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=26), session TEXT NOT NULL CHECK(length(session)=26), revision INTEGER NOT NULL CHECK(revision>0), terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=24576 AND json_valid(payload))) STRICT;
+             CREATE TABLE download_preferences (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=8192 AND json_valid(payload))) STRICT;
+             CREATE TRIGGER downloads_capacity BEFORE INSERT ON downloads WHEN NOT EXISTS(SELECT 1 FROM downloads WHERE id=NEW.id) AND (SELECT count(*) FROM downloads)>=10000 BEGIN SELECT RAISE(ABORT,'download history capacity'); END;"
+        )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -2038,6 +2048,7 @@ mod tests {
         (13, 0x128f_f07d_8b37_6bc9),
         (14, 0x0bb9_e89a_39c2_fb9f),
         (15, 0x2f78_2c71_a646_acaf),
+        (16, 0x4e5d_c0be_fbd7_a2ba),
     ];
 
     fn schema_fingerprint(migrations: &[Migration], version: i64) -> u64 {
@@ -3221,7 +3232,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(15));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(16));
     }
 
     #[test]

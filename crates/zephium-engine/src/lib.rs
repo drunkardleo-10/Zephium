@@ -1522,6 +1522,30 @@ pub fn enforce_runtime_security_floor() -> Result<RuntimeSecurityAdvisories, Str
 }
 
 impl WebviewEngine {
+    /// Installs the profile-scoped download service before raw views are made.
+    pub fn initialize_downloads(
+        &self,
+        store: Arc<dyn zephium_core::ports::store::Store + Send + Sync>,
+        notify: impl Fn(ProfileId) + Send + Sync + 'static,
+    ) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.run(move || {
+                host::try_with(move |host| {
+                    if host.downloads.is_none() {
+                        host.downloads =
+                            Some(host::downloads::Downloads::new(store, Arc::new(notify)));
+                    }
+                });
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (store, notify);
+            true
+        }
+    }
+
     /// Takes the process-unique sequential native lifetime factory. This is
     /// mutually exclusive with `take_agent_browser_port`; no old port reopens.
     /// Merely taking the factory creates no native page, worker or timer.
@@ -1605,6 +1629,36 @@ impl WebviewEngine {
 }
 
 impl Engine for WebviewEngine {
+    fn download_call(
+        &self,
+        partition: Partition,
+        call: zephium_core::downloads::DownloadCall,
+        done: zephium_core::downloads::DownloadCompletion,
+    ) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.run(move || {
+                host::try_with(move |host| {
+                    if let Some(downloads) = &host.downloads {
+                        downloads.call(partition, call, done);
+                    } else {
+                        done.finish(zephium_core::downloads::DownloadResponse::Error {
+                            error: zephium_core::downloads::DownloadError::Unavailable,
+                        });
+                    }
+                });
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (partition, call);
+            done.finish(zephium_core::downloads::DownloadResponse::Error {
+                error: zephium_core::downloads::DownloadError::Unsupported,
+            });
+            true
+        }
+    }
+
     fn runtime_restart_required(&self) -> bool {
         lock_retirement_gate(&self.retirement).runtime_restart_required
     }
