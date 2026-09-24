@@ -880,6 +880,13 @@ impl NewWindowDeferralGuard {
         NewWindowResponse::Allow => {
           let _ = self.args.SetHandled(false);
         }
+        NewWindowResponse::CreateGuarded { webview, attached } => {
+          let success = self.args.SetNewWindow(&webview).is_ok();
+          // The engine closes the child if post-attachment policy cannot be
+          // established. Network navigation stays deferred until this returns.
+          attached(success);
+          let _ = self.args.SetHandled(true);
+        }
         NewWindowResponse::Create { webview } => {
           let _ = self.args.SetNewWindow(&webview);
           let _ = self.args.SetHandled(true);
@@ -1659,10 +1666,17 @@ impl InnerWebView {
     // and controller whose native container was destroyed behind its back.
     // Legacy destruction is an explicit opt-in for lifecycle-aware hosts.
     let page_close_policy = attributes.page_close_policy;
+    let page_close_handler = attributes.page_close_handler.take();
     webview.add_WindowCloseRequested(
-      &WindowCloseRequestedEventHandler::create(Box::new(move |_, _| match page_close_policy {
-        crate::PageClosePolicy::Ignore => Ok(()),
-        crate::PageClosePolicy::DestroyContainer => DestroyWindow(hwnd),
+      &WindowCloseRequestedEventHandler::create(Box::new(move |_, _| {
+        if let Some(handler) = &page_close_handler {
+          let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(handler));
+          return Ok(());
+        }
+        match page_close_policy {
+          crate::PageClosePolicy::Ignore => Ok(()),
+          crate::PageClosePolicy::DestroyContainer => DestroyWindow(hwnd),
+        }
       })),
       token,
     )?;
@@ -1925,6 +1939,16 @@ impl InnerWebView {
             return Ok(());
           };
 
+          let mut user_initiated = BOOL::default();
+          args.IsUserInitiated(&mut user_initiated)?;
+          let foreground = {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{
+              GetKeyState, VK_CONTROL, VK_MBUTTON, VK_SHIFT,
+            };
+            let modified =
+              GetKeyState(i32::from(VK_CONTROL.0)) < 0 || GetKeyState(i32::from(VK_MBUTTON.0)) < 0;
+            !modified || GetKeyState(i32::from(VK_SHIFT.0)) < 0
+          };
           let features = args
             .WindowFeatures()
             .map(|f| {
@@ -1953,6 +1977,8 @@ impl InnerWebView {
               }
 
               NewWindowFeatures {
+                user_initiated: user_initiated.as_bool(),
+                foreground,
                 position,
                 size,
                 opener: NewWindowOpener {
@@ -1962,6 +1988,8 @@ impl InnerWebView {
               }
             })
             .unwrap_or_else(|_| NewWindowFeatures {
+              user_initiated: user_initiated.as_bool(),
+              foreground,
               position: None,
               size: None,
               opener: NewWindowOpener {
@@ -1978,7 +2006,11 @@ impl InnerWebView {
           // or it will deadlock, see https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/threading-model#reentrancy
           unsafe {
             Self::dispatch_local_handler(hwnd, move || {
-              completion.finish(new_window_req_handler(uri, features));
+              let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                new_window_req_handler(uri, features)
+              }))
+              .unwrap_or(NewWindowResponse::Deny);
+              completion.finish(response);
             });
           }
         } else {
@@ -1990,6 +2022,39 @@ impl InnerWebView {
       token,
     )?;
     Self::attach_main_thread_dispatcher(hwnd)?;
+
+    if let Some(handler) = pl_attrs.native_context_menu_handler.clone() {
+      // Save-page/SaveAs is distinct from DownloadStarting. Keep that separate
+      // filesystem surface denied even when selected download/edit menu items
+      // are enabled. Registration is mandatory before any content can load.
+      let core25: ICoreWebView2_25 = webview.cast()?;
+      core25.add_SaveAsUIShowing(
+        &SaveAsUIShowingEventHandler::create(Box::new(|_, args| {
+          if let Some(args) = args {
+            args.SetCancel(true)?;
+          }
+          Ok(())
+        })),
+        token,
+      )?;
+      let owner = controller.clone();
+      let core11: ICoreWebView2_11 = webview.cast()?;
+      core11.add_ContextMenuRequested(
+        &ContextMenuRequestedEventHandler::create(Box::new(move |_, args| {
+          let Some(args) = args else {
+            return Ok(());
+          };
+          args.SetHandled(true)?;
+          if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&owner, &args)))
+            .unwrap_or(false)
+          {
+            args.SetHandled(false)?;
+          }
+          Ok(())
+        })),
+        token,
+      )?;
+    }
 
     // Download handler. Deny-without-metadata is a separate native path: it
     // cancels before requesting the operation URI or destination path and

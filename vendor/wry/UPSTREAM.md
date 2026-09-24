@@ -194,3 +194,25 @@ cancellation (`NSURLErrorDomain`, -999) emit Cancelled rather than Failed. Neith
 outcome implies a committed document or completed download. The application keeps
 an uncommitted cancelled controller hidden/reusable so pending native download
 save sheets retain their owner. See Apple's [policy-interruption constant](https://developer.apple.com/documentation/webkit/webkiterrorframeloadinterruptedbypolicychange).
+
+### Native links and context-menu downloads
+
+The native new-window hook carries user-activation evidence and foreground intent.
+WebKit's automatic-script-window preference is disabled. Modifier-click interception
+loads the original NSURLRequest into the supplied host-owned controller. Ordinary
+new-window requests preserve WebKit's supplied configuration and native WindowProxy.
+Windows adds a guarded Create response: the embedder installs request filters after
+SetNewWindow and before the native deferral completes, or closes the child. Callback
+panic denies. An opt-in page-close callback leaves controller destruction to the host.
+
+The optional private WebKit navigation delegate selector
+`_webView:contextMenuDidCreateDownload:` hands a context-menu WKDownload to the same
+native broker used for navigation downloads. Explicit denial still wins; a missing
+handler or panic cancels. This selector requires native testing on each supported
+macOS/WebKit version and must be reviewed during upstream rebases. It is not a
+public API guarantee or a URL replay fallback.
+
+Windows native context menus are opt-in and host filtered, and require a separate
+SaveAsUIShowing cancellation registration because document Save As is distinct
+from DownloadStarting. Privileged/agent defaults remain unchanged. See the
+[application qualification record](../../docs/native-links-implementation.md).

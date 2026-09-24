@@ -687,7 +687,7 @@ pub(crate) fn did_finish_navigation(
 // Navigation handler
 pub(crate) fn navigation_policy(
   this: &WryNavigationDelegate,
-  _webview: &WKWebView,
+  webview: &WKWebView,
   action: &WKNavigationAction,
   handler: &block2::Block<dyn Fn(WKNavigationActionPolicy)>,
 ) {
@@ -717,6 +717,47 @@ pub(crate) fn navigation_policy(
         (*handler).call((WKNavigationActionPolicy::Cancel,));
         return;
       };
+      #[cfg(target_os = "macos")]
+      if action.navigationType() == objc2_web_kit::WKNavigationType::LinkActivated
+        && action.targetFrame().is_some()
+      {
+        use objc2_app_kit::NSEventModifierFlags as Flags;
+        let flags = action.modifierFlags();
+        if flags.contains(Flags::Command) || action.buttonNumber() == 2 {
+          if let Some(open) = &this.ivars().new_window_req_handler {
+            let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+              open(
+                url.clone(),
+                crate::NewWindowFeatures {
+                  user_initiated: true,
+                  foreground: flags.contains(Flags::Shift),
+                  size: None,
+                  position: None,
+                  opener: crate::NewWindowOpener {
+                    webview: objc2::rc::Retained::retain(webview as *const _ as *mut _)
+                      .expect("borrowed live webview"),
+                    target_configuration: webview.configuration(),
+                  },
+                },
+              )
+            }))
+            .unwrap_or(crate::NewWindowResponse::Deny);
+            match response {
+              crate::NewWindowResponse::Create { webview: created } => {
+                // Preserve method, body, referrer and native cookie context.
+                created.loadRequest(&request);
+                (*handler).call((WKNavigationActionPolicy::Cancel,));
+                return;
+              }
+              crate::NewWindowResponse::Deny => {
+                (*handler).call((WKNavigationActionPolicy::Cancel,));
+                return;
+              }
+              crate::NewWindowResponse::Allow => {}
+            }
+          }
+        }
+      }
       // The embedder's navigation callback owns browser-level top-frame URL
       // admission. It cannot authenticate a WebExtension child resource and
       // must not preempt WebKit's controller-bound URL scheme handler, which

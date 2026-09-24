@@ -936,6 +936,8 @@ impl InnerWebView {
         match new_window_req_handler(
           url.clone(),
           NewWindowFeatures {
+            user_initiated: action.is_user_gesture(),
+            foreground: true,
             size: None,
             position: None,
             opener: NewWindowOpener {

@@ -4,7 +4,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use objc2::{define_class, msg_send, rc::Retained, runtime::NSObject, MainThreadOnly};
+use objc2::{
+  define_class, msg_send, rc::Retained, runtime::NSObject, DefinedClass, MainThreadOnly,
+};
 use objc2_foundation::{MainThreadMarker, NSError, NSObjectProtocol};
 #[cfg(target_os = "macos")]
 use objc2_foundation::{
@@ -41,6 +43,9 @@ use super::wry_download_delegate::WryDownloadDelegate;
 pub struct WryNavigationDelegateIvars {
   pub pending_scripts: Arc<Mutex<Option<Vec<String>>>>,
   pub has_download_handler: bool,
+  #[cfg(target_os = "macos")]
+  pub new_window_req_handler:
+    Option<std::rc::Rc<dyn Fn(String, crate::NewWindowFeatures) -> crate::NewWindowResponse>>,
   pub navigation_policy_function: Box<dyn Fn(String) -> bool>,
   pub download_delegate: Option<Retained<WryDownloadDelegate>>,
   pub on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent)>>,
@@ -63,6 +68,30 @@ define_class!(
   pub struct WryNavigationDelegate;
 
   unsafe impl NSObjectProtocol for WryNavigationDelegate {}
+
+  // WebKit's macOS context-menu download entry point is an optional private
+  // delegate selector (present since the WKDownload API). It delivers the
+  // public WKDownload object, not a URL to be replayed. Engines that do not
+  // send it simply cannot use this path; navigation download hooks remain.
+  #[cfg(target_os = "macos")]
+  impl WryNavigationDelegate {
+    #[unsafe(method(_webView:contextMenuDidCreateDownload:))]
+    fn context_menu_download(&self, _webview: &WKWebView, download: &WKDownload) {
+      if !self.ivars().has_download_handler {
+        unsafe { download.cancel(None) };
+        return;
+      }
+      if let Some(delegate) = &self.ivars().download_delegate {
+        if let Some(native) = &delegate.ivars().native {
+          if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| native(download))).is_err() {
+            unsafe { download.cancel(None) };
+          }
+          return;
+        }
+      }
+      unsafe { download.cancel(None) };
+    }
+  }
 
   unsafe impl WKNavigationDelegate for WryNavigationDelegate {
     #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
@@ -210,6 +239,9 @@ impl WryNavigationDelegate {
     webview: Retained<WryWebView>,
     pending_scripts: Arc<Mutex<Option<Vec<String>>>>,
     has_download_handler: bool,
+    #[cfg(target_os = "macos")] new_window_req_handler: Option<
+      std::rc::Rc<dyn Fn(String, crate::NewWindowFeatures) -> crate::NewWindowResponse>,
+    >,
     navigation_handler: Option<Box<dyn Fn(String) -> bool>>,
     download_delegate: Option<Retained<WryDownloadDelegate>>,
     on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent, String)>>,
@@ -249,6 +281,8 @@ impl WryNavigationDelegate {
         pending_scripts,
         navigation_policy_function,
         has_download_handler,
+        #[cfg(target_os = "macos")]
+        new_window_req_handler,
         download_delegate,
         on_page_load_handler,
         navigation_event_handler,

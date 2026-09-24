@@ -393,6 +393,8 @@ impl InnerWebView {
       });
 
       let _preference = config.preferences();
+      // WebKit admits script-created windows only during native user activation.
+      _preference.setJavaScriptCanOpenWindowsAutomatically(false);
       let _yes = NSNumber::numberWithBool(true);
       let _no = NSNumber::numberWithBool(false);
 
@@ -680,10 +682,15 @@ impl InnerWebView {
         None
       };
 
+      let new_window_req_handler: Option<
+        std::rc::Rc<dyn Fn(String, crate::NewWindowFeatures) -> crate::NewWindowResponse>,
+      > = attributes.new_window_req_handler.map(std::rc::Rc::from);
       let navigation_policy_delegate = WryNavigationDelegate::new(
         webview.clone(),
         pending_scripts.clone(),
         has_download_handler,
+        #[cfg(target_os = "macos")]
+        new_window_req_handler.clone(),
         attributes.navigation_handler,
         download_delegate.clone(),
         attributes.on_page_load_handler,
@@ -698,7 +705,9 @@ impl InnerWebView {
 
       let ui_delegate: Retained<WryWebViewUIDelegate> = WryWebViewUIDelegate::new(
         mtm,
-        attributes.new_window_req_handler,
+        #[cfg(target_os = "macos")]
+        attributes.page_close_handler,
+        new_window_req_handler,
         attributes.permission_handler,
         #[cfg(target_os = "macos")]
         pl_attrs.permission_request_handler,
