@@ -1295,16 +1295,18 @@ impl Shell {
         // A projection or adapter panic is terminal, but cannot skip the
         // independent Store/native/blocker barriers below.
         let pre_store_coordination_clean = if std::time::Instant::now() >= deadline {
+            crate::diagnostic!("shutdown: pre-Store blocker result folding deadline passed");
+            false
+        } else if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.drain_blocker_inbox();
+        }))
+        .is_err()
+        {
+            crate::diagnostic!("shutdown: pre-Store blocker result folding panicked");
             false
         } else {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.drain_blocker_inbox();
-            }))
-            .is_ok()
+            true
         };
-        if !pre_store_coordination_clean {
-            crate::diagnostic!("shutdown: pre-Store blocker result folding panicked");
-        }
         let storage_clean = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.store.shutdown_until(deadline)
         })) {
