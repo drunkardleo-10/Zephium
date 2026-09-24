@@ -11,6 +11,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     validate(&source, &port)?;
     for (path, required, forbidden) in ADAPTER_RULES {
         let source = std::fs::read_to_string(root.join(path)).map_err(|e| e.to_string())?;
+        let source = adapter_source(path, source)?;
         validate_adapter(&source, required, forbidden).map_err(|e| format!("{path}: {e}"))?;
         if path.ends_with("platform/macos/agent_context.rs") {
             validate_url_revocation_order(&source)?;
@@ -94,13 +95,17 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "current_scope(request.observation().scope(),resource.last_invocation)",
             "anchor.snapshot_generation().get()==last_invocation",
             "SemanticScope::Table(_)|SemanticScope::Frame(_)=>false",
-            "self.work_resources.values().any(|resource|", "read.presentation.is_some()",
+            // f8996d56: a busy peer presentation retires idle reading surfaces or waits.
+            "letpresentation_busy=self.work_resources.iter().any(|(id,resource)|{*id!=guard.resource().identity().context()&&resource.presentation_in_flight()});",
+            "ifpresentation_busy&&!resource.retire_reading_presentation(){task.refuse(SemanticRuntimePortFailure::NotReady);return;}",
             "Arc::ptr_eq(&resource.guard,&guard)", "Arc::ptr_eq(&resource.guard,guard)",
             "WorkObservationPresentation::human_current", "gate.observation_stamp(read.correlation.frame().context())",
             "Some(read.document)", "!self.erasure_tombstones.contains(&resource.profile())",
             "resource.observation=Some(WorkObservation", "wake:ObservationWake::schedule(&guard)",
             "guard.admits(&read.lease,now)", "presentation.present()", "Instant::now()>=read.deadline",
-            "letretired=read.retirement_ready()", "read.delivery_ready(retired,idle)",
+            // 27a3726e: only a clean successful read keeps its page presented.
+            "letpreserve=read.refusal.is_none()&&read.outcome.as_ref().is_some_and(|outcome|outcome.is_ok())&&resource.revocation.is_none()&&resource.destruction.is_none();",
+            "letretired=preserve||read.retirement_ready()", "read.delivery_ready(retired,idle)",
             "self.callback_returned", "self.wake.as_ref().is_none_or(ObservationWake::drained)",
             "self.correlation!=*correlation||!self.dispatched||self.callback_returned",
             "drop(debt);notify_work_resource(queued)",
@@ -112,16 +117,19 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-engine/src/platform/macos/work_observation_presentation.rs",
         &[
-            "letmain=page.window().ok_or(PresentationState::Unavailable)?", "foreground(&app,&main,&responder)",
-            "letresting_facts=[page.isHidden(),original_frame.size==viewport().size,Retained::as_ptr(&responder).addr()!=Retained::as_ptr(&page).addr(),]",
-            "if!resting_facts.into_iter().all(|fact|fact)", "NSWindowStyleMask::Borderless",
-            "surface.setIgnoresMouseEvents(true)", "surface.setOpaque(true)",
-            "surface.canBecomeKeyWindow()", "surface.canBecomeMainWindow()",
-            "self.state=PresentationState::Acquiring;parent.addSubview(&self.page)",
-            "self.page.setHidden(false);surface.orderFrontRegardless()", "Instant::now()>=self.deadline",
-            "self.page.setHidden(true)", "surface.orderOut(None)", "self.parent.addSubview(&self.page)",
-            "self.page.setFrame(self.original_frame)", "self.retired_surface=Some(Weak::from_retained(&surface))",
-            "surface.load().is_none()", "self.cleanup_failed|=", "human_owners(&self.app)!=before",
+            // cd6792df..53d344ba: the page is hosted beneath the human window's
+            // chrome instead of a borderless surface; the window refuses its focus.
+            "letmain=page.window().ok_or(PresentationState::Unavailable)?",
+            "letresting_facts=[page.isHidden(),original_frame.size==viewport().size,!responder_inside(&main,&page),]",
+            "if!resting_facts.into_iter().all(|fact|fact)",
+            "if!super::passive_page::register(&self.page)",
+            "self.state=PresentationState::Acquiring;",
+            "self.parent.addSubview_positioned_relativeTo(&self.page,NSWindowOrderingMode::Below,None);self.page.setFrame(viewport());self.page.setHidden(false);",
+            "Instant::now()>=self.deadline",
+            "self.page.setHidden(true);self.page.setFrame(self.original_frame);super::passive_page::unregister(&self.page);",
+            "letoriginal_parent=unsafe{self.page.superview()}.is_some_and(|parent|std::ptr::eq(&*parent,&*self.parent));",
+            "page.load().is_some_and(|page|hosted_current(&page,&main))",
+            "&&!responder_inside(main,page)", "self.cleanup_failed|=", "human_owners(&self.app)!=before",
         ],
         &["makeKeyAndOrderFront", "makeFirstResponder", "activateIgnoringOtherApps", "setActivationPolicy", "setInactiveSchedulingPolicy", "requestAnimationFrame", "evaluateJavaScript", "runUntilDate"],
     ),
@@ -167,10 +175,13 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "!resource.pending()&&resource.ready()",
             "NAVIGATION_BUDGET.min(Duration::from_millis(",
             "lease.deadline().millis().saturating_sub(now.millis())",
-            "resource.navigation=Some(WorkNavigation{task,timer,deadline,})",
-            "guard.navigation_current(&lease,operation,now,false)",
-            "ifgate.arm_successor(source,&native).is_err()",
-            "view.prepare_semantic_document_load().is_err()",
+            // 99bf594a: dispatch waits for the runtime to park, then arms the successor;
+            // each stage rechecks its own lease authority.
+            "resource.navigation=Some(WorkNavigation{task,timer,deadline,stage:WorkNavigationStage::Parking,})",
+            "WorkNavigationStage::Parking=>self.guard.navigation_dispatch_current(&lease,operation,now)",
+            "WorkNavigationStage::Navigating=>self.guard.navigation_completion_current(&lease,operation,now)",
+            "view.semantic_runtime_parked()",
+            "view.prepare_semantic_document_load().is_ok()&&view.work_navigation().is_some_and(|gate|gate.arm_successor(source,&native).is_ok())",
             ".load_url(native.target().as_url().as_str())",
             "gate.take_successor_terminal()",
             "pending.task.complete(outcome)",
@@ -181,7 +192,9 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-app/src/work_resources_product.rs",
         &[
-            "letspec=input.retained_resource_spec()?", "StagedActor::try_new(input,browser,runtime,provider,credential,audit,task)",
+            // b8bf7f37: the actor also carries the durable human wait; a continuation must have one.
+            "letspec=input.retained_resource_spec()?", "StagedActor::try_new(input,browser,runtime,provider,credential,audit,task,waiting,)",
+            "letwaiting=waiting.ok_or(AgentWorkFailure::Contract)?;StagedActor::try_new(input,browser,runtime,provider,credential,audit,task,Some(waiting),)",
             "spec.identity.profile()!=profile.profile()", "spec.storage!=profile.storage_class()",
             "!std::ptr::addr_eq(Arc::as_ptr(&journal),Arc::as_ptr(&audit))",
             "Arc::ptr_eq(engine,&prepared.engine)",
@@ -201,10 +214,15 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-app/src/shell/mod.rs",
         &[
-            "self.work.is_some()||self.retained_work.is_some()",
+            // b892f874/24832e90: a stuck retained Work moves to a draining graveyard,
+            // and shutdown begins on every retained owner instead of one.
+            "ifself.work.is_some()||self.retained_work.as_ref().is_some_and(|work|!work.is_closed())",
             "!work.admits(&self.engine,&self.store,self.work_profile_binding())",
             "self.retained_work=Some(Box::new(work));self.retained_work.as_mut().unwrap().initialize()",
-            "ifletSome(work)=&mutself.retained_work{returnwork.shutdown_until(deadline);}",
+            "ifletSome(mutstuck)=self.retained_work.take(){stuck.begin_shutdown();self.retained_graveyard.push(*stuck);}",
+            "forpagein&mutself.retained_pages{page.begin_shutdown();}",
+            "ifletSome(work)=&mutself.retained_work{work.begin_shutdown();}",
+            "forworkin&mutself.retained_graveyard{work.begin_shutdown();}",
         ], &[],
     ),
     (
@@ -400,7 +418,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-agent-controller/src/work.rs",
         &[
-            "ifretained.is_some()&&(extraction_schema.is_none()||(actions_before_extraction&&!retained.as_ref().is_some_and(|browser|browser.supports_actions()))||subtree_extraction||navigation_target.is_some()||navigation_route.is_some()||(navigation_discovery.is_some()&&!retained.as_ref().is_some_and(|browser|browser.supports_navigation())))",
+            // 08219870: a retained browser must also support screenshots to take one.
+            "ifretained.is_some()&&(extraction_schema.is_none()||(actions_before_extraction&&!retained.as_ref().is_some_and(|browser|browser.supports_actions()))||subtree_extraction||navigation_target.is_some()||navigation_route.is_some()||(navigation_discovery.is_some()&&!retained.as_ref().is_some_and(|browser|browser.supports_navigation()))||(viewport_screenshot&&!retained.as_ref().is_some_and(|browser|browser.supports_screenshots())))",
             "resources:retained.is_none().then(||WorkContextResources{",
             "ifstate.native.retained.is_some(){journal.emit(AgentWorkEventKind::ContextActive)?;self.start_session()?;self.browser_loop(worker,browser).await?;returnself.close_retained(worker,None).await;}",
             "state.transport.take().ok_or(AgentWorkFailure::Contract)?",
@@ -438,7 +457,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "provider:Some(terminal.provider)",
             "state.native.retained_delivery=Some(delivery)",
             "controller.drain_recovery(&mutworker,&WorkBrowser::Retained).await",
-            "controller.publish_terminal(&mutworker,false).await",
+            // 8755115b: the frozen terminal intent replaces the unsuccessful flag.
+            "controller.publish_terminal(&mutworker).await",
             "journal.audit.is_quiescent()",
             "Self::Retained=>ContextDispatch::Unsupported",
             "self.0.journal_admission(owner)",
@@ -465,8 +485,9 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "self.dispatch_attempt(flight.request,flight.phase,flight.reconciliations+1)",
             "self.owner.locally_retired()", "self.flight.is_none()", "self.unstarted.is_none()",
             "self.destruction_settled=true", "Err(Refusal::Busy)=>returnOk(false)",
-            "letlocal_ready=self.local_shutdown_settled()||(self.destroyed&&self.owner.locally_retired()&&self.unexpected_native.is_none()&&self.unstarted.is_none()&&self.final_scoped_recovery_is_classified());",
-            "ifdeadline.is_some_and(|deadline|Instant::now()>=deadline)||!local_ready{returnOk(false);}",
+            // 24832e90: readiness moved into native_audit_ready and grouped pages wait for their turn.
+            "fnnative_audit_ready(&self)->bool{self.local_shutdown_settled()||(self.destroyed&&self.owner.locally_retired()&&self.unexpected_native.is_none()&&self.unstarted.is_none()&&self.final_scoped_recovery_is_classified())}",
+            "ifself.grouped&&!self.group_shutdown{returnOk(false);}ifdeadline.is_some_and(|deadline|Instant::now()>=deadline)||!self.native_audit_ready(){returnOk(false);}",
             "RetainedNativeShutdown::new(&self.owner)?", "shutdown.settle(event)",
             "and_then(RetainedNativeShutdown::next_deadline)",
             "notifications.epoch.snapshot()", "self.poll_shutdown_before(now,Some(deadline))",
@@ -534,8 +555,9 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "Ok(Some(event.into_terminal()))",
             "ticket.register_waker(listener.into())", "Some(ticket)",
             "self.browser.shared.lock_rows()", "revoke_with_delivery(&self.browser.lease)",
-            "observe_initial(&self.browser.lease,now)", "request.observation().clone()",
-            ".observe_expansion(&self.browser.lease,previous,acknowledgement,target,kind,now,)",
+            // 7cf84437: reads carry the observation capability.
+            "observe_initial_with_capability(&self.browser.lease,capability,now)", "request.observation().clone()",
+            ".observe_expansion_with_capability(&self.browser.lease,previous,acknowledgement,target,kind,capability,now,)",
             "Some(LifecycleResult::Delivered(proof))",
         ],
         &["pubstruct", "pubfn", "pub(crate)", "AgentBrowserPort", "ContextRegistry", "AgentNativeShutdownProof", "AgentWorkJournal", "Serialize", "Deserialize", "std::thread", "tokio::spawn", "port.dispatch", "port.invoke_semantic", "port.seal_for_shutdown", "running.swap"],
@@ -554,10 +576,11 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-agentic/src/work_browser_observation.rs",
         &[
-            "#[derive(Debug)]pubstructWorkBrowserReadBinding{lease:WorkBrowserExecutionLease,frame:SemanticFrameJoin,document:Arc<ContextNavigationTarget>,requested_document:Arc<ContextNavigationTarget>,current_requested_document:Arc<ContextNavigationTarget>,document_policy:crate::WorkBrowserDocumentPolicy,storage:ContextProfileStorageClass,}",
+            // 1783cf12/98f3e6c9: two derived facts; the requested document is the admission one.
+            "#[derive(Debug)]pubstructWorkBrowserReadBinding{lease:WorkBrowserExecutionLease,frame:SemanticFrameJoin,document:Arc<ContextNavigationTarget>,requested_document:Arc<ContextNavigationTarget>,current_requested_document:Arc<ContextNavigationTarget>,document_policy:crate::WorkBrowserDocumentPolicy,storage:ContextProfileStorageClass,isolated_public:bool,at_admission_document:bool,}",
             "self.admits_lease(lease,now)?;letrow=self.row_mut(lease.resource())?;if!row.document_available||row.navigation.is_some()||row.action.is_some(){returnErr(WorkBrowserResourceError::Pending);}letdocument=row.effective_document.as_ref()",
             "ContextJoin::work_execution(ContextIdentity::new(row.join.identity.context,lease.run,row.join.identity.profile,ContextKind::Owned,)",
-            "Ok(WorkBrowserReadBinding{lease:lease.clone(),frame,document:Arc::clone(document),current_requested_document:row.current_requested_document.as_ref().or(row.document.as_ref()).cloned().ok_or(WorkBrowserResourceError::Phase)?,requested_document:row.document.clone().ok_or(WorkBrowserResourceError::Phase)?,document_policy:row.document_policy,storage:row.storage,})",
+            "Ok(WorkBrowserReadBinding{lease:lease.clone(),frame,document:Arc::clone(document),current_requested_document:row.current_requested_document.as_ref().or(row.document.as_ref()).cloned().ok_or(WorkBrowserResourceError::Phase)?,requested_document:row.admission_document.clone().ok_or(WorkBrowserResourceError::Phase)?,document_policy:row.document_policy,storage:row.storage,isolated_public:row.isolated_public,at_admission_document:row.navigation_epoch==row.admission_epoch,})",
             "letbinding=self.read_binding(lease,now)?;letrow=self.row_mut(lease.resource())?;ifrow.observation.is_some()",
             "letframe=binding.frame;letcontext=frame.context();",
             "SemanticObservationId::new(u64::from(sequence))",
@@ -743,7 +766,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "request.document_policy()!=self.document_policy",
             "construction_pending:true",
             "state.phase==Phase::Constructing&&state.construction_pending&&!state.uncertain",
-            "!state.construction_pending&&state.retirement_delivery.is_none()&&state.reads==0&&state.navigation.is_none()&&state.action.is_none()&&state.callbacks==0&&!state.notification_pending",
+            // a866eb38: human handoff delivery is a fourth owned callback debt.
+            "!state.construction_pending&&state.retirement_delivery.is_none()&&state.human_delivery.is_none()&&state.reads==0&&state.navigation.is_none()&&state.action.is_none()&&state.callbacks==0&&!state.notification_pending",
             "letremove=guard.construction_returned()",
             "self.admission.work_construction_returned(&guard)",
             "state.phase=Phase::Revoking",
@@ -752,7 +776,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "state.reads==0&&state.navigation.is_none()&&state.action.is_none()&&state.callbacks==0&&!state.notification_pending",
             "admission.reserve_audit().ok()",
             "state.notification_pending||state.phase==Phase::Destroyed",
-            "completion(matcheffective{Some(document)=>request.complete_document(document),None=>request.complete(outcome),})",
+            "completion(matcheffective{Some(document)ifoutcome==Outcome::HumanContinued=>{request.complete_human_document(document)}Some(document)=>request.complete_document(document),None=>request.complete(outcome),})",
             "self.guard.read_terminal_begin()",
             "self.guard.read_terminal_end()",
             "self.permit.release()",
@@ -769,9 +793,9 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "drop(state);letnotified=notification.is_none_or(|notification|notification.notify())",
             "if!notified{state.uncertain=true;",
             "ifexact&&permit_released&&state.retirement_delivery.as_ref()==Some(lease){",
-            "self.permit.release();ifletSome(lease)=&revocation{self.guard.finish_revocation_delivery(",
+            "self.permit.release();ifletSome(operation)=human{self.guard.finish_human_delivery(", "ifletSome(lease)=&revocation{self.guard.finish_revocation_delivery(",
             "self.permit.released&&self.permit.admission.counts().is_some()",
-            "(construction||revocation.is_some())&&self.guard.destruction_started()",
+            "(construction||revocation.is_some()||human.is_some())&&self.guard.destruction_started()",
             "Arc::ptr_eq(current,guard)",
             "ingress.rows.len()>=MAX_LIVE_CONTEXTS",
             ">=zephium_agentic::MAX_EXECUTING_CONTEXTS",
@@ -787,7 +811,9 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-engine/src/host/work_resource.rs",
         &[
-            "CONSTRUCTION_BUDGET:Duration=Duration::from_secs(30)",
+            // 88d35dc0: one slow-page retry, clamped to the original deadline (pinned in validate).
+            "letoriginal_deadline=guard.construction_deadline(Instant::now());",
+            "iforiginal_deadline.is_none_or(|deadline|deadline<=Instant::now()){task.complete(Outcome::Refused);return;}",
             "resource.record_construction_failure(\"construction_deadline\")",
             "resource.record_construction_failure(\"navigation_gate\")",
             "resource.record_construction_failure(\"native_health\")",
@@ -804,7 +830,10 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "operation==Operation::Destroy&&!self.work_resources.contains_key(&id)&&!guard.callbacks_drained()",
             "WorkNativeResource::unconstructed(guard.clone(),reservation)",
             "ifresource.prepare_destruction()",
-            "self.retire_construction();self.cancel_observation(SemanticRuntimePortFailure::Shutdown);self.cancel_action();ifletSome(navigation)=self.navigation.take(){navigation.refuse(ContextPortFailure::Shutdown);}ifletSome(task)=self.revocation.take(){task.complete(Outcome::Refused);}self.retire_page();self.destruction_drained()",
+            // 08219870/64d6c7b9: screenshots and native Back are owned debts too.
+            "self.retire_construction();self.cancel_observation(SemanticRuntimePortFailure::Shutdown);self.cancel_action();",
+            "screenshot.cancelled.store(true,Ordering::Release);",
+            "ifletSome(navigation)=self.navigation.take(){navigation.refuse(ContextPortFailure::Shutdown);}ifletSome(history)=self.history_back.take(){history.refuse(ContextPortFailure::Shutdown);}ifletSome(task)=self.revocation.take(){task.complete(Outcome::Refused);}self.retire_page();self.destruction_drained()",
             "self.retirement_clean&&self.view.is_none()&&self.guard.callbacks_drained()&&self.observation.is_none()",
             "!self.erasure_tombstones.contains(&resource.profile())",
             "native_resource.reclassify(NativeResourceClass::AgentContext)",
@@ -917,6 +946,35 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     ),
 ];
 
+// Admits the Shell's read-group handle (385c39c2): creation and the failed and
+// sealed flags cross the crate; its journal and runtime stay private.
+const GROUP_HANDLE: [&str; 5] = [
+    "pub(crate) struct RetainedWorkGroup {",
+    "pub(crate) fn try_new(work: WorkId, capacity: u8) -> Result<Self, RuntimeSpawnError> {",
+    "pub(crate) fn is_failed(&self) -> bool {",
+    "pub(crate) fn seal(&self) {",
+    "pub(crate) fn is_sealed(&self) -> bool {",
+];
+
+fn adapter_source(path: &str, source: String) -> Result<String, String> {
+    if path.ends_with("work_resources_application.rs") {
+        admit_group_handle(&source)
+    } else {
+        Ok(source)
+    }
+}
+
+fn admit_group_handle(source: &str) -> Result<String, String> {
+    let mut source = source.to_owned();
+    for item in GROUP_HANDLE {
+        if source.matches(item).count() != 1 {
+            return Err(format!("Work read-group handle drifted: {item}"));
+        }
+        source = source.replacen(item, &item["pub(crate) ".len()..], 1);
+    }
+    Ok(source)
+}
+
 fn validate_adapter(source: &str, required: &[&str], forbidden: &[&str]) -> Result<(), String> {
     let source = compact(production(source));
     for needle in required {
@@ -950,6 +1008,10 @@ fn validate(source: &str, port: &str) -> Result<(), String> {
     let source = compact(source);
     let port = compact(port);
     require(&source, "pubstructWorkBrowserResourceIdentity{work:WorkId,resource:WorkBrowserResourceId,profile:ProfileId,context:ContextId,}")?;
+    require(
+        &source,
+        "std::time::Duration::from_secs(matchself{Self::Initial=>30,Self::SlowPageRetry=>60,})",
+    )?;
     for needle in [
         "Arc::ptr_eq(&self.0,&other.0)",
         "self.sequence.checked_add(1)",
@@ -1116,6 +1178,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         for (path, required, forbidden) in ADAPTER_RULES {
             let original = std::fs::read_to_string(root.join(path)).unwrap();
+            let original = adapter_source(path, original).unwrap();
             let source = compact(production(&original));
             validate_adapter(&source, required, forbidden)
                 .unwrap_or_else(|e| panic!("{path}: {e}"));
