@@ -10,26 +10,30 @@
   $effect(() => {
     const next = new DownloadSession(profile);
     session = next;
-    // No startup history query and no idle poll: listen for native transfers.
+    // Read one bounded native snapshot, then listen without idle polling.
     void next.start(false);
     return () => next.stop();
   });
   let active = $derived(
-    session.entries.find((entry) => ["pending", "receiving", "finalizing"].includes(entry.state)),
+    session.entries.find((entry) =>
+      ["pending", "receiving", "cancelling", "finalizing"].includes(entry.state),
+    ),
   );
   let current = $derived(active ?? session.entries[0]);
   let label = $derived(
     current?.state === "pending"
       ? m.download_pending()
-      : current?.state === "finalizing"
-        ? m.download_finalizing()
-        : current?.state === "receiving"
-          ? m.download_receiving()
-          : current?.state === "completed"
-            ? m.download_completed()
-            : current?.state === "cancelled"
-              ? m.download_cancelled()
-              : m.download_failed(),
+      : current?.state === "cancelling"
+        ? m.download_cancelling()
+        : current?.state === "finalizing"
+          ? m.download_finalizing()
+          : current?.state === "receiving"
+            ? m.download_receiving()
+            : current?.state === "completed"
+              ? m.download_completed()
+              : current?.state === "cancelled"
+                ? m.download_cancelled()
+                : m.download_failed(),
   );
   let terminalKey = $derived(!active && current ? `${current.id}:${current.state}` : "");
   $effect(() => {

@@ -810,6 +810,14 @@ pub trait Store {
     ) -> bool {
         false
     }
+    /// Enumerates only registered durable profiles for startup download recovery.
+    /// False means the callback was not retained.
+    fn download_recovery_profiles(
+        &self,
+        _done: Box<dyn FnOnce(crate::downloads::DownloadStoreReply) + Send>,
+    ) -> bool {
+        false
+    }
     /// Bounded asynchronous download persistence on the existing Store actor.
     /// Private profiles must never call this port. False means no callback is retained.
     fn download_call(

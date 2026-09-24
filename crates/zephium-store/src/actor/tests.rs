@@ -8731,6 +8731,7 @@ fn downloads_are_profile_scoped_and_recover_interrupted_native_ownership() {
         created_at: 1,
         filename: "fixture.txt".into(),
         source: "https://example.com".into(),
+        source_is_context: false,
         state: DownloadState::Pending,
         received: 0,
         total: None,
@@ -8739,6 +8740,8 @@ fn downloads_are_profile_scoped_and_recover_interrupted_native_ownership() {
         staging: None,
         staging_identity: None,
         identity: None,
+        writer: None,
+        writer_released: false,
     };
     assert!(matches!(
         hub.download_call(profile, DownloadStoreCall::Save(Box::new(record.clone()))),

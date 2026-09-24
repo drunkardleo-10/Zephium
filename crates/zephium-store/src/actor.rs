@@ -755,6 +755,7 @@ enum Cmd {
         ExtensionNativeOwnershipMutationPermit,
         ExtensionNativeOwnershipJournalMutationDone,
     ),
+    DownloadRecoveryProfiles(Box<dyn FnOnce(DownloadStoreReply) + Send>),
     DownloadCall(
         ProfileId,
         DownloadStoreCall,
@@ -2960,6 +2961,12 @@ impl Store for SqliteStore {
         rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
     }
 
+    fn download_recovery_profiles(&self, done: Box<dyn FnOnce(DownloadStoreReply) + Send>) -> bool {
+        self.tx
+            .try_send(Cmd::DownloadRecoveryProfiles(done))
+            .is_ok()
+    }
+
     fn download_call(
         &self,
         profile: ProfileId,
@@ -3665,6 +3672,9 @@ fn actor(
                 };
                 drop(admission);
                 done(response);
+            }
+            Some(Cmd::DownloadRecoveryProfiles(done)) => {
+                done(hub.download_recovery_profiles());
             }
             Some(Cmd::DownloadCall(profile, call, done)) => {
                 done(hub.download_call(profile, call));

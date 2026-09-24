@@ -2,7 +2,7 @@ use super::*;
 
 impl Downloads {
     pub(in crate::host) fn is_retired(&self, profile: ProfileId) -> bool {
-        self.retired.borrow().contains(&profile)
+        self.drained_profiles.borrow().contains(&profile)
     }
 
     pub(in crate::host) fn quiesce(
@@ -39,8 +39,7 @@ impl Downloads {
             let request = self.calls.borrow_mut().remove(&token);
             let panel = self.directory_panels.borrow_mut().remove(&token);
             if let Some((panel, _lease)) = panel {
-                unsafe { panel.cancel(None) };
-                panel.orderOut(None);
+                platform::cancel_directory(&panel);
             }
             drop(request);
         }
@@ -53,7 +52,12 @@ impl Downloads {
         self.forgotten
             .borrow_mut()
             .retain(|(owner, _)| profile.is_some_and(|profile| *owner != profile));
-        self.recovered.borrow_mut().clear();
+
+        if let Some(profile) = profile {
+            self.begin_retirement_recovery(profile);
+        } else {
+            self.begin_shutdown_recovery();
+        }
         self.ensure_timer();
     }
 }

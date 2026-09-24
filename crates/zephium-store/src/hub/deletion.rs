@@ -368,6 +368,17 @@ impl Hub {
             .collect())
     }
 
+    /// Tombstoned profiles still own download staging until native erasure is
+    /// proven. Only the internal cleanup path can access their download records.
+    pub(super) fn download_cleanup_deletions(&self) -> rusqlite::Result<Vec<ProfileId>> {
+        Ok(self
+            .profile_deletion_journal_entries()?
+            .into_iter()
+            .filter(|entry| !entry.native_erasure_verified && entry.local_unlink_process.is_none())
+            .map(|entry| entry.profile)
+            .collect())
+    }
+
     /// Refreshes process-local registry truth from the durable transaction
     /// before interpreting the deletion journal. This is required after a
     /// commit error: SQLite/OS failures can leave the caller unable to infer
@@ -650,6 +661,7 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM user_resource_usage;
          DELETE FROM userscripts;
          DELETE FROM userscript_catalog;
+         DELETE FROM download_cleanup;
          DELETE FROM download_preferences;
          DELETE FROM downloads;
          DELETE FROM search_queries;
@@ -916,6 +928,7 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         let expected_tables = [
+            "download_cleanup",
             "download_preferences",
             "downloads",
             "extension_grant_api_permissions",
@@ -961,6 +974,7 @@ mod tests {
         );
 
         for table in [
+            "download_cleanup",
             "download_preferences",
             "downloads",
             "search_queries",

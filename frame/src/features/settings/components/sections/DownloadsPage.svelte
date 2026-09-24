@@ -40,13 +40,19 @@
   <SettingsRow
     settingId="downloads.ask"
     title={m.pref_downloads_ask()}
-    description={m.pref_downloads_ask_help()}
+    description={session.siteDownloadsRequireConfirmation
+      ? m.download_windows_confirmation_help()
+      : m.pref_downloads_ask_help()}
   >
     <Switch
       label={m.pref_downloads_ask()}
       labelHidden
-      checked={session.preferences?.ask_destination ?? true}
-      disabled={session.busy || !session.preferences || !session.supported}
+      checked={session.siteDownloadsRequireConfirmation ||
+        (session.preferences?.ask_destination ?? true)}
+      disabled={session.busy ||
+        !session.preferences ||
+        !session.supported ||
+        session.siteDownloadsRequireConfirmation}
       onchange={(enabled) => void session.perform({ kind: "set_ask_destination", enabled })}
     />
   </SettingsRow>

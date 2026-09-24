@@ -8,6 +8,7 @@ const entry: DownloadView = {
   created_at: "1",
   filename: "file",
   source: "https://example.com",
+  source_is_context: false,
   state: "receiving",
   received: "512",
   total: null,

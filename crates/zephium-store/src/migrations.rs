@@ -2062,6 +2062,16 @@ pub static PROFILE: &[Migration] = &[
         )
         },
     },
+    Migration {
+        version: 21,
+        up: |tx| {
+            tx.execute_batch(
+            "CREATE TABLE download_cleanup (id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=26), session TEXT NOT NULL CHECK(length(session)=26), terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=24576 AND json_valid(payload))) STRICT;
+             INSERT INTO download_cleanup(id,session,terminal,payload) SELECT id,session,terminal,payload FROM downloads WHERE json_type(payload,'$.staging')='text' AND json_type(payload,'$.staging_identity')='object';
+             CREATE TRIGGER download_cleanup_capacity BEFORE INSERT ON download_cleanup WHEN NOT EXISTS(SELECT 1 FROM download_cleanup WHERE id=NEW.id) AND (SELECT count(*) FROM download_cleanup)>=10000 BEGIN SELECT RAISE(ABORT,'download cleanup capacity'); END;"
+        )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -2118,6 +2128,7 @@ mod tests {
         (18, 0xa412_5523_e2ac_aef7),
         (19, 0x321a_2e79_d8d2_77da),
         (20, 0x4b37_b9cf_91e8_b507),
+        (21, 0x3483_1796_92c9_33a6),
     ];
 
     fn schema_fingerprint(migrations: &[Migration], version: i64) -> u64 {
@@ -2160,7 +2171,12 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         apply(&mut conn, &PROFILE[..15]).unwrap();
         let transaction = conn.transaction().unwrap();
-        (PROFILE.last().unwrap().up)(&transaction).unwrap();
+        (PROFILE
+            .iter()
+            .find(|migration| migration.version == 20)
+            .unwrap()
+            .up)(&transaction)
+        .unwrap();
         transaction.pragma_update(None, "user_version", 16).unwrap();
         transaction.commit().unwrap();
         // The old standalone QA assigned download tables to version 16.
@@ -2249,7 +2265,7 @@ mod tests {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            20
+            21
         );
     }
 
@@ -3399,7 +3415,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(20));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(21));
     }
 
     #[test]

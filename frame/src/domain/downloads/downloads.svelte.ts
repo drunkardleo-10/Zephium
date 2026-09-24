@@ -2,6 +2,7 @@ import { commands } from "$shared/ipc/bindings";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import type {
   DownloadCall,
+  DownloadCleanup,
   DownloadError,
   DownloadPreferences,
   DownloadView,
@@ -15,6 +16,8 @@ export class DownloadSession {
   preferences = $state.raw<DownloadPreferences | null>(null);
   error = $state<DownloadError | null>(null);
   supported = $state(true);
+  cleanup = $state.raw<DownloadCleanup>({ running: false, error: null });
+  siteDownloadsRequireConfirmation = $state(false);
   loading = $state(false);
   busy = $state(false);
   next = $state<string | null>(null);
@@ -25,6 +28,7 @@ export class DownloadSession {
   private updating = false;
   private updateAgain = false;
   private removedDuringLoad = new SvelteSet<string>();
+  private cleanupUpdatedDuringLoad = false;
   private updatedDuringLoad = new SvelteSet<string>();
 
   constructor(profile: string) {
@@ -35,17 +39,30 @@ export class DownloadSession {
     if (this.active) return;
     this.active = true;
     const generation = ++this.generation;
-    const stop = await events.downloadsChanged.listen(({ payload }) => {
-      if (!this.active || generation !== this.generation || payload.profile !== this.profile)
+    try {
+      const stop = await events.downloadsChanged.listen(({ payload }) => {
+        if (!this.active || generation !== this.generation || payload.profile !== this.profile)
+          return;
+        void this.refresh();
+      });
+      if (!this.active || generation !== this.generation) {
+        stop();
         return;
-      void this.refresh();
-    });
-    if (!this.active || generation !== this.generation) {
-      stop();
-      return;
+      }
+      this.stopListening = stop;
+      if (initial) await this.reload();
+      else await this.refresh(); // Bounded native snapshot; no history read or idle polling.
+    } catch {
+      if (generation === this.generation) {
+        this.active = false;
+        this.error = "unavailable";
+      }
     }
-    this.stopListening = stop;
-    if (initial) await this.reload();
+  }
+
+  async retry() {
+    if (!this.active) await this.start();
+    else await this.reload();
   }
 
   stop() {
@@ -54,6 +71,8 @@ export class DownloadSession {
     this.stopListening?.();
     this.stopListening = null;
     this.entries = [];
+    this.cleanup = { running: false, error: null };
+    this.cleanupUpdatedDuringLoad = false;
     this.removedDuringLoad.clear();
     this.updatedDuringLoad.clear();
     this.next = null;
@@ -75,6 +94,8 @@ export class DownloadSession {
       const response = await commands.downloadCall(this.profile, { kind: "updates" });
       if (generation !== this.generation) return;
       if (response.kind === "updates") {
+        this.cleanup = response.cleanup;
+        if (this.loading) this.cleanupUpdatedDuringLoad = true;
         const records = new SvelteMap(this.entries.map((entry) => [entry.id, entry]));
         for (const entry of response.entries) {
           if (this.loading) this.updatedDuringLoad.add(entry.id);
@@ -88,6 +109,8 @@ export class DownloadSession {
         this.entries = [...records.values()]
           .sort((a, b) => b.id.localeCompare(a.id))
           .slice(0, 2000);
+      } else if (response.kind === "error") {
+        this.error = response.error;
       }
     } catch {
       if (generation === this.generation) this.error = "unavailable";
@@ -119,6 +142,7 @@ export class DownloadSession {
       if (generation !== this.generation) return;
       if (response.kind === "page") {
         this.supported = response.supported;
+        if (!this.cleanupUpdatedDuringLoad) this.cleanup = response.cleanup;
         const entries = response.entries
           .filter((entry) => !this.removedDuringLoad.has(entry.id))
           .map((entry) => {
@@ -153,6 +177,7 @@ export class DownloadSession {
         this.loading = false;
         this.removedDuringLoad.clear();
         this.updatedDuringLoad.clear();
+        this.cleanupUpdatedDuringLoad = false;
         if (this.refreshAgain && this.active) {
           this.refreshAgain = false;
           void this.reload();
@@ -173,7 +198,10 @@ export class DownloadSession {
         if (response.error !== "cancelled") this.error = response.error;
       } else if (response.kind === "preferences") {
         this.preferences = response.preferences;
+        this.siteDownloadsRequireConfirmation = response.site_downloads_require_confirmation;
         this.supported = response.supported;
+      } else if (call.kind === "retry_cleanup") {
+        await this.refresh();
       } else if (call.kind === "forget" || call.kind === "cancel") {
         await this.reload();
       }

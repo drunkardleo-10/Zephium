@@ -16,6 +16,12 @@ impl Downloads {
             });
             return;
         }
+        self.ensure_recovery(partition);
+        if matches!(call, DownloadCall::RetryCleanup) {
+            self.schedule_recovery(partition.profile());
+            done.finish(DownloadResponse::Accepted);
+            return;
+        }
         if matches!(call, DownloadCall::Updates) {
             let mut records: Vec<_> = self
                 .recent
@@ -41,6 +47,7 @@ impl Downloads {
             done.finish(DownloadResponse::Updates {
                 entries: records,
                 removed,
+                cleanup: self.cleanup_status(partition.profile()),
             });
             return;
         }
@@ -172,7 +179,9 @@ impl Downloads {
                     self.ui_store(token, partition, DownloadStoreCall::Forget(id));
                 }
             }
-            DownloadCall::Cancel { .. } | DownloadCall::Updates => unreachable!(),
+            DownloadCall::Cancel { .. } | DownloadCall::Updates | DownloadCall::RetryCleanup => {
+                unreachable!()
+            }
         }
     }
 
@@ -208,7 +217,6 @@ impl Downloads {
         }
         match (call, reply) {
             (DownloadCall::List { before, limit }, DownloadStoreReply::Page(mut records)) => {
-                self.recover_page(partition, &records);
                 let full = records.len() == limit as usize;
                 for (owner, record) in self.recent.borrow().iter() {
                     if owner.profile() == partition.profile() {
@@ -242,6 +250,7 @@ impl Downloads {
                     entries: records.iter().map(DownloadRecord::view).collect(),
                     next,
                     supported: true,
+                    cleanup: self.cleanup_status(partition.profile()),
                 });
             }
             (DownloadCall::Preferences, DownloadStoreReply::Preferences(preferences)) => {
@@ -249,6 +258,7 @@ impl Downloads {
                     .borrow_mut()
                     .insert(partition.profile(), preferences.clone());
                 done.finish(DownloadResponse::Preferences {
+                    site_downloads_require_confirmation: false,
                     preferences,
                     supported: true,
                 });
@@ -325,32 +335,15 @@ impl Downloads {
             request.done.finish(DownloadResponse::Error { error });
             return;
         }
-        let Some(path) = path.to_str() else {
-            request.done.finish(DownloadResponse::Error {
-                error: DownloadError::Destination,
-            });
-            return;
+        let result = match request.call {
+            DownloadCall::Reveal { .. } => platform::reveal(&path),
+            DownloadCall::Open { .. } => platform::open(&path),
+            _ => Err(DownloadError::Invalid),
         };
-        let url = NSURL::fileURLWithPath(&NSString::from_str(path));
-        let workspace = NSWorkspace::sharedWorkspace();
-        match request.call {
-            DownloadCall::Reveal { .. } => {
-                workspace.activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
-                request.done.finish(DownloadResponse::Applied);
-            }
-            DownloadCall::Open { .. } => {
-                request.done.finish(if workspace.openURL(&url) {
-                    DownloadResponse::Applied
-                } else {
-                    DownloadResponse::Error {
-                        error: DownloadError::Unavailable,
-                    }
-                });
-            }
-            _ => request.done.finish(DownloadResponse::Error {
-                error: DownloadError::Invalid,
-            }),
-        }
+        request.done.finish(match result {
+            Ok(()) => DownloadResponse::Applied,
+            Err(error) => DownloadResponse::Error { error },
+        });
     }
 
     pub(super) fn finish_directory_selection(
@@ -390,6 +383,7 @@ impl Downloads {
                 .borrow_mut()
                 .insert(partition.profile(), preferences.clone());
             done.finish(DownloadResponse::Preferences {
+                site_downloads_require_confirmation: false,
                 preferences,
                 supported: true,
             });
@@ -416,140 +410,5 @@ impl Downloads {
                 identity,
             }),
         );
-    }
-
-    fn choose_directory(
-        self: &Rc<Self>,
-        token: u64,
-        partition: Partition,
-        preferences: DownloadPreferences,
-        done: DownloadCompletion,
-    ) {
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
-        let Some(window) = objc2_app_kit::NSApplication::sharedApplication(mtm).keyWindow() else {
-            return;
-        };
-        if window.attachedSheet().is_some() {
-            done.finish(DownloadResponse::Error {
-                error: DownloadError::Capacity,
-            });
-            return;
-        }
-        let Some(lease) = PanelLease::acquire() else {
-            done.finish(DownloadResponse::Error {
-                error: DownloadError::Capacity,
-            });
-            return;
-        };
-        let panel = NSOpenPanel::openPanel(mtm);
-        panel.setCanChooseDirectories(true);
-        panel.setCanChooseFiles(false);
-        panel.setAllowsMultipleSelection(false);
-        panel.setMessage(Some(&NSString::from_str(
-            "Choose where Zephium saves downloads",
-        )));
-        if self.stopping.get()
-            || self.retired.borrow().contains(&partition.profile())
-            || !window.isVisible()
-            || !window.isKeyWindow()
-            || window.attachedSheet().is_some()
-        {
-            done.finish(DownloadResponse::Error {
-                error: DownloadError::Unavailable,
-            });
-            return;
-        }
-        self.calls.borrow_mut().insert(
-            token,
-            UiCall {
-                partition,
-                call: DownloadCall::ChooseDirectory,
-                done,
-            },
-        );
-        self.directory_panels
-            .borrow_mut()
-            .insert(token, (panel.clone(), lease));
-        let selected = panel.clone();
-        let weak = Rc::downgrade(self);
-        let callback = RcBlock::new(move |result: NSModalResponse| {
-            let Some(manager) = weak.upgrade() else {
-                return;
-            };
-            let _panel_owner = manager.directory_panels.borrow_mut().remove(&token);
-            let request = manager.calls.borrow_mut().remove(&token);
-            let Some(request) = request else { return };
-            let path = (result == NSModalResponseOK)
-                .then(|| selected.URLs())
-                .and_then(|urls| urls.firstObject())
-                .and_then(|url| url.path())
-                .and_then(|path| bounded(&path, 4096));
-            selected.orderOut(None);
-            if let Some(path) = path {
-                manager.work.set(manager.work.get() + 1);
-                let sender = manager.sender.clone();
-                let preferences = preferences.clone();
-                if std::thread::Builder::new()
-                    .name("zephium-download-directory".into())
-                    .spawn(move || {
-                        let result =
-                            super::super::download_files::select_directory(PathBuf::from(path));
-                        let _ =
-                            sender.send(Message::DirectorySelected(request, preferences, result));
-                    })
-                    .is_err()
-                {
-                    manager.work.set(manager.work.get() - 1);
-                }
-            } else {
-                request.done.finish(DownloadResponse::Error {
-                    error: DownloadError::Cancelled,
-                });
-            }
-        });
-        panel.beginSheetModalForWindow_completionHandler(&window, &callback);
-    }
-}
-
-impl Downloads {
-    fn recover_page(&self, partition: Partition, records: &[DownloadRecord]) {
-        if matches!(partition, Partition::Ephemeral(_)) || self.recovering.get() {
-            return;
-        }
-        let records: Vec<_> = records
-            .iter()
-            .filter(|record| {
-                record.state.terminal()
-                    && record.staging.is_some()
-                    && record.staging_identity.is_some()
-                    && !self.recovered.borrow().contains(&record.id)
-            })
-            .cloned()
-            .collect();
-        if records.is_empty() {
-            return;
-        }
-        self.recovering.set(true);
-        self.work.set(self.work.get() + 1);
-        let sender = self.sender.clone();
-        if std::thread::Builder::new()
-            .name("zephium-download-recovery".into())
-            .spawn(move || {
-                let cleaned = records
-                    .into_iter()
-                    .filter_map(|record| {
-                        super::super::download_files::recover_staging(&record).ok()?;
-                        Some((record.id, record.staging_identity?))
-                    })
-                    .collect();
-                let _ = sender.send(Message::Recovered(partition.profile(), cleaned));
-            })
-            .is_err()
-        {
-            self.recovering.set(false);
-            self.work.set(self.work.get() - 1);
-        }
     }
 }

@@ -375,7 +375,12 @@ export type DocumentNode_Serialize = {
 	marks?: DocumentMark[],
 };
 
-export type DownloadCall = { kind: "updates" } | { kind: "list"; before: string | null; limit: number } | { kind: "cancel"; id: string } | { kind: "open"; id: string } | { kind: "reveal"; id: string } | { kind: "forget"; id: string } | { kind: "preferences" } | { kind: "choose_directory" } | { kind: "set_ask_destination"; enabled: boolean };
+export type DownloadCall = { kind: "updates" } | { kind: "retry_cleanup" } | { kind: "list"; before: string | null; limit: number } | { kind: "cancel"; id: string } | { kind: "open"; id: string } | { kind: "reveal"; id: string } | { kind: "forget"; id: string } | { kind: "preferences" } | { kind: "choose_directory" } | { kind: "set_ask_destination"; enabled: boolean };
+
+export type DownloadCleanup = {
+	running: boolean,
+	error: DownloadError | null,
+};
 
 export type DownloadError = "invalid" | "unavailable" | "unsupported" | "capacity" | "storage" | "destination" | "network" | "disk_full" | "protection" | "missing_file" | "changed_file" | "cancelled";
 
@@ -387,9 +392,9 @@ export type DownloadPreferences = {
 	directory_identity?: string | null,
 };
 
-export type DownloadResponse = { kind: "updates"; entries: DownloadView[]; removed: string[] } | { kind: "page"; entries: DownloadView[]; next: string | null; supported: boolean } | { kind: "preferences"; preferences: DownloadPreferences; supported: boolean } | { kind: "accepted" } | { kind: "applied" } | { kind: "error"; error: DownloadError };
+export type DownloadResponse = { kind: "updates"; entries: DownloadView[]; removed: string[]; cleanup: DownloadCleanup } | { kind: "page"; entries: DownloadView[]; next: string | null; supported: boolean; cleanup: DownloadCleanup } | { kind: "preferences"; preferences: DownloadPreferences; supported: boolean; site_downloads_require_confirmation: boolean } | { kind: "accepted" } | { kind: "applied" } | { kind: "error"; error: DownloadError };
 
-export type DownloadState = "pending" | "receiving" | "finalizing" | "completed" | "cancelled" | "interrupted" | "failed";
+export type DownloadState = "pending" | "receiving" | "cancelling" | "finalizing" | "completed" | "cancelled" | "interrupted" | "failed";
 
 export type DownloadView = {
 	id: string,
@@ -397,6 +402,8 @@ export type DownloadView = {
 	created_at: string,
 	filename: string,
 	source: string,
+	/**  For origin-less generated data, the displayed origin is page context. */
+	source_is_context?: boolean,
 	state: DownloadState,
 	received: string,
 	total: string | null,

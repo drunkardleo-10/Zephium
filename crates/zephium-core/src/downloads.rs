@@ -15,6 +15,7 @@ pub const MAX_DOWNLOAD_RECORD_BYTES: usize = 24 * 1024;
 pub enum DownloadState {
     Pending,
     Receiving,
+    Cancelling,
     Finalizing,
     Completed,
     Cancelled,
@@ -58,6 +59,9 @@ pub struct DownloadRecord {
     pub filename: String,
     /// An HTTP(S) origin, never a signed URL, credentials, query or blob token.
     pub source: String,
+    /// For origin-less generated data, the displayed origin is page context.
+    #[serde(default)]
+    pub source_is_context: bool,
     pub state: DownloadState,
     pub received: u64,
     pub total: Option<u64>,
@@ -66,6 +70,19 @@ pub struct DownloadRecord {
     pub staging: Option<PathBuf>,
     pub staging_identity: Option<FileIdentity>,
     pub identity: Option<FileIdentity>,
+    /// Native Windows writer incarnation, never exposed through UI IPC.
+    #[serde(default)]
+    pub writer: Option<DownloadWriter>,
+    /// A native completion/cancellation or process-exit proof ended writes.
+    #[serde(default)]
+    pub writer_released: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DownloadWriter {
+    pub process: u32,
+    pub created: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +90,9 @@ pub struct DownloadRecord {
 pub struct FileIdentity {
     pub volume: u64,
     pub file: u64,
+    /// Upper half of a Windows 128-bit file ID; zero for legacy/Unix identities.
+    #[serde(default)]
+    pub file_high: u64,
     pub bytes: u64,
     #[serde(default)]
     pub modified: Option<(i64, i64)>,
@@ -80,7 +100,10 @@ pub struct FileIdentity {
 
 impl DownloadRecord {
     pub fn validate(&self) -> bool {
-        self.revision > 0
+        self.writer
+            .as_ref()
+            .is_none_or(|writer| writer.process != 0 && writer.created != 0)
+            && self.revision > 0
             && self.created_at >= 0
             && !self.filename.is_empty()
             && self.filename.len() <= 240
@@ -95,6 +118,25 @@ impl DownloadRecord {
                 || (self.destination.is_some() && self.identity.is_some()))
     }
 
+    /// A native progress getter may pump a terminal callback. Recheck state
+    /// after that call so stale samples cannot invalidate a terminal Store ack.
+    pub fn update_progress(&mut self, received: u64, total: Option<u64>) -> bool {
+        if self.state != DownloadState::Receiving
+            || (self.received == received && total.is_none_or(|value| self.total == Some(value)))
+        {
+            return false;
+        }
+        let Some(next) = self.revision.checked_add(1) else {
+            return false;
+        };
+        self.revision = next;
+        self.received = received;
+        if total.is_some() {
+            self.total = total;
+        }
+        true
+    }
+
     pub fn view(&self) -> DownloadView {
         DownloadView {
             id: self.id.to_string(),
@@ -102,6 +144,7 @@ impl DownloadRecord {
             created_at: self.created_at.to_string(),
             filename: self.filename.clone(),
             source: self.source.clone(),
+            source_is_context: self.source_is_context,
             state: self.state,
             received: self.received.to_string(),
             total: self.total.map(|value| value.to_string()),
@@ -117,6 +160,9 @@ pub struct DownloadView {
     pub created_at: String,
     pub filename: String,
     pub source: String,
+    /// For origin-less generated data, the displayed origin is page context.
+    #[serde(default)]
+    pub source_is_context: bool,
     pub state: DownloadState,
     pub received: String,
     pub total: Option<String>,
@@ -145,7 +191,7 @@ impl Default for DownloadPreferences {
 impl DownloadPreferences {
     pub fn validate(&self) -> bool {
         self.directory_identity.as_ref().is_none_or(|value| {
-            value.len() == 33
+            matches!(value.len(), 33 | 49)
                 && value.as_bytes()[16] == b':'
                 && value
                     .bytes()
@@ -163,6 +209,7 @@ impl DownloadPreferences {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DownloadCall {
     Updates,
+    RetryCleanup,
     List { before: Option<String>, limit: u32 },
     Cancel { id: String },
     Open { id: String },
@@ -197,21 +244,30 @@ pub enum DownloadResponse {
     Updates {
         entries: Vec<DownloadView>,
         removed: Vec<String>,
+        cleanup: DownloadCleanup,
     },
     Page {
         entries: Vec<DownloadView>,
         next: Option<String>,
         supported: bool,
+        cleanup: DownloadCleanup,
     },
     Preferences {
         preferences: DownloadPreferences,
         supported: bool,
+        site_downloads_require_confirmation: bool,
     },
     Accepted,
     Applied,
     Error {
         error: DownloadError,
     },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct DownloadCleanup {
+    pub running: bool,
+    pub error: Option<DownloadError>,
 }
 
 /// Reply fallback makes queue rejection/teardown observable rather than hanging
@@ -267,6 +323,13 @@ pub enum DownloadStoreCall {
         session: DownloadId,
         active: Vec<DownloadId>,
     },
+    /// Cleanup ownership is independent of visible history retention.
+    RecoveryPage {
+        after: Option<DownloadId>,
+        limit: u32,
+        session: DownloadId,
+        active: Vec<DownloadId>,
+    },
     Get(DownloadId),
     Forget(DownloadId),
     ClearStaging {
@@ -285,6 +348,7 @@ pub enum DownloadPreferenceChange {
 #[derive(Clone, Debug)]
 pub enum DownloadStoreReply {
     Saved,
+    Profiles(Vec<crate::ids::ProfileId>),
     Page(Vec<DownloadRecord>),
     Record(Option<Box<DownloadRecord>>),
     Preferences(DownloadPreferences),
@@ -301,6 +365,33 @@ pub fn valid_filename(value: &str) -> bool {
     !value.is_empty() && value.len() <= 240 && sanitize_filename(value, 240) == value
 }
 
+/// Keep collision suffixes inside the portable filename budget, preserving a
+/// normal extension and complete UTF-8 characters even for user-entered names.
+pub fn collision_filename(name: &str, index: usize) -> String {
+    if index == 0 {
+        return name.to_owned();
+    }
+    let path = std::path::Path::new(name);
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| value.len() <= 32)
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    let stem = if extension.is_empty() {
+        name
+    } else {
+        &name[..name.len() - extension.len()]
+    };
+    let suffix = format!(" ({index}){extension}");
+    let budget = 240 - suffix.len();
+    let mut end = stem.len().min(budget);
+    while !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{suffix}", &stem[..end])
+}
+
 fn sanitize_filename(suggested: &str, limit: usize) -> String {
     let leaf = suggested.rsplit(['/', '\\']).next().unwrap_or_default();
     let mut name = String::new();
@@ -309,7 +400,7 @@ fn sanitize_filename(suggested: &str, limit: usize) -> String {
             break;
         }
         if ch.is_control()
-            || matches!(ch, ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            || matches!(ch, ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
         {
             name.push('_');
         } else {
@@ -324,11 +415,18 @@ fn sanitize_filename(suggested: &str, limit: usize) -> String {
         .split('.')
         .next()
         .unwrap_or_default()
+        .trim_end_matches([' ', '.'])
         .to_ascii_uppercase();
+    let device_number = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"));
     let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
-        || (stem.len() == 4
-            && (stem.starts_with("COM") || stem.starts_with("LPT"))
-            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+        || device_number.is_some_and(|number| {
+            matches!(
+                number,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        });
     if reserved {
         format!("_{name}")
     } else {
@@ -348,12 +446,68 @@ mod tests {
             (" .. ", "download"),
             ("report\u{202e}exe.txt", "report_exe.txt"),
             ("LPT9.", "_LPT9"),
+            ("COM¹.txt", "_COM¹.txt"),
+            ("CON .txt", "_CON .txt"),
         ] {
             assert_eq!(safe_filename(input), expected);
         }
         let bounded = safe_filename(&"é".repeat(1000));
         assert!(bounded.len() <= 220);
         assert_eq!(safe_filename(&bounded), bounded);
+    }
+    #[test]
+    fn collision_suffixes_fit_portable_names_without_splitting_unicode() {
+        for name in [
+            format!("{}.txt", "a".repeat(236)),
+            format!("{}.txt", "é".repeat(118)),
+            "a".repeat(240),
+        ] {
+            for index in [1, 9999] {
+                let value = collision_filename(&name, index);
+                assert!(valid_filename(&value), "{value}");
+                assert!(value.contains(&format!(" ({index})")));
+                if name.ends_with(".txt") {
+                    assert!(value.ends_with(".txt"));
+                }
+            }
+        }
+    }
+    #[test]
+    fn terminal_progress_samples_cannot_invalidate_persistence_acknowledgements() {
+        let mut record = DownloadRecord {
+            id: DownloadId::generate(),
+            session: DownloadId::generate(),
+            revision: 1,
+            created_at: 1,
+            filename: "report.txt".into(),
+            source: "https://example.com".into(),
+            source_is_context: false,
+            state: DownloadState::Receiving,
+            received: 0,
+            total: None,
+            error: None,
+            destination: None,
+            staging: None,
+            staging_identity: None,
+            identity: None,
+            writer: None,
+            writer_released: false,
+        };
+        assert!(record.update_progress(5, Some(10)));
+        assert!(!record.update_progress(5, None));
+        for state in [
+            DownloadState::Cancelling,
+            DownloadState::Finalizing,
+            DownloadState::Completed,
+            DownloadState::Cancelled,
+            DownloadState::Failed,
+        ] {
+            record.state = state;
+            let revision = record.revision;
+            assert!(!record.update_progress(10, Some(10)));
+            assert_eq!(record.revision, revision);
+            assert_eq!(record.received, 5);
+        }
     }
     #[test]
     fn ipc_rejects_noncanonical_ids_and_unbounded_pages() {

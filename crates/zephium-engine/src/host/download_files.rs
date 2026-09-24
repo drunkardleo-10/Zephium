@@ -8,7 +8,9 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-use zephium_core::downloads::{safe_filename, DownloadError, FileIdentity};
+use zephium_core::downloads::{
+    collision_filename as collision_name, valid_filename, DownloadError, FileIdentity,
+};
 use zephium_core::ids::DownloadId;
 
 pub(super) struct Destination {
@@ -34,7 +36,7 @@ impl Destination {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or(DownloadError::Destination)?;
-        if filename != safe_filename(filename) {
+        if !valid_filename(filename) {
             return Err(DownloadError::Destination);
         }
         let parent_path = fs::canonicalize(requested.parent().ok_or(DownloadError::Destination)?)
@@ -219,7 +221,8 @@ pub(super) fn verify_file(path: &Path, expected: &FileIdentity) -> Result<(), Do
         })?;
     let metadata = file.metadata().map_err(map_io)?;
     let actual = identity(&metadata);
-    if !metadata.is_file()
+    if expected.file_high != 0
+        || !metadata.is_file()
         || actual.volume != expected.volume
         || actual.file != expected.file
         || actual.bytes != expected.bytes
@@ -241,7 +244,8 @@ pub(super) fn recover_staging(
     let (Some(path), Some(expected)) = (&record.staging, &record.staging_identity) else {
         return Ok(());
     };
-    if !record.state.terminal()
+    if record.writer.is_some()
+        || !record.state.terminal()
         || path.file_name().and_then(|name| name.to_str())
             != Some(format!(".zephium-download-{}", record.id).as_str())
     {
@@ -257,7 +261,8 @@ pub(super) fn recover_staging(
         Err(_) => return Err(DownloadError::ChangedFile),
     };
     let metadata = directory.metadata().map_err(map_io)?;
-    if metadata.dev() != expected.volume
+    if expected.file_high != 0
+        || metadata.dev() != expected.volume
         || metadata.ino() != expected.file
         || metadata.mode() & 0o077 != 0
     {
@@ -288,6 +293,7 @@ pub(super) fn recover_staging(
 
 fn identity(metadata: &fs::Metadata) -> FileIdentity {
     FileIdentity {
+        file_high: 0,
         volume: metadata.dev(),
         file: metadata.ino(),
         bytes: metadata.len(),
@@ -300,20 +306,6 @@ fn map_io(error: std::io::Error) -> DownloadError {
         DownloadError::DiskFull
     } else {
         DownloadError::Destination
-    }
-}
-
-fn collision_name(name: &str, index: usize) -> String {
-    if index == 0 {
-        return name.to_owned();
-    }
-    let path = Path::new(name);
-    match (
-        path.file_stem().and_then(|s| s.to_str()),
-        path.extension().and_then(|s| s.to_str()),
-    ) {
-        (Some(stem), Some(ext)) => format!("{stem} ({index}).{ext}"),
-        _ => format!("{name} ({index})"),
     }
 }
 
@@ -427,6 +419,7 @@ mod tests {
             created_at: 1,
             filename: "file.txt".into(),
             source: "https://example.com".into(),
+            source_is_context: false,
             state: DownloadState::Interrupted,
             received: 0,
             total: None,
@@ -435,6 +428,8 @@ mod tests {
             staging: Some(path.clone()),
             staging_identity: Some(staging_identity),
             identity: None,
+            writer: None,
+            writer_released: false,
         };
         recover_staging(&record).unwrap();
         assert!(!path.exists());

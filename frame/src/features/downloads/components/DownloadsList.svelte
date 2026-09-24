@@ -15,6 +15,7 @@
   const labels: Record<DownloadState, () => string> = {
     pending: m.download_pending,
     receiving: m.download_receiving,
+    cancelling: m.download_cancelling,
     finalizing: m.download_finalizing,
     completed: m.download_completed,
     cancelled: m.download_cancelled,
@@ -43,7 +44,18 @@
   aria-busy={session.loading}
 >
   {#if session.error}<p role="alert">{errors[session.error]()}</p>
-    <Button size="compact" onclick={() => void session.reload()}>{m.surface_retry()}</Button>{/if}
+    <Button size="compact" onclick={() => void session.retry()}>{m.surface_retry()}</Button>{/if}
+  {#if session.cleanup.error}
+    <p role="alert">{m.download_cleanup_error()}</p>
+    <Button
+      size="compact"
+      disabled={session.busy || session.cleanup.running}
+      onclick={() => void session.perform({ kind: "retry_cleanup" })}
+    >
+      {session.cleanup.running ? m.download_cleanup_running() : m.download_cleanup_retry()}
+    </Button>
+  {/if}
+  {#if !session.supported}<p role="status">{m.download_error_unsupported()}</p>{/if}
   {#if !session.entries.length && !session.error}<p class="empty" role="status">
       {session.loading ? m.download_loading() : m.download_empty()}
     </p>{/if}
@@ -51,7 +63,11 @@
     {#each session.entries as entry (entry.id)}
       <li>
         <div class="file-copy">
-          <strong title={entry.filename}>{entry.filename}</strong><span>{entry.source}</span>
+          <strong title={entry.filename}>{entry.filename}</strong><span
+            >{entry.source_is_context
+              ? m.download_source_context({ origin: entry.source })
+              : entry.source}</span
+          >
         </div>
         <div class="transfer-status">
           <span>{labels[entry.state]()}</span><span

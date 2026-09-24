@@ -33,6 +33,7 @@ test("native completion replaces cancellation with ID-scoped open and reveal act
     created_at: "1",
     filename: "fixture.txt",
     source: "https://example.com",
+    source_is_context: false,
     state: "receiving",
     received: "10",
     total: "100",
@@ -40,8 +41,20 @@ test("native completion replaces cancellation with ID-scoped open and reveal act
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) => {
     if (call.kind === "list")
-      return { kind: "page", entries: [entry], next: null, supported: true };
-    if (call.kind === "updates") return { kind: "updates", entries: [entry], removed: [] };
+      return {
+        kind: "page",
+        cleanup: { running: false, error: null },
+        entries: [entry],
+        next: null,
+        supported: true,
+      };
+    if (call.kind === "updates")
+      return {
+        kind: "updates",
+        cleanup: { running: false, error: null },
+        entries: [entry],
+        removed: [],
+      };
     return { kind: "applied" };
   });
   const screen = await render(DownloadsList, { profile });
@@ -49,7 +62,16 @@ test("native completion replaces cancellation with ID-scoped open and reveal act
   await expect
     .element(page.getByRole("button", { name: "Open", exact: true }))
     .not.toBeInTheDocument();
-  entry = { ...entry, revision: "00000002", state: "completed", received: "100" };
+  entry = { ...entry, revision: "00000002", state: "cancelling" };
+  native.listener?.({ payload: { profile } });
+  await expect.element(page.getByText("Cancelling…", { exact: true })).toBeVisible();
+  await expect
+    .element(page.getByRole("button", { name: "Cancel", exact: true }))
+    .not.toBeInTheDocument();
+  await expect
+    .element(page.getByRole("button", { name: "Remove from list", exact: true }))
+    .not.toBeInTheDocument();
+  entry = { ...entry, revision: "00000003", state: "completed", received: "100" };
   native.listener?.({ payload: { profile } });
   await expect.element(page.getByRole("button", { name: "Open", exact: true })).toBeVisible();
   await expect

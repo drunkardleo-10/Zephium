@@ -1020,5 +1020,11 @@
   "download_error_changed": "The downloaded file has changed since it was saved.",
   "download_default_directory": "System Downloads folder",
   "download_settings_loading": "Loading download preferences…",
-  "download_show_status": "Show downloads"
+  "download_show_status": "Show downloads",
+  "download_cancelling": "Cancelling\u2026",
+  "download_cleanup_error": "Some temporary download files could not be removed. Your saved files are unaffected.",
+  "download_cleanup_running": "Cleaning up\u2026",
+  "download_cleanup_retry": "Retry cleanup",
+  "download_windows_confirmation_help": "Windows currently requires a save confirmation for every download. Your chosen folder is used as the starting location.",
+  "download_source_context": "Generated in page at {origin}"
 }
