@@ -151,13 +151,29 @@ fn measure(output: &str, wall_ms: u128) -> (Row, Option<FailureReason>, bool) {
 }
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
+    run_queue(
+        (0..RUNS)
+            .flat_map(|repetition| SCENARIOS.iter().map(move |scenario| (repetition, *scenario)))
+            .collect(),
+    )
+}
+
+/// One run of one named scenario, with the suite's own row.
+pub(super) fn run_one(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
+    let scenario = SCENARIOS
+        .iter()
+        .find(|(scenario, _)| name == *scenario)
+        .ok_or(super::ProbeFailure::Authority)?;
+    run_queue([(0, *scenario)].into())
+}
+
+fn run_queue(
+    mut queue: std::collections::VecDeque<(usize, (&'static str, &'static str))>,
+) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
     let executable = std::env::current_exe().map_err(|_| Error::Authority)?;
     let root = std::path::Path::new("target/work-runtime-proof/acceptance");
     std::fs::create_dir_all(root).map_err(|_| Error::Output)?;
-    let mut queue: std::collections::VecDeque<_> = (0..RUNS)
-        .flat_map(|repetition| SCENARIOS.iter().map(move |scenario| (repetition, *scenario)))
-        .collect();
     let mut running = Vec::new();
     let mut passes = 0;
     let mut runs = 0;

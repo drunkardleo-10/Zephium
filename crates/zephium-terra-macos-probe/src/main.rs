@@ -123,6 +123,10 @@ fn main() {
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-acceptance" => acceptance::run(),
         #[cfg(feature = "durable-runtime")]
+        [argument, scenario] if argument == "--live-acceptance-only" => {
+            acceptance::run_one(scenario)
+        }
+        #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-work" => work_durable::run_agent(),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-read-work" => work_durable::run_agent_read(),
