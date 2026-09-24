@@ -42,6 +42,22 @@ impl AgentWorkController {
         loop {
             state.check_task_contract()?;
             state.native.check_control(worker, browser)?;
+            let top = observation.frames().first();
+            state.journal_mut()?.emit(AgentWorkEventKind::ObservationFacts {
+                nodes: observation.node_count(),
+                text_bytes: observation.total_text_bytes(),
+                dialogs: top.map_or(0, |frame| {
+                    let dialogs = frame
+                        .nodes()
+                        .iter()
+                        .filter(|node| node.role() == SemanticRole::Dialog)
+                        .count();
+                    u8::try_from(dialogs).unwrap_or(u8::MAX)
+                }),
+                complete: top.is_some_and(|frame| {
+                    frame.completeness() == SemanticCompleteness::Complete
+                }),
+            })?;
             let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
             if session.decisions.is_none() || progress == AgentWorkTaskProgress::Complete {
                 break;

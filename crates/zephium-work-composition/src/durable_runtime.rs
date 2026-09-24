@@ -559,6 +559,7 @@ impl MacosWorkComposition {
                         | AgentWorkEventKind::DecisionSettled(_)
                         | AgentWorkEventKind::DecisionFallback { .. }
                         | AgentWorkEventKind::RowRead { .. }
+                        | AgentWorkEventKind::ObservationFacts { .. }
                 ) {
                     if let Some(diagnostic) = diagnostics.model_diagnostic {
                         diagnostic(event.kind());

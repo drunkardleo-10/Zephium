@@ -4522,6 +4522,17 @@ pub enum AgentWorkEventKind {
         /// Why no record could be copied.
         refused: Option<SemanticExtractionError>,
     },
+    /// Closed size facts of one observation a typed read decides on.
+    ObservationFacts {
+        /// Nodes across every captured frame.
+        nodes: u16,
+        /// Text bytes across every captured frame.
+        text_bytes: u32,
+        /// Nodes with the dialog role in the top frame.
+        dialogs: u8,
+        /// Whether the top frame was captured completely.
+        complete: bool,
+    },
     /// The model proposed a bounded typed tool.
     ToolProposed(AgentBrowserToolKind),
     /// Snapshot scope was incompatible with the delivered baseline. No native
