@@ -857,7 +857,15 @@ impl DecisionReadSelection {
                 SemanticExtractionValueKind::Url => json!({"k":"url","sources":sources}),
                 SemanticExtractionValueKind::ImageUrl => json!({"k":"image_url","sources":sources}),
                 _ => {
-                    json!({"k":"text","sources":sources,"value":field.verbatim_value(fragment.verbatim_text().ok_or(SemanticExtractionError::VerbatimMismatch)?)})
+                    let text = field.verbatim_value(
+                        fragment
+                            .verbatim_text()
+                            .ok_or(SemanticExtractionError::VerbatimMismatch)?,
+                    );
+                    if !fits(field, text)? {
+                        continue;
+                    }
+                    json!({"k":"text","sources":sources,"value":text})
                 }
             };
             copied.insert(field.name().to_owned(), value);
@@ -983,9 +991,17 @@ impl DecisionReadSelection {
             let value = match field.kind() {
                 SemanticExtractionValueKind::Url => json!({"k":"url","sources":[token]}),
                 SemanticExtractionValueKind::ImageUrl => json!({"k":"image_url","sources":[token]}),
-                _ => json!({"k":"text","sources":[token],"value":field.verbatim_value(fragment
-                    .verbatim_text()
-                    .ok_or(SemanticExtractionError::VerbatimMismatch)?)}),
+                _ => {
+                    let text = field.verbatim_value(
+                        fragment
+                            .verbatim_text()
+                            .ok_or(SemanticExtractionError::VerbatimMismatch)?,
+                    );
+                    if !fits(field, text)? {
+                        continue;
+                    }
+                    json!({"k":"text","sources":[token],"value":text})
+                }
             };
             copied.insert(field.name().to_owned(), value);
         }
@@ -1169,6 +1185,20 @@ fn number_only(text: &str) -> bool {
                     .chars()
                     .all(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | '#'))
         })
+}
+
+/// Whether a verbatim copy fits its column. A longer located node, such as
+/// a whole description block, leaves an optional column unknown; a required
+/// one refuses the located read so the page planner reads the page instead.
+fn fits(
+    field: &SemanticExtractionFieldSchema,
+    text: &str,
+) -> Result<bool, SemanticExtractionError> {
+    let fits = field.max_text_bytes().is_none_or(|max| text.len() <= max);
+    if !fits && field.required() {
+        return Err(SemanticExtractionError::TextLimit);
+    }
+    Ok(fits)
 }
 
 fn copy_only(field: &SemanticExtractionFieldSchema) -> bool {

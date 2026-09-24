@@ -367,6 +367,20 @@ fn located_fixture_with(
     SemanticExtractionSchema,
     DecisionObservation,
 ) {
+    located_fixture_priced(generated, extra, true, 512)
+}
+
+fn located_fixture_priced(
+    generated: bool,
+    extra: &[Value],
+    price_required: bool,
+    price_bytes: usize,
+) -> (
+    AgentModelCallRequest,
+    SemanticObservation,
+    SemanticExtractionSchema,
+    DecisionObservation,
+) {
     let (_, call, previous, _) = admitted_fixture();
     let mut nodes = json!([
         {"k":1,"r":"document","fc":true},
@@ -407,7 +421,7 @@ fn located_fixture_with(
             .unwrap()
             .with_verbatim_text()
             .unwrap(),
-        SemanticExtractionFieldSchema::try_text("price".into(), true, 512)
+        SemanticExtractionFieldSchema::try_text("price".into(), price_required, price_bytes)
             .unwrap()
             .with_verbatim_text()
             .unwrap(),
@@ -571,6 +585,41 @@ fn located_read_copies_exact_sources_and_discards_unused_speculative_fallback() 
         .read_omissions()
         .contains(SemanticReadOmission::ReferenceSelection));
     assert_eq!(result.stats().values(), 3);
+}
+
+#[test]
+fn a_located_copy_longer_than_its_column_is_unknown_when_optional_and_refused_when_required() {
+    for required in [false, true] {
+        let (call, observation, schema, projection) = located_fixture_priced(false, &[], required, 4);
+        let response = projection
+            .request()
+            .decode_emulation(
+                &serde_json::to_vec(&located_answers(&projection)).unwrap(),
+                DecisionUsage::default(),
+            )
+            .unwrap();
+        let mut answers = projection.route(Ok(response)).unwrap().finish(None);
+        let selection = answers
+            .take_read_selection(&observation, call.account(), &schema)
+            .unwrap()
+            .unwrap();
+        let prepared = selection.prepare(
+            &observation,
+            call.account(),
+            SemanticCaptureInstant::from_millis(101),
+            None,
+        );
+        if required {
+            assert!(matches!(prepared, Err(SemanticExtractionError::TextLimit)));
+            continue;
+        }
+        let result = prepared.unwrap().finish(None).unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!()
+        };
+        let names: Vec<_> = rows.items()[0].fields().iter().map(|field| field.name()).collect();
+        assert_eq!(names, ["name", "picture"]);
+    }
 }
 
 #[test]

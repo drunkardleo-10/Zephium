@@ -526,7 +526,14 @@ fn copy(
     Some(match field.kind() {
         SemanticExtractionValueKind::Url => json!({"k":"url","sources":[token]}),
         SemanticExtractionValueKind::ImageUrl => json!({"k":"image_url","sources":[token]}),
-        _ => json!({"k":"text","sources":[token],"value":field.verbatim_value(fragment.verbatim_text()?)}),
+        _ => {
+            let text = field.verbatim_value(fragment.verbatim_text()?);
+            // Too long for its column: unknown, or the record is dropped when required.
+            if field.max_text_bytes().is_some_and(|max| text.len() > max) {
+                return None;
+            }
+            json!({"k":"text","sources":[token],"value":text})
+        }
     })
 }
 
