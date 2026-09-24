@@ -1544,7 +1544,7 @@ impl WebviewEngine {
         store: Arc<dyn zephium_core::ports::store::Store + Send + Sync>,
         notify: impl Fn(ProfileId) + Send + Sync + 'static,
     ) -> bool {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             self.run(move || {
                 host::try_with(move |host| {
@@ -1555,7 +1555,7 @@ impl WebviewEngine {
                 });
             })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (store, notify);
             true
@@ -1651,7 +1651,7 @@ impl Engine for WebviewEngine {
         call: zephium_core::downloads::DownloadCall,
         done: zephium_core::downloads::DownloadCompletion,
     ) -> bool {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             self.run(move || {
                 host::try_with(move |host| {
@@ -1665,7 +1665,7 @@ impl Engine for WebviewEngine {
                 });
             })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (partition, call);
             done.finish(zephium_core::downloads::DownloadResponse::Error {

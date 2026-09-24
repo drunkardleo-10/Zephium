@@ -294,6 +294,26 @@ fn dispatch_registry_has_capacity(current: usize) -> bool {
   current < PENDING_DISPATCH_LIMIT
 }
 
+// A native stopped/cancelled navigation is not a controller-construction
+// failure. Keep its uncommitted view reusable (including download handoff);
+// no document is committed or granted presentation by this classification.
+fn navigation_completion_phase(
+  succeeded: bool,
+  status: COREWEBVIEW2_WEB_ERROR_STATUS,
+) -> NavigationEventPhase {
+  if succeeded {
+    NavigationEventPhase::Finished
+  } else if matches!(
+    status,
+    COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED
+      | COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED
+  ) {
+    NavigationEventPhase::Cancelled
+  } else {
+    NavigationEventPhase::Failed
+  }
+}
+
 #[derive(Default)]
 struct InFlightNavigationUrls {
   urls: HashMap<u64, String>,
@@ -1393,7 +1413,17 @@ impl InnerWebView {
     unsafe { Self::set_webview_settings(&webview, &attributes, &pl_attrs)? };
 
     // Webview handlers
-    unsafe { Self::attach_handlers(hwnd, controller, &webview, &mut attributes, &mut token, env)? };
+    unsafe {
+      Self::attach_handlers(
+        hwnd,
+        controller,
+        &webview,
+        &mut attributes,
+        &mut token,
+        env,
+        &pl_attrs,
+      )?
+    };
 
     // IPC handler
     if attributes.ipc_handler.is_some() {
@@ -1622,6 +1652,7 @@ impl InnerWebView {
     attributes: &mut WebViewAttributes,
     token: &mut EventRegistrationToken,
     env: &ICoreWebView2Environment,
+    pl_attrs: &super::PlatformSpecificWebViewAttributes,
   ) -> Result<()> {
     // Page `window.close()` is only a request. The secure default deliberately
     // keeps the child HWND alive so an embedder cannot retain a logical view
@@ -1716,6 +1747,10 @@ impl InnerWebView {
           let mut succeeded = BOOL::default();
           args.NavigationId(&mut navigation_id)?;
           args.IsSuccess(&mut succeeded)?;
+          let mut status = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+          if !succeeded.as_bool() {
+            args.WebErrorStatus(&mut status)?;
+          }
           let url = completed_urls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1723,11 +1758,7 @@ impl InnerWebView {
           if let Some(url) = url {
             completed_handler(NavigationEvent {
               id: NavigationId::from_raw(navigation_id),
-              phase: if succeeded.as_bool() {
-                NavigationEventPhase::Finished
-              } else {
-                NavigationEventPhase::Failed
-              },
+              phase: navigation_completion_phase(succeeded.as_bool(), status),
               url,
             });
           }
@@ -1968,6 +1999,25 @@ impl InnerWebView {
       webview4.add_DownloadStarting(
         &DownloadStartingEventHandler::create(Box::new(move |_, args| {
           if let Some(args) = args {
+            args.SetCancel(true)?;
+          }
+          Ok(())
+        })),
+        token,
+      )?;
+    } else if let Some(native) = pl_attrs.native_download_handler.clone() {
+      let owner = controller.clone();
+      let webview4: ICoreWebView2_4 = webview.cast()?;
+      webview4.add_DownloadStarting(
+        &DownloadStartingEventHandler::create(Box::new(move |_, args| {
+          let Some(args) = args else {
+            return Ok(());
+          };
+          args.SetCancel(true)?;
+          args.SetHandled(true)?;
+          if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| native(&owner, &args)))
+            .is_err()
+          {
             args.SetCancel(true)?;
           }
           Ok(())
@@ -3332,6 +3382,33 @@ fn is_windows_7() -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn stopped_navigation_does_not_destroy_a_download_destination_context() {
+    for status in [
+      COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED,
+      COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED,
+    ] {
+      assert_eq!(
+        navigation_completion_phase(false, status),
+        NavigationEventPhase::Cancelled
+      );
+    }
+    for status in [
+      COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID,
+      COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED,
+      COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_RESET,
+    ] {
+      assert_eq!(
+        navigation_completion_phase(false, status),
+        NavigationEventPhase::Failed
+      );
+    }
+    assert_eq!(
+      navigation_completion_phase(true, COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN),
+      NavigationEventPhase::Finished
+    );
+  }
 
   #[test]
   fn public_error_is_send_and_sync_for_tauri_runtime_propagation() {

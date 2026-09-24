@@ -101,6 +101,17 @@ impl EngineHost {
         }
         #[cfg(target_os = "windows")]
         if let (Some(profile), Some(view)) = (profile, removed) {
+            let view = if let Some(downloads) = &self.downloads {
+                match downloads.retain_closed_view(view) {
+                    Ok(()) => {
+                        self.close_idle_spare(profile);
+                        return;
+                    }
+                    Err(view) => view,
+                }
+            } else {
+                view
+            };
             let (debt, policy_cleanup_failed) = view.close_explicit();
             if policy_cleanup_failed {
                 self.fail_content_policy_retirement();
@@ -222,6 +233,19 @@ impl EngineHost {
             // the shell to have settled every exact Close before this barrier.
             self.native_resource_accounting_failed = true;
         }
+        #[cfg(target_os = "windows")]
+        if let Some(downloads) = &self.downloads {
+            for view in downloads.take_retained_views() {
+                let profile = view.cleanup_profile;
+                let (debt, failed) = view.close_explicit();
+                if failed {
+                    self.fail_content_policy_retirement();
+                }
+                if let Some(debt) = debt {
+                    self.retain_windows_cleanup_debt(profile, debt);
+                }
+            }
+        }
         let ids: Vec<ItemId> = self.views.keys().copied().collect();
         for id in ids {
             self.close(id);
@@ -332,11 +356,13 @@ impl EngineHost {
 #[cfg(test)]
 mod tests;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 type ShutdownPart = Box<dyn FnOnce(bool) + Send>;
 
-#[cfg(target_os = "macos")]
-fn join_download_shutdown(done: Box<dyn FnOnce(bool) + Send>) -> (ShutdownPart, ShutdownPart) {
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) fn join_download_shutdown(
+    done: Box<dyn FnOnce(bool) + Send>,
+) -> (ShutdownPart, ShutdownPart) {
     struct Join {
         left: usize,
         clean: bool,

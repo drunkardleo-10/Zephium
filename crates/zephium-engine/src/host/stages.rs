@@ -140,6 +140,8 @@ impl EngineHost {
         let Some(view) = self.views.get(&id) else {
             return false;
         };
+        view.download_surface_intent
+            .store(!expected.is_empty(), Ordering::Release);
         let Some(generation) = view.event_permit.active_token() else {
             return false;
         };
@@ -338,6 +340,13 @@ impl EngineHost {
             Some(_) => tree.as_ref().map(Pane::tabs).unwrap_or_default(),
             None => Vec::new(),
         };
+        #[cfg(target_os = "windows")]
+        for (id, view) in &self.views {
+            if stage.has_view(*id) || tabs.contains(id) {
+                view.download_surface_intent
+                    .store(region.is_some() && tabs.contains(id), Ordering::Release);
+            }
+        }
         for id in &tabs {
             let Some(view) = self.views.get(id) else {
                 // The outer lifecycle gate distinguishes an inactive item

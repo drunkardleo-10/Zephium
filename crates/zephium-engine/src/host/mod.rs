@@ -8,7 +8,10 @@ mod discard;
 mod dispatch;
 #[cfg(target_os = "macos")]
 mod download_files;
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "windows")]
+#[path = "download_files_windows.rs"]
+mod download_files;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) mod downloads;
 #[cfg(target_os = "macos")]
 mod extension_action;
@@ -128,7 +131,7 @@ struct ObservedView {
     // A current layout may request a view before its first document commits
     // (for example a download URL entered in a new tab). This permits only a
     // native download decision, never document presentation or file access.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     download_surface_intent: Arc<AtomicBool>,
     event_permit: EventPermit,
     navigation: NavigationEpochTracker,
@@ -697,7 +700,7 @@ pub(crate) struct EngineHost {
     extension_browser_surfaces: HashMap<ProfileId, ExtensionBrowserSurface>,
     #[cfg(target_os = "macos")]
     page_permissions: page_permissions::PagePermissionBroker,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) downloads: Option<Rc<downloads::Downloads>>,
     native_resource_accounting_failed: bool,
     navigation_snapshots: HashMap<ItemId, NavigationSnapshot>,

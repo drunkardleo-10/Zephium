@@ -16,6 +16,13 @@ impl Downloads {
             });
             return;
         }
+        #[cfg(target_os = "windows")]
+        if matches!(call, DownloadCall::SetAskDestination { enabled: false }) {
+            done.finish(DownloadResponse::Error {
+                error: DownloadError::Unsupported,
+            });
+            return;
+        }
         self.ensure_recovery(partition);
         if matches!(call, DownloadCall::RetryCleanup) {
             self.schedule_recovery(partition.profile());
@@ -258,7 +265,7 @@ impl Downloads {
                     .borrow_mut()
                     .insert(partition.profile(), preferences.clone());
                 done.finish(DownloadResponse::Preferences {
-                    site_downloads_require_confirmation: false,
+                    site_downloads_require_confirmation: cfg!(target_os = "windows"),
                     preferences,
                     supported: true,
                 });
@@ -383,7 +390,7 @@ impl Downloads {
                 .borrow_mut()
                 .insert(partition.profile(), preferences.clone());
             done.finish(DownloadResponse::Preferences {
-                site_downloads_require_confirmation: false,
+                site_downloads_require_confirmation: cfg!(target_os = "windows"),
                 preferences,
                 supported: true,
             });

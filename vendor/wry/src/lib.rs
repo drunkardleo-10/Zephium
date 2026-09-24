@@ -410,7 +410,8 @@ pub use self::webview2::{
 };
 #[cfg(target_os = "windows")]
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-  ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Environment,
+  ICoreWebView2, ICoreWebView2Controller, ICoreWebView2DownloadStartingEventArgs,
+  ICoreWebView2Environment,
 };
 
 use std::{borrow::Cow, collections::HashMap, path::PathBuf, rc::Rc};
@@ -2083,6 +2084,9 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
   environment: Option<ICoreWebView2Environment>,
   environment_created_handler: Option<std::sync::Arc<dyn Fn(&ICoreWebView2Environment) + 'static>>,
   profile_name: Option<String>,
+  native_download_handler: Option<
+    std::sync::Arc<dyn Fn(&ICoreWebView2Controller, &ICoreWebView2DownloadStartingEventArgs)>,
+  >,
 }
 
 #[cfg(windows)]
@@ -2101,12 +2105,21 @@ impl Default for PlatformSpecificWebViewAttributes {
       environment: None,
       environment_created_handler: None,
       profile_name: None,
+      native_download_handler: None,
     }
   }
 }
 
 #[cfg(windows)]
 pub trait WebViewBuilderExtWindows {
+  /// Hands the original native download event to the host. Cancellation is
+  /// set before invocation; the host must retain a deferral to resolve later.
+  /// Explicit download denial always takes precedence over this opt-in hook.
+  fn with_native_download_handler(
+    self,
+    handler: impl Fn(&ICoreWebView2Controller, &ICoreWebView2DownloadStartingEventArgs) + 'static,
+  ) -> Self;
+
   /// Pass additional args to WebView2 upon creating the webview.
   ///
   /// ## Warning
@@ -2250,6 +2263,14 @@ pub trait WebViewBuilderExtWindows {
 
 #[cfg(windows)]
 impl WebViewBuilderExtWindows for WebViewBuilder<'_> {
+  fn with_native_download_handler(
+    mut self,
+    handler: impl Fn(&ICoreWebView2Controller, &ICoreWebView2DownloadStartingEventArgs) + 'static,
+  ) -> Self {
+    self.platform_specific.native_download_handler = Some(std::sync::Arc::new(handler));
+    self
+  }
+
   fn with_additional_browser_args<S: Into<String>>(mut self, additional_args: S) -> Self {
     self.platform_specific.additional_browser_args = Some(additional_args.into());
     self

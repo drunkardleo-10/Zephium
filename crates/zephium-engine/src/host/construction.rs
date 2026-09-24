@@ -587,7 +587,7 @@ impl EngineHost {
         );
         #[cfg(target_os = "macos")]
         let load_file_uploads = Rc::downgrade(&file_uploads);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let download_surface_intent = Arc::new(AtomicBool::new(false));
         let guard_presentation_permit = presentation_permit.clone();
         let load_presentation_permit = presentation_permit.clone();
@@ -985,6 +985,26 @@ impl EngineHost {
                     }
                     *observed = Some(environment.clone());
                 });
+            if let Some(downloads) = &self.downloads {
+                let downloads = Rc::downgrade(downloads);
+                let download_permit = event_permit.clone();
+                let download_intent = download_surface_intent.clone();
+                let download_navigation = navigation.clone();
+                builder = builder
+                    .with_download_policy(DownloadPolicy::UseHandlers)
+                    .with_native_download_handler(move |controller, event| {
+                        if let Some(manager) = downloads.upgrade() {
+                            manager.admit(
+                                partition,
+                                download_permit.clone(),
+                                download_intent.clone(),
+                                download_navigation.clone(),
+                                controller,
+                                event,
+                            );
+                        }
+                    });
+            }
             if let Some(environment) = cached_environment {
                 builder = builder.with_environment(environment);
             }
@@ -1657,7 +1677,7 @@ impl EngineHost {
         Some(ObservedView {
             #[cfg(target_os = "macos")]
             file_uploads,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             download_surface_intent,
             event_permit,
             navigation,

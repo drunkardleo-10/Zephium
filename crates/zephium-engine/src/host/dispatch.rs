@@ -490,7 +490,7 @@ pub(crate) fn install(
             extension_browser_surfaces: HashMap::new(),
             #[cfg(target_os = "macos")]
             page_permissions: super::page_permissions::PagePermissionBroker::default(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             downloads: None,
             native_resource_accounting_failed: false,
             navigation_snapshots: HashMap::new(),
@@ -1907,6 +1907,16 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
         };
         #[cfg(target_os = "windows")]
         {
+            let (done, download_exit) = if let Some(downloads) = &host.downloads {
+                let (native_done, download_done) = super::lifecycle::join_download_shutdown(done);
+                let notice = downloads.runtime_exit_notifier();
+                downloads.quiesce(None, download_done);
+                (native_done, Some(notice))
+            } else {
+                (done, None)
+            };
+            let download_exit = Arc::new(std::sync::Mutex::new(download_exit));
+            let spawn_failure_exit = download_exit.clone();
             let (browser_processes, process_provenance_valid) = host.shutdown();
             let private_runtime_cleanup = host.private_runtime.cleanup_ticket();
             let worker_completion = Arc::new(std::sync::Mutex::new(Some(done)));
@@ -1917,7 +1927,10 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
             let spawned = std::thread::Builder::new()
                 .name("zephium-webview2-shutdown".into())
                 .spawn(move || {
-                    let finish = |clean| {
+                    let finish = |clean: bool| {
+                        if !clean {
+                            if let Some(notice)=download_exit.lock().unwrap_or_else(|error|error.into_inner()).take(){notice(false);}
+                        }
                         if let Some(done) = worker_completion
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1938,6 +1951,7 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                         finish(false);
                         return;
                     }
+                    if let Some(notice)=download_exit.lock().unwrap_or_else(|error|error.into_inner()).take(){notice(true);}
                     let cleaned = match private_runtime_cleanup.cleanup_after_proven_exit() {
                         Ok(()) => true,
                         Err(error) => {
@@ -1952,6 +1966,13 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                 });
             if let Err(error) = spawned {
                 eprintln!("shutdown: could not start WebView2 cleanup worker: {error}");
+                if let Some(notice) = spawn_failure_exit
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                {
+                    notice(false);
+                }
                 if let Some(done) = spawn_failure
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())

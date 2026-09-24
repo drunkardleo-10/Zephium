@@ -610,7 +610,7 @@ impl EngineHost {
         extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
         completion: Arc<crate::erasure::Completion>,
     ) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(downloads) = self
             .downloads
             .as_ref()
@@ -998,6 +998,9 @@ impl EngineHost {
             return;
         }
 
+        if let Some(downloads) = &self.downloads {
+            downloads.runtime_exited(profile);
+        }
         // BrowserProcessExited means the whole process group and UDF resources
         // for this exact PID are released. It can subsume a coalesced
         // ProcessFailed callback, so retire any still-associated controllers.

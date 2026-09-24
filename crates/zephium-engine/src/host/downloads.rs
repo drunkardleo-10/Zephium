@@ -5,6 +5,9 @@ mod lifecycle;
 #[cfg(target_os = "macos")]
 #[path = "downloads/platform_macos.rs"]
 mod platform;
+#[cfg(target_os = "windows")]
+#[path = "downloads/platform_windows.rs"]
+mod platform;
 mod recovery;
 mod ui;
 use platform::{Delegate, DialogLease, DirectoryPanel, Native, SavePanel, Source, Timer};
@@ -80,6 +83,8 @@ enum Message {
     #[cfg(target_os = "macos")]
     Cancelled(DownloadId),
     Cleaned,
+    #[cfg(target_os = "windows")]
+    RuntimeExited(bool),
     RecoveryProfiles(DownloadStoreReply),
     RecoveryPage(ProfileId, DownloadStoreReply),
     Recovered(
@@ -124,6 +129,8 @@ pub(crate) struct Downloads {
     recovery: RefCell<recovery::Recovery>,
     work: Cell<usize>,
     directory_panels: RefCell<HashMap<u64, (DirectoryPanel, DialogLease)>>,
+    #[cfg(target_os = "windows")]
+    retained_views: RefCell<Vec<super::ObservedView>>,
 }
 
 impl Downloads {
@@ -150,6 +157,8 @@ impl Downloads {
             recovery: RefCell::default(),
             work: Cell::new(0),
             directory_panels: RefCell::new(HashMap::new()),
+            #[cfg(target_os = "windows")]
+            retained_views: RefCell::new(Vec::new()),
         });
         manager.initialize_recovery();
         manager
@@ -368,6 +377,8 @@ impl Downloads {
         for profile in changed {
             (self.notify)(profile);
         }
+        #[cfg(target_os = "windows")]
+        self.release_retained_views();
         if self.work.get() == 0 {
             let mut ready = Vec::new();
             {
@@ -433,6 +444,8 @@ impl Downloads {
     fn message(self: &Rc<Self>, message: Message) {
         #[cfg(target_os = "macos")]
         let native_notice = matches!(message, Message::Cancelled(_));
+        #[cfg(target_os = "windows")]
+        let native_notice = matches!(message, Message::RuntimeExited(_));
         if !native_notice {
             self.work.set(self.work.get().saturating_sub(1));
         }
@@ -446,6 +459,8 @@ impl Downloads {
                 self.recovery_saved(profile, id, identity, reply)
             }
             Message::Cleaned => {}
+            #[cfg(target_os = "windows")]
+            Message::RuntimeExited(clean) => self.runtime_exit_result(clean),
             Message::Preferences(id, DownloadStoreReply::Preferences(preferences)) => {
                 self.choose_destination(id, preferences)
             }

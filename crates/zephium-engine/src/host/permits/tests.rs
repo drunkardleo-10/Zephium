@@ -100,3 +100,18 @@ fn navigation_callbacks_require_generation_tracker_and_epoch_identity() {
         coincident,
     ));
 }
+
+#[test]
+fn a_download_only_view_cannot_regain_page_authority() {
+    let first = Arc::new(AtomicBool::new(true));
+    let second = Arc::new(AtomicBool::new(true));
+    let permit = EventPermit::bound(&first);
+    assert!(permit.retire_for_download());
+    assert!(permit.active_token().is_none());
+    assert!(permit.allows_navigation("about:blank"));
+    assert!(!permit.allows_navigation("https://example.com"));
+    assert!(!permit.bind_once(&second));
+    assert!(!permit.retire_for_download());
+    permit.revoke();
+    assert!(!permit.allows_navigation("about:blank"));
+}
