@@ -2,6 +2,7 @@
 
 pub mod blocker;
 pub mod commands;
+pub mod downloads;
 pub mod extensions;
 pub mod geometry;
 pub mod icon;

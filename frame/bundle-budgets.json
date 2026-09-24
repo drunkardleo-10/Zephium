@@ -97,7 +97,7 @@
   },
   "lazy:features/tools/components/ToolSlot.svelte": {
     "js": 283200,
-    "css": 3600
+    "css": 4500
   },
   "lazy:features/notes/components/Notes.svelte": {
     "js": 405000,
@@ -125,7 +125,7 @@
   },
   "lazy:domain/resources/index.ts": {
     "js": 237000,
-    "css": 3300
+    "css": 4200
   },
   "lazy:features/search/components/LauncherPanel.svelte": {
     "js": 376593,
@@ -145,7 +145,7 @@
   },
   "lazy:features/library/components/LibraryPage.svelte": {
     "js": 318567,
-    "css": 4500
+    "css": 9000
   },
   "lazy:features/tasks/components/TasksPage.svelte": {
     "js": 371000,
@@ -161,6 +161,10 @@
   },
   "lazy:features/tasks/lib/capture.ts": {
     "js": 175000,
-    "css": 1500
+    "css": 4200
+  },
+  "lazy:features/downloads/components/DownloadsList.svelte": {
+    "js": 155000,
+    "css": 7000
   }
 }

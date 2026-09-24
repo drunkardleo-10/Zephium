@@ -143,6 +143,7 @@ zephium-agentic = { workspace = true, optional = true }
 zephium-core.workspace = true
 zephium-extension-runtime-api.workspace = true
 wry.workspace = true
+dirs = "6"
 serde_json.workspace = true
 serde = { workspace = true, optional = true }
 sha2 = { version = "=0.10.9", optional = true }
@@ -202,6 +203,8 @@ objc2-security = { version = "0.3", default-features = false, features = [
 objc2-web-kit = { version = "0.3", default-features = false, features = [
     "block2",
     "objc2-app-kit",
+    "WKDownload",
+    "WKDownloadDelegate",
     "WKContentWorld",
     "WKContentRuleList",
     "WKContentRuleListStore",

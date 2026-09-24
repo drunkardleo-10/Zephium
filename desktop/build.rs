@@ -63,28 +63,40 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
     let extension_lab = env::var_os("CARGO_FEATURE_LOCAL_EXTENSION_LAB").is_some();
     let resource_ui_qa = env::var_os("CARGO_FEATURE_RESOURCE_UI_QA").is_some();
     let rendering_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_RENDERING_PROBE").is_some();
-    if resource_ui_qa {
+    let file_workflows_qa = env::var_os("CARGO_FEATURE_FILE_WORKFLOWS_QA").is_some();
+    if resource_ui_qa && file_workflows_qa {
+        return Err("resource and file workflow QA identities are mutually exclusive".into());
+    }
+    if resource_ui_qa || file_workflows_qa {
         if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
             || env::var("PROFILE").as_deref() != Ok("debug")
             || extensions_staging
             || extension_lab
             || rendering_probe
         {
-            return Err("resource UI QA requires an isolated macOS debug build".into());
+            return Err("product UI QA requires an isolated macOS debug build".into());
         }
+        let (qa_id, qa_name) = if file_workflows_qa {
+            (
+                "app.zephium.files-integration-qa",
+                "Zephium Files Integration QA",
+            )
+        } else {
+            ("app.zephium.resources-qa", "Zephium Resources QA")
+        };
         let config = config_override
             .as_ref()
-            .ok_or("resource UI QA requires an explicit isolated configuration")?;
-        if config.get("identifier").and_then(Value::as_str) != Some("app.zephium.resources-qa")
-            || config.get("productName").and_then(Value::as_str) != Some("Zephium Resources QA")
+            .ok_or("product UI QA requires an explicit isolated configuration")?;
+        if config.get("identifier").and_then(Value::as_str) != Some(qa_id)
+            || config.get("productName").and_then(Value::as_str) != Some(qa_name)
             || config
                 .pointer("/app/windows/0/title")
                 .and_then(Value::as_str)
-                != Some("Zephium Resources QA")
+                != Some(qa_name)
             || config.pointer("/build/devUrl") != Some(&Value::Null)
         {
             return Err(
-                "resource UI QA requires its exact isolated identity and bundled frontend".into(),
+                "product UI QA requires its exact isolated identity and bundled frontend".into(),
             );
         }
     }
@@ -150,6 +162,7 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
                 && !extension_lab
                 && !rendering_probe
                 && !resource_ui_qa
+                && !file_workflows_qa
             {
                 validate_linux_identity("effective", &config, &root)?;
             }

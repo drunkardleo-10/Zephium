@@ -39,7 +39,7 @@ export const tools = {
   },
   downloads: {
     title: m.browser_downloads_title,
-    description: m.browser_downloads_unavailable,
+    description: m.browser_downloads_description,
     empty: m.browser_downloads_empty,
     icon: Download01Icon,
     load: () => import("./previews/DownloadsView.svelte"),

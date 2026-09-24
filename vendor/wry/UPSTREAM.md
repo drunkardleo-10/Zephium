@@ -10,6 +10,12 @@ reviewed native security adapter under active hardening, not an unmodified copy
 of the crates.io package and not yet an externally audited production boundary.
 Its security-relevant deltas currently enforce these invariants:
 
+- macOS file selection is deny-by-default with an explicit embedder callback.
+  Native frame origins are bounded before Rust allocation. The single-use,
+  non-Send responder cancels on drop, including unwind, and returns only native
+  selected URLs to WebKit. The embedder owns picker admission, visible origin
+  labelling and navigation/view teardown; no Tauri or agent builder opts in.
+
 - Permission callbacks are available on every supported platform and unhandled
   permission requests fail closed.
 - No script-message/IPC bridge is registered when the embedder supplied no
@@ -169,3 +175,22 @@ regenerate both lockfiles deliberately, run native hostile-page tests on all
 three platforms, update the immutable revision, and rerun dependency, license,
 and provenance gates. A version bump without that review is not an accepted
 update procedure.
+
+### macOS website file workflows
+
+The opt-in upload responder owns the main-thread native completion and cancels on
+drop. An opt-in download callback hands the original WKDownload to the embedder
+before installing the legacy delegate; explicit DownloadPolicy::Deny always wins.
+Renderable HTTP attachment responses use the native download policy too. Native
+failure callbacks accept absent resume data. Handler-enabled file drops validate
+the complete pasteboard cohort (128 items and bounded file URLs), preserve WebKit's
+actual drag operation, and reject hidden views before native fallback. Default
+upload/download/file-drop denial remains available to privileged/agent views.
+See the application file-workflow record for broker ownership and native evidence.
+
+Native cancellation retains the exact WKNavigation identity. The public legacy
+WebKit policy-interruption error (`WebKitErrorDomain`, 102) and Foundation request
+cancellation (`NSURLErrorDomain`, -999) emit Cancelled rather than Failed. Neither
+outcome implies a committed document or completed download. The application keeps
+an uncommitted cancelled controller hidden/reusable so pending native download
+save sheets retain their owner. See Apple's [policy-interruption constant](https://developer.apple.com/documentation/webkit/webkiterrorframeloadinterruptedbypolicychange).

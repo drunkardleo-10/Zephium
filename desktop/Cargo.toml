@@ -6,6 +6,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Isolated actual-product file workflow verification, never a shipping app.
+file-workflows-qa = ["tauri/custom-protocol"]
 # Isolated user-resource UI verification; never a shipping application.
 resource-ui-qa = ["tauri/custom-protocol"]
 # Same release-excluded retained path, one closed real-public product-brief task.

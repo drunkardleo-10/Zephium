@@ -8716,6 +8716,121 @@ fn history_pages_every_visit_newest_first_without_gaps_or_repeats() {
 }
 
 #[test]
+fn downloads_are_profile_scoped_and_recover_interrupted_native_ownership() {
+    use zephium_core::downloads::*;
+    use zephium_core::ids::DownloadId;
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    let id = DownloadId::generate();
+    let session = DownloadId::generate();
+    let mut record = DownloadRecord {
+        id,
+        session,
+        revision: 1,
+        created_at: 1,
+        filename: "fixture.txt".into(),
+        source: "https://example.com".into(),
+        state: DownloadState::Pending,
+        received: 0,
+        total: None,
+        error: None,
+        destination: None,
+        staging: None,
+        staging_identity: None,
+        identity: None,
+    };
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Save(Box::new(record.clone()))),
+        DownloadStoreReply::Saved
+    ));
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Save(Box::new(record.clone()))),
+        DownloadStoreReply::Saved
+    ));
+    record.filename = "changed.txt".into();
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Save(Box::new(record.clone()))),
+        DownloadStoreReply::Error(DownloadError::Invalid)
+    ));
+    assert!(matches!(
+        hub.download_call(ProfileId::from(999), DownloadStoreCall::Get(id)),
+        DownloadStoreReply::Error(DownloadError::Storage)
+    ));
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Forget(id)),
+        DownloadStoreReply::Error(DownloadError::Invalid)
+    ));
+    let DownloadStoreReply::Page(page) = hub.download_call(
+        profile,
+        DownloadStoreCall::List {
+            before: None,
+            limit: 10,
+            session: DownloadId::generate(),
+            active: Vec::new(),
+        },
+    ) else {
+        panic!("download page")
+    };
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].state, DownloadState::Interrupted);
+    record.revision = 2;
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Save(Box::new(record))),
+        DownloadStoreReply::Error(DownloadError::Invalid)
+    ));
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Forget(id)),
+        DownloadStoreReply::Saved
+    ));
+}
+
+#[test]
+fn download_preferences_are_validated_and_persist_only_in_registered_profiles() {
+    use zephium_core::downloads::*;
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    let value = DownloadPreferences {
+        ask_destination: false,
+        directory: Some("/tmp/download-fixtures".into()),
+        directory_identity: Some("0000000000000001:0000000000000002".into()),
+    };
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::SetPreferences(
+            DownloadPreferenceChange::AskDestination(false)
+        )), DownloadStoreReply::Preferences(saved) if !saved.ask_destination
+    ));
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::SetPreferences(
+            DownloadPreferenceChange::Directory {
+                path: value.directory.clone().unwrap(), identity: value.directory_identity.clone().unwrap(),
+            }
+        )), DownloadStoreReply::Preferences(saved) if saved == value
+    ));
+    assert!(
+        matches!(hub.download_call(profile, DownloadStoreCall::Preferences), DownloadStoreReply::Preferences(saved) if saved == value)
+    );
+    assert!(matches!(
+        hub.download_call(
+            ProfileId::from(999),
+            DownloadStoreCall::SetPreferences(DownloadPreferenceChange::AskDestination(true))
+        ),
+        DownloadStoreReply::Error(DownloadError::Storage)
+    ));
+    assert!(matches!(
+        hub.download_call(
+            profile,
+            DownloadStoreCall::SetPreferences(DownloadPreferenceChange::Directory {
+                path: "relative".into(),
+                identity: "0000000000000001:0000000000000002".into()
+            })
+        ),
+        DownloadStoreReply::Error(DownloadError::Invalid)
+    ));
+}
+
+#[test]
 fn history_page_narrows_by_query_and_keeps_repeat_visits() {
     let mut hub = Hub::in_memory().unwrap();
     hub.save(&sample()).unwrap();

@@ -3078,6 +3078,16 @@ chrome positioning) carries over as-is.
 - **Later, own track:** Tier 2 extensions compat, sync (change-log at the
   reducer chokepoint), SQLCipher/SecretStore.
 
+Website file workflows are implemented for macOS foreground human tabs:
+[file workflow ownership and qualification](file-workflows-progress.md). Native
+selection stays in the engine, with no durable upload manager or frontend file
+path authority. A profile-scoped native WKDownload coordinator owns transfers,
+Store-backed metadata/preferences and bounded progress snapshots. Private transfers
+remain memory-only. Filesystem workers mediate staging, quarantine, exclusive
+publication and file-identity checks. Trusted UI actions carry download IDs;
+paths and native completions stay in Rust. Windows/Linux download adapters remain
+outstanding. Local-document viewing is outside this delivery's scope.
+
 ---
 
 ## 16. Reversible vs irreversible

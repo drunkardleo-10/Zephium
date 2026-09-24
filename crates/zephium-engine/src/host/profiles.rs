@@ -610,6 +610,31 @@ impl EngineHost {
         extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
         completion: Arc<crate::erasure::Completion>,
     ) {
+        #[cfg(target_os = "macos")]
+        if let Some(downloads) = self
+            .downloads
+            .as_ref()
+            .filter(|downloads| !downloads.is_retired(profile))
+        {
+            downloads.quiesce(
+                Some(profile),
+                Box::new(move |clean| {
+                    if !clean {
+                        completion
+                            .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
+                        return;
+                    }
+                    let rejected = completion.clone();
+                    if !super::dispatch::try_with_profile_erasure(move |host| {
+                        host.erase_profile_data(profile, extension_native_namespace, completion)
+                    }) {
+                        rejected
+                            .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
+                    }
+                }),
+            );
+            return;
+        }
         if !admit_profile_erasure(
             &mut self.erasure_tombstones,
             &mut self.erasure_attempts,

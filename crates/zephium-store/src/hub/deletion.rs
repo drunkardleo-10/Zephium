@@ -650,6 +650,8 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM user_resource_usage;
          DELETE FROM userscripts;
          DELETE FROM userscript_catalog;
+         DELETE FROM download_preferences;
+         DELETE FROM downloads;
          DELETE FROM search_queries;
          DELETE FROM history;
          DELETE FROM history_usage;
@@ -787,7 +789,9 @@ mod tests {
              VALUES (1, 'space', 'item', 'private-layout');
              INSERT INTO favicons(origin, content_type, icon, fetched_at)
              VALUES ('https://history.example', 'image/png', X'01020304', 1);
-             INSERT INTO settings(key, value) VALUES ('private-setting', 'private-value');",
+             INSERT INTO settings(key, value) VALUES ('private-setting', 'private-value');
+             INSERT INTO downloads(id,session,revision,terminal,payload) VALUES ('00000000000000000000000001','00000000000000000000000002',1,1,'{\"private\":\"download-history\"}');
+             INSERT INTO download_preferences(id,payload) VALUES (1,'{\"directory\":\"/private/downloads\"}');",
         )
         .unwrap();
         conn.execute(
@@ -912,6 +916,8 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         let expected_tables = [
+            "download_preferences",
+            "downloads",
             "extension_grant_api_permissions",
             "extension_grant_host_permissions",
             "extension_grants",
@@ -955,6 +961,8 @@ mod tests {
         );
 
         for table in [
+            "download_preferences",
+            "downloads",
             "search_queries",
             "task_list_receipts",
             "task_lists",

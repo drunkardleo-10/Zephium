@@ -122,6 +122,14 @@ impl EngineHost {
             done(false);
             return;
         }
+        #[cfg(target_os = "macos")]
+        let done = if let Some(downloads) = &self.downloads {
+            let (native_done, download_done) = join_download_shutdown(done);
+            downloads.quiesce(None, download_done);
+            native_done
+        } else {
+            done
+        };
         self.shutdown_completion = Some(done);
         self.shutdown_common();
         self.finish_content_policy_shutdown_if_quiescent();
@@ -323,3 +331,39 @@ impl EngineHost {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(target_os = "macos")]
+type ShutdownPart = Box<dyn FnOnce(bool) + Send>;
+
+#[cfg(target_os = "macos")]
+fn join_download_shutdown(done: Box<dyn FnOnce(bool) + Send>) -> (ShutdownPart, ShutdownPart) {
+    struct Join {
+        left: usize,
+        clean: bool,
+        done: Option<Box<dyn FnOnce(bool) + Send>>,
+    }
+    let state = std::sync::Arc::new(std::sync::Mutex::new(Join {
+        left: 2,
+        clean: true,
+        done: Some(done),
+    }));
+    let part = |state: std::sync::Arc<std::sync::Mutex<Join>>| -> Box<dyn FnOnce(bool) + Send> {
+        Box::new(move |clean| {
+            let ready = {
+                let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+                state.clean &= clean;
+                state.left -= 1;
+                if state.left == 0 {
+                    let clean = state.clean;
+                    state.done.take().map(|done| (done, clean))
+                } else {
+                    None
+                }
+            };
+            if let Some((done, clean)) = ready {
+                done(clean);
+            }
+        })
+    };
+    (part(state.clone()), part(state))
+}

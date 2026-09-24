@@ -374,6 +374,11 @@ pub enum Command {
         call: Arc<zephium_core::resources::ResourceCall>,
         done: ResourceCompletion,
     },
+    DownloadCall {
+        expected_profile: ProfileId,
+        call: Box<zephium_core::downloads::DownloadCall>,
+        done: zephium_core::downloads::DownloadCompletion,
+    },
     HistoryCall {
         expected_profile: ProfileId,
         call: Box<zephium_ipc::HistoryCall>,

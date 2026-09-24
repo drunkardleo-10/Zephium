@@ -348,6 +348,8 @@
 #[cfg(any(target_os = "windows", target_os = "android"))]
 mod custom_protocol_workaround;
 mod error;
+#[cfg(target_os = "macos")]
+mod file_upload;
 #[cfg(any(target_os = "android", test))]
 mod inject_initialization_scripts;
 mod native_admission;
@@ -355,6 +357,8 @@ mod native_bounds;
 #[cfg(any(target_os = "windows", test))]
 mod native_cleanup;
 mod permissions;
+#[cfg(target_os = "macos")]
+pub use file_upload::{FileUploadRequest, FileUploadResponder};
 mod proxy;
 #[cfg(any(target_os = "macos", target_os = "android", target_os = "ios"))]
 mod util;
@@ -1808,6 +1812,10 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
   permission_request_handler:
     Option<Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>>,
   #[cfg(target_os = "macos")]
+  file_upload_handler: Option<Box<file_upload::FileUploadHandler>>,
+  #[cfg(target_os = "macos")]
+  native_download_handler: Option<Box<dyn Fn(&objc2_web_kit::WKDownload)>>,
+  #[cfg(target_os = "macos")]
   context_menu_handler: Option<
     Box<
       dyn Fn(
@@ -1835,6 +1843,10 @@ impl Default for PlatformSpecificWebViewAttributes {
       webview_configuration: None,
       #[cfg(target_os = "macos")]
       permission_request_handler: None,
+      #[cfg(target_os = "macos")]
+      file_upload_handler: None,
+      #[cfg(target_os = "macos")]
+      native_download_handler: None,
       #[cfg(target_os = "macos")]
       context_menu_handler: None,
     }
@@ -1910,6 +1922,21 @@ pub trait WebViewBuilderExtMacos {
     self,
     handler: impl Fn(PermissionRequest) -> PermissionRequestDisposition + 'static,
   ) -> Self;
+  /// Transfers native download delegation to the embedder. The callback must
+  /// retain its delegate/operation and cancel on any admission failure.
+  /// Requires `DownloadPolicy::UseHandlers`; a deny policy always wins.
+  fn with_native_download_handler(
+    self,
+    handler: impl Fn(&objc2_web_kit::WKDownload) + 'static,
+  ) -> Self;
+  /// Installs a main-thread native file upload broker. Without it uploads are
+  /// denied before inspecting request metadata. The responder cancels on drop;
+  /// the embedder must cancel retained responders on navigation and teardown.
+  /// WebKit owns user activation and the original input/frame association.
+  fn with_file_upload_handler(
+    self,
+    handler: impl Fn(&objc2_web_kit::WKWebView, FileUploadRequest, FileUploadResponder) + 'static,
+  ) -> Self;
   /// Merges browser-owned items into the native page context menu without
   /// serializing page metadata through Rust. The callback receives WebKit's
   /// already-created default menu and may replace or suppress it.
@@ -1942,6 +1969,22 @@ impl WebViewBuilderExtMacos for WebViewBuilder<'_> {
   ) -> Self {
     self.attrs.permission_handler = None;
     self.platform_specific.permission_request_handler = Some(Box::new(handler));
+    self
+  }
+
+  fn with_native_download_handler(
+    mut self,
+    handler: impl Fn(&objc2_web_kit::WKDownload) + 'static,
+  ) -> Self {
+    self.platform_specific.native_download_handler = Some(Box::new(handler));
+    self
+  }
+
+  fn with_file_upload_handler(
+    mut self,
+    handler: impl Fn(&objc2_web_kit::WKWebView, FileUploadRequest, FileUploadResponder) + 'static,
+  ) -> Self {
+    self.platform_specific.file_upload_handler = Some(Box::new(handler));
     self
   }
 
@@ -3014,7 +3057,10 @@ pub enum NavigationEventPhase {
   Committed,
   /// The committed navigation completed successfully.
   Finished,
-  /// The navigation terminated with an error or cancellation.
+  /// Native policy or user cancellation ended navigation without a document.
+  /// This is not a successful commit or a successful download.
+  Cancelled,
+  /// The navigation terminated with an error.
   Failed,
 }
 

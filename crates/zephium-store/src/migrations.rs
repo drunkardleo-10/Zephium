@@ -2052,6 +2052,16 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 20,
+        up: |tx| {
+            tx.execute_batch(
+            "CREATE TABLE downloads (id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=26), session TEXT NOT NULL CHECK(length(session)=26), revision INTEGER NOT NULL CHECK(revision>0), terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=24576 AND json_valid(payload))) STRICT;
+             CREATE TABLE download_preferences (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=8192 AND json_valid(payload))) STRICT;
+             CREATE TRIGGER downloads_capacity BEFORE INSERT ON downloads WHEN NOT EXISTS(SELECT 1 FROM downloads WHERE id=NEW.id) AND (SELECT count(*) FROM downloads)>=10000 BEGIN SELECT RAISE(ABORT,'download history capacity'); END;"
+        )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -2107,6 +2117,7 @@ mod tests {
         (17, 0x8b55_d4bb_445e_7756),
         (18, 0xa412_5523_e2ac_aef7),
         (19, 0x321a_2e79_d8d2_77da),
+        (20, 0x4b37_b9cf_91e8_b507),
     ];
 
     fn schema_fingerprint(migrations: &[Migration], version: i64) -> u64 {
@@ -2142,6 +2153,104 @@ mod tests {
             }
             println!("    ];");
         }
+    }
+
+    #[test]
+    fn standalone_download_qa_v16_is_not_mistaken_for_the_task_schema() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &PROFILE[..15]).unwrap();
+        let transaction = conn.transaction().unwrap();
+        (PROFILE.last().unwrap().up)(&transaction).unwrap();
+        transaction.pragma_update(None, "user_version", 16).unwrap();
+        transaction.commit().unwrap();
+        // The old standalone QA assigned download tables to version 16.
+        // The release lineage assigned Tasks to that version. Never rewrite
+        // the version or partially migrate a foreign schema into this lineage.
+        assert!(apply(&mut conn, PROFILE).is_err());
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            16
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM pragma_table_info('user_resources') WHERE name='status'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='downloads'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn profile_v20_adds_downloads_without_changing_existing_tasks_or_receipts() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let previous = PROFILE
+            .iter()
+            .position(|migration| migration.version == 20)
+            .unwrap();
+        apply(&mut conn, &PROFILE[..previous]).unwrap();
+        let id = "00000000000000000000000001";
+        let list = "00000000000000000000000002";
+        let body = r#"{"title":"Keep this task","content":{"kind":"task","description":"Original description","details":{"list":"00000000000000000000000002"}}}"#;
+        conn.execute(
+            "INSERT INTO task_lists(id,title,revision) VALUES(?1,'Release',3)",
+            [list],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO user_resources(id,kind,revision,title,completed,pinned,trashed,created_at,updated_at,body,search_text,task_list,task_deadline,task_duration) VALUES(?1,'task',7,'Keep this task',0,0,0,10,20,?2,'keep this task',?3,'2026-10-01',45)", rusqlite::params![id,body,list]).unwrap();
+        conn.execute("INSERT INTO user_resource_receipts(request_id,digest,retained,resource_id,revision) VALUES('request-1',zeroblob(32),1,?1,7)", [id]).unwrap();
+        conn.execute("INSERT INTO task_list_receipts(request_id,digest,list_id,retained) VALUES('list-request-1',zeroblob(32),?1,1)", [list]).unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        let saved: (String, i64, String, i64) = conn
+            .query_row(
+                "SELECT body,revision,task_deadline,task_duration FROM user_resources WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(saved, (body.into(), 7, "2026-10-01".into(), 45));
+        assert_eq!(
+            conn.query_row(
+                "SELECT bytes FROM user_resource_usage WHERE id=1",
+                [],
+                |row| row.get::<_, usize>(0)
+            )
+            .unwrap(),
+            body.len()
+        );
+        for table in ["task_lists", "task_list_receipts", "user_resource_receipts"] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+        for table in ["downloads", "download_preferences"] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        apply(&mut conn, PROFILE).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            20
+        );
     }
 
     #[test]
@@ -3290,7 +3399,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(19));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(20));
     }
 
     #[test]

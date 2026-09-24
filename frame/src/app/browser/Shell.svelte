@@ -7,6 +7,7 @@
   import { EssentialTile } from "$features/essentials";
   import { AddressField } from "$features/address";
   import { Dock } from "$features/dock";
+  import { DownloadStatus } from "$features/downloads";
   import { EssentialsRail } from "$features/essentials";
   import { ExtensionActions } from "$features/extensions";
   import { sidebarTree } from "$features/tabs";
@@ -168,6 +169,10 @@
             </UtilityTray>
           {/snippet}
         </AddressField>
+        {#if tabs.profile()?.id}<DownloadStatus
+            profile={tabs.profile()!.id}
+            onopen={() => toolHost.open("downloads")}
+          />{/if}
         {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
             {m.choose_split()}
           </p>{/if}

@@ -126,6 +126,7 @@ export const commands = {
 	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
 	resourceCall: (expectedProfile: string, call: ResourceCall_Deserialize) => __TAURI_INVOKE<ResourceReply_Serialize>("resource_call", { expectedProfile, call }),
 	historyCall: (expectedProfile: string, call: HistoryCall) => __TAURI_INVOKE<HistoryResponse>("history_call", { expectedProfile, call }),
+	downloadCall: (expectedProfile: string, call: DownloadCall) => __TAURI_INVOKE<DownloadResponse>("download_call", { expectedProfile, call }),
 	/**
 	 *  Opens an address in the focused window. The launcher panel and the history
 	 *  surfaces have no tab id to navigate, and must not be given one.
@@ -142,6 +143,7 @@ export const commands = {
 export const events = {
 	blockerStatusChanged: makeEvent<BlockerStatusChanged>("blocker-status-changed"),
 	browserCredentialCapabilityChanged: makeEvent<BrowserCredentialCapabilityChanged>("browser-credential-capability-changed"),
+	downloadsChanged: makeEvent<DownloadsChanged>("downloads-changed"),
 	extensionActionFailed: makeEvent<ExtensionActionFailed>("extension-action-failed"),
 	extensionActionShortcut: makeEvent<ExtensionActionShortcut>("extension-action-shortcut"),
 	extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
@@ -371,6 +373,38 @@ export type DocumentNode_Serialize = {
 	text?: string | null,
 	attrs?: DocumentAttrs_Serialize | null,
 	marks?: DocumentMark[],
+};
+
+export type DownloadCall = { kind: "updates" } | { kind: "list"; before: string | null; limit: number } | { kind: "cancel"; id: string } | { kind: "open"; id: string } | { kind: "reveal"; id: string } | { kind: "forget"; id: string } | { kind: "preferences" } | { kind: "choose_directory" } | { kind: "set_ask_destination"; enabled: boolean };
+
+export type DownloadError = "invalid" | "unavailable" | "unsupported" | "capacity" | "storage" | "destination" | "network" | "disk_full" | "protection" | "missing_file" | "changed_file" | "cancelled";
+
+export type DownloadPreferences = {
+	ask_destination: boolean,
+	/**  Set only by the native directory picker, never accepted from page IPC. */
+	directory: string | null,
+	/**  Read-only native directory identity; only the OS picker can mint it. */
+	directory_identity?: string | null,
+};
+
+export type DownloadResponse = { kind: "updates"; entries: DownloadView[]; removed: string[] } | { kind: "page"; entries: DownloadView[]; next: string | null; supported: boolean } | { kind: "preferences"; preferences: DownloadPreferences; supported: boolean } | { kind: "accepted" } | { kind: "applied" } | { kind: "error"; error: DownloadError };
+
+export type DownloadState = "pending" | "receiving" | "finalizing" | "completed" | "cancelled" | "interrupted" | "failed";
+
+export type DownloadView = {
+	id: string,
+	revision: string,
+	created_at: string,
+	filename: string,
+	source: string,
+	state: DownloadState,
+	received: string,
+	total: string | null,
+	error: DownloadError | null,
+};
+
+export type DownloadsChanged = {
+	profile: string,
 };
 
 export type ExtensionActionFailed = ExtensionActionFailedView;

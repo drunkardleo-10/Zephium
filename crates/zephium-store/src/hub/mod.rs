@@ -10,6 +10,7 @@ mod agent_work;
 mod blocker;
 mod compatibility;
 mod deletion;
+mod downloads;
 mod extension_grants;
 mod extension_profile_policy;
 mod extensions;

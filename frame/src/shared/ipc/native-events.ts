@@ -3,6 +3,7 @@ import type {
   FaviconsView,
   NoteOpenRequested,
   ResourceChanged,
+  DownloadsChanged,
   BlockerStatusChanged,
   BrowserCredentialCapabilityChanged,
   ExtensionActionFailed,
@@ -44,6 +45,7 @@ export const nativeEventNames = {
   favicons: "zephium:favicons",
   noteOpenRequested: "zephium:note-open-requested",
   resourceChanged: "zephium:resource-changed",
+  downloadsChanged: "zephium:downloads-changed",
   resourceClose: "zephium:resource-close",
   resourceCloseCancelled: "zephium:resource-close-cancelled",
   browserCredentialCapabilityChanged: "zephium:browser-credential-capability",
@@ -73,6 +75,7 @@ export const events = {
   resourceClose: scopedEvent<string>(nativeEventNames.resourceClose),
   resourceCloseCancelled: scopedEvent<string>(nativeEventNames.resourceCloseCancelled),
   resourceChanged: scopedEvent<ResourceChanged>(nativeEventNames.resourceChanged),
+  downloadsChanged: scopedEvent<DownloadsChanged>(nativeEventNames.downloadsChanged),
   panelState: scopedEvent<PanelState>(nativeEventNames.panelState),
   browserCredentialCapabilityChanged: scopedEvent<BrowserCredentialCapabilityChanged>(
     nativeEventNames.browserCredentialCapabilityChanged,

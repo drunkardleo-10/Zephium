@@ -202,9 +202,11 @@ Any change that breaks one of these invariants must fail review and release:
 5. Raw content permissions are denied by the pinned Wry permission callback. Raw and
    privileged downloads and popups/new windows are denied rather than silently
    forwarded to the OS or converted into a tab without trustworthy gesture metadata.
-   Linux and macOS additionally cancel file-chooser requests from both raw and
-   privileged WebViews; macOS also denies privileged media capture and device motion
-   natively.
+   Linux additionally cancels file-chooser requests from both raw and privileged
+   WebViews. macOS raw foreground views opt into a native upload picker bound to
+   the exact view/navigation and labelled with WebKit's initiating-frame origin;
+   privileged and agent views retain file-selection denial. macOS also denies
+   privileged media capture and device motion natively.
 6. Both privileged WebViews are created with incognito mode and their platform-native
    store is checked to be InPrivate/ephemeral/non-persistent. That check and every
    platform hardening hook must succeed before bundled application assets or page script
@@ -340,11 +342,10 @@ The probe can still verify exact deferred Deny, duplicate-settlement rejection, 
 JavaScript `NotAllowedError` under a pre-authorized responsible process. The bundle
 includes camera and microphone usage descriptions, but those strings grant no
 authority. A signed packaged WKWebView/TCC gate on the supported security floor is
-still required before the release capability can change. All downloads are disabled,
-so Zephium does not currently claim destination validation,
-dangerous-file handling, Windows
-Mark-of-the-Web, or macOS quarantine. Linux also cancels privileged file-picker
-requests. Stable WebView2 exposes no supported file-chooser interception event, so a
+still required before the release capability can change. Foreground human macOS tabs
+use the native download broker described below. Windows/Linux and privileged
+downloads remain denied; download scanning and Windows Mark-of-the-Web are not
+implemented. Linux also cancels privileged file-picker requests. Stable WebView2 exposes no supported file-chooser interception event, so a
 raw Windows file input remains an engine-owned, user-selected native upload surface and
 privileged Windows views have no equivalent native denial hook. This is an explicit
 platform limitation, not a broker Zephium has implemented. Raw Windows views disable
@@ -366,6 +367,53 @@ action can bypass the DOM guard through the PDF viewer. Until Zephium can disabl
 broker the built-in viewer with a supported native API, packaged malicious-PDF testing
 and an explicit risk decision are separate Windows stable-release gates. Zephium does
 not claim that the current source tree denies this path.
+
+**Human file uploads on macOS.** Raw content construction opts into Wry's
+native upload callback. The default remains denial before request metadata is
+read. The engine retains one process-main-thread NSOpenPanel reservation, labels
+it with the canonical HTTP(S) origin supplied by WebKit for the initiating
+frame, and requires a live, presented, visible view in the key window before
+opening it. WebKit owns input user activation and the original input/frame
+association; Zephium does not infer authority from a recent generic click.
+Single/multiple/directory modes come from native parameters. Selected NSURLs
+stay native and are returned only to the original WebKit completion, with at
+most 1024 selected entries and no filesystem paths in frontend IPC or storage.
+A non-cloneable, non-Send responder cancels on drop. A unique request identity
+prevents a late sheet callback from settling a newer request. Navigation start,
+renderer exit, removal from the presented layout and view teardown cancel the
+panel. Settlement rechecks the view permit, committed navigation, navigation
+activity (including failed attempts), visibility and exact window attachment,
+including after native sheet dismissal. There is no persistent filesystem grant.
+The public pinned WKOpenPanelParameters API exposes selection modes but not
+HTML accept filters; this adapter does not invent those filters with page JS.
+Linux upload selection remains disabled; Windows selection retains the engine-owned
+behavior described above. macOS human views opt into native WebKit file drops with
+a 128-item bound, URL bounds, and document/presentation checks at entry and drop.
+Privileged and agent views retain default denial. See
+[file upload implementation and qualification](file-upload-implementation.md).
+
+**Human downloads on macOS.** Raw human views explicitly opt into a WKDownload
+broker; the native network request retains its WebKit profile, cookies, POST body,
+and blob ownership. No URL is replayed through a separate HTTP client. At most
+eight transfers run; an accepted transfer survives source-tab closure. Destination
+panels share the main-thread upload reservation. Pending decisions are bound to
+the initiating view, navigation activity, intended presentation and key window.
+A direct attachment response may arrive before a document commit; that download
+intent does not grant permission to reveal page content.
+
+Rust owns transfer state, bounded profile history and native paths. The trusted
+UI receives typed metadata and issues ID-scoped actions. Private-profile records
+remain in memory. Default behavior asks for a destination; a native directory
+selection records its filesystem identity before automatic saves are permitted.
+Same-volume private staging is journaled before native bytes are admitted.
+Publication applies and checks quarantine, synchronizes the file, and uses an
+exclusive rename with collision suffixes. Open/Reveal verify the recorded file
+identity; interrupted staging cleanup requires the original directory receipt
+and removes only the fixed payload and empty staging directory. Shutdown and
+profile erasure drain native cancellation, filesystem work and Store replies.
+Recovery marks abandoned transfers Interrupted; it does not claim resumability.
+Quarantine is OS provenance, not malware scanning. Qualification and remaining
+platform work are recorded in [file workflows](file-workflows-progress.md).
 
 **Profiles and storage.** Persistent profiles use distinct native engine data
 partitions: profile paths/contexts on Windows and Linux and named WKWebsiteDataStore
@@ -1519,8 +1567,8 @@ The following are roadmap items or disabled backends, not current security guara
 - release-enabled page permission prompts or native enforcement of remembered
   per-origin grants (the bounded coordinator is built but the desktop feature gate is
   disabled pending live WKWebView and packaged-build evidence);
-- downloads, safe filenames, destination mediation, quarantine/MOTW, or download
-  scanning;
+- Windows/Linux download adapters, Windows Mark-of-the-Web, download scanning,
+  and automatic transfer resumption;
 - extension installation, extension API mediation, or Chrome/Firefox extension
   compatibility;
 - continuously maintained online blocker sources or full EasyList semantics: the usable
@@ -1562,8 +1610,9 @@ risk. The recurring engine-floor, advisory, and fork-review procedure is defined
    local storage, WebSQL where present, HTTP authentication state, and engine caches for
    persistent and incognito profiles. Inject crashes and ambiguous storage outcomes at
    every authorization, native-proof, filesystem, and journal-finalization boundary.
-4. Keep downloads, permission grants, extensions, and product-level content blocking
-   disabled until their brokers are complete and adversarially tested. Blocker enablement
+4. Keep unsupported download adapters, permission grants, extensions, and
+   product-level content blocking disabled until their brokers are complete and
+   adversarially tested. Qualify the macOS file broker on signed release artifacts. Blocker enablement
    additionally requires provisioning and exercising the production trust domain and exact
    licensed list package, plus the packaged cross-platform enforcement, external-review,
    and endurance gates in `docs/adblock.md`.

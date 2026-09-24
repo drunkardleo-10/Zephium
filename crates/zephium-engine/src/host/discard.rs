@@ -150,10 +150,10 @@ impl EngineHost {
         ) {
             return;
         }
-        // Raw-content downloads are denied at construction (and per-context
-        // before load on GTK), so there is no admitted active download state
-        // to query here. That remains a mandatory invariant until a broker
-        // supplies an explicit download lease.
+        // Admitted macOS downloads belong to the profile coordinator and
+        // retain their WKDownload/delegate independently of this view. Pending
+        // destination decisions remain view-bound and are revoked on teardown.
+        // Windows/Linux continue denying downloads at their native boundary.
         permit.emit(
             &self.sink,
             EngineEvent::DiscardSafety {

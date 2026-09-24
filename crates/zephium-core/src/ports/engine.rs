@@ -514,6 +514,20 @@ pub enum StageMotion {
 }
 
 pub trait Engine {
+    /// Browser-owned file actions. Only trusted Shell admission supplies the
+    /// profile partition; the caller supplies IDs, never filesystem paths.
+    fn download_call(
+        &self,
+        _partition: Partition,
+        _call: crate::downloads::DownloadCall,
+        done: crate::downloads::DownloadCompletion,
+    ) -> bool {
+        done.finish(crate::downloads::DownloadResponse::Error {
+            error: crate::downloads::DownloadError::Unsupported,
+        });
+        true
+    }
+
     /// Schedules creation on the native UI thread. `false` means the request
     /// was not admitted at all, so the shell must roll back its live-view bit.
     fn create_view(&self, id: ItemId, partition: Partition, url: &str, bounds: Rect) -> bool;

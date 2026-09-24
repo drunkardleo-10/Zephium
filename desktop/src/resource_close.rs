@@ -24,10 +24,10 @@ pub(super) fn touch(label: &str) {
 }
 impl Gate {
     fn complete(&mut self, label: &str, token: &str, success: bool) -> bool {
-        if !self
+        if self
             .pending
             .get(label)
-            .is_some_and(|(expected, _)| expected == token)
+            .is_none_or(|(expected, _)| expected != token)
         {
             return false;
         }
