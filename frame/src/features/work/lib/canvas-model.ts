@@ -17,7 +17,10 @@ type CanvasKind =
   | "folder"
   | "link"
   | "page"
-  | "agent";
+  | "agent"
+  | "findings"
+  | "file"
+  | "command";
 type RelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
 /** Display values only; deliberately independent from the generated Work wire contract. */
 export type CanvasItem = {
@@ -39,6 +42,32 @@ export type CanvasItem = {
   /** What the run established about a subject, price first. */
   facts?: { label: string; value: string }[];
   finding?: FindingView;
+  /** One findings artifact folded into one card: its claims, most confident first. */
+  findings?: {
+    items: {
+      claim: string;
+      confidence: FindingView["confidence"];
+      subject?: string;
+      evidence: number;
+    }[];
+    total: number;
+  };
+  /** A file the run touched, one card per distinct path per run. */
+  file?: {
+    name: string;
+    folder: string;
+    what: "read" | "searched" | "changed" | "created";
+    delta?: { plus: number; minus: number };
+  };
+  /** A command the run executed; the tail is its last output lines. */
+  command?: {
+    line: string;
+    state: "running" | "exit";
+    exit?: number;
+    elapsed_ms?: number;
+    tail: string[];
+    reason?: string;
+  };
   /** Transient agent presence: avatar seed, status, and its latest line. */
   agent?: { seed: number; activity: string; objective: string; line?: string; worker?: boolean };
   /** The pages one fetch stage cited; opening a row goes through the pane. */
