@@ -144,8 +144,11 @@ impl AgentProviderActionAuthority {
         &self,
         observation: &SemanticObservation,
     ) -> Option<impl Iterator<Item = (SemanticReferenceId, SemanticOperations)> + '_> {
-        self.matches(observation)
-            .then(|| self.entries.iter().map(|entry| (entry.reference, entry.operations)))
+        self.matches(observation).then(|| {
+            self.entries
+                .iter()
+                .map(|entry| (entry.reference, entry.operations))
+        })
     }
 
     fn matches(&self, observation: &SemanticObservation) -> bool {
@@ -424,44 +427,6 @@ impl AgentProviderActionTargets {
     #[cfg(test)]
     pub(super) fn exclusion_count(&self) -> usize {
         self.exclusions.len()
-    }
-
-    #[cfg(test)]
-    pub(super) fn for_test(
-        observation: u64,
-        generation: u64,
-        entries: &[(u16, &[crate::SemanticOperationClass])],
-    ) -> Self {
-        Self {
-            observation: SemanticObservationId::new(observation).expect("observation"),
-            generation: SemanticObservationGeneration::new(generation).expect("generation"),
-            guard: [0; 32],
-            entries: entries
-                .iter()
-                .map(|(reference, operations)| AgentProviderActionTarget {
-                    reference: SemanticReferenceId::new(*reference).expect("reference"),
-                    operations: SemanticOperations::try_new(operations).expect("operations"),
-                    reveal_only: operations.contains(&crate::SemanticOperationClass::Click),
-                })
-                .collect(),
-            exclusions: Vec::new(),
-            host_projected: false,
-            required_effect: None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn exclude_for_test(
-        &mut self,
-        kind: SemanticActionKind,
-        target: u16,
-        error: SemanticActionBindingError,
-    ) {
-        self.exclusions.push(AgentProviderActionExclusion {
-            kind,
-            target: SemanticReferenceId::new(target).expect("reference"),
-            error,
-        });
     }
 }
 
@@ -2403,6 +2368,45 @@ impl fmt::Debug for AgentProviderBoundScreenshotContinuation {
 
 #[cfg(test)]
 mod tests {
+    // Fixture constructors live with the tests so production stays panic-free.
+    impl super::AgentProviderActionTargets {
+        pub(in crate::agent_provider) fn for_test(
+            observation: u64,
+            generation: u64,
+            entries: &[(u16, &[crate::SemanticOperationClass])],
+        ) -> Self {
+            Self {
+                observation: SemanticObservationId::new(observation).expect("observation"),
+                generation: SemanticObservationGeneration::new(generation).expect("generation"),
+                guard: [0; 32],
+                entries: entries
+                    .iter()
+                    .map(|(reference, operations)| AgentProviderActionTarget {
+                        reference: SemanticReferenceId::new(*reference).expect("reference"),
+                        operations: SemanticOperations::try_new(operations).expect("operations"),
+                        reveal_only: operations.contains(&crate::SemanticOperationClass::Click),
+                    })
+                    .collect(),
+                exclusions: Vec::new(),
+                host_projected: false,
+                required_effect: None,
+            }
+        }
+
+        pub(in crate::agent_provider) fn exclude_for_test(
+            &mut self,
+            kind: SemanticActionKind,
+            target: u16,
+            error: SemanticActionBindingError,
+        ) {
+            self.exclusions.push(AgentProviderActionExclusion {
+                kind,
+                target: SemanticReferenceId::new(target).expect("reference"),
+                error,
+            });
+        }
+    }
+
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine as _;
     use serde_json::json;
