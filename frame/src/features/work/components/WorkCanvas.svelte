@@ -1,6 +1,6 @@
 <script lang="ts">
   import "@xyflow/svelte/dist/base.css";
-  import { SvelteFlow, Background, type Edge } from "@xyflow/svelte";
+  import { SvelteFlow, Background, type Edge, type useSvelteFlow } from "@xyflow/svelte";
   import { untrack, setContext, tick } from "svelte";
   import {
     canvasInspection,
@@ -18,6 +18,7 @@
   import AreaNode from "./AreaNode.svelte";
   import ClusterNode from "./ClusterNode.svelte";
   import CanvasControls from "./CanvasControls.svelte";
+  import CanvasFlowHandle from "./CanvasFlowHandle.svelte";
   import {
     reconcileNodes,
     applyRemoteView,
@@ -31,6 +32,7 @@
     validViewport,
     withClusters,
     edgeClass,
+    defaultSize,
     type CanvasArea,
     type CanvasCluster,
     type CanvasItem,
@@ -39,6 +41,7 @@
     type CanvasSize,
     type CanvasView,
     type WorkNode,
+    type WorkItemNode,
   } from "../lib/canvas-model";
   import * as m from "$shared/i18n/messages";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
@@ -54,6 +57,7 @@
     authoritative,
     fitBottomInset = 0,
     fitTopInset = 0,
+    still = false,
     virtualizeFrom = 24,
     oninspect,
     onopen,
@@ -79,6 +83,8 @@
     authoritative: ReadonlySet<string>;
     fitBottomInset?: number;
     fitTopInset?: number;
+    /** A lift, the pane or the takeover is open: the camera does not follow the agent. */
+    still?: boolean;
     virtualizeFrom?: number;
     oninspect: (id: string) => void;
     onopen?: (id: string) => void;
@@ -304,6 +310,8 @@
     selectionBounds: () => (CanvasPosition & CanvasSize & { ids: string[] }) | null;
     center: (id: string) => void;
     focusCard: (id: string) => void;
+    followAgent: () => boolean;
+    resumeFollow: () => void;
   };
   function selectionBounds() {
     const ids = selection.filter((id) => nodes.some((node) => node.id === id && isItemNode(node)));
@@ -347,6 +355,93 @@
       selectionBounds,
       center,
       focusCard: (id: string) => void focusCard(id),
+      followAgent: () => following,
+      resumeFollow,
+    });
+  });
+
+  // Camera follow. While a run is live and its agent walks to a stand out of
+  // sight, the view pans (never zooms) so the agent lands in the lower-right
+  // third. A manual pan, zoom or drag pauses it until a new stage or a new run.
+  const FOLLOW_MS = 420;
+  const FOLLOW_AIR = 24;
+  let flow: ReturnType<typeof useSvelteFlow> | undefined;
+  let following = $state(true);
+  let fitted = false;
+  let stands: Record<string, string> = {};
+  const requests: Record<string, true> = {};
+  function resumeFollow() {
+    following = true;
+  }
+  /** `--ease-smooth`, cubic-bezier(0.2, 0.8, 0.2, 1), as a function of time. */
+  function easeSmooth(t: number): number {
+    const bezier = (a: number, b: number, u: number) =>
+      3 * a * u * (1 - u) ** 2 + 3 * b * u ** 2 * (1 - u) + u ** 3;
+    let low = 0;
+    let high = 1;
+    for (let step = 0; step < 24; step++) {
+      const mid = (low + high) / 2;
+      if (bezier(0.2, 0.2, mid) < t) low = mid;
+      else high = mid;
+    }
+    return bezier(0.8, 1, (low + high) / 2);
+  }
+  function followTo(position: CanvasPosition, size: CanvasSize) {
+    const zoom = viewport.zoom;
+    const top = fitTopInset;
+    const bottom = canvasHeight - fitBottomInset;
+    const width = canvasWidth;
+    const air = FOLLOW_AIR * zoom;
+    const box = {
+      left: position.x * zoom + viewport.x - air,
+      top: position.y * zoom + viewport.y - air,
+      right: (position.x + size.width) * zoom + viewport.x + air,
+      bottom: (position.y + size.height) * zoom + viewport.y + air,
+    };
+    if (box.left >= 0 && box.top >= top && box.right <= width && box.bottom <= bottom) return;
+    const w = size.width * zoom;
+    const h = size.height * zoom;
+    const clamp = (value: number, min: number, max: number) =>
+      Math.max(min, Math.min(value, Math.max(min, max)));
+    const x = clamp((width * 5) / 6 - w / 2, air, width - air - w);
+    const y = clamp(top + ((bottom - top) * 5) / 6 - h / 2, top + air, bottom - air - h);
+    const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    void flow?.setViewport(
+      { x: x - position.x * zoom, y: y - position.y * zoom, zoom },
+      { duration: reduced ? 0 : FOLLOW_MS, ease: easeSmooth, interpolate: "linear" },
+    );
+  }
+  $effect(() => {
+    const agents = nodes.filter(
+      (node): node is WorkItemNode => isItemNode(node) && !!node.data.agent,
+    );
+    const cards = scene.items.flatMap((item) =>
+      item.type === "request" || item.type === "objective" ? [item.id] : [],
+    );
+    const paused = still;
+    untrack(() => {
+      // A new stage's request card, or the end of a run, resumes following.
+      const seeded = Object.keys(requests).length > 0;
+      for (const id of cards)
+        if (!requests[id]) {
+          requests[id] = true;
+          if (seeded) following = true;
+        }
+      if (!agents.length && Object.keys(stands).length) {
+        stands = {};
+        following = true;
+      }
+      for (const node of agents) {
+        const position = absolutePosition(node, nodes);
+        const key = `${position.x},${position.y}`;
+        const moved = stands[node.id] !== key;
+        stands[node.id] = key;
+        if (!moved || !fitted || !following || paused || node.dragging) continue;
+        followTo(position, {
+          width: node.width ?? defaultSize(node.data).width,
+          height: node.height ?? defaultSize(node.data).height,
+        });
+      }
     });
   });
   let lastClick = { id: "", at: 0 };
@@ -429,7 +524,13 @@
         if (area !== current) onareachange?.(node.id, area);
       }}
       onmoveend={publishView}
+      oninit={() => requestAnimationFrame(() => requestAnimationFrame(() => (fitted = true)))}
+      onmovestart={(event) => {
+        if (event) following = false;
+      }}
+      onnodedragstart={() => (following = false)}
     >
+      <CanvasFlowHandle onready={(handle) => (flow = handle)} />
       <Background patternColor="var(--work-canvas-dot)" gap={20} size={1.5} />
       <CanvasControls bottomInset={fitBottomInset} />
     </SvelteFlow>
@@ -535,6 +636,13 @@
   /* stylelint-disable-next-line selector-class-pattern */
   .work-canvas :global(.svelte-flow__node.agent-node) {
     transition: transform 700ms var(--ease-smooth);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    /* stylelint-disable-next-line selector-class-pattern */
+    .work-canvas :global(.svelte-flow__node.agent-node) {
+      transition: none;
+    }
   }
 
   .work-canvas :global(.work-edge.kind-working) {

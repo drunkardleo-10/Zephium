@@ -1932,6 +1932,7 @@
               {authoritative}
               expose={(api) => (canvasRef = api)}
               fitBottomInset={composerHeight}
+              still={!!lifted || !!pane || !!takeover}
               oninspect={(id: string) => (inspected = id)}
               onopen={openLift}
               onopenlink={openCitation}
