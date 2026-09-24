@@ -75,7 +75,7 @@ test("compact objective inspection joins historical plans and keeps exact result
   });
   await screen.getByRole("button", { name: "Dependency findings", exact: true }).click();
   await expect.element(screen.getByText("Reviewed findings", { exact: true })).toBeVisible();
-  await screen.getByRole("button", { name: "Source 1", exact: true }).click();
+  await screen.getByRole("button", { name: "Page", exact: true }).click();
   await expect.element(screen.getByText("Original provider title", { exact: true })).toBeVisible();
   expect(readEvidence).toHaveBeenCalledExactlyOnceWith(link);
   expect(onopencitation).not.toHaveBeenCalled();

@@ -172,12 +172,15 @@ function content(data: WorkArtifactDataV1, refs: Refs): ArtifactContent {
   }
 }
 
-/** Recognizable source labels from provider citations; falls back to numbering. */
+/**
+ * Recognizable source labels: the citation's title, else its site, else what
+ * kind of source it is. Never a number: "Source 10" tells a person nothing.
+ */
 function evidenceReferences(
   links: readonly WorkEvidenceLink[],
   execution: WorkExecutionFact,
 ): EvidenceReference[] {
-  return links.map((link, index) => {
+  return links.map((link) => {
     const key = `${link.extraction_id}:${link.source_id}`;
     const record = execution.provider_evidence?.find((record) => record.id === link.extraction_id);
     const citation = record?.evidence.citations[link.source_id - 1];
@@ -194,7 +197,7 @@ function evidenceReferences(
           };
     return {
       key,
-      label: citation?.title?.trim() || origin || m.work_source_number({ number: index + 1 }),
+      label: citation?.title?.trim() || origin || m.work_env_page(),
       ...(origin ? { origin } : {}),
       ...(citation?.url ? { url: citation.url } : {}),
     };

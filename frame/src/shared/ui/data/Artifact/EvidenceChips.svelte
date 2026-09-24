@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { EvidenceReference } from "./artifact";
+  import HostGlyph from "./HostGlyph.svelte";
   let {
     references,
     compact = false,
@@ -9,6 +10,9 @@
     compact?: boolean;
     onevidence?: (reference: EvidenceReference) => void;
   } = $props();
+  /** A chip names where it came from: the site, or the file by its name. */
+  const name = (reference: EvidenceReference) =>
+    reference.file ? reference.label : reference.origin || reference.label;
 </script>
 
 {#if references.length}
@@ -21,7 +25,12 @@
         title={reference.label}
         onclick={() => onevidence?.(reference)}
       >
-        {#if compact}{reference.origin || reference.label}{:else}{reference.label}{/if}
+        <HostGlyph
+          host={reference.origin || reference.label}
+          file={!!reference.file}
+          size={compact ? 12 : 14}
+        />
+        <span class="name">{name(reference)}</span>
       </button>
     {/each}
   </span>
@@ -35,8 +44,11 @@
   }
 
   .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     max-inline-size: 180px;
-    padding: 2px 8px;
+    padding: 1px 8px 1px 2px;
     border: 0;
     border-radius: var(--radius-capsule);
     background: var(--color-fill);
@@ -44,17 +56,20 @@
     font: inherit;
     font-size: var(--text-caption);
     line-height: 14px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
     cursor: default;
     transition: background-color var(--motion-fast) var(--ease-smooth);
   }
 
+  .name {
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .compact .chip {
-    max-inline-size: 120px;
-    padding: 1px 6px;
-    font-size: 10px;
+    max-inline-size: 132px;
+    padding: 1px 6px 1px 2px;
   }
 
   .chip:disabled {
