@@ -753,7 +753,7 @@ impl AgentProviderDecisionInputStats {
             questions,
         }
     }
-    /// Serialized state bytes, excluding question rubrics and HTTP envelope.
+    /// Encoded state bytes, excluding question rubrics and HTTP envelope.
     pub const fn bytes(self) -> u32 {
         self.bytes
     }

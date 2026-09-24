@@ -1019,16 +1019,15 @@ impl OpenAiResponsesStreamDecoder {
         .map_err(|error| {
             #[cfg(feature = "probe-harness")]
             if let Some(arguments) = retained_arguments {
-                let _ = std::fs::create_dir_all("target/work-runtime-proof");
                 let body = serde_json::json!({
                     "tool": tool.name.as_str(),
                     "arguments": arguments,
                     "error": format!("{error:?}"),
                 });
                 if let Ok(bytes) = serde_json::to_vec(&body) {
-                    let _ = std::fs::write(
-                        "target/work-runtime-proof/refused-browser-tool.json",
-                        bytes,
+                    crate::probe_evidence_path::write_runtime_proof(
+                        "refused-browser-tool.json",
+                        &bytes,
                     );
                 }
             }

@@ -254,7 +254,7 @@ pub enum MacosAgentProviderCredentialError {
 #[cfg(target_os = "macos")]
 pub fn load_macos_development_openai_credential(
 ) -> Result<AgentProviderCredential, MacosAgentProviderCredentialError> {
-    load_macos_login_credential(
+    load_keychain_login_credential(
         AgentProviderKind::OpenAiResponses,
         MACOS_OPENAI_KEYCHAIN_SERVICE,
         MACOS_OPENAI_KEYCHAIN_ACCOUNT,
@@ -273,7 +273,7 @@ pub const MACOS_TYPESAFE_KEYCHAIN_ACCOUNT: &str = "development";
 pub fn load_macos_development_typesafe_credential(
 ) -> Result<AgentProviderCredential<DecisionCredentialProvider>, MacosAgentProviderCredentialError>
 {
-    load_macos_login_credential(
+    load_keychain_login_credential(
         DecisionCredentialProvider::TypeSafe,
         MACOS_TYPESAFE_KEYCHAIN_SERVICE,
         MACOS_TYPESAFE_KEYCHAIN_ACCOUNT,
@@ -281,7 +281,7 @@ pub fn load_macos_development_typesafe_credential(
 }
 
 #[cfg(target_os = "macos")]
-fn load_macos_login_credential<P: AgentCredentialBinding>(
+fn load_keychain_login_credential<P: AgentCredentialBinding>(
     provider: P,
     service: &'static str,
     account: &'static str,
