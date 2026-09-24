@@ -134,9 +134,9 @@
     "description": "Measured 328183 JS bytes with the agent run operation, step labels, and the agent line on the canvas card in the shared graph. Media record revisions for context selection add 0.1 KB (330153 measured)."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 591800,
-    "css": 132500,
-    "description": "Cards add 14.3 KB JS and 8.2 KB CSS (568279 and 127517 measured on b1628da5): the Findings, File and Command cards, one card frame, and the card mode of every result renderer. Derived cluster nodes, latent relation edges and the path draw-in add 3.0 KB JS and 0.9 KB CSS (571252 and 128409 measured together). The camera following the agent adds 1.6 KB JS (572888 measured). Selection, the marquee, the arrange bar and area fit, rename and remove add 17.7 KB JS and 3.6 KB CSS (590564 and 132017 measured). The link card's Play here button adds 0.2 KB JS and 0.3 KB CSS (591458 and 132341 measured)."
+    "js": 604800,
+    "css": 134900,
+    "description": "Cards add 14.3 KB JS and 8.2 KB CSS (568279 and 127517 measured on b1628da5): the Findings, File and Command cards, one card frame, and the card mode of every result renderer. Derived cluster nodes, latent relation edges and the path draw-in add 3.0 KB JS and 0.9 KB CSS (571252 and 128409 measured together). The camera following the agent adds 1.6 KB JS (572888 measured). Selection, the marquee, the arrange bar and area fit, rename and remove add 17.7 KB JS and 3.6 KB CSS (590564 and 132017 measured). The link card's Play here button adds 0.2 KB JS and 0.3 KB CSS (591458 and 132341 measured). Cards sized to what they say, plan steps as cards with their glyphs, whole subject facts, compare checks and best-value dots, and request-to-request thread handles add 11.8 KB JS and 2.0 KB CSS (603288 and 134373 measured)."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
     "js": 70000,
@@ -144,9 +144,9 @@
     "description": "Measured 65242 JS and 2553 CSS bytes: a hand-written SVG plot with no chart library."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 598000,
+    "js": 608100,
     "css": 113000,
-    "description": "Measured 588440 JS and 110023 CSS bytes: the agent stands beside what it acts on; one stage layout places the run's cards and the projected ones in clusters, with the Work cluster's file and command cards; subject pictures admit through a per-canvas queue with fallback and one retry. Selection bar and area actions add 1.1 KB JS (589516 measured). One lift header for every kind, the folded pages under Sources, video thumbnails through the picture queue and Play here over the card add 4.6 KB JS and 0.8 KB CSS (594774 and 110792 measured). Live command cards with their policy reason, observed link titles and the command lift add 2.8 KB JS (597603 measured)."
+    "description": "Measured 588440 JS and 110023 CSS bytes: the agent stands beside what it acts on; one stage layout places the run's cards and the projected ones in clusters, with the Work cluster's file and command cards; subject pictures admit through a per-canvas queue with fallback and one retry. Selection bar and area actions add 1.1 KB JS (589516 measured). One lift header for every kind, the folded pages under Sources, video thumbnails through the picture queue and Play here over the card add 4.6 KB JS and 0.8 KB CSS (594774 and 110792 measured). Live command cards with their policy reason, observed link titles and the command lift add 2.8 KB JS (597603 measured). Content sizing in the stage layout, the Plan cluster and step projection, and the plain-word takeover add 9.5 KB JS (607106 measured)."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 114800,
@@ -174,9 +174,9 @@
     "description": "Measured 64732 JS and 5077 CSS bytes: one file record or proposed change, opened from the lift."
   },
   "lazy:features/work/components/WorkResultInspector.svelte": {
-    "js": 158400,
+    "js": 160400,
     "css": 25000,
-    "description": "Measured 147677 JS and 22233 CSS bytes: the lift renders the result itself, the quiet per-cell correction and the one Accept the review state needs; the card mode of the result renderers, source glyphs on chips, and bars for numeric compare rows add 6.6 KB. Reading mode, the lift header and the collapsed sources rail add 9.3 KB JS and 2.5 KB CSS (158031 and 24772 measured)."
+    "description": "Measured 147677 JS and 22233 CSS bytes: the lift renders the result itself, the quiet per-cell correction and the one Accept the review state needs; the card mode of the result renderers, source glyphs on chips, and bars for numeric compare rows add 6.6 KB. Reading mode, the lift header and the collapsed sources rail add 9.3 KB JS and 2.5 KB CSS (158031 and 24772 measured). Compare check rows and best-value dots add 1.4 KB JS (159821 measured)."
   },
   "lazy:features/notes/components/NoteEditorHost.svelte": {
     "js": 96000,
@@ -184,9 +184,9 @@
     "description": "Single-note editor host for the Work lift; shares the Notes editor graph."
   },
   "lazy:features/work/components/WorkSubjectInspector.svelte": {
-    "js": 117700,
+    "js": 119300,
     "css": 9400,
-    "description": "Measured 107031 JS and 7994 CSS bytes: the product view of one subject, its admitted pictures, facts with sources, and the pages behind them. The lift header and the sources rail add 7.2 KB JS and 1.1 KB CSS (117296 and 9141 measured)."
+    "description": "Measured 107031 JS and 7994 CSS bytes: the product view of one subject, its admitted pictures, facts with sources, and the pages behind them. The lift header and the sources rail add 7.2 KB JS and 1.1 KB CSS (117296 and 9141 measured). Sentence-case fact labels and compare best values add 1.1 KB JS (118845 measured)."
   },
   "lazy:features/work/components/pane/TakeoverPane.svelte": {
     "js": 73000,
