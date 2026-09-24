@@ -22,7 +22,7 @@ impl Error for PublicSearchModelCatalogError {}
 
 /// Builds the explicitly requested search profile using reviewed catalog rates.
 /// The adapter applies the profile-specific search content charge and tool fee.
-/// Source: https://developers.openai.com/api/docs/models/gpt-4.1-mini
+/// Rates: OpenAI gpt-4.1-mini model documentation, catalog revision 20260913.
 pub fn try_public_search_provider_exact_call_config(
     requested_model: &str,
     max_output_tokens: u32,
