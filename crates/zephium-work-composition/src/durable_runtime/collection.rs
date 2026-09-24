@@ -323,6 +323,13 @@ impl WorkBrowseCollectionSchema {
             else {
                 return Err(WorkError::Invalid);
             };
+            // One name is one subject: a repeated card keeps its first row.
+            if subjects
+                .iter()
+                .any(|subject: &WorkSubject| subject.name.trim() == name.trim())
+            {
+                continue;
+            }
             let name_evidence = cite(sources)?;
             subjects.push(WorkSubject {
                 name: name.clone(),
@@ -794,5 +801,52 @@ mod tests {
         assert!(schema
             .comparison(&rows, &mut |_| Err(WorkError::Invalid))
             .is_err());
+    }
+
+    #[test]
+    fn repeated_names_keep_their_first_row_as_one_subject() {
+        // Recorded shape: Airbnb's monthly stays page read four rows under one
+        // repeated name, and the duplicate subjects refused the whole matrix.
+        let schema = WorkBrowseCollectionSchema::try_new(
+            "Observed stays".into(),
+            vec![
+                SemanticExtractionFieldSchema::try_text("name".into(), true, 256).unwrap(),
+                SemanticExtractionFieldSchema::try_text("displayed_price".into(), false, 128)
+                    .unwrap(),
+            ],
+            4,
+        )
+        .unwrap();
+        let row = |name: &str, first: u16, price: &str| {
+            serde_json::json!([
+                {"name":"name","value":{"kind":"text","value":name,"sources":[first]}},
+                {"name":"displayed_price","value":{"kind":"text","value":price,"sources":[first + 1]}}
+            ])
+        };
+        let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([
+            row("Monthly stay", 1, "$2,100"),
+            row(" Monthly stay", 3, "$2,300"),
+            row("Studio", 5, "$1,900"),
+            row("Monthly stay", 7, "$2,500"),
+        ]))
+        .unwrap();
+        let mut cited = Vec::new();
+        let data = schema
+            .comparison(&rows, &mut |ids| {
+                cited.extend_from_slice(ids);
+                Ok(ids.iter().map(|id| id - 1).collect())
+            })
+            .unwrap();
+        data.validate(8).unwrap();
+        let WorkArtifactDataV1::ComparisonMatrix {
+            subjects, cells, ..
+        } = data
+        else {
+            panic!()
+        };
+        let names: Vec<_> = subjects.iter().map(|subject| subject.name.as_str()).collect();
+        assert_eq!(names, ["Monthly stay", "Studio"]);
+        assert!(matches!(&cells[0][0].value, WorkCellValue::Text { text } if text == "$2,100"));
+        assert_eq!(cited, [1, 2, 5, 6]);
     }
 }
