@@ -1,5 +1,5 @@
 <script lang="ts">
-  import ComputerTerminal01Icon from "@hugeicons/core-free-icons/ComputerTerminal01Icon";
+  import { ComputerTerminal01Icon } from "../../lib/icons";
   import CardFrame from "./CardFrame.svelte";
   import type { CanvasItem } from "../../lib/canvas-model";
   import * as m from "$shared/i18n/messages";

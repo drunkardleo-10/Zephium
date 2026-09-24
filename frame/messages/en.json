@@ -798,7 +798,6 @@
   "work_accepted": "Accepted by you",
   "work_rejected": "Rejected by you",
   "work_review_required": "You review this",
-  "work_source_number": "Source {number}",
   "work_child_agent": "Child agent",
   "work_plan_node": "Responsibility",
   "work_not_started": "Not started",

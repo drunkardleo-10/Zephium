@@ -1,7 +1,6 @@
 <script lang="ts">
-  import SourceCodeIcon from "@hugeicons/core-free-icons/SourceCodeIcon";
   import CardFrame from "./CardFrame.svelte";
-  import { Doc01Icon, File01Icon, Image01Icon } from "../../lib/icons";
+  import { Doc01Icon, File01Icon, Image01Icon, SourceCodeIcon } from "../../lib/icons";
   import { homePath } from "../../lib/work-files";
   import type { CanvasItem } from "../../lib/canvas-model";
   import * as m from "$shared/i18n/messages";
