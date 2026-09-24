@@ -1083,8 +1083,6 @@
   "work_account_update_invalid": "Enter the current value and a different temporary value before sending.",
   "work_activity_searching": "Searching the web",
   "work_env_status_done": "Done",
-  "work_env_worker": "Worker",
-  "work_env_browsing": "Browsing the web",
   "work_context_kind_source": "Source",
   "work_env_choose": "Choose",
   "work_env_unchoose": "Unchoose",

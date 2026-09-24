@@ -2,7 +2,22 @@
   import AgentAvatar from "./AgentAvatar.svelte";
   import type { CanvasItem } from "../../lib/canvas-model";
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
-  const active = $derived(!!item.agent && item.agent.activity !== "");
+  /** The canvas moves the capsule over 700 ms; while it walks nothing else on it moves. */
+  const WALK_MS = 700;
+  let walking = $state(false);
+  let from = "";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const stand = JSON.stringify(item.agent?.stand ?? null);
+    const moved = from !== "" && stand !== from;
+    from = stand;
+    if (!moved) return;
+    walking = true;
+    clearTimeout(timer);
+    timer = setTimeout(() => (walking = false), WALK_MS);
+  });
+  $effect(() => () => clearTimeout(timer));
+  const active = $derived(!!item.agent && item.agent.activity !== "" && !walking);
 </script>
 
 <article class="agent" class:selected>

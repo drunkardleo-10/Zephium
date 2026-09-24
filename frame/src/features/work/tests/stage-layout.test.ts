@@ -41,7 +41,9 @@ test("a stage reads left to right in grids, and the next request clears its tall
   ]);
   // Three rows of pages are the tallest cluster.
   expect(layout.extent).toBe(3 * 168 + 2 * 20);
-  expect(stageStand(layout)).toEqual({ x: result + 420 + 16, y: 0 });
+  expect(
+    stageStand(layout, { request, at: ["results"], size: { width: 260, height: 84 } }),
+  ).toEqual({ x: result + 420 + 16, y: 0 });
 
   const next = { x: 0, y: layout.extent + STAGE_GAP, ...SIZES.request };
   const second = stageLayout(next, { pages: { members: cards("later", 1, SIZES.page) } });
@@ -78,4 +80,22 @@ test("saved cards keep their place, and a cluster narrows rather than grow into 
   ]);
   expect(layout.positions.kept).toEqual({ x: 700, y: 0 });
   expect(layout.positions.new).toEqual({ x: 940, y: 0 });
+});
+
+test("the agent's stand steps down past a cluster it would cover, never onto a card", () => {
+  const layout = stageLayout(request, {
+    sources: { members: cards("sources", 1, SIZES.sources) },
+    pages: { members: cards("page", 2, SIZES.page) },
+  });
+  const size = { width: 260, height: 104 };
+  // Right of Sources the capsule would sit on the pages; one row of them is shorter to clear.
+  const stand = stageStand(layout, { request, at: ["sources"], size });
+  expect(stand).toEqual({ x: 348 + 300 + 16, y: 168 + 16 });
+  for (const box of [request, ...layout.clusters.map((cluster) => cluster.box)])
+    expect(
+      stand.x < box.x + box.width &&
+        box.x < stand.x + size.width &&
+        stand.y < box.y + box.height &&
+        box.y < stand.y + size.height,
+    ).toBe(false);
 });

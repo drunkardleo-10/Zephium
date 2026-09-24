@@ -43,3 +43,19 @@ export const FILE_STEPS = ["list", "read_file", "search_files", "write_file", "e
 export function isAgentExecution(execution: WorkExecutionFact): boolean {
   return execution.spec.nodes.some((node) => node.capability.kind === "agent");
 }
+
+/** What the agent acts on now, from the steps it is running; the canvas stands it there. */
+export type AgentDoing = "thinking" | "searching" | "reading" | "working" | "writing" | "done";
+export function agentDoing(execution: WorkExecutionFact): AgentDoing {
+  const steps = execution.steps ?? [];
+  if (steps.some((step) => step.kind.kind === "finish" && step.status === "succeeded"))
+    return "done";
+  const running = new Set<string>(
+    steps.flatMap((step) => (step.status === "running" ? [step.kind.kind] : [])),
+  );
+  if (running.has("publish") || running.has("finish")) return "writing";
+  if (running.has("read") || running.has("discover")) return "reading";
+  if (running.has("run_command") || FILE_STEPS.some((kind) => running.has(kind))) return "working";
+  if (running.has("search")) return "searching";
+  return "thinking";
+}

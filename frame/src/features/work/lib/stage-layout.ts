@@ -115,8 +115,42 @@ export function stageLayout(stage: Placement, contents: StageContents): StageLay
   return { clusters, positions, extent };
 }
 
-/** Where the agent waits: right of the stage's newest cluster, level with its top. */
-export function stageStand(layout: StageLayout): CanvasPosition | undefined {
-  const box = layout.clusters.at(-1)?.box;
-  return box ? { x: box.x + box.width + STAND_GAP, y: box.y } : undefined;
+/**
+ * Where the agent waits: right of the first cluster of `at` the stage has, level
+ * with its top, else right of the request. A stand that would cover a card
+ * steps right or down past it, whichever moves it less, until it is clear.
+ */
+export function stageStand(
+  layout: StageLayout,
+  {
+    request,
+    at = [],
+    size,
+    avoid = [],
+  }: {
+    request: Placement;
+    at?: readonly ClusterKind[];
+    size: CanvasSize;
+    /** Other stages' boxes the stand keeps off as well. */
+    avoid?: readonly Placement[];
+  },
+): CanvasPosition {
+  const anchor =
+    at.map((kind) => layout.clusters.find((cluster) => cluster.kind === kind)?.box).find(Boolean) ??
+    request;
+  const blocks = [request, ...layout.clusters.map((cluster) => cluster.box), ...avoid];
+  const stand = { x: anchor.x + anchor.width + STAND_GAP, y: anchor.y };
+  const covers = (box: Placement) =>
+    stand.x < box.x + box.width + STAND_GAP &&
+    box.x < stand.x + size.width + STAND_GAP &&
+    stand.y < box.y + box.height + STAND_GAP &&
+    box.y < stand.y + size.height + STAND_GAP;
+  // Every step moves right or down, so the walk ends past the last box.
+  for (let hit = blocks.find(covers); hit; hit = blocks.find(covers)) {
+    const right = hit.x + hit.width + STAND_GAP - stand.x;
+    const down = hit.y + hit.height + STAND_GAP - stand.y;
+    if (right <= down) stand.x += right;
+    else stand.y += down;
+  }
+  return stand;
 }

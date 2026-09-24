@@ -8,7 +8,7 @@ import type {
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
 import { activityLabel, artifactView } from "./project-work";
-import { agentLine, isAgentExecution, isLive } from "./agent-steps";
+import { agentDoing, agentLine, isAgentExecution, isLive, type AgentDoing } from "./agent-steps";
 import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
 import { firstRequest, type WorkStage } from "./project-environment-thread";
 import {
@@ -24,6 +24,7 @@ import { heldPage, humanPage, phaseLabel } from "./work-human";
 import { pageFrameUrl } from "$domain/resources";
 import {
   clipText,
+  defaultSize,
   type CanvasCluster,
   type CanvasItem,
   type CanvasLink,
@@ -389,9 +390,23 @@ export function environmentLinks(snapshot: WorkEnvironmentSnapshot): CanvasLink[
   );
 }
 
-/** Transient agent presence for objectives with live executions; never persisted.
- * The primary avatar stands beside its stage's newest cluster; a worker avatar
- * appears beside it while a native step browses. */
+/** Where the agent stands while it does each thing: the first cluster the stage has. */
+const STANDS: Record<AgentDoing, readonly ClusterKind[]> = {
+  thinking: [],
+  searching: ["sources"],
+  reading: ["pages"],
+  working: ["work"],
+  writing: ["subjects", "findings", "results"],
+  done: ["results", "findings", "subjects", "work", "pages", "sources"],
+};
+
+/**
+ * Transient agent presence for objectives with live executions; never
+ * persisted. The agent stands beside what its running steps act on: the
+ * request while it thinks, Sources while it searches, the Pages cluster while
+ * it reads, the Work cluster for files and commands, the objects it writes,
+ * and the result once it is done.
+ */
 export function environmentAgents(
   snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
@@ -414,7 +429,11 @@ export function environmentAgents(
     for (const char of projection.work.id) seed = (seed * 31 + char.charCodeAt(0)) % 9973;
     const id = `agent:${element.id}`;
     const line = agentLine(execution);
-    items.push({
+    const doing = agentDoing(execution);
+    const stage = stages.find((stage) => stage.executions.includes(execution.id));
+    const request =
+      stage?.place ?? snapshot.view.placements.find((place) => place.element === element.id);
+    const item: CanvasItem = {
       id,
       type: "agent",
       kind: m.work_env_agent(),
@@ -427,56 +446,41 @@ export function environmentAgents(
           : execution.status === "approved"
             ? m.work_env_agent_idle()
             : m.work_env_working()),
-      agent: {
-        seed,
-        activity: signal ?? "",
-        objective: projection.work.id,
-        ...(line ? { line } : {}),
-      },
-    });
-    const stage = stages.find((stage) => stage.executions.includes(execution.id));
-    const anchor =
-      stage?.place ?? snapshot.view.placements.find((place) => place.element === element.id);
-    // Until a cluster exists the agent waits under the request it serves.
-    const home = anchor ? { x: anchor.x, y: anchor.y + anchor.height + 20 } : undefined;
-    const steps = execution.steps ?? [];
-    // A cited source and a subject's picture are rows and pictures, not cards:
-    // the agent never ties itself to one.
-    const elementsOf = (artifacts: readonly string[]) =>
-      snapshot.elements.filter(
-        (candidate) =>
-          "artifact" in candidate.reference &&
-          candidate.reference.kind !== "source" &&
-          !pictures.has(candidate.id) &&
-          candidate.reference.execution === execution.id &&
-          artifacts.includes(candidate.reference.artifact),
-      );
-    // The agent acts on the objects it just placed and stands beside the
-    // stage's newest cluster.
-    const working = new Set<string>();
-    const lastPublish = [...steps].reverse().find((step) => step.kind.kind === "publish");
-    const latestTurn = Math.max(0, ...steps.map((step) => step.turn));
-    if (lastPublish && lastPublish.turn === latestTurn)
-      for (const target of elementsOf(lastPublish.artifacts ?? [])) working.add(target.id);
-    const stand = (stage && stageStand(stage.layout)) ?? home;
-    if (stand) positions[id] = stand;
-    for (const target of working)
-      links.push({ id: `working:${target}`, source: id, target, kind: "working" });
-    for (const step of steps) {
-      if (step.status !== "running" || step.kind.kind !== "discover") continue;
-      const worker = `${id}:${step.id}`;
-      items.push({
-        id: worker,
-        type: "agent",
-        kind: m.work_env_worker(),
-        title: m.work_env_worker(),
-        detail: "",
-        status: m.work_env_browsing(),
-        agent: { seed: seed + 1, activity: "reading", objective: projection.work.id, worker: true },
+      agent: { seed, activity: signal ?? "", objective: projection.work.id, doing },
+    };
+    if (line) item.agent!.line = line;
+    if (request) {
+      const stand = stageStand(stage?.layout ?? { clusters: [], positions: {}, extent: 0 }, {
+        request,
+        at: STANDS[doing],
+        size: defaultSize(item),
+        avoid: stages
+          .filter((other) => other !== stage)
+          .flatMap((other) => [
+            other.place,
+            ...other.layout.clusters.map((cluster) => cluster.box),
+          ]),
       });
-      links.push({ id: `agent-worker:${worker}`, source: id, target: worker, kind: "working" });
-      if (stand) positions[worker] = { x: stand.x, y: stand.y + 140 };
+      positions[id] = stand;
+      item.agent!.stand = stand;
     }
+    items.push(item);
+    // A cited source and a subject's picture are rows and pictures, not cards:
+    // the agent ties itself to what it just published, never to one of those.
+    const steps = execution.steps ?? [];
+    const lastPublish = steps.findLast((step) => step.kind.kind === "publish");
+    const latestTurn = Math.max(0, ...steps.map((step) => step.turn));
+    if (!lastPublish || lastPublish.turn !== latestTurn) continue;
+    const published = lastPublish.artifacts ?? [];
+    for (const target of snapshot.elements)
+      if (
+        "artifact" in target.reference &&
+        target.reference.kind !== "source" &&
+        !pictures.has(target.id) &&
+        target.reference.execution === execution.id &&
+        published.includes(target.reference.artifact)
+      )
+        links.push({ id: `working:${target.id}`, source: id, target: target.id, kind: "working" });
   }
   return { items, links, positions };
 }

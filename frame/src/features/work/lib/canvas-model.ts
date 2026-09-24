@@ -68,8 +68,15 @@ export type CanvasItem = {
     tail: string[];
     reason?: string;
   };
-  /** Transient agent presence: avatar seed, status, and its latest line. */
-  agent?: { seed: number; activity: string; objective: string; line?: string; worker?: boolean };
+  /** Transient agent presence: avatar seed, status, its latest line, and where it stands. */
+  agent?: {
+    seed: number;
+    activity: string;
+    objective: string;
+    line?: string;
+    doing?: string;
+    stand?: CanvasPosition;
+  };
   /** The pages one fetch stage cited; opening a row goes through the pane. */
   sources?: readonly {
     key: string;
@@ -221,9 +228,7 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
     case "page":
       return { width: 248, height: 168 };
     case "agent":
-      return item.agent?.worker
-        ? { width: 200, height: 64 }
-        : { width: 260, height: item.agent?.line ? 104 : 84 };
+      return { width: 260, height: item.agent?.line ? 104 : 84 };
     default:
       return { width: 280, height: 160 };
   }
