@@ -3424,6 +3424,15 @@ fn work_probe_teardown_keeps_exactly_one_success_owner_and_failure_cleanup() {
     assert!(WorkProbeTeardown::Application.host_required(false));
 }
 
+/// Probe only: a hidden host's profile gets these content rules instead of
+/// none, to compare a page with and without the release lists.
+static PROBE_CONTENT_RULES: std::sync::OnceLock<Arc<zephium_core::blocker::ContentRules>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn use_probe_content_rules(rules: Arc<zephium_core::blocker::ContentRules>) -> bool {
+    PROBE_CONTENT_RULES.set(rules).is_ok()
+}
+
 fn run_work_host(
     profile: ProfileId,
     teardown: WorkProbeTeardown,
@@ -3551,17 +3560,21 @@ fn run_work_host(
     let run_loop = NSRunLoop::currentRunLoop();
     let result = (|| {
         if !application_policy {
+            let probe_rules = PROBE_CONTENT_RULES.get().cloned();
+            let compiling = if probe_rules.is_some() { 60 } else { 5 };
             if engine.install_content_rules(
                 profile,
                 generation,
-                zephium_core::blocker::ContentRules::allow_all(
-                    zephium_core::blocker::ContentRuleDigest::from_bytes([0; 32]),
-                ),
+                probe_rules.unwrap_or_else(|| {
+                    zephium_core::blocker::ContentRules::allow_all(
+                        zephium_core::blocker::ContentRuleDigest::from_bytes([0; 32]),
+                    )
+                }),
             ) != zephium_core::ports::engine::NativeDispatch::Scheduled
             {
                 return Err("actor_profile_policy_dispatch");
             }
-            let policy_deadline = Instant::now() + Duration::from_secs(5);
+            let policy_deadline = Instant::now() + Duration::from_secs(compiling);
             while policy.load(Ordering::Acquire) == 0 && Instant::now() < policy_deadline {
                 for _ in 0..256 {
                     let Ok(operation) = receiver.try_recv() else {

@@ -314,6 +314,15 @@ pub fn run_macos_decision_observation_probe(
     platform::macos::agentic_decision_probe::run(site, capture)
 }
 
+/// Records the next decision observation under these content rules instead of none.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe", feature = "agentic-browser-qa"))]
+#[doc(hidden)]
+pub fn use_macos_decision_observation_content_rules(
+    rules: std::sync::Arc<zephium_core::blocker::ContentRules>,
+) -> bool {
+    platform::macos::agentic_decision_probe::use_content_rules(rules)
+}
+
 /// Pumps the actual production EngineHost port for an excluded public qualifier.
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
 #[doc(hidden)]

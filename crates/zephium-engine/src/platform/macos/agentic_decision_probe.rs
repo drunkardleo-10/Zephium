@@ -30,6 +30,10 @@ pub enum DecisionObservationSite {
     Interstitial,
     /// A long public documentation page read for cited findings.
     Documentation,
+    /// Airbnb's city stays page, as a search citation names it.
+    AirbnbStays,
+    /// Airbnb's city monthly stays page.
+    AirbnbMonthly,
 }
 
 impl DecisionObservationSite {
@@ -47,15 +51,20 @@ impl DecisionObservationSite {
             Self::Consent => "https://www.ikea.com/pl/pl/",
             Self::Interstitial => "https://www.zalando.pl/",
             Self::Documentation => "https://www.sqlite.org/wal.html",
+            Self::AirbnbStays => "https://www.airbnb.com/san-francisco-ca/stays",
+            Self::AirbnbMonthly => "https://www.airbnb.com/san-francisco-ca/stays/monthly",
         }
     }
 
     /// A listing rewrites its query during setup, exactly as a Work read admits.
     fn document_policy(self) -> WorkBrowserDocumentPolicy {
         match self {
-            Self::AirbnbListing | Self::LegoTheme | Self::Consent | Self::Interstitial => {
-                WorkBrowserDocumentPolicy::PublicQueryFinalization
-            }
+            Self::AirbnbListing
+            | Self::AirbnbStays
+            | Self::AirbnbMonthly
+            | Self::LegoTheme
+            | Self::Consent
+            | Self::Interstitial => WorkBrowserDocumentPolicy::PublicQueryFinalization,
             _ => WorkBrowserDocumentPolicy::Exact,
         }
     }
@@ -63,7 +72,9 @@ impl DecisionObservationSite {
     /// A heavy client-rendered listing needs longer before its first capture.
     fn settle(self) -> Duration {
         match self {
-            Self::AirbnbListing => Duration::from_secs(8),
+            Self::AirbnbListing | Self::AirbnbStays | Self::AirbnbMonthly => {
+                Duration::from_secs(8)
+            }
             Self::LegoTheme | Self::Consent | Self::Interstitial => Duration::from_secs(5),
             _ => Duration::from_secs(2),
         }
@@ -224,4 +235,9 @@ pub fn run(
             None
         }))
     })
+}
+
+/// The next recording's profile gets these content rules instead of none.
+pub(crate) fn use_content_rules(rules: std::sync::Arc<zephium_core::blocker::ContentRules>) -> bool {
+    super::agentic_semantic_probe::use_probe_content_rules(rules)
 }
