@@ -1,6 +1,13 @@
+<script lang="ts" module>
+  import type { PointerTool } from "../lib/selection";
+  /** Select or hand: remembered for this app session only. */
+  let pointerTool = $state<PointerTool>("hand");
+</script>
+
 <script lang="ts">
   import "@xyflow/svelte/dist/base.css";
   import { SvelteFlow, Background, type Edge, type useSvelteFlow } from "@xyflow/svelte";
+  import { NodeToolbar, Position, SelectionMode } from "@xyflow/svelte";
   import { untrack, setContext, tick } from "svelte";
   import {
     canvasInspection,
@@ -13,11 +20,22 @@
     canvasAreas,
     canvasAuthor,
     canvasPictures,
+    canvasAreaActions,
   } from "../lib/canvas-context";
   import CanvasNode from "./CanvasNode.svelte";
   import AreaNode from "./AreaNode.svelte";
   import ClusterNode from "./ClusterNode.svelte";
   import CanvasControls from "./CanvasControls.svelte";
+  import SelectionBar from "./SelectionBar.svelte";
+  import {
+    alignTo,
+    arrange,
+    fitArea,
+    moveTo,
+    selectedPlacements,
+    type Alignment,
+    type Arrangement,
+  } from "../lib/selection";
   import CanvasFlowHandle from "./CanvasFlowHandle.svelte";
   import {
     reconcileNodes,
@@ -67,6 +85,8 @@
     onviewchange,
     onselectionchange,
     onareachange,
+    onselectionaction,
+    onareaedit,
     expose,
   }: {
     items: readonly CanvasItem[];
@@ -95,6 +115,12 @@
     onviewchange?: (view: CanvasView) => void;
     onselectionchange?: (ids: string[]) => void;
     onareachange?: (id: string, area: string | null) => void;
+    /** A selection bar action on the selected cards. */
+    onselectionaction?: (action: "area" | "ask" | "remove", ids: string[]) => void;
+    onareaedit?: (
+      area: string,
+      edit: { kind: "rename"; title: string } | { kind: "remove" },
+    ) => void;
     expose?: (api: CanvasApi) => void;
   } = $props();
   setContext(canvasEvidence, {
@@ -210,14 +236,10 @@
     const ready = valid;
     nodes = untrack(() =>
       ready
-        ? reconcileNodes(
-            nodes,
-            next,
-            initialView?.positions,
-            initialView?.sizes,
-            grouping,
-            initialView?.areas,
-          )
+        ? reconcileNodes(nodes, next, initialView?.positions, initialView?.sizes, grouping, {
+            ...initialView?.areas,
+            ...pendingAreas,
+          })
         : [],
     );
   });
@@ -307,14 +329,19 @@
   type CanvasApi = {
     screenRect: (id: string) => DOMRect | null;
     flowPosition: (clientX: number, clientY: number) => CanvasPosition | null;
-    selectionBounds: () => (CanvasPosition & CanvasSize & { ids: string[] }) | null;
+    selectionBounds: (
+      only?: readonly string[],
+    ) => (CanvasPosition & CanvasSize & { ids: string[] }) | null;
+    placeArea: (area: string, rect: CanvasPosition & CanvasSize) => void;
     center: (id: string) => void;
     focusCard: (id: string) => void;
     followAgent: () => boolean;
     resumeFollow: () => void;
   };
-  function selectionBounds() {
-    const ids = selection.filter((id) => nodes.some((node) => node.id === id && isItemNode(node)));
+  function selectionBounds(only?: readonly string[]) {
+    const ids = (only ?? selection).filter((id) =>
+      nodes.some((node) => node.id === id && isItemNode(node)),
+    );
     const bounds = nodesBounds(ids, nodes);
     return bounds ? { ...bounds, ids } : null;
   }
@@ -353,6 +380,7 @@
       screenRect,
       flowPosition,
       selectionBounds,
+      placeArea,
       center,
       focusCard: (id: string) => void focusCard(id),
       followAgent: () => following,
@@ -445,10 +473,73 @@
     });
   });
   let lastClick = { id: "", at: 0 };
+
+  // Selection, marquee, arrange and areas.
+  const pendingAreas: Record<string, CanvasPosition & CanvasSize> = {};
+  /** Where a new area stands: kept until its node exists, or moved in place once it does. */
+  function placeArea(area: string, rect: CanvasPosition & CanvasSize) {
+    const id = `area:${area}`;
+    if (!nodes.some((node) => node.id === id)) {
+      pendingAreas[area] = rect;
+      return;
+    }
+    nodes = nodes.map((node) =>
+      node.id === id
+        ? { ...node, position: { x: rect.x, y: rect.y }, width: rect.width, height: rect.height }
+        : node,
+    );
+  }
+  let marquee = $state(false);
+  let engaged = false;
+  const selectedItems = $derived(
+    nodes.flatMap((node) => (node.selected && isItemNode(node) ? [node.id] : [])),
+  );
+  const dragging = $derived(nodes.some((node) => node.dragging));
+  function place(next: WorkNode[]) {
+    if (next === nodes) return;
+    nodes = next;
+    publishedPositions = positionKey(next);
+    publishView();
+  }
+  const arrangeSelection = (how: Arrangement) =>
+    place(moveTo(nodes, arrange(selectedPlacements(selectedItems, nodes), how)));
+  const alignSelection = (how: Alignment) =>
+    place(moveTo(nodes, alignTo(selectedPlacements(selectedItems, nodes), how)));
+  function clearSelection() {
+    if (!nodes.some((node) => node.selected)) return false;
+    nodes = nodes.map((node) => (node.selected ? { ...node, selected: false } : node));
+    return true;
+  }
+  setContext(canvasAreaActions, {
+    fit: (id: string) => place(fitArea(nodes, id)),
+    rename: (id: string, title: string) =>
+      onareaedit?.(id.slice("area:".length), { kind: "rename", title }),
+    remove: (id: string) => onareaedit?.(id.slice("area:".length), { kind: "remove" }),
+  });
+  /** V and H pick the tool, Escape clears the selection, while the canvas holds the keyboard. */
+  function canvasKeys(event: KeyboardEvent) {
+    if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+    const active = document.activeElement;
+    const inside = !!active && !!host?.contains(active);
+    if (!inside && !(engaged && (!active || active === document.body))) return;
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target?.closest("input, textarea, select, [contenteditable]")) return;
+    const key = event.key.toLowerCase();
+    if (key === "v" || key === "h") {
+      pointerTool = key === "v" ? "select" : "hand";
+      event.preventDefault();
+    } else if (event.key === "Escape" && clearSelection()) event.preventDefault();
+  }
 </script>
+
+<svelte:window
+  onpointerdowncapture={(event) => (engaged = !!host?.contains(event.target as Node))}
+  onkeydown={canvasKeys}
+/>
 
 <div
   class="work-canvas"
+  class:multi={selectedItems.length > 1}
   bind:this={host}
   bind:clientWidth={canvasWidth}
   bind:clientHeight={canvasHeight}
@@ -476,8 +567,21 @@
       zoomOnScroll={false}
       zoomOnPinch
       zoomOnDoubleClick={false}
-      panOnDrag
-      selectionOnDrag={false}
+      panOnDrag={pointerTool === "hand"}
+      selectionOnDrag={pointerTool === "select"}
+      selectionKey="Shift"
+      multiSelectionKey={["Meta", "Shift"]}
+      panActivationKey=" "
+      selectionMode={SelectionMode.Partial}
+      onselectionstart={() => (marquee = true)}
+      onselectionend={() => {
+        marquee = false;
+        // A marquee that caught cards leaves the areas it touched alone.
+        if (selectedItems.length && nodes.some((node) => node.selected && isAreaNode(node)))
+          nodes = nodes.map((node) =>
+            node.selected && isAreaNode(node) ? { ...node, selected: false } : node,
+          );
+      }}
       autoPanOnNodeDrag
       elevateNodesOnSelect
       nodeDragThreshold={3}
@@ -532,7 +636,27 @@
     >
       <CanvasFlowHandle onready={(handle) => (flow = handle)} />
       <Background patternColor="var(--work-canvas-dot)" gap={20} size={1.5} />
-      <CanvasControls bottomInset={fitBottomInset} />
+      <CanvasControls
+        bottomInset={fitBottomInset}
+        tool={pointerTool}
+        ontool={(tool) => (pointerTool = tool)}
+      />
+      <NodeToolbar
+        nodeId={selectedItems}
+        isVisible={selectedItems.length > 1 && !dragging && !marquee}
+        position={Position.Top}
+        offset={14}
+      >
+        <SelectionBar
+          count={selectedItems.length}
+          owned={selectedItems.filter((id) => authoritative.has(id)).length}
+          onarrange={arrangeSelection}
+          onalign={alignSelection}
+          onarea={() => onselectionaction?.("area", selectedItems)}
+          onask={() => onselectionaction?.("ask", selectedItems)}
+          onremove={() => onselectionaction?.("remove", selectedItems)}
+        />
+      </NodeToolbar>
     </SvelteFlow>
   {:else}<div class="canvas-empty" role="status">
       {valid ? m.work_canvas_empty() : m.work_canvas_unavailable()}
@@ -661,6 +785,26 @@
   .work-canvas :global(.work-edge.kind-supports.active) {
     stroke: var(--color-success);
   }
+
+  /* Several cards selected: one bar for all of them, not a toolbar and handles each. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  .work-canvas.multi :global(.svelte-flow__node-toolbar:not(:has(.selection-bar))),
+  .work-canvas.multi :global(.work-resize-handle) {
+    display: none;
+  }
+
+  /* An area is taken by its title; its body lets the pane pan or draw a marquee. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  .work-canvas :global(.svelte-flow__node-area) {
+    pointer-events: none;
+  }
+
+  /* stylelint-disable selector-class-pattern */
+  .work-canvas :global(.svelte-flow__node-area .area-title),
+  .work-canvas :global(.svelte-flow__node-area .work-resize-handle) {
+    pointer-events: auto;
+  }
+  /* stylelint-enable selector-class-pattern */
 
   .canvas-empty {
     height: 100%;

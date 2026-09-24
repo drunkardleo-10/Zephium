@@ -11,3 +11,5 @@ export const canvasAreas = Symbol("canvas-areas");
 export const canvasAuthor = Symbol("canvas-author");
 /** The admitted picture of each subject, by merge key, for compare columns. */
 export const canvasPictures = Symbol("canvas-pictures");
+/** An area's own actions: fit to members, rename in place, remove. */
+export const canvasAreaActions = Symbol("canvas-area-actions");

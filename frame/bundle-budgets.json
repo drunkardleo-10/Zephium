@@ -134,9 +134,9 @@
     "description": "Measured 328183 JS bytes with the agent run operation, step labels, and the agent line on the canvas card in the shared graph."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 573400,
-    "css": 128800,
-    "description": "Cards add 14.3 KB JS and 8.2 KB CSS (568279 and 127517 measured on b1628da5): the Findings, File and Command cards, one card frame, and the card mode of every result renderer. Derived cluster nodes, latent relation edges and the path draw-in add 3.0 KB JS and 0.9 KB CSS (571252 and 128409 measured together). The camera following the agent adds 1.6 KB JS (572888 measured)."
+    "js": 591000,
+    "css": 132500,
+    "description": "Cards add 14.3 KB JS and 8.2 KB CSS (568279 and 127517 measured on b1628da5): the Findings, File and Command cards, one card frame, and the card mode of every result renderer. Derived cluster nodes, latent relation edges and the path draw-in add 3.0 KB JS and 0.9 KB CSS (571252 and 128409 measured together). The camera following the agent adds 1.6 KB JS (572888 measured). Selection, the marquee, the arrange bar and area fit, rename and remove add 17.7 KB JS and 3.6 KB CSS (590564 and 132017 measured)."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
     "js": 70000,
@@ -144,9 +144,9 @@
     "description": "Measured 65242 JS and 2553 CSS bytes: a hand-written SVG plot with no chart library."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 588900,
+    "js": 590000,
     "css": 113000,
-    "description": "Measured 588440 JS and 110023 CSS bytes: the agent stands beside what it acts on; one stage layout places the run's cards and the projected ones in clusters, with the Work cluster's file and command cards; subject pictures admit through a per-canvas queue with fallback and one retry."
+    "description": "Measured 588440 JS and 110023 CSS bytes: the agent stands beside what it acts on; one stage layout places the run's cards and the projected ones in clusters, with the Work cluster's file and command cards; subject pictures admit through a per-canvas queue with fallback and one retry. Selection bar and area actions add 1.1 KB JS (589516 measured)."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 114400,

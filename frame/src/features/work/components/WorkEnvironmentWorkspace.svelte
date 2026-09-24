@@ -55,7 +55,7 @@
   import BrowserPane from "./pane/BrowserPane.svelte";
   import Lift from "./Lift.svelte";
   import HostGlyph from "./cards/HostGlyph.svelte";
-  import { defaultSize } from "../lib/canvas-model";
+  import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
   import { isLive } from "../lib/agent-steps";
   import { environmentPlan } from "../lib/project-environment-plan";
@@ -150,13 +150,17 @@
   let canvasRef = $state<{
     screenRect: (id: string) => DOMRect | null;
     flowPosition: (clientX: number, clientY: number) => CanvasPosition | null;
-    selectionBounds: () => {
+    selectionBounds: (only?: readonly string[]) => {
       x: number;
       y: number;
       width: number;
       height: number;
       ids: string[];
     } | null;
+    placeArea: (
+      area: string,
+      rect: { x: number; y: number; width: number; height: number },
+    ) => void;
     center: (id: string) => void;
     focusCard: (id: string) => void;
   }>();
@@ -1500,8 +1504,11 @@
       chrome?.close();
     }
   }
-  async function groupSelection(title: string) {
-    const bounds = canvasRef?.selectionBounds();
+  const ownedElements = (ids: readonly string[]) =>
+    ids.filter((id) => snapshot?.elements.some((element) => element.id === id));
+  /** A new area around the person's selected elements; the canvas places it before they move in. */
+  async function groupSelection(title: string, ids: readonly string[] = selectedIds) {
+    const bounds = canvasRef?.selectionBounds(ownedElements(ids));
     const current = snapshot;
     if (!bounds || !current || !title.trim()) return;
     if (!(await session.flushView())) return;
@@ -1510,25 +1517,28 @@
       (area) => !current.areas.some((known) => known.id === area.id),
     );
     if (!created) return;
-    for (const id of bounds.ids)
+    const { ids: members, ...rect } = bounds;
+    canvasRef?.placeArea(created.id, rect);
+    for (const id of members)
       if (!(await session.edit({ kind: "assign_area", element: id, area: created.id }))) return;
-    const latest = session.snapshot;
-    if (latest)
-      session.checkpoint({
-        ...latest.view,
-        areas: [
-          ...(latest.view.areas ?? []).filter((entry) => entry.area !== created.id),
-          {
-            area: created.id,
-            x: bounds.x,
-            y: bounds.y,
-            width: bounds.width,
-            height: bounds.height,
-          },
-        ],
-      });
     areaTitle = "";
     chrome?.close();
+  }
+  async function selectionAction(action: "area" | "ask" | "remove", ids: string[]) {
+    const owned = ownedElements(ids);
+    if (action === "ask") {
+      composerElement?.querySelector<HTMLElement>("textarea")?.focus();
+      return;
+    }
+    if (action === "area") {
+      const first = items.find((item) => item.id === owned[0])?.title.trim();
+      await groupSelection(first ? clipText(first, 24).trimEnd() : m.work_env_area(), owned);
+      return;
+    }
+    for (const id of owned) {
+      if (!(await session.edit({ kind: "remove", element: id }))) return;
+      if (inspected === id) inspected = null;
+    }
   }
   function onPanelChange(panel: WorkEnvironmentPanel | null) {
     session.tabsIntroduced = true;
@@ -1944,6 +1954,17 @@
               }}
               onareachange={(id: string, area: string | null) =>
                 void session.edit({ kind: "assign_area", element: id, area })}
+              onselectionaction={(action: "area" | "ask" | "remove", ids: string[]) =>
+                void selectionAction(action, ids)}
+              onareaedit={(
+                area: string,
+                edit: { kind: "rename"; title: string } | { kind: "remove" },
+              ) =>
+                void session.edit(
+                  edit.kind === "rename"
+                    ? { kind: "rename_area", area, title: edit.title }
+                    : { kind: "remove_area", area },
+                )}
               onevidence={(id: string, source: EvidenceReference) => void openResult(id, source)}
               onaction={(id: string, action?: string) => {
                 if (action === "remove") {
