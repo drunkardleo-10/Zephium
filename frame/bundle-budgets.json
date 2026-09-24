@@ -149,9 +149,9 @@
     "description": "Measured 588440 JS and 110023 CSS bytes: the agent stands beside what it acts on; one stage layout places the run's cards and the projected ones in clusters, with the Work cluster's file and command cards; subject pictures admit through a per-canvas queue with fallback and one retry. Selection bar and area actions add 1.1 KB JS (589516 measured). One lift header for every kind, the folded pages under Sources, video thumbnails through the picture queue and Play here over the card add 4.6 KB JS and 0.8 KB CSS (594774 and 110792 measured)."
   },
   "lazy:features/work/components/AgentLine.svelte": {
-    "js": 114400,
+    "js": 114800,
     "css": 8600,
-    "description": "Measured 113866 JS and 8299 CSS bytes: a clipped headline opens whole, and follow-ups wait behind Next as rows in the line's panel; every ending of a run and every refused request has its own line."
+    "description": "Measured 113866 JS and 8299 CSS bytes: a clipped headline opens whole, and follow-ups wait behind Next as rows in the line's panel; every ending of a run and every refused request has its own line. The local-work commits grow the shared graph to 114551 JS (measured on 236b43c4)."
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
     "js": 169400,
@@ -189,8 +189,8 @@
     "description": "Measured 71637 JS and 10464 CSS bytes: the well the agent's own view is presented in, its reason, countdown, account choice and release."
   },
   "lazy:features/settings/components/sections/WorkPage.svelte": {
-    "js": 303000,
+    "js": 303400,
     "css": 84000,
-    "description": "Measured 302457 JS and 83808 CSS bytes: the Decisions control over the shared settings graph and the work-decision session."
+    "description": "Measured 302457 JS and 83808 CSS bytes: the Decisions control over the shared settings graph and the work-decision session. The local-work commits grow the shared graph to 303111 JS (measured on 236b43c4)."
   }
 }
