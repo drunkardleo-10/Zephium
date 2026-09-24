@@ -1123,14 +1123,14 @@ fn settles_retired(
 /// Close stages repeat on every settle pass; each is logged once per page.
 #[cfg(any(test, feature = "public-qualification"))]
 #[derive(Default)]
-struct StageOnce(std::cell::RefCell<Vec<String>>);
+struct StageOnce(std::sync::Mutex<Vec<String>>);
 #[cfg(any(test, feature = "public-qualification"))]
 impl StageOnce {
     fn first(&self, label: &str) -> bool {
         if !label.starts_with("close:") {
             return true;
         }
-        let mut seen = self.0.borrow_mut();
+        let mut seen = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if seen.iter().any(|stage| stage == label) {
             return false;
         }
