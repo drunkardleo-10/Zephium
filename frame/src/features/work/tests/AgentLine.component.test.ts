@@ -139,8 +139,73 @@ test("a finished run closes on its own sentence and a follow-up continues the wo
   await expect
     .element(screen.getByRole("button", { name: "Stop", exact: true }))
     .not.toBeInTheDocument();
+  await screen.getByRole("button", { name: "Next", exact: true }).click();
   await screen.getByRole("button", { name: "Show me the quietest one", exact: true }).click();
   expect(continueWith).toHaveBeenCalledExactlyOnceWith("Show me the quietest one");
+  await screen.unmount();
+  session.dispose();
+});
+
+test("follow-ups wait behind Next and open as rows, one whole request each", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  const done = agentRun("completed");
+  const followups = [
+    "Show me the quietest one under 150 with hot-swappable switches and a wireless mode",
+    "Compare the two cheapest",
+    "Find reviews from this year",
+  ];
+  done.steps = [
+    ...done.steps!,
+    {
+      id: "finish",
+      turn: 2,
+      kind: { kind: "finish", followups },
+      status: "succeeded",
+      note: "Compared three keyboards.",
+    },
+  ];
+  session.projection = { ...structuredClone(projection), executions: [done] };
+  const continueWith = vi.spyOn(session, "continueWith").mockResolvedValue(true);
+  const screen = await render(AgentLine, { session });
+  await expect.poll(() => session.followups).toEqual(followups);
+  // No pills: until Next opens the panel, the follow-ups are not on the line.
+  expect(screen.container.querySelector(".expand.shown")).toBeNull();
+  expect(screen.container.querySelectorAll(".chip")).toHaveLength(0);
+  const next = screen.getByRole("button", { name: "Next", exact: true });
+  await next.click();
+  await expect.element(next).toHaveAttribute("aria-expanded", "true");
+  const rows = screen.container.querySelectorAll(".expand.shown .rows li button");
+  expect([...rows].map((row) => row.textContent?.trim())).toEqual(followups);
+  await screen.getByRole("button", { name: "Compare the two cheapest", exact: true }).click();
+  expect(continueWith).toHaveBeenCalledExactlyOnceWith("Compare the two cheapest");
+  await screen.unmount();
+  session.dispose();
+});
+
+test("a clipped headline shows a chevron and its words open the whole line", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  const done = agentRun("completed");
+  const closing = `Compared ${"quiet mechanical keyboards on price, switch noise and build quality, ".repeat(6)}and picked one.`;
+  done.steps = [
+    ...done.steps!,
+    {
+      id: "finish",
+      turn: 2,
+      kind: { kind: "finish", followups: [] },
+      status: "succeeded",
+      note: closing,
+    },
+  ];
+  session.projection = { ...structuredClone(projection), executions: [done] };
+  const screen = await render(AgentLine, { session });
+  const words = screen.getByRole("button", { name: closing, exact: true });
+  await expect.element(words).toBeVisible();
+  expect(words.element().querySelector("svg")).not.toBeNull();
+  await words.click();
+  await expect.element(words).toHaveAttribute("aria-expanded", "true");
+  expect(screen.container.querySelector(".expand.shown .full")?.textContent).toBe(closing);
   await screen.unmount();
   session.dispose();
 });

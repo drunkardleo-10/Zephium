@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { tick, untrack } from "svelte";
   import type { WorkSession } from "$domain/work";
   import { currentActivity } from "$domain/work";
   import { agentLine, endingNote, isLive } from "../lib/agent-steps";
@@ -9,7 +9,7 @@
   import type { CanvasItem } from "../lib/canvas-model";
   import AgentAvatar from "./cards/AgentAvatar.svelte";
   import Icon from "$shared/ui/Icon";
-  import { ArrowUp02Icon, StopIcon } from "../lib/icons";
+  import { ArrowDown01Icon, ArrowRight02Icon, ArrowUp02Icon, StopIcon } from "../lib/icons";
   import * as m from "$shared/i18n/messages";
   let {
     session,
@@ -227,11 +227,37 @@
   const preview = $derived(draft.trim().slice(0, 60));
 
   let open = $state(false);
-  let expanded = $state(false);
+  /** What the person opened the panel for; a question takes the panel whenever it is open. */
+  let want = $state<"answer" | "next" | "full" | null>(null);
   let answer = $state("");
   let host = $state<HTMLElement>();
+  /** The headline is one line; when it is clipped its words open the whole of it. */
+  let words = $state<HTMLElement>();
+  let clipped = $state(false);
+  const panel = $derived(
+    want === null
+      ? null
+      : question
+        ? "question"
+        : want === "next" && followups.length
+          ? "next"
+          : want === "full" && clipped
+            ? "full"
+            : null,
+  );
+  const expanded = $derived(panel !== null);
   $effect(() => {
-    if (!question) expanded = false;
+    if (want && !panel) want = null;
+  });
+  $effect(() => {
+    void headline;
+    const element = words;
+    if (!element) return;
+    const measure = () => (clipped = element.scrollWidth > element.clientWidth);
+    void tick().then(measure);
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
   });
   $effect(() => {
     if (!live) open = false;
@@ -251,7 +277,7 @@
       : await session.answerStep(execution.id, question.id, text);
     if (sent) {
       answer = "";
-      expanded = false;
+      want = null;
     }
   }
   async function steer() {
@@ -288,7 +314,7 @@
     if (event.key !== "Escape" || (!open && !expanded)) return;
     event.stopPropagation();
     open = false;
-    expanded = false;
+    want = null;
   }}
 />
 
@@ -313,9 +339,27 @@
         {:else}<li class="none">{m.work_line_no_agents()}</li>{/each}
       </ul>
     {/if}
-    <div class="expand" class:shown={expanded && !!question} aria-hidden={!expanded}>
+    <div class="expand" class:shown={expanded} aria-hidden={!expanded}>
       <div class="expand-inner">
-        {#if question}
+        {#if panel === "next"}
+          <ul class="rows" aria-label={m.work_line_next()}>
+            {#each followups as followup, index (index)}
+              <li>
+                <button
+                  type="button"
+                  class="row"
+                  disabled={blocked}
+                  onclick={() => {
+                    want = null;
+                    void session.continueWith(followup);
+                  }}><span>{followup}</span><Icon icon={ArrowRight02Icon} size={13} /></button
+                >
+              </li>
+            {/each}
+          </ul>
+        {:else if panel === "full"}
+          <p class="full">{headline}</p>
+        {:else if panel === "question" && question}
           <form
             onsubmit={(event) => {
               event.preventDefault();
@@ -372,7 +416,22 @@
               >{/if}
           </button>
         {:else}
-          {#key headline}<span class="words">{headline}</span>{/key}
+          {#key headline}
+            {#if clipped}
+              <button
+                type="button"
+                class="words more"
+                aria-expanded={panel === "full"}
+                onclick={() => (want = want === "full" ? null : "full")}
+                ><span class="text" bind:this={words}>{headline}</span><Icon
+                  icon={ArrowDown01Icon}
+                  size={12}
+                /></button
+              >
+            {:else}
+              <span class="words"><span class="text" bind:this={words}>{headline}</span></span>
+            {/if}
+          {/key}
         {/if}
         {#if live && preview}<span class="draft">{preview}</span>{/if}
       </div>
@@ -392,8 +451,15 @@
             onclick={() => onreview?.(proposal.id)}>{m.work_line_review()}</button
           >
         {:else if question && !expanded}
-          <button type="button" class="action" onclick={() => (expanded = true)}
+          <button type="button" class="action" onclick={() => (want = "answer")}
             >{m.work_line_answer()}</button
+          >
+        {:else if followups.length}
+          <button
+            type="button"
+            class="action"
+            aria-expanded={panel === "next"}
+            onclick={() => (want = want === "next" ? null : "next")}>{m.work_line_next()}</button
           >
         {:else if pageHandoff}
           <button type="button" class="action" disabled={blocked} onclick={() => void openPage()}
@@ -427,18 +493,6 @@
         {/if}
       </div>
     </div>
-    {#if followups.length}
-      <div class="followups">
-        {#each followups as followup, index (index)}
-          <button
-            type="button"
-            class="chip"
-            disabled={blocked}
-            onclick={() => void session.continueWith(followup)}>{followup}</button
-          >
-        {/each}
-      </div>
-    {/if}
   </section>
 {/if}
 
@@ -496,12 +550,45 @@
   }
 
   .words {
-    flex: none;
+    display: flex;
+    align-items: baseline;
+    min-inline-size: 0;
     max-inline-size: 100%;
+    animation: line-in var(--motion-base) var(--ease-smooth);
+  }
+
+  .words .text {
+    min-inline-size: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    animation: line-in var(--motion-base) var(--ease-smooth);
+  }
+
+  button.more {
+    align-items: center;
+    gap: 4px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: var(--text-label);
+    cursor: default;
+  }
+
+  button.more:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  button.more :global(svg) {
+    flex: none;
+    color: var(--color-muted);
+    transition: rotate var(--motion-base) var(--ease-smooth);
+  }
+
+  button.more[aria-expanded="true"] :global(svg) {
+    rotate: 180deg;
   }
 
   .settled .words {
@@ -606,11 +693,15 @@
   .expand {
     display: grid;
     grid-template-rows: 0fr;
-    transition: grid-template-rows var(--motion-base) var(--ease-smooth);
+    opacity: 0;
+    transition:
+      grid-template-rows var(--motion-base) var(--ease-smooth),
+      opacity var(--motion-base) var(--ease-smooth);
   }
 
   .expand.shown {
     grid-template-rows: 1fr;
+    opacity: 1;
   }
 
   .expand-inner {
@@ -618,23 +709,79 @@
     overflow: hidden;
   }
 
-  form {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 12px 14px;
+  form,
+  .rows,
+  .full {
+    margin: 0;
     border-radius: var(--radius-control);
     background: var(--color-menu);
     backdrop-filter: blur(12px) saturate(1.2);
     box-shadow: var(--shadow-float);
   }
 
+  .full {
+    padding: 12px 14px;
+    font-size: var(--text-label);
+  }
+
+  .rows {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    inline-size: 100%;
+    box-sizing: border-box;
+    min-block-size: 32px;
+    padding: 6px 8px;
+    border: 0;
+    border-radius: var(--radius-control-compact);
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    font-size: var(--text-label);
+    text-align: start;
+    cursor: default;
+    transition: background-color var(--motion-fast) var(--ease-smooth);
+  }
+
+  .row :global(svg) {
+    flex: none;
+    color: var(--color-muted);
+  }
+
+  .row:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  .row:disabled {
+    color: var(--color-faint);
+  }
+
+  .row:hover:not(:disabled) {
+    background: var(--color-control-hover);
+  }
+
+  form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px;
+  }
+
   label {
     font-size: var(--text-label);
   }
 
-  .options,
-  .followups {
+  .options {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;

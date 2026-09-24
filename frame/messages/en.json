@@ -1120,6 +1120,7 @@
   "work_line_stop": "Stop",
   "work_line_steer": "Steer",
   "work_line_steer_hint": "Hand this to the agent at its next move",
+  "work_line_next": "Next",
   "work_composer_start": "What do you want to do?",
   "work_composer_continue": "Message the agent…",
   "work_line_send_answer": "Send answer",

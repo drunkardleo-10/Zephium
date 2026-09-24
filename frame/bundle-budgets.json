@@ -149,9 +149,9 @@
     "description": "Measured 588440 JS and 110023 CSS bytes: the agent stands beside what it acts on; one stage layout places the run's cards and the projected ones in clusters, with the Work cluster's file and command cards; subject pictures admit through a per-canvas queue with fallback and one retry."
   },
   "lazy:features/work/components/AgentLine.svelte": {
-    "js": 112000,
-    "css": 7000,
-    "description": "Measured 111646 JS and 6813 CSS bytes: every ending of a run and every refused request now has its own line instead of a generic failure."
+    "js": 114400,
+    "css": 8600,
+    "description": "Measured 113866 JS and 8299 CSS bytes: a clipped headline opens whole, and follow-ups wait behind Next as rows in the line's panel; every ending of a run and every refused request has its own line."
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
     "js": 162000,
