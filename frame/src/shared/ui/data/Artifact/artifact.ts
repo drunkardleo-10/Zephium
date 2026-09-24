@@ -268,3 +268,72 @@ export function displayHost(value: string | undefined): string {
     return "";
   }
 }
+
+/** What a result card says of a document: its lead and the steps it asks for. */
+export type DocumentDigest = { lead: string; stepsLabel: string; steps: string[] };
+const LEAD_LABEL = /^(summary|in short|tl;?dr|overview|answer|bottom line|the short answer)$/iu;
+const STEPS_LABEL =
+  /^((recommended |suggested )?next steps?|what to do next|action items|to do|todo)$/iu;
+const BULLET = /^\s*(?:[-*•]|\d+[.)]|\[[ xX]\])\s+/u;
+const label = (text: string) =>
+  text
+    .replace(/^#+\s*/u, "")
+    .replace(/[:：]\s*$/u, "")
+    .replace(/\*+/gu, "")
+    .trim();
+function plainText(node: DocumentNodeView): string {
+  if (node.type === "text") return node.text ?? "";
+  if (node.type === "hardBreak") return "\n";
+  return (node.content ?? []).map(plainText).join(node.type === "listItem" ? " " : "");
+}
+
+export function documentDigest(content: {
+  paragraphs: readonly string[];
+  formatted?: NoteDocumentView | null;
+}): DocumentDigest {
+  // One flat run of blocks: headings (or a paragraph that only names a
+  // section), prose, and list items, whichever form the writer used.
+  type Block = { kind: "heading" | "text" | "item"; text: string };
+  const blocks: Block[] = [];
+  const push = (text: string) => {
+    const lines = text.split("\n").filter((line) => line.trim());
+    for (const line of lines) {
+      const clean = line.trim();
+      if (BULLET.test(clean)) blocks.push({ kind: "item", text: clean.replace(BULLET, "") });
+      else if (
+        /^#+\s/u.test(clean) ||
+        LEAD_LABEL.test(label(clean)) ||
+        STEPS_LABEL.test(label(clean))
+      )
+        blocks.push({ kind: "heading", text: label(clean) });
+      else blocks.push({ kind: "text", text: clean });
+    }
+  };
+  const root = content.formatted?.document;
+  if (root)
+    for (const node of root.content ?? []) {
+      if (node.type === "heading") blocks.push({ kind: "heading", text: label(plainText(node)) });
+      else if (node.type === "bulletList" || node.type === "orderedList")
+        for (const item of node.content ?? [])
+          blocks.push({ kind: "item", text: plainText(item).replace(/\s+/gu, " ").trim() });
+      else if (node.type === "paragraph" || node.type === "blockquote") push(plainText(node));
+    }
+  else for (const paragraph of content.paragraphs) push(paragraph);
+  const after = (pattern: RegExp) => {
+    const at = blocks.findIndex((block) => block.kind === "heading" && pattern.test(block.text));
+    if (at < 0) return null;
+    const end = blocks.findIndex((block, index) => index > at && block.kind === "heading");
+    return { heading: blocks[at]!.text, body: blocks.slice(at + 1, end < 0 ? undefined : end) };
+  };
+  const summary = after(LEAD_LABEL);
+  const next = after(STEPS_LABEL);
+  const lead =
+    summary?.body.find((block) => block.kind === "text")?.text ??
+    blocks.find((block) => block.kind === "text")?.text ??
+    blocks.find((block) => block.kind === "item")?.text ??
+    "";
+  const steps = (next?.body ?? [])
+    .map((block) => block.text)
+    .filter((text) => text && text !== lead);
+  return { lead, stepsLabel: next?.heading ?? "", steps };
+}

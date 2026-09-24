@@ -8,6 +8,8 @@
     notes,
     labels,
     onevidence,
+    card = false,
+    more,
   }: {
     subjects: readonly SubjectView[];
     criteria: readonly CriterionView[];
@@ -22,7 +24,13 @@
       no: string;
     };
     onevidence?: (reference: EvidenceReference) => void;
+    /** Card mode: three subjects by three criteria, no sources, then "+n". */
+    card?: boolean;
+    more?: (count: number) => string;
   } = $props();
+  const CARD = 3;
+  const shownSubjects = $derived(card ? subjects.slice(0, CARD) : subjects);
+  const shownCriteria = $derived(card ? criteria.slice(0, CARD) : criteria);
   const money = (amount: string, currency: string) => {
     const value = Number(amount);
     if (!Number.isFinite(value)) return `${amount} ${currency}`;
@@ -34,21 +42,25 @@
   };
 </script>
 
-<div class="matrix-scroll" tabindex="-1">
+<div class="matrix-scroll" class:card tabindex="-1">
   <table class="matrix">
     <thead>
       <tr>
         <th scope="col" class="corner"><span class="sr-only">{labels.criterion}</span></th>
-        {#each subjects as subject, index (index)}
+        {#each shownSubjects as subject, index (index)}
           <th scope="col" class="subject">
             <span class="name">{subject.name}</span>
-            {#if subject.descriptor}<span class="descriptor">{subject.descriptor}</span>{/if}
+            {#if subject.descriptor && !card}<span class="descriptor">{subject.descriptor}</span
+              >{/if}
           </th>
         {/each}
+        {#if card && subjects.length > CARD}<th scope="col" class="stub"
+            >+{subjects.length - CARD}</th
+          >{/if}
       </tr>
     </thead>
     <tbody>
-      {#each criteria as criterion, column (column)}
+      {#each shownCriteria as criterion, column (column)}
         <tr>
           <th scope="row" class="criterion">
             <span class="name">{criterion.name}</span>
@@ -58,7 +70,7 @@
                 >{criterion.rubric}</span
               >{/if}
           </th>
-          {#each subjects as _, row (row)}
+          {#each shownSubjects as _, row (row)}
             {@const cell = cells[row]?.[column]}
             <td class:unknown={!cell || cell.value.kind === "unknown"}>
               {#if !cell || cell.value.kind === "unknown"}<span class="value muted"
@@ -81,20 +93,22 @@
                   class="value presence"
                   class:yes={cell.value.present}>{cell.value.present ? labels.yes : labels.no}</span
                 >{/if}
-              {#if cell?.note}<span class="note">{cell.note}</span>{/if}
-              {#if cell}<span class="basis">
+              {#if cell?.note && !card}<span class="note">{cell.note}</span>{/if}
+              {#if cell && !card}<span class="basis">
                   {#if cell.generalKnowledge}<span class="general">{labels.generalKnowledge}</span
                     >{/if}
                   <EvidenceChips references={cell.evidence} compact {onevidence} />
                 </span>{/if}
             </td>
           {/each}
+          {#if card && subjects.length > CARD}<td class="stub"></td>{/if}
         </tr>
       {/each}
     </tbody>
   </table>
 </div>
-{#if notes.length}<ul class="notes">
+{#if card && criteria.length > CARD && more}<p class="more">{more(criteria.length - CARD)}</p>
+{:else if notes.length && !card}<ul class="notes">
     {#each notes as note, index (index)}<li>{note}</li>{/each}
   </ul>{/if}
 
@@ -216,6 +230,49 @@
     background: var(--color-fill);
     color: var(--color-faint);
     font-size: 10px;
+  }
+
+  .card .matrix {
+    table-layout: fixed;
+  }
+
+  .card th,
+  .card td {
+    padding: 6px 8px;
+  }
+
+  .card .corner,
+  .card .criterion {
+    min-inline-size: 0;
+    inline-size: 30%;
+  }
+
+  .card .subject {
+    min-inline-size: 0;
+  }
+
+  .card .name,
+  .card .value {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .card .meta {
+    display: none;
+  }
+
+  .stub {
+    inline-size: 36px;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
+    font-weight: 400;
+  }
+
+  .more {
+    margin: 6px 0 0;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
   }
 
   .notes {

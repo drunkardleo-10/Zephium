@@ -1,19 +1,30 @@
 <script lang="ts">
-  import type {
-    DocumentNodeView as DocumentNode,
-    NoteDocumentView as NoteDocument,
+  import {
+    documentDigest,
+    type DocumentNodeView as DocumentNode,
+    type NoteDocumentView as NoteDocument,
   } from "./artifact";
   import DocumentView from "./DocumentView.svelte";
   let {
     document,
     node,
     onlink,
+    card = false,
+    paragraphs = [],
+    more,
   }: {
-    document?: NoteDocument;
+    document?: NoteDocument | null;
     node?: DocumentNode;
     /** Links open through a native intent; chrome never navigates itself. */
     onlink?: (href: string) => void;
+    /** The result card: the lead and the next steps, never the whole text. */
+    card?: boolean;
+    /** Plain paragraphs, for a card whose document carries no formatting. */
+    paragraphs?: readonly string[];
+    more?: (count: number) => string;
   } = $props();
+  const STEPS = 3;
+  const digest = $derived(card ? documentDigest({ paragraphs, formatted: document }) : null);
   const root = $derived(node ?? document?.document);
   const children = $derived(root?.content ?? []);
   function href(text: DocumentNode): string | null {
@@ -46,7 +57,20 @@
   {/each}
 {/snippet}
 
-{#if root}
+{#if digest}
+  <div class="digest">
+    {#if digest.lead}<p class="lead">{digest.lead}</p>{/if}
+    {#if digest.steps.length}<p class="steps-label">{digest.stepsLabel}</p>
+      <ul class="steps">
+        {#each digest.steps.slice(0, STEPS) as step, index (index)}<li>
+            <span class="tick" aria-hidden="true"></span><span class="step">{step}</span>
+          </li>{/each}
+      </ul>
+      {#if digest.steps.length > STEPS && more}<p class="more">
+          {more(digest.steps.length - STEPS)}
+        </p>{/if}{/if}
+  </div>
+{:else if root}
   {#each children as child, index (index)}
     {#if child.type === "paragraph"}<p>{@render inline(child.content ?? [])}</p>
     {:else if child.type === "heading"}
@@ -70,6 +94,73 @@
 {/if}
 
 <style>
+  .digest {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-block-size: 0;
+  }
+
+  .lead {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+    margin: 0;
+    overflow: hidden;
+    font-size: var(--text-label);
+    line-height: 16px;
+    text-wrap: pretty;
+  }
+
+  .steps-label {
+    margin: 4px 0 0;
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+    font-weight: 600;
+    line-height: 13px;
+  }
+
+  .steps {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .steps li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-inline-size: 0;
+    font-size: var(--text-label);
+    line-height: 16px;
+  }
+
+  .tick {
+    flex: none;
+    inline-size: 10px;
+    block-size: 10px;
+    border-radius: 3px;
+    box-shadow: inset 0 0 0 1.5px var(--color-border-strong);
+  }
+
+  .step {
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .more {
+    margin: 0;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
+    line-height: 13px;
+  }
+
   p,
   blockquote,
   ul,

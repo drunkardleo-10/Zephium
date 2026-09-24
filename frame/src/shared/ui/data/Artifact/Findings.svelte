@@ -6,6 +6,8 @@
     items,
     labels,
     onevidence,
+    limit,
+    more,
   }: {
     subjects: readonly SubjectView[];
     items: readonly FindingView[];
@@ -14,28 +16,38 @@
       generalKnowledge: string;
     };
     onevidence?: (reference: EvidenceReference) => void;
+    /** Card mode: this many claims, no detail and no chips, then "+n". */
+    limit?: number;
+    more?: (count: number) => string;
   } = $props();
+  const shown = $derived(limit === undefined ? items : items.slice(0, limit));
 </script>
 
-<ul class="findings">
-  {#each items as finding, index (index)}
+<ul class="findings" class:card={limit !== undefined}>
+  {#each shown as finding, index (index)}
     <li class={`finding ${finding.confidence}`}>
       <span class="marker" aria-hidden="true"></span>
       <div class="body">
         <p class="claim">{finding.claim}</p>
-        {#if finding.detail}<p class="detail">{finding.detail}</p>{/if}
-        <div class="meta">
-          <span class="confidence">{labels.confidence[finding.confidence]}</span>
-          {#if finding.subject !== undefined && subjects[finding.subject]}<span class="subject"
-              >{subjects[finding.subject]!.name}</span
-            >{/if}
-          {#if finding.generalKnowledge}<span class="subject">{labels.generalKnowledge}</span>{/if}
-          <EvidenceChips references={finding.evidence} compact {onevidence} />
-        </div>
+        {#if limit === undefined}{#if finding.detail}<p class="detail">{finding.detail}</p>{/if}
+          <div class="meta">
+            <span class="confidence">{labels.confidence[finding.confidence]}</span>
+            {#if finding.subject !== undefined && subjects[finding.subject]}<span class="subject"
+                >{subjects[finding.subject]!.name}</span
+              >{/if}
+            {#if finding.generalKnowledge}<span class="subject">{labels.generalKnowledge}</span
+              >{/if}
+            <EvidenceChips references={finding.evidence} compact {onevidence} />
+          </div>{:else if finding.subject !== undefined && subjects[finding.subject]}<span
+            class="subject">{subjects[finding.subject]!.name}</span
+          >{/if}
       </div>
     </li>
   {/each}
 </ul>
+{#if more && items.length > shown.length}<p class="more">
+    {more(items.length - shown.length)}
+  </p>{/if}
 
 <style>
   .findings {
@@ -110,5 +122,53 @@
     border-radius: var(--radius-capsule);
     background: var(--color-fill);
     color: var(--color-label-secondary);
+  }
+
+  .card {
+    gap: 6px;
+  }
+
+  .card .finding {
+    gap: 8px;
+  }
+
+  .card .marker {
+    inline-size: 6px;
+    block-size: 6px;
+    margin-block-start: 5px;
+  }
+
+  .card .body {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .card .claim {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    flex: 1;
+    min-inline-size: 0;
+    overflow: hidden;
+    font-size: var(--text-label);
+    line-height: 16px;
+  }
+
+  .card .subject {
+    flex: none;
+    max-inline-size: 96px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--text-caption);
+    line-height: 14px;
+  }
+
+  .more {
+    margin: 6px 0 0;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
   }
 </style>

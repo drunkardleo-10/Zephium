@@ -20,6 +20,7 @@
     onlink,
     embedded = false,
     compact = false,
+    card = false,
   }: {
     artifact: ArtifactView;
     onevidence?: (reference: EvidenceReference) => void;
@@ -28,7 +29,13 @@
     embedded?: boolean;
     /** The card version of a plot: no readout, no values table. */
     compact?: boolean;
+    /** The canvas card: no chips, no sections past the first, capped rows, then "+n". */
+    card?: boolean;
   } = $props();
+  const CAP = { table: 4, checklist: 3, findings: 4, sources: 4 } as const;
+  const more = (count: number) => m.work_card_more({ count });
+  const tableRows = (rows: readonly (readonly string[])[]) =>
+    card ? rows.slice(0, CAP.table) : rows;
   let valid = $derived(artifactRenderable(artifact));
   let content = $derived(artifact.content);
   const labels = {
@@ -61,12 +68,18 @@
   };
 </script>
 
-<article aria-label={artifact.title} class="artifact">
+<article aria-label={artifact.title} class="artifact" class:card>
   {#if !embedded}<header>
       <h2>{artifact.title}</h2>
       <p class="review">{artifact.reviewLabel}</p>
     </header>{/if}
   {#if !valid}<p role="alert">{m.work_artifact_unavailable()}</p>
+  {:else if content.kind === "document" && card}<DocumentView
+      card
+      document={content.formatted}
+      paragraphs={content.paragraphs}
+      {more}
+    />
   {:else if content.kind === "document"}<div class="document">
       {#if content.formatted}<DocumentView document={content.formatted} {onlink} />
       {:else}{#each content.paragraphs as paragraph, i (i)}<p>{paragraph}</p>{:else}<p>
@@ -77,24 +90,30 @@
       caption={artifact.title}
       showCaption={!embedded}
       columns={content.columns.map((label, i) => ({ key: String(i), label }))}
-      rows={content.rows.map((row, i) => ({
+      rows={tableRows(content.rows).map((row, i) => ({
         key: String(i),
         label: String(i + 1),
         cells: Object.fromEntries(row.map((cell, c) => [String(c), cell])),
       }))}
       {labels}
-    />
+    />{#if card && content.rows.length > CAP.table}<p class="more">
+        {more(content.rows.length - CAP.table)}
+      </p>{/if}
   {:else if content.kind === "comparison"}<DataTable
       caption={artifact.title}
       showCaption={!embedded}
       columns={content.criteria.map((label, i) => ({ key: String(i), label }))}
-      rows={content.alternatives.map((row, i) => ({
-        key: String(i),
-        label: row.name,
-        cells: Object.fromEntries(row.values.map((cell, c) => [String(c), cell])),
-      }))}
+      rows={(card ? content.alternatives.slice(0, CAP.table) : content.alternatives).map(
+        (row, i) => ({
+          key: String(i),
+          label: row.name,
+          cells: Object.fromEntries(row.values.map((cell, c) => [String(c), cell])),
+        }),
+      )}
       {labels}
-    />
+    />{#if card && content.alternatives.length > CAP.table}<p class="more">
+        {more(content.alternatives.length - CAP.table)}
+      </p>{/if}
   {:else if content.kind === "matrix"}<Matrix
       subjects={content.subjects}
       criteria={content.criteria}
@@ -102,12 +121,16 @@
       notes={content.notes}
       labels={matrixLabels}
       {onevidence}
+      {card}
+      {more}
     />
   {:else if content.kind === "findings"}<Findings
       subjects={content.subjects}
       items={content.items}
       labels={findingLabels}
       {onevidence}
+      limit={card ? CAP.findings : undefined}
+      {more}
     />
   {:else if content.kind === "chart"}<LazyView
       loader={loadChart}
@@ -121,33 +144,38 @@
           series={content.series}
           basis={content.basis}
           generalKnowledge={content.generalKnowledge}
-          {compact}
+          compact={compact || card}
           {onevidence}
         />{/snippet}</LazyView
     >
   {:else if content.kind === "checklist"}<ul class="checklist">
-      {#each content.items as item, i (i)}<li>
+      {#each card ? content.items.slice(0, CAP.checklist) : content.items as item, i (i)}<li>
           <span aria-label={item.completed ? m.work_item_complete() : m.work_item_open()}
             >{item.completed ? "✓" : "○"}</span
           ><span>{item.text}</span>
         </li>{:else}<li>{m.work_empty_data()}</li>{/each}
     </ul>
+    {#if card && content.items.length > CAP.checklist}<p class="more">
+        {more(content.items.length - CAP.checklist)}
+      </p>{/if}
   {:else if content.kind === "sources"}<Sources
       summary={content.summary}
       subjects={content.subjects}
       entries={content.entries}
       fallback={artifact.evidence}
       {onevidence}
+      limit={card ? CAP.sources : undefined}
+      {more}
     />
   {:else if content.kind === "browser"}<section class="resource">
       <p class="eyebrow">{m.work_browser_resource()}</p>
       <h3>{content.title}</h3>
       <p class="location">{displayLocation(content.location) || m.work_location_unavailable()}</p>
       <p>{content.summary}</p>
-      <small>{m.work_browser_preview_only()}</small>
+      {#if !card}<small>{m.work_browser_preview_only()}</small>{/if}
     </section>
   {:else if content.kind === "unavailable"}<p role="status">{content.reason}</p>{/if}
-  {#if valid && artifact.evidence.length && content.kind !== "sources" && content.kind !== "matrix" && content.kind !== "findings"}<footer
+  {#if valid && !card && artifact.evidence.length && content.kind !== "sources" && content.kind !== "matrix" && content.kind !== "findings"}<footer
       aria-label={m.work_sources()}
     >
       <EvidenceChips references={artifact.evidence} {onevidence} />
@@ -216,6 +244,41 @@
 
   .location {
     color: var(--color-muted);
+  }
+
+  .card .checklist li {
+    gap: 8px;
+    padding-block: 2px;
+    font-size: var(--text-label);
+    line-height: 16px;
+  }
+
+  .card .checklist li > span:last-child {
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .card .resource {
+    padding: 10px 12px;
+  }
+
+  .card .resource p {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    margin: 0;
+    overflow: hidden;
+    line-height: 16px;
+  }
+
+  .more {
+    margin: 4px 0 0;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
+    line-height: 13px;
   }
 
   footer {
