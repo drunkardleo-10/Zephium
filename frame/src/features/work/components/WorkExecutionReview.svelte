@@ -276,10 +276,8 @@
 {/if}
 
 <style>
+  /* Inside the request lift, which scrolls as one page. */
   .execution-review {
-    padding: 0 24px 16px;
-    max-block-size: 50%;
-    overflow: auto;
     flex-shrink: 0;
   }
 

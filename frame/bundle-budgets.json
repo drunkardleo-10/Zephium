@@ -154,9 +154,9 @@
     "description": "Measured 113866 JS and 8299 CSS bytes: a clipped headline opens whole, and follow-ups wait behind Next as rows in the line's panel; every ending of a run and every refused request has its own line."
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
-    "js": 162000,
-    "css": 22000,
-    "description": "Measured 21835 CSS bytes: the card mode of the result renderers and source glyphs on evidence chips; account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog."
+    "js": 169400,
+    "css": 24500,
+    "description": "Measured 21835 CSS bytes: the card mode of the result renderers and source glyphs on evidence chips; account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog. The request lift's header and its run as a timeline of steps add 10.1 KB JS and 2.4 KB CSS (168962 and 24212 measured)."
   },
   "lazy:features/work/components/local/CommandInspector.svelte": {
     "js": 68000,

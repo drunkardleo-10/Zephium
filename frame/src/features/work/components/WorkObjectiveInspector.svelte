@@ -10,6 +10,20 @@
   import WorkPlanEditor from "./WorkPlanEditor.svelte";
   import WorkExecutionReview from "./WorkExecutionReview.svelte";
   import ContextManifestList from "./composer/ContextManifestList.svelte";
+  import LiftHeader from "./LiftHeader.svelte";
+  import Icon from "$shared/ui/Icon";
+  import HostGlyph from "./cards/HostGlyph.svelte";
+  import {
+    CheckListIcon,
+    ComputerTerminal01Icon,
+    File01Icon,
+    Note01Icon,
+    Search01Icon,
+    Target01Icon,
+    Tick02Icon,
+  } from "../lib/icons";
+  import { runTimeline, type TimelineGlyph } from "../lib/run-timeline";
+  import { isAgentExecution, isLive } from "../lib/agent-steps";
   import * as m from "$shared/i18n/messages";
   let {
     session,
@@ -92,6 +106,37 @@
       : { state: "unavailable", reason: m.work_evidence_unavailable() };
   }
 
+  const timeline = $derived(execution ? runTimeline(execution) : []);
+  const GLYPHS = {
+    said: Note01Icon,
+    search: Search01Icon,
+    file: File01Icon,
+    command: ComputerTerminal01Icon,
+    ask: CheckListIcon,
+    done: Tick02Icon,
+  } as const satisfies Record<Exclude<TimelineGlyph, "page">, unknown>;
+  const meta = $derived.by(() => {
+    if (!projection || !execution) return "";
+    const state = isLive(projection, execution)
+      ? m.work_lift_run_live()
+      : execution.status === "completed" || execution.status === "needs_review"
+        ? m.work_lift_run_done()
+        : projection.interrupted.includes(execution.id) || execution.status === "cancelled"
+          ? m.work_lift_run_stopped()
+          : m.work_lift_run_failed();
+    if (!timeline.length) return state;
+    const steps =
+      timeline.length === 1
+        ? m.work_lift_run_steps_one()
+        : m.work_lift_run_steps({ count: timeline.length });
+    return `${state} · ${steps}`;
+  });
+  /** Agent runs need no planning; reviewed work keeps its plan controls open. */
+  const planning = $derived(
+    !execution ||
+      !isAgentExecution(execution) ||
+      !!work?.questions.some((question) => question.state === "active"),
+  );
   const blocked = $derived(
     !!session.pending || session.hasDrafts || !["ready", "rejected"].includes(session.delivery),
   );
@@ -100,84 +145,109 @@
 </script>
 
 {#if work}<div class="objective-inspector">
-    <header>
-      <h2>{m.work_env_objective()}</h2>
-    </header>
-    <form
-      onsubmit={(event) => {
-        event.preventDefault();
-        const text = session.draft("objective");
-        if (text) void session.saveDraft("objective", text.trim());
-      }}
-    >
-      <label for={`${id}-objective`}>{m.work_env_objective()}</label><textarea
-        id={`${id}-objective`}
-        rows="3"
-        value={session.draft("objective") ?? work.objective}
-        oninput={(event) => session.setDraft("objective", event.currentTarget.value)}
-        disabled={!!session.pending}
-        maxlength="8192"></textarea><Button
-        type="submit"
-        disabled={!!session.pending || !session.draft("objective")}
-        >{m.work_submit_objective()}</Button
-      >
-    </form>
-    {#each work.questions.filter((question) => question.state === "active") as question (question.id)}<form
+    <LiftHeader
+      kind={m.work_env_objective()}
+      title={work.objective}
+      {meta}
+      icon={Target01Icon}
+      whole
+    />
+    {#if timeline.length}<ol class="timeline" aria-label={m.work_lift_run_label()}>
+        {#each timeline as row (row.key)}<li class:said={row.glyph === "said"}>
+            <span class="glyph" class:live={row.live} aria-hidden="true"
+              >{#if row.glyph === "page"}<HostGlyph host={row.where} size={14} />{:else}<Icon
+                  icon={GLYPHS[row.glyph]}
+                  size={14}
+                />{/if}</span
+            >
+            <span class="what">{row.what}</span>
+            {#if row.where}<span class="where" class:mono={row.glyph === "command"}
+                >{row.where}</span
+              >{/if}
+            {#if row.elapsed}<span class="elapsed">{row.elapsed}</span>{/if}
+            {#if row.failure}<span class="note">{row.failure}</span>{/if}
+          </li>{/each}
+      </ol>{/if}
+    <details class="planning" open={planning}>
+      <summary>{m.work_lift_request_details()}</summary>
+      <form
         onsubmit={(event) => {
           event.preventDefault();
-          const text = session.draft(`question:${question.id}`);
-          if (text) void session.saveDraft(`question:${question.id}`, text.trim());
+          const text = session.draft("objective");
+          if (text) void session.saveDraft("objective", text.trim());
         }}
       >
-        <label for={`${id}-${question.id}`}>{question.prompt}</label>
-        <div class="actions">
-          {#each question.options as option, index (index)}<Button
-              size="compact"
-              disabled={!!session.pending}
-              onclick={() => session.setDraft(`question:${question.id}`, option)}>{option}</Button
-            >{/each}
-        </div>
-        <textarea
-          id={`${id}-${question.id}`}
-          rows="2"
-          maxlength="8192"
-          value={session.draft(`question:${question.id}`) ?? ""}
-          oninput={(event) =>
-            session.setDraft(`question:${question.id}`, event.currentTarget.value)}
-          disabled={!!session.pending}></textarea><Button
+        <label for={`${id}-objective`}>{m.work_env_objective()}</label><textarea
+          id={`${id}-objective`}
+          rows="3"
+          value={session.draft("objective") ?? work.objective}
+          oninput={(event) => session.setDraft("objective", event.currentTarget.value)}
+          disabled={!!session.pending}
+          maxlength="8192"></textarea><Button
           type="submit"
-          disabled={!!session.pending || !session.draft(`question:${question.id}`)}
-          >{m.work_submit_answer()}</Button
+          disabled={!!session.pending || !session.draft("objective")}
+          >{m.work_submit_objective()}</Button
         >
-      </form>{/each}
-    <div class="actions">
-      <Button
-        disabled={blocked || operating || preferences.value("ai.enabled") === "false"}
-        onclick={() => {
-          if (work)
-            void session.operations.begin({
-              kind: "plan",
-              request: { version: 1, work: work.id, expected_revision: work.revision },
-            });
-        }}>{m.work_generate_plan()}</Button
-      ><Button
-        disabled={!!session.pending || !!session.planDraft}
-        onclick={() => session.editPlan()}>{m.work_edit_plan()}</Button
-      >
-    </div>
-    <p>{m.work_planning_disclosure()}</p>
-    {#if latest && ["pending", "unknown"].includes(latest.state.kind)}<p role="status">
-        {latest.state.kind === "pending" ? m.work_operation_pending() : m.work_operation_unknown()}
-      </p>{/if}
-    {#if plan && !session.planDraft}<ol>
-        {#each plan.draft.nodes as node (node.id)}<li>{node.objective}</li>{/each}
-      </ol>
-      {#if plan.context}<details class="context">
-          <summary>{m.work_context_disclosed()}</summary>
-          <ContextManifestList disclosure={plan.context} />
-        </details>{/if}{/if}
-    <WorkPlanEditor {session} />
-    <WorkExecutionReview {session} />
+      </form>
+      {#each work.questions.filter((question) => question.state === "active") as question (question.id)}<form
+          onsubmit={(event) => {
+            event.preventDefault();
+            const text = session.draft(`question:${question.id}`);
+            if (text) void session.saveDraft(`question:${question.id}`, text.trim());
+          }}
+        >
+          <label for={`${id}-${question.id}`}>{question.prompt}</label>
+          <div class="actions">
+            {#each question.options as option, index (index)}<Button
+                size="compact"
+                disabled={!!session.pending}
+                onclick={() => session.setDraft(`question:${question.id}`, option)}>{option}</Button
+              >{/each}
+          </div>
+          <textarea
+            id={`${id}-${question.id}`}
+            rows="2"
+            maxlength="8192"
+            value={session.draft(`question:${question.id}`) ?? ""}
+            oninput={(event) =>
+              session.setDraft(`question:${question.id}`, event.currentTarget.value)}
+            disabled={!!session.pending}></textarea><Button
+            type="submit"
+            disabled={!!session.pending || !session.draft(`question:${question.id}`)}
+            >{m.work_submit_answer()}</Button
+          >
+        </form>{/each}
+      <div class="actions">
+        <Button
+          disabled={blocked || operating || preferences.value("ai.enabled") === "false"}
+          onclick={() => {
+            if (work)
+              void session.operations.begin({
+                kind: "plan",
+                request: { version: 1, work: work.id, expected_revision: work.revision },
+              });
+          }}>{m.work_generate_plan()}</Button
+        ><Button
+          disabled={!!session.pending || !!session.planDraft}
+          onclick={() => session.editPlan()}>{m.work_edit_plan()}</Button
+        >
+      </div>
+      <p>{m.work_planning_disclosure()}</p>
+      {#if latest && ["pending", "unknown"].includes(latest.state.kind)}<p role="status">
+          {latest.state.kind === "pending"
+            ? m.work_operation_pending()
+            : m.work_operation_unknown()}
+        </p>{/if}
+      {#if plan && !session.planDraft}<ol>
+          {#each plan.draft.nodes as node (node.id)}<li>{node.objective}</li>{/each}
+        </ol>
+        {#if plan.context}<details class="context">
+            <summary>{m.work_context_disclosed()}</summary>
+            <ContextManifestList disclosure={plan.context} />
+          </details>{/if}{/if}
+      <WorkPlanEditor {session} />
+      <WorkExecutionReview {session} />
+    </details>
     {#if projection && execution && projection.executions.length > 1}<label
         >{m.work_execution()}<select
           value={execution?.id}
@@ -270,7 +340,8 @@
 
 <style>
   .objective-inspector,
-  form {
+  form,
+  .planning {
     display: flex;
     flex-direction: column;
     gap: 16px;
@@ -281,12 +352,98 @@
     color: var(--color-muted);
   }
 
-  h2,
   h3 {
     margin: 0;
     font-size: var(--text-body);
     font-weight: 600;
     overflow-wrap: anywhere;
+  }
+
+  summary {
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    cursor: default;
+  }
+
+  summary:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  li {
+    margin-block: 8px;
+  }
+
+  ul li {
+    display: flex;
+    gap: 12px;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .timeline {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .timeline li {
+    display: grid;
+    grid-template-columns: 20px auto minmax(0, 1fr) auto;
+    align-items: baseline;
+    column-gap: 8px;
+    margin: 0;
+    padding-block: 5px;
+    font-size: var(--text-label);
+  }
+
+  .timeline .glyph {
+    display: inline-grid;
+    place-items: center;
+    align-self: center;
+    color: var(--color-faint);
+  }
+
+  .timeline .glyph.live {
+    color: var(--color-accent);
+  }
+
+  .timeline .what {
+    font-weight: 550;
+  }
+
+  .timeline .said .what {
+    grid-column: 2 / 4;
+    color: var(--color-muted);
+    font-weight: 400;
+  }
+
+  .timeline .where {
+    min-inline-size: 0;
+    color: var(--color-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .timeline .mono {
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+  }
+
+  .timeline .elapsed {
+    grid-column: 4;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .timeline .note {
+    grid-column: 2 / -1;
+    color: var(--color-danger);
+    font-size: var(--text-caption);
   }
 
   select,
@@ -316,16 +473,5 @@
   ul {
     list-style: none;
     padding: 0;
-  }
-
-  li {
-    margin-block: 8px;
-  }
-
-  ul li {
-    display: flex;
-    gap: 12px;
-    justify-content: space-between;
-    align-items: center;
   }
 </style>
