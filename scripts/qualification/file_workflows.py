@@ -7,6 +7,7 @@ Received bodies are bounded, compared against fixed fixture bytes and discarded.
 """
 
 import argparse
+import base64
 import hashlib
 import json
 import secrets
@@ -60,6 +61,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         base = "/" + self.server.token
+        if self.path == base + "/linked":
+            self.send_body(200,"text/html",b'<title>Linked native tab</title><h1>Linked native tab</h1><p>The original native navigation was preserved.</p>')
+            return
+        if self.path == base + "/image.png":
+            self.send_body(200,"image/png",base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1kAAAAASUVORK5CYII="))
+            return
         if self.path == base + "/empty":
             self.send_attachment("zephium-empty.txt", b"")
             return
@@ -125,6 +132,11 @@ class FixtureHandler(BaseHTTPRequestHandler):
         page = r'''<!doctype html><meta charset="utf-8"><title>Zephium file workflow fixture</title>
 <style>body{font:16px system-ui;margin:32px;max-width:850px}label{display:block;margin:20px 0}button{padding:8px 16px}pre{white-space:pre-wrap}iframe{width:100%;height:360px}#drop{padding:20px;border:2px dashed #888}</style>
 <h1>Native file uploads</h1>
+<p><a href="__BASE__/linked">Ordinary link</a> · <a target="_blank" rel="noreferrer" href="__BASE__/linked">New-tab link</a> · <a target="_blank" rel="noreferrer" href="__BASE__/download">New-tab attachment</a></p>
+<form method="POST" target="_blank" action="__BASE__/export"><input type="hidden" name="fixture" value="generated"><button>New-tab POST export</button></form>
+<p><button id="native-popup">Scripted window from click</button> <button id="delayed-popup">Try delayed popup</button></p>
+<img alt="Generated image fixture" width="120" height="80" src="__BASE__/image.png">
+
 <p>Select only the generated fixture files. Uploads stay on this loopback server.</p>
 <p><a href="__BASE__/download">Download attachment</a> · <a href="__BASE__/slow">Slow download (32 MiB)</a> · <a href="__BASE__/redirect">Redirected download</a></p>
 <p><button id="blob">Download generated text</button> <button id="data">Download data URL</button></p>
@@ -144,6 +156,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
 __FRAME__
 <script>
 const form = document.querySelector('#upload'), result = document.querySelector('#result');
+document.querySelector('#native-popup').onclick=()=> {
+  const child=window.open('about:blank');
+  if(child) {child.document.write('<title>Native scripted child</title><h1>Native scripted child</h1><p>Native opener relationship preserved.</p>');child.document.close();}
+  result.textContent=child ? 'Native window returned' : 'Window refused';
+};
+document.querySelector('#delayed-popup').onclick=()=>setTimeout(()=>{const child=window.open('__BASE__/linked');result.textContent=child ? 'FAIL: delayed popup opened' : 'PASS: delayed popup blocked';},6000);
 document.querySelector('#blob').onclick = () => {
   const url = URL.createObjectURL(new Blob(['Zephium generated download fixture\n'], {type:'text/plain'}));
   const link = document.createElement('a'); link.href=url; link.download='zephium-generated.txt'; link.click();
