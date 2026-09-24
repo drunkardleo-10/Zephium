@@ -1740,7 +1740,7 @@ async fn agent_workflow(
                                     browser_settings(binding, key),
                                 )
                                 .await;
-                            keep_frames(&observed);
+                            keep_frames(observed);
                             outcome
                         }
                     }
