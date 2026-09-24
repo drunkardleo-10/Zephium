@@ -65,6 +65,8 @@ enum Mode {
     AgentTrip,
     AgentAirbnb,
     AgentListing,
+    /// One read of the page named on the command line.
+    AgentPage,
     AgentMoney,
     MoneyNode,
 }
@@ -111,6 +113,48 @@ pub(super) fn run_agent_airbnb() -> Result<(), super::ProbeFailure> {
 
 pub(super) fn run_agent_listing() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::AgentListing)
+}
+
+static PAGE_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static PAGE_OBJECTIVE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// One agent read of a named public page; its frames are kept locally.
+pub(super) fn run_agent_page(url: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
+    let url = url
+        .to_str()
+        .filter(|url| url.starts_with("https://") && url.len() <= 512)
+        .ok_or(super::ProbeFailure::Authority)?;
+    let _ = PAGE_URL.set(url.to_owned());
+    let _ = PAGE_OBJECTIVE.set(format!("Read {url} in one browser read and report the places to stay it shows with their displayed prices, as cited findings from that page. Do not search, follow links, book, sign in or interact with verification controls. If the page shows no places to stay, report that honestly."));
+    run_mode(Mode::AgentPage)
+}
+
+/// Keeps each settled page's last frame under target and prints only its size.
+fn keep_frames(observed: &Mutex<Option<zephium_app::work_runtime::WorkAttemptObserver>>) {
+    static KEPT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let directory = std::path::Path::new("target/work-runtime-proof/frames");
+    if std::fs::create_dir_all(directory).is_err() {
+        return;
+    }
+    let pages = observed
+        .lock()
+        .ok()
+        .and_then(|observer| observer.as_ref().map(|observer| observer.pages()))
+        .unwrap_or_default();
+    for page in pages {
+        let Some(frame) = page.frame.filter(|_| !page.live) else {
+            continue;
+        };
+        let index = KEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::write(directory.join(format!("page-{index}.png")), frame.png.as_slice());
+        let _ = writeln!(
+            std::io::stdout().lock(),
+            "agent-work: frame index={index} width={} height={} png_bytes={}",
+            frame.width,
+            frame.height,
+            frame.png.len()
+        );
+    }
 }
 
 pub(super) fn run_agent_details() -> Result<(), super::ProbeFailure> {
@@ -306,6 +350,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentTrip
             | Mode::AgentAirbnb
             | Mode::AgentListing
+            | Mode::AgentPage
             | Mode::AgentMoney
     ) {
         6
@@ -331,6 +376,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         | Mode::AgentTrip
         | Mode::AgentAirbnb
         | Mode::AgentListing
+        | Mode::AgentPage
         | Mode::AgentMoney => 720,
         Mode::Public => 160,
         _ => 240,
@@ -561,6 +607,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentTrip
             | Mode::AgentAirbnb
             | Mode::AgentListing
+            | Mode::AgentPage
             | Mode::AgentMoney
     ) {
         let execution = &state.executions[0];
@@ -849,6 +896,7 @@ async fn workflow(
             | Mode::AgentTrip
             | Mode::AgentAirbnb
             | Mode::AgentListing
+            | Mode::AgentPage
             | Mode::AgentMoney
             | Mode::AgentFiles
     ) {
@@ -1426,6 +1474,7 @@ async fn agent_workflow(
         Mode::AgentMoney => AGENT_MONEY_OBJECTIVE,
         Mode::AgentListing => "Read https://www.airbnb.com/rooms/23813739?adults=1 in one browser read and collect this one listing: its name, displayed nightly price, displayed monthly total, stay dates or minimum stay, its own page address as an optional url column named listing_url, and picture. Dates are unspecified, so leave any value the page does not show unknown. Do not search, follow links, book, sign in or interact with verification controls.",
         Mode::AgentRead => AGENT_READ_OBJECTIVE,
+        Mode::AgentPage => PAGE_OBJECTIVE.get().map(String::as_str).unwrap_or_default(),
         Mode::AgentGovernment | Mode::AgentHumanGovernment => AGENT_GOVERNMENT_OBJECTIVE,
         Mode::AgentDisclosure => "Read https://www.lego.com/en-us/product/tower-bridge-21067 in one browser assignment. Find the Specifications disclosure, bring it into view if needed, expand it, and inspect its revealed content. Return the product name, displayed price, piece count and exact dimensions with citations from this page. Do not follow links, buy, sign in, change locale, or substitute public search. Leave unsupported details unknown. Use one browser read assignment and a source-backed note.",
         Mode::AgentScroll => "Read https://www.lego.com/en-us/product/tower-bridge-21067 in one browser assignment. Dismiss entry and privacy notices if needed. Before extracting, scroll the document down by one page, inspect the new viewport, then scroll the document down by another page and inspect again. Report the product name and any details visible after scrolling, with cited evidence. The two actual scrolls are required: snapshots alone do not satisfy this task. Do not buy, sign in, change locale, or follow links. Use one read responsibility and a source-backed note.",
@@ -1627,6 +1676,7 @@ async fn agent_workflow(
             approved
         })
     });
+    let observed = Mutex::new(None);
     let agent_run = async {
         WorkAgentService::new(handle.clone())
             .with_diagnostic(|event| {
@@ -1653,6 +1703,7 @@ async fn agent_workflow(
                 |probe, request| {
                     let key = keys.lock().ok().and_then(|mut keys| keys.pop());
                     let callback = &callback;
+                    let observed = &observed;
                     async move {
                         let key = match key {
                             Some(key) => key,
@@ -1681,18 +1732,24 @@ async fn agent_workflow(
                                 )
                                 .await
                         } else {
-                            composition
+                            let outcome = composition
                                 .run_agent_step(
                                     callback,
                                     &probe,
                                     request,
                                     browser_settings(binding, key),
                                 )
-                                .await
+                                .await;
+                            keep_frames(&observed);
+                            outcome
                         }
                     }
                 },
-                |_| {},
+                |observer| {
+                    if let Ok(mut observed) = observed.lock() {
+                        *observed = Some(observer);
+                    }
+                },
             )
             .await
     };

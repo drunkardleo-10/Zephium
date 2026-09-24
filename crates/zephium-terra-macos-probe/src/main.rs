@@ -49,6 +49,12 @@ fn main() {
         [argument, case] if argument == "--live-decision-eval-case-terra" => decision_eval::run_case(case, ProbeModel::Terra),
         #[cfg(feature = "decision-eval")]
         [argument, site] if argument == "--record-decision-observation" => decision_observation::run(site),
+        #[cfg(feature = "decision-eval")]
+        [argument, site, lists]
+            if argument == "--record-decision-observation" && lists == "release-lists" =>
+        {
+            decision_observation::use_release_lists().and_then(|()| decision_observation::run(site))
+        }
         [argument] if argument == "--check-provider-keychain" => {
             let started = std::time::Instant::now();
             let result = zephium_agentic::load_macos_probe_openai_credential()
@@ -146,6 +152,8 @@ fn main() {
         [argument] if argument == "--live-agent-airbnb-work" => work_durable::run_agent_airbnb(),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-airbnb-listing-work" => work_durable::run_agent_listing(),
+        #[cfg(feature = "durable-runtime")]
+        [argument, url] if argument == "--live-agent-page-work" => work_durable::run_agent_page(url),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-product-details-work" => {
             work_durable::run_agent_details()
