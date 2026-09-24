@@ -55,18 +55,15 @@ test("explicit result focus restores readable zoom without moving nodes and supp
   expect(onviewchange.mock.lastCall?.[0].sizes.result).toEqual({ width: 480, height: 360 });
   const body = screen.getByRole("region", { name: "Research", exact: true });
   await expect.element(body).toHaveFocus();
-  const scroll = screen.container.querySelector(".artifact-body")!;
-  expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
-  expect(scroll.textContent).toContain(paragraphs.at(-1));
+  // The card reads as the answer: its lead, not the whole text, and no citation chips.
+  const card = screen.container.querySelector(".artifact-body")!;
+  expect(card.textContent).toContain(paragraphs[0]);
+  expect(card.textContent).not.toContain(paragraphs.at(-1));
+  expect(card.querySelector(".chip")).toBeNull();
   oninspect.mockClear();
   await screen.getByText(paragraphs[0]!, { exact: true }).click();
   expect(oninspect).not.toHaveBeenCalled();
-  await screen.getByRole("button", { name: "Source 1", exact: true }).click();
-  expect(onevidence).toHaveBeenCalledExactlyOnceWith("result", {
-    key: "evidence:1",
-    label: "Source 1",
-  });
-  expect(oninspect).not.toHaveBeenCalled();
+  expect(onevidence).not.toHaveBeenCalled();
   await expect
     .element(screen.getByRole("button", { name: "Inspect", exact: true }))
     .not.toBeInTheDocument();

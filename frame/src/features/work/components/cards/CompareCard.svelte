@@ -9,6 +9,8 @@
   import type { CanvasItem } from "../../lib/canvas-model";
   import * as m from "$shared/i18n/messages";
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
+  const COLUMNS = 3;
+  const ROWS = 3;
   const pictures = getContext<{ readonly map: ReadonlyMap<string, ComparePicture> }>(
     canvasPictures,
   );
@@ -16,29 +18,33 @@
     const content = item.artifact?.content;
     return content?.kind === "matrix" ? compareModel(content, pictures?.map) : null;
   });
-  /** The card says who is compared and the first two things they differ on. */
-  const rows = $derived(model?.rows.slice(0, 2) ?? []);
+  /** The card shows who is compared and the first things they differ on; the lift has all. */
+  const columns = $derived(model?.columns.slice(0, COLUMNS) ?? []);
+  const rows = $derived(model?.rows.slice(0, ROWS) ?? []);
+  const rest = $derived(Math.max(0, (model?.columns.length ?? 0) - COLUMNS));
 </script>
 
-<CardFrame kind={item.kind} title={item.title} icon={GitCompareIcon} {selected} dense>
+<CardFrame title={item.title} icon={GitCompareIcon} {selected} dense>
   {#if model}
-    <div class="compare">
-      <ul class="subjects">
-        {#each model.columns.slice(0, 4) as column (column.key)}
-          <li>
-            <span class="picture">
-              <SubjectPicture picture={column.picture} name={column.name} />
-            </span>
-            <span class="name">{column.name}</span>
-            {#if column.price}<span class="price">{column.price}</span>{/if}
-          </li>
+    <div class="compare" style:--columns={columns.length} class:stub={rest > 0}>
+      <div class="head">
+        <span></span>
+        {#each columns as column (column.key)}
+          <div class="subject">
+            <span class="picture"
+              ><SubjectPicture picture={column.picture} name={column.name} /></span
+            >
+            <span class="name" title={column.name}>{column.name}</span>
+            <span class="price">{column.price ?? ""}</span>
+          </div>
         {/each}
-      </ul>
+        {#if rest}<span class="more" title={m.work_card_more({ count: rest })}>+{rest}</span>{/if}
+      </div>
       <dl class="rows">
         {#each rows as row (row.key)}
           <div class="row">
-            <dt>{row.label}</dt>
-            {#each row.cells.slice(0, 4) as cell (cell.subject)}
+            <dt title={row.label}>{row.label}</dt>
+            {#each row.cells.slice(0, COLUMNS) as cell (cell.subject)}
               <dd class:numeric={row.numeric}>
                 {#if cell.value.kind === "unknown"}<span class="dash">—</span>
                 {:else if cell.value.kind === "mark"}<span
@@ -47,9 +53,10 @@
                     aria-label={cell.value.yes ? m.work_yes() : m.work_no()}
                     ><Icon icon={cell.value.yes ? Tick02Icon : Cancel01Icon} size={13} /></span
                   >
-                {:else}{cell.value.text}{/if}
+                {:else}<span title={cell.value.text}>{cell.value.text}</span>{/if}
               </dd>
             {/each}
+            {#if rest}<span></span>{/if}
           </div>
         {/each}
       </dl>
@@ -67,78 +74,93 @@
     min-block-size: 0;
     overflow: hidden;
 
-    --compare-columns: repeat(4, minmax(0, 1fr));
+    --grid: 88px repeat(var(--columns), minmax(0, 1fr));
   }
 
-  .subjects,
+  .compare.stub {
+    --grid: 88px repeat(var(--columns), minmax(0, 1fr)) 28px;
+  }
+
+  .head,
   .row {
     display: grid;
-    grid-template-columns: 78px var(--compare-columns);
+    grid-template-columns: var(--grid);
     align-items: start;
-    gap: 8px;
+    gap: 10px;
     margin: 0;
-    padding: 0;
   }
 
-  .subjects {
-    list-style: none;
-    grid-column: 1 / -1;
-    grid-template-columns: 78px var(--compare-columns);
-  }
-
-  .subjects::before {
-    content: "";
-  }
-
-  .subjects li {
+  .subject {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     min-inline-size: 0;
   }
 
   .picture {
-    inline-size: 100%;
-    aspect-ratio: 1;
-    max-block-size: 54px;
-    border-radius: var(--radius-xs);
+    display: block;
+    inline-size: 64px;
+    block-size: 64px;
+    margin-block-end: 4px;
+    border-radius: var(--radius-sm);
     background: var(--color-fill);
     overflow: hidden;
   }
 
-  .name,
-  dd {
-    min-inline-size: 0;
+  .name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: var(--text-caption);
-  }
-
-  .name {
+    font-size: var(--text-label);
     font-weight: 600;
+    line-height: 16px;
   }
 
   .price {
+    min-block-size: 16px;
+    font-size: var(--text-label);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 16px;
+  }
+
+  .more {
+    place-self: center;
+    padding: 0 6px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill);
+    color: var(--color-muted);
     font-size: var(--text-caption);
     font-variant-numeric: tabular-nums;
+    line-height: 18px;
   }
 
   .rows {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 0;
     margin: 0;
     min-block-size: 0;
     overflow: hidden;
   }
 
-  dt {
-    color: var(--color-muted);
-    font-size: var(--text-caption);
+  .row {
+    padding-block: 5px;
+    border-block-start: 1px solid var(--color-border);
+  }
+
+  dt,
+  dd {
+    min-inline-size: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-size: var(--text-label);
+    line-height: 16px;
+  }
+
+  dt {
+    color: var(--color-muted);
   }
 
   dd {
@@ -166,5 +188,6 @@
   .summary {
     margin: 0;
     color: var(--color-muted);
+    font-size: var(--text-label);
   }
 </style>

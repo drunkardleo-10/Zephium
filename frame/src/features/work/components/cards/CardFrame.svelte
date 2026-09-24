@@ -3,10 +3,14 @@
   import type { IconSvgElement } from "@hugeicons/svelte";
   import Icon from "$shared/ui/Icon";
   let {
-    kind,
+    kind = "",
     title,
     icon,
     leading,
+    hero,
+    count,
+    lines = 2,
+    mono = false,
     selected = false,
     active = false,
     unavailable = false,
@@ -14,10 +18,17 @@
     children,
     footer,
   }: {
-    kind: string;
+    /** Said only where the card does not already say what it is. */
+    kind?: string;
     title: string;
     icon?: IconSvgElement;
     leading?: Snippet;
+    /** A full-bleed picture above the header. */
+    hero?: Snippet;
+    /** A tally beside the title, in tabular numerals. */
+    count?: number;
+    lines?: 1 | 2;
+    mono?: boolean;
     selected?: boolean;
     /** The stage a run is working in right now. */
     active?: boolean;
@@ -29,13 +40,17 @@
 </script>
 
 <article class="card" class:selected class:active class:unavailable class:dense>
+  {#if hero}<div class="hero work-drag-handle">{@render hero()}</div>{/if}
   <header class="work-drag-handle">
-    <span class="glyph">
-      {#if leading}{@render leading()}{:else if icon}<Icon {icon} size={16} />{/if}
-    </span>
+    {#if leading || icon}<span class="glyph">
+        {#if leading}{@render leading()}{:else if icon}<Icon {icon} size={14} />{/if}
+      </span>{/if}
     <span class="titles">
-      <span class="kind">{kind}</span>
-      <strong class="title">{title}</strong>
+      {#if kind}<span class="kind">{kind}</span>{/if}
+      <span class="line">
+        <strong class="title" class:one={lines === 1} class:mono {title}>{title}</strong>
+        {#if count !== undefined}<span class="count">{count}</span>{/if}
+      </span>
     </span>
   </header>
   {#if children}<div class="body">{@render children()}</div>{/if}
@@ -43,6 +58,8 @@
 </article>
 
 <style>
+  /* One card language: a hairline at rest, a firmer one under the pointer,
+     the accent when chosen, and a lift only while the card is carried. */
   .card {
     display: flex;
     flex-direction: column;
@@ -68,6 +85,13 @@
       0 0 0 3px var(--color-accent);
   }
 
+  /* stylelint-disable-next-line selector-class-pattern */
+  :global(.svelte-flow__node.dragging) .card {
+    box-shadow:
+      inset 0 0 0 1px var(--color-border-strong),
+      var(--shadow-popover);
+  }
+
   /* The stage the run is working in breathes; it never flashes. */
   .card.active {
     animation: card-active 2.4s var(--ease-smooth) infinite;
@@ -88,20 +112,28 @@
     opacity: 0.6;
   }
 
+  .hero {
+    flex: none;
+    overflow: hidden;
+    background: var(--color-fill);
+    cursor: grab;
+  }
+
   header {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     flex: none;
     padding: 12px 14px 8px;
     cursor: grab;
   }
 
   .dense header {
-    padding: 10px 12px;
+    padding: 10px 12px 6px;
   }
 
-  header:active {
+  header:active,
+  .hero:active {
     cursor: grabbing;
   }
 
@@ -109,24 +141,36 @@
     display: grid;
     place-items: center;
     flex: none;
-    inline-size: 28px;
-    block-size: 28px;
-    border-radius: var(--radius-sm);
+    inline-size: 24px;
+    block-size: 24px;
+    border-radius: var(--radius-xs);
     background: var(--color-fill);
     color: var(--color-label-secondary);
+    overflow: hidden;
   }
 
   .titles {
     display: flex;
     flex-direction: column;
     gap: 1px;
+    flex: 1;
     min-inline-size: 0;
   }
 
   .kind {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     color: var(--color-faint);
     font-size: var(--text-caption);
     line-height: 13px;
+  }
+
+  .line {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-inline-size: 0;
   }
 
   .title {
@@ -134,11 +178,34 @@
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
     line-clamp: 2;
+    min-inline-size: 0;
     overflow: hidden;
     font-size: var(--text-body);
     font-weight: 600;
     line-height: 17px;
     letter-spacing: -0.005em;
+    overflow-wrap: anywhere;
+  }
+
+  .title.one {
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
+  }
+
+  .title.mono {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: var(--text-label);
+    font-weight: 500;
+    letter-spacing: 0;
+    word-break: break-all;
+  }
+
+  .count {
+    flex: none;
+    color: var(--color-faint);
+    font-size: var(--text-label);
+    font-variant-numeric: tabular-nums;
+    line-height: 17px;
   }
 
   .body {
@@ -157,8 +224,14 @@
     justify-content: space-between;
     gap: 8px;
     flex: none;
-    padding: 8px 14px 10px;
+    min-inline-size: 0;
+    padding: 6px 14px 10px;
     color: var(--color-faint);
     font-size: var(--text-caption);
+    line-height: 13px;
+  }
+
+  .dense footer {
+    padding: 6px 12px 9px;
   }
 </style>

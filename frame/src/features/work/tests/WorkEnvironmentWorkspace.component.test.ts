@@ -472,8 +472,11 @@ test("prompt submission keeps work on canvas and clarification choices above the
   await screen.getByRole("button", { name: "Fit view", exact: true }).click();
   await expect.element(screen.getByText("Reviewed findings", { exact: true })).toBeVisible();
   expect(screen.container.querySelector(".detail")).toBeNull();
-  // A citation on the card opens the one surface: the lift, on that source.
-  await screen.getByRole("button", { name: "Source 1", exact: true }).first().click();
+  // The card carries the answer; its citations live in the lift, named by kind, never numbered.
+  expect(screen.container.querySelector(".work-canvas .chip")).toBeNull();
+  await screen.getByText("Reviewed findings", { exact: true }).click();
+  await screen.getByRole("button", { name: "Open", exact: true }).click();
+  await screen.getByRole("button", { name: "Page", exact: true }).first().click();
   await expect.element(screen.getByText("Exact cited source", { exact: true })).toBeVisible();
   expect(readEvidence).toHaveBeenCalledExactlyOnceWith(link);
   // A result reads as finished: no review strip beside it, no second panel.

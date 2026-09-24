@@ -134,9 +134,9 @@
     "description": "Measured 328183 JS bytes with the agent run operation, step labels, and the agent line on the canvas card in the shared graph."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 557500,
-    "css": 120500,
-    "description": "Measured 556987 JS and 120225 CSS bytes: derived cluster nodes, latent relation edges and the path draw-in policy; the regenerated decision-preference IPC surface enters every entry that reaches the bindings."
+    "js": 572000,
+    "css": 128800,
+    "description": "Cards add 14.3 KB JS and 8.2 KB CSS (568279 and 127517 measured on b1628da5): the Findings, File and Command cards, one card frame, and the card mode of every result renderer. Derived cluster nodes, latent relation edges and the path draw-in add 3.0 KB JS and 0.9 KB CSS (571252 and 128409 measured together)."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
     "js": 70000,
@@ -155,8 +155,8 @@
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
     "js": 162000,
-    "css": 19500,
-    "description": "Account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog."
+    "css": 22000,
+    "description": "Measured 21835 CSS bytes: the card mode of the result renderers and source glyphs on evidence chips; account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog."
   },
   "lazy:features/work/components/WorkFileInspector.svelte": {
     "js": 66000,
@@ -164,9 +164,9 @@
     "description": "Measured 64732 JS and 5077 CSS bytes: one file record or proposed change, opened from the lift."
   },
   "lazy:features/work/components/WorkResultInspector.svelte": {
-    "js": 141500,
-    "css": 19000,
-    "description": "Measured 141028 JS and 18498 CSS bytes: the lift renders the result itself, the quiet per-cell correction and the one Accept the review state needs; the shared live-run predicate adds 28 bytes."
+    "js": 148200,
+    "css": 22400,
+    "description": "Measured 147677 JS and 22233 CSS bytes: the lift renders the result itself, the quiet per-cell correction and the one Accept the review state needs; the card mode of the result renderers, source glyphs on chips, and bars for numeric compare rows add 6.6 KB."
   },
   "lazy:features/notes/components/NoteEditorHost.svelte": {
     "js": 96000,

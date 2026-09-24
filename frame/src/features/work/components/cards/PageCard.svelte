@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
+  import AgentAvatar from "./AgentAvatar.svelte";
   import type { CanvasItem } from "../../lib/canvas-model";
   import { cardCountdown, reasonBadge } from "../../lib/work-human";
   import * as m from "$shared/i18n/messages";
@@ -27,7 +28,9 @@
   <header class="work-drag-handle">
     <span class="host">{item.page?.host || item.kind}</span>
     {#if !item.unavailable}<span class="state">
-        {#if item.page?.live}<span class="dot" aria-hidden="true"></span>{/if}{item.status}
+        {item.status}
+        <!-- The reader mark: the agent is on this page right now. -->
+        {#if item.page?.live}<span class="reader"><AgentAvatar size={14} active /></span>{/if}
       </span>{/if}
   </header>
   <div class="frame">
@@ -61,7 +64,7 @@
     {/if}
   </div>
   <!-- A read that gave up says so in Rust's words, not with a shrug. -->
-  {#if item.unavailable}<p class="reason">{item.status}</p>{/if}
+  {#if item.unavailable}<p class="reason" title={item.status}>{item.status}</p>{/if}
 </article>
 
 <style>
@@ -72,15 +75,28 @@
     block-size: 100%;
     border-radius: var(--radius-lg);
     background: var(--color-surface);
-    box-shadow: var(--shadow-popover);
+    box-shadow: inset 0 0 0 1px var(--color-border);
     color: var(--color-text);
     overflow: hidden;
+    transition: box-shadow var(--motion-fast) var(--ease-smooth);
+  }
+
+  .page:hover {
+    box-shadow: inset 0 0 0 1px var(--color-border-strong);
   }
 
   .page.selected {
     box-shadow:
-      var(--shadow-popover),
-      0 0 0 2px var(--color-accent-soft);
+      inset 0 0 0 1px var(--color-border-strong),
+      0 0 0 2px var(--color-accent-soft),
+      0 0 0 3px var(--color-accent);
+  }
+
+  /* stylelint-disable-next-line selector-class-pattern */
+  :global(.svelte-flow__node.dragging) .page {
+    box-shadow:
+      inset 0 0 0 1px var(--color-border-strong),
+      var(--shadow-popover);
   }
 
   header {
@@ -88,8 +104,10 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 8px 12px;
+    flex: none;
+    padding: 7px 10px 6px 12px;
     font-size: var(--text-label);
+    line-height: 16px;
     cursor: grab;
   }
 
@@ -104,22 +122,14 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    flex: none;
     color: var(--color-muted);
+    font-size: var(--text-caption);
     white-space: nowrap;
   }
 
-  .dot {
-    inline-size: 6px;
-    block-size: 6px;
-    border-radius: 50%;
-    background: var(--color-accent);
-    animation: pulse 1.6s ease-in-out infinite;
-  }
-
-  @keyframes pulse {
-    50% {
-      opacity: 0.35;
-    }
+  .reader {
+    display: inline-flex;
   }
 
   .frame {
@@ -205,18 +215,15 @@
   }
 
   .reason {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
     flex: none;
     margin: 0;
-    padding: 0 12px 10px;
+    padding: 0 12px 8px;
     color: var(--color-muted);
-    font-size: var(--text-label);
-    line-height: 17px;
-    text-wrap: pretty;
+    font-size: var(--text-caption);
+    line-height: 13px;
     overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .placeholder {
@@ -224,11 +231,5 @@
     font-weight: 700;
     color: var(--color-faint);
     text-transform: uppercase;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .dot {
-      animation: none;
-    }
   }
 </style>

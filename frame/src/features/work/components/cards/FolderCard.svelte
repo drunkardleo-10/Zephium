@@ -8,8 +8,8 @@
   const path = $derived(homePath(item.detail));
 </script>
 
-<CardFrame kind={item.kind} title={item.title} icon={FolderAddIcon} {selected} dense>
-  {#snippet footer()}<span class="path" title={path}>{path}</span><span class="granted"
+<CardFrame title={item.title} icon={FolderAddIcon} {selected} lines={1} dense>
+  {#snippet footer()}<span class="path" title={path}><bdi>{path}</bdi></span><span class="granted"
       >{m.work_env_folder_granted()}</span
     >{/snippet}
 </CardFrame>

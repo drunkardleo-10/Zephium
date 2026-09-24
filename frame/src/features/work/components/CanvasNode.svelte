@@ -19,6 +19,9 @@
   import ResultCard from "./cards/ResultCard.svelte";
   import SubjectCard from "./cards/SubjectCard.svelte";
   import FindingCard from "./cards/FindingCard.svelte";
+  import FindingsCard from "./cards/FindingsCard.svelte";
+  import FileCard from "./cards/FileCard.svelte";
+  import CommandCard from "./cards/CommandCard.svelte";
   import SourcesCard from "./cards/SourcesCard.svelte";
   import CompareCard from "./cards/CompareCard.svelte";
   import FolderCard from "./cards/FolderCard.svelte";
@@ -36,7 +39,18 @@
   let root = $state<HTMLDivElement>();
   const type = $derived(data.type ?? (data.artifact ? "result" : "objective"));
   /** A card the run drew, not an element the person placed: it takes no orders. */
-  const inert = $derived(["responsibility", "agent", "page", "sources", "request"].includes(type));
+  const inert = $derived(
+    [
+      "responsibility",
+      "agent",
+      "page",
+      "sources",
+      "request",
+      "findings",
+      "file",
+      "command",
+    ].includes(type),
+  );
   /** A page held for a person opens the takeover, never a copy in Browse. */
   const waiting = $derived(data.page?.human?.phase === "waiting_for_human");
 </script>
@@ -66,7 +80,7 @@
         ? m.work_human_help()
         : m.work_env_open()}
     </button>
-    {#if data.artifact}<button
+    {#if data.artifact && !inert}<button
         type="button"
         onclick={async () => {
           focusResult(id);
@@ -112,6 +126,9 @@
   {#if type === "tab" || type === "link"}<TabCard item={data} {selected} />
   {:else if type === "subject"}<SubjectCard item={data} {selected} />
   {:else if type === "finding"}<FindingCard item={data} {selected} />
+  {:else if type === "findings"}<FindingsCard item={data} {selected} />
+  {:else if type === "file"}<FileCard item={data} {selected} />
+  {:else if type === "command"}<CommandCard item={data} {selected} />
   {:else if type === "sources"}<SourcesCard item={data} {selected} />
   {:else if type === "folder"}<FolderCard item={data} {selected} />
   {:else if type === "page"}<PageCard item={data} {selected} onhelp={() => action(id, "help")} />

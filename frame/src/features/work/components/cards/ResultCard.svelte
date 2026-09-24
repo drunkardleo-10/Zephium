@@ -44,19 +44,15 @@
   });
 </script>
 
-<CardFrame kind={item.kind} title={item.title} {icon} {selected}>
+<!-- The hero of a stage: the answer itself, not the sources it cites. -->
+<CardFrame title={item.title} {icon} {selected}>
   {#if item.artifact}
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-    <div
-      class="artifact-body nodrag nopan nowheel"
-      role="region"
-      aria-label={item.title}
-      tabindex="0"
-    >
+    <div class="artifact-body nodrag nopan" role="region" aria-label={item.title} tabindex="0">
       <Artifact
         artifact={item.artifact}
         embedded
-        compact
+        card
         onevidence={evidence?.open ? (reference) => evidence.open?.(id, reference) : undefined}
         onlink={openLink}
       />
@@ -75,7 +71,7 @@
 <style>
   .artifact-body {
     block-size: 100%;
-    overflow: auto;
+    overflow: hidden;
     font-size: var(--text-label);
   }
 
@@ -86,8 +82,15 @@
   }
 
   .summary {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
     margin: 0;
+    overflow: hidden;
     color: var(--color-muted);
+    font-size: var(--text-label);
+    line-height: 16px;
   }
 
   .link {
@@ -99,6 +102,7 @@
     font: inherit;
     font-size: var(--text-caption);
     cursor: default;
+    transition: background-color var(--motion-fast) var(--ease-smooth);
   }
 
   .link:hover {
