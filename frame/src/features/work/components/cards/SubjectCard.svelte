@@ -2,35 +2,35 @@
   import CardFrame from "./CardFrame.svelte";
   import SubjectPicture from "./SubjectPicture.svelte";
   import { displayHost } from "$shared/ui/data/Artifact";
+  import { factBeside, SUBJECT_FACTS } from "../../lib/card-size";
   import type { CanvasItem } from "../../lib/canvas-model";
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
   const host = $derived(displayHost(item.subject?.homepage));
-  // The card is sized for a picture as soon as the run found one to admit:
-  // until one is, the tile stands quietly in its place.
-  const pictured = $derived(!!item.image || !!item.subject?.imageCandidates?.length);
-  /** The lead fact (the price, when there is one) and one more; the lift has the rest. */
-  const facts = $derived((item.facts ?? []).slice(0, 2));
+  /** The lead fact (the price, when there is one) and the rest, each whole. */
+  const facts = $derived((item.facts ?? []).slice(0, SUBJECT_FACTS));
 </script>
 
 {#snippet picture()}<div class="picture">
     <SubjectPicture picture={item.image} name={item.title} large />
   </div>{/snippet}
-{#snippet tile()}<SubjectPicture picture={item.image} name={item.title} />{/snippet}
+{#snippet initial()}<SubjectPicture name={item.title} />{/snippet}
 
+<!-- A picture when the run admitted one; otherwise the initial beside the name. -->
 <CardFrame
   title={item.title}
   {selected}
   unavailable={item.unavailable}
-  hero={pictured ? picture : undefined}
-  leading={pictured ? undefined : tile}
+  hero={item.image ? picture : undefined}
+  leading={item.image ? undefined : initial}
+  tile={!item.image}
   dense
 >
   {#if facts.length}
     <dl class="facts">
       {#each facts as fact, index (fact.label)}
-        <div class="fact" class:lead={index === 0}>
+        <div class="fact" class:lead={index === 0} class:stacked={!factBeside(fact)}>
           <dt>{fact.label}</dt>
-          <dd title={fact.value}>{fact.value}</dd>
+          <dd>{fact.value}</dd>
         </div>
       {/each}
     </dl>
@@ -45,7 +45,7 @@
 
   .facts {
     display: grid;
-    gap: 2px;
+    gap: 4px;
     margin: 0;
   }
 
@@ -59,27 +59,41 @@
     line-height: 16px;
   }
 
+  .fact.stacked {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+  }
+
   .fact dt {
     flex: none;
-    max-inline-size: 50%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     color: var(--color-muted);
-    text-transform: capitalize;
+  }
+
+  .fact.stacked dt {
+    font-size: var(--text-caption);
+    line-height: 13px;
   }
 
   .fact dd {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     min-inline-size: 0;
     margin: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+    text-align: end;
+  }
+
+  .fact.stacked dd {
+    text-align: start;
   }
 
   .fact.lead dd {
     font-weight: 600;
+    font-variant-numeric: tabular-nums;
   }
 
   .descriptor {

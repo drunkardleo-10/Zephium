@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import type { WorkExecutionFact } from "$shared/ipc/bindings";
-import { subjectFacts, subjectImageCandidates, subjectKey } from "../lib/subjects";
+import { factName, subjectFacts, subjectImageCandidates, subjectKey } from "../lib/subjects";
 import { projection } from "./environment-fixtures";
 
 type Artifacts = WorkExecutionFact["artifacts"];
@@ -66,8 +66,8 @@ test("a merged subject keeps the facts of every artifact that described it", () 
   ] as Artifacts;
   // The price cell wins over the earlier text row and the label never repeats.
   expect(subjectFacts(execution, { name: "tower bridge" })).toEqual([
-    { label: "price", value: "$119.99" },
-    { label: "pieces", value: "4295 pieces" },
+    { label: "Price", value: "$119.99" },
+    { label: "Pieces", value: "4295 pieces" },
   ]);
   expect(subjectFacts(execution, { name: "Paris" })).toEqual([]);
 });
@@ -112,7 +112,7 @@ test("a fact never restates the subject's own identity", () => {
   // are identity, not facts.
   expect(subjectFacts(execution, { name: "Tower Bridge" })).toEqual([
     { label: "Price", value: "$119.99" },
-    { label: "Piece Count", value: "4295" },
+    { label: "Piece count", value: "4295" },
   ]);
 });
 
@@ -170,13 +170,13 @@ test("a detail read outranks the catalogue row for the same criterion", () => {
     },
   ] as WorkExecutionFact["steps"];
   expect(subjectFacts(execution, { name: "New York City" })).toEqual([
-    { label: "displayed price", value: "$349.99" },
-    { label: "piece count", value: "3745" },
+    { label: "Displayed price", value: "$349.99" },
+    { label: "Piece count", value: "3745" },
   ]);
   // A set no detail read covered still keeps the catalogue's answer.
   expect(subjectFacts(execution, { name: "Himeji Castle" })).toEqual([
-    { label: "displayed price", value: "$199.99 New" },
-    { label: "piece count", value: "2125 pieces" },
+    { label: "Displayed price", value: "$199.99 New" },
+    { label: "Piece count", value: "2125 pieces" },
   ]);
 });
 
@@ -227,4 +227,11 @@ test("pictures a browser step recorded outrank the ones a table claims", () => {
     "https://img.example/tb-catalog.jpg",
     "https://img.example/tower-bridge.jpg",
   ]);
+});
+
+test("a fact's label keeps its words, drops a trailing qualifier, and reads in sentence case", () => {
+  expect(factName("Displayed Routing (from the listing)")).toBe("Displayed routing");
+  expect(factName("piece_count")).toBe("Piece count");
+  expect(factName("ESTA Fee (USD)")).toBe("ESTA fee");
+  expect(factName("(per night)")).toBe("(per night)");
 });

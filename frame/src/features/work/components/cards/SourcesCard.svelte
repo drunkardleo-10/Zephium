@@ -3,6 +3,7 @@
   import HostGlyph from "./HostGlyph.svelte";
   import { Link04Icon } from "../../lib/icons";
   import type { CanvasItem } from "../../lib/canvas-model";
+  import { SOURCE_ROWS } from "../../lib/card-size";
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
   const MARKS = 8;
   const rows = $derived(item.sources ?? []);
@@ -23,7 +24,7 @@
       {#if marks.length > MARKS}<span class="extra">+{marks.length - MARKS}</span>{/if}
     </div>{/if}
   <ul class="rows">
-    {#each rows.slice(0, 2) as row (row.key)}
+    {#each rows.slice(0, SOURCE_ROWS) as row (row.key)}
       <li>
         <span class="where">{row.where}</span>
         <span class="title" class:refused={!!row.note} title={row.note || row.title}

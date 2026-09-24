@@ -45,10 +45,17 @@
 </script>
 
 <!-- The hero of a stage: the answer itself, not the sources it cites. -->
-<CardFrame title={item.title} {icon} {selected}>
+<!-- State belongs to the agent line: the card says only the answer, and its one action. -->
+<CardFrame title={item.title} {icon} {selected} footer={item.actionLabel ? action : undefined}>
   {#if item.artifact}
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-    <div class="artifact-body nodrag nopan" role="region" aria-label={item.title} tabindex="0">
+    <div
+      class="artifact-body nodrag nopan"
+      class:end={!item.actionLabel}
+      role="region"
+      aria-label={item.title}
+      tabindex="0"
+    >
       <Artifact
         artifact={item.artifact}
         embedded
@@ -58,21 +65,26 @@
       />
     </div>
   {:else}<p class="summary">{item.detail || item.status}</p>{/if}
-  {#snippet footer()}<span>{item.status}</span>{#if item.actionLabel}<button
-        type="button"
-        class="link nodrag nopan"
-        onclick={(event) => {
-          event.stopPropagation();
-          onaction();
-        }}>{item.actionLabel}</button
-      >{/if}{/snippet}
 </CardFrame>
+{#snippet action()}<span></span><button
+    type="button"
+    class="link nodrag nopan"
+    onclick={(event) => {
+      event.stopPropagation();
+      onaction();
+    }}>{item.actionLabel}</button
+  >{/snippet}
 
 <style>
   .artifact-body {
+    box-sizing: border-box;
     block-size: 100%;
     overflow: hidden;
     font-size: var(--text-label);
+  }
+
+  .artifact-body.end {
+    padding-block-end: 14px;
   }
 
   .artifact-body:focus-visible {

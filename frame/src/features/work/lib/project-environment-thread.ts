@@ -10,14 +10,9 @@ import {
   type CanvasPosition,
   type CanvasSize,
 } from "./canvas-model";
+import { requestSize } from "./card-size";
 import { stageContents } from "./project-environment-stage";
-import {
-  SIZES,
-  STAGE_GAP,
-  stageLayout,
-  type StageContents,
-  type StageLayout,
-} from "./stage-layout";
+import { STAGE_GAP, stageLayout, type StageContents, type StageLayout } from "./stage-layout";
 import * as m from "$shared/i18n/messages";
 
 /**
@@ -64,7 +59,11 @@ export function environmentStages(
     const saved = snapshot.view.placements.find((place) => place.element === element.id);
     const first = saved
       ? { x: saved.x, y: saved.y, width: saved.width, height: saved.height }
-      : { x: 80 + (index % 3) * 520, y: 120 + Math.floor(index / 3) * 420, ...SIZES.request };
+      : {
+          x: 80 + (index % 3) * 520,
+          y: 120 + Math.floor(index / 3) * 420,
+          ...requestSize(firstRequest(projection)),
+        };
     const drafts: { card: string; request: string; executions: string[] }[] = [];
     for (const [order, execution] of projection.executions.entries()) {
       const request = clipText(execution.spec.request?.trim() ?? "", REQUEST_TEXT);
@@ -92,7 +91,8 @@ export function environmentStages(
       });
     const pages = recorded(projection.work.id);
     let place = first;
-    for (const draft of drafts) {
+    for (const [order, draft] of drafts.entries()) {
+      if (order > 0) place = { ...place, ...requestSize(draft.request) };
       const contents = stageContents(
         snapshot,
         projection,
@@ -108,7 +108,7 @@ export function environmentStages(
         contents,
         layout,
       });
-      place = { x: first.x, y: layout.extent + STAGE_GAP, ...SIZES.request };
+      place = { x: first.x, y: layout.extent + STAGE_GAP, width: 0, height: 0 };
     }
   }
   return stages;

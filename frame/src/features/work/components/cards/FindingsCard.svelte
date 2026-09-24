@@ -2,9 +2,9 @@
   import CardFrame from "./CardFrame.svelte";
   import { Tick02Icon } from "../../lib/icons";
   import type { CanvasItem } from "../../lib/canvas-model";
+  import { FINDINGS_ROWS as ROWS } from "../../lib/card-size";
   import * as m from "$shared/i18n/messages";
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
-  const ROWS = 4;
   const items = $derived(item.findings?.items ?? []);
   const total = $derived(Math.max(item.findings?.total ?? 0, items.length));
 </script>

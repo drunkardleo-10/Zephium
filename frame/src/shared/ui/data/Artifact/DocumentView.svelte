@@ -11,19 +11,16 @@
     onlink,
     card = false,
     paragraphs = [],
-    more,
   }: {
     document?: NoteDocument | null;
     node?: DocumentNode;
     /** Links open through a native intent; chrome never navigates itself. */
     onlink?: (href: string) => void;
-    /** The result card: the lead and the next steps, never the whole text. */
+    /** The result card: the lead and the section headings; the steps stand beside it as cards. */
     card?: boolean;
     /** Plain paragraphs, for a card whose document carries no formatting. */
     paragraphs?: readonly string[];
-    more?: (count: number) => string;
   } = $props();
-  const STEPS = 3;
   const digest = $derived(card ? documentDigest({ paragraphs, formatted: document }) : null);
   const root = $derived(node ?? document?.document);
   const children = $derived(root?.content ?? []);
@@ -60,15 +57,9 @@
 {#if digest}
   <div class="digest">
     {#if digest.lead}<p class="lead">{digest.lead}</p>{/if}
-    {#if digest.steps.length}<p class="steps-label">{digest.stepsLabel}</p>
-      <ul class="steps">
-        {#each digest.steps.slice(0, STEPS) as step, index (index)}<li>
-            <span class="tick" aria-hidden="true"></span><span class="step">{step}</span>
-          </li>{/each}
-      </ul>
-      {#if digest.steps.length > STEPS && more}<p class="more">
-          {more(digest.steps.length - STEPS)}
-        </p>{/if}{/if}
+    {#if digest.headings.length}<ul class="sections">
+        {#each digest.headings as heading, index (index)}<li>{heading}</li>{/each}
+      </ul>{/if}
   </div>
 {:else if root}
   {#each children as child, index (index)}
@@ -104,8 +95,8 @@
   .lead {
     display: -webkit-box;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 4;
-    line-clamp: 4;
+    -webkit-line-clamp: 14;
+    line-clamp: 14;
     margin: 0;
     overflow: hidden;
     font-size: var(--text-label);
@@ -113,52 +104,33 @@
     text-wrap: pretty;
   }
 
-  .steps-label {
-    margin: 4px 0 0;
-    color: var(--color-muted);
-    font-size: var(--text-caption);
-    font-weight: 600;
-    line-height: 13px;
-  }
-
-  .steps {
+  .sections {
     display: flex;
     flex-direction: column;
     gap: 4px;
-    margin: 0;
+    margin: 4px 0 0;
     padding: 0;
     list-style: none;
   }
 
-  .steps li {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-inline-size: 0;
+  .sections li {
+    position: relative;
+    padding-inline-start: 12px;
+    color: var(--color-label-secondary);
     font-size: var(--text-label);
+    font-weight: 500;
     line-height: 16px;
   }
 
-  .tick {
-    flex: none;
-    inline-size: 10px;
-    block-size: 10px;
-    border-radius: 3px;
-    box-shadow: inset 0 0 0 1.5px var(--color-border-strong);
-  }
-
-  .step {
-    min-inline-size: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .more {
-    margin: 0;
-    color: var(--color-faint);
-    font-size: var(--text-caption);
-    line-height: 13px;
+  .sections li::before {
+    position: absolute;
+    inset-block-start: 7px;
+    inset-inline-start: 1px;
+    inline-size: 4px;
+    block-size: 4px;
+    border-radius: 50%;
+    background: var(--color-border-strong);
+    content: "";
   }
 
   p,

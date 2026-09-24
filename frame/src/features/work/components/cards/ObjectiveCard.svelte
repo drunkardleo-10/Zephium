@@ -100,8 +100,8 @@
     position: relative;
     display: -webkit-box;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
+    -webkit-line-clamp: 5;
+    line-clamp: 5;
     margin: 0;
     overflow: hidden;
     font-size: var(--text-body);

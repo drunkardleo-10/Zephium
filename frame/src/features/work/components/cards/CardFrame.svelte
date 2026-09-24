@@ -15,6 +15,7 @@
     active = false,
     unavailable = false,
     dense = false,
+    tile = false,
     children,
     footer,
   }: {
@@ -34,6 +35,8 @@
     active?: boolean;
     unavailable?: boolean;
     dense?: boolean;
+    /** The leading glyph is a 40 px tile: a subject's initial where it has no picture. */
+    tile?: boolean;
     children?: Snippet;
     footer?: Snippet;
   } = $props();
@@ -41,7 +44,7 @@
 
 <article class="card" class:selected class:active class:unavailable class:dense>
   {#if hero}<div class="hero work-drag-handle">{@render hero()}</div>{/if}
-  <header class="work-drag-handle">
+  <header class="work-drag-handle" class:tile>
     {#if leading || icon}<span class="glyph">
         {#if leading}{@render leading()}{:else if icon}<Icon {icon} size={14} />{/if}
       </span>{/if}
@@ -147,6 +150,13 @@
     background: var(--color-fill);
     color: var(--color-label-secondary);
     overflow: hidden;
+  }
+
+  .tile .glyph {
+    inline-size: 40px;
+    block-size: 40px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-body);
   }
 
   .titles {

@@ -2,6 +2,8 @@ import type { MediaAssetV1 } from "$domain/resources";
 import type { ArtifactView, FindingView, SubjectView } from "$shared/ui/data/Artifact";
 import type { Node } from "@xyflow/svelte";
 import type { HumanPage } from "./work-human";
+import { defaultSize } from "./card-size";
+export { defaultSize };
 
 type CanvasKind =
   | "tab"
@@ -20,7 +22,8 @@ type CanvasKind =
   | "agent"
   | "findings"
   | "file"
-  | "command";
+  | "command"
+  | "step";
 type RelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
 /** Display values only; deliberately independent from the generated Work wire contract. */
 export type CanvasItem = {
@@ -69,6 +72,12 @@ export type CanvasItem = {
     reason?: string;
     /** The settled command's record id; the lift opens it whole. */
     record?: string;
+  };
+  /** One step of a result's plan, standing beside it as its own card. */
+  step?: {
+    index: number;
+    text: string;
+    icon: "dates" | "flight" | "stay" | "entry" | "money" | "document" | "check";
   };
   /** Transient agent presence: avatar seed, status, its latest line, and where it stands. */
   agent?: {
@@ -188,53 +197,6 @@ const validAreaSize = (s: CanvasSize | undefined): s is CanvasSize =>
   s.height >= 160 &&
   s.height <= 8192;
 const CANVAS_ITEM_LIMIT = 500;
-export function defaultSize(item: CanvasItem): { width: number; height: number } {
-  if (item.type === "findings") return { width: 300, height: 200 };
-  if (item.artifact) {
-    switch (item.artifact.content.kind) {
-      case "comparison":
-      case "matrix":
-        return { width: 520, height: 320 };
-      case "sources":
-        return { width: 320, height: 240 };
-      case "browser":
-        return { width: 320, height: 180 };
-      default:
-        return { width: 420, height: 300 };
-    }
-  }
-  switch (item.type) {
-    case "tab":
-    case "link":
-      return { width: 280, height: 96 };
-    case "subject":
-      return { width: 220, height: item.image ? 248 : 136 };
-    case "finding":
-      return { width: 300, height: 140 };
-    case "sources":
-      return { width: 300, height: 200 };
-    case "folder":
-    case "file":
-      return { width: 248, height: 96 };
-    case "command":
-      return { width: 248, height: 120 };
-    case "note":
-      return { width: 300, height: 200 };
-    case "media":
-      return { width: 248, height: 200 };
-    case "objective":
-    case "request":
-      return { width: 300, height: 110 };
-    case "responsibility":
-      return { width: 280, height: 150 };
-    case "page":
-      return { width: 248, height: 168 };
-    case "agent":
-      return { width: 260, height: item.agent?.line ? 104 : 84 };
-    default:
-      return { width: 280, height: 160 };
-  }
-}
 const CANVAS_LINK_LIMIT = 2000;
 const TEXT_LIMIT = { id: 128, title: 512, detail: 2048, kind: 128, status: 256 } as const;
 
@@ -426,7 +388,8 @@ export function reconcileNodes(
         JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility) &&
         JSON.stringify(node.data.findings) === JSON.stringify(item.findings) &&
         JSON.stringify(node.data.file) === JSON.stringify(item.file) &&
-        JSON.stringify(node.data.command) === JSON.stringify(item.command);
+        JSON.stringify(node.data.command) === JSON.stringify(item.command) &&
+        JSON.stringify(node.data.step) === JSON.stringify(item.step);
       // Agents follow their work: a fresh computed position moves the node.
       const moved = item.agent ? positions[item.id] : undefined;
       const relocated =
@@ -435,9 +398,20 @@ export function reconcileNodes(
         !node.dragging &&
         (node.position.x !== moved.x || node.position.y !== moved.y);
       if (same && !relocated) return node;
+      // A card nobody sized follows what it says; a saved or resized one keeps its size.
+      const was = defaultSize(node.data);
+      const grown =
+        !same &&
+        !Object.hasOwn(sizes, item.id) &&
+        node.width === was.width &&
+        node.height === was.height
+          ? defaultSize(item)
+          : undefined;
+      const size = grown ? { width: grown.width, height: grown.height } : {};
       if (!reparented)
         return {
           ...node,
+          ...size,
           data: item,
           ariaLabel: `${item.title}. ${item.status}`,
           ...(relocated ? { position: { ...moved } } : {}),
@@ -445,6 +419,7 @@ export function reconcileNodes(
       const absolute = absolutePosition(node, previous);
       return {
         ...node,
+        ...size,
         data: item,
         ariaLabel: `${item.title}. ${item.status}`,
         parentId: parent ? parentId : undefined,

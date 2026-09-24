@@ -9,8 +9,11 @@ import type {
 } from "$shared/ipc/bindings";
 import { FILE_STEPS, isAgentExecution } from "./agent-steps";
 import { clipText, type CanvasItem, type CanvasSize } from "./canvas-model";
+import { findingsSize, resultSize, sourcesSize, stepSize, subjectSize } from "./card-size";
+import { resultPlan, stepId } from "./plan-steps";
+import { artifactView } from "./project-work";
 import { CLUSTER_CAP, SIZES, type StageContents, type StageMember } from "./stage-layout";
-import { listingArtifacts, subjectKey, subjectsOf } from "./subjects";
+import { listingArtifacts, subjectFacts, subjectKey, subjectsOf } from "./subjects";
 import { fileFolder, fileName, homePath } from "./work-files";
 import * as m from "$shared/i18n/messages";
 
@@ -297,17 +300,30 @@ export function observedTitle(
 }
 export const displayPath = (path: string) => clipText(homePath(path), DETAIL_TEXT);
 
-function resultSize(artifact: WorkArtifactV1 | undefined): CanvasSize {
-  switch (artifact?.data.kind) {
-    case "findings":
-      return SIZES.findings;
-    case "document":
-      return SIZES.document;
-    case "comparison_matrix":
-      return SIZES.comparison;
-    default:
-      return SIZES.result;
-  }
+/** A published object's card, sized to what it says, as its canvas item is built. */
+export function artifactSize(artifact: WorkArtifactV1, execution: WorkExecutionFact): CanvasSize {
+  const view = artifactView(artifact, execution);
+  if (view.content.kind !== "findings") return resultSize(artifact.title, view);
+  const { items, subjects } = view.content;
+  return findingsSize(
+    items.map((item) => {
+      const subject = item.subject === undefined ? undefined : subjects[item.subject];
+      return { claim: item.claim, ...(subject ? { subject: subject.name } : {}) };
+    }),
+    items.length,
+  );
+}
+/** A subject's card: its picture, its name and the facts the run established. */
+export function subjectCardSize(
+  execution: WorkExecutionFact,
+  subject: ReturnType<typeof subjectsOf>[number],
+): CanvasSize {
+  return subjectSize(
+    subject.name,
+    !!subject.image_candidates?.length,
+    subjectFacts(execution, subject),
+    subject.descriptor ?? "",
+  );
 }
 
 /** What one message's runs put in each cluster, in projection order. */
@@ -337,8 +353,9 @@ export function stageContents(
   const work: StageMember[] = [];
   for (const execution of runs) {
     if (!isAgentExecution(execution)) continue;
-    if (sourceRows(execution).length)
-      sources.push({ id: `sources:${stage.element}:${execution.id}`, size: SIZES.sources });
+    const rows = sourceRows(execution).length;
+    if (rows)
+      sources.push({ id: `sources:${stage.element}:${execution.id}`, size: sourcesSize(rows) });
     for (const group of pageGroups(execution, recorded))
       pages.push({ id: group.id, size: SIZES.page });
     for (const card of fileCards(execution)) work.push({ id: card.id, size: SIZES.file });
@@ -347,6 +364,7 @@ export function stageContents(
   const subjects: StageMember[] = [];
   const findings: StageMember[] = [];
   const results: StageMember[] = [];
+  const plan: StageMember[] = [];
   const hubs = new Set<string>();
   for (const element of snapshot.elements) {
     const reference = element.reference;
@@ -357,13 +375,21 @@ export function stageContents(
       const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
       if (subject) hubs.add(subjectKey(subject));
       subjects.push(
-        member(element.id, subject?.image_candidates?.length ? SIZES.pictured : SIZES.subject),
+        member(
+          element.id,
+          subject && execution ? subjectCardSize(execution, subject) : SIZES.subject,
+        ),
       );
     } else if (reference.kind === "finding") findings.push(member(element.id, SIZES.findings));
-    else if (reference.kind === "artifact")
-      (artifact?.data.kind === "findings" ? findings : results).push(
-        member(element.id, resultSize(artifact)),
+    else if (reference.kind === "artifact") {
+      const size = artifact && execution ? artifactSize(artifact, execution) : SIZES.result;
+      (artifact?.data.kind === "findings" ? findings : results).push(member(element.id, size));
+      // A result's plan stands beside it, one card per step.
+      const view = artifact && execution ? artifactView(artifact, execution) : undefined;
+      resultPlan(view?.content).forEach((step, index) =>
+        plan.push({ id: stepId(element.id, index), size: stepSize(step.text, step.detail) }),
       );
+    }
   }
   // Subjects the runs named that never earned a card only count on the label.
   const named = new Set<string>();
@@ -381,5 +407,6 @@ export function stageContents(
     subjects: { members: subjects, more: subjects.length >= CLUSTER_CAP.subjects ? unshown : 0 },
     findings: { members: findings },
     results: { members: results },
+    plan: { members: plan },
   };
 }

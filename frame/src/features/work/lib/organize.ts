@@ -10,6 +10,7 @@ import { isAgentExecution } from "./agent-steps";
 import type { CanvasPosition, CanvasSize } from "./canvas-model";
 import { listingArtifacts, recordArtifacts, subjectKey, subjectsOf } from "./subjects";
 import { environmentStages, type WorkStage } from "./project-environment-thread";
+import { artifactSize, subjectCardSize } from "./project-environment-stage";
 import { SIZES, stageLayout, type ClusterKind, type StageContents } from "./stage-layout";
 
 type Placement = CanvasPosition & CanvasSize;
@@ -276,11 +277,7 @@ function organizeAgentRun(
         index,
       };
       if (subjectCount < SUBJECTS_PER_RUN) {
-        join(
-          "subjects",
-          reference,
-          subject.image_candidates?.length ? SIZES.pictured : SIZES.subject,
-        );
+        join("subjects", reference, subjectCardSize(execution, subject));
         subjectCount += 1;
         subjectByName.set(name, reference);
       }
@@ -296,7 +293,7 @@ function organizeAgentRun(
       artifact: artifact.id,
     };
     if (artifact.data.kind === "findings") {
-      join("findings", reference, SIZES.findings);
+      join("findings", reference, artifactSize(artifact, execution));
       const named = new Set<number>();
       for (const item of artifact.data.items)
         if (item.subject !== null && item.subject !== undefined) named.add(item.subject);
@@ -306,7 +303,7 @@ function organizeAgentRun(
       }
       continue;
     }
-    join("results", reference, objectSize(artifact));
+    join("results", reference, artifactSize(artifact, execution));
     if (artifact.data.kind === "comparison_matrix")
       for (const subject of subjects)
         relations.push({ from: subject, to: reference, kind: "uses" });

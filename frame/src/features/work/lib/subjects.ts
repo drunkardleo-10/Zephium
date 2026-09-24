@@ -140,6 +140,26 @@ export function restatesSubject(label: string, text: string, name: string): bool
   );
 }
 
+/**
+ * A column name as a person reads it: its words kept, a trailing qualifier in
+ * parentheses dropped, in sentence case ("Displayed Routing (per listing)"
+ * reads "Displayed routing"). Acronyms keep their capitals; nothing is cut.
+ */
+export function factName(name: string): string {
+  const words = name
+    .replace(/[_]+/gu, " ")
+    .replace(/\s*\([^()]*\)\s*$/u, "")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .split(" ")
+    .map((word, index) =>
+      index > 0 && /^\p{Lu}\p{Ll}+$/u.test(word) ? word.toLocaleLowerCase() : word,
+    )
+    .join(" ");
+  const text = words || name.trim();
+  return text.charAt(0).toLocaleUpperCase() + text.slice(1);
+}
+
 /** Everything the run has established about one subject, price first. */
 export function subjectFacts(execution: WorkExecutionFact, subject: Subject): SubjectFact[] {
   const money: SubjectFact[] = [];
@@ -178,12 +198,12 @@ export function subjectFacts(execution: WorkExecutionFact, subject: Subject): Su
       if (!text || identityText(text) === identity) return;
       seen.add(label);
       (value.kind === "money" ? money : other).push({
-        label: criterion.name,
-        value: text.slice(0, 80),
+        label: factName(criterion.name),
+        value: text.slice(0, 120),
       });
     });
   }
-  return [...money, ...other].slice(0, 3);
+  return [...money, ...other].slice(0, 4);
 }
 
 /**

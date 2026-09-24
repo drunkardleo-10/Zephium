@@ -27,6 +27,7 @@
   import FolderCard from "./cards/FolderCard.svelte";
   import AgentCard from "./cards/AgentCard.svelte";
   import PageCard from "./cards/PageCard.svelte";
+  import StepCard from "./cards/StepCard.svelte";
   import * as m from "$shared/i18n/messages";
   const open = getContext<(id: string) => void>(canvasOpen);
   const action = getContext<(id: string, action?: string) => void>(canvasAction);
@@ -49,6 +50,7 @@
       "findings",
       "file",
       "command",
+      "step",
     ].includes(type),
   );
   /** A page held for a person opens the takeover, never a copy in Browse. */
@@ -133,6 +135,7 @@
   {:else if type === "findings"}<FindingsCard item={data} {selected} />
   {:else if type === "file"}<FileCard item={data} {selected} />
   {:else if type === "command"}<CommandCard item={data} {selected} />
+  {:else if type === "step"}<StepCard item={data} {selected} />
   {:else if type === "sources"}<SourcesCard item={data} {selected} />
   {:else if type === "folder"}<FolderCard item={data} {selected} />
   {:else if type === "page"}<PageCard item={data} {selected} onhelp={() => action(id, "help")} />
@@ -157,7 +160,6 @@
   tabindex={-1}
   aria-hidden="true"
 />
-
 <!-- The thread runs down from one request into the next; other edges read left to right. -->
 <Handle
   id="below"

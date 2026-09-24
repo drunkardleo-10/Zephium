@@ -43,7 +43,8 @@ test("every message keeps its own request card, laid out down the roadmap", () =
   expect(stages.map((stage) => [stage.card, stage.request, stage.place.y])).toEqual([
     ["objective-card", "Compare quiet keyboards", 0],
     ["request:objective-card:continuation-1", "Show me the quietest one", 716],
-    ["request:objective-card:continuation-2", "And the wireless ones", 882],
+    // A one-line request is as short as its words: 716 + 64 + 56.
+    ["request:objective-card:continuation-2", "And the wireless ones", 836],
   ]);
   // The request card the work began with keeps the first sentence, not the last.
   expect(environmentItems(scene, [], [], objectives)[0]?.title).toBe("Compare quiet keyboards");

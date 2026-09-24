@@ -269,18 +269,31 @@ export function displayHost(value: string | undefined): string {
   }
 }
 
-/** What a result card says of a document: its lead and the steps it asks for. */
-export type DocumentDigest = { lead: string; stepsLabel: string; steps: string[] };
+/** One step of a plan: what to do, and for a numbered section, the first thing it says. */
+export type PlanStep = { text: string; detail?: string };
+/** What a result card says of a document: its lead, its sections, and the steps it asks for. */
+export type DocumentDigest = {
+  lead: string;
+  /** Section headings the card lists; the summary, the steps and the title are not among them. */
+  headings: string[];
+  stepsLabel: string;
+  steps: PlanStep[];
+};
 const LEAD_LABEL = /^(summary|in short|tl;?dr|overview|answer|bottom line|the short answer)$/iu;
 const STEPS_LABEL =
-  /^((recommended |suggested )?next steps?|what to do next|action items|to do|todo)$/iu;
+  /^((recommended |suggested )?next steps?|what to do next|action items|to do|todo|steps)$/iu;
 const BULLET = /^\s*(?:[-*•]|\d+[.)]|\[[ xX]\])\s+/u;
+const NUMBERED = /^\d{1,2}[.)]\s+/u;
+/** Trailing citation markers ("[3, 5]", "[55–56]") belong to the lift, not a card. */
+const CITATION = /\s*\[[\d\s,–-]+\]\s*$/u;
 const label = (text: string) =>
   text
     .replace(/^#+\s*/u, "")
     .replace(/[:：]\s*$/u, "")
     .replace(/\*+/gu, "")
     .trim();
+const bare = (text: string) => text.replace(/\s+/gu, " ").replace(CITATION, "").trim();
+const firstSentence = (text: string) => bare(text).split(/(?<=[.!?])\s+/u)[0] ?? "";
 function plainText(node: DocumentNodeView): string {
   if (node.type === "text") return node.text ?? "";
   if (node.type === "hardBreak") return "\n";
@@ -293,47 +306,80 @@ export function documentDigest(content: {
 }): DocumentDigest {
   // One flat run of blocks: headings (or a paragraph that only names a
   // section), prose, and list items, whichever form the writer used.
-  type Block = { kind: "heading" | "text" | "item"; text: string };
+  type Block = { kind: "heading" | "text" | "item"; text: string; level?: number };
   const blocks: Block[] = [];
   const push = (text: string) => {
     const lines = text.split("\n").filter((line) => line.trim());
     for (const line of lines) {
       const clean = line.trim();
-      if (BULLET.test(clean)) blocks.push({ kind: "item", text: clean.replace(BULLET, "") });
-      else if (
-        /^#+\s/u.test(clean) ||
-        LEAD_LABEL.test(label(clean)) ||
-        STEPS_LABEL.test(label(clean))
-      )
-        blocks.push({ kind: "heading", text: label(clean) });
+      const hashes = /^(#+)\s/u.exec(clean)?.[1]?.length;
+      if (hashes) blocks.push({ kind: "heading", text: label(clean), level: hashes });
+      else if (BULLET.test(clean)) blocks.push({ kind: "item", text: clean.replace(BULLET, "") });
+      else if (LEAD_LABEL.test(label(clean)) || STEPS_LABEL.test(label(clean)))
+        blocks.push({ kind: "heading", text: label(clean), level: 2 });
       else blocks.push({ kind: "text", text: clean });
     }
   };
   const root = content.formatted?.document;
   if (root)
     for (const node of root.content ?? []) {
-      if (node.type === "heading") blocks.push({ kind: "heading", text: label(plainText(node)) });
+      if (node.type === "heading")
+        blocks.push({
+          kind: "heading",
+          text: label(plainText(node)),
+          level: node.attrs?.level ?? 2,
+        });
       else if (node.type === "bulletList" || node.type === "orderedList")
         for (const item of node.content ?? [])
           blocks.push({ kind: "item", text: plainText(item).replace(/\s+/gu, " ").trim() });
       else if (node.type === "paragraph" || node.type === "blockquote") push(plainText(node));
     }
   else for (const paragraph of content.paragraphs) push(paragraph);
-  const after = (pattern: RegExp) => {
-    const at = blocks.findIndex((block) => block.kind === "heading" && pattern.test(block.text));
-    if (at < 0) return null;
-    const end = blocks.findIndex((block, index) => index > at && block.kind === "heading");
-    return { heading: blocks[at]!.text, body: blocks.slice(at + 1, end < 0 ? undefined : end) };
+  const heading = (block: Block) => block.kind === "heading";
+  const after = (at: number) => {
+    const end = blocks.findIndex((block, index) => index > at && heading(block));
+    return blocks.slice(at + 1, end < 0 ? undefined : end);
   };
-  const summary = after(LEAD_LABEL);
-  const next = after(STEPS_LABEL);
-  const lead =
-    summary?.body.find((block) => block.kind === "text")?.text ??
-    blocks.find((block) => block.kind === "text")?.text ??
-    blocks.find((block) => block.kind === "item")?.text ??
-    "";
-  const steps = (next?.body ?? [])
-    .map((block) => block.text)
-    .filter((text) => text && text !== lead);
-  return { lead, stepsLabel: next?.heading ?? "", steps };
+  const find = (pattern: RegExp) =>
+    blocks.findIndex((block) => heading(block) && pattern.test(block.text));
+  const summary = find(LEAD_LABEL);
+  const next = find(STEPS_LABEL);
+  const leadBlock =
+    (summary >= 0 ? after(summary).find((block) => block.kind === "text") : undefined) ??
+    blocks.find((block) => block.kind === "text") ??
+    blocks.find((block) => block.kind === "item");
+  const lead = leadBlock ? bare(leadBlock.text) : "";
+  // A "Next steps" section wins; otherwise sections numbered 1., 2., ... are the plan.
+  const numbered = blocks.flatMap((block, index) =>
+    heading(block) && (block.level ?? 2) > 1 && NUMBERED.test(block.text) ? [index] : [],
+  );
+  let steps: PlanStep[] = [];
+  if (next >= 0)
+    steps = after(next)
+      .map((block) => ({ text: bare(block.text) }))
+      .filter((step) => step.text && step.text !== lead);
+  else if (numbered.length >= 2)
+    steps = numbered.map((at) => {
+      const first = after(at).find((block) => block.kind !== "heading");
+      const detail = first ? firstSentence(first.text) : "";
+      return { text: blocks[at]!.text.replace(NUMBERED, ""), ...(detail ? { detail } : {}) };
+    });
+  const headings = blocks.flatMap((block, index) =>
+    heading(block) &&
+    (block.level ?? 2) > 1 &&
+    index !== summary &&
+    index !== next &&
+    !(next < 0 && numbered.length >= 2 && numbered.includes(index))
+      ? [block.text]
+      : [],
+  );
+  return { lead, headings, stepsLabel: next >= 0 ? blocks[next]!.text : "", steps };
+}
+
+/** The steps a result asks the person to take: a checklist's items, or a document's plan. */
+export function planSteps(content: ArtifactContent): PlanStep[] {
+  if (content.kind === "checklist")
+    return content.items.flatMap((item) => (item.text.trim() ? [{ text: bare(item.text) }] : []));
+  if (content.kind === "document") return documentDigest(content).steps;
+  return [];
 }

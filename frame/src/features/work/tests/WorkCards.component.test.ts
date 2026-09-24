@@ -6,17 +6,22 @@ import FindingsCard from "../components/cards/FindingsCard.svelte";
 import ResultCard from "../components/cards/ResultCard.svelte";
 import CompareCard from "../components/cards/CompareCard.svelte";
 import FileCard from "../components/cards/FileCard.svelte";
-import type { CanvasItem } from "../lib/canvas-model";
+import SubjectCard from "../components/cards/SubjectCard.svelte";
+import { defaultSize, type CanvasItem } from "../lib/canvas-model";
 
 const base = { kind: "", detail: "", status: "Done" };
 
-test("a findings card lists four claims with their confidence, then how many more", async () => {
+test("a findings card lists eight claims with their confidence, then how many more", async () => {
   await page.viewport(1200, 800);
   const confidence = [
     "supported",
     "contradicted",
     "inferred",
     "unverified",
+    "supported",
+    "supported",
+    "supported",
+    "inferred",
     "supported",
     "supported",
   ];
@@ -32,28 +37,25 @@ test("a findings card lists four claims with their confidence, then how many mor
         evidence: 1,
         ...(index === 0 ? { subject: "Tower Bridge" } : {}),
       })),
-      total: 6,
+      total: 10,
     },
   };
   const screen = await render(FindingsCard, { item, selected: false });
   const rows = [...screen.container.querySelectorAll("li")];
-  expect(rows.map((row) => row.className.split(" ")[0])).toEqual([
-    "supported",
-    "contradicted",
-    "inferred",
-    "unverified",
-  ]);
+  expect(rows.map((row) => row.className.split(" ")[0])).toEqual(confidence.slice(0, 8));
   const dot = (row: Element) => getComputedStyle(row.querySelector(".dot")!).backgroundColor;
   expect(dot(rows[0]!)).not.toBe(dot(rows[1]!));
   expect(dot(rows[2]!)).toBe(dot(rows[3]!));
   await expect.element(screen.getByText("Tower Bridge")).toBeVisible();
+  await expect.element(screen.getByText("Claim 8", { exact: true })).toBeVisible();
   await expect.element(screen.getByText("+2 more")).toBeVisible();
-  expect(screen.container.textContent).not.toContain("Claim 5");
+  expect(screen.container.textContent).not.toContain("Claim 9");
   await screen.unmount();
 });
 
-test("a document result shows its lead and next steps, never citation chips", async () => {
+test("a document result shows its whole summary and its sections, never its steps or chips", async () => {
   await page.viewport(1200, 800);
+  const lead = "Stay in Alfama and take the 28 tram early. ".repeat(6).trim();
   const item: CanvasItem = {
     ...base,
     id: "result",
@@ -68,8 +70,9 @@ test("a document result shows its lead and next steps, never citation chips", as
         kind: "document",
         paragraphs: [
           "Summary",
-          "Stay in Alfama and take the 28 tram early.",
-          "Background that the card leaves to the lift.",
+          lead,
+          "## Where to stay",
+          "Alfama is quiet in the morning.",
           "Next steps:",
           "- Book the hotel\n- Buy a Viva Viagem card\n- Reserve Belém tickets\n- Pack",
         ],
@@ -77,14 +80,52 @@ test("a document result shows its lead and next steps, never citation chips", as
     },
   };
   const screen = await render(ResultCard, { id: "result", item, selected: false, onaction() {} });
-  await expect
-    .element(screen.getByText("Stay in Alfama and take the 28 tram early."))
-    .toBeVisible();
-  await expect.element(screen.getByText("Book the hotel")).toBeVisible();
-  expect(screen.container.textContent).not.toContain("Background that the card leaves");
-  expect(screen.container.textContent).not.toContain("Pack");
+  const summary = screen.getByText(lead);
+  await expect.element(summary).toBeVisible();
+  // Whole: the paragraph is not cut to a few lines.
+  const shown = summary.element() as HTMLElement;
+  expect(shown.scrollHeight).toBeLessThanOrEqual(shown.clientHeight + 1);
+  await expect.element(screen.getByText("Where to stay")).toBeVisible();
+  // The steps stand beside the card as cards of their own.
+  expect(screen.container.textContent).not.toContain("Book the hotel");
   expect(screen.container.querySelector(".chip")).toBeNull();
   expect(screen.container.textContent).not.toContain("visitlisboa.com");
+  // State belongs to the agent line: no status word in a footer.
+  expect(screen.container.querySelector("footer")).toBeNull();
+  await screen.unmount();
+});
+
+test("a subject card shows four facts whole, the lead one first", async () => {
+  await page.viewport(1200, 800);
+  const facts = [
+    { label: "Price per month", value: "$4,120" },
+    { label: "Rating", value: "4.89 from 152 reviews" },
+    { label: "Displayed routing", value: "Walk to Golden Gate Park, then the N Judah into town" },
+    { label: "Workspace", value: "Dedicated desk" },
+  ];
+  const item: CanvasItem = {
+    ...base,
+    id: "subject",
+    type: "subject",
+    title: "Charming Cole Valley Victorian",
+    subject: { name: "Charming Cole Valley Victorian", homepage: "https://www.airbnb.com/rooms/1" },
+    facts,
+  };
+  const size = defaultSize(item);
+  const screen = await render(SubjectCard, { item, selected: false });
+  const card = screen.container.querySelector<HTMLElement>(".card")!;
+  card.parentElement!.style.inlineSize = `${size.width}px`;
+  card.parentElement!.style.blockSize = `${size.height}px`;
+  for (const fact of facts) {
+    await expect.element(screen.getByText(fact.label, { exact: true })).toBeVisible();
+    const value = screen.getByText(fact.value, { exact: true }).element() as HTMLElement;
+    expect(value.scrollHeight).toBeLessThanOrEqual(value.clientHeight + 1);
+    expect(getComputedStyle(value).textOverflow).not.toBe("ellipsis");
+  }
+  // No picture yet: the initial stands in a tile beside the name, not a hero placeholder.
+  expect(screen.container.querySelector(".hero")).toBeNull();
+  expect(screen.container.querySelector("header.tile")).not.toBeNull();
+  await expect.element(screen.getByText("airbnb.com")).toBeVisible();
   await screen.unmount();
 });
 

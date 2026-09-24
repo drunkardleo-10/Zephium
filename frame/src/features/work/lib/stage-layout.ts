@@ -1,7 +1,7 @@
 import { bounds, grid, type Placement } from "./arrange";
 import type { CanvasPosition, CanvasSize } from "./canvas-model";
 
-/** Card sizes the run places and the cards are built to. */
+/** Card sizes the run places where a card does not size itself to what it says. */
 export const SIZES = {
   request: { width: 300, height: 110 },
   sources: { width: 300, height: 200 },
@@ -22,7 +22,15 @@ export const STAGE_GAP = 56;
 const STAND_GAP = 16;
 
 /** A stage reads left to right in this order; empty clusters take no width. */
-const CLUSTER_ORDER = ["sources", "pages", "work", "subjects", "findings", "results"] as const;
+const CLUSTER_ORDER = [
+  "sources",
+  "pages",
+  "work",
+  "subjects",
+  "findings",
+  "results",
+  "plan",
+] as const;
 export type ClusterKind = (typeof CLUSTER_ORDER)[number];
 /** Past these a cluster's cards stop and its label counts the rest. */
 export const CLUSTER_CAP = { pages: 8, subjects: 12 } as const;
@@ -33,6 +41,7 @@ const GRID: Record<ClusterKind, { columns: number; cap: number }> = {
   subjects: { columns: 3, cap: CLUSTER_CAP.subjects },
   findings: { columns: 1, cap: Infinity },
   results: { columns: 1, cap: Infinity },
+  plan: { columns: 2, cap: Infinity },
 };
 
 /** One card of a cluster; `placed` is a saved placement, which is never rewritten. */

@@ -97,3 +97,71 @@ export const snapshot: WorkEnvironmentSnapshot = {
     },
   ],
 };
+
+/** A trip plan as a run writes it: a lead, sections, and four next steps. */
+const TRIP_PLAN = [
+  "# Poland → San Francisco for a YC batch",
+  "Planning note: dates and budget weren’t provided, so this plan keeps every booking open.",
+  "## YC timing",
+  "The on-time deadline is November 2 at 8 p.m. PT.",
+  "## Entry and arrival",
+  "Polish citizens may use the Visa Waiver Program with an approved ESTA.",
+  "## Suggested next steps",
+  [
+    "1. Confirm the target YC batch and its current application/interview schedule; use that to choose tentative travel dates.",
+    "2. Check your ESTA eligibility and official entry requirements. [3, 5]",
+    "3. Once dates and a budget are set, compare Airbnb flats for total cost.",
+    "4. Plan the SFO-to-stay route by BART.",
+  ].join("\n"),
+];
+
+/** An architecture-style run: a request and one document, no sources, pages or subjects. */
+export function planScene(): {
+  scene: WorkEnvironmentSnapshot;
+  objectives: Map<string, WorkRuntimeProjection>;
+} {
+  const state = structuredClone(projection);
+  const run = state.executions[0]!;
+  run.user_artifacts = [];
+  run.artifacts = [
+    {
+      ...run.artifacts[0]!,
+      id: "plan",
+      title: "Winter 2027 YC trip plan",
+      data: { kind: "document", paragraphs: TRIP_PLAN },
+    },
+  ];
+  return {
+    scene: {
+      ...snapshot,
+      elements: [
+        snapshot.elements[0]!,
+        {
+          id: "plan-card",
+          area: null,
+          reference: {
+            kind: "artifact",
+            objective: "objective",
+            execution: "execution",
+            artifact: "plan",
+          },
+        },
+      ],
+      relations: [
+        // The person asked about the result: the goal uses it. No edge is drawn for that.
+        {
+          id: "asked",
+          from: "objective-card",
+          to: "plan-card",
+          kind: "uses",
+          origin: { kind: "user" },
+        },
+      ],
+      view: {
+        ...snapshot.view,
+        placements: [{ element: "objective-card", x: 0, y: 0, width: 300, height: 110 }],
+      },
+    } as WorkEnvironmentSnapshot,
+    objectives: new Map([["objective", state]]),
+  };
+}

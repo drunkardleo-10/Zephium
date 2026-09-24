@@ -194,7 +194,7 @@ test("catalogue rows enrich the hub a detail read created without becoming cards
     "Tower Bridge",
   ]);
   expect(items.find((item) => item.id === "hub")?.facts).toEqual([
-    { label: "price", value: "$119.99" },
+    { label: "Price", value: "$119.99" },
   ]);
 });
 

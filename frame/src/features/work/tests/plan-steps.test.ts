@@ -1,0 +1,132 @@
+import { expect, test } from "vitest";
+import { defaultSize } from "../lib/canvas-model";
+import { stepIcon } from "../lib/plan-steps";
+import {
+  environmentClusters,
+  environmentItems,
+  environmentLinks,
+  environmentSteps,
+} from "../lib/project-environment";
+import { environmentStages } from "../lib/project-environment-thread";
+import { planScene } from "./environment-fixtures";
+
+test("a step's glyph comes from a closed keyword table, travel words first", () => {
+  expect(
+    [
+      "Confirm the batch and interview dates, then choose a travel window.",
+      "Check your ESTA eligibility before booking.",
+      "Enter dates and a budget on Airbnb’s monthly-stay page.",
+      "Compare fares from WAW to SFO.",
+      "Set aside $300 for the first week.",
+      "Submit the application form.",
+      "Tell the team.",
+    ].map(stepIcon),
+  ).toEqual(["dates", "entry", "stay", "flight", "money", "document", "check"]);
+});
+
+test("a plan's steps stand beside their result, one card each, and never twice", () => {
+  const { scene, objectives } = planScene();
+  const stages = environmentStages(scene, objectives);
+  const { items } = environmentSteps(scene, objectives, stages);
+  expect(items.map((item) => [item.id, item.step?.index, item.step?.icon])).toEqual([
+    ["step:plan-card:0", 1, "dates"],
+    ["step:plan-card:1", 2, "entry"],
+    ["step:plan-card:2", 3, "stay"],
+    ["step:plan-card:3", 4, "flight"],
+  ]);
+  // A citation marker stays with the lift.
+  expect(items[1]!.title).toBe("Check your ESTA eligibility and official entry requirements.");
+  const result = environmentItems(scene, [], [], objectives).find(
+    (item) => item.id === "plan-card",
+  );
+  expect(result?.type).toBe("result");
+});
+
+test("a pure result reads Request → Result → Plan with no empty gaps, and no tie reaches the request", () => {
+  const { scene, objectives } = planScene();
+  const stages = environmentStages(scene, objectives);
+  const layout = stages[0]!.layout;
+  expect(layout.clusters.map((cluster) => cluster.kind)).toEqual(["results", "plan"]);
+  const result = layout.positions["plan-card"]!;
+  expect(result).toEqual({ x: 300 + 48, y: 0 });
+  const width = stages[0]!.contents.results!.members[0]!.size.width;
+  expect(layout.positions["step:plan-card:0"]).toEqual({ x: result.x + width + 48, y: 0 });
+  expect(layout.positions["step:plan-card:1"]!.x).toBe(result.x + width + 48 + 248 + 20);
+  const { links } = environmentClusters(stages);
+  expect(links.map((link) => [link.source, link.target])).toEqual([
+    ["objective-card", "plan-card"],
+    ["plan-card", "cluster:objective-card:plan"],
+  ]);
+  expect(environmentLinks(scene)).toEqual([]);
+});
+
+test("cards are as tall as what they say, up to their cap", () => {
+  const base = { id: "card", kind: "", detail: "", status: "" };
+  const document = (paragraphs: string[]) =>
+    defaultSize({
+      ...base,
+      type: "result",
+      title: "Plan",
+      artifact: {
+        key: "a",
+        title: "Plan",
+        reviewLabel: "",
+        evidence: [],
+        content: { kind: "document", paragraphs },
+      },
+    });
+  const short = document(["One line."]);
+  const long = document(["word ".repeat(200)]);
+  expect(short.width).toBe(420);
+  expect(long.height).toBeGreaterThan(short.height);
+  expect(
+    document(["word ".repeat(2000), ...Array.from({ length: 40 }, (_, i) => `## Part ${i}`)])
+      .height,
+  ).toBe(560);
+  const claims = (count: number) =>
+    defaultSize({
+      ...base,
+      type: "findings",
+      title: "Findings",
+      findings: {
+        items: Array.from({ length: count }, () => ({
+          claim: "A claim that runs long enough to need a second line on the card.",
+          confidence: "supported" as const,
+          evidence: 1,
+        })),
+        total: count,
+      },
+    });
+  expect(claims(2).height).toBeLessThan(claims(8).height);
+  expect(claims(12).height).toBeLessThanOrEqual(420);
+  const subject = (facts: number) =>
+    defaultSize({
+      ...base,
+      type: "subject",
+      title: "Charming Cole Valley Victorian",
+      facts: Array.from({ length: facts }, (_, index) => ({
+        label: `Fact ${index}`,
+        value: "4.89",
+      })),
+    });
+  expect(subject(0)).toEqual({ width: 220, height: expect.any(Number) });
+  expect(subject(4).height).toBeGreaterThan(subject(1).height);
+  expect(subject(4).height).toBeLessThanOrEqual(300);
+  const request = (text: string) => defaultSize({ ...base, type: "request", title: text });
+  expect(request("Short").height).toBeLessThan(request("word ".repeat(40)).height);
+  expect(request("word ".repeat(400)).height).toBe(request("word ".repeat(80)).height);
+  const sources = (rows: number) =>
+    defaultSize({
+      ...base,
+      type: "sources",
+      title: "Sources",
+      sources: Array.from({ length: rows }, (_, index) => ({
+        key: String(index),
+        url: `https://a.example/${index}`,
+        where: "a.example",
+        title: "A page",
+      })),
+    });
+  expect(sources(2).height).toBeLessThan(sources(6).height);
+  expect(sources(20).height).toBe(sources(6).height);
+});

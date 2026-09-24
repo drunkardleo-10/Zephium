@@ -32,7 +32,7 @@
     /** The canvas card: no chips, no sections past the first, capped rows, then "+n". */
     card?: boolean;
   } = $props();
-  const CAP = { table: 4, checklist: 3, findings: 4, sources: 4 } as const;
+  const CAP = { table: 4, findings: 4, sources: 4 } as const;
   const more = (count: number) => m.work_card_more({ count });
   const tableRows = (rows: readonly (readonly string[])[]) =>
     card ? rows.slice(0, CAP.table) : rows;
@@ -78,7 +78,6 @@
       card
       document={content.formatted}
       paragraphs={content.paragraphs}
-      {more}
     />
   {:else if content.kind === "document"}<div class="document">
       {#if content.formatted}<DocumentView document={content.formatted} {onlink} />
@@ -148,16 +147,18 @@
           {onevidence}
         />{/snippet}</LazyView
     >
+  {:else if content.kind === "checklist" && card}<p class="count">
+      {content.items.length === 1
+        ? m.work_card_step_one()
+        : m.work_card_steps({ count: content.items.length })}
+    </p>
   {:else if content.kind === "checklist"}<ul class="checklist">
-      {#each card ? content.items.slice(0, CAP.checklist) : content.items as item, i (i)}<li>
+      {#each content.items as item, i (i)}<li>
           <span aria-label={item.completed ? m.work_item_complete() : m.work_item_open()}
             >{item.completed ? "✓" : "○"}</span
           ><span>{item.text}</span>
         </li>{:else}<li>{m.work_empty_data()}</li>{/each}
     </ul>
-    {#if card && content.items.length > CAP.checklist}<p class="more">
-        {more(content.items.length - CAP.checklist)}
-      </p>{/if}
   {:else if content.kind === "sources"}<Sources
       summary={content.summary}
       subjects={content.subjects}
@@ -246,18 +247,11 @@
     color: var(--color-muted);
   }
 
-  .card .checklist li {
-    gap: 8px;
-    padding-block: 2px;
+  .count {
+    margin: 0;
+    color: var(--color-muted);
     font-size: var(--text-label);
     line-height: 16px;
-  }
-
-  .card .checklist li > span:last-child {
-    min-inline-size: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .card .resource {

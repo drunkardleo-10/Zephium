@@ -22,6 +22,7 @@ import {
 } from "./project-environment-stage";
 import { SIZES, stageLayout, stageStand, type ClusterKind } from "./stage-layout";
 import { heldPage, humanPage, phaseLabel } from "./work-human";
+import { resultPlan, stepIcon, stepId } from "./plan-steps";
 import { pageFrameUrl } from "$domain/resources";
 import {
   clipText,
@@ -746,6 +747,79 @@ export function environmentFiles(
   return { items, positions };
 }
 
+/**
+ * A result's plan, one card per step in the stage's Plan cluster. A step ties
+ * (only while focused) to the subjects it names and to the Sources it rests on.
+ */
+export function environmentSteps(
+  snapshot: WorkEnvironmentSnapshot,
+  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+  stages: readonly WorkStage[],
+): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
+  const items: CanvasItem[] = [];
+  const links: CanvasLink[] = [];
+  const positions: Record<string, CanvasPosition> = {};
+  for (const stage of stages) {
+    const projection = objectives.get(stage.objective);
+    if (!projection) continue;
+    const sources = new Set(stage.contents.sources?.members.map((member) => member.id) ?? []);
+    const named = snapshot.elements.flatMap((element) => {
+      const reference = element.reference;
+      if (reference.kind !== "subject" || !stage.executions.includes(reference.execution))
+        return [];
+      const execution = projection.executions.find((entry) => entry.id === reference.execution);
+      const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
+      const name = artifact ? subjectsOf(artifact)[reference.index]?.name.trim() : undefined;
+      return name && name.length >= 3 ? [{ id: element.id, name: name.toLowerCase() }] : [];
+    });
+    for (const element of snapshot.elements) {
+      const reference = element.reference;
+      if (reference.kind !== "artifact" || !stage.executions.includes(reference.execution))
+        continue;
+      const execution = projection.executions.find((entry) => entry.id === reference.execution);
+      const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
+      if (!execution || !artifact) continue;
+      const source = `sources:${stage.element}:${execution.id}`;
+      resultPlan(artifactView(artifact, execution).content).forEach((step, index) => {
+        const id = stepId(element.id, index);
+        const text = clipText(step.text, TITLE_TEXT);
+        const detail = clipText(step.detail ?? "", DETAIL_TEXT);
+        const icon = stepIcon(text) === "check" && detail ? stepIcon(detail) : stepIcon(text);
+        items.push({
+          id,
+          type: "step",
+          kind: m.work_env_step(),
+          title: text,
+          detail,
+          status: "",
+          step: { index: index + 1, text, icon },
+        });
+        const position = stage.layout.positions[id];
+        if (position) positions[id] = position;
+        const said = `${text} ${detail}`.toLowerCase();
+        for (const subject of named)
+          if (said.includes(subject.name))
+            links.push({
+              id: `step-subject:${id}:${subject.id}`,
+              source: id,
+              target: subject.id,
+              kind: "uses",
+              label: m.work_env_relation_uses(),
+            });
+        if (sources.has(source))
+          links.push({
+            id: `step-sources:${id}`,
+            source,
+            target: id,
+            kind: "supports",
+            label: m.work_env_relation_supports(),
+          });
+      });
+    }
+  }
+  return { items, links, positions };
+}
+
 const CLUSTER_LABELS: Record<ClusterKind, (count: number) => string> = {
   sources: (count) => m.work_env_sources_count({ count }),
   pages: (count) =>
@@ -756,9 +830,11 @@ const CLUSTER_LABELS: Record<ClusterKind, (count: number) => string> = {
     count === 1 ? m.work_env_cluster_subject_one() : m.work_env_cluster_subjects({ count }),
   findings: (count) => m.work_env_cluster_findings({ count }),
   results: (count) => m.work_env_cluster_results({ count }),
+  plan: (count) =>
+    count === 1 ? m.work_env_cluster_step_one() : m.work_env_cluster_steps({ count }),
 };
 /** Kinds that always gather under a label; the rest do only when they hold several cards. */
-const LABELLED = new Set<ClusterKind>(["pages", "work", "subjects"]);
+const LABELLED = new Set<ClusterKind>(["pages", "work", "subjects", "plan"]);
 
 /**
  * Each stage's clusters and the path that reads through them: request, then

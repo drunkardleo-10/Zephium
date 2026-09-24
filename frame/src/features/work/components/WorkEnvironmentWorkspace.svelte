@@ -63,6 +63,7 @@
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
   import { youtubeThumbnail } from "../lib/link-media";
+  import { stepResult } from "../lib/plan-steps";
   import { isAgentExecution, isLive } from "../lib/agent-steps";
   import { environmentPlan } from "../lib/project-environment-plan";
   import {
@@ -74,6 +75,7 @@
     environmentPages,
     environmentPictures,
     environmentSources,
+    environmentSteps,
     environmentView,
     fileEvidence,
   } from "../lib/project-environment";
@@ -194,6 +196,12 @@
   function openLift(id: string) {
     const item = items.find((item) => item.id === id);
     if (!item) return;
+    // A step is part of its result: it opens the result whole.
+    const owner = item.type === "step" ? stepResult(id) : null;
+    if (owner) {
+      openLift(owner);
+      return;
+    }
     if (results.references.has(id)) {
       void openResult(id);
       return;
@@ -758,6 +766,11 @@
     return null;
   });
   const requests = $derived(environmentRequests(stages));
+  const steps = $derived(
+    snapshot
+      ? environmentSteps(snapshot, context.objectives, stages)
+      : { items: [], links: [], positions: {} },
+  );
   const files = $derived(
     snapshot ? environmentFiles(context.objectives, stages) : { items: [], positions: {} },
   );
@@ -768,6 +781,7 @@
     ...sources.items,
     ...pages.items,
     ...files.items,
+    ...steps.items,
     ...agents.items,
   ]);
   const links = $derived([
@@ -777,6 +791,7 @@
     ...requests.links,
     ...sources.links,
     ...pages.links,
+    ...steps.links,
     ...agents.links,
   ]);
   const organizing = new SvelteSet<string>();
@@ -1164,6 +1179,7 @@
             ...sources.positions,
             ...pages.positions,
             ...files.positions,
+            ...steps.positions,
             ...agents.positions,
             ...plannedGeometry.positions,
             ...planGeometry.positions,
