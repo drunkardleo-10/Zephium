@@ -1,6 +1,7 @@
 # Native file uploads: first implementation slice
 
-Branch: `feature/browser-file-workflows`, based on UI commit `35308e16`.
+Historical checkpoint: `feature/browser-file-workflows`, based on UI commit `35308e16`.
+Current integration/hardening: [file-workflows-hardening.md](file-workflows-hardening.md).
 Implementation is isolated in `/private/tmp/zephium-browser-file-workflows`;
 the original UI worktree and its uncommitted edits are untouched.
 
@@ -62,12 +63,12 @@ cd desktop
 ```
 
 The debug-only `file-workflows-qa` feature requires the exact isolated
-`app.zephium.files-qa` identity, bundled frontend and matching window title.
+`app.zephium.files-integration-qa` identity, bundled frontend and matching window title.
 It cannot be combined with the other QA/staging identities. The QA feature
 does not enable the upload implementation: ordinary macOS builds use the same
 production construction path.
 
-Open the resulting `target/debug/bundle/macos/Zephium Files QA.app` and navigate
+Open the resulting `target/debug/bundle/macos/Zephium Files Integration QA.app` and navigate
 to the printed URL. For each test, reset the form, select generated files and
 submit. The report must say `ok: true` and match the intended count/byte hashes.
 Use the fixture's delayed navigation button to navigate with a picker open;

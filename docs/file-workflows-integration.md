@@ -1,6 +1,8 @@
 # File workflows and current UI integration
 
-Checkpoint date: 2026-09-24. Branch: `feature/file-workflows-integration`.
+Integration checkpoint date: 2026-09-24. The subsequently committed hardening and
+Windows candidate are recorded in [file-workflows-hardening.md](file-workflows-hardening.md).
+The validation below describes the integration checkpoint. Branch: `feature/file-workflows-integration`.
 
 ## Lineage and scope
 
@@ -8,8 +10,8 @@ Checkpoint date: 2026-09-24. Branch: `feature/file-workflows-integration`.
 - Standalone macOS file-workflow checkpoint: `8bc96fc4` on
   `feature/browser-file-workflows`, originally based on `35308e16`.
 - This normal merge preserves both histories. The original worktrees and UI
-  branch are retained; nothing is pushed. Windows implementation and user-selected
-  local-document viewing are separate follow-ups. Linux is deferred by the user.
+  branch are retained; nothing is pushed. Windows work now follows this checkpoint in the same isolated
+  worktree; local-document viewing and Linux remain deferred.
 
 ## Reconciliation
 
@@ -78,7 +80,8 @@ The unchanged UI snapshot was built separately to compare graph accounting.
 ## QA isolation and remaining product work
 
 The integration build uses `app.zephium.files-integration-qa` / **Zephium Files
-Integration QA**, still restricted to debug macOS and an exact bundled config.
+Integration QA**, restricted at this checkpoint to debug macOS and an exact bundled config. The
+subsequent hardening also permits the isolated Windows debug QA configuration.
 It does not reuse either `app.zephium.files-qa` or `app.zephium.resources-qa`.
 Do not relabel an older standalone QA database's schema version to open it here.
 
@@ -87,7 +90,8 @@ September 22 native evidence and remaining hardening work. This merge is not a
 claim of complete release qualification. In particular, history retention must
 preserve pending staging-cleanup receipts, recovery should not depend on opening
 history, and native failure/teardown/drag/cloud-provider checks remain. Windows
-currently returns Unsupported for downloads and needs its native adapter next.
+returned Unsupported at this checkpoint; the subsequent adapter and remaining
+qualification are tracked in the hardening record.
 
 ## Integrated native smoke
 

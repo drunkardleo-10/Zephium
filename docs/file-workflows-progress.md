@@ -6,6 +6,9 @@ The standalone work was committed as `8bc96fc4`. Current UI integration is
 tracked in [the integration record](file-workflows-integration.md). This document
 retains the standalone implementation and September 22 qualification evidence.
 
+For current recovery/Windows changes, see [the hardening record](file-workflows-hardening.md).
+The sections below preserve the earlier checkpoint evidence.
+
 ## Implemented on macOS
 
 - Native macOS upload selection, bounded by exact view/document lifetime.

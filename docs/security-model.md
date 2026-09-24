@@ -343,9 +343,10 @@ JavaScript `NotAllowedError` under a pre-authorized responsible process. The bun
 includes camera and microphone usage descriptions, but those strings grant no
 authority. A signed packaged WKWebView/TCC gate on the supported security floor is
 still required before the release capability can change. Foreground human macOS tabs
-use the native download broker described below. Windows/Linux and privileged
-downloads remain denied; download scanning and Windows Mark-of-the-Web are not
-implemented. Linux also cancels privileged file-picker requests. Stable WebView2 exposes no supported file-chooser interception event, so a
+use the native download broker described below. Foreground human Windows views
+now opt into the WebView2 download adapter described below; privileged, agent and
+Linux downloads remain denied. Windows Attachment Services and Mark-of-the-Web
+are implemented but await native Windows qualification. Linux also cancels privileged file-picker requests. Stable WebView2 exposes no supported file-chooser interception event, so a
 raw Windows file input remains an engine-owned, user-selected native upload surface and
 privileged Windows views have no equivalent native denial hook. This is an explicit
 platform limitation, not a broker Zephium has implemented. Raw Windows views disable
@@ -412,8 +413,38 @@ identity; interrupted staging cleanup requires the original directory receipt
 and removes only the fixed payload and empty staging directory. Shutdown and
 profile erasure drain native cancellation, filesystem work and Store replies.
 Recovery marks abandoned transfers Interrupted; it does not claim resumability.
-Quarantine is OS provenance, not malware scanning. Qualification and remaining
-platform work are recorded in [file workflows](file-workflows-progress.md).
+Migration 21 separates cleanup ownership from visible history, so forget/pruning
+cannot discard a pending receipt. Startup enumerates active and deletion-pending
+profiles without a history view. Recovery is paged, profile-scoped, identity-checked
+and retriable. Tombstoned profiles permit only internal cleanup and terminal saves.
+Private receipts stay in memory and drain on orderly closure; abrupt process death
+can leave an incomplete hidden staging directory at the selected destination.
+Quarantine is OS provenance, not malware scanning.
+
+**Human downloads on Windows.** The adapter retains the original WebView2
+DownloadStarting event/deferral and operation. Default cancellation and hidden
+native download UI precede host admission. Cookies, POST bodies and blob/data
+payloads remain native. Pending destination selection requires the exact live
+view/navigation/presentation and foreground parent. Automatic
+saving is not inferred from a recent click or a concurrent browser navigation:
+the event has no initiating-frame activation/navigation identity proof, so every
+Windows download requires native confirmation. HTTP origins
+are displayed without URL secrets; origin-less data downloads label their top
+page origin as context, not an initiating-frame assertion.
+
+Directory handles pin canonical ancestors; a protected staging DACL admits only
+the current user and SYSTEM. File identities retain all 128 Windows file-ID bits.
+Publication invokes Attachment Services with the proposed filename/source origin,
+requires an Internet zone stream, flushes the payload and moves it without a
+replace/cross-volume-copy flag. Protection failure cannot produce Completed.
+Recovery never recursively deletes and refuses an open native writer. Uncertain
+shutdown preserves the writer PID plus creation time and its durable receipt.
+Closing the logical tab revokes page authority, hides/disables scripts and parks
+the retained controller at about:blank until its transfer ends. Native process
+exit proof joins download drain during shutdown/profile retirement. These Windows
+paths have been cross-checked, not yet qualified on a native Windows runtime.
+See [Windows qualification](file-workflows-windows-qa.md) and
+[the current hardening record](file-workflows-hardening.md).
 
 **Profiles and storage.** Persistent profiles use distinct native engine data
 partitions: profile paths/contexts on Windows and Linux and named WKWebsiteDataStore
@@ -1151,7 +1182,7 @@ These inherited properties must not be overstated:
   Raw content requires Settings4, disables password autosave and general autofill, and
   reads both values back before navigation. It also disables browser accelerator keys
   and default context menus and requires Settings7 to hide PDF Save, Save As, and Print.
-  Raw and privileged downloads are denied. Both view classes replace Wry's
+  Privileged downloads remain denied; raw human views use the native download adapter. Both view classes replace Wry's
   broader default browser arguments with only the `msWebOOUI`/`msPdfOOUI` suppressions,
   so Zephium does not deliberately disable SmartScreen.
 - Every view also requires CoreWebView2_18. Raw and privileged subframe navigations are
@@ -1567,8 +1598,8 @@ The following are roadmap items or disabled backends, not current security guara
 - release-enabled page permission prompts or native enforcement of remembered
   per-origin grants (the bounded coordinator is built but the desktop feature gate is
   disabled pending live WKWebView and packaged-build evidence);
-- Windows/Linux download adapters, Windows Mark-of-the-Web, download scanning,
-  and automatic transfer resumption;
+- Linux downloads, native Windows release qualification of downloads/protection,
+  guaranteed malware detection, and automatic transfer resumption;
 - extension installation, extension API mediation, or Chrome/Firefox extension
   compatibility;
 - continuously maintained online blocker sources or full EasyList semantics: the usable
