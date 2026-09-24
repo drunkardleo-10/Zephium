@@ -671,31 +671,19 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     let money_accepted = !matches!(mode, Mode::AgentMoney | Mode::MoneyNode) || state.executions[0].artifacts.iter().any(|artifact| {
         artifact.title == "Observed product prices" && matches!(&artifact.data, zephium_core::work::artifact::WorkArtifactDataV1::ComparisonMatrix { subjects, cells, .. } if subjects.len() == 1 && subjects[0].name == "Acme Circles T-Shirt" && !subjects[0].image_candidates.is_empty() && subjects.len() == cells.len() && cells.iter().all(|row| row.first().is_some_and(|cell| matches!(&cell.value, zephium_core::work::artifact::WorkCellValue::Money { currency, observed_at: None, .. } if currency == "USD") && !cell.evidence.is_empty())))
     });
-    let airbnb_target = |value: &str| {
-        zephium_agentic::ContextNavigationTarget::parse(value)
-            .ok()
-            .and_then(|target| {
-                let url = target.as_url();
-                let host = url.host_str()?;
-                let allowed = ["airbnb.com", "airbnb.pl"]
-                    .iter()
-                    .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")));
-                allowed.then(|| url.path().to_owned())
-            })
-    };
     let airbnb_reads: std::collections::BTreeSet<_> = state.executions[0]
         .steps
         .iter()
         .filter_map(|step| match &step.kind {
             WorkStepKindV1::Read { url, .. } if step.status == WorkStepStatus::Succeeded => {
-                airbnb_target(url)
+                airbnb_page(url)
             }
             _ => None,
         })
         .collect();
     let airbnb_listing_reads = airbnb_reads
         .iter()
-        .filter(|path| path.starts_with("/rooms/"))
+        .filter(|page| matches!(page, AirbnbPage::Listing(_)))
         .count();
     let travel_accepted = match mode {
         Mode::AgentTrip => !airbnb_reads.is_empty(),
@@ -712,8 +700,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
                     };
                     let pages: std::collections::BTreeSet<_> = subjects
                         .iter()
-                        .filter_map(|subject| subject.homepage.as_deref().and_then(&airbnb_target))
-                        .filter(|path| path.starts_with("/rooms/") && airbnb_reads.contains(path))
+                        .filter_map(|subject| subject.homepage.as_deref().and_then(airbnb_page))
+                        .filter(|page| matches!(page, AirbnbPage::Listing(_)) && airbnb_reads.contains(page))
                         .collect();
                     subjects.len() == 3 && pages.len() == 3 && !artifact.evidence.is_empty()
                 })
@@ -1975,6 +1963,35 @@ fn browser_settings(
     }
 }
 
+/// What an Airbnb read showed: one listing, whether the site linked it as
+/// `/rooms/<id>` or as a search pinned to it, or some other page by path.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum AirbnbPage {
+    Listing(String),
+    Other(String),
+}
+
+fn airbnb_page(value: &str) -> Option<AirbnbPage> {
+    let target = zephium_agentic::ContextNavigationTarget::parse(value).ok()?;
+    let url = target.as_url();
+    let host = url.host_str()?;
+    if !["airbnb.com", "airbnb.pl"]
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+    {
+        return None;
+    }
+    let listing = match url.path().strip_prefix("/rooms/") {
+        Some(rest) => rest.split('/').next().filter(|id| !id.is_empty()).map(str::to_owned),
+        None if url.path() == "/s/homes" => url
+            .query_pairs()
+            .find(|(name, value)| name == "pinned_listings[]" && !value.is_empty())
+            .map(|(_, value)| value.into_owned()),
+        None => None,
+    };
+    Some(listing.map_or_else(|| AirbnbPage::Other(url.path().to_owned()), AirbnbPage::Listing))
+}
+
 fn has_product_specification(data: &zephium_core::work::artifact::WorkArtifactDataV1) -> bool {
     use zephium_core::work::artifact::{WorkArtifactDataV1, WorkCellValue};
     let WorkArtifactDataV1::ComparisonMatrix {
@@ -2081,5 +2098,37 @@ async fn human_government_input(
                 std::future::pending::<()>().await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod airbnb_page_tests {
+    use super::{airbnb_page, AirbnbPage};
+
+    #[test]
+    fn a_room_and_a_pinned_search_are_the_same_listing_and_a_catalog_is_not() {
+        let listing = Some(AirbnbPage::Listing("49597911".into()));
+        assert_eq!(airbnb_page("https://www.airbnb.com/rooms/49597911"), listing);
+        assert_eq!(
+            airbnb_page("https://www.airbnb.com/rooms/49597911?search_mode=regular_search&adults=1"),
+            listing
+        );
+        assert_eq!(
+            airbnb_page("https://www.airbnb.com/s/homes?pinned_listings%5B%5D=49597911&pinned_reason=SEO&photo_id=1"),
+            listing
+        );
+        assert_eq!(
+            airbnb_page("https://www.airbnb.com/s/homes?pinned_listings[]=49597911&pinned_reason=SEO"),
+            listing
+        );
+        assert_eq!(
+            airbnb_page("https://www.airbnb.com/s/homes?query=San%20Francisco"),
+            Some(AirbnbPage::Other("/s/homes".into()))
+        );
+        assert_eq!(
+            airbnb_page("https://www.airbnb.com/san-francisco-ca/stays"),
+            Some(AirbnbPage::Other("/san-francisco-ca/stays".into()))
+        );
+        assert_eq!(airbnb_page("https://example.com/rooms/49597911"), None);
     }
 }
