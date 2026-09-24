@@ -67,6 +67,8 @@ export type CanvasItem = {
     elapsed_ms?: number;
     tail: string[];
     reason?: string;
+    /** The settled command's record id; the lift opens it whole. */
+    record?: string;
   };
   /** Transient agent presence: avatar seed, status, its latest line, and where it stands. */
   agent?: {

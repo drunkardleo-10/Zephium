@@ -1,5 +1,6 @@
 import type {
   WorkArtifactV1,
+  WorkCommandRecordV1,
   WorkEnvironmentSnapshot,
   WorkExecutionFact,
   WorkFileRecordV1,
@@ -11,6 +12,7 @@ import { clipText, type CanvasItem, type CanvasSize } from "./canvas-model";
 import { CLUSTER_CAP, SIZES, type StageContents, type StageMember } from "./stage-layout";
 import { listingArtifacts, subjectKey, subjectsOf } from "./subjects";
 import { fileFolder, fileName, homePath } from "./work-files";
+import * as m from "$shared/i18n/messages";
 
 const DETAIL_TEXT = 2048;
 const ROW_TEXT = 200;
@@ -190,29 +192,108 @@ export function fileCards(execution: WorkExecutionFact): {
   return [...byPath.values()];
 }
 
-/** The command records a run keeps once the local runtime reports them. */
-type CommandRecord = {
-  id: string;
-  command: { command: string; exit?: number | null; elapsed_ms: number; text: string };
-};
+const tail = (text: string) =>
+  text
+    .trimEnd()
+    .split("\n")
+    .slice(-TAIL_LINES)
+    .map((line) => clipText(line, ROW_TEXT));
+/** Why a command ran, in the person's words; nothing when the policy gives no closed reason. */
+function commandReason(step: Step): string | undefined {
+  const policy = step.local?.policy;
+  if (!policy || step.kind.kind !== "run_command") return undefined;
+  const approved = step.kind.decision === true;
+  if (policy.class === "read") return m.work_command_ran_without_asking();
+  if (policy.class === "write" && (approved || policy.scope === "none"))
+    return m.work_command_allowed_folder();
+  if (policy.class === "ask" && approved) return m.work_command_you_approved();
+  return undefined;
+}
+/** One card per command step: live output while it runs, its record once it settles. */
 export function commandCards(
   execution: WorkExecutionFact,
 ): { id: string; command: NonNullable<CanvasItem["command"]> }[] {
-  if (!("command_evidence" in execution) || !Array.isArray(execution.command_evidence)) return [];
-  return (execution.command_evidence as CommandRecord[]).map((record) => ({
-    id: `command:${execution.id}:${record.id}`,
-    command: {
-      line: clipText(record.command.command, ROW_TEXT),
-      state: "exit",
-      ...(typeof record.command.exit === "number" ? { exit: record.command.exit } : {}),
-      elapsed_ms: record.command.elapsed_ms,
-      tail: record.command.text
-        .trimEnd()
-        .split("\n")
-        .slice(-TAIL_LINES)
-        .map((line) => clipText(line, ROW_TEXT)),
-    },
-  }));
+  const records = execution.command_evidence ?? [];
+  const cited = new Set<string>();
+  const cards: { id: string; command: NonNullable<CanvasItem["command"]> }[] = [];
+  for (const step of execution.steps ?? []) {
+    if (step.kind.kind !== "run_command") continue;
+    const line = clipText(step.kind.command, ROW_TEXT);
+    const reason = commandReason(step);
+    const id = `command:${execution.id}:${step.id}`;
+    if (step.status === "running") {
+      const output = step.local?.output;
+      // No output yet means no process: the command waits on the person, without a timer.
+      const waiting = !output && step.kind.decision == null && step.local?.policy?.scope !== "none";
+      const why = waiting ? m.work_command_waiting() : reason;
+      cards.push({
+        id,
+        command: {
+          line,
+          state: "running",
+          ...(output ? { elapsed_ms: output.elapsed_ms ?? 0 } : {}),
+          tail: output ? tail(output.text) : [],
+          ...(why ? { reason: why } : {}),
+        },
+      });
+      continue;
+    }
+    const record = records.find((entry) => entry.id === step.evidence);
+    if (!record) continue;
+    cited.add(record.id);
+    cards.push({ id, command: settled(record, line, reason) });
+  }
+  for (const record of records)
+    if (!cited.has(record.id))
+      cards.push({
+        id: `command:${execution.id}:${record.id}`,
+        command: settled(record, clipText(record.command.command, ROW_TEXT)),
+      });
+  return cards;
+}
+function settled(
+  record: WorkCommandRecordV1,
+  line: string,
+  reason?: string,
+): NonNullable<CanvasItem["command"]> {
+  return {
+    line,
+    state: "exit",
+    ...(typeof record.command.exit === "number" ? { exit: record.command.exit } : {}),
+    elapsed_ms: record.command.elapsed_ms,
+    tail: tail(record.command.text),
+    record: record.id,
+    ...(reason ? { reason } : {}),
+  };
+}
+/** The full record behind a settled command card, wherever its run sits on the canvas. */
+export function commandRecord(
+  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+  record: string,
+): WorkCommandRecordV1 | undefined {
+  for (const projection of objectives.values())
+    for (const execution of projection.executions)
+      for (const entry of execution.command_evidence ?? []) if (entry.id === record) return entry;
+  return undefined;
+}
+/** The title a successful read observed for this address, the latest one across the canvas. */
+export function observedTitle(
+  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+  url: string,
+): string | undefined {
+  const wanted = cleanUrl(url);
+  let title: string | undefined;
+  for (const projection of objectives.values())
+    for (const execution of projection.executions)
+      for (const step of execution.steps ?? [])
+        if (
+          step.kind.kind === "read" &&
+          step.status === "succeeded" &&
+          step.local?.page_title &&
+          cleanUrl(step.kind.url) === wanted
+        )
+          title = step.local.page_title;
+  return title;
 }
 export const displayPath = (path: string) => clipText(homePath(path), DETAIL_TEXT);
 

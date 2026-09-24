@@ -16,6 +16,7 @@ import {
   displayPath,
   fileCards,
   host,
+  observedTitle,
   pageGroups,
   sourceRows,
 } from "./project-environment-stage";
@@ -221,7 +222,11 @@ function elementItems(
         type: "link" as const,
         area: element.area,
         kind: m.work_env_link(),
-        title: link.title || host(link.url) || link.url,
+        // A read's observed page title names the card; the stored title stays as it is.
+        title: clipText(
+          observedTitle(objectives, link.url) || link.title || host(link.url) || link.url,
+          TITLE_TEXT,
+        ),
         detail: origin,
         status: area,
       };
