@@ -2,6 +2,7 @@ use super::*;
 
 fn document() -> ArchivedDocument {
     ArchivedDocument {
+        page_title: None,
         version: 1,
         id: [1; 16],
         profile: 2_u128.into(),
@@ -65,6 +66,29 @@ fn document() -> ArchivedDocument {
                 value: "Fixture label".into(),
             },
         }],
+    }
+}
+
+#[test]
+fn archived_page_title_is_optional_bounded_and_restart_readable() {
+    let old = document();
+    let (_, bytes) = encode(&old);
+    assert!(!std::str::from_utf8(&bytes).unwrap().contains("page_title"));
+    let mut titled = document();
+    titled.version = 8;
+    titled.page_title = Some("Observed page title".into());
+    for source in &mut titled.sources {
+        source.observation = Some(4);
+        source.observation_generation = Some(1);
+        source.captured_millis = Some(5);
+    }
+    let (descriptor, bytes) = encode(&titled);
+    let archived = AgentWorkArchivedExtraction::decode(descriptor, &bytes).unwrap();
+    assert_eq!(archived.page_title(), Some("Observed page title"));
+    assert!(!format!("{archived:?}").contains("Observed page title"));
+    for title in ["x".repeat(513), "bad\ntitle".into(), String::new()] {
+        titled.page_title = Some(title);
+        assert!(titled.validate().is_err());
     }
 }
 

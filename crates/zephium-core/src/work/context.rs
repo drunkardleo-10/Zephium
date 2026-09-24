@@ -271,7 +271,8 @@ impl std::fmt::Debug for WorkAdmittedContext {
     }
 }
 
-fn truncate(text: &str, max: usize) -> (String, bool) {
+/// Clips a context body at a UTF-8 boundary and reports omitted text.
+pub fn truncate(text: &str, max: usize) -> (String, bool) {
     let text = text.trim();
     if text.len() <= max {
         return (text.to_owned(), false);

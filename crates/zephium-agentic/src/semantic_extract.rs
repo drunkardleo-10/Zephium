@@ -988,6 +988,7 @@ impl SemanticExtractionStats {
 
 /// Validated structured mapping over one exact committed semantic read.
 pub struct SemanticExtractionResult<'a> {
+    page_title: Option<String>,
     schema: SemanticExtractionSchemaId,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
@@ -1079,6 +1080,7 @@ impl<'a> SemanticExtractionResult<'a> {
             edges.push(u16::try_from(index).map_err(|_| SemanticExtractionError::Invariant)?);
         }
         Ok(SemanticOwnedExtractionResult {
+            page_title: self.page_title,
             schema: self.schema,
             observation: self.observation,
             observation_generation: self.observation_generation,
@@ -1196,6 +1198,7 @@ pub struct SemanticOwnedExtractionSource {
 /// Its only constructor consumes the validated result. It is not policy,
 /// task-completion, persistence or independent factual-verification proof.
 pub struct SemanticOwnedExtractionResult {
+    page_title: Option<String>,
     schema: SemanticExtractionSchemaId,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
@@ -1210,6 +1213,10 @@ pub struct SemanticOwnedExtractionResult {
 }
 
 impl SemanticOwnedExtractionResult {
+    /// Public document title observed by the terminal read, never model output.
+    pub fn page_title(&self) -> Option<&str> {
+        self.page_title.as_deref()
+    }
     /// Exact source-read omissions. Empty does not certify whole-document coverage
     /// or factual correctness: only the admitted bounded projection was read.
     pub const fn read_omissions(&self) -> crate::SemanticReadOmissions {
@@ -1453,6 +1460,7 @@ pub(crate) fn extract_semantic_read_inner<'a>(
             .map_err(|_| SemanticExtractionError::Invariant)?,
     };
     Ok(SemanticExtractionResult {
+        page_title: read.page_title().map(str::to_owned),
         schema: schema.id(),
         observation: read.observation(),
         observation_generation: read.observation_generation(),
@@ -2917,6 +2925,35 @@ mod tests {
         assert!(!debug.contains("Quarterly"));
         assert!(!debug.contains("Private"));
         assert!(!debug.contains("title"));
+    }
+
+    #[test]
+    fn page_title_survives_owned_extraction_without_using_model_text() {
+        let observation = observation_with_nodes(json!([
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"paragraph","t":"Page content"},
+            {"k":3,"p":0,"r":"paragraph","n":"Page title","t":"Observed title"}
+        ]));
+        let read = read(&observation, 31);
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(29).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_text("title".into(), true, 64).unwrap()],
+        )
+        .unwrap();
+        let output = json!({"v":SEMANTIC_EXTRACTION_SCHEMA_VERSION,"schema":29,"fields":[
+            {"name":"title","value":{"k":"text","value":"Model title","sources":["@r1"]}}
+        ]});
+        let owned = extract_semantic_read(
+            &schema,
+            &read,
+            &delivered(&read),
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&output).unwrap(),
+        )
+        .unwrap()
+        .into_owned()
+        .unwrap();
+        assert_eq!(owned.page_title(), Some("Observed title"));
     }
 
     #[test]

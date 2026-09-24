@@ -742,6 +742,7 @@ pub(super) fn update(
         | WorkRuntimeUpdate::BeginStep { execution, .. }
         | WorkRuntimeUpdate::SettleStep { execution, .. }
         | WorkRuntimeUpdate::CommandProgress { execution, .. }
+        | WorkRuntimeUpdate::PageTitle { execution, .. }
         | WorkRuntimeUpdate::SettleCommand { execution, .. }
         | WorkRuntimeUpdate::FinishCancellation { execution } => *execution,
         WorkRuntimeUpdate::SettleProviderSearch { .. } => return Err(WorkError::Invalid),
@@ -761,6 +762,32 @@ pub(super) fn update(
         _ => None,
     };
     match update {
+        WorkRuntimeUpdate::PageTitle {
+            attempt,
+            step,
+            title,
+            ..
+        } => {
+            if !row
+                .fact
+                .attempts
+                .iter()
+                .any(|a| a.id == attempt && a.status == WorkAttemptStatus::Running)
+            {
+                return Err(WorkError::Conflict);
+            }
+            let step = row
+                .fact
+                .steps
+                .iter_mut()
+                .find(|s| s.id == step && s.status == WorkStepStatus::Running)
+                .ok_or(WorkError::Conflict)?;
+            if !matches!(step.kind, WorkStepKindV1::Read { .. }) {
+                return Err(WorkError::Invalid);
+            }
+            validate_page_title(&title)?;
+            step.local.get_or_insert_with(Default::default).page_title = Some(title);
+        }
         WorkRuntimeUpdate::Begin { attempt, node, .. }
         | WorkRuntimeUpdate::BeginChild { attempt, node, .. } => {
             let spec = row

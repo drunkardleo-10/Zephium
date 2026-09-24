@@ -71,6 +71,9 @@ pub struct WorkFolderApprovalV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkCommandOutputV1 {
+    /// Present with output only after the process starts; excludes approval time.
+    #[serde(default)]
+    pub elapsed_ms: u32,
     pub text: String,
     pub bytes: u32,
     pub truncated: bool,
@@ -79,6 +82,9 @@ pub struct WorkCommandOutputV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct WorkLocalStepV1 {
+    /// Observed public title for a read step's URL, retained after settlement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<WorkCommandPolicyV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,6 +96,12 @@ pub struct WorkLocalStepV1 {
 }
 impl WorkLocalStepV1 {
     pub fn validate(&self, kind: &WorkStepKindV1) -> Result<(), WorkError> {
+        if let Some(title) = &self.page_title {
+            if !matches!(kind, WorkStepKindV1::Read { .. }) {
+                return Err(WorkError::Invalid);
+            }
+            validate_page_title(title)?;
+        }
         if let Some(policy) = &self.policy {
             if !matches!(kind, WorkStepKindV1::RunCommand { .. }) {
                 return Err(WorkError::Invalid);
@@ -124,6 +136,16 @@ impl WorkLocalStepV1 {
         }
         Ok(())
     }
+}
+
+pub fn validate_page_title(title: &str) -> Result<(), WorkError> {
+    if title.is_empty()
+        || title.len() > crate::work::environment::MAX_ENVIRONMENT_TITLE_BYTES
+        || title.chars().any(char::is_control)
+    {
+        return Err(WorkError::Invalid);
+    }
+    Ok(())
 }
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -243,6 +265,26 @@ pub fn validate_replacements(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn work_live_metadata_keeps_legacy_journals_readable() {
+        let output: WorkCommandOutputV1 =
+            serde_json::from_str(r#"{"text":"","bytes":0,"truncated":false}"#).unwrap();
+        assert_eq!(output.elapsed_ms, 0);
+        let legacy: WorkLocalStepV1 = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.page_title, None);
+        let titled = WorkLocalStepV1 {
+            page_title: Some("Read title".into()),
+            ..Default::default()
+        };
+        assert!(titled
+            .validate(&WorkStepKindV1::Read {
+                url: "https://example.com".into(),
+                collection: None
+            })
+            .is_ok());
+        assert!(titled.validate(&WorkStepKindV1::Turn).is_err());
+        assert!(validate_page_title(&"a".repeat(513)).is_err());
+    }
     #[test]
     fn work_local_legacy_edits_and_command_bounds() {
         let legacy = serde_json::from_str::<WorkStepKindV1>(r#"{"kind":"edit_file","path":"/Users/a/project/a","old":"a","new":"b","decision":null}"#).unwrap();

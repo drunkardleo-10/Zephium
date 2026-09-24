@@ -89,6 +89,7 @@ impl crate::Shell {
                 | WorkRequest::ReadPlan { .. }
                 | WorkRequest::RuntimeRead { .. }
                 | WorkRequest::ReadEvidence { .. }
+                | WorkRequest::ReadMediaContext { .. }
         );
         let queue = self.self_queue.clone();
         let result = self.store.work_document(

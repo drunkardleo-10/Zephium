@@ -73,6 +73,7 @@ impl Output {
             format!("{}{}", &all[..h], &all[t..])
         };
         WorkCommandOutputV1 {
+            elapsed_ms: 0,
             text,
             bytes: self.bytes.min(u64::from(u32::MAX)) as u32,
             truncated,
@@ -255,6 +256,7 @@ where
         .spawn()
         .map_err(|_| "The command could not be started")?;
     let group = groups::Group::new(child.id().ok_or("The command could not be started")?);
+    progress(Output::new().view()).await;
     let mut stdout = child.stdout.take().ok_or("The output could not be read")?;
     let mut stderr = child.stderr.take().ok_or("The output could not be read")?;
     let mut output = Output::new();
@@ -283,7 +285,12 @@ where
                     if status.is_none() { status = tokio::time::timeout(Duration::from_millis(300), child.wait()).await.ok().and_then(Result::ok); }
                     break;
                 }
-                if published.elapsed() >= Duration::from_millis(300) { progress(output.view()).await; published = Instant::now(); }
+                if published.elapsed() >= Duration::from_millis(300) {
+                    let mut view = output.view();
+                    view.elapsed_ms = started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+                    progress(view).await;
+                    published = Instant::now();
+                }
             }
         }
         if status.is_some() && !out_open && !err_open {
@@ -390,6 +397,33 @@ mod tests {
         expected.update(&bytes);
         expected.update(b"final\xff");
         assert_eq!(output.hash.finalize(), expected.finalize());
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn work_quiet_command_publishes_start_and_elapsed_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let updates = std::sync::Mutex::new(Vec::new());
+        let result = run(
+            dir.path(),
+            "sleep 1",
+            10,
+            || async { false },
+            |view| {
+                updates.lock().unwrap().push(view);
+                async {}
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.succeeded);
+        let updates = updates.into_inner().unwrap();
+        assert_eq!(updates[0].elapsed_ms, 0);
+        assert_eq!(updates[0].bytes, 0);
+        assert!(updates.iter().any(|view| view.elapsed_ms >= 300));
+        assert!(updates
+            .windows(2)
+            .all(|pair| pair[0].elapsed_ms <= pair[1].elapsed_ms));
+        assert!(updates.last().unwrap().elapsed_ms <= result.evidence.elapsed_ms);
     }
     #[cfg(unix)]
     #[tokio::test]

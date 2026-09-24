@@ -299,3 +299,102 @@ async fn context_admission_binds_digests_and_refuses_stale_or_private_public_rea
     .await;
     assert!(matches!(not_found, Err(WorkError::NotFound)));
 }
+
+#[tokio::test]
+async fn work_media_context_keeps_revision_privacy_and_existing_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(zephium_store::SqliteStore::open(dir.path()).unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let space = shell.windows.focused().unwrap().space;
+    let receiver = handle.import_media(
+        profile,
+        MediaImport {
+            request_id: "work-media-context-fixture-0001".into(),
+            name: "notes.txt".into(),
+            origin: MediaOrigin::Imported,
+            bytes: std::sync::Arc::new("context text\n".repeat(2000).into_bytes()),
+        },
+    );
+    let reply = drive(&mut shell, &queue, async {
+        loop {
+            if let Ok(reply) = receiver.try_recv() {
+                break reply;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    let ResourceResponse::Applied { record, .. } = reply.response else {
+        panic!()
+    };
+    let created = environment(
+        &mut shell,
+        &queue,
+        &handle,
+        profile,
+        WorkEnvironmentCall::Command {
+            command: WorkCommandId::generate(),
+            intent: WorkEnvironmentIntent::Create {
+                space,
+                title: "Media context".into(),
+            },
+        },
+    )
+    .await;
+    let snapshot = environment(
+        &mut shell,
+        &queue,
+        &handle,
+        profile,
+        WorkEnvironmentCall::Command {
+            command: WorkCommandId::generate(),
+            intent: WorkEnvironmentIntent::Edit {
+                id: created.id,
+                expected: created.revision,
+                edit: WorkEnvironmentEdit::Add {
+                    reference: WorkEnvironmentReference::Resource {
+                        resource: ResourceId::parse(&record.id).unwrap(),
+                    },
+                    area: None,
+                },
+            },
+        },
+    )
+    .await;
+    let selection = WorkContextSelectionV1 {
+        environment: snapshot.id,
+        items: vec![WorkContextSelectionItem {
+            element: snapshot.elements[0].id,
+            revision: record.revision.clone(),
+        }],
+    };
+    let admission = WorkContextAdmission::new(handle);
+    let admitted = drive(
+        &mut shell,
+        &queue,
+        admission.admit(profile, WorkContextPurpose::Agent, &selection),
+    )
+    .await
+    .unwrap();
+    assert_eq!(admitted.disclosure.items[0].revision, record.revision);
+    assert_eq!(
+        admitted.disclosure.items[0].kind,
+        WorkContextItemKind::Object
+    );
+    assert_eq!(
+        admitted.disclosure.items[0].visibility,
+        WorkContextVisibility::Private
+    );
+    assert!(admitted.disclosure.items[0].truncated);
+    assert!(admitted.bodies[0].text.contains("1 pages)\ncontext text"));
+    assert!(admitted.bodies[0].text.len() <= MAX_CONTEXT_ITEM_BYTES);
+    assert!(matches!(
+        drive(
+            &mut shell,
+            &queue,
+            admission.admit(profile, WorkContextPurpose::PublicRead, &selection)
+        )
+        .await,
+        Err(WorkError::ReviewRequired)
+    ));
+}

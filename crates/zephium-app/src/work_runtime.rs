@@ -569,6 +569,17 @@ impl WorkAttemptProbe {
         self.lifetime.hold();
         WorkPersonHold(self.lifetime.clone())
     }
+    /// Persists the observed public title of a running page-read step.
+    pub async fn record_page_title(&self, step: WorkStepId, title: &str) -> Result<(), WorkError> {
+        self.commit_step(WorkRuntimeUpdate::PageTitle {
+            execution: self.execution,
+            attempt: self.attempt,
+            step,
+            title: title.to_owned(),
+        })
+        .await
+        .map(|_| ())
+    }
     /// Records the newest frame of one browser step's page, bounded per attempt.
     pub fn record_page_frame(
         &self,

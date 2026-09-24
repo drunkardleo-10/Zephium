@@ -2000,6 +2000,12 @@ pub enum WorkRuntimeIntent {
 
 #[derive(Clone, Debug)]
 pub enum WorkRuntimeUpdate {
+    PageTitle {
+        execution: WorkExecutionId,
+        attempt: WorkAttemptId,
+        step: WorkStepId,
+        title: String,
+    },
     SettleProviderSearch {
         execution: WorkExecutionId,
         attempt: WorkAttemptId,

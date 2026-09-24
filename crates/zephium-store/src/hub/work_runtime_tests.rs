@@ -1144,6 +1144,92 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         &state.executions[0].steps[4],
         WorkStepFact { kind: WorkStepKindV1::WriteFile { decision: Some(true), .. }, status: WorkStepStatus::Succeeded, evidence: Some(id), .. } if *id == 71.into()
     ));
+    // A public page title is projected only under a live read step.
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::BeginStep {
+            execution,
+            attempt,
+            step: step(
+                88,
+                2,
+                WorkStepKindV1::Read {
+                    url: "https://example.com/page".into(),
+                    collection: None,
+                },
+                WorkStepStatus::Running,
+            ),
+            artifacts: vec![],
+            evidence: None,
+            file: None,
+        },
+    )
+    .unwrap();
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::PageTitle {
+            execution,
+            attempt,
+            step: 88.into(),
+            title: "Observed page title".into(),
+        },
+    )
+    .unwrap();
+    let state = read_runtime(&mut hub, &initial);
+    assert_eq!(
+        state.executions[0]
+            .steps
+            .iter()
+            .find(|s| s.id == 88.into())
+            .unwrap()
+            .local
+            .as_ref()
+            .unwrap()
+            .page_title
+            .as_deref(),
+        Some("Observed page title")
+    );
+    assert!(update(
+        &mut hub,
+        WorkRuntimeUpdate::PageTitle {
+            execution,
+            attempt,
+            step: 1.into(),
+            title: "Not a read".into(),
+        }
+    )
+    .is_err());
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::SettleStep {
+            execution,
+            attempt,
+            step: 88.into(),
+            status: WorkStepStatus::Succeeded,
+            usage: Some(WorkUsage {
+                model_tokens: 0,
+                cost_micro_usd: 0,
+                operations: 0,
+                accounting: WorkUsageAccounting::Exact,
+            }),
+            artifacts: vec![],
+            evidence: None,
+            file: None,
+            note: None,
+            measurements: None,
+        },
+    )
+    .unwrap();
+    assert!(update(
+        &mut hub,
+        WorkRuntimeUpdate::PageTitle {
+            execution,
+            attempt,
+            step: 88.into(),
+            title: "Too late".into(),
+        }
+    )
+    .is_err());
     // Success needs the Finish step first.
     let settle = |hub: &mut Hub, status| {
         let state = read_runtime(hub, &initial);
@@ -1184,6 +1270,6 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
     settle(&mut hub, WorkAttemptStatus::Succeeded).unwrap();
     let state = read_runtime(&mut hub, &initial);
     assert_eq!(state.executions[0].status, WorkExecutionStatus::NeedsReview);
-    assert_eq!(state.executions[0].steps.len(), 6);
+    assert_eq!(state.executions[0].steps.len(), 7);
     assert!(matches!(steer(&mut hub, 211), Err(WorkError::Conflict)));
 }

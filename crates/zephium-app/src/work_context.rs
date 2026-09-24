@@ -9,6 +9,8 @@ use zephium_core::{
 };
 
 const READ_TIMEOUT: Duration = Duration::from_secs(8);
+#[path = "work_context_media.rs"]
+mod media;
 
 pub struct WorkContextAdmission {
     handle: crate::Handle,
@@ -298,10 +300,31 @@ impl WorkContextAdmission {
             ResourceContent::Object { object } => {
                 (WorkContextItemKind::Object, object.data.plain_text())
             }
-            ResourceContent::Media { asset } => (
-                WorkContextItemKind::Object,
-                format!("{} ({}, {} bytes)", asset.name, asset.mime, asset.bytes),
-            ),
+            ResourceContent::Media { asset } => {
+                let text = if asset.kind == zephium_core::resources::MediaKind::Image {
+                    media::metadata(asset)
+                } else {
+                    let request = self.handle.submit_work_document(
+                        WorkRequest::ReadMediaContext {
+                            resource: record.id.clone(),
+                            revision: record.revision.clone(),
+                        },
+                        Some(profile),
+                    )?;
+                    let response = tokio::time::timeout(READ_TIMEOUT, request)
+                        .await
+                        .map_err(|_| WorkError::Unavailable)??;
+                    if response.profile != profile {
+                        return Err(WorkError::ProfileUnavailable);
+                    }
+                    let WorkReply::MediaContext(bytes) = response.reply else {
+                        return Err(WorkError::Invalid);
+                    };
+                    let asset = asset.clone();
+                    media::disclose(asset, bytes.0).await
+                };
+                (WorkContextItemKind::Object, text)
+            }
         };
         Ok(WorkContextSource {
             element,

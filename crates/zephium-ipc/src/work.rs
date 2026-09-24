@@ -455,11 +455,13 @@ impl WorkResponseV1 {
                 WorkReplyV1::PlanHistory { revisions }
             }
             Ok(port::WorkReply::Page { works, next }) => WorkReplyV1::Page { works, next },
-            Ok(port::WorkReply::RuntimeStarted { .. } | port::WorkReply::Deleted { .. }) => {
-                WorkReplyV1::Error {
-                    error: WorkFailureV1::Invalid,
-                }
-            }
+            Ok(
+                port::WorkReply::RuntimeStarted { .. }
+                | port::WorkReply::Deleted { .. }
+                | port::WorkReply::MediaContext(_),
+            ) => WorkReplyV1::Error {
+                error: WorkFailureV1::Invalid,
+            },
             Err(error) => WorkReplyV1::Error {
                 error: error.into(),
             },
@@ -591,6 +593,21 @@ impl From<planning::WorkPlanningError> for WorkPlanningFailureV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_media_context_cannot_be_projected_over_ipc() {
+        let response = WorkResponseV1::from_result(
+            1.into(),
+            Ok(port::WorkReply::MediaContext(port::WorkMediaContext(
+                b"private media body".to_vec(),
+            ))),
+        );
+        assert!(matches!(
+            response.reply,
+            WorkReplyV1::Error {
+                error: WorkFailureV1::Invalid
+            }
+        ));
+    }
     #[test]
     fn fixtures_match_validated_rust_contracts() {
         let state: WorkProjectionV1 =

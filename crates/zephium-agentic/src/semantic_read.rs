@@ -653,6 +653,7 @@ impl SemanticReadStats {
 
 /// Bounded borrowed readable projection of one exact semantic observation.
 pub struct SemanticReadResult<'a> {
+    page_title: Option<String>,
     focused: bool,
     url_sources: u8,
     roles: SemanticReadRoleSelection,
@@ -680,6 +681,10 @@ struct SemanticReadSubtreeProof {
 }
 
 impl<'a> SemanticReadResult<'a> {
+    /// Public top-frame title metadata from this exact observed document.
+    pub fn page_title(&self) -> Option<&str> {
+        self.page_title.as_deref()
+    }
     pub(crate) const fn url_sources(&self) -> u8 {
         self.url_sources
     }
@@ -1355,6 +1360,33 @@ impl<'a> SemanticReadBuilder<'a> {
             guard = hasher.finalize().into();
         }
         SemanticReadResult {
+            page_title: self.observation.frames().first().and_then(|frame| {
+                frame
+                    .nodes()
+                    .iter()
+                    .find(|node| {
+                        node.role() == SemanticRole::Paragraph
+                            && node
+                                .name()
+                                .is_some_and(|name| name.as_str() == "Page title")
+                            && node.sensitivity() == SemanticSensitivity::Public
+                            && node.operations().is_empty()
+                    })
+                    .and_then(|node| node.text())
+                    .and_then(|text| {
+                        let title: String =
+                            text.as_str().chars().filter(|c| !c.is_control()).collect();
+                        let title = title.trim();
+                        let mut end = title
+                            .len()
+                            .min(zephium_core::work::environment::MAX_ENVIRONMENT_TITLE_BYTES);
+                        while !title.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        (!title.is_empty() && !crate::semantic_wire::looks_like_secret_value(title))
+                            .then(|| title[..end].to_owned())
+                    })
+            }),
             focused: !matches!(
                 self.observation.request().scope(),
                 crate::SemanticScope::Initial
@@ -1669,6 +1701,34 @@ mod tests {
         .unwrap()
         .finish()
         .unwrap()
+    }
+
+    #[test]
+    fn public_page_title_is_observed_bounded_metadata() {
+        for sensitivity in ["public", "sensitive", "secret"] {
+            let source = retained_observation(
+                1,
+                json!([
+                    {"k":1,"r":"document","o":16},
+                    {"k":2,"p":0,"r":"paragraph","n":"Page title","t":"界".repeat(200),"q":sensitivity}
+                ]),
+            );
+            let ack = acknowledgement(&source);
+            let read = read_semantic_observation(
+                &source,
+                SemanticReadAuthority::Acknowledged(&ack),
+                SemanticCaptureInstant::from_millis(1),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::STANDARD,
+            )
+            .unwrap();
+            if sensitivity == "public" {
+                assert_eq!(read.page_title().unwrap().len(), 510);
+                assert!(!format!("{read:?}").contains('界'));
+            } else {
+                assert_eq!(read.page_title(), None);
+            }
+        }
     }
 
     #[test]

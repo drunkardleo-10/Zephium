@@ -5,6 +5,11 @@ use super::*;
 
 #[derive(Clone)]
 pub enum WorkRequest {
+    /// Host-only context read, bound to an existing resource revision and profile.
+    ReadMediaContext {
+        resource: String,
+        revision: String,
+    },
     Environment {
         call: environment::WorkEnvironmentCall,
         /// Application-actor observations, never decoded from IPC. Store checks
@@ -94,6 +99,14 @@ impl WorkRequest {
             evidence.evidence.validate()?;
         }
         match self {
+            Self::RuntimeUpdate {
+                update: runtime::WorkRuntimeUpdate::PageTitle { title, .. },
+                ..
+            } => runtime::validate_page_title(title),
+            Self::ReadMediaContext { resource, revision } => {
+                validate_text(resource, 128)?;
+                validate_text(revision, 128)
+            }
             Self::Environment { call, .. } => call.validate(),
             Self::AuthoringCommand { intent, .. } => intent.validate(),
             Self::RuntimeCommand {
@@ -264,6 +277,7 @@ impl std::fmt::Debug for WorkSummary {
 }
 #[derive(Clone, Debug)]
 pub enum WorkReply {
+    MediaContext(WorkMediaContext),
     Environment(environment::WorkEnvironmentReply),
     AuthoringCommand(authoring::WorkAuthoringReceipt),
     Evidence(artifact::WorkEvidencePreviewV1),
@@ -304,6 +318,17 @@ pub enum WorkReply {
     },
 }
 pub type WorkCompletion = Box<dyn FnOnce(Result<WorkReply, WorkError>) + Send>;
+
+/// Native context bytes, never an IPC projection or diagnostic body.
+#[derive(Clone)]
+pub struct WorkMediaContext(pub Vec<u8>);
+impl std::fmt::Debug for WorkMediaContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkMediaContext")
+            .field("bytes", &self.0.len())
+            .finish()
+    }
+}
 
 impl std::fmt::Debug for WorkRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

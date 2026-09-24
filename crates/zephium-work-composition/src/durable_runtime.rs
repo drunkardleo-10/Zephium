@@ -992,6 +992,18 @@ impl MacosWorkComposition {
                         accounting: WorkUsageAccounting::ConservativeReservation,
                     }),
                 );
+                if disposition == Some(AgentWorkDisposition::Succeeded)
+                    && resume_plan.as_ref().is_some_and(|plan| {
+                        matches!(plan.request.step, WorkStepKindV1::Read { .. })
+                    })
+                {
+                    if let (Some((step, _)), Some(title)) = (
+                        &page,
+                        archived.as_ref().and_then(|archive| archive.page_title()),
+                    ) {
+                        attempt.record_page_title(*step, title).await?;
+                    }
+                }
                 let result = match (disposition, archived) {
                     (Some(AgentWorkDisposition::Succeeded), Some(archive)) => match collection {
                         Some(schema) => outputs

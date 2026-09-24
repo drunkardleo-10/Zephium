@@ -641,7 +641,7 @@ async fn admit_remote(
         else {
             return refused(ResourceError::NotFound);
         };
-        if !matches!(subject.reference, WorkEnvironmentReference::Subject { .. }) {
+        if !remote_image_target(&subject.reference) {
             return refused(ResourceError::Invalid);
         }
         let area = subject.area;
@@ -746,8 +746,41 @@ async fn admit_remote(
     }
 }
 
+#[cfg(feature = "work-product")]
+fn remote_image_target(
+    reference: &zephium_core::work::environment::WorkEnvironmentReference,
+) -> bool {
+    use zephium_core::work::environment::WorkEnvironmentReference;
+    matches!(
+        reference,
+        WorkEnvironmentReference::Subject { .. } | WorkEnvironmentReference::Link { .. }
+    )
+}
+
 #[cfg(test)]
 mod date_tests {
+    #[cfg(feature = "work-product")]
+    #[test]
+    fn remote_thumbnails_accept_subjects_and_links_only() {
+        use zephium_core::work::environment::WorkEnvironmentReference;
+        assert!(super::remote_image_target(
+            &WorkEnvironmentReference::Link {
+                url: "https://example.com/video".into(),
+                title: "example.com".into(),
+            }
+        ));
+        assert!(super::remote_image_target(
+            &WorkEnvironmentReference::Subject {
+                objective: 1.into(),
+                execution: 2.into(),
+                artifact: 3.into(),
+                index: 0,
+            }
+        ));
+        assert!(!super::remote_image_target(
+            &WorkEnvironmentReference::Resource { resource: 4.into() }
+        ));
+    }
     #[test]
     fn civil_date_is_iso_shaped() {
         let today = super::civil_date_today();

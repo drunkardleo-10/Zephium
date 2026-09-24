@@ -165,7 +165,10 @@ impl AgentWorkArtifactPublication {
         };
         let fields = archive_fields(result.fields(), &mut cite)?;
         let document = ArchivedDocument {
-            version: if sources.values().any(|source| source.field == 8) {
+            page_title: result.page_title().map(str::to_owned),
+            version: if result.page_title().is_some() {
+                8
+            } else if sources.values().any(|source| source.field == 8) {
                 7
             } else if fields.iter().any(contains_money) {
                 6
@@ -485,6 +488,8 @@ impl ArchivedSource {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ArchivedDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    page_title: Option<String>,
     version: u8,
     id: [u8; 16],
     profile: ProfileId,
@@ -504,6 +509,10 @@ pub struct AgentWorkArchivedExtraction {
     document: ArchivedDocument,
 }
 impl AgentWorkArchivedExtraction {
+    /// Public observed page title; display data only, never navigation authority.
+    pub fn page_title(&self) -> Option<&str> {
+        self.document.page_title.as_deref()
+    }
     /// Validates bounded canonical bytes and exact metadata before publication.
     pub fn decode(
         descriptor: AgentWorkArtifactDescriptor,
@@ -560,7 +569,19 @@ impl fmt::Debug for AgentWorkArchivedExtraction {
 impl ArchivedDocument {
     fn validate(&self) -> Result<(), AgentWorkJournalError> {
         let invalid = AgentWorkJournalError::Uncertain;
-        if !matches!(self.version, 1..=7)
+        if let Some(title) = &self.page_title {
+            valid_text(
+                title,
+                zephium_core::work::environment::MAX_ENVIRONMENT_TITLE_BYTES,
+            )?;
+        }
+        if !matches!(self.version, 1..=8)
+            || self.page_title.as_ref().is_some_and(|title| {
+                self.version < 8
+                    || title.is_empty()
+                    || title.len() > zephium_core::work::environment::MAX_ENVIRONMENT_TITLE_BYTES
+                    || title.chars().any(char::is_control)
+            })
             || self.id == [0; 16]
             || self.schema == 0
             || self.observation == 0

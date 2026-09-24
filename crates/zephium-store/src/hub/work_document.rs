@@ -35,6 +35,40 @@ impl Hub {
         if self.recovery_required.is_some() {
             return Err(WorkError::Unavailable);
         }
+        if let WorkRequest::ReadMediaContext { resource, revision } = &request {
+            use sha2::{Digest, Sha256};
+            use zephium_core::resources::{
+                ResourceCall, ResourceContent, ResourceResponse, MAX_MEDIA_FILE_BYTES,
+            };
+            let ResourceResponse::Record { record } = self.resource_call(
+                profile,
+                ResourceCall::Get {
+                    id: resource.clone(),
+                },
+            ) else {
+                return Err(WorkError::NotFound);
+            };
+            if record.trashed {
+                return Err(WorkError::NotFound);
+            }
+            if &record.revision != revision {
+                return Err(WorkError::Conflict);
+            }
+            let ResourceContent::Media { asset } = record.draft.content else {
+                return Err(WorkError::Invalid);
+            };
+            let bytes = self
+                .media
+                .as_ref()
+                .and_then(|media| media.read(profile, &asset.digest, MAX_MEDIA_FILE_BYTES as usize))
+                .ok_or(WorkError::NotFound)?;
+            if bytes.len() != asset.bytes as usize
+                || format!("{:x}", Sha256::digest(&bytes)) != asset.digest
+            {
+                return Err(WorkError::Conflict);
+            }
+            return Ok(WorkReply::MediaContext(WorkMediaContext(bytes)));
+        }
         let runtime_session = runtime_store::RuntimeClock {
             session: self.work_runtime_session,
             tick_ms: i64::try_from(self.work_runtime_epoch.elapsed().as_millis())
@@ -204,7 +238,9 @@ fn apply(
         WorkRequest::AuthoringCommand { command, intent } => {
             authoring_store::command(tx, profile, runtime_session, command, intent)?
         }
-        WorkRequest::ReadEvidence { .. } => return Err(WorkError::Invalid),
+        WorkRequest::ReadEvidence { .. } | WorkRequest::ReadMediaContext { .. } => {
+            return Err(WorkError::Invalid)
+        }
         WorkRequest::RuntimeAbandon {
             id,
             execution,
