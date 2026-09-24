@@ -68,13 +68,15 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
         return Err("resource and file workflow QA identities are mutually exclusive".into());
     }
     if resource_ui_qa || file_workflows_qa {
-        if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+        let target = env::var("CARGO_CFG_TARGET_OS")?;
+        let supported_target = target == "macos" || (file_workflows_qa && target == "windows");
+        if !supported_target
             || env::var("PROFILE").as_deref() != Ok("debug")
             || extensions_staging
             || extension_lab
             || rendering_probe
         {
-            return Err("product UI QA requires an isolated macOS debug build".into());
+            return Err("product UI QA requires an isolated supported-platform debug build".into());
         }
         let (qa_id, qa_name) = if file_workflows_qa {
             (

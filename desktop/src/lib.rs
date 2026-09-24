@@ -3,9 +3,12 @@
 
 #[cfg(all(
     feature = "file-workflows-qa",
-    any(not(debug_assertions), not(target_os = "macos"))
+    any(
+        not(debug_assertions),
+        not(any(target_os = "macos", target_os = "windows"))
+    )
 ))]
-compile_error!("file workflows QA is macOS debug-only");
+compile_error!("file workflows QA requires a macOS or Windows debug build");
 
 #[cfg(all(
     feature = "resource-ui-qa",

@@ -60,6 +60,29 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         base = "/" + self.server.token
+        if self.path == base + "/empty":
+            self.send_attachment("zephium-empty.txt", b"")
+            return
+        if self.path == base + "/truncated":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", 'attachment; filename="zephium-truncated.bin"')
+            self.send_header("Content-Length", "1048576")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"deliberately incomplete fixture")
+            self.wfile.flush()
+            self.close_connection = True
+            return
+        if self.path == base + "/unknown-length":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", 'attachment; filename="zephium-unknown-length.txt"')
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"Unknown-length fixture\n")
+            self.close_connection = True
+            return
         if self.path == base + "/authenticated":
             if f"fixture_session={self.server.token}" not in self.headers.get("Cookie", "").split("; "):
                 self.send_body(403, "text/plain", b"Fixture cookie missing")
@@ -104,7 +127,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
 <h1>Native file uploads</h1>
 <p>Select only the generated fixture files. Uploads stay on this loopback server.</p>
 <p><a href="__BASE__/download">Download attachment</a> · <a href="__BASE__/slow">Slow download (32 MiB)</a> · <a href="__BASE__/redirect">Redirected download</a></p>
-<p><button id="blob">Download generated text</button></p>
+<p><button id="blob">Download generated text</button> <button id="data">Download data URL</button></p>
+<p><a href="__BASE__/empty">Empty file</a> · <a href="__BASE__/unknown-length">Unknown length</a> · <a href="__BASE__/truncated">Truncated response (must fail)</a></p>
 <p><a href="__BASE__/authenticated">Cookie-authenticated text attachment</a></p>
 <form method="POST" action="__BASE__/export"><input type="hidden" name="fixture" value="generated"><button>Download POST export</button></form>
 <form id="upload">
@@ -124,6 +148,11 @@ document.querySelector('#blob').onclick = () => {
   const url = URL.createObjectURL(new Blob(['Zephium generated download fixture\n'], {type:'text/plain'}));
   const link = document.createElement('a'); link.href=url; link.download='zephium-generated.txt'; link.click();
   setTimeout(() => URL.revokeObjectURL(url),60000);
+};
+document.querySelector('#data').onclick = () => {
+  const link = document.createElement('a');
+  link.href='data:text/plain;charset=utf-8,'+encodeURIComponent('Zephium data URL fixture\n'.repeat(1024));
+  link.download='zephium-data.txt';link.click();
 };
 async function send(data) {
   try {
