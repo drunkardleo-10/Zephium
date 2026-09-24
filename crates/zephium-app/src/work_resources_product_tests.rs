@@ -810,6 +810,121 @@ fn work_page_group_retires_a_settled_uncertain_page_and_admits_a_later_read() {
 }
 
 #[test]
+fn work_page_group_keeps_a_sibling_read_when_a_page_fails_before_admission() {
+    if child("work_page_group_keeps_a_sibling_read_when_a_page_fails_before_admission") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(zephium_store::SqliteStore::open(directory.path()).unwrap());
+    let engine = Arc::new(crate::shell::tests::FakeEngine::default());
+    let queue = crate::actor::CommandQueue::new();
+    let owner = crate::actor::Handle::new(queue.clone());
+    let callback = owner.callback_handle();
+    let mut shell = crate::Shell::new(
+        engine.clone(),
+        store.clone(),
+        Arc::new(crate::shell::tests::FakeChrome),
+        Box::new(|_| {}),
+    );
+    shell.attach_queue(queue.clone());
+    shell.handle(Command::Bootstrap);
+    let profile = selected(&owner, &queue, &mut shell);
+    let factories = Arc::new(AtomicUsize::new(0));
+    let servers = Servers::default();
+    let work = WorkId::generate();
+    let execution = zephium_core::work::WorkExecutionId::generate();
+    let attempt = zephium_core::work::WorkAttemptId::generate();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let attach = |native: Arc<Native>| {
+        native.allow_global_shutdown.store(true, Ordering::Release);
+        native.hold_construct.store(true, Ordering::Release);
+        let request = prepared_until_isolated(
+            profile,
+            engine.clone(),
+            store.clone(),
+            native,
+            factories.clone(),
+            servers.clone(),
+            deadline,
+            WorkBrowserDocumentPolicy::Exact,
+            true,
+            None,
+        )
+        .with_work_identity(work)
+        .with_page_admission(crate::RetainedPageAdmission {
+            profile: profile.profile(),
+            work,
+            execution,
+            attempt,
+            step: zephium_core::work::WorkStepId::generate(),
+            workers: 2,
+            deadline,
+        })
+        .unwrap();
+        callback.attach_retained_work(request).unwrap()
+    };
+    let failing_native = Arc::new(Native::default());
+    let sibling_native = Arc::new(Native::default());
+    let failing = attach(failing_native.clone());
+    let sibling = attach(sibling_native.clone());
+    pump(&queue, &mut shell, || {
+        [&failing_native, &sibling_native]
+            .iter()
+            .all(|native| native.construction.lock().unwrap().is_some())
+    });
+    // The first page's load fails natively before it enters the journal.
+    let (request, completion) = failing_native.construction.lock().unwrap().take().unwrap();
+    completion(request.complete(WorkBrowserResourceNativeOutcome::Refused));
+    pump(&queue, &mut shell, || {
+        failing.snapshot().phase == RetainedWorkPhase::Uncertain
+    });
+    assert_eq!(
+        failing.snapshot().failure,
+        Some(AgentWorkFailure::ContextLost)
+    );
+    sibling_native.release_construction();
+    pump(&queue, &mut shell, || {
+        while sibling.take_event().is_some() {}
+        matches!(
+            sibling.snapshot().phase,
+            RetainedWorkPhase::Terminal | RetainedWorkPhase::Refused | RetainedWorkPhase::Uncertain
+        )
+    });
+    let snapshot = sibling.snapshot();
+    assert_eq!(
+        (snapshot.phase, snapshot.failure),
+        (RetainedWorkPhase::Terminal, None)
+    );
+    assert!(snapshot
+        .record
+        .is_some_and(|record| record.disposition() == AgentWorkDisposition::Succeeded));
+    assert!(failing.close() && sibling.close());
+    pump(&queue, &mut shell, || {
+        failing.is_closed() && sibling.is_closed()
+    });
+    assert_eq!(factories.load(Ordering::Acquire), 2);
+    for server in servers.lock().unwrap().drain(..) {
+        server.join().unwrap();
+    }
+    let shutdown = owner.shutdown_with_deadline(Instant::now() + Duration::from_secs(5));
+    while let Some(command) = queue.try_recv() {
+        let terminal = matches!(command, Command::Shutdown { .. });
+        shell.handle(command);
+        if terminal {
+            break;
+        }
+    }
+    assert_eq!(shutdown.recv(), Ok(crate::ShutdownOutcome::Clean));
+    for native in [failing_native, sibling_native] {
+        native.join();
+        assert!(native.global_sealed.load(Ordering::Acquire));
+    }
+}
+
+#[test]
 fn selected_shell_retains_page_after_durable_result_and_owns_global_shutdown() {
     if child("selected_shell_retains_page_after_durable_result_and_owns_global_shutdown") {
         return;

@@ -210,6 +210,12 @@ impl RetainedWorkGroup {
             failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
+    /// This page's run entered the group manifest.
+    fn holds(&self, context: ContextId) -> bool {
+        self.records
+            .lock()
+            .map_or(true, |records| records.iter().any(|(id, _)| *id == context))
+    }
     fn remember(
         &self,
         context: ContextId,
@@ -557,7 +563,13 @@ impl RetainedWork {
     }
 
     fn fail(&mut self, failure: AgentWorkFailure) {
-        if let Some(group) = &self.runtime_group {
+        // Only a run in the group manifest can leave peers an uncertain row;
+        // a page that failed before admission leaves its group healthy.
+        if let Some(group) = self
+            .runtime_group
+            .as_ref()
+            .filter(|group| group.holds(self.resource.identity().context()))
+        {
             group.fail();
         }
         self.failure.get_or_insert(failure);
