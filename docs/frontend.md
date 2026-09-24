@@ -68,8 +68,8 @@ export_typescript_bindings`. Never edit it by hand.
    survive process death.
 6. **Production CSP is a release invariant.** `script-src` remains exactly
    `'self'`; production must never gain `unsafe-eval`, inline script, `data:`, or
-   `blob:`. Svelte production output needs none of them. The current inline
-   bootstrap and dynamic native geometry still require style `unsafe-inline`;
+   `blob:`. Svelte production output needs none of them. Dynamic native geometry and dropdown style restoration require style
+   `unsafe-inline`;
    changing that is a separate hardening project, not migration cleanup.
 
 ## Native presentation barrier
@@ -114,8 +114,11 @@ security boundary, not a rendering optimization.
   before its first native query. The main surface installs projection listeners,
   resolves theme/material, synchronously forces style/layout, and only then
   calls `commands.uiReady()`.
-- Keep the opaque bootstrap colors in `browser.html` byte-exact with the native
-  presentation background (`#1a1b20` dark, `#f3f3f6` light). A hidden WebView
+- Keep the opaque bootstrap colors in `src/styles/axes/bootstrap.css` byte-exact with
+  the canvas tokens (`#1a1a1d` dark, `#f1f1f3` light). Both root stylesheets import
+  this file. Do not add inline `<style>` blocks to either privileged HTML entry:
+  Tauri adds style nonces, which override `unsafe-inline` and prevent dropdowns
+  from restoring pointer input. A hidden WebView
   may suspend `requestAnimationFrame`; startup must not depend on one. Native's
   15-second watchdog intentionally fails closed instead of revealing partial
   privileged chrome.

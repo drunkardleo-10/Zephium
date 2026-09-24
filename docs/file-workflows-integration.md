@@ -115,3 +115,33 @@ The integration bundle is under the reused Cargo target directory:
 `/private/tmp/zephium-browser-file-workflows/target/debug/bundle/macos/Zephium Files Integration QA.app`.
 Its sources are in `/private/tmp/zephium-files-integration`, not the old download
 worktree. Reusing Cargo's build cache does not change that old branch's source.
+
+## Dropdown input-lock follow-up
+
+The user reported that dropdowns left the app unusable and logged a style CSP
+violation. The inline startup style blocks and CSP configuration were unchanged
+from the committed UI baseline. Tauri injects a nonce into each inline HTML style
+block and adds that nonce to the effective `style-src`; browsers then ignore that
+directive's `unsafe-inline`. Bits UI sets body pointer events through CSSOM while
+opening a dropdown, then restores the previous `style` attribute on close. The
+restoration was blocked, leaving `pointer-events: none` on the body.
+
+Startup paint now lives in `frame/src/styles/axes/bootstrap.css`, imported into
+both existing root stylesheets. There are no inline style blocks in either emitted
+privileged HTML document. The CSP configuration, script restrictions and Tauri
+CSP modification remain unchanged. Native tests still verify exact canvas colors,
+and the production build rejects a reintroduced inline style block.
+
+A WebKit regression derives the effective style policy from the real CSP config
+and both HTML sources. Before the fix, menu selection left pointer events at
+`none`; after the fix, Menu and Select selection, Escape dismissal, subsequent
+physical clicks and the absence of style-policy violations all pass. This covers
+the interaction missing from the earlier native smoke.
+
+Validation: 248 frontend unit tests, 142 WebKit component tests, 106 desktop tests
+(2 ignored), frontend build and emitted CSS checks pass. The rebuilt native QA app
+was relaunched; Tools and Tasks menus were exercised, and a physical-coordinate
+click focused the task search field after selection and Escape dismissal.
+
+References: [Tauri CSP processing](https://v2.tauri.app/reference/config/),
+[nonce/hash precedence in CSP](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP).

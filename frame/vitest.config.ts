@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vitest/config";
 import { playwright } from "@vitest/browser-playwright";
 import tailwindcss from "@tailwindcss/vite";
@@ -44,6 +45,21 @@ export default defineConfig({
         },
         test: {
           name: "component",
+          provide: {
+            packagedStylePolicy: {
+              styleSource: JSON.parse(
+                readFileSync(new URL("../desktop/tauri.conf.json", import.meta.url), "utf8"),
+              ).app.security.csp["style-src"] as string,
+              // Match the HTML style elements to which Tauri adds nonce sources.
+              inlineStyleCount: ["./browser.html", "./panel.html"].reduce(
+                (count, path) =>
+                  count +
+                  (readFileSync(new URL(path, import.meta.url), "utf8").match(/<style(?:\s|>)/giu)
+                    ?.length ?? 0),
+                0,
+              ),
+            },
+          },
           include: ["src/**/*.component.test.ts"],
           browser: {
             enabled: true,

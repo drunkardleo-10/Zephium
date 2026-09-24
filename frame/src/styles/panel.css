@@ -1,3 +1,4 @@
+@import "./axes/bootstrap.css";
 @import "tailwindcss" source(none);
 @import "./tokens/primitive.css";
 @import "./tokens.css";

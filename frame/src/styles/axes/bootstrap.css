@@ -1,0 +1,18 @@
+/* External startup paint: inline HTML style blocks acquire a Tauri nonce,
+   which would disable style-src unsafe-inline needed by runtime geometry and
+   dropdown scroll-lock restoration. Keep this in the render-blocking CSS. */
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+  background: #1a1a1d;
+}
+
+@media (prefers-color-scheme: light) {
+  html,
+  body,
+  #root {
+    background: #f1f1f3;
+  }
+}

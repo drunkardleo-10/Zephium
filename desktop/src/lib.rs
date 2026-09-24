@@ -6176,9 +6176,26 @@ mod tests {
     }
 
     #[test]
+    fn privileged_html_does_not_add_style_nonces_that_disable_runtime_style_restoration() {
+        for html in [
+            crate::frame_sources::INDEX_HTML,
+            crate::frame_sources::PANEL_HTML,
+        ] {
+            assert!(!html.to_ascii_lowercase().contains("<style"),
+                "Tauri adds nonces to inline style blocks; this disables the configured unsafe-inline and can strand dropdown pointer locks");
+        }
+        for css in [
+            include_str!("../../frame/src/styles/global.css"),
+            include_str!("../../frame/src/styles/panel.css"),
+        ] {
+            assert!(css.starts_with("@import \"./axes/bootstrap.css\";"));
+        }
+    }
+
+    #[test]
     fn bootstrap_paint_matches_the_canvas_token() {
         let tokens = crate::frame_sources::SRC_STYLES_TOKENS_CSS;
-        let bootstrap = crate::frame_sources::INDEX_HTML;
+        let bootstrap = crate::frame_sources::SRC_BOOTSTRAP_CSS;
 
         let canvas = |block: &str| -> String {
             let rest = &tokens[tokens.find(block).expect("theme block")..];

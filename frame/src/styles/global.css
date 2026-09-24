@@ -1,3 +1,4 @@
+@import "./axes/bootstrap.css";
 @import "tailwindcss" source("../");
 @import "./tokens/primitive.css";
 @import "./tokens.css";
@@ -30,7 +31,7 @@
  * pages.
  *
  * --color-canvas must stay byte-identical to the bootstrap paint in
- * index.html; it is the startup presentation background.
+ * bootstrap.css; it is the startup presentation background.
  */
 html,
 body,
