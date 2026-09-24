@@ -630,20 +630,42 @@ impl ProductWork {
     pub(crate) fn is_page(&self) -> bool {
         self.page.is_some()
     }
-    pub(crate) fn admits_peers(&self, peers: &[ProductWork]) -> bool {
+    /// Live peers and settled members all hold a native seat in the group; a
+    /// settled member's step may be read again.
+    pub(crate) fn admits_peers<'a>(
+        &self,
+        live: &[ProductWork],
+        settled: impl Iterator<Item = &'a ProductWork>,
+    ) -> bool {
         let Some(page) = &self.page else {
             return false;
         };
-        peers.len() < usize::from(page.workers.min(3))
-            && Instant::now() < page.deadline
-            && peers.iter().all(|peer| {
-                !peer.group_shutdown
-                    && !peer.is_stuck()
-                    && peer
-                        .page
-                        .as_ref()
-                        .is_some_and(|other| page.same_group(other) && page.step != other.step)
+        let admits = |peer: &ProductWork, live: bool| {
+            !peer.group_shutdown
+                && peer.page.as_ref().is_some_and(|other| {
+                    page.same_group(other) && (!live || page.step != other.step)
+                })
+        };
+        let mut seats = live.len();
+        Instant::now() < page.deadline
+            && live.iter().all(|peer| admits(peer, true))
+            && settled.into_iter().all(|peer| {
+                seats += 1;
+                admits(peer, false)
             })
+            && seats < usize::from(page.workers.min(3))
+    }
+    /// An unclosed page that owns a native resource owner in its group.
+    pub(crate) fn native_member(&self) -> bool {
+        self.page.is_some() && self.coordinator.is_some() && !self.is_closed()
+    }
+    /// A member whose native audit has not ended; it can still close.
+    pub(crate) fn awaits_native_close(&self) -> bool {
+        self.native_member()
+            && !self
+                .coordinator
+                .as_ref()
+                .is_some_and(RetainedWork::native_audit_settled)
     }
     pub(crate) fn is_closed(&self) -> bool {
         self.signal.closed.load(Ordering::Acquire)

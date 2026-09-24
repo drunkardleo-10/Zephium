@@ -599,13 +599,17 @@ impl Shell {
                         || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
                         || !work.admits(&self.engine, &self.store, self.work_profile_binding())
                         || if work.is_page() {
-                            !work.admits_peers(&self.retained_pages)
-                                || self
-                                    .retained_page_runtime
-                                    .as_ref()
-                                    .is_some_and(|group| group.is_failed())
+                            !work.admits_peers(
+                                &self.retained_pages,
+                                self.retained_graveyard
+                                    .iter()
+                                    .filter(|work| work.native_member()),
+                            ) || self
+                                .retained_page_runtime
+                                .as_ref()
+                                .is_some_and(|group| group.is_failed() || group.is_sealed())
                         } else {
-                            !self.retained_pages.is_empty()
+                            self.retained_page_runtime.is_some()
                         }
                     {
                         work.refuse();
@@ -632,7 +636,7 @@ impl Shell {
                 if let Some(mut work) = crate::work::ApplicationWork::take_attachment(&attachment) {
                     if !work.belongs_to_store(&self.store)
                         || self.retained_work.is_some()
-                        || !self.retained_pages.is_empty()
+                        || self.retained_page_runtime.is_some()
                         || !work.belongs_to_engine(&self.engine)
                         || !work.accepts_predecessor(self.work.as_deref())
                         || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
@@ -1124,7 +1128,7 @@ impl Shell {
     }
 
     /// A settled page that cannot close with its group moves to the graveyard
-    /// and releases its runtime share; the group no longer waits on it.
+    /// and stops holding admission; the group no longer waits on it.
     #[cfg(feature = "work-execution")]
     fn retire_settled_pages(&mut self) {
         self.retained_pages.retain(|page| !page.is_closed());
@@ -1139,14 +1143,24 @@ impl Shell {
                 index += 1;
             }
         }
-        if self.retained_pages.is_empty() {
+        // The group, and the native group it stands for, ends with its last
+        // member, live or graveyarded, not with its last live page: a
+        // graveyarded page still owns a native seat and an audit, and a fresh
+        // group cannot start natively until every member has closed.
+        if self.retained_pages.is_empty()
+            && !self
+                .retained_graveyard
+                .iter()
+                .any(|work| work.native_member())
+        {
             self.retained_page_runtime = None;
         }
     }
 
-    /// One native audit at a time across live and graveyarded pages. Live
-    /// pages audit once every live page is ready; a graveyarded page audits
-    /// only after the live group has gone.
+    /// One native audit at a time across live and graveyarded pages. The
+    /// audit counts the whole native browser, so it starts only once no
+    /// member holds a resource. Live pages take the turn first; the first turn
+    /// seals the group against new pages.
     #[cfg(feature = "work-execution")]
     fn grant_native_audit(&mut self) {
         self.retire_settled_pages();
@@ -1155,29 +1169,39 @@ impl Shell {
             .iter()
             .chain(&self.retained_graveyard)
             .any(|work| work.holds_native_audit())
+            || !self
+                .retained_pages
+                .iter()
+                .chain(
+                    self.retained_graveyard
+                        .iter()
+                        .filter(|work| work.native_member()),
+                )
+                .all(|page| page.ready_for_group_shutdown())
         {
             return;
         }
-        if !self.retained_pages.is_empty() {
-            if self
-                .retained_pages
-                .iter()
-                .all(|page| page.ready_for_group_shutdown())
-            {
-                if let Some(page) = self
-                    .retained_pages
-                    .iter_mut()
-                    .find(|page| !page.is_closed())
-                {
-                    page.allow_group_shutdown();
-                }
-            }
+        let granted = if let Some(page) = self
+            .retained_pages
+            .iter_mut()
+            .find(|page| !page.is_closed())
+        {
+            page.allow_group_shutdown();
+            true
         } else if let Some(work) = self
             .retained_graveyard
             .iter_mut()
             .find(|work| work.awaits_group_audit())
         {
             work.allow_group_shutdown();
+            true
+        } else {
+            false
+        };
+        if granted {
+            if let Some(group) = &self.retained_page_runtime {
+                group.seal();
+            }
         }
     }
 
@@ -1190,10 +1214,7 @@ impl Shell {
                 queue.schedule_work(page.next_deadline());
             }
         }
-        self.retained_pages.retain(|page| !page.is_closed());
-        if self.retained_pages.is_empty() {
-            self.retained_page_runtime = None;
-        }
+        self.retire_settled_pages();
         if let Some(work) = &mut self.retained_work {
             work.poll();
             if let Some(queue) = &self.self_queue {
@@ -1470,13 +1491,18 @@ impl Shell {
         #[cfg(feature = "work-execution")]
         let mut buried = true;
         #[cfg(feature = "work-execution")]
-        if !self.retained_pages.is_empty() {
+        if self.retained_page_runtime.is_some() {
             for page in &mut self.retained_pages {
                 page.begin_shutdown();
             }
-            while std::time::Instant::now() < deadline
-                && self.retained_pages.iter().any(|page| !page.is_closed())
-            {
+            let open = |shell: &Self| {
+                shell.retained_pages.iter().any(|page| !page.is_closed())
+                    || shell
+                        .retained_graveyard
+                        .iter()
+                        .any(|work| work.awaits_native_close())
+            };
+            while std::time::Instant::now() < deadline && open(self) {
                 self.grant_native_audit();
                 for work in self
                     .retained_pages
@@ -1485,7 +1511,7 @@ impl Shell {
                 {
                     work.poll();
                 }
-                if self.retained_pages.iter().any(|page| !page.is_closed()) {
+                if open(self) {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
@@ -1496,8 +1522,7 @@ impl Shell {
             .retained_work
             .as_mut()
             .map(|work| work.shutdown_until(deadline));
-        // Graveyarded works audit last and one at a time, after every live
-        // native owner has gone.
+        // What the group could not close audits last, one at a time.
         #[cfg(feature = "work-execution")]
         for work in &mut self.retained_graveyard {
             work.allow_group_shutdown();

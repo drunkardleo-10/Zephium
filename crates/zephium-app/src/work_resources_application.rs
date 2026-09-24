@@ -200,6 +200,7 @@ pub(crate) struct RetainedWorkGroup {
     runtime: AgentRuntimeWorkerGroup,
     records: Arc<std::sync::Mutex<Vec<(ContextId, AgentWorkRecord)>>>,
     failed: Arc<std::sync::atomic::AtomicBool>,
+    sealed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RetainedWorkGroup {
@@ -208,6 +209,7 @@ impl RetainedWorkGroup {
             runtime: AgentRuntimeWorkerGroup::try_new(work, capacity)?,
             records: Arc::new(std::sync::Mutex::new(Vec::new())),
             failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sealed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
     /// This page's run entered the group manifest.
@@ -266,6 +268,14 @@ impl RetainedWorkGroup {
     }
     pub(crate) fn is_failed(&self) -> bool {
         self.failed.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// A member took the native audit turn: the native group admits no page.
+    pub(crate) fn seal(&self) {
+        self.sealed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+    pub(crate) fn is_sealed(&self) -> bool {
+        self.sealed.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
