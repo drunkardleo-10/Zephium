@@ -129,6 +129,18 @@ pub(super) fn run_agent_page(url: &std::ffi::OsStr) -> Result<(), super::ProbeFa
     run_mode(Mode::AgentPage)
 }
 
+/// One agent read of a named listing page in the shape the Airbnb scenario
+/// asks of each listing; its frames are kept locally.
+pub(super) fn run_agent_listing_page(url: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
+    let url = url
+        .to_str()
+        .filter(|url| url.starts_with("https://") && url.len() <= 512)
+        .ok_or(super::ProbeFailure::Authority)?;
+    let _ = PAGE_URL.set(url.to_owned());
+    let _ = PAGE_OBJECTIVE.set(format!("Read {url} in one browser read and collect this one listing: its name, displayed price, rating, stay type or monthly terms, location or neighborhood, and picture, each as an optional verbatim column. Dates are unspecified, so leave any value the page does not show unknown. Do not search, follow links, book, sign in or interact with verification controls."));
+    run_mode(Mode::AgentPage)
+}
+
 /// Keeps each settled page's last frame under target and prints only its size.
 fn keep_frames(observed: &Mutex<Option<zephium_app::work_runtime::WorkAttemptObserver>>) {
     static KEPT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

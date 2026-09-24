@@ -159,6 +159,10 @@ fn main() {
         #[cfg(feature = "durable-runtime")]
         [argument, url] if argument == "--live-agent-page-work" => work_durable::run_agent_page(url),
         #[cfg(feature = "durable-runtime")]
+        [argument, url] if argument == "--live-agent-listing-page-work" => {
+            work_durable::run_agent_listing_page(url)
+        }
+        #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-product-details-work" => {
             work_durable::run_agent_details()
         }
