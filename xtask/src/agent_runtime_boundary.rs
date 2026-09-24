@@ -243,8 +243,12 @@ const SCOPED_RULES: &[(&str, &[&str], &[&str])] = &[
         "completed&&inner.joined.wait_until(deadline)&&Instant::now()<deadline&&inner.controller_returned.load(Ordering::Acquire)&&inner.run_state.load(Ordering::Acquire)==RUN_SUCCEEDED&&inner.mailbox.fault().is_none()",
         "joined:Arc<WorkerJoinCompletion>", "self.joined.finish(joined)",
         "letjoined=self.worker.join().is_ok()", "drop(self.permit)",
-        "letretained_worker=recover_lock(&EMERGENCY_WORKER_REAP).take()",
-        "schedule_reap(worker);returnErr(RuntimeSpawnError::AlreadyRunning)",
+        // c102b9a4: a work group holds up to three workers, so failed reapers
+        // retain every worker and each retry refuses a new spawn.
+        "letretained_workers=std::mem::take(&mut*recover_lock(&EMERGENCY_WORKER_REAP));",
+        "forworkerinretained_workers{schedule_reap(worker);}",
+        "ifletSome(worker)=worker{emergency.push(worker);}",
+        "ifretry_emergency_reapers(){returnErr(RuntimeSpawnError::AlreadyRunning);}",
         "recover_lock(&inner.scoped_closure).take()",
         "self.inner.control_wake.notify_waiters();Ok(ticket)",
     ], &["worker.take().is_some_and(RuntimeWorkerOwnership::join)", "worker.is_finished()", "control_wake.notify_one()"]),
