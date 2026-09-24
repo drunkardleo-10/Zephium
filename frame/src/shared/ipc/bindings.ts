@@ -1717,6 +1717,8 @@ export type WorkCommandOutcomeV1 = {
 };
 
 export type WorkCommandOutputV1 = {
+	/**  Present with output only after the process starts; excludes approval time. */
+	elapsed_ms?: number,
 	text: string,
 	bytes: number,
 	truncated: boolean,
@@ -2439,6 +2441,8 @@ export type WorkLifecycle = "active" | "archived";
 export type WorkLocalStepV1 = WorkLocalStepV1_Serialize | WorkLocalStepV1_Deserialize;
 
 export type WorkLocalStepV1_Deserialize = {
+	/**  Observed public title for a read step's URL, retained after settlement. */
+	page_title?: string | null,
 	policy?: WorkCommandPolicyV1 | null,
 	output?: WorkCommandOutputV1 | null,
 	proposal?: string | null,
@@ -2446,6 +2450,8 @@ export type WorkLocalStepV1_Deserialize = {
 };
 
 export type WorkLocalStepV1_Serialize = {
+	/**  Observed public title for a read step's URL, retained after settlement. */
+	page_title?: string | null,
 	policy?: WorkCommandPolicyV1 | null,
 	output?: WorkCommandOutputV1 | null,
 	proposal?: string | null,
