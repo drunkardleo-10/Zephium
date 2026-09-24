@@ -120,6 +120,11 @@ fn resolve(cwd: &Path, value: &str) -> Option<PathBuf> {
 }
 fn path_argument(arg: &str) -> Option<&str> {
     let value = arg.split_once('=').map_or(arg, |(_, value)| value);
+    if value.starts_with('-') && !value.starts_with("--") {
+        if let Some(slash) = value.find('/') {
+            return Some(&value[slash..]);
+        }
+    }
     (!value.is_empty() && (!value.starts_with('-') || value.contains('/') || value.contains('~')))
         .then_some(value)
 }
@@ -194,6 +199,13 @@ fn simple(args: &[String]) -> (Class, Reason) {
     let a: Vec<&str> = args[1..].iter().map(String::as_str).collect();
     let ask = |r| (Class::Ask, r);
     let write = |r| (Class::Write, r);
+    let short_flag = |letters: &[char]| {
+        a.iter().any(|arg| {
+            arg.starts_with('-')
+                && !arg.starts_with("--")
+                && arg[1..].chars().any(|c| letters.contains(&c))
+        })
+    };
     if (p == "env" && !a.is_empty())
         || matches!(
             p,
@@ -264,11 +276,11 @@ fn simple(args: &[String]) -> (Class, Reason) {
         if a[0] == "push" {
             return ask(Reason::Network);
         }
-        if a.contains(&"--force")
-            || a.contains(&"-f")
+        if a.iter().any(|s| s.starts_with("--force"))
+            || short_flag(&['f'])
             || a[0] == "clean"
             || (a[0] == "reset" && a.contains(&"--hard"))
-            || (a[0] == "branch" && a.contains(&"-D"))
+            || (a[0] == "branch" && (short_flag(&['d', 'D']) || a.contains(&"--delete")))
         {
             return ask(Reason::Destructive);
         }
@@ -345,24 +357,20 @@ fn simple(args: &[String]) -> (Class, Reason) {
         return ask(Reason::Destructive);
     }
     if (p == "rg" && a.iter().any(|s| s.starts_with("--pre")))
-        || (p == "fd"
-            && a.iter()
-                .any(|s| matches!(*s, "-x" | "-X") || s.starts_with("--exec")))
+        || (p == "fd" && (short_flag(&['x', 'X']) || a.iter().any(|s| s.starts_with("--exec"))))
     {
         return ask(Reason::ShellSyntax);
     }
     if (p == "uniq" && a.iter().filter(|s| !s.starts_with('-')).count() > 1)
-        || (p == "tree" && a.iter().any(|s| s.starts_with("-o")))
-        || (p == "file" && (a.contains(&"-C") || a.contains(&"--compile")))
+        || (p == "tree" && short_flag(&['o']))
+        || (p == "file" && (short_flag(&['C']) || a.contains(&"--compile")))
     {
         return write(Reason::FileChange);
     }
     if p == "sort" && a.iter().any(|s| s.starts_with("--compress-program")) {
         return ask(Reason::ShellSyntax);
     }
-    if (p == "sort"
-        && a.iter()
-            .any(|s| s.starts_with("-o") || s.starts_with("--output")))
+    if (p == "sort" && (short_flag(&['o']) || a.iter().any(|s| s.starts_with("--output"))))
         || (p == "find"
             && a.iter()
                 .any(|s| matches!(*s, "-fprint" | "-fprint0" | "-fprintf" | "-fls")))
@@ -536,6 +544,9 @@ mod tests {
             "echo hi > a",
             "cat a >> b",
             "sort -o b a",
+            "sort -rooutput a",
+            "tree -aooutput",
+            "file -iC",
             "find . -fprint a",
             "ls && cargo test",
             "cargo test || echo failed",
@@ -563,6 +574,9 @@ mod tests {
             "git push --force",
             "git branch -D x",
             "git checkout --force x",
+            "git checkout -qf x",
+            "git branch -aD x",
+            "git branch --delete x",
             "find . -delete",
             "find . -exec echo a",
             "chmod +x a",
@@ -592,6 +606,8 @@ mod tests {
             "cat ~/a",
             "cd /tmp",
             "echo x > /tmp/a",
+            "sort -o/tmp/output a",
+            "tree -o/tmp/output",
             "ls |",
             "| ls",
             "echo 'broken",
@@ -601,6 +617,8 @@ mod tests {
             "git diff --ext-diff",
             "rg --pre=tool x",
             "fd -x tool",
+            "fd -xrm",
+            "fd -Hx tool",
             "sed -n '1e' a",
             "sed -n '1p' -e 'w output' a",
             "sed -n '1p' -f script a",

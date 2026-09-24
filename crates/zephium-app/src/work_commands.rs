@@ -422,7 +422,7 @@ mod tests {
         let started = Instant::now();
         let result = run(
             dir.path(),
-            "trap '' TERM; sleep 30 & printf '%s' \"$!\"; wait",
+            "/bin/sh -c 'trap \"\" TERM; sleep 30 & printf \"%s\" \"$!\"; wait'",
             30,
             || async { started.elapsed() >= Duration::from_millis(200) },
             |_| async {},

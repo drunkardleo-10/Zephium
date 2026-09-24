@@ -436,15 +436,9 @@ mod tests {
             .as_array()
             .unwrap()
         {
-            assert_eq!(
-                branch["properties"]
-                    .as_object()
-                    .unwrap()
-                    .keys()
-                    .next()
-                    .map(String::as_str),
-                Some("kind")
-            );
+            assert_eq!(branch["properties"]["kind"]["enum"].as_array().unwrap().len(), 1);
+            assert!(branch["required"].as_array().unwrap().contains(&json!("kind")));
+            assert_eq!(branch["additionalProperties"], false);
         }
         for branch in collection_schema()["anyOf"][0]["properties"]["columns"]["items"]
             ["properties"]["value"]["anyOf"]
