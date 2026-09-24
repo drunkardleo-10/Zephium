@@ -1170,6 +1170,8 @@ impl Shell {
     }
 
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
+        #[cfg(feature = "work-runtime")]
+        crate::work_commands::shutdown();
         #[cfg(feature = "work-execution")]
         for page in &mut self.retained_pages {
             page.begin_shutdown();

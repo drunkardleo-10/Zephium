@@ -12,6 +12,8 @@ pub const MAX_AGENT_ARTIFACTS_PER_TURN: usize = 6;
 pub struct WorkAgentSourceView {
     pub key: u16,
     pub acquired_by: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<WorkCommandOutcomeV1>,
     pub title: String,
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -116,13 +118,20 @@ impl WorkAgentTurnDisclosure {
                 return Err(WorkError::Invalid);
             }
             validate_text(&preview.origin, 4096)?;
-            validate_text(&preview.text, 8192)?;
+            if matches!(preview.source, WorkEvidenceSourceV1::Command { .. }) {
+                validate_local_text(&preview.text)?;
+            } else {
+                validate_text(&preview.text, 8192)?;
+            }
             let (title, url) = match &preview.source {
                 WorkEvidenceSourceV1::ProviderSearch { url, title, .. } => {
                     (title.clone(), url.clone())
                 }
                 WorkEvidenceSourceV1::NativeExtraction => {
                     (preview.origin.clone(), preview.origin.clone())
+                }
+                WorkEvidenceSourceV1::Command { cwd, command, .. } => {
+                    (command.clone(), format!("file://{cwd}"))
                 }
                 WorkEvidenceSourceV1::File { path, name, .. } => {
                     (name.clone(), format!("file://{path}"))
@@ -145,10 +154,15 @@ impl WorkAgentTurnDisclosure {
             urls.push(url.clone());
             sources.push(WorkAgentSourceView {
                 key: sources.len() as u16,
+                command: match &preview.source {
+                    WorkEvidenceSourceV1::Command { outcome, .. } => Some(outcome.clone()),
+                    _ => None,
+                },
                 acquired_by: match &preview.source {
                     WorkEvidenceSourceV1::NativeExtraction => "native_browser",
                     WorkEvidenceSourceV1::ProviderSearch { .. } => "provider_search",
                     WorkEvidenceSourceV1::File { .. } => "file",
+                    WorkEvidenceSourceV1::Command { .. } => "command",
                 },
                 title: if title.trim().is_empty() {
                     preview.origin.clone()
@@ -178,9 +192,9 @@ impl WorkAgentTurnDisclosure {
                         },
                     ),
                     WorkStepKindV1::Steer { text } => ("person", text.clone()),
-                    WorkStepKindV1::List { path } => ("list", path.clone()),
-                    WorkStepKindV1::ReadFile { path } => ("read_file", path.clone()),
-                    WorkStepKindV1::SearchFiles { path, query } => {
+                    WorkStepKindV1::List { path, .. } => ("list", path.clone()),
+                    WorkStepKindV1::ReadFile { path, .. } => ("read_file", path.clone()),
+                    WorkStepKindV1::SearchFiles { path, query, .. } => {
                         ("search_files", format!("{path}\n{query}"))
                     }
                     WorkStepKindV1::WriteFile { path, decision, .. }
@@ -196,6 +210,13 @@ impl WorkAgentTurnDisclosure {
                             None => path.clone(),
                         },
                     ),
+                    WorkStepKindV1::RunCommand { cwd, command, .. } => {
+                        ("run_command", format!("{cwd}\n{command}"))
+                    }
+                    WorkStepKindV1::MoveFile { from, to, .. } => {
+                        ("move_file", format!("{from} → {to}"))
+                    }
+                    WorkStepKindV1::DeleteFile { path, .. } => ("delete_file", path.clone()),
                     WorkStepKindV1::Finish { .. } => ("finish", String::new()),
                 };
                 WorkAgentStepView {
@@ -363,20 +384,61 @@ impl WorkAgentTurnDisclosure {
                 WorkAgentFetch::Discover { query, collection } => {
                     WorkStepKindV1::Discover { query, collection }
                 }
-                WorkAgentFetch::List { path } => WorkStepKindV1::List { path },
-                WorkAgentFetch::ReadFile { path } => WorkStepKindV1::ReadFile { path },
-                WorkAgentFetch::SearchFiles { path, query } => {
-                    WorkStepKindV1::SearchFiles { path, query }
-                }
+                WorkAgentFetch::List { path, depth } => WorkStepKindV1::List { path, depth },
+                WorkAgentFetch::ReadFile {
+                    path,
+                    offset,
+                    limit,
+                } => WorkStepKindV1::ReadFile {
+                    path,
+                    offset,
+                    limit,
+                },
+                WorkAgentFetch::SearchFiles {
+                    path,
+                    query,
+                    glob,
+                    regex,
+                } => WorkStepKindV1::SearchFiles {
+                    path,
+                    query,
+                    glob,
+                    regex,
+                },
                 WorkAgentFetch::WriteFile { path, content } => WorkStepKindV1::WriteFile {
                     path,
                     content,
                     decision: None,
                 },
-                WorkAgentFetch::EditFile { path, old, new } => WorkStepKindV1::EditFile {
+                WorkAgentFetch::EditFile {
                     path,
                     old,
                     new,
+                    replacements,
+                } => WorkStepKindV1::EditFile {
+                    path,
+                    old,
+                    new,
+                    replacements,
+                    decision: None,
+                },
+                WorkAgentFetch::RunCommand {
+                    cwd,
+                    command,
+                    timeout_secs,
+                } => WorkStepKindV1::RunCommand {
+                    cwd,
+                    command,
+                    timeout_secs,
+                    decision: None,
+                },
+                WorkAgentFetch::MoveFile { from, to } => WorkStepKindV1::MoveFile {
+                    from,
+                    to,
+                    decision: None,
+                },
+                WorkAgentFetch::DeleteFile { path } => WorkStepKindV1::DeleteFile {
+                    path,
                     decision: None,
                 },
             };
@@ -390,6 +452,7 @@ impl WorkAgentTurnDisclosure {
                 evidence: None,
                 note: None,
                 measurements: None,
+                local: None,
             };
             if probe.validate().is_err() {
                 notices.push(
@@ -427,6 +490,7 @@ impl WorkAgentTurnDisclosure {
                 evidence: None,
                 note: None,
                 measurements: None,
+                local: None,
             };
             if probe.validate().is_err() {
                 notices.push("The question was dropped: it needs a prompt.".into());
@@ -937,23 +1001,52 @@ pub enum WorkAgentFetch {
     },
     List {
         path: String,
+        #[serde(default)]
+        depth: Option<u8>,
     },
     ReadFile {
         path: String,
+        #[serde(default)]
+        offset: Option<u32>,
+        #[serde(default)]
+        limit: Option<u32>,
     },
     SearchFiles {
         path: String,
         query: String,
+        #[serde(default)]
+        glob: Option<String>,
+        #[serde(default)]
+        regex: Option<bool>,
     },
+    /// A proposed whole-file write; `decision` is the person's answer.
     WriteFile {
         path: String,
         #[serde(rename = "text")]
         content: String,
     },
+    /// A proposed replacement of one exact passage.
     EditFile {
         path: String,
+        #[serde(default)]
         old: String,
+        #[serde(default)]
         new: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        replacements: Vec<WorkFileReplacementV1>,
+    },
+    MoveFile {
+        from: String,
+        to: String,
+    },
+    DeleteFile {
+        path: String,
+    },
+    RunCommand {
+        cwd: String,
+        command: String,
+        #[serde(default)]
+        timeout_secs: Option<u32>,
     },
 }
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]

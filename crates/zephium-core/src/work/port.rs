@@ -176,6 +176,17 @@ impl WorkRequest {
                 }
                 validate_step_payload(artifacts, evidence.as_deref(), file.as_deref())
             }
+            Self::RuntimeUpdate {
+                update: runtime::WorkRuntimeUpdate::CommandProgress { output, .. },
+                ..
+            } => runtime::validate_local_text(&output.text),
+            Self::RuntimeUpdate {
+                update: runtime::WorkRuntimeUpdate::SettleCommand { record, note, .. },
+                ..
+            } => {
+                record.command.validate()?;
+                validate_text(note, runtime::MAX_WORK_STEP_NOTE_BYTES)
+            }
             Self::RuntimeCommand {
                 intent: runtime::WorkRuntimeIntent::Approve { spec },
                 ..

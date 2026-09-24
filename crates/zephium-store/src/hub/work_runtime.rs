@@ -437,6 +437,15 @@ pub(super) fn command(
             }
             | WorkStepKindV1::EditFile {
                 decision: pending, ..
+            }
+            | WorkStepKindV1::MoveFile {
+                decision: pending, ..
+            }
+            | WorkStepKindV1::DeleteFile {
+                decision: pending, ..
+            }
+            | WorkStepKindV1::RunCommand {
+                decision: pending, ..
             }) = &mut proposed.kind
             else {
                 return Err(WorkError::Invalid);
@@ -444,7 +453,47 @@ pub(super) fn command(
             if proposed.status != WorkStepStatus::Running || pending.is_some() {
                 return Err(WorkError::Conflict);
             }
-            *pending = Some(approve);
+            if matches!(proposed.kind, WorkStepKindV1::RunCommand { .. })
+                && proposed
+                    .local
+                    .as_ref()
+                    .and_then(|l| l.policy.as_ref())
+                    .is_none_or(|p| p.scope == WorkCommandApprovalScopeV1::None)
+            {
+                return Err(WorkError::Conflict);
+            }
+            match &mut proposed.kind {
+                WorkStepKindV1::WriteFile { decision, .. }
+                | WorkStepKindV1::EditFile { decision, .. }
+                | WorkStepKindV1::MoveFile { decision, .. }
+                | WorkStepKindV1::DeleteFile { decision, .. }
+                | WorkStepKindV1::RunCommand { decision, .. } => *decision = Some(approve),
+                _ => return Err(WorkError::Invalid),
+            }
+            if approve {
+                if let Some(policy) = proposed
+                    .local
+                    .as_ref()
+                    .and_then(|l| l.policy.as_ref())
+                    .filter(|p| p.scope == WorkCommandApprovalScopeV1::Folder)
+                {
+                    if !row
+                        .fact
+                        .folder_approvals
+                        .iter()
+                        .any(|a| a.root == policy.root)
+                    {
+                        row.fact.folder_approvals.push(WorkFolderApprovalV1 {
+                            root: policy.root.clone(),
+                            at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_err(|_| WorkError::Unavailable)?
+                                .as_secs()
+                                .to_string(),
+                        });
+                    }
+                }
+            }
             row.fact.validate(
                 &read_plan(tx, id, row.fact.spec.plan_revision)?,
                 expected.next()?,
@@ -480,6 +529,7 @@ pub(super) fn command(
                 evidence: None,
                 note: None,
                 measurements: None,
+                local: None,
             });
             row.fact.validate(
                 &read_plan(tx, id, row.fact.spec.plan_revision)?,
@@ -590,6 +640,8 @@ pub(super) fn command(
                 user_artifacts: vec![],
                 provider_evidence: vec![],
                 file_evidence: vec![],
+                command_evidence: vec![],
+                folder_approvals: vec![],
                 steps: vec![],
             };
             fact.validate(plan, expected.next()?)?;
@@ -689,6 +741,8 @@ pub(super) fn update(
         | WorkRuntimeUpdate::Settle { execution, .. }
         | WorkRuntimeUpdate::BeginStep { execution, .. }
         | WorkRuntimeUpdate::SettleStep { execution, .. }
+        | WorkRuntimeUpdate::CommandProgress { execution, .. }
+        | WorkRuntimeUpdate::SettleCommand { execution, .. }
         | WorkRuntimeUpdate::FinishCancellation { execution } => *execution,
         WorkRuntimeUpdate::SettleProviderSearch { .. } => return Err(WorkError::Invalid),
     };
@@ -944,6 +998,94 @@ pub(super) fn update(
                 file,
             )?;
             row.fact.steps.push(step);
+        }
+        WorkRuntimeUpdate::CommandProgress {
+            attempt,
+            step,
+            output,
+            ..
+        } => {
+            let node = row
+                .fact
+                .attempts
+                .iter()
+                .find(|a| a.id == attempt && a.status == WorkAttemptStatus::Running)
+                .ok_or(WorkError::Conflict)?;
+            let _ = node;
+            let step = row
+                .fact
+                .steps
+                .iter_mut()
+                .find(|s| s.id == step && s.status == WorkStepStatus::Running)
+                .ok_or(WorkError::Conflict)?;
+            if !matches!(step.kind, WorkStepKindV1::RunCommand { .. }) {
+                return Err(WorkError::Invalid);
+            }
+            let local = step.local.as_mut().ok_or(WorkError::Invalid)?;
+            if local
+                .policy
+                .as_ref()
+                .is_some_and(|p| p.scope != WorkCommandApprovalScopeV1::None)
+                && step.kind.file_decision() != Some(true)
+            {
+                return Err(WorkError::Conflict);
+            }
+            validate_local_text(&output.text)?;
+            local.output = Some(output);
+        }
+        WorkRuntimeUpdate::SettleCommand {
+            attempt,
+            step,
+            status,
+            record,
+            note,
+            ..
+        } => {
+            if !matches!(status, WorkStepStatus::Succeeded | WorkStepStatus::Failed) {
+                return Err(WorkError::Invalid);
+            }
+            let fact = row
+                .fact
+                .attempts
+                .iter()
+                .find(|a| a.id == attempt && a.status == WorkAttemptStatus::Running)
+                .ok_or(WorkError::Conflict)?;
+            if record.attempt != attempt
+                || record.node != fact.node
+                || row.fact.command_evidence.len() >= MAX_WORK_STEPS
+            {
+                return Err(WorkError::Invalid);
+            }
+            record.command.validate()?;
+            let step = row
+                .fact
+                .steps
+                .iter_mut()
+                .find(|s| s.id == step && s.status == WorkStepStatus::Running)
+                .ok_or(WorkError::Conflict)?;
+            let WorkStepKindV1::RunCommand { cwd, command, .. } = &step.kind else {
+                return Err(WorkError::Invalid);
+            };
+            if *cwd != record.command.cwd || *command != record.command.command {
+                return Err(WorkError::Invalid);
+            }
+            let policy = step
+                .local
+                .as_ref()
+                .and_then(|l| l.policy.as_ref())
+                .ok_or(WorkError::Invalid)?;
+            if policy.scope != WorkCommandApprovalScopeV1::None
+                && step.kind.file_decision() != Some(true)
+            {
+                return Err(WorkError::Conflict);
+            }
+            step.status = status;
+            step.evidence = Some(record.id);
+            step.note = Some(note);
+            if let Some(local) = &mut step.local {
+                local.output = None;
+            }
+            row.fact.command_evidence.push(*record);
         }
         WorkRuntimeUpdate::SettleStep {
             attempt,

@@ -852,6 +852,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         evidence: None,
         note: None,
         measurements: None,
+        local: None,
     };
     // Steps need a live attempt.
     assert!(update(
@@ -1116,6 +1117,9 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
             digest: "a".repeat(64),
             text: "@@ -1,0 +1,1 @@\n+ one\n".into(),
             truncated: false,
+            before_digest: None,
+            after_digest: None,
+            lines: None,
         },
     };
     update(

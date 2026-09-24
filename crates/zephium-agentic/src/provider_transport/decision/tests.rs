@@ -2864,6 +2864,7 @@ fn catalog_link_projection_matches_recorded_evals_and_excludes_unadmitted_target
         .sources
         .iter()
         .map(|source| zephium_core::work::agent::WorkAgentSourceView {
+            command: None,
             key: source.key,
             acquired_by: source.acquired_by,
             title: source.title.clone(),

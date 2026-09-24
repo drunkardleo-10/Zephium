@@ -117,6 +117,7 @@ impl WorkAgentTurnProvider for Script {
     ) -> WorkAgentTurnFuture<'a> {
         Box::pin(async move {
             let context = input.context();
+            for source in &context.sources { if source.acquired_by == "command" { assert!(source.command.is_some()); } }
             self.seen.lock().unwrap().push(Seen {
                 objective: context.objective.clone(),
                 thread: context
@@ -1013,3 +1014,6 @@ async fn work_a_person_on_a_page_does_not_spend_the_run() {
         .any(|step| matches!(step.kind, WorkStepKindV1::Read { .. })
             && step.status == WorkStepStatus::Succeeded));
 }
+
+#[path = "work_local_tests.rs"]
+mod local_tests;

@@ -2,6 +2,9 @@
 //! serializable values is a policy manifest, context lease or live worker token.
 use super::{artifact::*, *};
 use crate::ids::ItemId;
+#[path = "local.rs"]
+mod local;
+pub use local::*;
 
 pub const MAX_WORK_EXECUTIONS: usize = 16;
 pub const MAX_WORK_ATTEMPTS: usize = 128;
@@ -843,6 +846,10 @@ pub struct WorkExecutionFact {
     /// What file steps disclosed: listings, excerpts, hits and applied diffs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_evidence: Vec<WorkFileRecordV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_evidence: Vec<WorkCommandRecordV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_approvals: Vec<WorkFolderApprovalV1>,
     /// User edits and decisions never overwrite the original agent output.
     #[serde(default)]
     pub user_artifacts: Vec<WorkArtifactUserState>,
@@ -889,13 +896,23 @@ pub enum WorkStepKindV1 {
     /// Directory listing inside a granted folder.
     List {
         path: String,
+        #[serde(default)]
+        depth: Option<u8>,
     },
     ReadFile {
         path: String,
+        #[serde(default)]
+        offset: Option<u32>,
+        #[serde(default)]
+        limit: Option<u32>,
     },
     SearchFiles {
         path: String,
         query: String,
+        #[serde(default)]
+        glob: Option<String>,
+        #[serde(default)]
+        regex: Option<bool>,
     },
     /// A proposed whole-file write; `decision` is the person's answer.
     WriteFile {
@@ -909,7 +926,28 @@ pub enum WorkStepKindV1 {
         path: String,
         old: String,
         new: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        replacements: Vec<WorkFileReplacementV1>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision: Option<bool>,
+    },
+    MoveFile {
+        from: String,
+        to: String,
+        #[serde(default)]
+        decision: Option<bool>,
+    },
+    DeleteFile {
+        path: String,
+        #[serde(default)]
+        decision: Option<bool>,
+    },
+    RunCommand {
+        cwd: String,
+        command: String,
+        #[serde(default)]
+        timeout_secs: Option<u32>,
+        #[serde(default)]
         decision: Option<bool>,
     },
     Finish {
@@ -950,6 +988,8 @@ pub struct WorkStepFact {
     /// Closed measurements of a settled browser step; absent for other kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measurements: Option<WorkStepMeasurementsV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<Box<WorkLocalStepV1>>,
 }
 impl WorkStepKindV1 {
     fn validate(&self) -> Result<(), WorkError> {
@@ -989,8 +1029,30 @@ impl WorkStepKindV1 {
                 Ok(())
             }
             Self::Steer { text } => validate_text(text, MAX_WORK_TEXT_BYTES),
-            Self::List { path } | Self::ReadFile { path } => validate_file_path(path),
-            Self::SearchFiles { path, query } => {
+            Self::List { path, depth } => {
+                validate_file_path(path)?;
+                if depth.is_some_and(|v| !(1..=3).contains(&v)) {
+                    return Err(WorkError::Invalid);
+                }
+                Ok(())
+            }
+            Self::ReadFile {
+                path,
+                offset,
+                limit,
+            } => {
+                validate_file_path(path)?;
+                if offset == &Some(0) || limit.is_some_and(|v| !(1..=2000).contains(&v)) {
+                    return Err(WorkError::Invalid);
+                }
+                Ok(())
+            }
+            Self::SearchFiles {
+                path, query, glob, ..
+            } => {
+                if let Some(glob) = glob {
+                    validate_text(glob, MAX_WORK_FILE_QUERY_BYTES)?;
+                }
                 validate_file_path(path)?;
                 validate_text(query, MAX_WORK_FILE_QUERY_BYTES)
             }
@@ -1001,14 +1063,30 @@ impl WorkStepKindV1 {
                 }
                 Ok(())
             }
-            Self::EditFile { path, old, new, .. } => {
+            Self::EditFile {
+                path,
+                old,
+                new,
+                replacements,
+                ..
+            } => {
                 validate_file_path(path)?;
-                if old.is_empty()
-                    || old.len() > MAX_WORK_FILE_CONTENT_BYTES
-                    || new.len() > MAX_WORK_FILE_CONTENT_BYTES
-                    || old.contains('\0')
-                    || new.contains('\0')
-                {
+                validate_replacements(old, new, replacements)
+            }
+            Self::MoveFile { from, to, .. } => {
+                validate_file_path(from)?;
+                validate_file_path(to)
+            }
+            Self::DeleteFile { path, .. } => validate_file_path(path),
+            Self::RunCommand {
+                cwd,
+                command,
+                timeout_secs,
+                ..
+            } => {
+                validate_file_path(cwd)?;
+                validate_command(command)?;
+                if timeout_secs.is_some_and(|v| !(1..=600).contains(&v)) {
                     return Err(WorkError::Invalid);
                 }
                 Ok(())
@@ -1044,25 +1122,41 @@ impl WorkStepKindV1 {
                 | Self::SearchFiles { .. }
                 | Self::WriteFile { .. }
                 | Self::EditFile { .. }
+                | Self::MoveFile { .. }
+                | Self::DeleteFile { .. }
         )
     }
     /// A proposed change that waits for the person's decision.
     pub fn proposes_write(&self) -> bool {
-        matches!(self, Self::WriteFile { .. } | Self::EditFile { .. })
+        matches!(
+            self,
+            Self::WriteFile { .. }
+                | Self::EditFile { .. }
+                | Self::MoveFile { .. }
+                | Self::DeleteFile { .. }
+                | Self::RunCommand { .. }
+        )
     }
     pub fn file_decision(&self) -> Option<bool> {
         match self {
-            Self::WriteFile { decision, .. } | Self::EditFile { decision, .. } => *decision,
+            Self::WriteFile { decision, .. }
+            | Self::EditFile { decision, .. }
+            | Self::MoveFile { decision, .. }
+            | Self::DeleteFile { decision, .. }
+            | Self::RunCommand { decision, .. } => *decision,
             _ => None,
         }
     }
     fn keeps_record(&self) -> bool {
-        matches!(self, Self::Search { .. }) || self.files()
+        matches!(self, Self::Search { .. } | Self::RunCommand { .. }) || self.files()
     }
 }
 impl WorkStepFact {
     pub fn validate(&self) -> Result<(), WorkError> {
         self.kind.validate()?;
+        if let Some(local) = &self.local {
+            local.validate(&self.kind)?;
+        }
         if let Some(note) = &self.note {
             validate_text(note, MAX_WORK_STEP_NOTE_BYTES)?;
         }
@@ -1085,7 +1179,11 @@ impl WorkStepFact {
             || (!self.artifacts.is_empty()
                 && (!succeeded
                     || !(matches!(self.kind, WorkStepKindV1::Publish) || self.kind.fetches())))
-            || self.evidence.is_some() != (succeeded && self.kind.keeps_record())
+            || if matches!(self.kind, WorkStepKindV1::RunCommand { .. }) {
+                (running && self.evidence.is_some()) || (succeeded && self.evidence.is_none())
+            } else {
+                self.evidence.is_some() != (succeeded && self.kind.keeps_record())
+            }
         {
             return Err(WorkError::Invalid);
         }
@@ -1094,7 +1192,9 @@ impl WorkStepFact {
             // A proposal may run undecided or decided (being applied); once
             // settled, the decision is on record.
             WorkStepKindV1::WriteFile { decision, .. }
-            | WorkStepKindV1::EditFile { decision, .. } => running || decision.is_some(),
+            | WorkStepKindV1::EditFile { decision, .. }
+            | WorkStepKindV1::MoveFile { decision, .. }
+            | WorkStepKindV1::DeleteFile { decision, .. } => !succeeded || *decision == Some(true),
             WorkStepKindV1::Publish
             | WorkStepKindV1::Finish { .. }
             | WorkStepKindV1::Steer { .. } => succeeded,
@@ -1200,6 +1300,8 @@ pub enum WorkFileKindV1 {
     Binary,
     Search,
     Written,
+    Moved,
+    Deleted,
 }
 /// What one file step disclosed, bounded and never the whole file system.
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -1215,10 +1317,22 @@ pub struct WorkFileEvidenceV1 {
     /// The excerpt, listing, hits or applied diff shown to the agent.
     pub text: String,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<WorkFileLinesV1>,
 }
 impl WorkFileEvidenceV1 {
     pub fn validate(&self) -> Result<(), WorkError> {
         validate_file_path(&self.path)?;
+        for value in [&self.before_digest, &self.after_digest]
+            .into_iter()
+            .flatten()
+        {
+            validate_digest(value)?;
+        }
         if self.name.is_empty()
             || self.name.len() > 255
             || self.name.chars().any(char::is_control)
@@ -1561,9 +1675,17 @@ impl WorkExecutionFact {
                 WorkStepKindV1::Search { .. }
                 | WorkStepKindV1::Read { .. }
                 | WorkStepKindV1::Discover { .. } => WorkStepStatus::OutcomeUnknown,
+                WorkStepKindV1::RunCommand { .. } => WorkStepStatus::Failed,
                 _ => WorkStepStatus::Cancelled,
             };
-            step.note = Some(WORK_STEP_INTERRUPTED.into());
+            step.note = Some(
+                if matches!(step.kind, WorkStepKindV1::RunCommand { .. }) {
+                    "Stopped when the app quit"
+                } else {
+                    WORK_STEP_INTERRUPTED
+                }
+                .into(),
+            );
         }
     }
     pub fn is_agent(&self) -> bool {
@@ -1622,6 +1744,8 @@ impl WorkExecutionFact {
         let mut ids = BTreeSet::new();
         let mut claimed_artifacts = BTreeSet::new();
         let mut claimed_evidence = BTreeSet::new();
+        let mut running_commands = 0usize;
+        let mut pending_file_change = false;
         let mut running_steps = 0usize;
         let mut finished = false;
         for step in &self.steps {
@@ -1629,11 +1753,46 @@ impl WorkExecutionFact {
             if !ids.insert(step.id) || step.turn > grant.max_turns || finished {
                 return Err(WorkError::Invalid);
             }
+            if matches!(step.kind, WorkStepKindV1::RunCommand { .. }) {
+                let policy = step
+                    .local
+                    .as_ref()
+                    .and_then(|local| local.policy.as_ref())
+                    .ok_or(WorkError::Invalid)?;
+                if policy.class == WorkCommandClassV1::Write
+                    && policy.scope == WorkCommandApprovalScopeV1::None
+                    && !self
+                        .folder_approvals
+                        .iter()
+                        .any(|approval| approval.root == policy.root)
+                {
+                    return Err(WorkError::Invalid);
+                }
+                if (step.status == WorkStepStatus::Succeeded || step.evidence.is_some())
+                    && policy.scope != WorkCommandApprovalScopeV1::None
+                    && step.kind.file_decision() != Some(true)
+                {
+                    return Err(WorkError::Invalid);
+                }
+            }
             if step.status == WorkStepStatus::Running {
                 if !running {
                     return Err(WorkError::Invalid);
                 }
                 running_steps += 1;
+                if matches!(step.kind, WorkStepKindV1::RunCommand { .. })
+                    && (step.kind.file_decision() == Some(true)
+                        || step
+                            .local
+                            .as_ref()
+                            .and_then(|l| l.policy.as_ref())
+                            .is_some_and(|p| p.scope == WorkCommandApprovalScopeV1::None))
+                {
+                    running_commands += 1;
+                }
+                pending_file_change |= step.kind.files()
+                    && step.kind.proposes_write()
+                    && step.kind.file_decision().is_none();
             }
             for artifact in &step.artifacts {
                 if !claimed_artifacts.insert(*artifact)
@@ -1654,6 +1813,10 @@ impl WorkExecutionFact {
                     {
                         return Err(WorkError::Invalid);
                     }
+                } else if matches!(step.kind, WorkStepKindV1::RunCommand { .. }) {
+                    if !self.command_evidence.iter().any(|r| r.id == evidence) {
+                        return Err(WorkError::Invalid);
+                    }
                 } else {
                     let record = self
                         .provider_evidence
@@ -1670,11 +1833,16 @@ impl WorkExecutionFact {
                 finished = true;
             }
         }
-        if running_steps > usize::from(self.spec.limits.max_workers)
+        if running_commands > MAX_WORK_RUNNING_COMMANDS
+            || (running_commands > 0 && pending_file_change)
+            || running_steps > usize::from(self.spec.limits.max_workers)
             || (complete && (running_steps > 0 || !finished))
             || (finished && !(complete || running))
             || claimed_artifacts.len() != self.artifacts.len()
-            || claimed_evidence.len() != self.provider_evidence.len() + self.file_evidence.len()
+            || claimed_evidence.len()
+                != self.provider_evidence.len()
+                    + self.file_evidence.len()
+                    + self.command_evidence.len()
         {
             return Err(WorkError::Invalid);
         }
@@ -1729,6 +1897,39 @@ impl WorkExecutionFact {
                 || record.node != node.node
                 || !sources.insert(record.id)
                 || artifacts.contains(&record.id)
+            {
+                return Err(WorkError::Invalid);
+            }
+        }
+        for record in &self.command_evidence {
+            record.command.validate()?;
+            let fact = attempt.ok_or(WorkError::Invalid)?;
+            if record.attempt != fact.id
+                || record.node != node.node
+                || !sources.insert(record.id)
+                || artifacts.contains(&record.id)
+            {
+                return Err(WorkError::Invalid);
+            }
+        }
+        if self.folder_approvals.len() > MAX_WORK_FOLDERS {
+            return Err(WorkError::Invalid);
+        }
+        let mut approved = BTreeSet::new();
+        for approval in &self.folder_approvals {
+            validate_file_path(&approval.root)?;
+            if approval.at.parse::<u64>().is_err()
+                || !approved.insert(&approval.root)
+                || !self.steps.iter().any(|s| {
+                    s.kind.file_decision() == Some(true)
+                        && s.local
+                            .as_ref()
+                            .and_then(|l| l.policy.as_ref())
+                            .is_some_and(|p| {
+                                p.scope == WorkCommandApprovalScopeV1::Folder
+                                    && p.root == approval.root
+                            })
+                })
             {
                 return Err(WorkError::Invalid);
             }
@@ -1840,6 +2041,20 @@ pub enum WorkRuntimeUpdate {
         artifacts: Vec<WorkArtifactV1>,
         evidence: Option<Box<WorkProviderSearchRecordV1>>,
         file: Option<Box<WorkFileRecordV1>>,
+    },
+    CommandProgress {
+        execution: WorkExecutionId,
+        attempt: WorkAttemptId,
+        step: WorkStepId,
+        output: WorkCommandOutputV1,
+    },
+    SettleCommand {
+        execution: WorkExecutionId,
+        attempt: WorkAttemptId,
+        step: WorkStepId,
+        status: WorkStepStatus,
+        record: Box<WorkCommandRecordV1>,
+        note: String,
     },
     SettleStep {
         execution: WorkExecutionId,

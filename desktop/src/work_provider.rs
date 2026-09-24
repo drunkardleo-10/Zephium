@@ -205,7 +205,7 @@ impl WorkProviders {
                         None => agent,
                     };
                     #[cfg(feature = "work-development-traces")]
-                    let agent = agent.with_public_response_retention().with_diagnostic(|event| {
+                    let agent = agent.with_diagnostic(|event| {
                         use zephium_core::work::synthesis::WorkSynthesisDiagnostic;
                         match event {
                             WorkSynthesisDiagnostic::InputCounted { tokens, maximum, request_bytes } => record_diagnostic(format_args!("work: phase=agent_turn input_counted tokens={tokens} maximum={maximum} request_bytes={request_bytes}")),

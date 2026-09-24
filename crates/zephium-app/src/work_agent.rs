@@ -1,5 +1,7 @@
 //! The routine agent loop. Rust admits every turn's operations, commits each
 //! step as it settles, and enforces budgets; the model only proposes.
+#[path = "work_agent_local.rs"]
+mod local;
 use crate::work_runtime::*;
 use std::{
     future::Future,
@@ -431,6 +433,7 @@ impl Driver {
             evidence: None,
             note: None,
             measurements: None,
+            local: None,
         }
     }
     async fn begin(
@@ -1114,8 +1117,9 @@ impl Driver {
             }
             offset += count;
         }
-        let (file_steps, browses): (Vec<_>, Vec<_>) =
-            browses.into_iter().partition(WorkStepKindV1::files);
+        let (file_steps, browses): (Vec<_>, Vec<_>) = browses
+            .into_iter()
+            .partition(|kind| kind.files() || matches!(kind, WorkStepKindV1::RunCommand { .. }));
         for kind in file_steps {
             if let Some(terminal) = self.file_step(kind).await? {
                 return Ok(Some(terminal));
@@ -1138,32 +1142,68 @@ impl Driver {
             self.notice(STEPS_EXHAUSTED);
             return Ok(None);
         }
-        let step = self.step(kind.clone(), WorkStepStatus::Running);
+        if matches!(kind, WorkStepKindV1::RunCommand { .. }) {
+            return self.command_step(kind, &files).await;
+        }
+        let mut step = self.step(kind.clone(), WorkStepStatus::Running);
+        let prepared = if kind.proposes_write() {
+            let path = match &kind {
+                WorkStepKindV1::MoveFile { from, .. } => from,
+                WorkStepKindV1::WriteFile { path, .. }
+                | WorkStepKindV1::EditFile { path, .. }
+                | WorkStepKindV1::DeleteFile { path, .. } => path,
+                _ => unreachable!(),
+            };
+            let resolved = files
+                .resolve(path, matches!(kind, WorkStepKindV1::WriteFile { .. }))
+                .ok();
+            let state = self.probe.runtime_projection().await?;
+            let known = state.executions.iter().find(|e| e.id == self.probe.execution()).and_then(|execution| {
+                execution.file_evidence.iter().rev().find_map(|record| {
+                    if resolved.as_ref().is_some_and(|p|p.to_string_lossy()==record.file.path) && !record.file.digest.is_empty() {
+                        Some((record.file.kind != WorkFileKindV1::Deleted).then_some(record.file.digest.as_str()))
+                    } else if execution.steps.iter().any(|step| step.evidence == Some(record.id) && matches!(&step.kind, WorkStepKindV1::MoveFile { from, .. } if from == path)) {
+                        Some(None)
+                    } else { None }
+                }).flatten()
+            });
+            Some(files.prepare(&kind, known))
+        } else {
+            None
+        };
+        if let Some(Ok(change)) = &prepared {
+            step.local = Some(Box::new(change.fact()));
+        }
         let id = self.begin(step, vec![], None).await?;
-        let outcome = match &kind {
-            WorkStepKindV1::List { path } => {
+        let outcome = match (&kind, prepared) {
+            (_, Some(Ok(change))) => return self.await_decision(id, &files, change).await,
+            (_, Some(Err(error))) => Err(error),
+            (WorkStepKindV1::List { path, depth }, _) => {
                 self.probe.record_activity(WorkActivityV1::Reading);
-                files.list(path)
+                files.list_at(path, depth.unwrap_or(1))
             }
-            WorkStepKindV1::ReadFile { path } => {
+            (
+                WorkStepKindV1::ReadFile {
+                    path,
+                    offset,
+                    limit,
+                },
+                _,
+            ) => {
                 self.probe.record_activity(WorkActivityV1::Reading);
-                files.read(path)
+                files.read_at(path, offset.unwrap_or(1), limit.unwrap_or(200))
             }
-            WorkStepKindV1::SearchFiles { path, query } => {
+            (
+                WorkStepKindV1::SearchFiles {
+                    path,
+                    query,
+                    glob,
+                    regex,
+                },
+                _,
+            ) => {
                 self.probe.record_activity(WorkActivityV1::Searching);
-                files.search(path, query)
-            }
-            WorkStepKindV1::WriteFile { path, content, .. } => {
-                match files.propose_write(path, content) {
-                    Ok(_) => return self.await_decision(id, &files, &kind).await,
-                    Err(error) => Err(error),
-                }
-            }
-            WorkStepKindV1::EditFile { path, old, new, .. } => {
-                match files.propose_edit(path, old, new) {
-                    Ok(_) => return self.await_decision(id, &files, &kind).await,
-                    Err(error) => Err(error),
-                }
+                files.search_with(path, query, glob.as_deref(), regex.unwrap_or(false))
             }
             _ => return Ok(None),
         };
@@ -1187,7 +1227,9 @@ impl Driver {
                 let note = Some(match record.file.kind {
                     WorkFileKindV1::Directory => format!("{} entries", record.file.bytes),
                     WorkFileKindV1::Search => format!("{} hits", record.file.bytes),
-                    WorkFileKindV1::Written => "Applied".to_owned(),
+                    WorkFileKindV1::Written | WorkFileKindV1::Moved | WorkFileKindV1::Deleted => {
+                        "Applied".to_owned()
+                    }
                     WorkFileKindV1::Text | WorkFileKindV1::Binary => {
                         format!("{} bytes", record.file.bytes)
                     }
@@ -1211,7 +1253,7 @@ impl Driver {
         &mut self,
         id: WorkStepId,
         files: &crate::work_files::WorkFileGrant,
-        kind: &WorkStepKindV1,
+        change: crate::work_files::PreparedChange,
     ) -> Result<Option<WorkAttemptStatus>, WorkError> {
         self.probe.record_activity(WorkActivityV1::WaitingForHuman);
         let since = self.wait();
@@ -1234,15 +1276,7 @@ impl Driver {
             }
             match decision {
                 Some(true) => {
-                    let outcome = match kind {
-                        WorkStepKindV1::WriteFile { path, content, .. } => {
-                            files.apply_write(path, content)
-                        }
-                        WorkStepKindV1::EditFile { path, old, new, .. } => {
-                            files.apply_edit(path, old, new)
-                        }
-                        _ => return Ok(None),
-                    };
+                    let outcome = files.apply(change);
                     self.settle_file_outcome(id, outcome).await?;
                     return Ok(None);
                 }
@@ -1989,6 +2023,9 @@ fn step_kind_label(kind: &WorkStepKindV1) -> &'static str {
         WorkStepKindV1::SearchFiles { .. } => "search_files",
         WorkStepKindV1::WriteFile { .. } => "write_file",
         WorkStepKindV1::EditFile { .. } => "edit_file",
+        WorkStepKindV1::RunCommand { .. } => "run_command",
+        WorkStepKindV1::MoveFile { .. } => "move_file",
+        WorkStepKindV1::DeleteFile { .. } => "delete_file",
         WorkStepKindV1::Finish { .. } => "finish",
     }
 }
@@ -2237,6 +2274,7 @@ mod tests {
             evidence: None,
             note: None,
             measurements: None,
+            local: None,
         };
         assert!(reuses_completed_read(&request, &step));
         let mut renamed = request.clone();

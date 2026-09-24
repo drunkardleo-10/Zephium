@@ -14,6 +14,8 @@ pub(super) struct RetainedNativeShutdown {
 
 impl RetainedNativeShutdown {
     pub(super) fn new(owner: &WorkResourceOwner) -> Result<Self, Refusal> {
+        #[cfg(feature = "work-runtime")]
+        crate::work_commands::shutdown();
         if !owner.locally_retired() {
             return Err(Refusal::Busy);
         }

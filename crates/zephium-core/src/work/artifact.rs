@@ -53,6 +53,11 @@ pub enum WorkEvidenceSourceV1 {
         name: String,
         file_kind: super::runtime::WorkFileKindV1,
     },
+    Command {
+        cwd: String,
+        command: String,
+        outcome: super::runtime::WorkCommandOutcomeV1,
+    },
     ProviderSearch {
         provider: super::search::WorkSearchProvider,
         model: String,

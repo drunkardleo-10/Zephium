@@ -677,6 +677,8 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         artifacts: vec![],
         provider_evidence: vec![],
         file_evidence: vec![],
+        command_evidence: vec![],
+        folder_approvals: vec![],
         user_artifacts: vec![],
         intervention: None,
         steps: vec![],
@@ -702,6 +704,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         evidence: None,
         note: None,
         measurements: None,
+        local: None,
     };
     let usage = WorkUsage {
         model_tokens: 1200,
@@ -1232,6 +1235,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         evidence: None,
         note: None,
         measurements: None,
+        local: None,
     };
     let steer = |status| {
         step(
@@ -1307,6 +1311,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         evidence: None,
         note: None,
         measurements: None,
+        local: None,
     };
     let proposal = |decision| WorkStepKindV1::WriteFile {
         path: "/Users/me/Documents/project/notes.txt".into(),
@@ -1321,13 +1326,15 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         .is_ok());
     assert!(file(proposal(None), WorkStepStatus::Failed)
         .validate()
-        .is_err());
+        .is_ok());
     assert!(file(proposal(Some(false)), WorkStepStatus::Failed)
         .validate()
         .is_ok());
     assert!(file(
         WorkStepKindV1::ReadFile {
-            path: "relative/notes.txt".into()
+            path: "relative/notes.txt".into(),
+            offset: None,
+            limit: None
         },
         WorkStepStatus::Running
     )
@@ -1336,6 +1343,8 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
     let mut succeeded_read = file(
         WorkStepKindV1::ReadFile {
             path: "/Users/me/Documents/project/notes.txt".into(),
+            offset: None,
+            limit: None,
         },
         WorkStepStatus::Succeeded,
     );

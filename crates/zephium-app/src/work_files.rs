@@ -4,7 +4,7 @@
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
-use zephium_core::work::runtime::*;
+use zephium_core::work::{runtime::*, WorkArtifactId};
 
 const MAX_READ_BYTES: u64 = 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 200;
@@ -32,6 +32,9 @@ pub enum WorkFileError {
     Binary,
     Ambiguous,
     Io,
+    Changed,
+    Exists,
+    Pattern,
 }
 impl WorkFileError {
     /// Closed wording for the step note and the agent.
@@ -44,6 +47,9 @@ impl WorkFileError {
             Self::TooLarge => "Larger than the read limit",
             Self::Binary => "Not a text file",
             Self::Ambiguous => "The passage to replace is missing or not unique",
+            Self::Changed => "The file changed since it was read",
+            Self::Exists => "The destination already exists",
+            Self::Pattern => "The search pattern could not be used",
             Self::Io => "The file could not be accessed",
         }
     }
@@ -86,7 +92,7 @@ impl WorkFileGrant {
     }
     /// The canonical target when the path (or, for a new file, its parent)
     /// lies inside a granted root.
-    fn resolve(&self, path: &str, may_create: bool) -> Result<PathBuf, WorkFileError> {
+    pub(crate) fn resolve(&self, path: &str, may_create: bool) -> Result<PathBuf, WorkFileError> {
         validate_file_path(path).map_err(|_| WorkFileError::Denied)?;
         let candidate = Path::new(path);
         if candidate
@@ -123,190 +129,439 @@ impl WorkFileGrant {
         }
     }
     pub fn list(&self, path: &str) -> Result<WorkFileEvidenceV1, WorkFileError> {
-        let dir = self.resolve(path, false)?;
-        if !dir.is_dir() {
-            return Err(WorkFileError::NotADirectory);
-        }
-        let mut entries: Vec<(bool, String, u64)> = std::fs::read_dir(&dir)
-            .map_err(|_| WorkFileError::Io)?
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') {
-                    return None;
-                }
-                let meta = entry.metadata().ok()?;
-                Some((meta.is_dir(), name, meta.len()))
-            })
-            .collect();
-        entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        let total = entries.len();
-        let mut text = String::new();
-        for (is_dir, name, len) in entries.into_iter().take(MAX_LIST_ENTRIES) {
-            if is_dir {
-                text.push_str(&format!("{name}/\n"));
-            } else {
-                text.push_str(&format!("{name}\t{len}\n"));
-            }
-        }
-        let (text, cut) = clip(text);
-        Ok(WorkFileEvidenceV1 {
-            path: dir.to_string_lossy().into_owned(),
-            name: file_name(&dir),
-            kind: WorkFileKindV1::Directory,
-            bytes: u32::try_from(total).unwrap_or(u32::MAX),
-            digest: String::new(),
-            text,
-            truncated: cut || total > MAX_LIST_ENTRIES,
-        })
+        self.list_at(path, 1)
     }
-    pub fn read(&self, path: &str) -> Result<WorkFileEvidenceV1, WorkFileError> {
-        let file = self.resolve(path, false)?;
-        let (bytes, digest, text) = read_text(&file)?;
-        let (kind, text, cut) = match text {
-            Some(text) => {
-                let (text, cut) = clip(text);
-                (WorkFileKindV1::Text, text, cut)
-            }
-            None => (WorkFileKindV1::Binary, String::new(), false),
-        };
-        Ok(WorkFileEvidenceV1 {
-            path: file.to_string_lossy().into_owned(),
-            name: file_name(&file),
-            kind,
-            bytes,
-            digest,
-            text,
-            truncated: cut,
-        })
-    }
-    /// Case-insensitive literal search over text files below the path.
-    pub fn search(&self, path: &str, query: &str) -> Result<WorkFileEvidenceV1, WorkFileError> {
+    pub fn list_at(&self, path: &str, depth: u8) -> Result<WorkFileEvidenceV1, WorkFileError> {
+        if !(1..=3).contains(&depth) {
+            return Err(WorkFileError::Denied);
+        }
         let root = self.resolve(path, false)?;
         if !root.is_dir() {
             return Err(WorkFileError::NotADirectory);
         }
-        let needle = query.to_lowercase();
-        if needle.trim().is_empty() {
-            return Err(WorkFileError::Ambiguous);
+        let mut pending = vec![(root.clone(), 0u8)];
+        let mut lines = Vec::new();
+        let mut cut = false;
+        while let Some((dir, level)) = pending.pop() {
+            let entries = std::fs::read_dir(&dir).map_err(|_| WorkFileError::Io)?;
+            let mut entries: Vec<_> = entries
+                .take(MAX_LIST_ENTRIES + 1)
+                .filter_map(Result::ok)
+                .collect();
+            if entries.len() > MAX_LIST_ENTRIES {
+                cut = true;
+            }
+            entries.sort_by_key(|e| e.file_name());
+            for entry in entries {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if SKIPPED_DIRS.contains(&name.as_str()) {
+                    continue;
+                }
+                let Ok(meta) = entry.file_type() else {
+                    continue;
+                };
+                if meta.is_symlink() {
+                    continue;
+                }
+                if lines.len() == MAX_LIST_ENTRIES {
+                    cut = true;
+                    break;
+                }
+                let relative = entry
+                    .path()
+                    .strip_prefix(&root)
+                    .unwrap_or(entry.path().as_path())
+                    .to_string_lossy()
+                    .into_owned();
+                lines.push(if meta.is_dir() {
+                    format!("{relative}/")
+                } else {
+                    format!(
+                        "{relative}\t{}",
+                        entry.metadata().map(|m| m.len()).unwrap_or(0)
+                    )
+                });
+                if meta.is_dir() && level + 1 < depth {
+                    pending.push((entry.path(), level + 1));
+                }
+            }
+            if lines.len() == MAX_LIST_ENTRIES {
+                cut |= !pending.is_empty();
+                break;
+            }
         }
+        lines.sort();
+        let mut result = evidence(
+            &root,
+            WorkFileKindV1::Directory,
+            lines.len() as u32,
+            String::new(),
+            lines.join("\n") + "\n",
+        );
+        result.truncated |= cut;
+        Ok(result)
+    }
+    pub fn read(&self, path: &str) -> Result<WorkFileEvidenceV1, WorkFileError> {
+        self.read_at(path, 1, 200)
+    }
+    pub fn read_at(
+        &self,
+        path: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<WorkFileEvidenceV1, WorkFileError> {
+        if offset == 0 || !(1..=2000).contains(&limit) {
+            return Err(WorkFileError::Denied);
+        }
+        let file = self.resolve(path, false)?;
+        let (bytes, digest, text) = read_text(&file)?;
+        let Some(text) = text else {
+            return Ok(evidence(
+                &file,
+                WorkFileKindV1::Binary,
+                bytes,
+                digest,
+                String::new(),
+            ));
+        };
+        let total = text.lines().count() as u32;
+        let mut excerpt = String::new();
+        let mut last = offset.saturating_sub(1).min(total);
+        let mut cut = false;
+        for (index, line) in text
+            .lines()
+            .enumerate()
+            .skip((offset - 1) as usize)
+            .take(limit as usize)
+        {
+            let numbered = format!("{}: {line}\n", index + 1);
+            if excerpt.len() + numbered.len() > MAX_WORK_FILE_TEXT_BYTES {
+                let (part, _) = clip_to(&numbered, MAX_WORK_FILE_TEXT_BYTES - excerpt.len());
+                excerpt.push_str(&part);
+                last = index as u32 + 1;
+                cut = true;
+                break;
+            }
+            excerpt.push_str(&numbered);
+            last = index as u32 + 1;
+        }
+        let mut result = evidence(&file, WorkFileKindV1::Text, bytes, digest, excerpt);
+        result.truncated |= cut || offset > 1 || last < total;
+        result.lines = Some(WorkFileLinesV1 {
+            first: if offset <= total { offset } else { 0 },
+            last: if offset <= total { last } else { 0 },
+            total,
+        });
+        Ok(result)
+    }
+    pub fn search(&self, path: &str, query: &str) -> Result<WorkFileEvidenceV1, WorkFileError> {
+        self.search_with(path, query, None, false)
+    }
+    pub fn search_with(
+        &self,
+        path: &str,
+        query: &str,
+        glob: Option<&str>,
+        regex: bool,
+    ) -> Result<WorkFileEvidenceV1, WorkFileError> {
+        if query.trim().is_empty() || query.len() > MAX_WORK_FILE_QUERY_BYTES {
+            return Err(WorkFileError::Pattern);
+        }
+        let root = self.resolve(path, false)?;
+        if !root.is_dir() {
+            return Err(WorkFileError::NotADirectory);
+        }
+        let pattern = if regex {
+            query.to_owned()
+        } else {
+            regex::escape(query)
+        };
+        let re = regex::RegexBuilder::new(&pattern)
+            .case_insensitive(true)
+            .size_limit(1024 * 1024)
+            .dfa_size_limit(1024 * 1024)
+            .build()
+            .map_err(|_| WorkFileError::Pattern)?;
+        let filter = glob
+            .map(|g| {
+                if g.len() > MAX_WORK_FILE_QUERY_BYTES {
+                    return Err(WorkFileError::Pattern);
+                }
+                globset::Glob::new(g)
+                    .map(|g| g.compile_matcher())
+                    .map_err(|_| WorkFileError::Pattern)
+            })
+            .transpose()?;
         let started = Instant::now();
         let mut pending = vec![root.clone()];
-        let mut visited = 0usize;
-        let mut hits = Vec::new();
+        let mut visited = 0;
+        let mut hits = 0;
+        let mut text = String::new();
         let mut cut = false;
         'walk: while let Some(dir) = pending.pop() {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
-            let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
-            entries.sort_by_key(|entry| entry.file_name());
-            for entry in entries {
-                if started.elapsed() > SEARCH_BUDGET || visited >= MAX_SEARCH_FILES {
+            for entry in entries.filter_map(Result::ok) {
+                if visited >= MAX_SEARCH_FILES || started.elapsed() >= SEARCH_BUDGET {
                     cut = true;
                     break 'walk;
                 }
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let Ok(meta) = entry.metadata() else {
+                visited += 1;
+                let Ok(meta) = entry.file_type() else {
                     continue;
                 };
+                if meta.is_symlink() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
                 if meta.is_dir() {
                     if !name.starts_with('.') && !SKIPPED_DIRS.contains(&name.as_str()) {
                         pending.push(entry.path());
                     }
                     continue;
                 }
-                if !meta.is_file() || meta.len() > MAX_READ_BYTES {
+                if !meta.is_file() {
                     continue;
                 }
-                visited += 1;
-                let Ok(bytes) = std::fs::read(entry.path()) else {
+                let relative = entry.path().strip_prefix(&root).unwrap().to_path_buf();
+                if filter.as_ref().is_some_and(|f| !f.is_match(&relative)) {
+                    continue;
+                }
+                let Ok((_, _, Some(content))) = read_text(&entry.path()) else {
                     continue;
                 };
-                let Ok(content) = std::str::from_utf8(&bytes) else {
-                    continue;
-                };
-                let relative = entry
-                    .path()
-                    .strip_prefix(&root)
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or(name);
-                for (index, line) in content.lines().enumerate() {
-                    if line.to_lowercase().contains(&needle) {
-                        hits.push(format!(
-                            "{relative}:{}: {}",
-                            index + 1,
-                            line.trim().chars().take(200).collect::<String>()
+                let lines: Vec<_> = content.lines().collect();
+                for (index, line) in lines.iter().enumerate() {
+                    if started.elapsed() >= SEARCH_BUDGET {
+                        cut = true;
+                        break 'walk;
+                    }
+                    if !re.is_match(line) {
+                        continue;
+                    }
+                    hits += 1;
+                    for (n, context) in lines
+                        .iter()
+                        .enumerate()
+                        .take(index + 2)
+                        .skip(index.saturating_sub(1))
+                    {
+                        text.push_str(&format!(
+                            "{}:{}{} {}\n",
+                            relative.to_string_lossy(),
+                            n + 1,
+                            if n == index { ":" } else { "-" },
+                            context.chars().take(200).collect::<String>()
                         ));
-                        if hits.len() >= MAX_SEARCH_HITS {
-                            cut = true;
-                            break 'walk;
-                        }
+                    }
+                    if hits >= MAX_SEARCH_HITS || text.len() >= MAX_WORK_FILE_TEXT_BYTES {
+                        cut = true;
+                        break 'walk;
                     }
                 }
             }
         }
-        let total = hits.len();
-        let (text, clipped) = clip(hits.join("\n"));
-        Ok(WorkFileEvidenceV1 {
-            path: root.to_string_lossy().into_owned(),
-            name: file_name(&root),
-            kind: WorkFileKindV1::Search,
-            bytes: u32::try_from(total).unwrap_or(u32::MAX),
-            digest: String::new(),
+        let mut result = evidence(
+            &root,
+            WorkFileKindV1::Search,
+            hits as u32,
+            String::new(),
             text,
-            truncated: cut || clipped,
-        })
+        );
+        result.truncated |= cut;
+        Ok(result)
     }
-    /// The change a whole-file write would make, for the person to approve.
-    pub fn propose_write(&self, path: &str, content: &str) -> Result<String, WorkFileError> {
-        let file = self.resolve(path, true)?;
+    pub fn prepare(
+        &self,
+        kind: &WorkStepKindV1,
+        known: Option<&str>,
+    ) -> Result<PreparedChange, WorkFileError> {
+        let (path, create) = match kind {
+            WorkStepKindV1::WriteFile { path, .. } => (path, true),
+            WorkStepKindV1::EditFile { path, .. } | WorkStepKindV1::DeleteFile { path, .. } => {
+                (path, false)
+            }
+            WorkStepKindV1::MoveFile { from, .. } => (from, false),
+            _ => return Err(WorkFileError::Denied),
+        };
+        let file = self.resolve(path, create)?;
         let current = match read_text(&file) {
-            Ok((_, _, Some(text))) => Some(text),
-            Ok(_) => return Err(WorkFileError::Binary),
-            Err(WorkFileError::NotFound) => None,
+            Ok(value) => Some(value),
+            Err(WorkFileError::NotFound) if create => None,
             Err(error) => return Err(error),
         };
-        Ok(diff(current.as_deref().unwrap_or(""), content))
+        let before = current.as_ref().map(|(_, digest, _)| digest.clone());
+        if known.is_some_and(|digest| Some(digest) != before.as_deref()) {
+            return Err(WorkFileError::Changed);
+        }
+        let mut destination = None;
+        let mut next = None;
+        let proposal = match kind {
+            WorkStepKindV1::WriteFile { content, .. } => {
+                if binary_looking(content) {
+                    return Err(WorkFileError::Binary);
+                }
+                let old = match &current {
+                    Some((_, _, Some(text))) => text.as_str(),
+                    None => "",
+                    _ => return Err(WorkFileError::Binary),
+                };
+                next = Some(content.clone());
+                diff(old, content)
+            }
+            WorkStepKindV1::EditFile {
+                old,
+                new,
+                replacements,
+                ..
+            } => {
+                validate_replacements(old, new, replacements)
+                    .map_err(|_| WorkFileError::Ambiguous)?;
+                let text = current
+                    .as_ref()
+                    .and_then(|(_, _, text)| text.as_ref())
+                    .ok_or(WorkFileError::Binary)?;
+                let legacy = [WorkFileReplacementV1 {
+                    old: old.clone(),
+                    new: new.clone(),
+                }];
+                let replacements = if replacements.is_empty() {
+                    &legacy[..]
+                } else {
+                    replacements
+                };
+                let mut spans = Vec::new();
+                for r in replacements {
+                    let start = text.find(&r.old).ok_or(WorkFileError::Ambiguous)?;
+                    let following = start + text[start..].chars().next().unwrap().len_utf8();
+                    if text[following..].contains(&r.old) {
+                        return Err(WorkFileError::Ambiguous);
+                    }
+                    spans.push((start, start + r.old.len(), r.new.as_str()));
+                }
+                spans.sort_by_key(|s| s.0);
+                if spans.windows(2).any(|w| w[0].1 > w[1].0) {
+                    return Err(WorkFileError::Ambiguous);
+                }
+                let mut edited = text.clone();
+                for (start, end, replacement) in spans.iter().rev() {
+                    edited.replace_range(*start..*end, replacement);
+                }
+                if edited.len() as u64 > MAX_READ_BYTES {
+                    return Err(WorkFileError::TooLarge);
+                }
+                if binary_looking(&edited) {
+                    return Err(WorkFileError::Binary);
+                }
+                let proposal = replacement_diff(text, &edited, &spans);
+                next = Some(edited);
+                proposal
+            }
+            WorkStepKindV1::MoveFile { to, .. } => {
+                let target = self.resolve(to, true)?;
+                if target.try_exists().map_err(|_| WorkFileError::Io)? {
+                    return Err(WorkFileError::Exists);
+                }
+                destination = Some(target);
+                format!("Move {path} → {to}")
+            }
+            WorkStepKindV1::DeleteFile { .. } => format!("Delete {path}"),
+            _ => return Err(WorkFileError::Denied),
+        };
+        let (proposal, truncated) = clip(proposal);
+        Ok(PreparedChange {
+            original: path.clone(),
+            file,
+            destination,
+            before,
+            next,
+            proposal,
+            truncated,
+        })
+    }
+    pub fn apply(&self, change: PreparedChange) -> Result<WorkFileEvidenceV1, WorkFileError> {
+        let file = self.resolve(&change.original, change.before.is_none())?;
+        if file != change.file {
+            return Err(WorkFileError::Changed);
+        }
+        let current = match read_text(&file) {
+            Ok((_, digest, _)) => Some(digest),
+            Err(WorkFileError::NotFound) => None,
+            Err(e) => return Err(e),
+        };
+        if current != change.before {
+            return Err(WorkFileError::Changed);
+        }
+        let (path, kind, after, bytes) = if let Some(next) = change.next {
+            write_atomic(&file, next.as_bytes(), change.before.as_deref())?;
+            let (bytes, digest, _) = read_text(&file)?;
+            (file, WorkFileKindV1::Written, Some(digest), bytes)
+        } else if let Some(to) = change.destination {
+            if self.resolve(&to.to_string_lossy(), true)? != to {
+                return Err(WorkFileError::Changed);
+            }
+            move_exclusive(&file, &to)?;
+            let (bytes, digest, _) = read_text(&to)?;
+            (to, WorkFileKindV1::Moved, Some(digest), bytes)
+        } else {
+            std::fs::remove_file(&file).map_err(|_| WorkFileError::Io)?;
+            (file, WorkFileKindV1::Deleted, None, 0)
+        };
+        let mut record = evidence(
+            &path,
+            kind,
+            bytes,
+            after
+                .clone()
+                .or_else(|| change.before.clone())
+                .unwrap_or_default(),
+            change.proposal,
+        );
+        record.truncated |= change.truncated;
+        record.before_digest = change.before;
+        record.after_digest = after;
+        Ok(record)
+    }
+    pub fn propose_write(&self, path: &str, content: &str) -> Result<String, WorkFileError> {
+        Ok(self
+            .prepare(
+                &WorkStepKindV1::WriteFile {
+                    path: path.into(),
+                    content: content.into(),
+                    decision: None,
+                },
+                None,
+            )?
+            .proposal)
     }
     pub fn apply_write(
         &self,
         path: &str,
         content: &str,
     ) -> Result<WorkFileEvidenceV1, WorkFileError> {
-        let file = self.resolve(path, true)?;
-        let text = self.propose_write(path, content)?;
-        write_atomic(&file, content.as_bytes())?;
-        let (bytes, digest, _) = read_text(&file)?;
-        let (text, truncated) = clip(text);
-        Ok(WorkFileEvidenceV1 {
-            path: file.to_string_lossy().into_owned(),
-            name: file_name(&file),
-            kind: WorkFileKindV1::Written,
-            bytes,
-            digest,
-            text,
-            truncated,
-        })
-    }
-    fn edited(
-        &self,
-        path: &str,
-        old: &str,
-        new: &str,
-    ) -> Result<(PathBuf, String, String), WorkFileError> {
-        let file = self.resolve(path, false)?;
-        let (_, _, text) = read_text(&file)?;
-        let current = text.ok_or(WorkFileError::Binary)?;
-        if current.matches(old).count() != 1 {
-            return Err(WorkFileError::Ambiguous);
-        }
-        let next = current.replacen(old, new, 1);
-        Ok((file, current, next))
+        self.apply(self.prepare(
+            &WorkStepKindV1::WriteFile {
+                path: path.into(),
+                content: content.into(),
+                decision: None,
+            },
+            None,
+        )?)
     }
     pub fn propose_edit(&self, path: &str, old: &str, new: &str) -> Result<String, WorkFileError> {
-        let (_, current, next) = self.edited(path, old, new)?;
-        Ok(diff(&current, &next))
+        Ok(self
+            .prepare(
+                &WorkStepKindV1::EditFile {
+                    path: path.into(),
+                    old: old.into(),
+                    new: new.into(),
+                    replacements: vec![],
+                    decision: None,
+                },
+                None,
+            )?
+            .proposal)
     }
     pub fn apply_edit(
         &self,
@@ -314,19 +569,16 @@ impl WorkFileGrant {
         old: &str,
         new: &str,
     ) -> Result<WorkFileEvidenceV1, WorkFileError> {
-        let (file, current, next) = self.edited(path, old, new)?;
-        write_atomic(&file, next.as_bytes())?;
-        let (bytes, digest, _) = read_text(&file)?;
-        let (text, truncated) = clip(diff(&current, &next));
-        Ok(WorkFileEvidenceV1 {
-            path: file.to_string_lossy().into_owned(),
-            name: file_name(&file),
-            kind: WorkFileKindV1::Written,
-            bytes,
-            digest,
-            text,
-            truncated,
-        })
+        self.apply(self.prepare(
+            &WorkStepKindV1::EditFile {
+                path: path.into(),
+                old: old.into(),
+                new: new.into(),
+                replacements: vec![],
+                decision: None,
+            },
+            None,
+        )?)
     }
 }
 
@@ -366,24 +618,144 @@ fn read_text(file: &Path) -> Result<(u32, String, Option<String>), WorkFileError
     if meta.len() > MAX_READ_BYTES {
         return Err(WorkFileError::TooLarge);
     }
-    let bytes = std::fs::read(file).map_err(|_| WorkFileError::Io)?;
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(file)
+        .map_err(|_| WorkFileError::Io)?
+        .take(MAX_READ_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| WorkFileError::Io)?;
+    if bytes.len() as u64 > MAX_READ_BYTES {
+        return Err(WorkFileError::TooLarge);
+    }
+    let byte_count = bytes.len() as u32;
     let digest = format!("{:x}", Sha256::digest(&bytes));
     let text = match String::from_utf8(bytes) {
         Ok(text) if !text.contains('\0') => Some(text),
         _ => None,
     };
-    Ok((u32::try_from(meta.len()).unwrap_or(u32::MAX), digest, text))
+    Ok((byte_count, digest, text))
 }
-fn write_atomic(file: &Path, bytes: &[u8]) -> Result<(), WorkFileError> {
+fn write_atomic(file: &Path, bytes: &[u8], expected: Option<&str>) -> Result<(), WorkFileError> {
+    use std::io::Write;
     let parent = file.parent().ok_or(WorkFileError::Denied)?;
-    let name = file_name(file);
-    let temp = parent.join(format!(".{name}.zephium-{}", std::process::id()));
-    std::fs::write(&temp, bytes).map_err(|_| WorkFileError::Io)?;
-    if std::fs::rename(&temp, file).is_err() {
-        let _ = std::fs::remove_file(&temp);
-        return Err(WorkFileError::Io);
+    let temp = parent.join(format!(".zephium-{}", WorkArtifactId::generate()));
+    let result = (|| {
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|_| WorkFileError::Io)?;
+        if let Ok(meta) = std::fs::metadata(file) {
+            output
+                .set_permissions(meta.permissions())
+                .map_err(|_| WorkFileError::Io)?;
+        }
+        output.write_all(bytes).map_err(|_| WorkFileError::Io)?;
+        output.sync_all().map_err(|_| WorkFileError::Io)?;
+        let current = match read_text(file) {
+            Ok((_, digest, _)) => Some(digest),
+            Err(WorkFileError::NotFound) => None,
+            Err(error) => return Err(error),
+        };
+        if current.as_deref() != expected {
+            return Err(WorkFileError::Changed);
+        }
+        if expected.is_none() {
+            move_exclusive(&temp, file).map_err(|error| {
+                if error == WorkFileError::Exists {
+                    WorkFileError::Changed
+                } else {
+                    error
+                }
+            })
+        } else {
+            std::fs::rename(&temp, file).map_err(|_| WorkFileError::Io)
+        }
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp);
     }
-    Ok(())
+    result
+}
+fn move_exclusive(from: &Path, to: &Path) -> Result<(), WorkFileError> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let from = std::ffi::CString::new(from.as_os_str().as_bytes())
+            .map_err(|_| WorkFileError::Denied)?;
+        let to =
+            std::ffi::CString::new(to.as_os_str().as_bytes()).map_err(|_| WorkFileError::Denied)?;
+        // RENAME_EXCL is atomic and refuses replacing a destination created during review.
+        if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } == 0 {
+            Ok(())
+        } else if std::io::Error::last_os_error().kind() == std::io::ErrorKind::AlreadyExists {
+            Err(WorkFileError::Exists)
+        } else {
+            Err(WorkFileError::Io)
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::fs::hard_link(from, to).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                WorkFileError::Exists
+            } else {
+                WorkFileError::Io
+            }
+        })?;
+        std::fs::remove_file(from).map_err(|_| WorkFileError::Io)
+    }
+}
+pub struct PreparedChange {
+    original: String,
+    file: PathBuf,
+    destination: Option<PathBuf>,
+    before: Option<String>,
+    next: Option<String>,
+    pub proposal: String,
+    truncated: bool,
+}
+impl PreparedChange {
+    pub fn fact(&self) -> WorkLocalStepV1 {
+        WorkLocalStepV1 {
+            proposal: Some(self.proposal.clone()),
+            before_digest: self.before.clone(),
+            ..Default::default()
+        }
+    }
+}
+fn binary_looking(text: &str) -> bool {
+    text.chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+}
+fn evidence(
+    path: &Path,
+    kind: WorkFileKindV1,
+    bytes: u32,
+    digest: String,
+    text: String,
+) -> WorkFileEvidenceV1 {
+    let (text, truncated) = clip(text);
+    WorkFileEvidenceV1 {
+        path: path.to_string_lossy().into_owned(),
+        name: file_name(path),
+        kind,
+        bytes,
+        digest,
+        text,
+        truncated,
+        before_digest: None,
+        after_digest: None,
+        lines: None,
+    }
+}
+fn clip_to(text: &str, max: usize) -> (String, bool) {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_owned(), end < text.len())
 }
 /// Removed and added lines around each change; enough to judge, never a
 /// full copy of both versions.
@@ -405,14 +777,78 @@ fn diff(current: &str, next: &str) -> String {
         b.len() - common_start - common_end
     );
     for line in &a[common_start..a.len() - common_end] {
-        out.push_str("- ");
+        out.push('-');
         out.push_str(line);
         out.push('\n');
     }
     for line in &b[common_start..b.len() - common_end] {
-        out.push_str("+ ");
+        out.push('+');
         out.push_str(line);
         out.push('\n');
+    }
+    out
+}
+/// Separate distant replacements into hunks so unchanged file bodies do not
+/// consume the review budget before the later edits are visible.
+fn replacement_diff(current: &str, next: &str, spans: &[(usize, usize, &str)]) -> String {
+    let a: Vec<_> = current.lines().collect();
+    let b: Vec<_> = next.lines().collect();
+    let mut ranges: Vec<(usize, usize, usize, usize)> = Vec::new();
+    let mut shift = 0isize;
+    for (start, end, replacement) in spans {
+        let first = current[..*start].bytes().filter(|c| *c == b'\n').count();
+        let last = (current[..*end].bytes().filter(|c| *c == b'\n').count() + 1).min(a.len());
+        let delta = replacement.bytes().filter(|c| *c == b'\n').count() as isize
+            - current[*start..*end]
+                .bytes()
+                .filter(|c| *c == b'\n')
+                .count() as isize;
+        let new_first = first.saturating_add_signed(shift).min(b.len());
+        let new_last = last.saturating_add_signed(shift + delta).min(b.len());
+        let range = (
+            first.saturating_sub(3),
+            (last + 3).min(a.len()),
+            new_first.saturating_sub(3),
+            (new_last + 3).min(b.len()),
+        );
+        if let Some(previous) = ranges.last_mut().filter(|r| range.0 <= r.1) {
+            previous.1 = range.1;
+            previous.3 = range.3;
+        } else {
+            ranges.push(range);
+        }
+        shift += delta;
+    }
+    let mut out = String::new();
+    for (a0, a1, b0, b1) in ranges {
+        let old = &a[a0..a1];
+        let new = &b[b0..b1];
+        let prefix = old.iter().zip(new).take_while(|(x, y)| x == y).count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(new[prefix..].iter().rev())
+            .take_while(|(x, y)| x == y)
+            .count();
+        out.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            a0 + 1,
+            a1 - a0,
+            b0 + 1,
+            b1 - b0
+        ));
+        for line in &old[..prefix] {
+            out.push_str(&format!(" {line}\n"));
+        }
+        for line in &old[prefix..old.len() - suffix] {
+            out.push_str(&format!("-{line}\n"));
+        }
+        for line in &new[prefix..new.len() - suffix] {
+            out.push_str(&format!("+{line}\n"));
+        }
+        for line in &old[old.len() - suffix..] {
+            out.push_str(&format!(" {line}\n"));
+        }
     }
     out
 }
@@ -477,7 +913,7 @@ mod tests {
         let (home, grant, project) = home_grant();
         let listing = grant.list(&project.to_string_lossy()).unwrap();
         assert_eq!(listing.kind, WorkFileKindV1::Directory);
-        assert!(listing.text.starts_with("src/\n"));
+        assert!(listing.text.contains("src/\n"));
         assert!(listing.text.contains("README.md\t"));
         let read = grant
             .read(&project.join("src/main.rs").to_string_lossy())
@@ -531,7 +967,7 @@ mod tests {
         let proposal = grant
             .propose_edit(&readme, "hello world", "hello, world")
             .unwrap();
-        assert!(proposal.contains("- hello world\n+ hello, world\n"));
+        assert!(proposal.contains("-hello world\n+hello, world\n"));
         assert_eq!(
             grant.propose_edit(&readme, "absent", "x").unwrap_err(),
             WorkFileError::Ambiguous
@@ -548,7 +984,7 @@ mod tests {
         assert!(grant
             .propose_write(&fresh, "one\ntwo\n")
             .unwrap()
-            .contains("+ one\n+ two\n"));
+            .contains("+one\n+two\n"));
         grant.apply_write(&fresh, "one\ntwo\n").unwrap();
         assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "one\ntwo\n");
         assert!(!project.join(".notes.txt.zephium-0").exists());
@@ -560,5 +996,159 @@ mod tests {
         );
         let (text, cut) = clip("a".repeat(MAX_WORK_FILE_TEXT_BYTES + 10));
         assert!(cut && text.len() == MAX_WORK_FILE_TEXT_BYTES);
+    }
+    #[test]
+    fn work_read_offsets_and_bounded_search() {
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_home, grant, project) = home_grant();
+        let path = project.join("many.txt");
+        std::fs::write(
+            &path,
+            (1..=500)
+                .map(|n| format!("value {n}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        let read = grant.read_at(&path.to_string_lossy(), 199, 3).unwrap();
+        assert_eq!(
+            read.text,
+            "199: value 199\n200: value 200\n201: value 201\n"
+        );
+        assert_eq!(
+            read.lines,
+            Some(WorkFileLinesV1 {
+                first: 199,
+                last: 201,
+                total: 500
+            })
+        );
+        assert!(read.truncated);
+        assert!(grant.read_at(&path.to_string_lossy(), 0, 1).is_err());
+        assert!(grant.read_at(&path.to_string_lossy(), 1, 2001).is_err());
+        let found = grant
+            .search_with(
+                &project.to_string_lossy(),
+                "value 20[01]$",
+                Some("*.txt"),
+                true,
+            )
+            .unwrap();
+        assert_eq!(found.bytes, 2);
+        assert!(found.text.contains("many.txt:199- value 199"));
+        assert!(found.text.contains("many.txt:201: value 201"));
+        assert!(grant
+            .search_with(&project.to_string_lossy(), "[", None, true)
+            .is_err());
+        assert_eq!(
+            grant
+                .search_with(&project.to_string_lossy(), "value", Some("*.rs"), false)
+                .unwrap()
+                .bytes,
+            0
+        );
+        assert!(grant
+            .list_at(&project.to_string_lossy(), 3)
+            .unwrap()
+            .text
+            .contains("src/main.rs"));
+    }
+    #[test]
+    fn work_multi_edit_is_atomic_and_detects_changed_digests() {
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_home, grant, project) = home_grant();
+        let path = project.join("README.md").to_string_lossy().into_owned();
+        let before = grant.read(&path).unwrap();
+        let mut kind = WorkStepKindV1::EditFile {
+            path: path.clone(),
+            old: String::new(),
+            new: String::new(),
+            decision: None,
+            replacements: vec![
+                WorkFileReplacementV1 {
+                    old: "Project".into(),
+                    new: "Demo".into(),
+                },
+                WorkFileReplacementV1 {
+                    old: "missing".into(),
+                    new: "world".into(),
+                },
+            ],
+        };
+        assert!(grant.prepare(&kind, Some(&before.digest)).is_err());
+        assert_eq!(grant.read(&path).unwrap().digest, before.digest);
+        if let WorkStepKindV1::EditFile { replacements, .. } = &mut kind {
+            replacements[1].old = "hello world".into();
+        }
+        let proposal = grant.prepare(&kind, Some(&before.digest)).unwrap();
+        std::fs::write(&path, "someone else edited this\n").unwrap();
+        assert!(matches!(grant.apply(proposal), Err(WorkFileError::Changed)));
+        assert!(matches!(
+            grant.prepare(&kind, Some(&before.digest)),
+            Err(WorkFileError::Changed)
+        ));
+        std::fs::write(&path, "# Project\nhello world\n").unwrap();
+        let applied = grant
+            .apply(grant.prepare(&kind, Some(&before.digest)).unwrap())
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Demo\nworld\n");
+        assert_eq!(applied.before_digest, Some(before.digest));
+        assert_eq!(applied.after_digest, Some(applied.digest.clone()));
+        std::fs::write(&path, "aaa").unwrap();
+        assert_eq!(
+            grant.propose_edit(&path, "aa", "b").unwrap_err(),
+            WorkFileError::Ambiguous
+        );
+    }
+    #[test]
+    fn work_moves_and_deletes_are_reviewed_and_exclusive() {
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_home, grant, project) = home_grant();
+        let from = project.join("README.md").to_string_lossy().into_owned();
+        let to = project.join("moved.md").to_string_lossy().into_owned();
+        let kind = WorkStepKindV1::MoveFile {
+            from: from.clone(),
+            to: to.clone(),
+            decision: None,
+        };
+        let change = grant.prepare(&kind, None).unwrap();
+        assert!(Path::new(&from).exists());
+        std::fs::write(&to, "other").unwrap();
+        assert!(matches!(grant.apply(change), Err(WorkFileError::Exists)));
+        assert!(Path::new(&from).exists());
+        std::fs::remove_file(&to).unwrap();
+        let record = grant.apply(grant.prepare(&kind, None).unwrap()).unwrap();
+        assert_eq!(record.before_digest, record.after_digest);
+        assert!(!Path::new(&from).exists());
+        let change = grant
+            .prepare(
+                &WorkStepKindV1::DeleteFile {
+                    path: to.clone(),
+                    decision: None,
+                },
+                Some(&record.digest),
+            )
+            .unwrap();
+        assert!(Path::new(&to).exists());
+        let deleted = grant.apply(change).unwrap();
+        assert!(!Path::new(&to).exists());
+        assert!(deleted.before_digest.is_some());
+        assert!(deleted.after_digest.is_none());
+        assert!(grant
+            .prepare(
+                &WorkStepKindV1::DeleteFile {
+                    path: project.to_string_lossy().into_owned(),
+                    decision: None
+                },
+                None
+            )
+            .is_err());
+        assert!(grant.propose_write(&to, "a\0b").is_err());
+        assert!(grant.propose_write(&to, "a\u{1}b").is_err());
     }
 }
