@@ -61,6 +61,8 @@
   import { environmentPlan } from "../lib/project-environment-plan";
   import {
     environmentAgents,
+    environmentClusters,
+    environmentFiles,
     environmentItems,
     environmentLinks,
     environmentPages,
@@ -69,7 +71,11 @@
     environmentView,
     fileEvidence,
   } from "../lib/project-environment";
-  import { environmentRequests, environmentStages } from "../lib/project-environment-thread";
+  import {
+    environmentRequests,
+    environmentStages,
+    type WorkStage,
+  } from "../lib/project-environment-thread";
   import { failureLine, humanPage, regionOf, sameRegion } from "../lib/work-human";
   import type { PaneRect } from "../lib/pane-geometry";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
@@ -677,8 +683,16 @@
   const pictures = $derived(
     snapshot ? environmentPictures(snapshot, context.objectives, context.media) : new Map(),
   );
+  /** The pages each work recorded: the live session has the newest frames for
+   * the work it is on; every other work keeps the frames the context read. */
+  const recordedPages = (objective: string) =>
+    objectiveSession?.selected === objective && objectiveSession.pages.length
+      ? objectiveSession.pages
+      : (context.pages.get(objective) ?? []);
   /** Every message of the thread, in order, with the card its run hangs from. */
-  const stages = $derived(snapshot ? environmentStages(snapshot, context.objectives) : []);
+  const stages = $derived(
+    snapshot ? environmentStages(snapshot, context.objectives, recordedPages) : [],
+  );
   const agents = $derived(
     snapshot
       ? environmentAgents(snapshot, context.objectives, signalOf, stages)
@@ -687,7 +701,7 @@
   const sources = $derived(
     snapshot
       ? environmentSources(snapshot, context.objectives, stages)
-      : { items: [], links: [], positions: {}, cards: new Map<string, string>() },
+      : { items: [], links: [], positions: {} },
   );
   const pages = $derived(
     snapshot
@@ -695,13 +709,7 @@
           snapshot,
           context.objectives,
           stages,
-          // The live session has the newest frames for the work it is on; every
-          // other work on the canvas keeps the frames the context read for it.
-          (objective) =>
-            objectiveSession?.selected === objective && objectiveSession.pages.length
-              ? objectiveSession.pages
-              : (context.pages.get(objective) ?? []),
-          sources.cards,
+          recordedPages,
           signalOf,
           new Set(agents.items.map((item) => item.id)),
           (objective) => human.pages.get(objective) ?? [],
@@ -734,16 +742,22 @@
       ? environmentRequests(snapshot, stages, new Set(sources.items.map((item) => item.id)))
       : { items: [], links: [], positions: {} },
   );
+  const files = $derived(
+    snapshot ? environmentFiles(context.objectives, stages) : { items: [], positions: {} },
+  );
+  const clusters = $derived(environmentClusters(stages));
   const items = $derived([
     ...results.items,
     ...requests.items,
     ...sources.items,
     ...pages.items,
+    ...files.items,
     ...agents.items,
   ]);
   const links = $derived([
     ...scene.links,
     ...(snapshot ? environmentLinks(snapshot) : []),
+    ...clusters.links,
     ...requests.links,
     ...sources.links,
     ...pages.links,
@@ -784,10 +798,12 @@
       const stage = stages.find((stage) => stage.executions.includes(execution.id));
       const place =
         stage?.place ?? current.view.placements.find((place) => place.element === element.id);
-      // What a run places stands beside its request, in the stage's columns.
+      // What a run places lands in its stage's clusters, beside its request.
       const anchor = place ? { x: place.x, y: place.y } : { x: 80, y: 120 };
       void untrack(() =>
-        organize(projection, execution, anchor).finally(() => organizing.delete(execution.id)),
+        organize(projection, execution, anchor, stage).finally(() =>
+          organizing.delete(execution.id),
+        ),
       );
     }
   });
@@ -795,9 +811,10 @@
     projection: WorkRuntimeProjection,
     execution: WorkExecutionFact,
     anchor: { x: number; y: number },
+    stage: WorkStage | undefined,
   ) {
     if (!session.snapshot) return;
-    const plan = organizeExecution(projection, execution, anchor, session.snapshot);
+    const plan = organizeExecution(projection, execution, anchor, session.snapshot, stage);
     if (!plan.adds.length || !(await session.flushView())) return;
     planned = {
       ...planned,
@@ -1094,6 +1111,7 @@
             ...requests.positions,
             ...sources.positions,
             ...pages.positions,
+            ...files.positions,
             ...agents.positions,
             ...plannedGeometry.positions,
             ...planGeometry.positions,
@@ -1905,6 +1923,7 @@
           >{#snippet children(Canvas)}<Canvas
               {items}
               {links}
+              clusters={clusters.clusters}
               areas={snapshot.areas}
               author={profileLabel}
               {pictures}

@@ -1,23 +1,35 @@
 import type {
-  WorkArtifactV1,
   WorkFileEvidenceV1,
-  WorkFileRecordV1,
   WorkEnvironmentSnapshot,
   TabView,
   ResourceSummary,
-  WorkExecutionFact,
   WorkHumanPageV1,
   WorkPageV1,
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
 import { activityLabel, artifactView } from "./project-work";
-import { agentLine, isAgentExecution, isLive, FILE_STEPS } from "./agent-steps";
+import { agentLine, isAgentExecution, isLive } from "./agent-steps";
 import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
-import { CARD_GAP, COLUMNS, PAGE_SIZE, SOURCES_SIZE } from "./organize";
 import { firstRequest, type WorkStage } from "./project-environment-thread";
-import { fileFolder } from "./work-files";
+import {
+  commandCards,
+  displayPath,
+  fileCards,
+  host,
+  pageGroups,
+  sourceRows,
+} from "./project-environment-stage";
+import { SIZES, stageLayout, stageStand, type ClusterKind } from "./stage-layout";
 import { heldPage, humanPage, phaseLabel } from "./work-human";
 import { pageFrameUrl } from "$domain/resources";
+import {
+  clipText,
+  type CanvasCluster,
+  type CanvasItem,
+  type CanvasLink,
+  type CanvasPosition,
+  type CanvasView,
+} from "./canvas-model";
 
 /** How many cited pages one Sources card lists; the lift shows the rest. */
 const SOURCE_ROWS = 24;
@@ -26,79 +38,6 @@ const TITLE_TEXT = 512;
 const DETAIL_TEXT = 2048;
 const ROW_TEXT = 200;
 const STATUS_TEXT = 256;
-
-function host(url: string | undefined): string {
-  if (!url) return "";
-  try {
-    return new URL(url).host;
-  } catch {
-    return "";
-  }
-}
-type SourceRow = {
-  key: string;
-  url: string;
-  where: string;
-  title: string;
-  note?: string;
-  file?: { record: string; path: string; kind: string };
-};
-/** A file a step disclosed: the folder it sits in stands where a host would. */
-function fileRow(key: string, record: WorkFileRecordV1, title?: string): SourceRow {
-  return {
-    key,
-    url: "",
-    where: clipText(fileFolder(record.file.path), ROW_TEXT),
-    title: clipText(title || record.file.name, ROW_TEXT),
-    file: { record: record.id, path: record.file.path, kind: record.file.kind },
-  };
-}
-/** The pages and files behind one evidence collection, in the order it cites them. */
-function collectionRows(execution: WorkExecutionFact, artifact: WorkArtifactV1): SourceRow[] {
-  if (artifact.data.kind !== "evidence_collection") return [];
-  return (artifact.data.entries ?? []).flatMap((entry) => {
-    const link = artifact.evidence[entry.evidence];
-    if (!link) return [];
-    const key = `${link.extraction_id}:${link.source_id}`;
-    const search = execution.provider_evidence?.find(
-      (candidate) => candidate.id === link.extraction_id,
-    );
-    const citation = search?.evidence.citations[link.source_id - 1];
-    const url = cleanUrl(citation?.url);
-    if (url)
-      return [
-        {
-          key,
-          url: clipText(url, DETAIL_TEXT),
-          where: host(url),
-          title: clipText(entry.title || citation?.title || host(url), ROW_TEXT),
-        },
-      ];
-    // A granted folder is not a place the pane can open: the row names the file.
-    const record = execution.file_evidence?.find(
-      (candidate) => candidate.id === link.extraction_id,
-    );
-    return record ? [fileRow(key, record, entry.title)] : [];
-  });
-}
-/** The provider's tracking parameter is not part of the page the card opens. */
-function cleanUrl(url: string | undefined): string | undefined {
-  if (!url) return undefined;
-  try {
-    const parsed = new URL(url);
-    parsed.searchParams.delete("utm_source");
-    return parsed.toString();
-  } catch {
-    return url;
-  }
-}
-import {
-  clipText,
-  type CanvasItem,
-  type CanvasLink,
-  type CanvasPosition,
-  type CanvasView,
-} from "./canvas-model";
 import type { MediaAssetV1 } from "$domain/resources";
 import * as m from "$shared/i18n/messages";
 
@@ -338,6 +277,32 @@ function elementItems(
       );
       const artifact = execution?.artifacts.find((artifact) => artifact.id === reference.artifact);
       const view = artifact && execution ? artifactView(artifact, execution) : undefined;
+      // A findings artifact is one card listing its claims; the lift reads the artifact.
+      if (view?.content.kind === "findings") {
+        const { items, subjects } = view.content;
+        return {
+          id: element.id,
+          type: "findings",
+          area: element.area,
+          kind: m.work_env_findings(),
+          title: clipText(artifact?.title ?? m.work_env_findings(), TITLE_TEXT),
+          detail: "",
+          status: view.reviewLabel,
+          artifact: view,
+          findings: {
+            items: items.map((item) => {
+              const subject = item.subject === undefined ? undefined : subjects[item.subject];
+              return {
+                claim: clipText(item.claim, TITLE_TEXT),
+                confidence: item.confidence,
+                ...(subject ? { subject: clipText(subject.name, ROW_TEXT) } : {}),
+                evidence: item.evidence.length,
+              };
+            }),
+            total: items.length,
+          },
+        };
+      }
       return {
         id: element.id,
         type: "result",
@@ -392,7 +357,7 @@ export function environmentView(snapshot: WorkEnvironmentSnapshot): CanvasView {
     viewport: { x: snapshot.view.x, y: snapshot.view.y, zoom: snapshot.view.zoom_milli / 1000 },
   };
 }
-const relationLabels: Record<CanvasLink["kind"], () => string> = {
+const relationLabels: Record<Exclude<CanvasLink["kind"], "path" | "thread">, () => string> = {
   dependency: m.work_env_relation_depends_on,
   reference: m.work_env_relation_uses,
   supports: m.work_env_relation_supports,
@@ -425,8 +390,8 @@ export function environmentLinks(snapshot: WorkEnvironmentSnapshot): CanvasLink[
 }
 
 /** Transient agent presence for objectives with live executions; never persisted.
- * The primary avatar stands beside what it just placed; a worker avatar appears
- * beside it while a native step browses. */
+ * The primary avatar stands beside its stage's newest cluster; a worker avatar
+ * appears beside it while a native step browses. */
 export function environmentAgents(
   snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
@@ -472,11 +437,8 @@ export function environmentAgents(
     const stage = stages.find((stage) => stage.executions.includes(execution.id));
     const anchor =
       stage?.place ?? snapshot.view.placements.find((place) => place.element === element.id);
-    const placement = (target: string) =>
-      snapshot.view.placements.find((place) => place.element === target);
-    // The columns to the right belong to the run's own cards: the agent waits
-    // under the request it serves until it has something to stand beside.
-    const home = anchor ? { x: anchor.x, y: anchor.y + anchor.height + CARD_GAP } : undefined;
+    // Until a cluster exists the agent waits under the request it serves.
+    const home = anchor ? { x: anchor.x, y: anchor.y + anchor.height + 20 } : undefined;
     const steps = execution.steps ?? [];
     // A cited source and a subject's picture are rows and pictures, not cards:
     // the agent never ties itself to one.
@@ -489,21 +451,14 @@ export function environmentAgents(
           candidate.reference.execution === execution.id &&
           artifacts.includes(candidate.reference.artifact),
       );
-    // The agent stands beside what it acts on now: the objects it just placed,
-    // or the request while it thinks, searches and reads.
+    // The agent acts on the objects it just placed and stands beside the
+    // stage's newest cluster.
     const working = new Set<string>();
     const lastPublish = [...steps].reverse().find((step) => step.kind.kind === "publish");
     const latestTurn = Math.max(0, ...steps.map((step) => step.turn));
-    let stand = home;
-    if (lastPublish && lastPublish.turn === latestTurn) {
-      const placed = elementsOf(lastPublish.artifacts ?? []);
-      for (const target of placed) working.add(target.id);
-      const newest = placed
-        .map((target) => placement(target.id))
-        .filter((place): place is NonNullable<typeof place> => !!place)
-        .sort((a, b) => b.y - a.y)[0];
-      if (newest) stand = { x: newest.x + newest.width + 40, y: newest.y };
-    }
+    if (lastPublish && lastPublish.turn === latestTurn)
+      for (const target of elementsOf(lastPublish.artifacts ?? [])) working.add(target.id);
+    const stand = (stage && stageStand(stage.layout)) ?? home;
     if (stand) positions[id] = stand;
     for (const target of working)
       links.push({ id: `working:${target}`, source: id, target, kind: "working" });
@@ -534,60 +489,31 @@ export function environmentAgents(
 export function environmentSources(
   snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
-  /** The message each run served; its Sources card hangs off that request. */
+  /** The message each run served; its Sources card stands in that stage. */
   stages: readonly WorkStage[],
-): {
-  items: CanvasItem[];
-  links: CanvasLink[];
-  positions: Record<string, CanvasPosition>;
-  /** The Sources card of each run, so its pages hang off the same card. */
-  cards: Map<string, string>;
-} {
+): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
   const items: CanvasItem[] = [];
   const links: CanvasLink[] = [];
   const positions: Record<string, CanvasPosition> = {};
-  const cards = new Map<string, string>();
   for (const stage of stages) {
     const projection = objectives.get(stage.objective);
     if (!projection) continue;
-    // The Sources column stands to the right of the request, at its own top.
-    const home = { x: COLUMNS.sources(stage.place.x), y: stage.place.y };
-    let index = 0;
     for (const id of stage.executions) {
       const execution = projection.executions.find((entry) => entry.id === id);
       if (!execution || !isAgentExecution(execution)) continue;
       const running = isLive(projection, execution);
-      const seen = new Set<string>();
-      const files = new Set<string>();
-      const rows: SourceRow[] = [];
-      const admit = (row: SourceRow) => {
-        if (seen.has(row.key) || (row.file && files.has(row.file.record))) return;
-        seen.add(row.key);
-        if (row.file) files.add(row.file.record);
-        rows.push(row);
-      };
+      const rows = sourceRows(execution);
+      if (!rows.length) continue;
+      const seen = new Set(rows.map((row) => row.key));
       // A page that would not be read says why, on the row that cites it.
       const read = new Set<string>();
       const refusals = new Map<string, string>();
       for (const step of execution.steps ?? []) {
-        if (step.kind.kind === "read") {
-          if (step.status === "succeeded") read.add(step.kind.url);
-          else if (step.status === "failed" && step.note?.trim())
-            refusals.set(step.kind.url, step.note.trim());
-        }
-        if (step.kind.kind === "search") {
-          for (const id of step.artifacts ?? []) {
-            const artifact = execution.artifacts.find((entry) => entry.id === id);
-            if (artifact?.data.kind !== "evidence_collection") continue;
-            for (const row of collectionRows(execution, artifact)) admit(row);
-          }
-          continue;
-        }
-        if (!FILE_STEPS.includes(step.kind.kind) || !step.evidence) continue;
-        const record = execution.file_evidence?.find((candidate) => candidate.id === step.evidence);
-        if (record) admit(fileRow(`file:${record.id}`, record));
+        if (step.kind.kind !== "read") continue;
+        if (step.status === "succeeded") read.add(step.kind.url);
+        else if (step.status === "failed" && step.note?.trim())
+          refusals.set(step.kind.url, step.note.trim());
       }
-      if (!rows.length) continue;
       const card = `sources:${stage.element}:${execution.id}`;
       items.push({
         id: card,
@@ -605,17 +531,9 @@ export function environmentSources(
           return refusal ? { ...row, note: clipText(refusal, ROW_TEXT) } : row;
         }),
       });
-      positions[card] = { x: home.x, y: home.y + index * (SOURCES_SIZE.height + CARD_GAP) };
-      index += 1;
-      cards.set(execution.id, card);
-      links.push({
-        id: `sources-of:${card}`,
-        source: stage.card,
-        target: card,
-        kind: "uses",
-        label: m.work_env_relation_uses(),
-      });
-      // Findings and published objects hang off the stage whose pages they cite.
+      const position = stage.layout.positions[card];
+      if (position) positions[card] = position;
+      // Findings and published objects tie to the stage whose pages they cite.
       for (const candidate of snapshot.elements) {
         const reference = candidate.reference;
         if (
@@ -645,19 +563,18 @@ export function environmentSources(
       }
     }
   }
-  return { items, links, positions, cards };
+  return { items, links, positions };
 }
 
-/** Pages the agent opened, one column per stage: every run of the stage keeps
- * the last frame it recorded, and a live page still shows the live one. */
+/** Pages the agent opened, a grid per stage: every run of the stage keeps the
+ * last frame it recorded, and a live page still shows the live one. Past the
+ * cluster's cap the rest only count on its label. */
 export function environmentPages(
   snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
-  /** Every message of the thread; a run's pages stand in its stage's column. */
+  /** Every message of the thread; a run's pages stand in its stage's cluster. */
   stages: readonly WorkStage[],
   pages: (objective: string) => readonly WorkPageV1[],
-  /** The Sources card of each run, so its pages hang off the same card. */
-  cards: ReadonlyMap<string, string> = new Map(),
   /** The run's current activity, so a page held for a hidden window says so. */
   activity: (objective: string) => string | undefined = () => undefined,
   /** The agent presences the scene already has; a tie to an absent one is no tie. */
@@ -675,33 +592,26 @@ export function environmentPages(
     const waiting = human(projection.work.id);
     const paused = activity(projection.work.id) === "paused";
     const agent = `agent:${stage.element}`;
-    const home = { x: COLUMNS.pages(stage.place.x), y: stage.place.y };
-    let index = 0;
-    for (const id of stage.executions) {
+    const runs = stage.executions.flatMap((id) => {
       const execution = projection.executions.find((entry) => entry.id === id);
-      if (!execution || !isAgentExecution(execution)) continue;
+      return execution && isAgentExecution(execution)
+        ? [{ execution, groups: pageGroups(execution, recorded) }]
+        : [];
+    });
+    // The frames this call sees decide the cluster; the stage may have counted fewer.
+    const layout = stageLayout(stage.place, {
+      ...stage.contents,
+      pages: {
+        members: runs.flatMap(({ groups }) =>
+          groups.map((group) => ({ id: group.id, size: SIZES.page })),
+        ),
+      },
+    });
+    for (const { execution, groups } of runs) {
       // Only the run that is still going marks its pages live; an earlier
       // stage keeps its last frames and says nothing about now.
       const running = isLive(projection, execution);
       const opened = recorded.filter((page) => page.execution === execution.id);
-      // One card per page: every step that opened the same URL folds into it.
-      const byUrl = new Map<
-        string,
-        { steps: typeof execution.steps & object; page?: WorkPageV1; running: boolean }
-      >();
-      for (const step of execution.steps ?? []) {
-        if (step.kind.kind !== "read" && step.kind.kind !== "discover") continue;
-        const page = opened.find((page) => page.step === step.id);
-        const url = page?.url || (step.kind.kind === "read" ? step.kind.url : "");
-        if (!url) continue;
-        const entry = byUrl.get(url) ?? { steps: [], running: false };
-        entry.steps.push(step);
-        if (page?.frame && (!entry.page?.frame || page.live)) entry.page = page;
-        else entry.page ??= page;
-        entry.running ||= running && step.status === "running";
-        byUrl.set(url, entry);
-      }
-      if (!byUrl.size) continue;
       const hubs = new Map<string, string>();
       for (const candidate of snapshot.elements) {
         const reference = candidate.reference;
@@ -710,10 +620,12 @@ export function environmentPages(
         const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
         if (subject) hubs.set(subjectKey(subject), candidate.id);
       }
-      for (const [url, entry] of byUrl) {
-        const first = entry.steps[0]!;
+      for (const entry of groups) {
+        const position = layout.positions[entry.id];
+        if (!position) continue;
+        const { id, url } = entry;
         const pageHost = host(url);
-        const live = entry.running;
+        const live = running && entry.steps.some((step) => step.status === "running");
         const succeeded = entry.steps.some((step) => step.status === "succeeded");
         // Rust says why a read gave up or was cut off; the card says it instead of "Failed".
         const refused = !succeeded && !live ? (entry.steps.at(-1)?.note?.trim() ?? "") : "";
@@ -733,7 +645,6 @@ export function environmentPages(
             ),
           ),
         );
-        const id = `page:${execution.id}:${first.id}`;
         items.push({
           id,
           type: "page",
@@ -752,17 +663,7 @@ export function environmentPages(
           page: { url, host: pageHost, frame, live, ...(held ? { human: humanPage(held) } : {}) },
           ...(live || succeeded || held ? {} : { unavailable: true }),
         });
-        positions[id] = { x: home.x, y: home.y + index * (PAGE_SIZE.height + CARD_GAP) };
-        index += 1;
-        const card = cards.get(execution.id);
-        if (card)
-          links.push({
-            id: `sources-page:${card}:${id}`,
-            source: card,
-            target: id,
-            kind: "uses",
-            label: m.work_env_relation_uses(),
-          });
+        positions[id] = position;
         if (live && present.has(agent))
           links.push({ id: `working:${id}`, source: agent, target: id, kind: "working" });
         const linked = new Set<string>();
@@ -785,4 +686,96 @@ export function environmentPages(
     }
   }
   return { items, links, positions };
+}
+
+/** The files and commands each run touched: the stage's Work cluster. */
+export function environmentFiles(
+  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+  stages: readonly WorkStage[],
+): { items: CanvasItem[]; positions: Record<string, CanvasPosition> } {
+  const items: CanvasItem[] = [];
+  const positions: Record<string, CanvasPosition> = {};
+  for (const stage of stages) {
+    const projection = objectives.get(stage.objective);
+    if (!projection) continue;
+    const start = items.length;
+    for (const id of stage.executions) {
+      const execution = projection.executions.find((entry) => entry.id === id);
+      if (!execution || !isAgentExecution(execution)) continue;
+      for (const card of fileCards(execution))
+        items.push({
+          id: card.id,
+          type: "file",
+          kind: m.work_env_file(),
+          title: card.file.name,
+          detail: displayPath(card.path),
+          status: "",
+          file: card.file,
+        });
+      for (const card of commandCards(execution))
+        items.push({
+          id: card.id,
+          type: "command",
+          kind: m.work_env_command(),
+          title: card.command.line,
+          detail: "",
+          status: "",
+          command: card.command,
+        });
+    }
+    for (const item of items.slice(start)) {
+      const position = stage.layout.positions[item.id];
+      if (position) positions[item.id] = position;
+    }
+  }
+  return { items, positions };
+}
+
+const CLUSTER_LABELS: Record<ClusterKind, (count: number) => string> = {
+  sources: (count) => m.work_env_sources_count({ count }),
+  pages: (count) =>
+    count === 1 ? m.work_env_cluster_page_one() : m.work_env_cluster_pages({ count }),
+  work: (count) =>
+    count === 1 ? m.work_env_cluster_work_one() : m.work_env_cluster_work({ count }),
+  subjects: (count) =>
+    count === 1 ? m.work_env_cluster_subject_one() : m.work_env_cluster_subjects({ count }),
+  findings: (count) => m.work_env_cluster_findings({ count }),
+  results: (count) => m.work_env_cluster_results({ count }),
+};
+/** Kinds that always gather under a label; the rest do only when they hold several cards. */
+const LABELLED = new Set<ClusterKind>(["pages", "work", "subjects"]);
+
+/**
+ * Each stage's clusters and the path that reads through them: request, then
+ * every non-empty cluster in order. A path edge attaches to a cluster's node,
+ * or to the card itself when a cluster is a single card.
+ */
+export function environmentClusters(stages: readonly WorkStage[]): {
+  clusters: CanvasCluster[];
+  links: CanvasLink[];
+} {
+  const clusters: CanvasCluster[] = [];
+  const links: CanvasLink[] = [];
+  for (const stage of stages) {
+    let from = { kind: "request", id: stage.card };
+    for (const cluster of stage.layout.clusters) {
+      const grouped = LABELLED.has(cluster.kind) || cluster.members.length > 1;
+      const id = grouped ? `cluster:${stage.card}:${cluster.kind}` : cluster.members[0]!;
+      if (grouped)
+        clusters.push({
+          id,
+          label: CLUSTER_LABELS[cluster.kind](cluster.members.length + cluster.more),
+          more: cluster.more,
+          members: cluster.members,
+        });
+      links.push({
+        id: `path:${stage.card}:${from.kind}:${cluster.kind}`,
+        source: from.id,
+        target: id,
+        kind: "path",
+      });
+      from = { kind: cluster.kind, id };
+    }
+  }
+  return { clusters, links };
 }

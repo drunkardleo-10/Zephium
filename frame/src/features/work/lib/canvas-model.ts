@@ -105,10 +105,34 @@ export type CanvasLink = {
   id: string;
   source: string;
   target: string;
-  /** `working` is the transient tie between an agent and what it acts on now. */
-  kind: "dependency" | "reference" | "working" | RelationKind;
+  /**
+   * `path` reads through a stage at rest and `thread` joins one stage to the
+   * next; relation kinds show only while an end is selected or hovered;
+   * `working` is the transient tie between an agent and what it acts on now.
+   */
+  kind: "dependency" | "reference" | "working" | "path" | "thread" | RelationKind;
   label?: string;
 };
+/** What Rust relates and the run's own ties: drawn only while an end is focused. */
+const LATENT = new Set<CanvasLink["kind"]>([
+  "supports",
+  "uses",
+  "depends_on",
+  "same_as",
+  "contradicts",
+]);
+/** The path is drawn at rest; relations wait for a focused end; a new path segment draws in. */
+export function edgeClass(link: CanvasLink, focused: ReadonlySet<string>, fresh: boolean): string {
+  const active = focused.has(link.source) || focused.has(link.target);
+  const path = link.kind === "path" || link.kind === "thread";
+  return [
+    "work-edge",
+    `kind-${link.kind}`,
+    ...(LATENT.has(link.kind) ? ["latent"] : []),
+    ...(active ? ["active"] : []),
+    ...(path && fresh ? ["draw"] : []),
+  ].join(" ");
+}
 export type CanvasPosition = { x: number; y: number };
 export type CanvasSize = { width: number; height: number };
 export type CanvasArea = { id: string; title: string };
@@ -119,12 +143,19 @@ export type CanvasView = {
   viewport: { x: number; y: number; zoom: number };
 };
 export type AreaData = { title: string; count: number };
+/** The cards of one kind in one stage; derived by projection, never persisted. */
+export type CanvasCluster = { id: string; label: string; more: number; members: readonly string[] };
+export type ClusterData = { label: string; more: number; active: boolean };
 export type WorkItemNode = Node<CanvasItem, "work">;
-export type WorkNode = WorkItemNode | Node<AreaData, "area">;
+type ClusterNode = Node<ClusterData, "cluster">;
+export type WorkNode = WorkItemNode | Node<AreaData, "area"> | ClusterNode;
 const AREA_PREFIX = "area:";
 const areaNodeId = (id: string) => `${AREA_PREFIX}${id}`;
 export const isAreaNode = (node: WorkNode): node is Node<AreaData, "area"> => node.type === "area";
+const isClusterNode = (node: WorkNode): node is ClusterNode => node.type === "cluster";
+export const isItemNode = (node: WorkNode): node is WorkItemNode => node.type === "work";
 const DEFAULT_AREA: CanvasSize = { width: 640, height: 420 };
+const CLUSTER_PAD = 12;
 const validPosition = (p: CanvasPosition | undefined): p is CanvasPosition =>
   !!p &&
   Number.isFinite(p.x) &&
@@ -149,24 +180,18 @@ const validAreaSize = (s: CanvasSize | undefined): s is CanvasSize =>
   s.height <= 8192;
 const CANVAS_ITEM_LIMIT = 500;
 export function defaultSize(item: CanvasItem): { width: number; height: number } {
+  if (item.type === "findings") return { width: 300, height: 200 };
   if (item.artifact) {
     switch (item.artifact.content.kind) {
       case "comparison":
-        return { width: 640, height: 360 };
       case "matrix":
-        return { width: 560, height: 300 };
-      case "table":
-        return { width: 560, height: 320 };
-      case "chart":
-        return { width: 480, height: 320 };
-      case "checklist":
-        return { width: 360, height: 300 };
+        return { width: 520, height: 320 };
       case "sources":
         return { width: 320, height: 240 };
       case "browser":
         return { width: 320, height: 180 };
       default:
-        return { width: 480, height: 360 };
+        return { width: 420, height: 300 };
     }
   }
   switch (item.type) {
@@ -174,24 +199,27 @@ export function defaultSize(item: CanvasItem): { width: number; height: number }
     case "link":
       return { width: 280, height: 96 };
     case "subject":
-      return { width: 240, height: 136 };
+      return { width: 220, height: item.image ? 248 : 136 };
     case "finding":
       return { width: 300, height: 140 };
     case "sources":
-      return { width: 300, height: 208 };
+      return { width: 300, height: 200 };
     case "folder":
-      return { width: 280, height: 96 };
+    case "file":
+      return { width: 248, height: 96 };
+    case "command":
+      return { width: 248, height: 120 };
     case "note":
       return { width: 300, height: 200 };
     case "media":
-      return { width: 280, height: 230 };
+      return { width: 248, height: 200 };
     case "objective":
     case "request":
-      return { width: 320, height: 150 };
+      return { width: 300, height: 110 };
     case "responsibility":
       return { width: 280, height: 150 };
     case "page":
-      return { width: 320, height: 236 };
+      return { width: 248, height: 168 };
     case "agent":
       return item.agent?.worker
         ? { width: 200, height: 64 }
@@ -220,7 +248,8 @@ export function clipText(value: string, max: number): string {
 export function sanitizeScene(
   items: readonly CanvasItem[],
   links: readonly CanvasLink[],
-): { items: CanvasItem[]; links: CanvasLink[] } {
+  clusters: readonly CanvasCluster[] = [],
+): { items: CanvasItem[]; links: CanvasLink[]; clusters: CanvasCluster[] } {
   const ids = new Set<string>();
   const kept: CanvasItem[] = [];
   for (const item of items) {
@@ -237,23 +266,42 @@ export function sanitizeScene(
         : { ...item, title, detail, kind, status },
     );
   }
+  // Clusters count against no limit: they are added once the cards are settled.
+  const groups: CanvasCluster[] = [];
+  const endpoints = new Set(ids);
+  for (const cluster of clusters) {
+    if (!cluster.id || cluster.id.length > TEXT_LIMIT.id || endpoints.has(cluster.id)) continue;
+    const members = cluster.members.filter((member) => ids.has(member));
+    if (!members.length) continue;
+    endpoints.add(cluster.id);
+    groups.push({
+      ...cluster,
+      label: clipText(cluster.label, TEXT_LIMIT.title),
+      members,
+    });
+  }
   const seen = new Set<string>();
   const edges: CanvasLink[] = [];
   for (const link of links) {
     if (edges.length >= CANVAS_LINK_LIMIT) break;
     if (!link.id || link.id.length > TEXT_LIMIT.id || seen.has(link.id)) continue;
-    if (link.source === link.target || !ids.has(link.source) || !ids.has(link.target)) continue;
+    if (link.source === link.target || !endpoints.has(link.source) || !endpoints.has(link.target))
+      continue;
     seen.add(link.id);
     edges.push(link);
   }
-  return { items: kept, links: edges };
+  return { items: kept, links: edges, clusters: groups };
 }
 
-export function validScene(items: readonly CanvasItem[], links: readonly CanvasLink[]): boolean {
+export function validScene(
+  items: readonly CanvasItem[],
+  links: readonly CanvasLink[],
+  clusters: readonly CanvasCluster[] = [],
+): boolean {
   if (items.length > CANVAS_ITEM_LIMIT || links.length > CANVAS_LINK_LIMIT) return false;
-  const ids = new Set(items.map((item) => item.id));
+  const ids = new Set([...items.map((item) => item.id), ...clusters.map((cluster) => cluster.id)]);
   return (
-    ids.size === items.length &&
+    ids.size === items.length + clusters.length &&
     items.every(
       (item) =>
         item.id.length > 0 &&
@@ -343,7 +391,7 @@ export function reconcileNodes(
     const node = existing.get(item.id);
     const parentId = item.area ? areaNodeId(item.area) : undefined;
     const parent = parentId ? areaById.get(parentId) : undefined;
-    if (node && !isAreaNode(node)) {
+    if (node && isItemNode(node)) {
       const reparented = (node.parentId ?? undefined) !== (parent ? parentId : undefined);
       const same =
         !reparented &&
@@ -368,7 +416,10 @@ export function reconcileNodes(
         JSON.stringify(node.data.agent) === JSON.stringify(item.agent) &&
         JSON.stringify(node.data.page) === JSON.stringify(item.page) &&
         JSON.stringify(node.data.facts) === JSON.stringify(item.facts) &&
-        JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility);
+        JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility) &&
+        JSON.stringify(node.data.findings) === JSON.stringify(item.findings) &&
+        JSON.stringify(node.data.file) === JSON.stringify(item.file) &&
+        JSON.stringify(node.data.command) === JSON.stringify(item.command);
       // Agents follow their work: a fresh computed position moves the node.
       const moved = item.agent ? positions[item.id] : undefined;
       const relocated =
@@ -427,11 +478,88 @@ export function reconcileNodes(
       ariaLabel: `${item.title}. ${item.status}`,
     };
   });
-  const combined: WorkNode[] = [...areaNodes, ...next];
+  // Clusters are derived from the cards afterwards; they keep their node until then.
+  const clusters = previous.filter(isClusterNode);
+  const combined: WorkNode[] = [...areaNodes, ...clusters, ...next];
   return combined.length === previous.length &&
     combined.every((node, index) => node === previous[index])
     ? previous
     : combined;
+}
+
+/**
+ * Cluster nodes around their members as they stand now, 12 px out. Members are
+ * fixed by projection, so a card dragged away stretches its cluster.
+ */
+export function withClusters(
+  nodes: WorkNode[],
+  clusters: readonly CanvasCluster[],
+  active: ReadonlySet<string> = new Set(),
+): WorkNode[] {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const derived: ClusterNode[] = [];
+  for (const cluster of clusters) {
+    const members = cluster.members.flatMap((id) => {
+      const node = byId.get(id);
+      return node && isItemNode(node) ? [node] : [];
+    });
+    if (!members.length) continue;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const node of members) {
+      const p = absolutePosition(node, nodes);
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x + (node.measured?.width ?? node.width ?? 280));
+      maxY = Math.max(maxY, p.y + (node.measured?.height ?? node.height ?? 160));
+    }
+    const position = { x: Math.round(minX - CLUSTER_PAD), y: Math.round(minY - CLUSTER_PAD) };
+    const width = Math.round(maxX - minX + CLUSTER_PAD * 2);
+    const height = Math.round(maxY - minY + CLUSTER_PAD * 2);
+    const data = {
+      label: cluster.label,
+      more: cluster.more,
+      active: cluster.members.some((id) => active.has(id)),
+    };
+    const node = byId.get(cluster.id);
+    derived.push(
+      node &&
+        isClusterNode(node) &&
+        node.position.x === position.x &&
+        node.position.y === position.y &&
+        node.width === width &&
+        node.height === height &&
+        node.data.label === data.label &&
+        node.data.more === data.more &&
+        node.data.active === data.active
+        ? node
+        : {
+            id: cluster.id,
+            type: "cluster",
+            position,
+            width,
+            height,
+            data,
+            class: "cluster-node",
+            selectable: false,
+            draggable: false,
+            focusable: false,
+            deletable: false,
+            connectable: false,
+            zIndex: -1,
+            ariaLabel: cluster.label,
+          },
+    );
+  }
+  const others = nodes.filter((node) => !isClusterNode(node));
+  const areas = others.filter(isAreaNode);
+  const cards = others.filter((node) => !isAreaNode(node));
+  const next = [...areas, ...derived, ...cards];
+  return next.length === nodes.length && next.every((node, index) => node === nodes[index])
+    ? nodes
+    : next;
 }
 
 /** Applies a remote view to existing nodes in place; dragging and derived nodes keep local geometry. */
@@ -516,7 +644,7 @@ export function nodesBounds(
   nodes: readonly WorkNode[],
   padding = 32,
 ): (CanvasPosition & CanvasSize) | null {
-  const selected = nodes.filter((node) => ids.includes(node.id) && !isAreaNode(node));
+  const selected = nodes.filter((node) => ids.includes(node.id) && isItemNode(node));
   if (!selected.length) return null;
   let minX = Infinity;
   let minY = Infinity;

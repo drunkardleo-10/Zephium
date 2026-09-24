@@ -134,9 +134,9 @@
     "description": "Measured 328183 JS bytes with the agent run operation, step labels, and the agent line on the canvas card in the shared graph."
   },
   "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 555000,
-    "css": 119600,
-    "description": "Measured 554021 JS and 119339 CSS bytes: the regenerated decision-preference IPC surface enters every entry that reaches the bindings."
+    "js": 557500,
+    "css": 120500,
+    "description": "Measured 556987 JS and 120225 CSS bytes: derived cluster nodes, latent relation edges and the path draw-in policy; the regenerated decision-preference IPC surface enters every entry that reaches the bindings."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
     "js": 70000,
@@ -144,9 +144,9 @@
     "description": "Measured 65242 JS and 2553 CSS bytes: a hand-written SVG plot with no chart library."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 580500,
+    "js": 588300,
     "css": 113000,
-    "description": "Measured 580135 JS and 109980 CSS bytes: subject pictures admit through a per-canvas queue with fallback and one retry."
+    "description": "Measured 587804 JS and 109980 CSS bytes: one stage layout places the run's cards and the projected ones in clusters, with the Work cluster's file and command cards; subject pictures admit through a per-canvas queue with fallback and one retry."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 112000,

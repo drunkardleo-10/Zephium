@@ -123,12 +123,18 @@ test("an agent run leaves its cited pages to the Sources card and places what th
   });
   expect(pendingOrganize(snapshot, state)?.id).toBe("execution");
   const plan = organizeExecution(state, execution, { x: 100, y: 300 }, snapshot);
-  expect(plan.adds.map((add) => add.reference.kind)).toEqual(["subject", "finding", "finding"]);
+  // The findings artifact is one card; the subject it names is still a hub.
+  expect(plan.adds.map((add) => add.reference.kind)).toEqual(["subject", "artifact"]);
   expect(plan.relations).toEqual([
     { from: plan.adds[1]!.reference, to: plan.adds[0]!.reference, kind: "supports" },
-    { from: plan.adds[2]!.reference, to: plan.adds[0]!.reference, kind: "supports" },
   ]);
-  expect(plan.adds[1]!.placement.y).toBeLessThan(plan.adds[2]!.placement.y);
+  // Request, Sources, subjects, findings: left to right, level with the request
+  // the canvas drew where it had no placement of its own.
+  const subjects = 80 + 300 + 48 + 300 + 48;
+  expect(plan.adds.map((add) => add.placement)).toEqual([
+    { x: subjects, y: 120, width: 220, height: 136 },
+    { x: subjects + 220 + 48, y: 120, width: 300, height: 200 },
+  ]);
 });
 
 test("reviewed plans still organize once, after they settle", () => {

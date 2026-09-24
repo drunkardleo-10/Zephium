@@ -1,6 +1,10 @@
 import { expect, test } from "vitest";
 import { projection, snapshot } from "./environment-fixtures";
-import { environmentItems, environmentPages } from "../lib/project-environment";
+import {
+  environmentClusters,
+  environmentItems,
+  environmentPages,
+} from "../lib/project-environment";
 test("joins exact objective and historical artifact identities without replacing originals", () => {
   const items = environmentItems(snapshot, [], [], new Map([["objective", projection]]));
   expect(items[0]?.title).toBe("Investigate dependencies");
@@ -316,22 +320,16 @@ test("a run's searches become one Sources card the request and its pages join", 
       title: "Review A",
     },
   ]);
-  expect(sources.links.map((link) => [link.source, link.target])).toEqual([
-    [objectiveElement.id, group.id],
-  ]);
   // The Sources card stands to the right of the request, level with it.
   expect(sources.positions[group.id]).toEqual({ x: 368, y: 0 });
-  expect(sources.cards.get("execution")).toBe(group.id);
-  // The page the run read hangs off the Sources card of the same run.
-  const pages = environmentPages(
-    withSource,
-    objectives,
-    environmentStages(withSource, objectives),
-    () => [],
-    sources.cards,
-  );
+  const stages = environmentStages(withSource, objectives);
+  const pages = environmentPages(withSource, objectives, stages, () => []);
   expect(pages.positions[pages.items[0]!.id]).toEqual({ x: 716, y: 0 });
-  expect(pages.links.some((link) => link.source === group.id)).toBe(true);
+  // The path reads request, Sources, then the stage's pages.
+  expect(environmentClusters(stages).links.map((link) => [link.source, link.target])).toEqual([
+    [objectiveElement.id, group.id],
+    [group.id, `cluster:${objectiveElement.id}:pages`],
+  ]);
 });
 
 test("browser steps become page cards with frames, working links and subject links", async () => {
@@ -416,7 +414,6 @@ test("browser steps become page cards with frames, working links and subject lin
         frame: { generation: 3, width: 640, height: 400 },
       },
     ],
-    new Map(),
     () => undefined,
     new Set([`agent:${objectiveElement.id}`]),
   );
@@ -515,7 +512,6 @@ test("file steps join their run's Sources card as file rows the lift can open", 
   ]);
   // The row opens what the run recorded, not a page the pane could load.
   expect(fileEvidence(objectives, "record")?.text).toBe("Plan for the week");
-  expect(sources.cards.size).toBe(1);
 });
 
 test("a read that gave up says why, on its page card and on the row that cites it", async () => {
@@ -656,13 +652,13 @@ test("every stage keeps the pages its own run read", async () => {
     ["page:execution:read", "a.example", false],
     ["page:follow-up:read", "b.example", true],
   ]);
-  // Each card stands in the page column of the stage its run served.
+  // Each card stands in the page cluster of the stage its run served, right of its request.
   expect(pages.positions["page:execution:read"]).toEqual({
-    x: 756,
+    x: 408,
     y: stages[0]!.place.y,
   });
   expect(pages.positions["page:follow-up:read"]).toEqual({
-    x: 756,
+    x: 388,
     y: stages[1]!.place.y,
   });
   expect(stages[1]!.place.y).toBeGreaterThan(stages[0]!.place.y);
@@ -719,7 +715,6 @@ test("a page the run is holding for a person reaches its card, matched by attemp
     objectives,
     stages,
     () => recorded,
-    new Map(),
     () => undefined,
     new Set(),
     () => [waiting],
@@ -740,7 +735,6 @@ test("a page the run is holding for a person reaches its card, matched by attemp
     objectives,
     stages,
     () => recorded,
-    new Map(),
     () => undefined,
     new Set(),
     () => [{ ...waiting, id: { ...waiting.id, attempt: "earlier" } }],

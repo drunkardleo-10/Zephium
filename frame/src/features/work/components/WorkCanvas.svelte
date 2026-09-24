@@ -16,6 +16,7 @@
   } from "../lib/canvas-context";
   import CanvasNode from "./CanvasNode.svelte";
   import AreaNode from "./AreaNode.svelte";
+  import ClusterNode from "./ClusterNode.svelte";
   import CanvasControls from "./CanvasControls.svelte";
   import {
     reconcileNodes,
@@ -23,11 +24,15 @@
     absolutePosition,
     containingArea,
     isAreaNode,
+    isItemNode,
     nodesBounds,
     sanitizeScene,
     validScene,
     validViewport,
+    withClusters,
+    edgeClass,
     type CanvasArea,
+    type CanvasCluster,
     type CanvasItem,
     type CanvasLink,
     type CanvasPosition,
@@ -40,6 +45,7 @@
   let {
     items,
     links,
+    clusters = [],
     areas = [],
     author = "",
     pictures = new Map(),
@@ -61,6 +67,8 @@
   }: {
     items: readonly CanvasItem[];
     links: readonly CanvasLink[];
+    /** Each stage's cards of one kind; frontend-only, never persisted. */
+    clusters?: readonly CanvasCluster[];
     areas?: readonly CanvasArea[];
     /** The person whose request starts a path on this canvas. */
     author?: string;
@@ -131,16 +139,33 @@
   const restoredViewport = untrack(() => validViewport(initialView?.viewport));
   let viewport = $state(restoredViewport ?? { x: 0, y: 0, zoom: 1 });
   // One bad card never hides the canvas: the scene is repaired, then guarded.
-  const scene = $derived(sanitizeScene(items, links));
-  let valid = $derived(validScene(scene.items, scene.links));
-  const nodeTypes = { work: CanvasNode, area: AreaNode };
+  const scene = $derived(sanitizeScene(items, links, clusters));
+  let valid = $derived(validScene(scene.items, scene.links, scene.clusters));
+  const nodeTypes = { work: CanvasNode, area: AreaNode, cluster: ClusterNode };
   let selection: string[] = [];
   let selectedIds = $state.raw<ReadonlySet<string>>(new Set());
+  let hovered = $state<string | null>(null);
+  /** Cards whose ties show: the selection and the card under the pointer. */
+  const focused = $derived<ReadonlySet<string>>(
+    hovered ? new Set([...selectedIds, hovered]) : selectedIds,
+  );
+  /** When each path edge first appeared; only a new one draws itself in. */
+  const firstSeen: Record<string, number> = {};
+  let seeded = false;
   let edges = $derived<Edge[]>(
     valid
       ? scene.links.map((link) => {
-          const active = selectedIds.has(link.source) || selectedIds.has(link.target);
-          const title = (id: string) => scene.items.find((item) => item.id === id)?.title ?? "";
+          const active = focused.has(link.source) || focused.has(link.target);
+          const title = (id: string) =>
+            scene.items.find((item) => item.id === id)?.title ??
+            scene.clusters.find((cluster) => cluster.id === id)?.label ??
+            "";
+          let draw = false;
+          if (link.kind === "path" || link.kind === "thread") {
+            const now = performance.now();
+            firstSeen[link.id] ??= seeded ? now : -Infinity;
+            draw = now - firstSeen[link.id]! < EDGE_DRAW_MS;
+          }
           return {
             id: link.id,
             source: link.source,
@@ -150,10 +175,10 @@
             deletable: false,
             selectable: false,
             focusable: false,
-            class: `work-edge kind-${link.kind}${active ? " active" : ""}`,
+            class: edgeClass(link, focused, draw),
             label: active && link.label ? link.label : undefined,
             ariaLabel:
-              link.kind === "dependency"
+              link.kind === "dependency" || link.kind === "path" || link.kind === "thread"
                 ? m.work_env_dependency_label({
                     source: title(link.source),
                     target: title(link.target),
@@ -168,6 +193,11 @@
         })
       : [],
   );
+  const EDGE_DRAW_MS = 520;
+  $effect(() => {
+    // The first scene is already there when the canvas opens: nothing draws in.
+    if (valid && scene.links.length) seeded = true;
+  });
   $effect(() => {
     const next = scene.items;
     const grouping = areas;
@@ -185,17 +215,26 @@
         : [],
     );
   });
+  $effect(() => {
+    const groups = scene.clusters;
+    const active = focused;
+    const current = nodes;
+    const next = withClusters(current, valid ? groups : [], active);
+    if (next !== current) nodes = next;
+  });
   let publishedPositions = "";
   const positionKey = (list: WorkNode[]) =>
     JSON.stringify(
-      list.map((node) => [
-        node.id,
-        node.parentId ?? "",
-        node.position.x,
-        node.position.y,
-        node.width,
-        node.height,
-      ]),
+      list
+        .filter((node) => isItemNode(node) || isAreaNode(node))
+        .map((node) => [
+          node.id,
+          node.parentId ?? "",
+          node.position.x,
+          node.position.y,
+          node.width,
+          node.height,
+        ]),
     );
   let appliedRemote = 0;
   let deferredRemote: CanvasView | null = null;
@@ -233,7 +272,7 @@
   });
   function publishView() {
     if (resizing) return;
-    const elements = nodes.filter((node) => !isAreaNode(node));
+    const elements = nodes.filter(isItemNode);
     const areaNodes = nodes.filter(isAreaNode);
     onviewchange?.({
       positions: Object.fromEntries(
@@ -267,7 +306,7 @@
     focusCard: (id: string) => void;
   };
   function selectionBounds() {
-    const ids = selection.filter((id) => nodes.some((node) => node.id === id && !isAreaNode(node)));
+    const ids = selection.filter((id) => nodes.some((node) => node.id === id && isItemNode(node)));
     const bounds = nodesBounds(ids, nodes);
     return bounds ? { ...bounds, ids } : null;
   }
@@ -366,6 +405,12 @@
         lastClick = { id: node.id, at: now };
         oninspect(node.id);
       }}
+      onnodepointerenter={({ node }) => {
+        if (isItemNode(node as WorkNode)) hovered = node.id;
+      }}
+      onnodepointerleave={({ node }) => {
+        if (hovered === node.id) hovered = null;
+      }}
       onpaneclick={() => {
         lastClick = { id: "", at: 0 };
         onselectionchange?.([]);
@@ -376,9 +421,9 @@
         onselectionchange?.(selection);
       }}
       onnodedragstop={({ targetNode }) => {
-        if (!targetNode || isAreaNode(targetNode as WorkNode)) return;
+        if (!targetNode || !isItemNode(targetNode as WorkNode)) return;
         const node = nodes.find((candidate) => candidate.id === targetNode.id);
-        if (!node || isAreaNode(node) || !authoritative.has(node.id)) return;
+        if (!node || !isItemNode(node) || !authoritative.has(node.id)) return;
         const area = containingArea(node, nodes);
         const current = node.parentId ? node.parentId.slice("area:".length) : null;
         if (area !== current) onareachange?.(node.id, area);
@@ -428,6 +473,21 @@
     opacity: 1;
   }
 
+  /* A relation shows only while one of its ends is focused. */
+  .work-canvas :global(.work-edge.latent) {
+    opacity: 0;
+    transition: opacity 140ms var(--ease-smooth);
+  }
+
+  .work-canvas :global(.work-edge.latent.active) {
+    opacity: 1;
+  }
+
+  /* stylelint-disable-next-line selector-class-pattern */
+  .work-canvas :global(.svelte-flow__node.cluster-node) {
+    pointer-events: none;
+  }
+
   .work-canvas :global(.work-edge.kind-reference),
   .work-canvas :global(.work-edge.kind-uses),
   .work-canvas :global(.work-edge.kind-same-as) {
@@ -455,9 +515,9 @@
     }
   }
 
-  /* The path draws itself: each edge is stroked on from its stage. */
+  /* A path segment that just appeared strokes itself on from its stage. */
   /* stylelint-disable-next-line selector-class-pattern */
-  .work-canvas :global(.work-edge .svelte-flow__edge-path) {
+  .work-canvas :global(.work-edge.draw .svelte-flow__edge-path) {
     animation: work-edge-draw 520ms var(--ease-smooth);
   }
 

@@ -301,7 +301,8 @@ test("a real attached objective expands its historical responsibilities directly
   expect(screen.container.textContent).not.toContain(
     "Operational prose should stay in optional details",
   );
-  await expect.poll(() => screen.container.querySelectorAll(".svelte-flow__edge").length).toBe(2);
+  // Two plan dependencies, and the path from the request to its result.
+  await expect.poll(() => screen.container.querySelectorAll(".svelte-flow__edge").length).toBe(3);
   const dependency = screen.container.querySelector(
     '[aria-label="Compare findings depends on Read evidence"]',
   );

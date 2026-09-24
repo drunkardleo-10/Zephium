@@ -42,8 +42,8 @@ test("every message keeps its own request card, laid out down the roadmap", () =
   const stages = environmentStages(scene, objectives);
   expect(stages.map((stage) => [stage.card, stage.request, stage.place.y])).toEqual([
     ["objective-card", "Compare quiet keyboards", 0],
-    ["request:objective-card:continuation-1", "Show me the quietest one", 732],
-    ["request:objective-card:continuation-2", "And the wireless ones", 954],
+    ["request:objective-card:continuation-1", "Show me the quietest one", 716],
+    ["request:objective-card:continuation-2", "And the wireless ones", 882],
   ]);
   // The request card the work began with keeps the first sentence, not the last.
   expect(environmentItems(scene, [], [], objectives)[0]?.title).toBe("Compare quiet keyboards");
@@ -57,7 +57,7 @@ test("every message keeps its own request card, laid out down the roadmap", () =
     ["result-card", "request:objective-card:continuation-1"],
     ["request:objective-card:continuation-1", "request:objective-card:continuation-2"],
   ]);
-  expect(requests.positions["request:objective-card:continuation-1"]).toEqual({ x: 0, y: 732 });
+  expect(requests.positions["request:objective-card:continuation-1"]).toEqual({ x: 0, y: 716 });
 });
 
 test("the next request clears the tallest column of the stage above it", () => {
@@ -74,7 +74,8 @@ test("the next request clears the tallest column of the stage above it", () => {
       browse_hops: 4,
     },
   };
-  // Four pages stand 260 apart: the column reaches further than the result.
+  // Four pages would sit two across, but the result already stands to their
+  // right: the cluster narrows to one column and reaches further than the result.
   first.steps = Array.from({ length: 4 }, (_, index) => ({
     id: `read-${index}`,
     turn: 1,
@@ -82,7 +83,7 @@ test("the next request clears the tallest column of the stage above it", () => {
     status: "succeeded" as const,
   }));
   const stages = environmentStages(scene, objectives);
-  expect(stages[1]!.place.y).toBe(1088);
+  expect(stages[1]!.place.y).toBe(4 * 168 + 3 * 20 + 56);
   expect(stages[1]!.place.x).toBe(stages[0]!.place.x);
 });
 

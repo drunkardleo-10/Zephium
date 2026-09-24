@@ -9,6 +9,8 @@ import type {
 import { isAgentExecution } from "./agent-steps";
 import type { CanvasPosition, CanvasSize } from "./canvas-model";
 import { listingArtifacts, recordArtifacts, subjectKey, subjectsOf } from "./subjects";
+import { environmentStages, type WorkStage } from "./project-environment-thread";
+import { SIZES, stageLayout, type ClusterKind, type StageContents } from "./stage-layout";
 
 type Placement = CanvasPosition & CanvasSize;
 export type OrganizePlan = {
@@ -24,35 +26,10 @@ export type OrganizePlan = {
 
 const same = (a: WorkEnvironmentReference, b: WorkEnvironmentReference) =>
   JSON.stringify(a) === JSON.stringify(b);
-const FINDINGS_PER_ARTIFACT = 8;
-const FINDINGS_PER_RUN = 32;
 const SUBJECTS_PER_RUN = 12;
 /** Rust's MAX_ENVIRONMENT_ELEMENTS: an add past it is refused, so none is planned. */
 const CANVAS_ELEMENTS = 500;
-const SIZES = {
-  subject: { width: 240, height: 136 },
-  pictured: { width: 240, height: 256 },
-  finding: { width: 300, height: 140 },
-  page: { width: 320, height: 236 },
-} as const;
 const GAP = 24;
-/** The air between two cards stacked in the same column. */
-export const CARD_GAP = GAP;
-/** The air between two columns of a stage. */
-const COLUMN_GAP = 48;
-/** The request card every stage opens with; the columns follow it rightwards. */
-export const REQUEST_SIZE = { width: 320, height: 150 } as const;
-/** One Sources card stands where a stage's cited pages were found. */
-export const SOURCES_SIZE = { width: 300, height: 208 } as const;
-/** One page card, sized for the frame it keeps. */
-export const PAGE_SIZE = SIZES.page;
-/** A stage reads left to right: request, Sources, pages, subjects, result. */
-export const COLUMNS = {
-  sources: (x: number) => x + REQUEST_SIZE.width + COLUMN_GAP,
-  pages: (x: number) => COLUMNS.sources(x) + SOURCES_SIZE.width + COLUMN_GAP,
-  subjects: (x: number) => COLUMNS.pages(x) + SIZES.page.width + COLUMN_GAP,
-  objects: (x: number) => COLUMNS.subjects(x) + SIZES.pictured.width + COLUMN_GAP,
-} as const;
 
 function roots(execution: WorkExecutionFact): WorkArtifactV1[] {
   return execution.artifacts.filter((artifact) =>
@@ -142,10 +119,12 @@ export function organizeExecution(
   execution: WorkExecutionFact,
   anchor: CanvasPosition,
   snapshot?: WorkEnvironmentSnapshot,
+  /** The stage the run serves, as the canvas draws it; derived when absent. */
+  stage?: WorkStage,
 ): OrganizePlan {
   const plan =
     snapshot && isAgentExecution(execution)
-      ? organizeAgentRun(projection, execution, anchor, snapshot)
+      ? organizeAgentRun(projection, execution, snapshot, stage)
       : organizeReviewedRun(projection, execution, anchor);
   // A long work fills the canvas; what does not fit stays in its run's result.
   const room = CANVAS_ELEMENTS - (snapshot?.elements.length ?? 0);
@@ -177,7 +156,7 @@ function organizeReviewedRun(
   const subjects = subjectOwner ? (subjectOwner.data.subjects ?? []) : [];
   // A reviewed run stands beside its request, not under it.
   let y = anchor.y;
-  const x0 = COLUMNS.sources(anchor.x);
+  const x0 = anchor.x + SIZES.request.width + 48;
   const subjectRefs: WorkEnvironmentReference[] = [];
   if (subjects.length) {
     subjects.forEach((_, index) => {
@@ -239,123 +218,106 @@ function organizeReviewedRun(
 
 function objectSize(artifact: WorkArtifactV1): CanvasSize {
   switch (artifact.data.kind) {
+    case "findings":
+      return SIZES.findings;
     case "document":
-      return { width: 480, height: 360 };
-    case "table":
-      return { width: 560, height: 320 };
+      return SIZES.document;
     case "comparison_matrix":
-      return { width: 560, height: 300 };
+      return SIZES.comparison;
     default:
-      return { width: 420, height: 300 };
+      return SIZES.result;
   }
 }
 
 /** Agent runs land incrementally: every new root artifact becomes objects that
- * join what is already there. Sources connect to the findings they support,
- * findings to their subjects, subjects to the comparison they appear in. */
+ * join what is already there, each in the slot its stage's layout gives it.
+ * Subjects are hubs, one per name; a findings artifact is one card that
+ * supports the subjects it names; a comparison uses its subjects. */
 function organizeAgentRun(
   projection: WorkRuntimeProjection,
   execution: WorkExecutionFact,
-  anchor: CanvasPosition,
   snapshot: WorkEnvironmentSnapshot,
+  given?: WorkStage,
 ): OrganizePlan {
   const objective = projection.work.id;
+  const stage =
+    given ??
+    environmentStages(snapshot, new Map([[objective, projection]])).find((candidate) =>
+      candidate.executions.includes(execution.id),
+    );
   const fresh = unplacedRoots(snapshot, execution);
   const records = recordArtifacts(execution);
-  const adds: OrganizePlan["adds"] = [];
   const relations: OrganizePlan["relations"] = [];
-  const existing = snapshot.elements.filter(
-    (element) => "execution" in element.reference && element.reference.execution === execution.id,
-  );
-  const placementOf = (element: WorkEnvironmentElement) =>
-    snapshot.view.placements.find((place) => place.element === element.id);
-  const bottom = (kind: WorkEnvironmentReference["kind"], fallback: number) =>
-    Math.max(
-      fallback,
-      ...existing
-        .filter((element) => element.reference.kind === kind)
-        .flatMap((element) => {
-          const place = placementOf(element);
-          return place ? [place.y + place.height + GAP] : [];
-        }),
-    );
-  const count = (kind: WorkEnvironmentReference["kind"]) =>
-    existing.filter((element) => element.reference.kind === kind).length;
-  // One flow, left to right: the Sources cards, the pages read from them, the
-  // subjects they establish, then findings and the published objects.
-  const subjectsX = COLUMNS.subjects(anchor.x);
-  const findingsX = COLUMNS.objects(anchor.x);
-  const objectsX = findingsX;
-  let subjectCount = count("subject");
-  let subjectY = bottom("subject", anchor.y);
-  let findingY = bottom("finding", anchor.y);
-  let objectY = Math.max(bottom("artifact", anchor.y), bottom("finding", anchor.y));
-
-  // Subjects are hubs: one per name across the run.
+  const pending: { reference: WorkEnvironmentReference; size: CanvasSize }[] = [];
+  const contents: StageContents = { ...stage?.contents };
+  const join = (kind: ClusterKind, reference: WorkEnvironmentReference, size: CanvasSize) => {
+    pending.push({ reference, size });
+    const cluster = contents[kind];
+    contents[kind] = {
+      ...cluster,
+      members: [...(cluster?.members ?? []), { id: JSON.stringify(reference), size }],
+    };
+  };
+  let subjectCount = snapshot.elements.filter(
+    (element) =>
+      element.reference.kind === "subject" && element.reference.execution === execution.id,
+  ).length;
   const subjectByName = placedSubjects(snapshot, execution);
-  const subjectRef = (artifact: WorkArtifactV1, index: number): WorkEnvironmentReference => ({
-    kind: "subject",
-    objective,
-    execution: execution.id,
-    artifact: artifact.id,
-    index,
-  });
-  const artifactRef = (artifact: WorkArtifactV1): WorkEnvironmentReference => ({
-    kind: "artifact",
-    objective,
-    execution: execution.id,
-    artifact: artifact.id,
-  });
-  const admitSubjects = (artifact: WorkArtifactV1): WorkEnvironmentReference[] => {
-    return subjectsOf(artifact).map((subject, index) => {
+  const admitSubjects = (artifact: WorkArtifactV1): WorkEnvironmentReference[] =>
+    subjectsOf(artifact).map((subject, index) => {
       const name = subjectKey(subject);
       const known = subjectByName.get(name);
       if (known) return known;
-      const reference = subjectRef(artifact, index);
+      const reference: WorkEnvironmentReference = {
+        kind: "subject",
+        objective,
+        execution: execution.id,
+        artifact: artifact.id,
+        index,
+      };
       if (subjectCount < SUBJECTS_PER_RUN) {
-        const size = subject.image_candidates?.length ? SIZES.pictured : SIZES.subject;
-        adds.push({ reference, placement: { x: subjectsX, y: subjectY, ...size } });
-        subjectY += size.height + GAP;
+        join(
+          "subjects",
+          reference,
+          subject.image_candidates?.length ? SIZES.pictured : SIZES.subject,
+        );
         subjectCount += 1;
         subjectByName.set(name, reference);
       }
       return reference;
     });
-  };
   for (const artifact of fresh) {
     const subjects = admitSubjects(artifact);
     if (records.has(artifact.id)) continue;
+    const reference: WorkEnvironmentReference = {
+      kind: "artifact",
+      objective,
+      execution: execution.id,
+      artifact: artifact.id,
+    };
     if (artifact.data.kind === "findings") {
-      let findingCount = count("finding");
-      for (const [index, item] of artifact.data.items.slice(0, FINDINGS_PER_ARTIFACT).entries()) {
-        if (findingCount >= FINDINGS_PER_RUN) break;
-        const reference: WorkEnvironmentReference = {
-          kind: "finding",
-          objective,
-          execution: execution.id,
-          artifact: artifact.id,
-          index,
-        };
-        adds.push({
-          reference,
-          placement: { x: findingsX, y: findingY, ...SIZES.finding },
-        });
-        findingY += SIZES.finding.height + GAP;
-        findingCount += 1;
-        const subject =
-          item.subject === null || item.subject === undefined ? undefined : subjects[item.subject];
+      join("findings", reference, SIZES.findings);
+      const named = new Set<number>();
+      for (const item of artifact.data.items)
+        if (item.subject !== null && item.subject !== undefined) named.add(item.subject);
+      for (const index of named) {
+        const subject = subjects[index];
         if (subject) relations.push({ from: reference, to: subject, kind: "supports" });
       }
       continue;
     }
-    const reference = artifactRef(artifact);
-    const size = objectSize(artifact);
-    adds.push({ reference, placement: { x: objectsX, y: objectY, ...size } });
-    objectY += size.height + GAP;
+    join("results", reference, objectSize(artifact));
     if (artifact.data.kind === "comparison_matrix")
       for (const subject of subjects)
         relations.push({ from: subject, to: reference, kind: "uses" });
   }
+  const place = stage?.place ?? { x: 80, y: 120, ...SIZES.request };
+  const { positions } = stageLayout(place, contents);
+  // A card past its cluster's cap only counts on the cluster's label.
+  const adds = pending.flatMap(({ reference, size }) => {
+    const position = positions[JSON.stringify(reference)];
+    return position ? [{ reference, placement: { ...position, ...size } }] : [];
+  });
   return {
     execution: execution.id,
     adds,
