@@ -476,6 +476,8 @@ test("prompt submission keeps work on canvas and clarification choices above the
   expect(screen.container.querySelector(".work-canvas .chip")).toBeNull();
   await screen.getByText("Reviewed findings", { exact: true }).click();
   await screen.getByRole("button", { name: "Open", exact: true }).click();
+  // The lift names its sources in one collapsed rail, not chips under the text.
+  await screen.getByRole("button", { name: "Based on 1 source" }).click();
   await screen.getByRole("button", { name: "Page", exact: true }).first().click();
   await expect.element(screen.getByText("Exact cited source", { exact: true })).toBeVisible();
   expect(readEvidence).toHaveBeenCalledExactlyOnceWith(link);

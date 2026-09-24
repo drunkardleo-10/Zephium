@@ -5,6 +5,9 @@
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
   import HostGlyph from "./cards/HostGlyph.svelte";
+  import LiftHeader from "./LiftHeader.svelte";
+  import SourcesRail from "./SourcesRail.svelte";
+  import { displayHost } from "$shared/ui/data/Artifact/artifact";
   import { Cancel01Icon, Tick02Icon } from "../lib/icons";
   import type { ComparePicture } from "../lib/compare";
   import { subjectDetail } from "../lib/subject-detail";
@@ -41,6 +44,7 @@
   );
   let shown = $state(0);
   const picture = $derived(pictures[Math.min(shown, Math.max(0, pictures.length - 1))]);
+  const meta = $derived(subject?.homepage ? displayHost(subject.homepage) : "");
   function open(reference: EvidenceReference) {
     if (reference.file) onfile?.(reference.file.record);
     else if (reference.url) onopen?.(reference.url);
@@ -49,7 +53,17 @@
 
 {#if subject}
   <section class="product">
-    <header>
+    <LiftHeader kind={m.work_env_subject()} title={subject.name} {meta}>
+      {#snippet leading()}<HostGlyph
+          host={subject?.homepage ? displayHost(subject.homepage) : ""}
+          size={16}
+        />{/snippet}
+      {#snippet actions()}{#if subject?.homepage}<Button
+            size="compact"
+            onclick={() => onopen?.(subject!.homepage!)}>{m.work_env_open_page()}</Button
+          >{/if}{/snippet}
+    </LiftHeader>
+    <div class="body">
       <div class="gallery">
         <span class="hero">
           {#if picture}<img src={mediaUrl(picture.profile, picture.digest)} alt={subject.name} />
@@ -73,67 +87,45 @@
           </ul>
         {/if}
       </div>
-      <div class="identity">
-        <p class="kind">{m.work_env_subject()}</p>
-        <h2>{subject.name}</h2>
+      <div class="details">
         {#if detail.price}<p class="price">{detail.price}</p>{/if}
         {#if subject.descriptor}<p class="descriptor">{subject.descriptor}</p>{/if}
-        {#if subject.homepage}
-          <Button size="compact" onclick={() => onopen?.(subject!.homepage!)}
-            >{m.work_env_open_page()}</Button
-          >
+        {#if detail.facts.length}
+          <dl class="facts">
+            {#each detail.facts as fact (fact.key)}
+              <div class="fact">
+                <dt>{fact.label}</dt>
+                <dd class:numeric={fact.numeric}>
+                  {#if fact.value.kind === "mark"}<span
+                      class="glyph"
+                      class:yes={fact.value.yes}
+                      aria-label={fact.value.yes ? m.work_yes() : m.work_no()}
+                      ><Icon icon={fact.value.yes ? Tick02Icon : Cancel01Icon} size={15} /></span
+                    >
+                  {:else if fact.value.kind !== "unknown"}{fact.value.text}{/if}
+                  <span class="chips">
+                    {#each fact.evidence as source (source.key)}
+                      <button
+                        type="button"
+                        class="chip"
+                        title={source.label}
+                        onclick={() => open(source)}
+                        ><HostGlyph
+                          host={source.origin ?? ""}
+                          file={!!source.file}
+                          size={13}
+                        /><span>{source.origin || source.label}</span></button
+                      >
+                    {/each}
+                  </span>
+                </dd>
+              </div>
+            {/each}
+          </dl>
         {/if}
       </div>
-    </header>
-    {#if detail.facts.length}
-      <dl class="facts">
-        {#each detail.facts as fact (fact.key)}
-          <div class="fact">
-            <dt>{fact.label}</dt>
-            <dd class:numeric={fact.numeric}>
-              {#if fact.value.kind === "mark"}<span
-                  class="glyph"
-                  class:yes={fact.value.yes}
-                  aria-label={fact.value.yes ? m.work_yes() : m.work_no()}
-                  ><Icon icon={fact.value.yes ? Tick02Icon : Cancel01Icon} size={15} /></span
-                >
-              {:else if fact.value.kind !== "unknown"}{fact.value.text}{/if}
-              <span class="chips">
-                {#each fact.evidence as source (source.key)}
-                  <button
-                    type="button"
-                    class="chip"
-                    title={source.label}
-                    onclick={() => open(source)}
-                    ><HostGlyph host={source.origin ?? ""} file={!!source.file} size={13} /><span
-                      >{source.origin || source.label}</span
-                    ></button
-                  >
-                {/each}
-              </span>
-            </dd>
-          </div>
-        {/each}
-      </dl>
-    {/if}
-    {#if detail.sources.length}
-      <section class="sources" aria-label={m.work_sources()}>
-        <h3>{m.work_sources()}</h3>
-        <ul>
-          {#each detail.sources as source (source.key)}
-            <li>
-              <button type="button" onclick={() => open(source)}>
-                <HostGlyph host={source.origin ?? ""} file={!!source.file} size={20} />
-                <span class="source">
-                  <strong>{source.label}</strong>
-                  <span>{source.origin}</span>
-                </span>
-              </button>
-            </li>
-          {/each}
-        </ul>
-      </section>
-    {/if}
+    </div>
+    <SourcesRail references={detail.sources} onpick={open} />
   </section>
 {:else}<p role="status">{m.work_artifact_unavailable()}</p>{/if}
 
@@ -145,10 +137,10 @@
     min-inline-size: 0;
   }
 
-  header {
+  .body {
     display: flex;
     gap: 20px;
-    padding-inline-end: 28px;
+    min-inline-size: 0;
   }
 
   .gallery {
@@ -156,13 +148,13 @@
     flex-direction: column;
     gap: 8px;
     flex: none;
-    inline-size: 220px;
+    inline-size: 160px;
   }
 
   .hero {
     display: block;
-    inline-size: 220px;
-    block-size: 220px;
+    inline-size: 160px;
+    block-size: 160px;
     border-radius: var(--radius-lg);
     background: var(--color-fill);
     overflow: hidden;
@@ -180,7 +172,7 @@
     inline-size: 100%;
     block-size: 100%;
     background: var(--color-accent-soft);
-    font-size: 48px;
+    font-size: 40px;
     font-weight: 700;
     text-transform: uppercase;
   }
@@ -194,8 +186,8 @@
   }
 
   .thumbs button {
-    inline-size: 46px;
-    block-size: 46px;
+    inline-size: 34px;
+    block-size: 34px;
     padding: 0;
     border: 0;
     border-radius: var(--radius-sm);
@@ -215,32 +207,12 @@
     object-fit: cover;
   }
 
-  .identity {
+  .details {
     display: flex;
+    flex: 1;
     flex-direction: column;
-    align-items: flex-start;
-    gap: 6px;
+    gap: 12px;
     min-inline-size: 0;
-  }
-
-  .kind {
-    margin: 0;
-    color: var(--color-faint);
-    font-size: var(--text-caption);
-  }
-
-  h2 {
-    margin: 0;
-    font-size: var(--text-title);
-    font-weight: 600;
-    letter-spacing: -0.01em;
-  }
-
-  h3 {
-    margin: 0 0 6px;
-    color: var(--color-muted);
-    font-size: var(--text-caption);
-    font-weight: 500;
   }
 
   .price {
@@ -323,9 +295,7 @@
     cursor: default;
   }
 
-  .chip span,
-  .source strong,
-  .source span {
+  .chip span {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -336,54 +306,8 @@
     color: var(--color-text);
   }
 
-  .sources ul {
-    list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin: 0;
-    padding: 0;
-  }
-
-  .sources button {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    inline-size: 100%;
-    box-sizing: border-box;
-    padding: 7px 10px;
-    border: 0;
-    border-radius: var(--radius-control-compact);
-    background: transparent;
-    color: var(--color-text);
-    font: inherit;
-    text-align: start;
-    cursor: default;
-  }
-
-  .sources button:hover {
-    background: var(--color-fill-hover);
-  }
-
-  .source {
-    display: flex;
-    flex-direction: column;
-    min-inline-size: 0;
-  }
-
-  .source strong {
-    font-size: var(--text-label);
-    font-weight: 550;
-  }
-
-  .source span {
-    color: var(--color-muted);
-    font-size: var(--text-caption);
-  }
-
   .thumbs button:focus-visible,
-  .chip:focus-visible,
-  .sources button:focus-visible {
+  .chip:focus-visible {
     outline: 2px solid var(--color-ring);
     outline-offset: -2px;
   }

@@ -33,11 +33,13 @@
     ChartColumnIcon,
     File01Icon,
     FolderAddIcon,
+    GlobalIcon,
     Image01Icon,
     LayoutGridIcon,
     Link04Icon,
     MapsIcon,
     NoteAddIcon,
+    Pdf01Icon,
     Search01Icon,
     Settings02Icon,
     Table01Icon,
@@ -51,13 +53,15 @@
   import { contextSelection } from "../lib/context-selection";
   import WorkTabPicker from "./WorkTabPicker.svelte";
   import WorkMediaPicker from "./WorkMediaPicker.svelte";
-  import { mediaUrl } from "$domain/resources";
+  import { mediaSize, mediaUrl } from "$domain/resources";
   import BrowserPane from "./pane/BrowserPane.svelte";
   import Lift from "./Lift.svelte";
+  import LiftHeader from "./LiftHeader.svelte";
+  import { pageGroups } from "../lib/project-environment-stage";
   import HostGlyph from "./cards/HostGlyph.svelte";
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
-  import { isLive } from "../lib/agent-steps";
+  import { isAgentExecution, isLive } from "../lib/agent-steps";
   import { environmentPlan } from "../lib/project-environment-plan";
   import {
     environmentAgents,
@@ -1027,6 +1031,29 @@
   const liftedPictures = $derived(
     liftedElement?.reference.kind === "subject" ? picturesOf(liftedElement.id) : [],
   );
+  /** Pages past the cluster's cap have no card; their stage's Sources lift lists them. */
+  const foldedPages = $derived.by(() => {
+    const item = liftedItem;
+    if (item?.type !== "sources") return [];
+    const run = item.id.split(":").at(-1) ?? "";
+    const stage = stages.find((entry) => entry.executions.includes(run));
+    const projection = stage ? context.objectives.get(stage.objective) : undefined;
+    if (!stage || !projection) return [];
+    const shown = new Set(pages.items.map((page) => page.id));
+    return stage.executions
+      .flatMap((id) => {
+        const execution = projection.executions.find((entry) => entry.id === id);
+        return execution && isAgentExecution(execution)
+          ? pageGroups(execution, recordedPages(stage.objective))
+          : [];
+      })
+      .filter((group) => !shown.has(group.id));
+  });
+  /** The one meta line of a media lift: what it is, how large, where it came from. */
+  function mediaMeta(asset: NonNullable<CanvasItem["media"]>["asset"]) {
+    const origin = asset.origin.kind === "fetched" ? host(asset.origin.url) : "";
+    return [asset.mime, mediaSize(asset.bytes), origin].filter(Boolean).join(" · ");
+  }
   // Opening a product view is an explicit act: it is worth admitting the other
   // pictures the run observed for that subject, and only then.
   const gallery = new SvelteSet<string>();
@@ -2106,49 +2133,89 @@
             />{/snippet}</LazyView
         >
       {:else if liftedItem?.sources}
-        <ul class="lift-sources">
-          {#each liftedItem.sources as row (row.key)}
-            <li>
-              <button
-                type="button"
-                onclick={() => {
-                  if (row.file) {
-                    liftFile = fileEvidence(context.objectives, row.file.record) ?? null;
-                    return;
-                  }
-                  const url = row.url;
-                  lifted = null;
-                  openPane({ kind: "url", url }, null);
-                }}
-              >
-                <HostGlyph host={row.where} file={!!row.file} size={22} />
-                <span class="source-text">
-                  <strong>{row.title}</strong>
-                  <span>{row.note || row.where}</span>
-                </span>
-              </button>
-            </li>
-          {/each}
-        </ul>
+        <div class="lift-body">
+          <LiftHeader
+            kind={m.work_sources()}
+            title={liftedItem.title}
+            meta={m.work_env_sources_count({ count: liftedItem.sources.length })}
+            icon={GlobalIcon}
+          />
+          <ul class="lift-sources">
+            {#each liftedItem.sources as row (row.key)}
+              <li>
+                <button
+                  type="button"
+                  onclick={() => {
+                    if (row.file) {
+                      liftFile = fileEvidence(context.objectives, row.file.record) ?? null;
+                      return;
+                    }
+                    const url = row.url;
+                    lifted = null;
+                    openPane({ kind: "url", url }, null);
+                  }}
+                >
+                  <HostGlyph host={row.where} file={!!row.file} size={22} />
+                  <span class="source-text">
+                    <strong>{row.title}</strong>
+                    <span>{row.note || row.where}</span>
+                  </span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+          {#if foldedPages.length}{@const more =
+              foldedPages.length === 1
+                ? m.work_lift_more_pages_one()
+                : m.work_lift_more_pages({ count: foldedPages.length })}
+            <section class="lift-folded" aria-label={more}>
+              <h3>{more}</h3>
+              <ul class="lift-sources">
+                {#each foldedPages as group (group.id)}<li>
+                    <button
+                      type="button"
+                      onclick={() => {
+                        lifted = null;
+                        openPane({ kind: "url", url: group.url }, null);
+                      }}
+                    >
+                      <HostGlyph host={host(group.url)} size={22} />
+                      <span class="source-text">
+                        <strong>{host(group.url) || group.url}</strong>
+                        <span>{group.url}</span>
+                      </span>
+                    </button>
+                  </li>{/each}
+              </ul>
+            </section>{/if}
+        </div>
       {:else if liftedElement?.reference.kind === "resource" && liftedItem?.media}
+        {@const asset = liftedItem.media.asset}
         {@const image =
-          liftedItem.media.asset.kind === "image"
-            ? mediaUrl(liftedItem.media.profile, liftedItem.media.asset.digest)
-            : null}
-        <div class="lift-media">
-          {#if image}<img src={image} alt={liftedItem.title} />{:else}
-            <p>{liftedItem.media.asset.mime}</p>
-            <Button
-              size="compact"
-              onclick={() => {
-                const id =
-                  liftedElement?.reference.kind === "resource"
-                    ? liftedElement.reference.resource
-                    : null;
-                if (id) void commands.mediaOpen(session.profile, id);
-              }}>{m.work_media_open_file()}</Button
-            >
-          {/if}
+          asset.kind === "image" ? mediaUrl(liftedItem.media.profile, asset.digest) : null}
+        <div class="lift-body lift-media">
+          <LiftHeader
+            kind={liftedItem.kind}
+            title={liftedItem.title}
+            meta={mediaMeta(asset)}
+            icon={asset.kind === "image"
+              ? Image01Icon
+              : asset.kind === "pdf"
+                ? Pdf01Icon
+                : File01Icon}
+          >
+            {#snippet actions()}{#if !image}<Button
+                  size="compact"
+                  onclick={() => {
+                    const id =
+                      liftedElement?.reference.kind === "resource"
+                        ? liftedElement.reference.resource
+                        : null;
+                    if (id) void commands.mediaOpen(session.profile, id);
+                  }}>{m.work_media_open_file()}</Button
+                >{/if}{/snippet}
+          </LiftHeader>
+          {#if image}<div class="lift-picture"><img src={image} alt={liftedItem.title} /></div>{/if}
         </div>
       {:else if liftedElement?.reference.kind === "resource"}
         <LazyView
@@ -2167,12 +2234,18 @@
         >
       {:else if liftedElement?.reference.kind === "folder"}
         {@const folder = liftedElement.reference.path}
-        <div class="lift-plain">
-          <span class="kind">{liftedItem?.kind}</span>
-          <h2>{liftedItem?.title}</h2>
-          <p class="lift-path">{homePath(folder)}</p>
+        <div class="lift-body lift-plain">
+          <LiftHeader
+            kind={liftedItem?.kind ?? m.work_env_folder()}
+            title={liftedItem?.title ?? ""}
+            meta={homePath(folder)}
+            icon={FolderAddIcon}
+          >
+            {#snippet actions()}<Button size="compact" onclick={() => reveal(folder)}
+                >{m.work_env_reveal()}</Button
+              >{/snippet}
+          </LiftHeader>
           <p>{m.work_env_folder_grant_note()}</p>
-          <Button size="compact" onclick={() => reveal(folder)}>{m.work_env_reveal()}</Button>
         </div>
       {:else if liftedElement?.reference.kind === "subject"}
         {@const subject = liftedElement.reference}
@@ -2221,24 +2294,30 @@
                     (liftFile = fileEvidence(context.objectives, record) ?? null)}
                 />{/snippet}</LazyView
             >
-          {:else}<h2>{liftedItem.title}</h2>{/if}
+          {:else}<LiftHeader kind={liftedItem.kind} title={liftedItem.title} />{/if}
         </div>
       {:else if liftedItem}
-        <div class="lift-plain">
-          <span class="kind">{liftedItem.kind}</span>
-          <h2>{liftedItem.title}</h2>
-          {#if liftedItem.detail}<p>{liftedItem.detail}</p>{/if}
-          {#if liftedItem.status}<p>{liftedItem.status}</p>{/if}
-          {#if liftedElement?.reference.kind === "browser"}<Button
-              size="compact"
-              onclick={() => {
-                const reference = liftedElement?.reference;
-                const id = liftedElement?.id ?? null;
-                lifted = null;
-                if (reference?.kind === "browser" && tabs.some((tab) => tab.id === reference.tab))
-                  openPane({ kind: "tab", id: reference.tab }, id);
-              }}>{m.work_env_open_here()}</Button
-            >{/if}
+        <div class="lift-body lift-plain">
+          <LiftHeader
+            kind={liftedItem.kind}
+            title={liftedItem.title}
+            meta={[liftedItem.detail, liftedItem.status].filter(Boolean).join(" · ")}
+            icon={liftedElement?.reference.kind === "browser" ? GlobalIcon : undefined}
+          >
+            {#snippet actions()}{#if liftedElement?.reference.kind === "browser"}<Button
+                  size="compact"
+                  onclick={() => {
+                    const reference = liftedElement?.reference;
+                    const id = liftedElement?.id ?? null;
+                    lifted = null;
+                    if (
+                      reference?.kind === "browser" &&
+                      tabs.some((tab) => tab.id === reference.tab)
+                    )
+                      openPane({ kind: "tab", id: reference.tab }, id);
+                  }}>{m.work_env_open_here()}</Button
+                >{/if}{/snippet}
+          </LiftHeader>
         </div>
       {/if}
     </Lift>
@@ -2406,19 +2485,18 @@
     inset-inline-end: 16px;
   }
 
-  .lift-path {
-    color: var(--color-muted);
-    font-family: var(--font-mono);
-    font-size: var(--text-label);
-    overflow-wrap: anywhere;
+  .lift-body {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-block-size: 0;
   }
 
-  .lift-result h2,
-  .lift-plain h2 {
-    margin: 0 0 12px;
-    font-size: var(--text-title);
-    font-weight: 600;
-    letter-spacing: -0.01em;
+  .lift-folded h3 {
+    margin: 0 0 4px;
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+    font-weight: 500;
   }
 
   .lift-sources {
@@ -2476,27 +2554,25 @@
   }
 
   .lift-media {
-    display: grid;
-    place-items: center;
-    gap: 12px;
     block-size: 100%;
+  }
+
+  .lift-picture {
+    display: grid;
+    flex: 1;
+    place-items: center;
     min-block-size: 0;
   }
 
-  .lift-media img {
+  .lift-picture img {
     max-inline-size: 100%;
     max-block-size: 100%;
     object-fit: contain;
     border-radius: var(--radius-sm);
   }
 
-  .lift-plain .kind {
-    color: var(--color-faint);
-    font-size: var(--text-caption);
-  }
-
   .lift-plain p {
-    margin: 0 0 8px;
+    margin: 0;
     color: var(--color-muted);
   }
 

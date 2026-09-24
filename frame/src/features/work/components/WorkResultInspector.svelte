@@ -2,10 +2,19 @@
   import type { WorkSession } from "$domain/work";
   import type { ResultReference } from "../lib/project-environment-results";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
-  import Artifact from "$shared/ui/data/Artifact";
+  import Artifact, { DocumentView } from "$shared/ui/data/Artifact";
   import Evidence, { type EvidenceView } from "$shared/ui/data/Evidence";
   import Compare from "./compare/Compare.svelte";
   import Button from "$shared/ui/Button";
+  import LiftHeader from "./LiftHeader.svelte";
+  import SourcesRail from "./SourcesRail.svelte";
+  import {
+    CheckListIcon,
+    Doc01Icon,
+    GitCompareIcon,
+    Table01Icon,
+    ChartColumnIcon,
+  } from "../lib/icons";
   import { artifactView } from "../lib/project-work";
   import { compareModel, type CompareCell, type ComparePicture } from "../lib/compare";
   import { correctedMatrix } from "../lib/correct";
@@ -75,6 +84,47 @@
       decision: "accepted",
     });
   }
+  /** Everything the result cites, once each, for the rail. */
+  const cited = $derived.by(() => {
+    const content = view?.content;
+    if (!view || !content || content.kind === "sources") return [];
+    const all: EvidenceReference[] = [...view.evidence];
+    if (content.kind === "matrix")
+      for (const row of content.cells) for (const cell of row) all.push(...cell.evidence);
+    if (content.kind === "findings") for (const item of content.items) all.push(...item.evidence);
+    return [...new Map(all.map((entry) => [entry.key, entry])).values()];
+  });
+  const icon = $derived(
+    compare || view?.content.kind === "comparison"
+      ? GitCompareIcon
+      : view?.content.kind === "findings"
+        ? CheckListIcon
+        : view?.content.kind === "table"
+          ? Table01Icon
+          : view?.content.kind === "chart"
+            ? ChartColumnIcon
+            : Doc01Icon,
+  );
+  const kind = $derived(
+    compare || view?.content.kind === "comparison"
+      ? m.work_lift_comparison()
+      : view?.content.kind === "findings"
+        ? m.work_env_findings()
+        : m.work_env_result(),
+  );
+  const meta = $derived.by(() => {
+    const content = view?.content;
+    if (compare)
+      return m.work_lift_compare_meta({
+        subjects: compare.columns.length,
+        rows: compare.rows.length,
+      });
+    if (content?.kind === "findings")
+      return content.items.length === 1
+        ? m.work_lift_claims_one()
+        : m.work_lift_claims({ count: content.items.length });
+    return session.projection?.work.objective ?? "";
+  });
   let evidence = $state.raw<EvidenceView | null>(null);
   let selectedSource = $derived(source);
   /** One click, one destination: a page opens in the pane, a file in the lift,
@@ -129,15 +179,25 @@
 
 {#if view}
   <section class="result">
-    <h2>{view.title}</h2>
+    <LiftHeader {kind} title={view.title} {meta} {icon} />
     {#if compare}<Compare
         model={compare}
         correctable={settled}
         onevidence={pick}
         oncorrect={(cell, text) => void correct(cell, text)}
       />
+    {:else if view.content.kind === "document"}<div class="reading">
+        {#if view.content.formatted}<DocumentView
+            document={view.content.formatted}
+            onlink={onopen}
+          />
+        {:else}{#each view.content.paragraphs as paragraph, index (index)}<p>
+              {paragraph}
+            </p>{/each}{/if}
+      </div>
     {:else}<Artifact artifact={view} embedded onevidence={pick} onlink={onopen} />{/if}
     {#if evidence}<Evidence {evidence} {onopen} />{/if}
+    <SourcesRail references={cited} onpick={pick} />
     {#if accepting}<footer>
         <Button size="compact" onclick={accept}>{m.work_env_accept_result()}</Button>
       </footer>{/if}
@@ -157,10 +217,18 @@
     justify-content: flex-end;
   }
 
-  h2 {
-    margin: 0 28px 0 0;
-    font-size: var(--text-title);
-    font-weight: 600;
-    letter-spacing: -0.01em;
+  /* Reading mode: a page, not a card. */
+  .reading {
+    inline-size: 100%;
+    max-inline-size: 640px;
+    margin-inline: auto;
+    font-size: var(--text-page-body);
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+  }
+
+  .reading p {
+    margin-block: 0 12px;
+    white-space: pre-wrap;
   }
 </style>

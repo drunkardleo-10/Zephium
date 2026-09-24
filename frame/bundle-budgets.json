@@ -169,9 +169,9 @@
     "description": "Measured 64732 JS and 5077 CSS bytes: one file record or proposed change, opened from the lift."
   },
   "lazy:features/work/components/WorkResultInspector.svelte": {
-    "js": 148200,
-    "css": 22400,
-    "description": "Measured 147677 JS and 22233 CSS bytes: the lift renders the result itself, the quiet per-cell correction and the one Accept the review state needs; the card mode of the result renderers, source glyphs on chips, and bars for numeric compare rows add 6.6 KB."
+    "js": 158400,
+    "css": 25000,
+    "description": "Measured 147677 JS and 22233 CSS bytes: the lift renders the result itself, the quiet per-cell correction and the one Accept the review state needs; the card mode of the result renderers, source glyphs on chips, and bars for numeric compare rows add 6.6 KB. Reading mode, the lift header and the collapsed sources rail add 9.3 KB JS and 2.5 KB CSS (158031 and 24772 measured)."
   },
   "lazy:features/notes/components/NoteEditorHost.svelte": {
     "js": 96000,
@@ -179,9 +179,9 @@
     "description": "Single-note editor host for the Work lift; shares the Notes editor graph."
   },
   "lazy:features/work/components/WorkSubjectInspector.svelte": {
-    "js": 110000,
-    "css": 8500,
-    "description": "Measured 107031 JS and 7994 CSS bytes: the product view of one subject, its admitted pictures, facts with sources, and the pages behind them."
+    "js": 117700,
+    "css": 9400,
+    "description": "Measured 107031 JS and 7994 CSS bytes: the product view of one subject, its admitted pictures, facts with sources, and the pages behind them. The lift header and the sources rail add 7.2 KB JS and 1.1 KB CSS (117296 and 9141 measured)."
   },
   "lazy:features/work/components/pane/TakeoverPane.svelte": {
     "js": 73000,
