@@ -1256,6 +1256,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         )
         .validate()
     };
+    assert!(finish(vec!["Pick the Airbnb for Jan 4–23", "Book the LOT fare"]).is_ok());
     assert!(finish(vec!["Add Tower Bridge to cart", "Watch the price"]).is_ok());
     assert!(finish(vec!["a", "b", "c", "d"]).is_err());
     assert!(finish(vec!["a", "a"]).is_err());
