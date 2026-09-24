@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-durable-runtime = ["macos-work", "dep:zephium-core", "dep:zephium-ipc", "zephium-app/work-runtime", "dep:tokio"]
+durable-runtime = ["macos-work", "dep:serde_json", "dep:zephium-core", "dep:zephium-ipc", "zephium-app/work-runtime", "dep:tokio"]
 macos-work = ["dep:zephium-app", "dep:zephium-engine", "dep:zephium-store", "dep:zephium-agent-controller", "dep:zephium-agent-provider-transport", "dep:zephium-agentic"]
 public-qualification = [
     "macos-work",
@@ -28,7 +28,7 @@ retained-qualification = ["public-qualification", "zephium-engine/native-agentic
 retained-public-qualification = ["retained-qualification", "zephium-engine/native-agentic-public-resource-probe"]
 
 [dependencies]
-serde_json.workspace = true
+serde_json = { workspace = true, optional = true }
 zephium-ipc = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["time"] }
 zephium-app = { workspace = true, optional = true, features = ["work-execution"] }
@@ -39,3 +39,6 @@ zephium-agent-provider-transport = { workspace = true, optional = true }
 zephium-agentic = { workspace = true, optional = true }
 zephium-agent-runtime = { workspace = true, optional = true }
 zephium-core = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
