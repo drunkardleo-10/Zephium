@@ -893,6 +893,7 @@ fn tab_view(
         title: tab.title.clone(),
         url: tab.url.as_ref().map(ToString::to_string),
         loading: tab.loading,
+        popup_blocked: tab.popup_blocked,
         can_go_back: tab.can_go_back,
         can_go_forward: tab.can_go_forward,
         icon,

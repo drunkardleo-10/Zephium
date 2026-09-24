@@ -292,6 +292,20 @@ impl Items {
         }
     }
 
+    /// Attach a preconfigured native popup without issuing Create/Navigate or
+    /// claiming a URL commit. Only later native observations attribute content.
+    pub fn adopt_native_view(&mut self, id: ItemId) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        if tab.view || tab.url.is_some() {
+            return false;
+        }
+        tab.view = true;
+        tab.loading = true;
+        true
+    }
+
     pub fn ensure_view(&mut self, id: ItemId) -> Vec<Effect> {
         if let Some(tab) = self.tab_mut(id) {
             if !tab.view {
@@ -372,9 +386,15 @@ impl Items {
         }
     }
 
+    pub fn set_popup_blocked(&mut self, id: ItemId, blocked: bool) {
+        if let Some(tab) = self.tab_mut(id) {
+            tab.popup_blocked = blocked;
+        }
+    }
     pub fn set_committed_url(&mut self, id: ItemId, url: Url) -> bool {
         if let Some(tab) = self.tab_mut(id) {
             tab.url = Some(url);
+            tab.popup_blocked = false;
             self.pending_navigations.remove(&id);
             true
         } else {

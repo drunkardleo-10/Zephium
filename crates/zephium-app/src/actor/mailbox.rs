@@ -70,7 +70,9 @@ impl CoalescedKey {
             | EngineEvent::PresentationReady { id, .. } => Self::Presentation(*id),
             EngineEvent::NavState { id, .. } => Self::Navigation(*id),
             EngineEvent::ZoomSettled { id, .. } => Self::Zoom(*id),
-            EngineEvent::NativeActionFailed { id, .. } => Self::NativeAction(*id),
+            EngineEvent::NativeActionFailed { id, .. } | EngineEvent::PageOpenBlocked { id } => {
+                Self::NativeAction(*id)
+            }
             EngineEvent::ExtensionActionsInvalidated { profile } => {
                 Self::ExtensionActions(*profile)
             }
@@ -1109,7 +1111,10 @@ fn command_is_critical(command: &Command) -> bool {
             | Command::BrowserChromeRestored { .. }
             | Command::ChromePresentationApplied { .. }
             | Command::Engine(
-                EngineEvent::UrlChanged { .. }
+                EngineEvent::NativeTabCloseRequested { .. }
+                    | EngineEvent::NativeTabOpened { .. }
+                    | EngineEvent::LinkedDownloadStarted { .. }
+                    | EngineEvent::UrlChanged { .. }
                     | EngineEvent::PresentationPending { .. }
                     | EngineEvent::PresentationReady { .. }
                     | EngineEvent::RuntimeRestartRequired

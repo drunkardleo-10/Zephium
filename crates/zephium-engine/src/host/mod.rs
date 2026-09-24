@@ -26,6 +26,8 @@ mod extensions;
 mod file_uploads;
 mod lifecycle;
 mod navigation;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod page_open;
 mod page_ops;
 #[cfg(target_os = "macos")]
 mod page_permissions;
@@ -702,6 +704,8 @@ pub(crate) struct EngineHost {
     page_permissions: page_permissions::PagePermissionBroker,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) downloads: Option<Rc<downloads::Downloads>>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    native_open_authority: Arc<crate::NativeOpenAuthority>,
     native_resource_accounting_failed: bool,
     navigation_snapshots: HashMap<ItemId, NavigationSnapshot>,
     partitions: HashMap<ItemId, Partition>,

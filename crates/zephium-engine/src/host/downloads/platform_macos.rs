@@ -63,19 +63,22 @@ pub(super) struct Source {
     activity: NavigationActivity,
     view: Retained<WKWebView>,
     window: Retained<NSWindow>,
+    initial_open: bool,
 }
 impl Source {
     pub(super) fn live(&self) -> bool {
         self.permit.active_token().is_some()
-            && self.surface_intent.load(Ordering::Acquire)
+            && (self.initial_open || self.surface_intent.load(Ordering::Acquire))
             && self.navigation.matches_activity(self.activity)
-            && unsafe { self.view.superview() }
-                .is_some_and(|parent| !parent.isHiddenOrHasHiddenAncestor())
+            && (self.initial_open
+                || unsafe { self.view.superview() }
+                    .is_some_and(|parent| !parent.isHiddenOrHasHiddenAncestor()))
             && self.window.isVisible()
-            && self
-                .view
-                .window()
-                .is_some_and(|window| std::ptr::eq(&*window, &*self.window))
+            && (self.initial_open
+                || self
+                    .view
+                    .window()
+                    .is_some_and(|window| std::ptr::eq(&*window, &*self.window)))
     }
 }
 
@@ -104,6 +107,7 @@ impl Downloads {
         surface_intent: Arc<AtomicBool>,
         navigation: NavigationEpochTracker,
         native: &WKDownload,
+        mut initial: Option<InitialDownload>,
     ) {
         if self.stopping.get()
             || self.retired.borrow().contains(&partition.profile())
@@ -111,7 +115,7 @@ impl Downloads {
             || self.work.get() >= MAX_BACKGROUND_WORK
             || !self.private_cleanup_capacity(partition)
             || permit.active_token().is_none()
-            || !surface_intent.load(Ordering::Acquire)
+            || (initial.is_none() && !surface_intent.load(Ordering::Acquire))
         {
             unsafe { native.cancel(None) };
             return;
@@ -139,7 +143,12 @@ impl Downloads {
             unsafe { native.cancel(None) };
             return;
         };
-        let Some(window) = view.window() else {
+        let initial_open = initial.is_some();
+        let Some(window) = initial
+            .as_ref()
+            .map(|context| context.window.clone())
+            .or_else(|| view.window())
+        else {
             unsafe { native.cancel(None) };
             return;
         };
@@ -154,6 +163,7 @@ impl Downloads {
             surface_intent,
             view,
             window,
+            initial_open,
         };
         if !source.live() || !source.window.isKeyWindow() {
             unsafe { native.cancel(None) };
@@ -234,6 +244,9 @@ impl Downloads {
                 destination: None,
                 panel: None,
                 panel_lease: None,
+                on_started: initial
+                    .as_mut()
+                    .and_then(|context| context.on_started.take()),
                 authorized: false,
                 cancelling: false,
                 persisting_terminal: false,

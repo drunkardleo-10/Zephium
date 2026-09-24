@@ -824,6 +824,51 @@ pub enum ContentRuleSettlement {
     },
 }
 
+type NativeTabDecision = Box<dyn FnOnce(bool) + Send>;
+struct NativeTabAdoptionInner(std::sync::Mutex<Option<NativeTabDecision>>);
+#[derive(Clone)]
+pub struct NativeTabAdoption(Arc<NativeTabAdoptionInner>);
+impl NativeTabAdoption {
+    pub fn new(done: impl FnOnce(bool) + Send + 'static) -> Self {
+        Self(Arc::new(NativeTabAdoptionInner(std::sync::Mutex::new(
+            Some(Box::new(done)),
+        ))))
+    }
+    pub fn finish(&self, accepted: bool) {
+        let done = self
+            .0
+             .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(accepted);
+        }
+    }
+}
+impl Drop for NativeTabAdoptionInner {
+    fn drop(&mut self) {
+        if let Some(done) = self
+            .0
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            done(false);
+        }
+    }
+}
+impl std::fmt::Debug for NativeTabAdoption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NativeTabAdoption")
+    }
+}
+impl PartialEq for NativeTabAdoption {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineEvent {
     /// A native browser environment reported that a newer runtime is
@@ -992,6 +1037,23 @@ pub enum EngineEvent {
         id: ItemId,
         can_go_back: bool,
         can_go_forward: bool,
+    },
+    /// The engine already owns this fully configured native child. Shell must
+    /// adopt the exact id or reject the lease; it must never replay the URL.
+    NativeTabOpened {
+        id: ItemId,
+        child: ItemId,
+        foreground: bool,
+        adoption: NativeTabAdoption,
+    },
+    NativeTabCloseRequested {
+        id: ItemId,
+    },
+    PageOpenBlocked {
+        id: ItemId,
+    },
+    LinkedDownloadStarted {
+        id: ItemId,
     },
     NewWindowRequested {
         id: ItemId,
@@ -1221,5 +1283,33 @@ mod user_content_tests {
             content.validate(),
             Err(UserContentApplyFailure::OwnerBudgetExceeded)
         );
+    }
+}
+
+#[cfg(test)]
+mod native_tab_adoption_tests {
+    use super::*;
+    #[test]
+    fn abandoned_native_tabs_are_rejected_once_after_the_last_clone() {
+        let (send, receive) = std::sync::mpsc::channel();
+        let lease = NativeTabAdoption::new(move |accepted| send.send(accepted).unwrap());
+        let retained = lease.clone();
+        drop(lease);
+        assert!(receive.try_recv().is_err());
+        drop(retained);
+        assert!(!receive.recv().unwrap());
+        assert!(receive.try_recv().is_err());
+    }
+    #[test]
+    fn a_settled_adoption_cannot_be_rejected_by_a_late_clone() {
+        let (send, receive) = std::sync::mpsc::channel();
+        let lease = NativeTabAdoption::new(move |accepted| send.send(accepted).unwrap());
+        let retained = lease.clone();
+        lease.finish(true);
+        retained.finish(false);
+        drop(lease);
+        drop(retained);
+        assert!(receive.recv().unwrap());
+        assert!(receive.try_recv().is_err());
     }
 }

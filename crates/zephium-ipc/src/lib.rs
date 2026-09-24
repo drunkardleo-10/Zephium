@@ -16,6 +16,8 @@ pub struct TabView {
     pub title: String,
     pub url: Option<String>,
     pub loading: bool,
+    #[serde(default)]
+    pub popup_blocked: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub icon: Option<IconRef>,

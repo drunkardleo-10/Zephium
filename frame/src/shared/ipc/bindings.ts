@@ -1298,6 +1298,7 @@ export type TabView = {
 	title: string,
 	url: string | null,
 	loading: boolean,
+	popup_blocked?: boolean,
 	can_go_back: boolean,
 	can_go_forward: boolean,
 	icon: IconRef | null,

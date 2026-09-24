@@ -184,6 +184,11 @@ impl AgentLifecycleOwner {
 
 mod browser_pages;
 
+struct NativeOpener {
+    source: ItemId,
+    activate_when_presentable: bool,
+}
+
 pub struct Shell {
     #[cfg(feature = "work-execution")]
     work: Option<Box<crate::work::ApplicationWork>>,
@@ -210,6 +215,7 @@ pub struct Shell {
     user_content_status: user_content_status::UserContentStatus,
     crash: CrashState,
     bootstrapped: bool,
+    native_openers: std::collections::HashMap<ItemId, NativeOpener>,
     persistence: PersistenceState,
     shutdown_result: Option<ShutdownOutcome>,
     self_queue: Option<CommandQueue>,
@@ -477,6 +483,7 @@ impl Shell {
             user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
             bootstrapped: false,
+            native_openers: std::collections::HashMap::new(),
             persistence: PersistenceState::default(),
             shutdown_result: None,
             self_queue: None,

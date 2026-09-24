@@ -245,7 +245,6 @@ impl EngineHost {
         source_permit: &EventPermit,
         source_navigation: &NavigationEpochTracker,
         epoch: NavigationEpoch,
-        title: String,
     ) {
         if !self.navigation_is_attributed(id, source_permit, source_navigation, epoch) {
             return;
@@ -256,7 +255,24 @@ impl EngineHost {
         if !view.presentable || view.title_ready != Some(epoch) {
             return;
         }
-        source_permit.emit(&self.sink, EngineEvent::TitleChanged { id, title });
+        // KVO/COM title observations may wait behind navigation settlement.
+        // A pre-finish empty title must not overwrite the freshly sampled title
+        // of that same epoch. Read current native state when this task runs.
+        let title = view
+            .document_title()
+            .ok()
+            .flatten()
+            .map(|title| bounded_title(&title));
+        let still_current = self
+            .views
+            .get(&id)
+            .is_some_and(|view| view.presentable && view.title_ready == Some(epoch))
+            && self.navigation_is_attributed(id, source_permit, source_navigation, epoch);
+        if still_current {
+            if let Some(title) = title {
+                source_permit.emit(&self.sink, EngineEvent::TitleChanged { id, title });
+            }
+        }
     }
 
     pub(super) fn emit_navigation_observation(
@@ -539,6 +555,11 @@ impl EngineHost {
                 source_navigation,
                 epoch,
             );
+        } else {
+            // Title KVO may have arrived while this exact document was still
+            // behind the chrome acknowledgement barrier. Resample now rather
+            // than trusting or replaying an earlier callback payload.
+            self.emit_title_observation(id, source_permit, source_navigation, epoch);
         }
     }
 

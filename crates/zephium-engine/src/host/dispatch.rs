@@ -370,12 +370,19 @@ const NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY: usize =
         - NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY;
 static PENDING_OVERFLOW_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(4);
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "startup injects distinct native ownership and terminal-failure capabilities"
+)]
 pub(crate) fn install(
     #[cfg(any(target_os = "macos", target_os = "windows"))] parent: RawWindowHandle,
     data_root: PathBuf,
     initial_user_content_generation: UserContentGeneration,
     initial_user_content: UserContent,
     extension_runtime_gate: super::extension_runtime::ExtensionRuntimeFactoryGate,
+    #[cfg(any(target_os = "macos", target_os = "windows"))] native_open_authority: Arc<
+        crate::NativeOpenAuthority,
+    >,
     sink: crate::EngineEventIngressSink,
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
 ) -> Result<(), String> {
@@ -492,6 +499,8 @@ pub(crate) fn install(
             page_permissions: super::page_permissions::PagePermissionBroker::default(),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             downloads: None,
+            #[cfg(any(target_os="macos",target_os="windows"))]
+            native_open_authority,
             native_resource_accounting_failed: false,
             navigation_snapshots: HashMap::new(),
             partitions: HashMap::new(),
@@ -602,6 +611,42 @@ where
     F: FnOnce(&mut EngineHost) + 'static,
 {
     with_priority(HostTaskPriority::Normal, None, f)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) fn try_open_native_tab(
+    source: zephium_core::ids::ItemId,
+    permit: &super::permits::EventPermit,
+    activity: crate::navigation_epoch::NavigationActivity,
+    url: &str,
+    features: wry::NewWindowFeatures,
+) -> wry::NewWindowResponse {
+    if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
+        return wry::NewWindowResponse::Deny;
+    }
+    HOST.with(|host| {
+        let Ok(mut slot) = host.try_borrow_mut() else {
+            return wry::NewWindowResponse::Deny;
+        };
+        let Some(host) = slot.as_mut() else {
+            return wry::NewWindowResponse::Deny;
+        };
+        host.open_native_tab(source, permit, activity, url, features)
+    })
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn finish_windows_native_tab(child: zephium_core::ids::ItemId, attached: bool) -> bool {
+    HOST.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return false;
+        };
+        let Some(host) = slot.as_mut() else {
+            return false;
+        };
+        host.finish_windows_native_tab(child, attached);
+        true
+    })
 }
 
 /// Local AppKit monitors must decide synchronously whether to consume an

@@ -59,6 +59,21 @@ const MAX_UI_CALLS: usize = 4;
 const MAX_BACKGROUND_WORK: usize = 32;
 const RECENT_LIMIT: usize = 64;
 
+/// One native, user-admitted initial navigation may download before its child
+/// is presented. Dropping an unconsumed admission also retires its empty tab.
+pub(in crate::host) struct InitialDownload {
+    #[cfg(target_os = "macos")]
+    pub window: objc2::rc::Retained<objc2_app_kit::NSWindow>,
+    pub on_started: Option<Box<dyn FnOnce()>>,
+}
+impl Drop for InitialDownload {
+    fn drop(&mut self) {
+        if let Some(done) = self.on_started.take() {
+            done();
+        }
+    }
+}
+
 struct Transfer {
     partition: Partition,
     record: DownloadRecord,
@@ -69,6 +84,7 @@ struct Transfer {
     destination: Option<Destination>,
     panel: Option<SavePanel>,
     panel_lease: Option<DialogLease>,
+    on_started: Option<Box<dyn FnOnce()>>,
     authorized: bool,
     cancelling: bool,
     persisting_terminal: bool,
@@ -308,7 +324,7 @@ impl Downloads {
     }
 
     fn terminal(&self, id: DownloadId, state: DownloadState, error: Option<DownloadError>) {
-        let destination = {
+        let (destination, on_started) = {
             let mut active = self.active.borrow_mut();
             let Some(transfer) = active.get_mut(&id) else {
                 return;
@@ -326,8 +342,11 @@ impl Downloads {
                 };
             transfer.record.revision += 1;
             transfer.persisting_terminal = true;
-            transfer.destination.take()
+            (transfer.destination.take(), transfer.on_started.take())
         };
+        if let Some(started) = on_started {
+            started();
+        }
         if let Some(destination) = destination {
             // A terminal native callback proves it no longer writes payload.
             self.cleanup(destination);
@@ -535,11 +554,19 @@ impl Downloads {
                                 let reply = transfer.destination_reply.take()?;
                                 transfer.record.state = DownloadState::Receiving;
                                 transfer.record.revision += 1;
-                                Some((reply, path, transfer.partition.profile()))
+                                Some((
+                                    reply,
+                                    path,
+                                    transfer.partition.profile(),
+                                    transfer.on_started.take(),
+                                ))
                             })
                     };
-                    if let Some((reply, path, profile)) = start {
+                    if let Some((reply, path, profile, on_started)) = start {
                         reply.finish(Some(path));
+                        if let Some(started) = on_started {
+                            started();
+                        }
                         (self.notify)(profile);
                     }
                 } else {

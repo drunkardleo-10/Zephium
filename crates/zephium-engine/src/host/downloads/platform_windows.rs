@@ -62,12 +62,13 @@ pub(super) struct Source {
     controller: ICoreWebView2Controller,
     parent: HWND,
     root: HWND,
+    initial_open: bool,
 }
 impl Source {
     pub(super) fn live(&self) -> bool {
         let mut parent = HWND::default();
         self.permit.active_token().is_some()
-            && self.surface_intent.load(Ordering::Acquire)
+            && (self.initial_open || self.surface_intent.load(Ordering::Acquire))
             && self.navigation.matches_activity(self.activity)
             && unsafe { self.controller.ParentWindow(&mut parent) }.is_ok()
             && parent == self.parent
@@ -304,16 +305,21 @@ impl Downloads {
         permit: EventPermit,
         surface_intent: Arc<AtomicBool>,
         navigation: NavigationEpochTracker,
-        controller: &ICoreWebView2Controller,
-        args: &ICoreWebView2DownloadStartingEventArgs,
+        request: (
+            &ICoreWebView2Controller,
+            &ICoreWebView2DownloadStartingEventArgs,
+        ),
+        mut initial: Option<InitialDownload>,
     ) {
+        let (controller, args) = request;
+        let initial_open = initial.is_some();
         if self.stopping.get()
             || self.retired.borrow().contains(&partition.profile())
             || self.active.borrow().len() >= MAX_ACTIVE_DOWNLOADS
             || self.work.get() >= MAX_BACKGROUND_WORK
             || !self.private_cleanup_capacity(partition)
             || permit.active_token().is_none()
-            || !surface_intent.load(Ordering::Acquire)
+            || (!initial_open && !surface_intent.load(Ordering::Acquire))
         {
             return;
         }
@@ -336,6 +342,7 @@ impl Downloads {
             controller: controller.clone(),
             parent,
             root: unsafe { GetAncestor(parent, GA_ROOT) },
+            initial_open,
         };
         if !source.key() {
             return;
@@ -474,6 +481,9 @@ impl Downloads {
                 destination: None,
                 panel: None,
                 panel_lease: None,
+                on_started: initial
+                    .as_mut()
+                    .and_then(|context| context.on_started.take()),
                 authorized: false,
                 cancelling: false,
                 persisting_terminal: false,

@@ -335,6 +335,26 @@ impl Shell {
                 self.items.set_nav_flags(id, can_go_back, can_go_forward);
                 self.project_tab(id);
             }
+            EngineEvent::NativeTabOpened {
+                id,
+                child,
+                foreground,
+                adoption,
+            } => self.adopt_linked_native_tab(id, child, foreground, adoption),
+            EngineEvent::NativeTabCloseRequested { id } => self.close_owned_native_tab(id),
+            EngineEvent::PageOpenBlocked { id } => {
+                self.items.set_popup_blocked(id, true);
+                self.project_tab(id);
+            }
+            EngineEvent::LinkedDownloadStarted { id } => {
+                if self.items.tab(id).is_some_and(|tab| {
+                    tab.url
+                        .as_ref()
+                        .is_none_or(|url| url.as_str() == "about:blank")
+                }) {
+                    self.close_owned_native_tab(id);
+                }
+            }
             EngineEvent::NewWindowRequested { id, url } => self.open_linked_tab(id, &url),
             EngineEvent::FaviconPixels { id, page_url, rgba } => {
                 self.favicon_pixels(id, &page_url, rgba);
@@ -554,6 +574,10 @@ impl Shell {
             | EngineEvent::FaviconPixels { id, .. }
             | EngineEvent::DiscardSafety { id, .. }
             | EngineEvent::NavState { id, .. }
+            | EngineEvent::NativeTabCloseRequested { id }
+            | EngineEvent::PageOpenBlocked { id }
+            | EngineEvent::NativeTabOpened { id, .. }
+            | EngineEvent::LinkedDownloadStarted { id }
             | EngineEvent::NewWindowRequested { id, .. }
             | EngineEvent::DownloadRequested { id, .. }
             | EngineEvent::ViewCreationFailed { id }

@@ -1060,6 +1060,10 @@ impl RetirementGate {
             | event @ EngineEvent::FaviconPixels { id, .. }
             | event @ EngineEvent::DiscardSafety { id, .. }
             | event @ EngineEvent::NavState { id, .. }
+            | event @ EngineEvent::NativeTabCloseRequested { id }
+            | event @ EngineEvent::PageOpenBlocked { id }
+            | event @ EngineEvent::NativeTabOpened { id, .. }
+            | event @ EngineEvent::LinkedDownloadStarted { id }
             | event @ EngineEvent::NewWindowRequested { id, .. }
             | event @ EngineEvent::DownloadRequested { id, .. }
             | event @ EngineEvent::Captured { id, .. }
@@ -1302,6 +1306,66 @@ fn retirement_filtering_sink(
     })
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) struct NativeOpenAuthority {
+    retirement: Arc<Mutex<RetirementGate>>,
+    dispatch: MainThreadDispatch,
+    fatal: Arc<dyn Fn(&'static str) + Send + Sync>,
+}
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl NativeOpenAuthority {
+    pub(crate) fn reserve(
+        &self,
+        source: ItemId,
+        source_token: &Arc<AtomicBool>,
+        child: ItemId,
+        profile: ProfileId,
+    ) -> Option<Arc<AtomicBool>> {
+        let mut gate = lock_retirement_gate(&self.retirement);
+        if !gate.allows_item_token(source, source_token)
+            || gate.active_profile(source) != Some(profile)
+        {
+            return None;
+        }
+        gate.reserve_item(child, profile)
+    }
+    pub(crate) fn release_failed(&self, child: ItemId, token: &Arc<AtomicBool>) {
+        lock_retirement_gate(&self.retirement).forget_item_if_token(child, token);
+    }
+    pub(crate) fn adoption(
+        &self,
+        child: ItemId,
+        token: Arc<AtomicBool>,
+    ) -> zephium_core::ports::engine::NativeTabAdoption {
+        let retirement = self.retirement.clone();
+        let dispatch = self.dispatch.clone();
+        let fatal = self.fatal.clone();
+        zephium_core::ports::engine::NativeTabAdoption::new(move |accepted| {
+            if !token.load(Ordering::Acquire) {
+                return;
+            }
+            if !accepted {
+                token.store(false, Ordering::Release);
+            }
+            let inner_fatal = fatal.clone();
+            if !dispatch(Box::new(move || {
+                if !host::try_with(move |host| {
+                    if accepted {
+                        host.finish_native_tab_adoption(child, &token);
+                    } else {
+                        host.close(child);
+                        lock_retirement_gate(&retirement).forget_item_if_token(child, &token);
+                    }
+                }) {
+                    inner_fatal("native tab adoption cleanup was rejected");
+                }
+            })) {
+                fatal("native tab adoption cleanup dispatch was rejected");
+            }
+        })
+    }
+}
+
 pub struct WebviewEngine {
     dispatch: MainThreadDispatch,
     sink: EngineEventIngressSink,
@@ -1504,6 +1568,12 @@ pub fn install(
         initial_user_content.generation,
         initial_user_content.content,
         extension_runtime_host.gate(),
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        Arc::new(NativeOpenAuthority {
+            retirement: retirement.clone(),
+            dispatch: dispatch.clone(),
+            fatal: native_terminal_failure.clone(),
+        }),
         sink.clone(),
         native_terminal_failure,
     )?;

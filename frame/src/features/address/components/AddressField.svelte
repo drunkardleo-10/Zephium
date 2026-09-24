@@ -214,9 +214,25 @@
     {#if !compact && trailing}{@render trailing()}{/if}
   </div>
   {#if failed}<p id="address-error" role="alert" class="sr-only">{m.browser_nav_failed()}</p>{/if}
+  {#if tabs.activeTab()?.popup_blocked}
+    <p class="popup-notice" role="status" title={m.address_popup_blocked()}>
+      <Icon icon={Alert02Icon} size={14} />
+      {#if !compact}<span>{m.address_popup_blocked()}</span>{/if}
+    </p>
+  {/if}
 </form>
 
 <style>
+  .popup-notice {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin: 8px 0 0;
+    color: var(--color-label-secondary);
+    font-size: 11px;
+  }
+
   /* The input's travel is clipped here rather than by the field, whose tray
      opens a panel below it that must not be cut off. */
   .address-clip {

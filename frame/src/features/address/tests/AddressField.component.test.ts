@@ -59,3 +59,17 @@ test("the page taking focus from the chrome ends editing", async () => {
   window.dispatchEvent(new Event("blur"));
   expect(document.activeElement).not.toBe(input);
 });
+
+test("a native blocked-popup projection is visible without changing the address", async () => {
+  const { screen, input } = await field();
+  const tab = tabs.activeTab()!;
+  emitNativeEvent("tabChanged", {
+    ...tab,
+    projection_revision: revision(Date.now() + 1),
+    popup_blocked: true,
+  });
+  await expect
+    .element(screen.getByRole("status"))
+    .toHaveTextContent("A popup or new-tab request was blocked.");
+  expect(input.value).toBe("www.wikipedia.org");
+});

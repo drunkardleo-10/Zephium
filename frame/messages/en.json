@@ -1026,5 +1026,6 @@
   "download_cleanup_running": "Cleaning up\u2026",
   "download_cleanup_retry": "Retry cleanup",
   "download_windows_confirmation_help": "Windows currently requires a save confirmation for every download. Your chosen folder is used as the starting location.",
-  "download_source_context": "Generated in page at {origin}"
+  "download_source_context": "Generated in page at {origin}",
+  "address_popup_blocked": "A popup or new-tab request was blocked."
 }

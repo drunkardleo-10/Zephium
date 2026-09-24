@@ -443,6 +443,7 @@ impl Shell {
                     .insert(id, (navigation, pending.url.clone()));
                 self.presentation.deferred_first_content_layout.remove(&id);
                 self.cancel_exact_pending_presentation(id, navigation);
+                self.activate_presented_native_tab(id);
             }
             NativeDispatch::Rejected => {
                 self.schedule_exact_presentation_retry(
