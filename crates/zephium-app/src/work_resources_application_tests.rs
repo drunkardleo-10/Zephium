@@ -171,6 +171,46 @@ fn own_recovery_record_is_reviewable_like_an_interruption() {
 }
 
 #[test]
+fn group_pages_share_one_review_of_the_same_recovery_row() {
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let current = AgentWorkIncarnation::generate();
+    let mut bytes = *interrupted_record(current, 1).as_bytes();
+    bytes[1] = AgentWorkDisposition::RecoveryRequired as u8;
+    let record = AgentWorkRecord::decode(bytes).unwrap();
+    let group = RetainedWorkGroup::try_new(WorkId::generate(), 2).unwrap();
+    let (mut first, _, first_journal) = review_coordinator(vec![record], current);
+    let (mut second, native, second_journal) = review_coordinator(vec![record], current);
+    first.set_runtime_group(group.clone());
+    second.set_runtime_group(group);
+    let accept = crate::AgentWorkReviewDecision::AcceptFreshAdmission;
+    first.review(record, accept);
+    assert_eq!(first.phase(), AdmissionPhase::Reviewing);
+    second.review(record, accept);
+    assert_eq!(
+        second.last_review(),
+        Some(Err(AgentWorkJournalError::Unavailable))
+    );
+    assert_eq!(second.phase(), AdmissionPhase::NeedsReview);
+    let (request, completion) = first_journal.0.lock().unwrap().pop_front().unwrap();
+    let AgentWorkJournalRequest::CompareAndSet(mutation) = request else {
+        panic!("review CAS");
+    };
+    let next = mutation.next();
+    completion(Ok(AgentWorkJournalReply::Record(Some(next))));
+    first.poll(now());
+    assert!(first.ready());
+    // The peer takes the acknowledged row; it never races a second CAS.
+    second.review(record, accept);
+    assert!(second_journal.0.lock().unwrap().is_empty());
+    assert_eq!(second.last_review(), Some(Ok(next)));
+    assert_eq!(second.records(), &[next]);
+    assert!(second.ready());
+    assert_eq!(native.acquisitions.load(Ordering::Acquire), 0);
+}
+
+#[test]
 fn historical_review_bad_ack_and_stop_cannot_reopen_admission() {
     for stop in [false, true] {
         let incarnation = AgentWorkIncarnation::generate();

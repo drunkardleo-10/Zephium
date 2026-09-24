@@ -195,10 +195,15 @@ enum DurableReply {
     Artifact(AgentWorkArtifactReply),
 }
 
+type GroupReview = (AgentWorkRecord, Option<AgentWorkRecord>);
+
 #[derive(Clone)]
 pub(crate) struct RetainedWorkGroup {
     runtime: AgentRuntimeWorkerGroup,
     records: Arc<std::sync::Mutex<Vec<(ContextId, AgentWorkRecord)>>>,
+    // Historical rows under review by a page of this group: the exact row and,
+    // once acknowledged, the row the journal now holds.
+    reviews: Arc<std::sync::Mutex<Vec<GroupReview>>>,
     failed: Arc<std::sync::atomic::AtomicBool>,
     sealed: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -208,6 +213,7 @@ impl RetainedWorkGroup {
         Ok(Self {
             runtime: AgentRuntimeWorkerGroup::try_new(work, capacity)?,
             records: Arc::new(std::sync::Mutex::new(Vec::new())),
+            reviews: Arc::new(std::sync::Mutex::new(Vec::new())),
             failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sealed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
@@ -217,6 +223,34 @@ impl RetainedWorkGroup {
         self.records
             .lock()
             .map_or(true, |records| records.iter().any(|(id, _)| *id == context))
+    }
+    /// Claims the review of `record` for one page, or returns the row a peer's
+    /// acknowledged review left. `Err` while a peer's review is in flight.
+    fn begin_review(
+        &self,
+        record: AgentWorkRecord,
+    ) -> Result<Option<AgentWorkRecord>, AgentWorkJournalError> {
+        let mut reviews = self
+            .reviews
+            .lock()
+            .map_err(|_| AgentWorkJournalError::Conflict)?;
+        match reviews.iter().find(|(expected, _)| *expected == record) {
+            Some((_, Some(next))) => Ok(Some(*next)),
+            Some((_, None)) => Err(AgentWorkJournalError::Unavailable),
+            None if reviews.len() < MAX_DURABLE_AGENT_WORK_RUNS => {
+                reviews.push((record, None));
+                Ok(None)
+            }
+            None => Err(AgentWorkJournalError::Capacity),
+        }
+    }
+    // An unacknowledged review stays claimed: its row is uncertain.
+    fn settle_review(&self, expected: AgentWorkRecord, next: AgentWorkRecord) {
+        if let Ok(mut reviews) = self.reviews.lock() {
+            if let Some(entry) = reviews.iter_mut().find(|(row, _)| *row == expected) {
+                entry.1 = Some(next);
+            }
+        }
     }
     fn remember(
         &self,
@@ -670,6 +704,11 @@ impl RetainedWork {
                             | AgentWorkDisposition::Rejected
                     ) {
                         return Err(AgentWorkJournalError::Transition);
+                    }
+                    if let (Some(group), Some(expected)) =
+                        (&self.runtime_group, mutation.expected())
+                    {
+                        group.settle_review(expected, record);
                     }
                     self.last_review = Some(Ok(record));
                     self.phase = if self.stopping {
@@ -1269,12 +1308,39 @@ impl RetainedWork {
                 },
             )
         };
+        // Pages of one group claim from the same journal; one reviews a row,
+        // its peers take the acknowledged row instead of racing the CAS.
         match result {
-            Ok(mutation) => {
-                self.last_review = None;
-                self.phase = AdmissionPhase::Reviewing;
-                self.dispatch(AgentWorkJournalRequest::CompareAndSet(mutation));
-            }
+            Ok(mutation) => match self
+                .runtime_group
+                .as_ref()
+                .map(|group| group.begin_review(record))
+            {
+                None | Some(Ok(None)) => {
+                    self.last_review = None;
+                    self.phase = AdmissionPhase::Reviewing;
+                    self.dispatch(AgentWorkJournalRequest::CompareAndSet(mutation));
+                }
+                Some(Ok(Some(reviewed))) if reviewed.key() == record.key() => {
+                    if let Some(row) = self.inventory.iter_mut().find(|row| **row == record) {
+                        *row = reviewed;
+                    }
+                    self.last_review = Some(Ok(reviewed));
+                    self.phase = if self
+                        .inventory
+                        .iter()
+                        .all(|record| historical_record_admissible(*record))
+                    {
+                        AdmissionPhase::Ready
+                    } else {
+                        AdmissionPhase::NeedsReview
+                    };
+                }
+                Some(Ok(Some(_))) => {
+                    self.last_review = Some(Err(AgentWorkJournalError::Conflict));
+                }
+                Some(Err(error)) => self.last_review = Some(Err(error)),
+            },
             Err(error) => self.last_review = Some(Err(error)),
         }
     }
@@ -1616,7 +1682,7 @@ impl RetainedWork {
 /// uncertainty. This predicate never permits reuse of an active execution owner.
 /// A record whose actor is gone and whose debt stays historical: a prior
 /// process's interruption, or this process's own scoped recovery.
-fn reviewable(disposition: AgentWorkDisposition) -> bool {
+pub(super) fn reviewable(disposition: AgentWorkDisposition) -> bool {
     matches!(
         disposition,
         AgentWorkDisposition::Interrupted | AgentWorkDisposition::RecoveryRequired

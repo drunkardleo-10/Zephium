@@ -447,8 +447,9 @@ impl RetainedWorkHandle {
             .map(|value| value.records.clone())
             .unwrap_or_default()
     }
-    /// Explicit human review of the exact claimed historical interruption.
-    /// Queue acceptance is not a Store acknowledgement or resumed execution.
+    /// Explicit human review of the exact claimed historical interruption, or
+    /// of this process's own scoped recovery. Queue acceptance is not a Store
+    /// acknowledgement or resumed execution.
     pub fn review(
         &self,
         record: AgentWorkRecord,
@@ -461,7 +462,7 @@ impl RetainedWorkHandle {
             || projection.review_requested.is_some()
             || projection.review_active
             || !projection.records.contains(&record)
-            || record.disposition() != AgentWorkDisposition::Interrupted
+            || !super::application::reviewable(record.disposition())
         {
             return false;
         }
