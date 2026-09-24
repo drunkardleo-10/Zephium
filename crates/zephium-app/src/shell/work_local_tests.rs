@@ -46,11 +46,19 @@ fn finish_local() -> WorkAgentTurnOutput {
     result
 }
 
-#[tokio::test]
-async fn work_local_file_and_command_approval_journal() {
+#[test]
+fn work_local_file_and_command_approval_journal() {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(work_local_file_and_command_approval_journal_inner());
+}
+
+async fn work_local_file_and_command_approval_journal_inner() {
     let home = Home::new();
     let root = home.project();
     let file = root.join("version.txt").to_string_lossy().into_owned();
@@ -208,11 +216,19 @@ async fn work_local_file_and_command_approval_journal() {
         .unwrap();
 }
 
-#[tokio::test]
-async fn work_local_command_timeout_and_stop_settle_with_output() {
+#[test]
+fn work_local_command_timeout_and_stop_settle_with_output() {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(work_local_command_timeout_and_stop_settle_with_output_inner());
+}
+
+async fn work_local_command_timeout_and_stop_settle_with_output_inner() {
     let home = Home::new();
     let root = home.project();
     for stop in [false, true] {
@@ -323,11 +339,19 @@ async fn work_local_command_timeout_and_stop_settle_with_output() {
     }
 }
 
-#[tokio::test]
-async fn work_local_quit_recovers_command_as_failed_without_replay() {
+#[test]
+fn work_local_quit_recovers_command_as_failed_without_replay() {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(work_local_quit_recovers_command_as_failed_without_replay_inner());
+}
+
+async fn work_local_quit_recovers_command_as_failed_without_replay_inner() {
     let home = Home::new();
     let root = home.project();
     let dir = tempfile::tempdir().unwrap();
