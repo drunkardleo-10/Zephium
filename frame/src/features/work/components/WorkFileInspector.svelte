@@ -34,11 +34,24 @@
       for (const entry of execution.steps ?? []) if (entry.id === wanted) return entry;
     return undefined;
   });
-  const change = $derived(
-    step?.kind.kind === "write_file" || step?.kind.kind === "edit_file" ? step.kind : undefined,
-  );
+  const change = $derived.by(() => {
+    const kind = step?.kind;
+    switch (kind?.kind) {
+      case "write_file":
+      case "edit_file":
+      case "move_file":
+      case "delete_file":
+      case "run_command":
+        return kind;
+      default:
+        return undefined;
+    }
+  });
   const waiting = $derived(
-    !!change && step?.status === "running" && (change.decision ?? null) === null,
+    !!change &&
+      step?.status === "running" &&
+      (change.decision ?? null) === null &&
+      change.kind !== "run_command",
   );
   const declined = $derived(change?.decision === false);
   /** Once the change settles, the record holds what was actually applied. */
@@ -50,9 +63,17 @@
     return undefined;
   });
   const shown = $derived(applied ?? file);
-  const path = $derived(shown?.path ?? change?.path ?? "");
+  const path = $derived(
+    shown?.path ??
+      (change?.kind === "move_file"
+        ? change.from
+        : change?.kind === "run_command"
+          ? change.cwd
+          : (change?.path ?? "")),
+  );
   const blocked = $derived(!!session?.pending);
   let deciding = $state(false);
+  let loadAttempt = $state(0);
   async function decide(approve: boolean) {
     const current = proposal;
     if (!current || !waiting || blocked || deciding) return;
@@ -83,12 +104,33 @@
       {#if onback}<Button size="compact" onclick={onback}>{m.work_env_back()}</Button>{/if}
     </span>
   </header>
-  {#if shown}
+  {#if change?.kind === "run_command" && step && session}
+    {#key loadAttempt}
+      {#await import("./local/CommandInspector.svelte") then module}
+        <module.default {step} {session} {ondecided} />
+      {:catch}
+        <Button onclick={() => loadAttempt++}>{m.work_local_approval_failed()}</Button>
+      {/await}
+    {/key}
+  {:else if shown}
+    {#if shown.lines}<p class="facts">
+        {m.work_local_lines({
+          first: String(shown.lines.first),
+          last: String(shown.lines.last),
+          total: String(shown.lines.total),
+        })}
+      </p>{/if}
     {#if shown.text}<pre class="body">{shown.text}</pre>{:else}<p class="empty">
         {m.work_env_file_empty()}
       </p>{/if}
   {:else if declined}
     <p class="empty">{m.work_env_file_declined()}</p>
+  {:else if step?.local?.proposal}
+    <pre class="body">{step.local.proposal}</pre>
+  {:else if change?.kind === "move_file"}
+    <p>{m.work_local_move({ from: homePath(change.from), to: homePath(change.to) })}</p>
+  {:else if change?.kind === "delete_file"}
+    <p>{m.work_local_delete({ path: homePath(change.path) })}</p>
   {:else if change?.kind === "edit_file"}
     <div class="passages">
       <div class="passage removed">
@@ -108,7 +150,7 @@
   {:else}
     <p class="empty">{m.work_env_file_empty()}</p>
   {/if}
-  {#if waiting}
+  {#if waiting && change?.kind !== "run_command"}
     <footer>
       <Button variant="primary" disabled={blocked || deciding} onclick={() => void decide(true)}
         >{m.work_line_approve_change()}</Button

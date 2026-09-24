@@ -158,6 +158,11 @@
     "css": 22000,
     "description": "Measured 21835 CSS bytes: the card mode of the result renderers and source glyphs on evidence chips; account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog."
   },
+  "lazy:features/work/components/local/CommandInspector.svelte": {
+    "js": 68000,
+    "css": 6000,
+    "description": "Local command review and result, loaded only when inspecting a command; measured 64877 JS and 5070 CSS bytes including shared controls and runtime. Existing entry budgets are unchanged."
+  },
   "lazy:features/work/components/WorkFileInspector.svelte": {
     "js": 66000,
     "css": 6000,

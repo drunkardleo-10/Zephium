@@ -1689,13 +1689,59 @@ export type WorkChecklistItem = {
 	completed: boolean,
 };
 
+export type WorkCommandApprovalScopeV1 = "none" | "folder" | "command";
+
+export type WorkCommandClassV1 = "read" | "write" | "ask";
+
+export type WorkCommandEvidenceV1 = {
+	cwd: string,
+	command: string,
+	exit: number | null,
+	signal: number | null,
+	elapsed_ms: number,
+	bytes: number,
+	digest: string,
+	text: string,
+	truncated: boolean,
+};
+
 /** Idempotency correlation only, never an entity capability. */
 export type WorkCommandId = string;
+
+export type WorkCommandOutcomeV1 = {
+	exit: number | null,
+	signal: number | null,
+	elapsed_ms: number,
+	bytes: number,
+	digest: string,
+};
+
+export type WorkCommandOutputV1 = {
+	text: string,
+	bytes: number,
+	truncated: boolean,
+};
+
+export type WorkCommandPolicyV1 = {
+	class: WorkCommandClassV1,
+	reason: WorkCommandReasonV1,
+	scope: WorkCommandApprovalScopeV1,
+	root: string,
+};
+
+export type WorkCommandReasonV1 = "inspection" | "project_execution" | "file_change" | "unknown_program" | "network" | "destructive" | "privilege" | "outside_roots" | "shell_syntax";
 
 export type WorkCommandReceipt = {
 	command: WorkCommandId,
 	applied_revision: WorkRevision,
 	execution: WorkExecutionId,
+};
+
+export type WorkCommandRecordV1 = {
+	id: WorkArtifactId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	command: WorkCommandEvidenceV1,
 };
 
 /**
@@ -2091,7 +2137,7 @@ export type WorkEvidencePreviewV1_Serialize = {
 
 export type WorkEvidenceSourceV1 = { kind: "native_extraction" } | 
 /**  A file step inside a granted folder. */
-{ kind: "file"; path: string; name: string; file_kind: WorkFileKindV1 } | { kind: "provider_search"; provider: WorkSearchProvider; model: string; url: string; title: string; response_id: string; search_call_id: string };
+{ kind: "file"; path: string; name: string; file_kind: WorkFileKindV1 } | { kind: "command"; cwd: string; command: string; outcome: WorkCommandOutcomeV1 } | { kind: "provider_search"; provider: WorkSearchProvider; model: string; url: string; title: string; response_id: string; search_call_id: string };
 
 export type WorkExecutionAuthorization = "reviewed_plan" | "user_directed_public_read" | 
 /**  The user sent an objective; the routine public envelope is the grant. */
@@ -2109,7 +2155,9 @@ export type WorkExecutionFact_Deserialize = {
 	artifacts: WorkArtifactV1_Deserialize[],
 	provider_evidence?: WorkProviderSearchRecordV1_Deserialize[],
 	/**  What file steps disclosed: listings, excerpts, hits and applied diffs. */
-	file_evidence?: WorkFileRecordV1[],
+	file_evidence?: WorkFileRecordV1_Deserialize[],
+	command_evidence?: WorkCommandRecordV1[],
+	folder_approvals?: WorkFolderApprovalV1[],
 	/**  User edits and decisions never overwrite the original agent output. */
 	user_artifacts?: WorkArtifactUserState_Deserialize[],
 	/**  Why automation stopped for a person. Continuation is a fresh approval. */
@@ -2128,7 +2176,9 @@ export type WorkExecutionFact_Serialize = {
 	artifacts: WorkArtifactV1_Serialize[],
 	provider_evidence: WorkProviderSearchRecordV1_Serialize[],
 	/**  What file steps disclosed: listings, excerpts, hits and applied diffs. */
-	file_evidence?: WorkFileRecordV1[],
+	file_evidence?: WorkFileRecordV1_Serialize[],
+	command_evidence?: WorkCommandRecordV1[],
+	folder_approvals?: WorkFolderApprovalV1[],
 	/**  User edits and decisions never overwrite the original agent output. */
 	user_artifacts: WorkArtifactUserState_Serialize[],
 	/**  Why automation stopped for a person. Continuation is a fresh approval. */
@@ -2209,7 +2259,10 @@ export type WorkFieldUpdateV1_Serialize = {
 };
 
 /**  What one file step disclosed, bounded and never the whole file system. */
-export type WorkFileEvidenceV1 = {
+export type WorkFileEvidenceV1 = WorkFileEvidenceV1_Serialize | WorkFileEvidenceV1_Deserialize;
+
+/**  What one file step disclosed, bounded and never the whole file system. */
+export type WorkFileEvidenceV1_Deserialize = {
 	path: string,
 	name: string,
 	kind: WorkFileKindV1,
@@ -2219,15 +2272,54 @@ export type WorkFileEvidenceV1 = {
 	/**  The excerpt, listing, hits or applied diff shown to the agent. */
 	text: string,
 	truncated: boolean,
+	before_digest?: string | null,
+	after_digest?: string | null,
+	lines?: WorkFileLinesV1 | null,
 };
 
-export type WorkFileKindV1 = "directory" | "text" | "binary" | "search" | "written";
+/**  What one file step disclosed, bounded and never the whole file system. */
+export type WorkFileEvidenceV1_Serialize = {
+	path: string,
+	name: string,
+	kind: WorkFileKindV1,
+	bytes: number,
+	/**  Hex SHA-256 of the file bytes; empty for directories and searches. */
+	digest: string,
+	/**  The excerpt, listing, hits or applied diff shown to the agent. */
+	text: string,
+	truncated: boolean,
+	before_digest?: string | null,
+	after_digest?: string | null,
+	lines?: WorkFileLinesV1 | null,
+};
 
-export type WorkFileRecordV1 = {
+export type WorkFileKindV1 = "directory" | "text" | "binary" | "search" | "written" | "moved" | "deleted";
+
+export type WorkFileLinesV1 = {
+	first: number,
+	last: number,
+	total: number,
+};
+
+export type WorkFileRecordV1 = WorkFileRecordV1_Serialize | WorkFileRecordV1_Deserialize;
+
+export type WorkFileRecordV1_Deserialize = {
 	id: WorkArtifactId,
 	node: WorkPlanNodeId,
 	attempt: WorkAttemptId,
-	file: WorkFileEvidenceV1,
+	file: WorkFileEvidenceV1_Deserialize,
+};
+
+export type WorkFileRecordV1_Serialize = {
+	id: WorkArtifactId,
+	node: WorkPlanNodeId,
+	attempt: WorkAttemptId,
+	file: WorkFileEvidenceV1_Serialize,
+};
+
+export type WorkFileReplacementV1 = {
+	old: string,
+	new: string,
 };
 
 export type WorkFinding = WorkFinding_Serialize | WorkFinding_Deserialize;
@@ -2259,6 +2351,12 @@ export type WorkFolderAdmitV1 =
  *  or an existing path that is not a folder.
  */
 { kind: "refused"; not_a_folder: boolean };
+
+export type WorkFolderApprovalV1 = {
+	root: string,
+	/**  Unix seconds as decimal text, without a JavaScript integer precision loss. */
+	at: string,
+};
 
 /**  Explicit user attestation; neither choice permits sensitive provider disclosure. */
 export type WorkHumanAccountV1 = "anonymous" | "signed_in_public_only";
@@ -2337,6 +2435,22 @@ export type WorkInterventionV1_Serialize = {
 };
 
 export type WorkLifecycle = "active" | "archived";
+
+export type WorkLocalStepV1 = WorkLocalStepV1_Serialize | WorkLocalStepV1_Deserialize;
+
+export type WorkLocalStepV1_Deserialize = {
+	policy?: WorkCommandPolicyV1 | null,
+	output?: WorkCommandOutputV1 | null,
+	proposal?: string | null,
+	before_digest?: string | null,
+};
+
+export type WorkLocalStepV1_Serialize = {
+	policy?: WorkCommandPolicyV1 | null,
+	output?: WorkCommandOutputV1 | null,
+	proposal?: string | null,
+	before_digest?: string | null,
+};
 
 export type WorkMeasurementBasis = WorkMeasurementBasis_Serialize | WorkMeasurementBasis_Deserialize;
 
@@ -2953,6 +3067,7 @@ export type WorkStepFact_Deserialize = {
 	note?: string | null,
 	/**  Closed measurements of a settled browser step; absent for other kinds. */
 	measurements?: WorkStepMeasurementsV1 | null,
+	local?: WorkLocalStepV1_Deserialize | null,
 };
 
 export type WorkStepFact_Serialize = {
@@ -2969,6 +3084,7 @@ export type WorkStepFact_Serialize = {
 	note?: string | null,
 	/**  Closed measurements of a settled browser step; absent for other kinds. */
 	measurements?: WorkStepMeasurementsV1 | null,
+	local?: WorkLocalStepV1_Serialize | null,
 };
 
 /** One admitted agent operation inside an execution. */
@@ -2978,41 +3094,41 @@ export type WorkStepKindV1 = WorkStepKindV1_Serialize | WorkStepKindV1_Deseriali
 
 export type WorkStepKindV1_Deserialize = 
 /**  One model turn; `note` on the step is what the agent said. */
-({ kind: "turn" }) & { answer?: never; collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; text?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null }) & { answer?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; text?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; text?: never; url?: never } | 
+({ kind: "turn" }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null }) & { answer?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | 
 /**  Objects the agent placed on the canvas from this turn. */
-({ kind: "publish" }) & { answer?: never; collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; path?: never; query?: never; text?: never; url?: never } | 
+({ kind: "publish" }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; path?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | 
 /**
  *  A message the person sent while the agent ran; the agent reads it at
  *  its next turn.
  */
-({ kind: "steer"; text: string }) & { answer?: never; collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; url?: never } | 
+({ kind: "steer"; text: string }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; regex?: never; replacements?: never; timeout_secs?: never; to?: never; url?: never } | 
 /**  Directory listing inside a granted folder. */
-({ kind: "list"; path: string }) & { answer?: never; collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "read_file"; path: string }) & { answer?: never; collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "search_files"; path: string; query: string }) & { answer?: never; collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; prompt?: never; text?: never; url?: never } | 
+({ kind: "list"; path: string; depth?: number | null }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | ({ kind: "read_file"; path: string; offset?: number | null; limit?: number | null }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; new?: never; old?: never; options?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | ({ kind: "search_files"; path: string; query: string; glob?: string | null; regex?: boolean | null }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | 
 /**  A proposed whole-file write; `decision` is the person's answer. */
-({ kind: "write_file"; path: string; content: string; decision?: boolean | null }) & { answer?: never; collection?: never; followups?: never; new?: never; old?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never } | 
+({ kind: "write_file"; path: string; content: string; decision?: boolean | null }) & { answer?: never; collection?: never; command?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | 
 /**  A proposed replacement of one exact passage. */
-({ kind: "edit_file"; path: string; old: string; new: string; decision?: boolean | null }) & { answer?: never; collection?: never; content?: never; followups?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "finish"; 
+({ kind: "edit_file"; path: string; old: string; new: string; replacements?: WorkFileReplacementV1[]; decision?: boolean | null }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; offset?: never; options?: never; prompt?: never; query?: never; regex?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | ({ kind: "move_file"; from: string; to: string; decision?: boolean | null }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; depth?: never; followups?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; url?: never } | ({ kind: "delete_file"; path: string; decision?: boolean | null }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | ({ kind: "run_command"; cwd: string; command: string; timeout_secs?: number | null; decision?: boolean | null }) & { answer?: never; collection?: never; content?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; to?: never; url?: never } | ({ kind: "finish"; 
 /**  Up to three short next requests the person may choose. */
-followups?: string[] }) & { answer?: never; collection?: never; content?: never; decision?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; text?: never; url?: never };
+followups?: string[] }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never };
 
 export type WorkStepKindV1_Serialize = 
 /**  One model turn; `note` on the step is what the agent said. */
-({ kind: "turn" }) & { answer?: never; collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; text?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null }) & { answer?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; text?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; text?: never; url?: never } | 
+({ kind: "turn" }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null }) & { answer?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | 
 /**  Objects the agent placed on the canvas from this turn. */
-({ kind: "publish" }) & { answer?: never; collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; path?: never; query?: never; text?: never; url?: never } | 
+({ kind: "publish" }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null }) & { collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; path?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | 
 /**
  *  A message the person sent while the agent ran; the agent reads it at
  *  its next turn.
  */
-({ kind: "steer"; text: string }) & { answer?: never; collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; url?: never } | 
+({ kind: "steer"; text: string }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; regex?: never; replacements?: never; timeout_secs?: never; to?: never; url?: never } | 
 /**  Directory listing inside a granted folder. */
-({ kind: "list"; path: string }) & { answer?: never; collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "read_file"; path: string }) & { answer?: never; collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "search_files"; path: string; query: string }) & { answer?: never; collection?: never; content?: never; decision?: never; followups?: never; new?: never; old?: never; options?: never; prompt?: never; text?: never; url?: never } | 
+({ kind: "list"; path: string; depth: number | null }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | ({ kind: "read_file"; path: string; offset: number | null; limit: number | null }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; new?: never; old?: never; options?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | ({ kind: "search_files"; path: string; query: string; glob: string | null; regex: boolean | null }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | 
 /**  A proposed whole-file write; `decision` is the person's answer. */
-({ kind: "write_file"; path: string; content: string; decision?: boolean | null }) & { answer?: never; collection?: never; followups?: never; new?: never; old?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never } | 
+({ kind: "write_file"; path: string; content: string; decision?: boolean | null }) & { answer?: never; collection?: never; command?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | 
 /**  A proposed replacement of one exact passage. */
-({ kind: "edit_file"; path: string; old: string; new: string; decision?: boolean | null }) & { answer?: never; collection?: never; content?: never; followups?: never; options?: never; prompt?: never; query?: never; text?: never; url?: never } | ({ kind: "finish"; 
+({ kind: "edit_file"; path: string; old: string; new: string; replacements?: WorkFileReplacementV1[]; decision?: boolean | null }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; offset?: never; options?: never; prompt?: never; query?: never; regex?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | ({ kind: "move_file"; from: string; to: string; decision: boolean | null }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; depth?: never; followups?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; url?: never } | ({ kind: "delete_file"; path: string; decision: boolean | null }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } | ({ kind: "run_command"; cwd: string; command: string; timeout_secs: number | null; decision: boolean | null }) & { answer?: never; collection?: never; content?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; to?: never; url?: never } | ({ kind: "finish"; 
 /**  Up to three short next requests the person may choose. */
-followups?: string[] }) & { answer?: never; collection?: never; content?: never; decision?: never; new?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; text?: never; url?: never };
+followups?: string[] }) & { answer?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never };
 
 /**
  *  Closed counts for one browser step: durations, call counts and exact
