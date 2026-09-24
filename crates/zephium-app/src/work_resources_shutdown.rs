@@ -143,4 +143,8 @@ impl RetainedNativeShutdown {
     pub(super) fn next_deadline(&self) -> Option<Instant> {
         self.retry_at.filter(|_| !self.failed)
     }
+
+    pub(super) fn in_flight(&self) -> bool {
+        self.proof.is_none() && !self.failed
+    }
 }

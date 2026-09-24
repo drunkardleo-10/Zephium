@@ -258,10 +258,16 @@ impl RetainedWorkGroup {
         self.failed
             .store(true, std::sync::atomic::Ordering::Release);
     }
+    pub(crate) fn is_failed(&self) -> bool {
+        self.failed.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 pub(super) struct RetainedWork {
     runtime_group: Option<RetainedWorkGroup>,
+    // Outlives the group itself: a page that left its group still audits
+    // native state only when the Shell hands it the one audit turn.
+    grouped: bool,
     group_shutdown: bool,
     human: Option<human::HumanHandoff>,
     prior_human: Option<AgentWorkWaitingForHuman>,
@@ -350,6 +356,7 @@ impl RetainedWork {
     ) -> Self {
         Self {
             runtime_group: None,
+            grouped: false,
             group_shutdown: false,
             human: None,
             prior_human: None,
@@ -719,6 +726,11 @@ impl RetainedWork {
 
     pub(super) fn set_runtime_group(&mut self, group: RetainedWorkGroup) {
         self.runtime_group = Some(group);
+        self.grouped = true;
+    }
+    /// Releases this page's share of the group's runtime slot.
+    pub(super) fn leave_group(&mut self) {
+        self.runtime_group = None;
     }
 
     fn activate(&mut self) {
@@ -1451,17 +1463,41 @@ impl RetainedWork {
         self.group_shutdown = true;
     }
 
-    fn poll_native_shutdown(&mut self, deadline: Option<Instant>) -> Result<bool, Refusal> {
-        if self.runtime_group.is_some() && !self.group_shutdown {
-            return Ok(false);
-        }
-        let local_ready = self.local_shutdown_settled()
+    fn native_audit_ready(&self) -> bool {
+        self.local_shutdown_settled()
             || (self.destroyed
                 && self.owner.locally_retired()
                 && self.unexpected_native.is_none()
                 && self.unstarted.is_none()
-                && self.final_scoped_recovery_is_classified());
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) || !local_ready {
+                && self.final_scoped_recovery_is_classified())
+    }
+    /// A grouped page that could start its native audit once given the turn.
+    pub(super) fn awaits_group_audit(&self) -> bool {
+        self.grouped
+            && !self.group_shutdown
+            && self.native_shutdown.is_none()
+            && self.native_audit_ready()
+    }
+    /// Its audit is in flight, or it holds the turn and can start one.
+    pub(super) fn holds_native_audit(&self) -> bool {
+        self.native_shutdown.as_ref().map_or(
+            self.grouped && self.group_shutdown && self.native_audit_ready(),
+            RetainedNativeShutdown::in_flight,
+        )
+    }
+    /// Its audit ended; nothing further can close it cleanly for the group.
+    pub(super) fn native_audit_settled(&self) -> bool {
+        self.native_shutdown
+            .as_ref()
+            .is_some_and(|shutdown| !shutdown.in_flight())
+    }
+
+    fn poll_native_shutdown(&mut self, deadline: Option<Instant>) -> Result<bool, Refusal> {
+        if self.grouped && !self.group_shutdown {
+            return Ok(false);
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) || !self.native_audit_ready()
+        {
             return Ok(false);
         }
         if self.native_shutdown.is_none() {

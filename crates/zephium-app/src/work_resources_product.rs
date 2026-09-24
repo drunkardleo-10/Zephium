@@ -652,7 +652,7 @@ impl ProductWork {
     /// prove a clean close. It keeps its debt and its shutdown duty, but it
     /// must not hold the one retained slot against fresh pages.
     pub(crate) fn is_stuck(&self) -> bool {
-        self.signal.close.load(Ordering::Acquire)
+        (self.signal.close.load(Ordering::Acquire) || Instant::now() >= self.deadline)
             && !self.is_closed()
             && self.signal.projection.lock().is_ok_and(|projection| {
                 matches!(
@@ -660,6 +660,38 @@ impl ProductWork {
                     RetainedWorkPhase::Uncertain | RetainedWorkPhase::Refused
                 )
             })
+    }
+    /// A settled page that can no longer close with its group: stuck, or its
+    /// native audit already ended without a clean close.
+    pub(crate) fn leaves_group(&self) -> bool {
+        !self.is_closed()
+            && (self.is_stuck()
+                || self
+                    .coordinator
+                    .as_ref()
+                    .is_some_and(RetainedWork::native_audit_settled))
+    }
+    /// Drops this page's share of the group runtime slot; its audit stays
+    /// gated on an explicit turn.
+    pub(crate) fn leave_group(&mut self) {
+        self.runtime_group = None;
+        if let Some(coordinator) = &mut self.coordinator {
+            coordinator.leave_group();
+        }
+    }
+    pub(crate) fn holds_native_audit(&self) -> bool {
+        !self.is_closed()
+            && self
+                .coordinator
+                .as_ref()
+                .is_some_and(RetainedWork::holds_native_audit)
+    }
+    pub(crate) fn awaits_group_audit(&self) -> bool {
+        !self.is_closed()
+            && self
+                .coordinator
+                .as_ref()
+                .is_some_and(RetainedWork::awaits_group_audit)
     }
     pub(crate) fn take(attachment: &RetainedWorkAttachment) -> Option<Self> {
         attachment.0.lock().ok()?.take()

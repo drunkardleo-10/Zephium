@@ -580,10 +580,7 @@ impl Shell {
                 if let Some(mut work) =
                     crate::work_resources::product::ProductWork::take(&attachment)
                 {
-                    self.retained_pages.retain(|page| !page.is_closed());
-                    if self.retained_pages.is_empty() {
-                        self.retained_page_runtime = None;
-                    }
+                    self.retire_settled_pages();
                     if self
                         .retained_work
                         .as_ref()
@@ -603,6 +600,10 @@ impl Shell {
                         || !work.admits(&self.engine, &self.store, self.work_profile_binding())
                         || if work.is_page() {
                             !work.admits_peers(&self.retained_pages)
+                                || self
+                                    .retained_page_runtime
+                                    .as_ref()
+                                    .is_some_and(|group| group.is_failed())
                         } else {
                             !self.retained_pages.is_empty()
                         }
@@ -1122,22 +1123,67 @@ impl Shell {
         self.poll_work();
     }
 
+    /// A settled page that cannot close with its group moves to the graveyard
+    /// and releases its runtime share; the group no longer waits on it.
     #[cfg(feature = "work-execution")]
-    fn poll_work(&mut self) {
-        if !self.retained_pages.is_empty()
-            && self
+    fn retire_settled_pages(&mut self) {
+        self.retained_pages.retain(|page| !page.is_closed());
+        let mut index = 0;
+        while index < self.retained_pages.len() {
+            if self.retained_pages[index].leaves_group() {
+                let mut page = self.retained_pages.remove(index);
+                page.leave_group();
+                page.begin_shutdown();
+                self.retained_graveyard.push(page);
+            } else {
+                index += 1;
+            }
+        }
+        if self.retained_pages.is_empty() {
+            self.retained_page_runtime = None;
+        }
+    }
+
+    /// One native audit at a time across live and graveyarded pages. Live
+    /// pages audit once every live page is ready; a graveyarded page audits
+    /// only after the live group has gone.
+    #[cfg(feature = "work-execution")]
+    fn grant_native_audit(&mut self) {
+        self.retire_settled_pages();
+        if self
+            .retained_pages
+            .iter()
+            .chain(&self.retained_graveyard)
+            .any(|work| work.holds_native_audit())
+        {
+            return;
+        }
+        if !self.retained_pages.is_empty() {
+            if self
                 .retained_pages
                 .iter()
                 .all(|page| page.ready_for_group_shutdown())
-        {
-            if let Some(page) = self
-                .retained_pages
-                .iter_mut()
-                .find(|page| !page.is_closed())
             {
-                page.allow_group_shutdown();
+                if let Some(page) = self
+                    .retained_pages
+                    .iter_mut()
+                    .find(|page| !page.is_closed())
+                {
+                    page.allow_group_shutdown();
+                }
             }
+        } else if let Some(work) = self
+            .retained_graveyard
+            .iter_mut()
+            .find(|work| work.awaits_group_audit())
+        {
+            work.allow_group_shutdown();
         }
+    }
+
+    #[cfg(feature = "work-execution")]
+    fn poll_work(&mut self) {
+        self.grant_native_audit();
         for page in &mut self.retained_pages {
             page.poll();
             if let Some(queue) = &self.self_queue {
@@ -1422,10 +1468,6 @@ impl Shell {
         #[cfg(feature = "work-execution")]
         let mut buried = true;
         #[cfg(feature = "work-execution")]
-        for work in &mut self.retained_graveyard {
-            buried &= work.shutdown_until(deadline);
-        }
-        #[cfg(feature = "work-execution")]
         if !self.retained_pages.is_empty() {
             for page in &mut self.retained_pages {
                 page.begin_shutdown();
@@ -1433,21 +1475,13 @@ impl Shell {
             while std::time::Instant::now() < deadline
                 && self.retained_pages.iter().any(|page| !page.is_closed())
             {
-                if self
+                self.grant_native_audit();
+                for work in self
                     .retained_pages
-                    .iter()
-                    .all(|page| page.ready_for_group_shutdown())
+                    .iter_mut()
+                    .chain(&mut self.retained_graveyard)
                 {
-                    if let Some(page) = self
-                        .retained_pages
-                        .iter_mut()
-                        .find(|page| !page.is_closed())
-                    {
-                        page.allow_group_shutdown();
-                    }
-                }
-                for page in &mut self.retained_pages {
-                    page.poll();
+                    work.poll();
                 }
                 if self.retained_pages.iter().any(|page| !page.is_closed()) {
                     std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1456,8 +1490,20 @@ impl Shell {
             buried &= self.retained_pages.iter().all(|page| page.is_closed());
         }
         #[cfg(feature = "work-execution")]
-        if let Some(work) = &mut self.retained_work {
-            return work.shutdown_until(deadline) && buried;
+        let retained_clean = self
+            .retained_work
+            .as_mut()
+            .map(|work| work.shutdown_until(deadline));
+        // Graveyarded works audit last and one at a time, after every live
+        // native owner has gone.
+        #[cfg(feature = "work-execution")]
+        for work in &mut self.retained_graveyard {
+            work.allow_group_shutdown();
+            buried &= work.shutdown_until(deadline);
+        }
+        #[cfg(feature = "work-execution")]
+        if let Some(clean) = retained_clean {
+            return clean && buried;
         }
         #[cfg(feature = "work-execution")]
         if !buried {
