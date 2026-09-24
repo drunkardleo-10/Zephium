@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import { edgeClass, type CanvasLink } from "../lib/canvas-model";
-import { environmentClusters } from "../lib/project-environment";
+import { environmentClusters, environmentLinks } from "../lib/project-environment";
+import { snapshot } from "./environment-fixtures";
 import type { WorkStage } from "../lib/project-environment-thread";
 import { SIZES, stageLayout, type StageContents } from "../lib/stage-layout";
 
@@ -71,5 +72,37 @@ test("an empty cluster is skipped: the path goes to the next stop", () => {
   expect(links.map((link) => [link.source, link.target])).toEqual([
     ["request", "sources"],
     ["sources", "result"],
+  ]);
+});
+
+test("no relation edge ends at a request: the path already reads from it", () => {
+  const links = environmentLinks({
+    ...snapshot,
+    elements: [
+      ...snapshot.elements,
+      {
+        id: "notes",
+        area: null,
+        reference: {
+          kind: "artifact",
+          objective: "objective",
+          execution: "execution",
+          artifact: "n",
+        },
+      },
+    ],
+    relations: [
+      {
+        id: "asked",
+        from: "objective-card",
+        to: "result-card",
+        kind: "uses",
+        origin: { kind: "user" },
+      },
+      { id: "cites", from: "notes", to: "result-card", kind: "supports", origin: { kind: "user" } },
+    ],
+  } as typeof snapshot);
+  expect(links.map((link) => [link.source, link.kind, link.target])).toEqual([
+    ["notes", "supports", "result-card"],
   ]);
 });

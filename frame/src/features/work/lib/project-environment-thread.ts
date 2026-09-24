@@ -114,13 +114,16 @@ export function environmentStages(
   return stages;
 }
 
-/** The request card of every message after the first, and the path into it. */
-export function environmentRequests(
-  snapshot: WorkEnvironmentSnapshot,
-  stages: readonly WorkStage[],
-  /** The Sources cards the scene has, so a path can leave from one. */
-  sources: ReadonlySet<string>,
-): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
+/**
+ * The request card of every message after the first, and the thread into it:
+ * the person's words join request to request; the stage between them already
+ * reads from each request to its result.
+ */
+export function environmentRequests(stages: readonly WorkStage[]): {
+  items: CanvasItem[];
+  links: CanvasLink[];
+  positions: Record<string, CanvasPosition>;
+} {
   const items: CanvasItem[] = [];
   const links: CanvasLink[] = [];
   const positions: Record<string, CanvasPosition> = {};
@@ -138,30 +141,10 @@ export function environmentRequests(
     positions[stage.card] = { x: stage.place.x, y: stage.place.y };
     links.push({
       id: `stage:${stage.card}`,
-      source: lastCard(snapshot, previous, sources),
+      source: previous.card,
       target: stage.card,
       kind: "thread",
     });
   }
   return { items, links, positions };
-}
-
-/** Where a stage ends: its result, else its Sources card, else its request. */
-function lastCard(
-  snapshot: WorkEnvironmentSnapshot,
-  stage: WorkStage,
-  sources: ReadonlySet<string>,
-): string {
-  let result = "";
-  for (const element of snapshot.elements) {
-    const reference = element.reference;
-    if (reference.kind === "artifact" && stage.executions.includes(reference.execution))
-      result = element.id;
-  }
-  if (result) return result;
-  for (const execution of [...stage.executions].reverse()) {
-    const id = `sources:${stage.element}:${execution}`;
-    if (sources.has(id)) return id;
-  }
-  return stage.card;
 }

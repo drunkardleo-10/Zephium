@@ -158,6 +158,24 @@
   aria-hidden="true"
 />
 
+<!-- The thread runs down from one request into the next; other edges read left to right. -->
+<Handle
+  id="below"
+  type="source"
+  position={Position.Bottom}
+  isConnectable={false}
+  tabindex={-1}
+  aria-hidden="true"
+/>
+<Handle
+  id="above"
+  type="target"
+  position={Position.Top}
+  isConnectable={false}
+  tabindex={-1}
+  aria-hidden="true"
+/>
+
 <style>
   .node-root {
     display: contents;

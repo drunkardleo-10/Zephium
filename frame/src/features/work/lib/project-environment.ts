@@ -374,11 +374,16 @@ const relationLabels: Record<Exclude<CanvasLink["kind"], "path" | "thread">, () 
   contradicts: m.work_env_relation_contradicts,
   working: m.work_env_relation_working,
 };
+/** Relations between cards; a request is never an end, the stage's path already reads from it. */
 export function environmentLinks(snapshot: WorkEnvironmentSnapshot): CanvasLink[] {
   const pictures = subjectPictures(snapshot);
   const ids = new Set(
     snapshot.elements.flatMap((element) =>
-      pictures.has(element.id) || element.reference.kind === "source" ? [] : [element.id],
+      pictures.has(element.id) ||
+      element.reference.kind === "source" ||
+      element.reference.kind === "objective"
+        ? []
+        : [element.id],
     ),
   );
   return (snapshot.relations ?? []).flatMap((relation) =>

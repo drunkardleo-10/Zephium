@@ -184,10 +184,24 @@
   /** When each path edge first appeared; only a new one draws itself in. */
   const firstSeen: Record<string, number> = {};
   let seeded = false;
+  /** Labelled ties at each focused card: a label shows only where it cannot land on another. */
+  const labelled = $derived.by(() => {
+    const count: Record<string, number> = {};
+    for (const link of scene.links)
+      if (link.label)
+        for (const end of [link.source, link.target])
+          if (focused.has(end)) count[end] = (count[end] ?? 0) + 1;
+    return count;
+  });
   let edges = $derived<Edge[]>(
     valid
       ? scene.links.map((link) => {
           const active = focused.has(link.source) || focused.has(link.target);
+          // The card under the pointer names its one tie; a hub of several shows lines only.
+          const named =
+            active &&
+            !!link.label &&
+            [link.source, link.target].some((end) => focused.has(end) && labelled[end] === 1);
           const title = (id: string) =>
             scene.items.find((item) => item.id === id)?.title ??
             scene.clusters.find((cluster) => cluster.id === id)?.label ??
@@ -203,12 +217,13 @@
             source: link.source,
             target: link.target,
             type: "smoothstep",
+            ...(link.kind === "thread" ? { sourceHandle: "below", targetHandle: "above" } : {}),
             animated: false,
             deletable: false,
             selectable: false,
             focusable: false,
             class: edgeClass(link, focused, draw),
-            label: active && link.label ? link.label : undefined,
+            label: named ? link.label : undefined,
             ariaLabel:
               link.kind === "dependency" || link.kind === "path" || link.kind === "thread"
                 ? m.work_env_dependency_label({

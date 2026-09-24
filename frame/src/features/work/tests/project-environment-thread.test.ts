@@ -47,15 +47,15 @@ test("every message keeps its own request card, laid out down the roadmap", () =
   ]);
   // The request card the work began with keeps the first sentence, not the last.
   expect(environmentItems(scene, [], [], objectives)[0]?.title).toBe("Compare quiet keyboards");
-  const requests = environmentRequests(scene, stages, new Set());
+  const requests = environmentRequests(stages);
   expect(requests.items.map((item) => [item.id, item.type, item.title])).toEqual([
     ["request:objective-card:continuation-1", "request", "Show me the quietest one"],
     ["request:objective-card:continuation-2", "request", "And the wireless ones"],
   ]);
-  // The path leaves the stage's last card: its result, else the request itself.
-  expect(requests.links.map((link) => [link.source, link.target])).toEqual([
-    ["result-card", "request:objective-card:continuation-1"],
-    ["request:objective-card:continuation-1", "request:objective-card:continuation-2"],
+  // The thread joins request to request; the stage between them reads to its result.
+  expect(requests.links.map((link) => [link.kind, link.source, link.target])).toEqual([
+    ["thread", "objective-card", "request:objective-card:continuation-1"],
+    ["thread", "request:objective-card:continuation-1", "request:objective-card:continuation-2"],
   ]);
   expect(requests.positions["request:objective-card:continuation-1"]).toEqual({ x: 0, y: 716 });
 });

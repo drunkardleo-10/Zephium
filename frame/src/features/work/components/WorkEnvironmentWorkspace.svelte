@@ -757,11 +757,7 @@
     }
     return null;
   });
-  const requests = $derived(
-    snapshot
-      ? environmentRequests(snapshot, stages, new Set(sources.items.map((item) => item.id)))
-      : { items: [], links: [], positions: {} },
-  );
+  const requests = $derived(environmentRequests(stages));
   const files = $derived(
     snapshot ? environmentFiles(context.objectives, stages) : { items: [], positions: {} },
   );

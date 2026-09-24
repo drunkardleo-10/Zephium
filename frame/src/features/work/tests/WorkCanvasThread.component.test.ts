@@ -37,7 +37,7 @@ test("three messages stand as three request cards, and one bad card never blanks
   };
   const objectives = new Map([["objective", state]]);
   const stages = environmentStages(scene, objectives);
-  const requests = environmentRequests(scene, stages, new Set());
+  const requests = environmentRequests(stages);
   const items: CanvasItem[] = [
     ...environmentItems(scene, [], [], objectives),
     ...requests.items,
