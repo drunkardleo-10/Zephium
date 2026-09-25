@@ -1,4 +1,8 @@
-import { documentDigest, type ArtifactView } from "$shared/ui/data/Artifact/artifact";
+import {
+  cardKnowledge,
+  documentDigest,
+  type ArtifactView,
+} from "$shared/ui/data/Artifact/artifact";
 import { TABLE_CARD, tableGrid } from "$shared/ui/data/Artifact/table";
 import { DIAGRAM } from "./diagram";
 import type { CanvasItem, CanvasSize } from "./canvas-model";
@@ -45,7 +49,8 @@ export function resultSize(
   view: ArtifactView | undefined,
   action = false,
 ): CanvasSize {
-  const end = action || view?.knowledge ? FRAME.footer : FRAME.end + 4;
+  const known = !!view && cardKnowledge(view);
+  const end = action || known ? FRAME.footer : FRAME.end + 4;
   switch (view?.content.kind) {
     case "table":
     case "comparison": {
@@ -69,7 +74,7 @@ export function resultSize(
           KIND +
             header(title, width - 24, false) +
             body +
-            (more || action || view.knowledge ? FRAME.footer : end),
+            (more || action || known ? FRAME.footer : end),
           120,
           440,
         ),

@@ -6,6 +6,7 @@
   import { SparklesIcon } from "../../lib/icons";
   import { TABLE_CARD, tableGrid } from "$shared/ui/data/Artifact/table";
   import Artifact, { documentDigest } from "$shared/ui/data/Artifact";
+  import { cardKnowledge } from "$shared/ui/data/Artifact/artifact";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import { canvasEvidence, canvasOpen, canvasOpenLink } from "../../lib/canvas-context";
   import type { CanvasItem } from "../../lib/canvas-model";
@@ -56,7 +57,8 @@
   );
   /** Rows past the six a table card shows. */
   const hidden = $derived(tabular ? tableGrid(tabular).rows.length - TABLE_CARD.rows : 0);
-  const knowledge = $derived(!!item.artifact?.knowledge);
+  // One caption per card: the card's own, never the chart's as well.
+  const knowledge = $derived(!!item.artifact && cardKnowledge(item.artifact));
   // A press that moved was a drag; a control inside the cover keeps its own click.
   let pressed: { x: number; y: number } | null = null;
   function openCover(event: MouseEvent) {

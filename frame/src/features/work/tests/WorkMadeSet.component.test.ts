@@ -141,10 +141,12 @@ test("a part shows its vendor's icon once it is held, and its kind's glyph until
   await held.unmount();
 });
 
-const result = (data: WorkArtifactDataV1): CanvasItem => {
+const result = (data: WorkArtifactDataV1, general_knowledge?: boolean): CanvasItem => {
   const state = structuredClone(projection);
   const execution = state.executions[0]!;
   execution.artifacts[0]!.data = data;
+  if (general_knowledge !== undefined)
+    execution.artifacts[0]!.general_knowledge = general_knowledge;
   execution.user_artifacts = [];
   const view = artifactView(execution.artifacts[0]!, execution);
   return {
@@ -220,4 +222,17 @@ test("a chart card is compact, and says it is from what the agent knows only whe
   await expect.poll(() => cited.container.querySelector(".chart.compact svg")).not.toBeNull();
   expect(cited.container.textContent).not.toContain("From what the agent knows");
   await cited.unmount();
+  // Marked on the chart and not on the result: still one caption, the card's own.
+  for (const whole of [true, false]) {
+    const both = await render(ResultCard, {
+      id: "result",
+      item: result(chart(true), whole),
+      selected: false,
+      onaction: () => {},
+    });
+    await expect.poll(() => both.container.querySelector(".chart.compact svg")).not.toBeNull();
+    expect(both.container.textContent?.match(/From what the agent knows/gu)).toHaveLength(1);
+    expect(both.container.querySelector(".chart .caption")).toBeNull();
+    await both.unmount();
+  }
 });

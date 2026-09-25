@@ -130,6 +130,10 @@ export type ArtifactView = {
   knowledge?: boolean;
 };
 
+/** A card carries one knowledge caption: the whole result's, or its chart's. */
+export const cardKnowledge = (view: ArtifactView) =>
+  !!view.knowledge || (view.content.kind === "chart" && !!view.content.generalKnowledge);
+
 // Renderer ceilings, not runtime admission rules. Oversized inputs remain unavailable
 // rather than silently presenting a truncated result as the complete artifact.
 const text = (value: string) => typeof value === "string" && value.length <= 16_384;
