@@ -137,8 +137,11 @@ test("a video link admits its thumbnail as its picture and plays in the pane", a
     "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
   ]);
   // The thumbnail is the link card's picture, never a media card of its own.
+  // The picture waits on a notes lookup before its media read.
   await expect
-    .poll(() => screen.container.querySelector(".thumbnail .play-mark") !== null)
+    .poll(() => screen.container.querySelector(".thumbnail .play-mark") !== null, {
+      timeout: 5000,
+    })
     .toBe(true);
   expect(screen.container.textContent).not.toContain("hqdefault.jpg");
   await screen.getByRole("button", { name: "Play here" }).click();
