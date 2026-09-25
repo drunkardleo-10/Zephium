@@ -17,6 +17,8 @@
     agents = [],
     draft = "",
     waiting = null,
+    problem = null,
+    ondismissproblem,
     onfocusagent,
     onwaitingpage,
     onopenpage,
@@ -35,6 +37,9 @@
       reason: WorkHumanReasonV1;
       remaining: number;
     } | null;
+    /** One line about something the person asked for that did not land. */
+    problem?: string | null;
+    ondismissproblem?: () => void;
     onfocusagent?: (id: string) => void;
     /** Pans to the waiting page card and focuses it. */
     onwaitingpage?: (card: string) => void;
@@ -433,6 +438,14 @@
                   >{cardCountdown(waiting.remaining)}</span
                 >{/if}
             </button>
+          {:else if problem}
+            <span class="problem" role="alert"
+              ><button
+                type="button"
+                title={m.work_line_dismiss()}
+                onclick={() => ondismissproblem?.()}>{problem}</button
+              ></span
+            >
           {:else}
             {#key headline}
               {#if clipped}
@@ -673,6 +686,29 @@
 
   button.waiting:hover {
     text-decoration-color: var(--color-lit);
+  }
+
+  /* What the person asked for and did not land: said once, gone when read. */
+  .problem {
+    display: flex;
+    min-inline-size: 0;
+  }
+
+  .problem button {
+    min-inline-size: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    font-size: var(--text-label);
+    text-align: start;
+    cursor: default;
+  }
+
+  .problem button:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
   }
 
   button.waiting .left {

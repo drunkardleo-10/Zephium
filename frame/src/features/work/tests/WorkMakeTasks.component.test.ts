@@ -1,0 +1,153 @@
+import "$styles/global.css";
+import { expect, test, vi } from "vitest";
+import { render } from "vitest-browser-svelte";
+import { page } from "vitest/browser";
+import { TaskSession } from "$domain/resources";
+import WorkCanvas from "../components/WorkCanvas.svelte";
+import {
+  environmentClusters,
+  environmentItems,
+  environmentSteps,
+} from "../lib/project-environment";
+import { environmentStages } from "../lib/project-environment-thread";
+import { resultPlan } from "../lib/plan-steps";
+import { stepPlan, WorkTasks, workTasksKey } from "../lib/work-tasks";
+import { planScene } from "./environment-fixtures";
+
+const native = vi.hoisted(() => ({ resource: vi.fn() }));
+vi.mock("$shared/ipc/bindings", async () => {
+  const { mockBindings } = await import("$shared/testing/bindings");
+  return mockBindings({ resourceCall: native.resource });
+});
+
+test("a plan's steps become the person's tasks on request, and a task done in Tasks strikes its step", async () => {
+  const { resourceTestServer } = await import("$shared/testing/resources/server");
+  const { emitNativeEvent } = await import("$shared/testing/native-events");
+  await page.viewport(1400, 900);
+  const profile = "profile";
+  const server = resourceTestServer(profile);
+  native.resource.mockImplementation(server.call);
+  const { scene, objectives } = planScene();
+  const stages = environmentStages(scene, objectives);
+  const steps = environmentSteps(scene, objectives, stages);
+  const { clusters, links } = environmentClusters(stages);
+  const items = [...environmentItems(scene, [], [], objectives), ...steps.items];
+  const result = items.find((item) => item.id === "plan-card")!;
+  const plan = stepPlan(
+    "plan-card",
+    "objective",
+    result.artifact!,
+    resultPlan(result.artifact!.content),
+  );
+  const session = new TaskSession(profile);
+  await session.start();
+  const open = vi.fn();
+  const tasks = new WorkTasks(profile, session, () => new Map([["plan-card", plan]]), open);
+  const screen = await render(WorkCanvas, {
+    props: {
+      items,
+      links: [...links, ...steps.links],
+      clusters,
+      authoritative: new Set(["objective-card", "plan-card"]),
+      initialView: {
+        positions: {
+          ...stages[0]!.layout.positions,
+          ...steps.positions,
+          "objective-card": { x: 0, y: 0 },
+        },
+        viewport: { x: 16, y: 16, zoom: 0.6 },
+      },
+      oninspect: vi.fn(),
+    },
+    context: new Map([[workTasksKey, tasks]]),
+  });
+  screen.container.style.width = "1400px";
+  screen.container.style.height = "900px";
+  const cards = () => [...screen.container.querySelectorAll<HTMLElement>(".step")];
+  await expect.poll(() => cards().length).toBe(4);
+  // Nothing is made until the person asks.
+  expect(server.records.size).toBe(0);
+  expect(screen.container.querySelectorAll(".step .task")).toHaveLength(0);
+
+  await screen.getByRole("button", { name: "Make tasks", exact: true }).click();
+  await expect.poll(() => screen.container.querySelectorAll(".step .task").length).toBe(4);
+  const made = [...server.records.values()]
+    .map((record) => ({ title: record.draft.title, task: record.draft.content }))
+    .toSorted((a, b) =>
+      a.task.kind === "task" && b.task.kind === "task"
+        ? (a.task.sort_key ?? "").localeCompare(b.task.sort_key ?? "")
+        : 0,
+    );
+  expect(made.map((entry) => entry.title)).toEqual(plan.steps.map((step) => step.title));
+  for (const { task } of made) {
+    expect(task).toMatchObject({
+      kind: "task",
+      origin: "agent",
+      assignee: "user",
+      status: "open",
+      work: "objective",
+    });
+  }
+  // Asked twice for the same lane, the action is spent.
+  const again = screen.getByRole("button", { name: "Tasks made", exact: true });
+  await expect.element(again).toBeDisabled();
+  expect(await tasks.make("plan-card")).toBe(false);
+  expect(server.records.size).toBe(4);
+
+  // Completed in Tasks: another session writes it, this one hears the change.
+  const first = tasks.tasks("plan-card")[0]!;
+  const elsewhere = new TaskSession(profile);
+  await elsewhere.start();
+  await elsewhere.load(first.id);
+  expect(await elsewhere.setStatus(first.id, "done")).toBe(true);
+  emitNativeEvent("resourceChanged", {
+    profile,
+    kind: "task",
+    id: first.id,
+    revision: server.records.get(first.id)!.revision,
+  });
+  await expect.poll(() => cards()[0]!.classList.contains("done")).toBe(true);
+  expect(cards()[1]!.classList.contains("done")).toBe(false);
+  expect(getComputedStyle(cards()[0]!.querySelector(".text")!).textDecorationLine).toBe(
+    "line-through",
+  );
+
+  cards()[0]!.querySelector<HTMLElement>(".task")!.click();
+  expect(open).toHaveBeenCalledExactlyOnceWith(first.id);
+  await screen.unmount();
+  session.stop();
+  elsewhere.stop();
+});
+
+test("a step that fails to become a task keeps the ones made and says so once", async () => {
+  const { resourceTestServer } = await import("$shared/testing/resources/server");
+  const server = resourceTestServer("profile");
+  let creates = 0;
+  native.resource.mockImplementation(async (owner: string, call) => {
+    if (call.kind === "mutate" && call.command.intent.kind === "create" && ++creates === 3)
+      return { profile: owner, response: { kind: "error", error: "unavailable" } };
+    return server.call(owner, call);
+  });
+  const { scene, objectives } = planScene();
+  const items = environmentItems(scene, [], [], objectives);
+  const result = items.find((item) => item.id === "plan-card")!;
+  const plan = stepPlan(
+    "plan-card",
+    "objective",
+    result.artifact!,
+    resultPlan(result.artifact!.content),
+  );
+  const session = new TaskSession("profile");
+  await session.start();
+  const tasks = new WorkTasks("profile", session, () => new Map([["plan-card", plan]]), vi.fn());
+  expect(await tasks.make("plan-card")).toBe(false);
+  expect(server.records.size).toBe(2);
+  expect(tasks.failed).toBe(true);
+  expect(tasks.state("plan-card")).toBe("ready");
+  // Asked again, only the missing steps are made.
+  expect(await tasks.make("plan-card")).toBe(true);
+  expect(server.records.size).toBe(4);
+  expect(tasks.failed).toBe(false);
+  expect(tasks.state("plan-card")).toBe("made");
+  session.stop();
+});

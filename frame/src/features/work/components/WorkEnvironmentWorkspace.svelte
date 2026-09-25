@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack, onMount } from "svelte";
+  import { untrack, onMount, setContext } from "svelte";
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { WorkEnvironmentContext, type WorkEnvironmentSession } from "$domain/work-environment";
   import { commandId, workSession, type WorkSession } from "$domain/work";
@@ -64,7 +64,8 @@
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
   import { youtubeThumbnail } from "../lib/link-media";
-  import { stepResult } from "../lib/plan-steps";
+  import { resultPlan, stepResult } from "../lib/plan-steps";
+  import { stepPlan, WorkTasks, workTasksKey, type StepPlan } from "../lib/work-tasks";
   import { isAgentExecution, isLive } from "../lib/agent-steps";
   import { environmentPlan } from "../lib/project-environment-plan";
   import {
@@ -147,6 +148,22 @@
   onMount(() => {
     void taskList.start();
     return () => taskList.stop();
+  });
+  /** What the panel lists: its own scope, or every task once a step opens one. */
+  let tasksScope = $state<"today" | "all">("today");
+  // Steps read their tasks from a session of their own, whose scope never changes.
+  const stepTaskSession = untrack(() => taskSession(session.profile, `work:${session.space}`));
+  onMount(() => {
+    let live = true;
+    void stepTaskSession.start().then(async () => {
+      // A lane's tasks may sit past the first page; a few pages cover a working list.
+      while (live && stepTaskSession.next && stepTaskSession.items.length < 500)
+        await stepTaskSession.reload(true);
+    });
+    return () => {
+      live = false;
+      stepTaskSession.stop();
+    };
   });
   let objectiveSession = $state.raw<WorkSession | null>(null);
   let inspected = $state<string | null>(null);
@@ -1053,6 +1070,47 @@
     }
   }
   const liftedItem = $derived(items.find((item) => item.id === lifted?.id));
+  /** Every result with steps, as tasks would carry them. */
+  const stepPlans = $derived(
+    new Map(
+      items.flatMap((item): [string, StepPlan][] => {
+        const reference = results.references.get(item.id);
+        const steps = item.artifact ? resultPlan(item.artifact.content) : [];
+        return reference && item.artifact && steps.length
+          ? [[item.id, stepPlan(item.id, reference.objective, item.artifact, steps)]]
+          : [];
+      }),
+    ),
+  );
+  const workTasks = untrack(
+    () => new WorkTasks(session.profile, stepTaskSession, () => stepPlans, openTask),
+  );
+  setContext(workTasksKey, workTasks);
+  /** A step's task opens in the Tasks panel, listed whatever its day. */
+  function openTask(id: string) {
+    chrome?.close();
+    lifted = null;
+    tasksScope = "all";
+    taskList.selectedId = id;
+    void taskList.load(id);
+    tasksOpen = true;
+  }
+  /** The lift's one action for a result: Make tasks for a plan. */
+  function resultAction(id: string) {
+    const state = workTasks.state(id);
+    if (state === "none") return undefined;
+    return {
+      label:
+        state === "made"
+          ? m.work_tasks_made()
+          : state === "making"
+            ? m.work_making_tasks()
+            : m.work_make_tasks(),
+      title: m.work_make_tasks_hint(),
+      disabled: state !== "ready",
+      onclick: () => void workTasks.make(id),
+    };
+  }
   const liftedCommand = $derived(
     liftedItem?.command?.record
       ? commandRecord(context.objectives, liftedItem.command.record)
@@ -1914,7 +1972,11 @@
       loadingLabel={m.surface_loading()}
       failureLabel={m.surface_render_failed()}
       retryLabel={m.surface_retry()}
-      >{#snippet children(Tasks)}<Tasks session={taskList} density="panel" />{/snippet}</LazyView
+      >{#snippet children(Tasks)}<Tasks
+          session={taskList}
+          density="panel"
+          scope={tasksScope}
+        />{/snippet}</LazyView
     >
   </div>
 {/snippet}
@@ -1937,6 +1999,8 @@
             lifted = { id: "", origin: null, proposal: step };
           }}
           waiting={agentWaiting}
+          problem={workTasks.failed ? m.work_tasks_failed() : null}
+          ondismissproblem={() => workTasks.dismiss()}
           onwaitingpage={(card: string) => {
             chrome?.close();
             canvasRef?.focusCard(card);
@@ -2321,6 +2385,7 @@
                   session={objectiveSession!}
                   reference={results.references.get(liftedItem!.id)!}
                   source={liftSource}
+                  primary={resultAction(liftedItem!.id)}
                   {pictures}
                   onopen={openCitation}
                   onfile={(record: string) =>
@@ -2429,7 +2494,10 @@
     {needsDecision}
     open={tasksOpen}
     panel={tasksPanel}
-    onopenchange={(open) => (tasksOpen = open)}
+    onopenchange={(open) => {
+      tasksOpen = open;
+      if (!open) tasksScope = "today";
+    }}
   />
   {#if aiEnabled}
     <div class="composer-dock">

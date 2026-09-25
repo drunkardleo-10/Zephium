@@ -6,7 +6,7 @@
   import Evidence, { type EvidenceView } from "$shared/ui/data/Evidence";
   import Compare from "./compare/Compare.svelte";
   import Button from "$shared/ui/Button";
-  import LiftHeader from "./LiftHeader.svelte";
+  import LiftHeader, { type LiftAction } from "./LiftHeader.svelte";
   import SourcesRail from "./SourcesRail.svelte";
   import {
     CheckListIcon,
@@ -27,6 +27,7 @@
     pictures,
     onopen,
     onfile,
+    primary,
   }: {
     session: WorkSession;
     reference: ResultReference;
@@ -36,6 +37,8 @@
     onopen?: (url: string) => void;
     /** A cited file opens where the run recorded it, not in the pane. */
     onfile?: (record: string) => void;
+    /** Make tasks for a plan, Save as note for a document. */
+    primary?: LiftAction;
   } = $props();
   const execution = $derived(
     session.projection?.work.id === reference.objective
@@ -179,7 +182,7 @@
 
 {#if view}
   <section class="result">
-    <LiftHeader {kind} title={view.title} {meta} {icon} />
+    <LiftHeader {kind} title={view.title} {meta} {icon} {primary} />
     {#if compare}<Compare
         model={compare}
         correctable={settled}
