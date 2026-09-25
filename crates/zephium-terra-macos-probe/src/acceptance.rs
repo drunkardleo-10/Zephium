@@ -15,6 +15,9 @@ const SCENARIOS: [(&str, &str); 6] = [
     ("airbnb_three", "--live-agent-airbnb-work"),
     ("architecture_design", "--live-agent-architecture-work"),
 ];
+/// Run only by name with --live-acceptance-only until the person admits
+/// them to the suite.
+const ON_REQUEST: [(&str, &str); 1] = [("engine_chart", "--live-agent-engine-chart-work")];
 const RUNS: usize = 3;
 /// Every scenario's own deadline: its 720 s execution plus the 30 s host
 /// allowance the probe gives it.
@@ -35,6 +38,8 @@ enum FailureReason {
     Travel,
     /// The making set, its knowledge marks, reads or time were unmet.
     Design,
+    /// A chart of nothing, repeated findings, or too many reads.
+    Chart,
     /// The agent loop itself failed.
     RunFailure,
     /// The native host or the probe process failed.
@@ -130,6 +135,7 @@ fn measure(output: &str, wall_ms: u128) -> (Row, Option<FailureReason>, bool) {
                 rest.contains("collection=true"),
                 rest.contains("travel=true"),
                 rest.contains("design=true"),
+                rest.contains("chart=true"),
             ));
         } else if line.contains("agent-work: run_failure=") {
             run_failure = true;
@@ -145,9 +151,10 @@ fn measure(output: &str, wall_ms: u128) -> (Row, Option<FailureReason>, bool) {
         Some(FailureReason::Outcome)
     } else {
         match accepted {
-            Some((false, _, _)) => Some(FailureReason::Collection),
-            Some((_, false, _)) => Some(FailureReason::Travel),
-            Some((_, _, false)) => Some(FailureReason::Design),
+            Some((false, _, _, _)) => Some(FailureReason::Collection),
+            Some((_, false, _, _)) => Some(FailureReason::Travel),
+            Some((_, _, false, _)) => Some(FailureReason::Design),
+            Some((_, _, _, false)) => Some(FailureReason::Chart),
             Some(_) => None,
             None => Some(FailureReason::Host),
         }
@@ -167,6 +174,7 @@ pub(super) fn run() -> Result<(), super::ProbeFailure> {
 pub(super) fn run_one(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
     let scenario = SCENARIOS
         .iter()
+        .chain(&ON_REQUEST)
         .find(|(scenario, _)| name == *scenario)
         .ok_or(super::ProbeFailure::Authority)?;
     run_queue([(0, *scenario)].into())

@@ -36,6 +36,7 @@ const AGENT_DETAILS_OBJECTIVE: &str = "Open https://www.lego.com/en-us/themes/ar
 const AGENT_MONEY_OBJECTIVE: &str = "Read https://demo.vercel.store/product/acme-geometric-circles-t-shirt in the browser and collect the Acme Circles T-Shirt with its explicitly displayed price, currency code and product image. Return only the target product with its observed amount and currency. Use one responsibility with one source-mapped output. Do not buy, sign in or change the cart. Do not substitute search snippets for the page.";
 const AGENT_READ_OBJECTIVE: &str = "From SQLite's official WAL documentation page, list every situation in which WAL mode does not work or has drawbacks, as cited findings with the page itself as the source. Read the actual page rather than relying on search snippets; use only sqlite.org.";
 const AGENT_GOVERNMENT_OBJECTIVE: &str = "Read https://travel.state.gov/ in the browser and report the passport and travel advisory services shown there, citing the actual page. Use one page read. Do not substitute search results, another page or prior knowledge. If verification prevents reading, report that honestly and stop; do not interact with verification controls, sign in or submit forms.";
+const AGENT_ENGINE_CHART_OBJECTIVE: &str = "Compare SQLite, DuckDB and RocksDB for a local-first desktop app with millions of records and frequent full-text search, then make a chart of their performance and resource use.";
 const AGENT_ARCHITECTURE_OBJECTIVE: &str = "Create me a full modern AI SaaS architecture and in general system design, technologies, stack, how much it will cost, etc.";
 /// A making request answers from knowledge: a bounded wall time for the loop.
 const ARCHITECTURE_DEADLINE: Duration = Duration::from_secs(180);
@@ -76,6 +77,8 @@ enum Mode {
     MoneyNode,
     /// A making request: a design answered from knowledge as a set.
     AgentArchitecture,
+    /// A research comparison asking for a chart of numbers sources rarely give.
+    AgentEngineChart,
 }
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
@@ -104,6 +107,10 @@ pub(super) fn run_money_node() -> Result<(), super::ProbeFailure> {
 
 pub(super) fn run_agent_architecture() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::AgentArchitecture)
+}
+
+pub(super) fn run_agent_engine_chart() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentEngineChart)
 }
 
 pub(super) fn run_agent_money() -> Result<(), super::ProbeFailure> {
@@ -376,6 +383,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentPage
             | Mode::AgentMoney
             | Mode::AgentArchitecture
+            | Mode::AgentEngineChart
     ) {
         6
     } else {
@@ -402,7 +410,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         | Mode::AgentListing
         | Mode::AgentPage
         | Mode::AgentMoney
-        | Mode::AgentArchitecture => 720,
+        | Mode::AgentArchitecture
+        | Mode::AgentEngineChart => 720,
         Mode::Public => 160,
         _ => 240,
     });
@@ -635,6 +644,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentPage
             | Mode::AgentMoney
             | Mode::AgentArchitecture
+            | Mode::AgentEngineChart
     ) {
         let execution = &state.executions[0];
         let counts = |kind: &str| {
@@ -736,6 +746,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     };
     let design_accepted =
         mode != Mode::AgentArchitecture || architecture_accepted(&state.executions[0]);
+    let chart_accepted =
+        mode != Mode::AgentEngineChart || engine_chart_accepted(&state.executions[0]);
     if mode == Mode::AgentListing {
         // The read asked for ?adults=1; only the page's canonical address,
         // not the admitted one, cites the listing without that query.
@@ -809,6 +821,12 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             } else {
                 "agent-architecture-incomplete.json"
             }
+        } else if mode == Mode::AgentEngineChart {
+            if chart_accepted {
+                "agent-engine-chart-run.json"
+            } else {
+                "agent-engine-chart-incomplete.json"
+            }
         } else if mode == Mode::AgentTrip {
             "agent-trip-run.json"
         } else if mode == Mode::AgentAirbnb {
@@ -848,6 +866,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             "collection_accepted": collection_accepted,
             "travel_accepted": travel_accepted,
             "design_accepted": design_accepted,
+            "chart_accepted": chart_accepted,
             "projection": state,
             "historical_evidence": evidence,
         }))
@@ -861,9 +880,14 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     }
     let _ = writeln!(
         std::io::stdout().lock(),
-        "agent-acceptance: collection={collection_accepted} money={money_accepted} travel={travel_accepted} design={design_accepted}"
+        "agent-acceptance: collection={collection_accepted} money={money_accepted} travel={travel_accepted} design={design_accepted} chart={chart_accepted}"
     );
-    if !collection_accepted || !money_accepted || !travel_accepted || !design_accepted {
+    if !collection_accepted
+        || !money_accepted
+        || !travel_accepted
+        || !design_accepted
+        || !chart_accepted
+    {
         return Err(Error::Runtime);
     }
     writeln!(std::io::stdout().lock(), "durable-work: fixed_collection_assignment={}; native_browser=true; artifacts={}; resource_closed=true; reopened=true; semantic_status={:?}; content=redacted", mode == Mode::AgentMoney, state.executions[0].artifacts.len(), state.executions[0].status).map_err(|_| Error::Output)?;
@@ -922,6 +946,7 @@ async fn workflow(
             | Mode::AgentPage
             | Mode::AgentMoney
             | Mode::AgentArchitecture
+            | Mode::AgentEngineChart
             | Mode::AgentFiles
     ) {
         return agent_workflow(
@@ -1466,6 +1491,113 @@ async fn review_product_results(
     Ok(state)
 }
 
+/// A research comparison that asks for numbers the sources rarely give: at
+/// most one findings object per turn, no chart of all-zero or unknown points,
+/// either a knowledge-marked chart with a basis or a finding that comparable
+/// numbers are unavailable, at most eight reads, and no claim repeated across
+/// findings objects.
+fn engine_chart_accepted(execution: &WorkExecutionFact) -> bool {
+    use zephium_core::work::artifact::WorkArtifactDataV1 as Data;
+    let kind_of = |id: &WorkArtifactId| {
+        execution
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.id == *id)
+            .map(|artifact| zephium_core::work::agent::artifact_kind(&artifact.data))
+    };
+    let mut per_turn = std::collections::BTreeMap::<u8, usize>::new();
+    for step in &execution.steps {
+        if matches!(step.kind, WorkStepKindV1::Publish) {
+            *per_turn.entry(step.turn).or_default() += step
+                .artifacts
+                .iter()
+                .filter(|id| kind_of(id) == Some("findings"))
+                .count();
+        }
+    }
+    let findings_max = per_turn.values().copied().max().unwrap_or(0);
+    let empty_charts = execution
+        .artifacts
+        .iter()
+        .filter(|artifact| {
+            matches!(&artifact.data, Data::Chart { series, .. }
+            if series.iter().flat_map(|series| &series.points).all(|point| {
+                let value = point.value.trim();
+                !value.bytes().any(|b| b.is_ascii_digit())
+                    || value.parse::<f64>().is_ok_and(|n| n == 0.0)
+            }))
+        })
+        .count();
+    let knowledge_chart = execution.artifacts.iter().any(|artifact| {
+        matches!(&artifact.data, Data::Chart { basis: Some(_), general_knowledge, .. }
+            if *general_knowledge || artifact.general_knowledge)
+    });
+    let collapse = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let claims: Vec<(usize, String)> = execution
+        .artifacts
+        .iter()
+        .enumerate()
+        .flat_map(|(index, artifact)| match &artifact.data {
+            Data::Findings { items, .. } => items
+                .iter()
+                .map(|item| (index, collapse(&item.claim)))
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    let unavailable_finding = claims.iter().any(|(_, claim)| {
+        let claim = claim.to_lowercase();
+        [
+            "no comparable",
+            "not comparable",
+            "unavailable",
+            "lack",
+            "no published",
+            "do not give",
+            "don't give",
+            "no measured",
+            "not report",
+        ]
+        .iter()
+        .any(|phrase| claim.contains(phrase))
+            && ["number", "benchmark", "figure", "metric", "measure", "data"]
+                .iter()
+                .any(|noun| claim.contains(noun))
+    });
+    let duplicate_claims = claims
+        .iter()
+        .enumerate()
+        .filter(|(at, (index, claim))| {
+            claims[..*at]
+                .iter()
+                .any(|(earlier, text)| earlier != index && text == claim)
+        })
+        .count();
+    let reads = execution
+        .steps
+        .iter()
+        .filter(|step| matches!(step.kind, WorkStepKindV1::Read { .. }))
+        .count();
+    let elapsed_ms = AGENT_ELAPSED_MS.load(std::sync::atomic::Ordering::Relaxed);
+    let mut kinds: Vec<_> = execution
+        .artifacts
+        .iter()
+        .map(|artifact| zephium_core::work::agent::artifact_kind(&artifact.data))
+        .collect();
+    kinds.sort_unstable();
+    let accepted = findings_max <= 1
+        && empty_charts == 0
+        && (knowledge_chart || unavailable_finding)
+        && reads <= 8
+        && duplicate_claims == 0;
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "chart_qualification findings_max_per_turn={findings_max} empty_charts={empty_charts} knowledge_chart={knowledge_chart} unavailable_finding={unavailable_finding} duplicate_claims={duplicate_claims} reads={reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
+        kinds.join(","),
+    );
+    accepted
+}
+
 /// A making request answered from knowledge as a set: a diagram of at least
 /// six nodes, five edges and one vendor host, a table, findings and a
 /// checklist, each marked knowledge; at most two reads, none failed, and the
@@ -1554,6 +1686,7 @@ async fn agent_workflow(
         Mode::AgentAirbnb => "Find three good Airbnb options in San Francisco for a solo founder attending a YC batch, compare and recommend one using cited public page evidence. Inspect Airbnb itself and observed listing links. Dates and budget are unspecified: state assumptions, distinguish nightly prices from total stay costs, and leave unavailable details unknown. Include observed pictures when available. Do not book, submit forms, sign in, create accounts, send messages or interact with verification controls. If access prevents three verified options, report that limitation instead of inventing options.",
         Mode::AgentMoney => AGENT_MONEY_OBJECTIVE,
         Mode::AgentArchitecture => AGENT_ARCHITECTURE_OBJECTIVE,
+        Mode::AgentEngineChart => AGENT_ENGINE_CHART_OBJECTIVE,
         Mode::AgentListing => "Read https://www.airbnb.com/rooms/23813739?adults=1 in one browser read and collect this one listing: its name, displayed nightly price, displayed monthly total, stay dates or minimum stay, its own page address as an optional url column named listing_url, and picture. Dates are unspecified, so leave any value the page does not show unknown. Do not search, follow links, book, sign in or interact with verification controls.",
         Mode::AgentRead => AGENT_READ_OBJECTIVE,
         Mode::AgentPage => PAGE_OBJECTIVE.get().map(String::as_str).unwrap_or_default(),

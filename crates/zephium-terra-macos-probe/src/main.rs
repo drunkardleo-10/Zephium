@@ -155,6 +155,10 @@ fn main() {
             work_durable::run_agent_architecture()
         }
         #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-engine-chart-work" => {
+            work_durable::run_agent_engine_chart()
+        }
+        #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-trip-work" => work_durable::run_agent_trip(),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-airbnb-work" => work_durable::run_agent_airbnb(),
