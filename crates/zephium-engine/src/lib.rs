@@ -1176,6 +1176,9 @@ impl RetirementGate {
             event @ EngineEvent::ExtensionActionsInvalidated { profile } => {
                 self.profile_is_active(profile).then_some(event)
             }
+            event @ EngineEvent::WorkPageFavicon { profile, .. } => {
+                self.profile_is_active(profile).then_some(event)
+            }
             event @ EngineEvent::ExtensionActionShortcutRequested { runtime, .. } => {
                 self.profile_is_active(runtime.profile()).then_some(event)
             }

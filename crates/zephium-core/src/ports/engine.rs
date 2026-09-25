@@ -1019,6 +1019,14 @@ pub enum EngineEvent {
         page_url: String,
         rgba: Vec<u8>,
     },
+    /// The same renderer-side discovery as [`EngineEvent::FaviconPixels`],
+    /// run on a Work page the agent read. It names no item: the icon is
+    /// cached by the page's origin under the profile the page ran in.
+    WorkPageFavicon {
+        profile: ProfileId,
+        page_url: String,
+        rgba: Vec<u8>,
+    },
     /// Positive results have already passed exact native-view generation,
     /// navigation-epoch, fixed-schema DOM-state, and (where available)
     /// native audio-state checks. The shell still owns the final visibility

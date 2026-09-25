@@ -356,6 +356,11 @@ impl Shell {
                 }
             }
             EngineEvent::NewWindowRequested { id, url } => self.open_linked_tab(id, &url),
+            EngineEvent::WorkPageFavicon {
+                profile,
+                page_url,
+                rgba,
+            } => self.work_page_favicon(profile, &page_url, rgba),
             EngineEvent::FaviconPixels { id, page_url, rgba } => {
                 self.favicon_pixels(id, &page_url, rgba);
             }
@@ -584,7 +589,8 @@ impl Shell {
             | EngineEvent::Crashed { id }
             | EngineEvent::Captured { id, .. }
             | EngineEvent::HtmlExtracted { id, .. } => self.profile_of_item(*id),
-            EngineEvent::PermissionRequested { profile, .. } => Some(*profile),
+            EngineEvent::PermissionRequested { profile, .. }
+            | EngineEvent::WorkPageFavicon { profile, .. } => Some(*profile),
             EngineEvent::ShortcutPressed { item, .. } => self.profile_of_item(*item),
         };
         profile.is_some_and(|profile| self.profile_deletion_quarantines(profile))

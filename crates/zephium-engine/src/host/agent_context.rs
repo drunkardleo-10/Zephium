@@ -12,6 +12,8 @@
 //! this owner retains every native and profile obligation until exact close
 //! or process shutdown.
 
+#[cfg(target_os = "macos")]
+mod favicon;
 #[cfg(all(target_os = "macos", feature = "native-agentic-foreground-probe"))]
 #[path = "agent_foreground_probe.rs"]
 mod foreground_probe;
@@ -229,6 +231,7 @@ pub(super) struct AgentOwnedContext {
     rendering_probe: Option<foreground_probe::AgentForegroundRendering>,
     #[cfg(feature = "native-agentic-foreground-probe")]
     rendering_probe_attempted: bool,
+    favicon: Option<favicon::AgentFaviconPoll>,
     view: crate::platform::imp::AgentOwnedView,
     native_resource: Option<NativeResourceLease>,
 }
@@ -265,6 +268,7 @@ impl AgentOwnedContext {
             rendering_probe: None,
             #[cfg(feature = "native-agentic-foreground-probe")]
             rendering_probe_attempted: false,
+            favicon: None,
             view,
             native_resource: Some(native_resource),
         }
@@ -2773,8 +2777,12 @@ impl EngineHost {
                 "agent-context navigation terminal lost its exact gate or target",
             );
         }
+        let committed = outcome.is_ok();
         pending.complete(outcome);
         self.retry_deferred_owned_agent_location_check(id);
+        if committed {
+            self.start_agent_favicon(id);
+        }
     }
 
     #[cfg(target_os = "macos")]

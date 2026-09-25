@@ -503,3 +503,49 @@ fn identical_pixels_are_sent_once_and_a_reattached_surface_gets_them_again() {
         .iter()
         .all(|view| view.surface == zephium_ipc::IconSurface::Chrome));
 }
+
+fn delivered_origins(icons: &IconLog) -> Vec<String> {
+    icons
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|view| view.surface == zephium_ipc::IconSurface::Chrome)
+        .flat_map(|view| view.entries.iter().map(|entry| entry.origin.clone()))
+        .collect()
+}
+
+#[test]
+fn work_page_read_feeds_the_favicon_cache_by_origin() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, _screen, icons) = setup_with_icon_log(store.clone());
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+
+    shell.handle(Command::Engine(EngineEvent::WorkPageFavicon {
+        profile,
+        page_url: "https://docs.example/guide".into(),
+        rgba: vec![3; zephium_core::icon::RGBA32_BYTES - 1],
+    }));
+    shell.handle(Command::Engine(EngineEvent::WorkPageFavicon {
+        profile: ProfileId::from(0xdead_u128),
+        page_url: "https://other.example/".into(),
+        rgba: vec![3; zephium_core::icon::RGBA32_BYTES],
+    }));
+    assert!(shell.favicons.icon_values.is_empty());
+
+    let rgba = vec![3; zephium_core::icon::RGBA32_BYTES];
+    shell.handle(Command::Engine(EngineEvent::WorkPageFavicon {
+        profile,
+        page_url: "https://docs.example/guide".into(),
+        rgba: rgba.clone(),
+    }));
+    assert!(shell
+        .favicons
+        .icon_values
+        .contains_key(&(profile, "https://docs.example".to_owned())));
+    assert_eq!(
+        store.icons.lock().unwrap().as_slice(),
+        &[(String::from("https://docs.example"), rgba)]
+    );
+    assert_eq!(delivered_origins(&icons), ["https://docs.example"]);
+}
