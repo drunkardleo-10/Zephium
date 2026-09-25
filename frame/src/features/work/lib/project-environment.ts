@@ -12,13 +12,14 @@ import type {
 import { activityLabel, artifactView } from "./project-work";
 import { agentDoing, isAgentExecution, isLive, type AgentDoing } from "./agent-steps";
 import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
-import { firstRequest, type WorkStage } from "./project-environment-thread";
+import { firstRequest, threadOf, type WorkStage } from "./project-environment-thread";
 import {
   commandCards,
   displayPath,
   fileCards,
   host,
   LANE_PLACEMENT,
+  laneFacts,
   laneElement,
   observedTitle,
   pageGroups,
@@ -336,6 +337,7 @@ function elementItems(
       };
     }
     // The person's sentence, carried plainly: state belongs to the agent line.
+    const lane = projection ? threadOf(element.id, projection)[0] : undefined;
     return {
       id: element.id,
       type: "objective",
@@ -344,6 +346,11 @@ function elementItems(
       title: clipText(projection ? firstRequest(projection) : m.work_env_request(), TITLE_TEXT),
       detail: "",
       status: area,
+      ...(projection && lane
+        ? laneFacts(
+            projection.executions.filter((execution) => lane.executions.includes(execution.id)),
+          )
+        : {}),
     };
   });
 }
@@ -736,11 +743,14 @@ export function environmentPages(
             ),
           ),
         );
+        // The title a read observed names the card; the host stands in until one did.
+        const observed = entry.steps.findLast((step) => step.local?.page_title?.trim())?.local
+          ?.page_title;
         items.push({
           id,
           type: "page",
           kind: m.work_env_page(),
-          title: pageHost || m.work_env_page(),
+          title: clipText(observed?.trim() || pageHost || m.work_env_page(), TITLE_TEXT),
           detail: clipText(url, DETAIL_TEXT),
           status: held
             ? (phaseLabel(held.phase) ?? m.work_line_waiting_for_you())

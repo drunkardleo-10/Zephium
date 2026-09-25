@@ -367,6 +367,26 @@ export function laneOffsets(snapshot: WorkEnvironmentSnapshot): Map<string, Lane
   return offsets;
 }
 
+/** What a request card says under its words: how long its runs took, what they read. */
+export function laneFacts(
+  executions: readonly WorkExecutionFact[],
+  recorded: readonly WorkPageV1[] = [],
+): Pick<CanvasItem, "elapsed" | "counts"> {
+  let elapsed = 0;
+  let sources = 0;
+  let pages = 0;
+  for (const execution of executions) {
+    for (const step of execution.steps ?? []) elapsed += step.measurements?.wall_millis ?? 0;
+    if (!isAgentExecution(execution)) continue;
+    sources += sourceRows(execution).length;
+    pages += pageGroups(execution, recorded).length;
+  }
+  return {
+    ...(elapsed ? { elapsed } : {}),
+    ...(sources || pages ? { counts: { sources, pages } } : {}),
+  };
+}
+
 /** Lead results first: a comparison or a chart heads the Made group. */
 const leads = (artifact: WorkArtifactV1 | undefined) =>
   artifact?.data.kind === "comparison_matrix" || artifact?.data.kind === "chart";

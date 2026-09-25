@@ -30,7 +30,9 @@ function header(title: string, width: number, dense: boolean, glyph: number = FR
 }
 
 const RESULT_CAP = 560;
-/** A document is as tall as its summary (whole, up to 14 lines) and its section headings. */
+/** The kind caption above a result's title. */
+const KIND = 16;
+/** A document is as tall as its kind caption, its whole summary and its section headings. */
 export function resultSize(
   title: string,
   view: ArtifactView | undefined,
@@ -48,18 +50,19 @@ export function resultSize(
     case "checklist":
       return {
         width: 420,
-        height: clamp(header(title, 420 - 28, false) + LINE.label + end, 96, 160),
+        height: clamp(KIND + header(title, 420 - 28, false) + LINE.label + end, 96, 176),
       };
     case "document": {
       const digest = documentDigest(view.content);
       const inner = 420 - 28;
-      let body = textLines(digest.lead, inner, ADVANCE.label, 14) * LINE.label;
+      // The whole summary, however long, until the card reaches its cap.
+      let body = textLines(digest.lead, inner, ADVANCE.label) * LINE.label;
       if (digest.headings.length) body += 10;
       for (const heading of digest.headings)
         body += Math.max(1, textLines(heading, inner - 12, ADVANCE.strong, 3)) * LINE.label + 4;
       return {
         width: 420,
-        height: clamp(header(title, inner, false) + body + end, 120, RESULT_CAP),
+        height: clamp(KIND + header(title, inner, false) + body + end, 120, RESULT_CAP),
       };
     }
     default:
@@ -131,10 +134,20 @@ export function stepSize(text: string, detail = ""): CanvasSize {
   return { width: 248, height: clamp(14 + 28 + 8 + body + 14, 96, 240) };
 }
 
-/** The person's words, up to five lines. */
-export function requestSize(text: string, action = false): CanvasSize {
-  const lines = Math.max(1, textLines(text, 300 - 32 - 34, ADVANCE.body, 5));
-  return { width: 300, height: clamp(31 + lines * LINE.body + (action ? 28 : 0), 64, 180) };
+/** A caption, the person's words up to eight lines, then the lane's counts once it has any. */
+export function requestSize(
+  text: string,
+  { action = false, footer = false }: { action?: boolean; footer?: boolean } = {},
+): CanvasSize {
+  const lines = Math.max(1, textLines(text, 300 - 24, ADVANCE.body, 8));
+  return {
+    width: 300,
+    height: clamp(
+      8 + LINE.caption + 2 + lines * LINE.body + 8 + (footer ? 22 : 0) + (action ? 28 : 0),
+      64,
+      240,
+    ),
+  };
 }
 
 export function defaultSize(item: CanvasItem): CanvasSize {
@@ -168,7 +181,7 @@ export function defaultSize(item: CanvasItem): CanvasSize {
       return { width: 248, height: 200 };
     case "objective":
     case "request":
-      return requestSize(item.title, !!item.actionLabel);
+      return requestSize(item.title, { action: !!item.actionLabel, footer: !!item.counts });
     case "responsibility":
       return { width: 280, height: 150 };
     case "page":

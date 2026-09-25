@@ -39,6 +39,7 @@ function lanes(...contents: StageContents[]): WorkStage[] {
       slots,
       live: false,
       targets: {},
+      facts: {},
     };
   });
 }

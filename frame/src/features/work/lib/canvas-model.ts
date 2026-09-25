@@ -116,6 +116,10 @@ export type CanvasItem = {
   active?: boolean;
   /** The user's recorded choice about this element. */
   decision?: string;
+  /** A request: how long its runs' steps took, in milliseconds, once any were measured. */
+  elapsed?: number;
+  /** A request: what its lane read, once it read anything. */
+  counts?: { sources: number; pages: number };
   /** An admitted media asset; the image URL is derived from profile and digest. */
   media?: { profile: string; asset: MediaAssetV1 };
   /** An admitted image related to this element, shown as its picture. */
@@ -436,6 +440,8 @@ export function reconcileNodes(
         node.data.finding === item.finding &&
         node.data.decision === item.decision &&
         node.data.active === item.active &&
+        node.data.elapsed === item.elapsed &&
+        JSON.stringify(node.data.counts) === JSON.stringify(item.counts) &&
         JSON.stringify(node.data.sources) === JSON.stringify(item.sources) &&
         node.data.media?.asset.digest === item.media?.asset.digest &&
         node.data.image?.digest === item.image?.digest &&

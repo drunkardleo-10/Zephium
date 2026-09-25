@@ -12,7 +12,7 @@ import {
   type CanvasSize,
 } from "./canvas-model";
 import { requestSize } from "./card-size";
-import { laneOffsets, stageContents } from "./project-environment-stage";
+import { laneFacts, laneOffsets, stageContents } from "./project-environment-stage";
 import {
   laneShape,
   laneSlots,
@@ -49,6 +49,8 @@ export type WorkStage = {
   live: boolean;
   /** Where the lane's saved cards stand: their lane place plus the person's offset. */
   targets: Record<string, CanvasPosition>;
+  /** What the request card says under its words. */
+  facts: Pick<CanvasItem, "elapsed" | "counts">;
 };
 const REQUEST_TEXT = 512;
 
@@ -61,7 +63,7 @@ export function firstRequest(projection: WorkRuntimeProjection): string {
  * A work's messages as lanes: a new sentence opens one, running the same one
  * again continues it. The first lane hangs from the objective element.
  */
-function threadOf(
+export function threadOf(
   element: string,
   projection: WorkRuntimeProjection,
 ): { card: string; request: string; executions: string[] }[] {
@@ -112,6 +114,7 @@ export function environmentStages(
     executions: string[];
     contents: StageContents;
     size: CanvasSize;
+    facts: Pick<CanvasItem, "elapsed" | "counts">;
   }[] = [];
   for (const element of snapshot.elements) {
     if (element.reference.kind !== "objective") continue;
@@ -121,6 +124,10 @@ export function environmentStages(
     const pages = recorded(projection.work.id);
     for (const draft of thread) {
       const saved = offsets.get(draft.card)?.size;
+      const facts = laneFacts(
+        draft.executions.flatMap((id) => projection.executions.filter((entry) => entry.id === id)),
+        pages,
+      );
       drafts.push({
         element: element.id,
         projection,
@@ -132,7 +139,8 @@ export function environmentStages(
           pages,
           offsets,
         ),
-        size: saved ?? requestSize(draft.request),
+        size: saved ?? requestSize(draft.request, { footer: !!facts.counts }),
+        facts,
       });
     }
   }
@@ -163,6 +171,7 @@ export function environmentStages(
         return !!execution && isLive(draft.projection, execution);
       }),
       targets,
+      facts: draft.facts,
     });
     top = nextLane(layout);
   }
@@ -193,6 +202,7 @@ export function environmentRequests(stages: readonly WorkStage[]): {
       title: stage.request,
       detail: "",
       status: "",
+      ...stage.facts,
     });
     links.push({
       id: `stage:${stage.card}`,

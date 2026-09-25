@@ -107,3 +107,49 @@ test("running the same sentence again continues the stage it began", () => {
   expect(stages).toHaveLength(1);
   expect(stages[0]!.executions).toEqual(["execution", "retry"]);
 });
+
+test("a request says how long its lane took and what it read; a page is named by its title", async () => {
+  const { environmentPages } = await import("../lib/project-environment");
+  const { snapshot: scene, objectives } = thread();
+  const state = objectives.get("objective")!;
+  const later = state.executions[1]!;
+  later.spec.nodes[0]!.capability = {
+    kind: "agent",
+    grant: {
+      provider: "open_ai",
+      model: "gpt-5.6-luna",
+      max_turns: 10,
+      max_steps: 32,
+      browse_hops: 4,
+    },
+  };
+  const measured = (wall_millis: number) =>
+    ({
+      wall_millis,
+      decision_calls: 0,
+      emulation_calls: 0,
+      planner_calls: 0,
+      native_actions: 0,
+      model_tokens: 0,
+      cost_micro_usd: 0,
+    }) as never;
+  later.steps = [
+    {
+      id: "read",
+      turn: 1,
+      kind: { kind: "read", url: "https://www.airbnb.com/rooms/1" },
+      status: "succeeded",
+      measurements: measured(3200),
+      local: { page_title: "Charming Cole Valley Victorian" },
+    },
+  ];
+  const stages = environmentStages(scene, objectives);
+  const [request] = environmentRequests(stages).items;
+  expect([request!.elapsed, request!.counts]).toEqual([3200, { sources: 0, pages: 1 }]);
+  // The first lane read nothing: its card says so by saying nothing.
+  expect(environmentItems(scene, [], [], objectives)[0]!.counts).toBeUndefined();
+  const pages = environmentPages(scene, objectives, stages, () => []);
+  expect(pages.items.map((item) => [item.title, item.page?.host])).toEqual([
+    ["Charming Cole Valley Victorian", "www.airbnb.com"],
+  ]);
+});
