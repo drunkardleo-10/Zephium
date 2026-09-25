@@ -3,7 +3,6 @@ import type { WorkExecutionFact, WorkEnvironmentSnapshot } from "$shared/ipc/bin
 import { projection, snapshot } from "./environment-fixtures";
 import { environmentAgents } from "../lib/project-environment";
 import { environmentStages } from "../lib/project-environment-thread";
-import { defaultSize } from "../lib/canvas-model";
 
 type Step = NonNullable<WorkExecutionFact["steps"]>[number];
 const step = (id: string, kind: Step["kind"], status: Step["status"], artifacts?: string[]) =>
@@ -63,6 +62,7 @@ function run(steps: Step[]) {
   return new Map([["objective", state]]);
 }
 
+// Saved before lanes: the request takes its lane place instead.
 const request = { x: 40, y: 60, width: 300, height: 110 };
 function scene(published: boolean): WorkEnvironmentSnapshot {
   return {
@@ -75,17 +75,25 @@ function scene(published: boolean): WorkEnvironmentSnapshot {
   };
 }
 
-test("the agent walks the path: request, Sources, Pages, the result it writes, and done", () => {
+test("the mark walks the lane: request, Worked with, the page it reads, Made, and the result", () => {
   const search = step("search", { kind: "search", query: "keyboards" }, "running", ["sources"]);
   const searched = { ...search, status: "succeeded" } as Step;
-  const read = step("read", { kind: "read", url: "https://a.example/review" }, "running");
+  const read = step("read", { kind: "read", url: "https://www.a.example/review" }, "running");
   const readDone = { ...read, status: "succeeded" } as Step;
   const publish = step("publish", { kind: "publish" }, "running", ["artifact"]);
-  const cases: [string, Step[], boolean, { x: number; y: number }][] = [
-    ["thinking", [step("turn", { kind: "turn" }, "running")], false, { x: 356, y: 60 }],
-    ["searching", [search], false, { x: 388 + 300 + 16, y: 60 }],
-    ["reading", [searched, read], false, { x: 736 + 248 + 16, y: 60 }],
-    ["writing", [searched, readDone, publish], true, { x: 1032 + 420 + 16, y: 60 }],
+  // Worked with holds Sources and one page: 24 + 300 + 16 + 248 + 24 wide, so Made starts at 1008.
+  const made = 348 + 612 + 48;
+  const cases: [string, Step[], boolean, { x: number; y: number }, string | undefined][] = [
+    ["thinking", [step("turn", { kind: "turn" }, "running")], false, { x: 316, y: 0 }, "Thinking"],
+    ["searching", [search], false, { x: 336, y: -12 }, "Searching"],
+    [
+      "reading",
+      [searched, read],
+      false,
+      { x: 348 + 24 + 300 + 16 + 248 + 8, y: 44 - 8 - 24 },
+      "Reading a.example",
+    ],
+    ["writing", [searched, readDone, publish], true, { x: made - 12, y: -12 }, "Writing"],
     [
       "done",
       [
@@ -95,27 +103,23 @@ test("the agent walks the path: request, Sources, Pages, the result it writes, a
         step("finish", { kind: "finish" }, "succeeded"),
       ],
       true,
-      { x: 1032 + 420 + 16, y: 60 },
+      { x: made + 24 + 420 + 8, y: 44 - 8 - 24 },
+      undefined,
     ],
   ];
-  for (const [doing, steps, published, stand] of cases) {
+  for (const [doing, steps, published, stand, caption] of cases) {
     const objectives = run(steps);
     const canvas = scene(published);
     const stages = environmentStages(canvas, objectives);
     const agents = environmentAgents(canvas, objectives, () => undefined, stages);
     const agent = agents.items[0]!;
-    expect([agent.agent?.doing, agents.positions[agent.id]]).toEqual([doing, stand]);
+    expect([agent.agent?.doing, agents.positions[agent.id], agent.agent?.caption]).toEqual([
+      doing,
+      stand,
+      caption,
+    ]);
     expect(agent.agent?.stand).toEqual(stand);
-    const size = defaultSize(agent);
-    for (const box of [request, ...stages[0]!.layout.clusters.map((cluster) => cluster.box)])
-      expect(
-        stand.x < box.x + box.width &&
-          box.x < stand.x + size.width &&
-          stand.y < box.y + box.height &&
-          box.y < stand.y + size.height,
-      ).toBe(false);
-    // The agent ties itself to the live page and to what it just published.
-    if (doing === "writing")
-      expect(agents.links.map((link) => link.target)).toEqual(["result-card"]);
+    // The mark is drawn from state; it ties itself to nothing.
+    expect(agents.links).toEqual([]);
   }
 });

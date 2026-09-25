@@ -1,101 +1,157 @@
 import { expect, test } from "vitest";
-import { SIZES, STAGE_GAP, stageLayout, stageStand, type StageMember } from "../lib/stage-layout";
+import {
+  SIZES,
+  laneShape,
+  laneSlots,
+  markStand,
+  placeLane,
+  stageLayout,
+  type StageContents,
+  type StageMember,
+} from "../lib/stage-layout";
 
 const request = { x: 0, y: 0, ...SIZES.request };
 const cards = (prefix: string, count: number, size: { width: number; height: number }) =>
   Array.from({ length: count }, (_, index): StageMember => ({ id: `${prefix}${index}`, size }));
+const step = { width: 248, height: 120 };
 
-test("a stage reads left to right in grids, and the next request clears its tallest cluster", () => {
-  const layout = stageLayout(request, {
+function full(): StageContents {
+  return {
     sources: { members: cards("sources", 1, SIZES.sources) },
     pages: { members: cards("page", 5, SIZES.page) },
     subjects: { members: cards("subject", 4, SIZES.subject) },
     findings: { members: cards("findings", 1, SIZES.findings) },
     results: { members: cards("result", 1, SIZES.document) },
-  });
-  const sources = 300 + 48;
-  const pages = sources + 300 + 48;
-  const subjects = pages + 2 * 248 + 20 + 48;
-  const findings = subjects + 3 * 220 + 2 * 20 + 48;
-  const result = findings + 300 + 48;
-  expect(layout.positions).toEqual({
-    sources0: { x: sources, y: 0 },
-    page0: { x: pages, y: 0 },
-    page1: { x: pages + 268, y: 0 },
-    page2: { x: pages, y: 188 },
-    page3: { x: pages + 268, y: 188 },
-    page4: { x: pages, y: 376 },
-    subject0: { x: subjects, y: 0 },
-    subject1: { x: subjects + 240, y: 0 },
-    subject2: { x: subjects + 480, y: 0 },
-    subject3: { x: subjects, y: 156 },
-    findings0: { x: findings, y: 0 },
-    result0: { x: result, y: 0 },
-  });
-  expect(layout.clusters.map((cluster) => [cluster.kind, cluster.members.length])).toEqual([
-    ["sources", 1],
-    ["pages", 5],
-    ["subjects", 4],
-    ["findings", 1],
-    ["results", 1],
-  ]);
-  // Three rows of pages are the tallest cluster.
-  expect(layout.extent).toBe(3 * 168 + 2 * 20);
-  expect(
-    stageStand(layout, { request, at: ["results"], size: { width: 260, height: 84 } }),
-  ).toEqual({ x: result + 420 + 16, y: 0 });
+    plan: {
+      members: cards("step", 2, step).map((member) => ({ ...member, of: "result0" })),
+    },
+  };
+}
 
-  const next = { x: 0, y: layout.extent + STAGE_GAP, ...SIZES.request };
-  const second = stageLayout(next, { pages: { members: cards("later", 1, SIZES.page) } });
-  expect(second.positions.later0).toEqual({ x: 300 + 48, y: 544 + 56 });
+test("a full lane: request, then Worked with, Found and Made in slots 1 to 3", () => {
+  const layout = stageLayout(request, full());
+  expect(layout.groups.map((group) => [group.kind, group.box])).toEqual([
+    // Sources, then pages two across: 24 + 300 + 16 + 248 + 16 + 248 + 24.
+    ["worked", { x: 348, y: 0, width: 876, height: 604 }],
+    // Subjects three across over the findings: 24 + 3 × 220 + 2 × 16 + 24.
+    ["found", { x: 348 + 876 + 48, y: 0, width: 740, height: 572 }],
+    // The result, the 48 px gutter, then its steps in their own box.
+    ["made", { x: 348 + 876 + 48 + 740 + 48, y: 0, width: 1060, height: 24 + 20 + 300 + 24 }],
+  ]);
+  const worked = 348;
+  const found = 1272;
+  const made = 2060;
+  expect(layout.positions).toMatchObject({
+    // A 24 px pad and a 20 px caption above the first cards.
+    sources0: { x: worked + 24, y: 44 },
+    page0: { x: worked + 340, y: 44 },
+    page1: { x: worked + 604, y: 44 },
+    page2: { x: worked + 340, y: 228 },
+    page4: { x: worked + 340, y: 412 },
+    subject0: { x: found + 24, y: 44 },
+    subject2: { x: found + 496, y: 44 },
+    subject3: { x: found + 24, y: 196 },
+    findings0: { x: found + 24, y: 348 },
+    result0: { x: made + 24, y: 44 },
+    step0: { x: made + 24 + 420 + 48 + 16, y: 44 + 16 + 20 },
+    step1: { x: made + 24 + 420 + 48 + 16 + 248 + 16, y: 80 },
+  });
+  expect(layout.groups[2]!.steps).toEqual([
+    {
+      result: "result0",
+      box: { x: made + 492, y: 44, width: 2 * 248 + 16 + 32, height: 120 + 32 + 20 },
+      members: ["step0", "step1"],
+    },
+  ]);
+  expect(layout.extent).toBe(604);
 });
 
-test("past eight pages or twelve subjects the rest only count on the label", () => {
+test("a pure result lays out request → Made in slot 1", () => {
+  const layout = stageLayout(request, { results: { members: cards("result", 1, SIZES.document) } });
+  expect(layout.groups.map((group) => [group.kind, group.box.x])).toEqual([["made", 348]]);
+  expect(layout.positions.result0).toEqual({ x: 372, y: 44 });
+  // Narrower than a slot, the group keeps its own width; the slot is never under 320.
+  expect(laneSlots([laneShape({ results: { members: cards("r", 1, SIZES.file) } })])).toEqual([
+    348,
+  ]);
+});
+
+test("lanes that share a shape align their groups into columns, sized by the widest", () => {
+  const first = laneShape(full());
+  const second = laneShape({
+    sources: { members: cards("sources", 1, SIZES.sources) },
+    pages: { members: cards("page", 1, SIZES.page) },
+    subjects: { members: cards("subject", 6, SIZES.subject) },
+    results: { members: cards("result", 1, SIZES.comparison) },
+  });
+  const slots = laneSlots([first, second]);
+  const top = placeLane(request, first, slots);
+  const below = placeLane({ ...request, y: top.extent + 96 }, second, slots);
+  expect(below.request.y).toBe(604 + 96);
+  expect(below.groups.map((group) => group.box.x)).toEqual(top.groups.map((group) => group.box.x));
+  // The first lane's groups are the widest in every slot.
+  expect(slots).toEqual([348, 1272, 2060]);
+});
+
+test("a lane that only worked locally has one row of files and commands", () => {
+  const layout = stageLayout(request, {
+    work: { members: [...cards("file", 3, SIZES.file), ...cards("command", 1, SIZES.command)] },
+  });
+  const [worked] = layout.groups;
+  expect(worked!.kind).toBe("worked");
+  expect(worked!.local).toEqual({ x: 372, y: 44, width: 2 * 248 + 16, height: 96 + 16 + 120 });
+  expect([layout.positions.file0, layout.positions.file1, layout.positions.file2]).toEqual([
+    { x: 372, y: 44 },
+    { x: 372 + 264, y: 44 },
+    { x: 372, y: 156 },
+  ]);
+  expect(layout.positions.command0).toEqual({ x: 636, y: 156 });
+});
+
+test("the local row sits under the web row inside the same group", () => {
+  const layout = stageLayout(request, {
+    sources: { members: cards("sources", 1, SIZES.sources) },
+    work: { members: cards("file", 1, SIZES.file) },
+  });
+  expect(layout.groups).toHaveLength(1);
+  expect(layout.positions.file0).toEqual({ x: 372, y: 44 + 200 + 16 });
+});
+
+test("past eight pages or twelve subjects the rest only count on the caption", () => {
   const layout = stageLayout(request, {
     pages: { members: cards("page", 11, SIZES.page) },
     subjects: { members: cards("subject", 12, SIZES.subject), more: 5 },
   });
-  const [pages, subjects] = layout.clusters;
-  expect([pages!.members.length, pages!.more]).toEqual([8, 3]);
-  expect([subjects!.members.length, subjects!.more]).toEqual([12, 5]);
+  const [worked, found] = layout.groups;
+  expect([worked!.members.length, worked!.more, worked!.counts.pages]).toEqual([8, 3, 11]);
+  expect([found!.members.length, found!.more, found!.counts.subjects]).toEqual([12, 5, 17]);
   expect(layout.positions.page8).toBeUndefined();
-  expect(Object.keys(layout.positions)).toHaveLength(20);
 });
 
-test("saved cards keep their place, and a cluster narrows rather than grow into one", () => {
-  const layout = stageLayout(request, {
-    pages: { members: cards("page", 3, SIZES.page) },
-    subjects: {
-      members: [
-        { id: "kept", size: SIZES.subject, placed: { x: 700, y: 0 } },
-        { id: "new", size: SIZES.subject },
-      ],
-    },
+test("the mark stands by what the agent acts on", () => {
+  const contents = full();
+  const layout = stageLayout(request, contents);
+  const sizes = Object.fromEntries(
+    Object.values(contents).flatMap((group) =>
+      group!.members.map((member) => [member.id, member.size] as const),
+    ),
+  );
+  expect(markStand(layout, { doing: "thinking" })).toEqual({ x: 316, y: 0 });
+  // The orb is centred on Worked with's top-left corner.
+  expect(markStand(layout, { doing: "searching" })).toEqual({ x: 336, y: -12 });
+  // Eight pixels outside the top-right corner of the page being read.
+  expect(markStand(layout, { doing: "reading", page: "page1" }, sizes)).toEqual({
+    x: 348 + 604 + 248 + 8,
+    y: 44 - 8 - 24,
   });
-  // Two pages across would reach 864 and run into the subjects at 700.
-  expect([layout.positions.page0, layout.positions.page1, layout.positions.page2]).toEqual([
-    { x: 348, y: 0 },
-    { x: 348, y: 188 },
-    { x: 348, y: 376 },
-  ]);
-  expect(layout.positions.kept).toEqual({ x: 700, y: 0 });
-  expect(layout.positions.new).toEqual({ x: 940, y: 0 });
-});
-
-test("the agent's stand steps down past a cluster it would cover, never onto a card", () => {
-  const layout = stageLayout(request, {
-    sources: { members: cards("sources", 1, SIZES.sources) },
-    pages: { members: cards("page", 2, SIZES.page) },
+  expect(markStand(layout, { doing: "writing" })).toEqual({ x: 2060 - 12, y: -12 });
+  expect(markStand(layout, { doing: "done", result: "result0" }, sizes)).toEqual({
+    x: 2060 + 24 + 420 + 8,
+    y: 12,
   });
-  const size = { width: 260, height: 104 };
-  // Right of Sources the capsule would sit on the pages; one row of them is shorter to clear.
-  const stand = stageStand(layout, { request, at: ["sources"], size });
-  expect(stand).toEqual({ x: 348 + 300 + 16, y: 168 + 16 });
-  for (const box of [request, ...layout.clusters.map((cluster) => cluster.box)])
-    expect(
-      stand.x < box.x + box.width &&
-        box.x < stand.x + size.width &&
-        stand.y < box.y + box.height &&
-        box.y < stand.y + size.height,
-    ).toBe(false);
+  // Before a group exists the mark waits where it will stand.
+  const empty = stageLayout(request, {});
+  expect(markStand(empty, { doing: "searching" }, {}, [348])).toEqual({ x: 336, y: -12 });
+  const local = stageLayout(request, { work: { members: cards("file", 1, SIZES.file) } });
+  expect(markStand(local, { doing: "working" })).toEqual({ x: 372 + 248 + 8, y: 44 });
 });

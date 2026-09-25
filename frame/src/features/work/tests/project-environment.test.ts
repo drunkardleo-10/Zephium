@@ -320,19 +320,20 @@ test("a run's searches become one Sources card the request and its pages join", 
       title: "Review A",
     },
   ]);
-  // The Sources card stands to the right of the request, level with it.
-  expect(sources.positions[group.id]).toEqual({ x: 368, y: 0 });
+  // Sources opens the web row of Worked with, in slot 1 right of the request column.
+  expect(sources.positions[group.id]).toEqual({ x: 348 + 24, y: 44 });
   const stages = environmentStages(withSource, objectives);
   const pages = environmentPages(withSource, objectives, stages, () => []);
-  expect(pages.positions[pages.items[0]!.id]).toEqual({ x: 716, y: 0 });
-  // The path reads request, Sources, then the stage's pages.
-  expect(environmentClusters(stages).links.map((link) => [link.source, link.target])).toEqual([
-    [objectiveElement.id, group.id],
-    [group.id, `cluster:${objectiveElement.id}:pages`],
+  expect(pages.positions[pages.items[0]!.id]).toEqual({ x: 372 + 300 + 16, y: 44 });
+  // One edge at rest: the request into its Worked with group, never to a card inside it.
+  const { clusters, links } = environmentClusters(stages);
+  expect(links.map((link) => [link.source, link.target])).toEqual([
+    [objectiveElement.id, `group:${objectiveElement.id}:worked`],
   ]);
+  expect(clusters[0]!.members).toEqual([group.id, pages.items[0]!.id]);
 });
 
-test("browser steps become page cards with frames, working links and subject links", async () => {
+test("browser steps become page cards with frames and evidence ties to what they found", async () => {
   const { environmentPages } = await import("../lib/project-environment");
   const { environmentStages } = await import("../lib/project-environment-thread");
   const state = structuredClone(projection);
@@ -362,6 +363,16 @@ test("browser steps become page cards with frames, working links and subject lin
         ],
         notes: [],
       },
+    },
+    {
+      ...execution.artifacts[0]!,
+      id: "facts",
+      data: {
+        kind: "findings",
+        subjects: [{ name: "Tower Bridge" }],
+        items: [{ claim: "Costs $119", subject: 0, evidence: [0], confidence: "supported" }],
+      },
+      evidence: [{ extraction_id: "catalog", source_id: 1 }],
     },
   ];
   execution.steps = [
@@ -397,6 +408,16 @@ test("browser steps become page cards with frames, working links and subject lin
           index: 0,
         },
       },
+      {
+        id: "claims",
+        area: null,
+        reference: {
+          kind: "artifact" as const,
+          objective: "objective",
+          execution: "execution",
+          artifact: "facts",
+        },
+      },
     ],
   };
   const objectives = new Map([["objective", state]]);
@@ -423,18 +444,21 @@ test("browser steps become page cards with frames, working links and subject lin
   ]);
   expect(pages.items[1]!.page?.frame).toMatch(/frame\/attempt\/read-2\/3$/);
   expect(pages.items[0]!.page?.frame).toBeNull();
+  // The page that established the subject and the claims is their evidence; nothing ties to the agent.
   expect(pages.links).toEqual([
     {
-      id: "page-subject:page:execution:read-1:hub",
+      id: "page-evidence:page:execution:read-1:hub",
       source: "page:execution:read-1",
       target: "hub",
       kind: "supports",
+      role: "evidence",
     },
     {
-      id: "working:page:execution:read-2",
-      source: `agent:${objectiveElement.id}`,
-      target: "page:execution:read-2",
-      kind: "working",
+      id: "page-evidence:page:execution:read-1:claims",
+      source: "page:execution:read-1",
+      target: "claims",
+      kind: "supports",
+      role: "evidence",
     },
   ]);
 });
@@ -652,16 +676,11 @@ test("every stage keeps the pages its own run read", async () => {
     ["page:execution:read", "a.example", false],
     ["page:follow-up:read", "b.example", true],
   ]);
-  // Each card stands in the page cluster of the stage its run served, right of its request.
-  expect(pages.positions["page:execution:read"]).toEqual({
-    x: 408,
-    y: stages[0]!.place.y,
-  });
-  expect(pages.positions["page:follow-up:read"]).toEqual({
-    x: 388,
-    y: stages[1]!.place.y,
-  });
-  expect(stages[1]!.place.y).toBeGreaterThan(stages[0]!.place.y);
+  // Each card stands in the Worked with group of the lane its run served; the lanes share slot 1.
+  expect(pages.positions["page:execution:read"]).toEqual({ x: 372, y: stages[0]!.place.y + 44 });
+  expect(pages.positions["page:follow-up:read"]).toEqual({ x: 372, y: stages[1]!.place.y + 44 });
+  // The second lane starts 96 px under the first one's group: 24 + 20 + 168 + 24.
+  expect(stages[1]!.place.y).toBe(236 + 96);
 });
 
 test("a page the run is holding for a person reaches its card, matched by attempt and step", async () => {

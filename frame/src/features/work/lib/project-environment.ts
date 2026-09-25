@@ -1,4 +1,6 @@
 import type {
+  WorkElementPlacement,
+  WorkExecutionFact,
   WorkFileEvidenceV1,
   WorkEnvironmentSnapshot,
   TabView,
@@ -8,7 +10,7 @@ import type {
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
 import { activityLabel, artifactView } from "./project-work";
-import { agentDoing, agentLine, isAgentExecution, isLive, type AgentDoing } from "./agent-steps";
+import { agentDoing, isAgentExecution, isLive, type AgentDoing } from "./agent-steps";
 import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
 import { firstRequest, type WorkStage } from "./project-environment-thread";
 import {
@@ -16,17 +18,27 @@ import {
   displayPath,
   fileCards,
   host,
+  LANE_PLACEMENT,
+  laneElement,
   observedTitle,
   pageGroups,
   sourceRows,
 } from "./project-environment-stage";
-import { SIZES, stageLayout, stageStand, type ClusterKind } from "./stage-layout";
+import {
+  LANE,
+  SIZES,
+  laneShape,
+  markStand,
+  placeLane,
+  type LaneGroup,
+  type MarkStand,
+} from "./stage-layout";
+import { fileName } from "./work-files";
 import { heldPage, humanPage, phaseLabel } from "./work-human";
 import { resultPlan, stepIcon, stepId } from "./plan-steps";
 import { pageFrameUrl } from "$domain/resources";
 import {
   clipText,
-  defaultSize,
   type CanvasCluster,
   type CanvasItem,
   type CanvasLink,
@@ -345,7 +357,16 @@ export function fileEvidence(
       for (const entry of execution.file_evidence ?? []) if (entry.id === record) return entry.file;
   return undefined;
 }
+/**
+ * The saved view as the canvas reads it. A lane card's place comes from its
+ * lane (see `environmentStages`), so only the person's own elements bring an
+ * absolute position; a lane card brings its size once it is saved in lane terms.
+ */
 export function environmentView(snapshot: WorkEnvironmentSnapshot): CanvasView {
+  const lane = new Set(
+    snapshot.elements.flatMap((element) => (laneElement(snapshot, element) ? [element.id] : [])),
+  );
+  const own = snapshot.view.placements.filter((place) => !lane.has(place.element));
   return {
     areas: Object.fromEntries(
       (snapshot.view.areas ?? []).map((place) => [
@@ -354,16 +375,54 @@ export function environmentView(snapshot: WorkEnvironmentSnapshot): CanvasView {
       ]),
     ),
     sizes: Object.fromEntries(
-      snapshot.view.placements.map((place) => [
-        place.element,
-        { width: place.width, height: place.height },
-      ]),
+      snapshot.view.placements
+        .filter((place) => !lane.has(place.element) || place.revision === LANE_PLACEMENT)
+        .map((place) => [place.element, { width: place.width, height: place.height }]),
     ),
-    positions: Object.fromEntries(
-      snapshot.view.placements.map((place) => [place.element, { x: place.x, y: place.y }]),
-    ),
+    positions: Object.fromEntries(own.map((place) => [place.element, { x: place.x, y: place.y }])),
     viewport: { x: snapshot.view.x, y: snapshot.view.y, zoom: snapshot.view.zoom_milli / 1000 },
   };
+}
+
+/**
+ * The placements a view saves: the person's own elements where they stand, a
+ * lane card as its offset from its lane place. A lane card the canvas has not
+ * placed yet keeps what it had.
+ */
+export function viewPlacements(
+  snapshot: WorkEnvironmentSnapshot,
+  view: CanvasView,
+  stages: readonly WorkStage[],
+): WorkElementPlacement[] {
+  const bases = new Map<string, CanvasPosition>();
+  for (const stage of stages) {
+    bases.set(stage.card, stage.place);
+    for (const [id, position] of Object.entries(stage.layout.positions)) bases.set(id, position);
+  }
+  return snapshot.elements.map((element) => {
+    const previous = snapshot.view.placements.find((place) => place.element === element.id);
+    const point = view.positions[element.id];
+    const size = {
+      width: view.sizes?.[element.id]?.width ?? previous?.width ?? 280,
+      height: view.sizes?.[element.id]?.height ?? previous?.height ?? 160,
+    };
+    if (!laneElement(snapshot, element))
+      return {
+        element: element.id,
+        x: Math.round(point?.x ?? previous?.x ?? 0),
+        y: Math.round(point?.y ?? previous?.y ?? 0),
+        ...size,
+      };
+    const base = bases.get(element.id);
+    if (!base || !point) return previous ?? { element: element.id, x: 0, y: 0, ...size };
+    return {
+      element: element.id,
+      x: Math.round(point.x - base.x),
+      y: Math.round(point.y - base.y),
+      ...size,
+      revision: LANE_PLACEMENT,
+    };
+  });
 }
 const relationLabels: Record<Exclude<CanvasLink["kind"], "path" | "thread">, () => string> = {
   dependency: m.work_env_relation_depends_on,
@@ -373,7 +432,6 @@ const relationLabels: Record<Exclude<CanvasLink["kind"], "path" | "thread">, () 
   depends_on: m.work_env_relation_depends_on,
   same_as: m.work_env_relation_same_as,
   contradicts: m.work_env_relation_contradicts,
-  working: m.work_env_relation_working,
 };
 /** Relations between cards; a request is never an end, the stage's path already reads from it. */
 export function environmentLinks(snapshot: WorkEnvironmentSnapshot): CanvasLink[] {
@@ -402,34 +460,76 @@ export function environmentLinks(snapshot: WorkEnvironmentSnapshot): CanvasLink[
   );
 }
 
-/** Where the agent stands while it does each thing: the first cluster the stage has. */
-const STANDS: Record<AgentDoing, readonly ClusterKind[]> = {
-  thinking: [],
-  searching: ["sources"],
-  reading: ["pages"],
-  working: ["work"],
-  writing: ["subjects", "findings", "results"],
-  done: ["results", "findings", "subjects", "work", "pages", "sources"],
-};
+/** What the mark says beside the orb: a word, a host or a file, while it lasts. */
+function agentCaption(
+  execution: WorkExecutionFact,
+  doing: AgentDoing,
+  signal: string | undefined,
+): string | undefined {
+  if (signal === "waiting_for_human") return m.work_line_waiting_for_you();
+  const running = (execution.steps ?? []).filter((step) => step.status === "running");
+  switch (doing) {
+    case "thinking":
+      return m.work_line_thinking();
+    case "searching":
+      return m.work_line_searching();
+    case "reading": {
+      const read = running.find((step) => step.kind.kind === "read");
+      const where = read?.kind.kind === "read" ? host(read.kind.url).replace(/^www\./u, "") : "";
+      return where ? m.work_line_reading({ host: where }) : m.work_line_reading_web();
+    }
+    case "working": {
+      for (const step of running) {
+        const kind = step.kind;
+        if (kind.kind === "read_file")
+          return m.work_line_reading_file({ name: fileName(kind.path) });
+        if (kind.kind === "search_files") return m.work_line_searching_files();
+        if (kind.kind === "write_file" || kind.kind === "edit_file")
+          return m.work_line_writing_file({ name: fileName(kind.path) });
+      }
+      return m.work_env_working();
+    }
+    case "writing":
+      return m.work_line_writing();
+    case "done":
+      return undefined;
+  }
+}
+
+/** Where the mark stands for what the agent does: the page it reads, the result it finished. */
+function standFor(execution: WorkExecutionFact, doing: AgentDoing, stage: WorkStage): MarkStand {
+  if (doing === "reading") {
+    const read = (execution.steps ?? []).find(
+      (step) =>
+        step.status === "running" && (step.kind.kind === "read" || step.kind.kind === "discover"),
+    );
+    const page = pageGroups(execution, []).find((group) =>
+      group.steps.some((step) => step.id === read?.id),
+    )?.id;
+    return page ? { doing, page } : { doing };
+  }
+  if (doing === "done") {
+    const result = stage.contents.results?.members[0]?.id;
+    return result ? { doing, result } : { doing };
+  }
+  return { doing };
+}
 
 /**
  * Transient agent presence for objectives with live executions; never
- * persisted. The agent stands beside what its running steps act on: the
- * request while it thinks, Sources while it searches, the Pages cluster while
- * it reads, the Work cluster for files and commands, the objects it writes,
- * and the result once it is done.
+ * persisted. The mark stands by what its running steps act on: the request
+ * while it thinks, Worked with while it searches, the page it reads, the
+ * local row, the group it writes into, and the result once it is done.
  */
 export function environmentAgents(
   snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
   activity: (objective: string) => string | undefined,
-  /** The message the live run serves; the agent waits beside that request. */
+  /** Every lane of the canvas; the mark stands in the one its run serves. */
   stages: readonly WorkStage[] = [],
 ): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
   const items: CanvasItem[] = [];
-  const links: CanvasLink[] = [];
   const positions: Record<string, CanvasPosition> = {};
-  const pictures = subjectPictures(snapshot);
   for (const element of snapshot.elements) {
     if (element.reference.kind !== "objective") continue;
     const projection = objectives.get(element.reference.objective);
@@ -440,76 +540,59 @@ export function environmentAgents(
     let seed = 0;
     for (const char of projection.work.id) seed = (seed * 31 + char.charCodeAt(0)) % 9973;
     const id = `agent:${element.id}`;
-    const line = agentLine(execution);
     const doing = agentDoing(execution);
-    const stage = stages.find((stage) => stage.executions.includes(execution.id));
-    const request =
-      stage?.place ?? snapshot.view.placements.find((place) => place.element === element.id);
+    const caption = agentCaption(execution, doing, signal);
+    const status =
+      caption ??
+      label ??
+      (execution.status === "cancel_requested"
+        ? m.work_activity_cancelling()
+        : execution.status === "approved"
+          ? m.work_env_agent_idle()
+          : m.work_env_working());
     const item: CanvasItem = {
       id,
       type: "agent",
       kind: m.work_env_agent(),
       title: m.work_env_agent(),
       detail: "",
-      status:
-        label ??
-        (execution.status === "cancel_requested"
-          ? m.work_activity_cancelling()
-          : execution.status === "approved"
-            ? m.work_env_agent_idle()
-            : m.work_env_working()),
-      agent: { seed, activity: signal ?? "", objective: projection.work.id, doing },
+      status,
+      agent: {
+        seed,
+        activity: signal ?? "",
+        objective: projection.work.id,
+        doing,
+        ...(caption ? { caption } : {}),
+      },
     };
-    if (line) item.agent!.line = line;
-    if (request) {
-      const stand = stageStand(stage?.layout ?? { clusters: [], positions: {}, extent: 0 }, {
-        request,
-        at: STANDS[doing],
-        size: defaultSize(item),
-        avoid: stages
-          .filter((other) => other !== stage)
-          .flatMap((other) => [
-            other.place,
-            ...other.layout.clusters.map((cluster) => cluster.box),
-          ]),
-      });
+    const stage = stages.find((stage) => stage.executions.includes(execution.id));
+    if (stage) {
+      const sizes = Object.fromEntries(
+        Object.values(stage.contents).flatMap((group) =>
+          (group?.members ?? []).map((member) => [member.id, member.size] as const),
+        ),
+      );
+      const stand = markStand(stage.layout, standFor(execution, doing, stage), sizes, stage.slots);
       positions[id] = stand;
       item.agent!.stand = stand;
     }
     items.push(item);
-    // A cited source and a subject's picture are rows and pictures, not cards:
-    // the agent ties itself to what it just published, never to one of those.
-    const steps = execution.steps ?? [];
-    const lastPublish = steps.findLast((step) => step.kind.kind === "publish");
-    const latestTurn = Math.max(0, ...steps.map((step) => step.turn));
-    if (!lastPublish || lastPublish.turn !== latestTurn) continue;
-    const published = lastPublish.artifacts ?? [];
-    for (const target of snapshot.elements)
-      if (
-        "artifact" in target.reference &&
-        target.reference.kind !== "source" &&
-        !pictures.has(target.id) &&
-        target.reference.execution === execution.id &&
-        published.includes(target.reference.artifact)
-      )
-        links.push({ id: `working:${target.id}`, source: id, target: target.id, kind: "working" });
   }
-  return { items, links, positions };
+  return { items, links: [], positions };
 }
 
 /**
  * One Sources card per execution: the pages its searches cited and the files
  * its steps opened, counted and listed together. Individual sources are rows,
- * never cards, and later objects connect to the stage that established them.
+ * never cards; the lane's group edges already say what came from them.
  */
 export function environmentSources(
-  snapshot: WorkEnvironmentSnapshot,
+  _snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
-  /** The message each run served; its Sources card stands in that stage. */
+  /** The message each run served; its Sources card stands in that lane. */
   stages: readonly WorkStage[],
 ): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
   const items: CanvasItem[] = [];
-  const links: CanvasLink[] = [];
   const positions: Record<string, CanvasPosition> = {};
   for (const stage of stages) {
     const projection = objectives.get(stage.objective);
@@ -520,7 +603,6 @@ export function environmentSources(
       const running = isLive(projection, execution);
       const rows = sourceRows(execution);
       if (!rows.length) continue;
-      const seen = new Set(rows.map((row) => row.key));
       // A page that would not be read says why, on the row that cites it.
       const read = new Set<string>();
       const refusals = new Map<string, string>();
@@ -549,37 +631,9 @@ export function environmentSources(
       });
       const position = stage.layout.positions[card];
       if (position) positions[card] = position;
-      // Findings and published objects tie to the stage whose pages they cite.
-      for (const candidate of snapshot.elements) {
-        const reference = candidate.reference;
-        if (
-          (reference.kind !== "finding" && reference.kind !== "artifact") ||
-          reference.execution !== execution.id
-        )
-          continue;
-        const artifact = execution.artifacts.find((entry) => entry.id === reference.artifact);
-        if (!artifact) continue;
-        const cited =
-          reference.kind === "artifact"
-            ? artifact.evidence
-            : (artifact.data.kind === "findings"
-                ? (artifact.data.items[reference.index]?.evidence ?? [])
-                : []
-              ).flatMap((position) =>
-                artifact.evidence[position] ? [artifact.evidence[position]!] : [],
-              );
-        if (!cited.some((link) => seen.has(`${link.extraction_id}:${link.source_id}`))) continue;
-        links.push({
-          id: `sources-support:${card}:${candidate.id}`,
-          source: card,
-          target: candidate.id,
-          kind: "supports",
-          label: m.work_env_relation_supports(),
-        });
-      }
     }
   }
-  return { items, links, positions };
+  return { items, links: [], positions };
 }
 
 /** Pages the agent opened, a grid per stage: every run of the stage keeps the
@@ -593,8 +647,8 @@ export function environmentPages(
   pages: (objective: string) => readonly WorkPageV1[],
   /** The run's current activity, so a page held for a hidden window says so. */
   activity: (objective: string) => string | undefined = () => undefined,
-  /** The agent presences the scene already has; a tie to an absent one is no tie. */
-  present: ReadonlySet<string> = new Set(),
+  /** Unused since the agent ties itself to nothing; kept for the caller's shape. */
+  _present: ReadonlySet<string> = new Set(),
   /** The pages this work is holding open for a person, if any are. */
   human: (objective: string) => readonly WorkHumanPageV1[] = () => [],
 ): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
@@ -607,34 +661,55 @@ export function environmentPages(
     const recorded = pages(projection.work.id);
     const waiting = human(projection.work.id);
     const paused = activity(projection.work.id) === "paused";
-    const agent = `agent:${stage.element}`;
     const runs = stage.executions.flatMap((id) => {
       const execution = projection.executions.find((entry) => entry.id === id);
       return execution && isAgentExecution(execution)
         ? [{ execution, groups: pageGroups(execution, recorded) }]
         : [];
     });
-    // The frames this call sees decide the cluster; the stage may have counted fewer.
-    const layout = stageLayout(stage.place, {
-      ...stage.contents,
-      pages: {
-        members: runs.flatMap(({ groups }) =>
-          groups.map((group) => ({ id: group.id, size: SIZES.page })),
-        ),
-      },
-    });
+    // The frames this call sees decide the group; the lane may have counted fewer.
+    const seen = runs.flatMap(({ groups }) => groups.map((group) => group.id));
+    const counted = stage.contents.pages?.members.map((member) => member.id) ?? [];
+    const layout =
+      JSON.stringify(seen) === JSON.stringify(counted)
+        ? stage.layout
+        : placeLane(
+            stage.place,
+            laneShape({
+              ...stage.contents,
+              pages: { members: seen.map((id) => ({ id, size: SIZES.page })) },
+            }),
+            stage.slots,
+          );
     for (const { execution, groups } of runs) {
       // Only the run that is still going marks its pages live; an earlier
       // stage keeps its last frames and says nothing about now.
       const running = isLive(projection, execution);
       const opened = recorded.filter((page) => page.execution === execution.id);
       const hubs = new Map<string, string>();
+      // What each Found card cites, so a page can say it is evidence for it.
+      const cites: { id: string; extractions: Set<string> }[] = [];
       for (const candidate of snapshot.elements) {
         const reference = candidate.reference;
-        if (reference.kind !== "subject" || reference.execution !== execution.id) continue;
+        if (!("execution" in reference) || reference.execution !== execution.id) continue;
         const artifact = execution.artifacts.find((artifact) => artifact.id === reference.artifact);
-        const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
-        if (subject) hubs.set(subjectKey(subject), candidate.id);
+        if (!artifact) continue;
+        if (reference.kind === "subject") {
+          const subject = subjectsOf(artifact)[reference.index];
+          if (subject) hubs.set(subjectKey(subject), candidate.id);
+        } else if (reference.kind === "finding" && artifact.data.kind === "findings") {
+          const evidence = artifact.data.items[reference.index]?.evidence ?? [];
+          cites.push({
+            id: candidate.id,
+            extractions: new Set(
+              evidence.flatMap((index) => artifact.evidence[index]?.extraction_id ?? []),
+            ),
+          });
+        } else if (reference.kind === "artifact" && artifact.data.kind === "findings")
+          cites.push({
+            id: candidate.id,
+            extractions: new Set(artifact.evidence.map((link) => link.extraction_id)),
+          });
       }
       for (const entry of groups) {
         const position = layout.positions[entry.id];
@@ -680,24 +755,33 @@ export function environmentPages(
           ...(live || succeeded || held ? {} : { unavailable: true }),
         });
         positions[id] = position;
-        if (live && present.has(agent))
-          links.push({ id: `working:${id}`, source: agent, target: id, kind: "working" });
+        // A page is evidence for the subjects its reads established and the findings citing them.
         const linked = new Set<string>();
-        for (const step of entry.steps)
+        const tie = (target: string) => {
+          if (linked.has(target)) return;
+          linked.add(target);
+          links.push({
+            id: `page-evidence:${id}:${target}`,
+            source: id,
+            target,
+            kind: "supports",
+            role: "evidence",
+          });
+        };
+        const produced = new Set<string>();
+        for (const step of entry.steps) {
+          if (step.evidence) produced.add(step.evidence);
           for (const artifactId of step.artifacts ?? []) {
+            produced.add(artifactId);
             const artifact = execution.artifacts.find((artifact) => artifact.id === artifactId);
             for (const subject of artifact ? subjectsOf(artifact) : []) {
               const hub = hubs.get(subjectKey(subject));
-              if (!hub || linked.has(hub)) continue;
-              linked.add(hub);
-              links.push({
-                id: `page-subject:${id}:${hub}`,
-                source: id,
-                target: hub,
-                kind: "supports",
-              });
+              if (hub) tie(hub);
             }
           }
+        }
+        for (const cited of cites)
+          if ([...produced].some((extraction) => cited.extractions.has(extraction))) tie(cited.id);
       }
     }
   }
@@ -748,8 +832,8 @@ export function environmentFiles(
 }
 
 /**
- * A result's plan, one card per step in the stage's Plan cluster. A step ties
- * (only while focused) to the subjects it names and to the Sources it rests on.
+ * A result's plan, one card per step beside it in Made. A step ties, only
+ * while focused, to the subjects it names.
  */
 export function environmentSteps(
   snapshot: WorkEnvironmentSnapshot,
@@ -762,7 +846,6 @@ export function environmentSteps(
   for (const stage of stages) {
     const projection = objectives.get(stage.objective);
     if (!projection) continue;
-    const sources = new Set(stage.contents.sources?.members.map((member) => member.id) ?? []);
     const named = snapshot.elements.flatMap((element) => {
       const reference = element.reference;
       if (reference.kind !== "subject" || !stage.executions.includes(reference.execution))
@@ -779,7 +862,6 @@ export function environmentSteps(
       const execution = projection.executions.find((entry) => entry.id === reference.execution);
       const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
       if (!execution || !artifact) continue;
-      const source = `sources:${stage.element}:${execution.id}`;
       resultPlan(artifactView(artifact, execution).content).forEach((step, index) => {
         const id = stepId(element.id, index);
         const text = clipText(step.text, TITLE_TEXT);
@@ -804,42 +886,55 @@ export function environmentSteps(
               source: id,
               target: subject.id,
               kind: "uses",
+              role: "named",
               label: m.work_env_relation_uses(),
             });
-        if (sources.has(source))
-          links.push({
-            id: `step-sources:${id}`,
-            source,
-            target: id,
-            kind: "supports",
-            label: m.work_env_relation_supports(),
-          });
       });
     }
   }
   return { items, links, positions };
 }
 
-const CLUSTER_LABELS: Record<ClusterKind, (count: number) => string> = {
-  sources: (count) => m.work_env_sources_count({ count }),
-  pages: (count) =>
-    count === 1 ? m.work_env_cluster_page_one() : m.work_env_cluster_pages({ count }),
-  work: (count) =>
-    count === 1 ? m.work_env_cluster_work_one() : m.work_env_cluster_work({ count }),
-  subjects: (count) =>
-    count === 1 ? m.work_env_cluster_subject_one() : m.work_env_cluster_subjects({ count }),
-  findings: (count) => m.work_env_cluster_findings({ count }),
-  results: (count) => m.work_env_cluster_results({ count }),
-  plan: (count) =>
-    count === 1 ? m.work_env_cluster_step_one() : m.work_env_cluster_steps({ count }),
-};
-/** Kinds that always gather under a label; the rest do only when they hold several cards. */
-const LABELLED = new Set<ClusterKind>(["pages", "work", "subjects", "plan"]);
+/** A group's caption counts what it holds: "2 pages · 3 local steps", "4 subjects", "6 steps". */
+function caption(group: LaneGroup): string {
+  const { pages = 0, work = 0, subjects = 0, findings = 0, results = 0 } = group.counts;
+  const parts =
+    group.kind === "worked"
+      ? [
+          pages === 1
+            ? m.work_env_cluster_page_one()
+            : pages
+              ? m.work_env_cluster_pages({ count: pages })
+              : "",
+          work === 1
+            ? m.work_env_cluster_work_one()
+            : work
+              ? m.work_env_cluster_work({ count: work })
+              : "",
+        ]
+      : group.kind === "found"
+        ? [
+            subjects === 1
+              ? m.work_env_cluster_subject_one()
+              : subjects
+                ? m.work_env_cluster_subjects({ count: subjects })
+                : "",
+            findings === 1
+              ? m.work_env_findings()
+              : findings
+                ? m.work_env_cluster_findings({ count: findings })
+                : "",
+          ]
+        : [results === 1 ? m.work_env_result() : m.work_env_cluster_results({ count: results })];
+  return parts.filter(Boolean).join(" · ") || m.work_env_sources();
+}
+const stepsCaption = (count: number) =>
+  count === 1 ? m.work_env_cluster_step_one() : m.work_env_cluster_steps({ count });
 
 /**
- * Each stage's clusters and the path that reads through them: request, then
- * every non-empty cluster in order. A path edge attaches to a cluster's node,
- * or to the card itself when a cluster is a single card.
+ * Each lane's groups and the edges that rest between them: request → Worked
+ * with → Found → Made, skipping what the lane lacks, and each result into its
+ * steps. Edges end at a group's box, never at a card inside it.
  */
 export function environmentClusters(stages: readonly WorkStage[]): {
   clusters: CanvasCluster[];
@@ -848,24 +943,46 @@ export function environmentClusters(stages: readonly WorkStage[]): {
   const clusters: CanvasCluster[] = [];
   const links: CanvasLink[] = [];
   for (const stage of stages) {
-    let from = { kind: "request", id: stage.card };
-    for (const cluster of stage.layout.clusters) {
-      const grouped = LABELLED.has(cluster.kind) || cluster.members.length > 1;
-      const id = grouped ? `cluster:${stage.card}:${cluster.kind}` : cluster.members[0]!;
-      if (grouped)
+    let from = stage.card;
+    for (const group of stage.layout.groups) {
+      const id = `group:${stage.card}:${group.kind}`;
+      const inner = (group.steps ?? []).map((entry) => ({
+        ...entry,
+        id: `group:${stage.card}:steps:${entry.result}`,
+      }));
+      const steps = new Set(inner.flatMap((entry) => entry.members));
+      for (const entry of inner)
         clusters.push({
-          id,
-          label: CLUSTER_LABELS[cluster.kind](cluster.members.length + cluster.more),
-          more: cluster.more,
-          members: cluster.members,
+          id: entry.id,
+          label: stepsCaption(entry.members.length),
+          more: 0,
+          members: entry.members,
+          inset: LANE.inset,
+          live: stage.live,
         });
+      clusters.push({
+        id,
+        label: caption(group),
+        more: group.more,
+        members: group.members.filter((member) => !steps.has(member)),
+        ...(inner.length ? { within: inner.map((entry) => entry.id) } : {}),
+        inset: LANE.pad,
+        live: stage.live,
+      });
       links.push({
-        id: `path:${stage.card}:${from.kind}:${cluster.kind}`,
-        source: from.id,
+        id: `path:${stage.card}:${group.kind}`,
+        source: from,
         target: id,
         kind: "path",
       });
-      from = { kind: cluster.kind, id };
+      for (const entry of inner)
+        links.push({
+          id: `path:${stage.card}:steps:${entry.result}`,
+          source: entry.result,
+          target: entry.id,
+          kind: "path",
+        });
+      from = id;
     }
   }
   return { clusters, links };

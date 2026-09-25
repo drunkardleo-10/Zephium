@@ -80,14 +80,15 @@ export type CanvasItem = {
     text: string;
     icon: "dates" | "flight" | "stay" | "entry" | "money" | "document" | "check";
   };
-  /** Transient agent presence: avatar seed, status, its latest line, and where it stands. */
+  /** Transient agent presence: its orb's seed, what it does, where it stands, what it says. */
   agent?: {
     seed: number;
     activity: string;
     objective: string;
-    line?: string;
     doing?: string;
     stand?: CanvasPosition;
+    /** One word or a host, while the activity lasts. */
+    caption?: string;
   };
   /** The pages one fetch stage cited; opening a row goes through the pane. */
   sources?: readonly {
@@ -125,32 +126,67 @@ export type CanvasLink = {
   source: string;
   target: string;
   /**
-   * `path` reads through a stage at rest and `thread` joins one stage to the
-   * next; relation kinds show only while an end is selected or hovered;
-   * `working` is the transient tie between an agent and what it acts on now.
+   * `path` joins a lane's groups at rest and `thread` joins one request to the
+   * next; relation kinds show only while an end is hovered or selected.
    */
-  kind: "dependency" | "reference" | "working" | "path" | "thread" | RelationKind;
+  kind: "dependency" | "reference" | "path" | "thread" | RelationKind;
+  /** Why a lane relation exists: a page is evidence for what was found, a step names a subject. */
+  role?: "evidence" | "named";
   label?: string;
 };
-/** What Rust relates and the run's own ties: drawn only while an end is focused. */
-const LATENT = new Set<CanvasLink["kind"]>([
-  "supports",
-  "uses",
-  "depends_on",
-  "same_as",
-  "contradicts",
+/** Past this many ties a focused card lights none: a fan of lines says nothing. */
+const RELATION_CAP = 6;
+const FOUND = new Set<CanvasKind | undefined>(["subject", "finding", "findings"]);
+/** Cards that never light a tie: the lane's edges already say where they stand. */
+const QUIET = new Set<CanvasKind | undefined>([
+  "objective",
+  "request",
+  "sources",
+  "result",
+  "agent",
+  "page",
+  "file",
+  "command",
+  "responsibility",
 ]);
-/** The path is drawn at rest; relations wait for a focused end; a new path segment draws in. */
-export function edgeClass(link: CanvasLink, focused: ReadonlySet<string>, fresh: boolean): string {
-  const active = focused.has(link.source) || focused.has(link.target);
-  const path = link.kind === "path" || link.kind === "thread";
-  return [
-    "work-edge",
-    `kind-${link.kind}`,
-    ...(LATENT.has(link.kind) ? ["latent"] : []),
-    ...(active ? ["active"] : []),
-    ...(path && fresh ? ["draw"] : []),
-  ].join(" ");
+/** Drawn at rest: a lane's group edges, the thread, and an expanded plan's own structure. */
+export const restLink = (link: CanvasLink) =>
+  link.kind === "path" ||
+  link.kind === "thread" ||
+  link.kind === "dependency" ||
+  link.kind === "reference";
+/**
+ * The relations a focused card lights: a Found card its evidence pages, a
+ * step the subjects it names, a card the person placed its own ties. The
+ * request, Sources and a result light nothing; more than six light nothing.
+ */
+export function relationLinks(
+  links: readonly CanvasLink[],
+  items: ReadonlyMap<string, CanvasItem>,
+  focused: ReadonlySet<string>,
+): Set<string> {
+  const lit = new Set<string>();
+  for (const id of focused) {
+    const item = items.get(id);
+    if (!item) continue;
+    const type = item.type ?? (item.artifact ? "result" : "objective");
+    if (!FOUND.has(type) && (QUIET.has(type) || item.artifact)) continue;
+    const ties = links.filter((link) => {
+      if (restLink(link)) return false;
+      if (FOUND.has(type)) return link.role === "evidence" && link.target === id;
+      if (type === "step") return link.role === "named" && link.source === id;
+      if (link.role) return false;
+      const other = items.get(link.source === id ? link.target : link.source);
+      return (
+        (link.source === id || link.target === id) &&
+        !!other &&
+        !QUIET.has(other.type) &&
+        !other.artifact
+      );
+    });
+    if (ties.length <= RELATION_CAP) for (const link of ties) lit.add(link.id);
+  }
+  return lit;
 }
 export type CanvasPosition = { x: number; y: number };
 export type CanvasSize = { width: number; height: number };
@@ -162,19 +198,36 @@ export type CanvasView = {
   viewport: { x: number; y: number; zoom: number };
 };
 export type AreaData = { title: string; count: number };
-/** The cards of one kind in one stage; derived by projection, never persisted. */
-export type CanvasCluster = { id: string; label: string; more: number; members: readonly string[] };
-export type ClusterData = { label: string; more: number; active: boolean };
+/** A lane's group of cards; derived by projection, never persisted. */
+export type CanvasCluster = {
+  id: string;
+  label: string;
+  more: number;
+  members: readonly string[];
+  /** Groups drawn inside this one, which its box also holds. */
+  within?: readonly string[];
+  /** The air between the box and its cards; the caption sits above them. */
+  inset?: number;
+  /** Whether the lane's run is still going: only then does a new group arrive in motion. */
+  live?: boolean;
+};
+export type ClusterData = { label: string; more: number; active: boolean; inset: number };
 export type WorkItemNode = Node<CanvasItem, "work">;
+type AgentNode = Node<CanvasItem, "agent">;
 type ClusterNode = Node<ClusterData, "cluster">;
-export type WorkNode = WorkItemNode | Node<AreaData, "area"> | ClusterNode;
+export type WorkNode = WorkItemNode | Node<AreaData, "area"> | ClusterNode | AgentNode;
 const AREA_PREFIX = "area:";
 const areaNodeId = (id: string) => `${AREA_PREFIX}${id}`;
 export const isAreaNode = (node: WorkNode): node is Node<AreaData, "area"> => node.type === "area";
 const isClusterNode = (node: WorkNode): node is ClusterNode => node.type === "cluster";
 export const isItemNode = (node: WorkNode): node is WorkItemNode => node.type === "work";
+export const isAgentNode = (node: WorkNode): node is AgentNode => node.type === "agent";
 const DEFAULT_AREA: CanvasSize = { width: 640, height: 420 };
-const CLUSTER_PAD = 12;
+/** The agent's orb; its caption hangs outside the node. */
+const MARK_SIZE = 24;
+/** A group box pads its cards by 24 and holds a 20 px caption above them. */
+const CLUSTER_PAD = 24;
+const CLUSTER_CAPTION = 20;
 const validPosition = (p: CanvasPosition | undefined): p is CanvasPosition =>
   !!p &&
   Number.isFinite(p.x) &&
@@ -310,6 +363,8 @@ export function reconcileNodes(
   sizes: Readonly<Record<string, CanvasSize>> = {},
   areas: readonly CanvasArea[] = [],
   areaPlacements: Readonly<Record<string, CanvasPosition & CanvasSize>> = {},
+  /** The positions the last call was given: a card follows only a place that changed. */
+  before: Readonly<Record<string, CanvasPosition>> = positions,
 ): WorkNode[] {
   const existing = new Map(previous.map((node) => [node.id, node]));
   const areaNodes: Node<AreaData, "area">[] = areas.map((area, index) => {
@@ -361,7 +416,7 @@ export function reconcileNodes(
     const node = existing.get(item.id);
     const parentId = item.area ? areaNodeId(item.area) : undefined;
     const parent = parentId ? areaById.get(parentId) : undefined;
-    if (node && isItemNode(node)) {
+    if (node && (isItemNode(node) || isAgentNode(node))) {
       const reparented = (node.parentId ?? undefined) !== (parent ? parentId : undefined);
       const same =
         !reparented &&
@@ -392,14 +447,26 @@ export function reconcileNodes(
         JSON.stringify(node.data.file) === JSON.stringify(item.file) &&
         JSON.stringify(node.data.command) === JSON.stringify(item.command) &&
         JSON.stringify(node.data.step) === JSON.stringify(item.step);
-      // Agents follow their work: a fresh computed position moves the node.
-      const moved = item.agent ? positions[item.id] : undefined;
+      // The agent follows its work; a card follows its lane when the lane moves it.
+      const target = positions[item.id];
+      const followed =
+        !!item.agent ||
+        (!parent &&
+          !!target &&
+          (before[item.id]?.x !== target.x || before[item.id]?.y !== target.y));
       const relocated =
-        !!moved &&
-        validPosition(moved) &&
+        followed &&
+        validPosition(target) &&
         !node.dragging &&
-        (node.position.x !== moved.x || node.position.y !== moved.y);
+        (node.position.x !== target.x || node.position.y !== target.y);
       if (same && !relocated) return node;
+      if (isAgentNode(node))
+        return {
+          ...node,
+          data: item,
+          ariaLabel: item.status,
+          ...(relocated ? { position: { ...target! } } : {}),
+        };
       // A card nobody sized follows what it says; a saved or resized one keeps its size.
       const was = defaultSize(node.data);
       const grown =
@@ -416,7 +483,7 @@ export function reconcileNodes(
           ...size,
           data: item,
           ariaLabel: `${item.title}. ${item.status}`,
-          ...(relocated ? { position: { ...moved } } : {}),
+          ...(relocated ? { position: { ...target! } } : {}),
         };
       const absolute = absolutePosition(node, previous);
       return {
@@ -432,6 +499,22 @@ export function reconcileNodes(
     }
     const restored = Object.hasOwn(positions, item.id) ? positions[item.id] : undefined;
     const absolute = validPosition(restored) ? { ...restored! } : nextPosition(index);
+    if (item.agent)
+      return {
+        id: item.id,
+        type: "agent",
+        position: absolute,
+        data: item,
+        width: MARK_SIZE,
+        height: MARK_SIZE,
+        selectable: false,
+        draggable: false,
+        focusable: false,
+        deletable: false,
+        connectable: false,
+        zIndex: 1000,
+        ariaLabel: item.status,
+      };
     occupied.push(absolute);
     const position = parent
       ? { x: absolute.x - parent.position.x, y: absolute.y - parent.position.y }
@@ -458,7 +541,6 @@ export function reconcileNodes(
       dragHandle: ".work-drag-handle",
       deletable: false,
       connectable: false,
-      class: item.agent ? "agent-node work-node-enter" : "work-node-enter",
       ariaLabel: `${item.title}. ${item.status}`,
     };
   });
@@ -472,8 +554,9 @@ export function reconcileNodes(
 }
 
 /**
- * Cluster nodes around their members as they stand now, 12 px out. Members are
- * fixed by projection, so a card dragged away stretches its cluster.
+ * Group nodes around their members as they stand now: padded on every side,
+ * a caption's height above, and around any group drawn inside. Members are
+ * fixed by projection, so a card dragged away stretches its group.
  */
 export function withClusters(
   nodes: WorkNode[],
@@ -481,31 +564,58 @@ export function withClusters(
   active: ReadonlySet<string> = new Set(),
 ): WorkNode[] {
   const byId = new Map(nodes.map((node) => [node.id, node]));
+  const boxes = new Map<string, CanvasPosition & CanvasSize>();
   const derived: ClusterNode[] = [];
-  for (const cluster of clusters) {
-    const members = cluster.members.flatMap((id) => {
+  // Inner groups first, so an outer one can hold them.
+  const ordered = [
+    ...clusters.filter((cluster) => clusters.some((outer) => outer.within?.includes(cluster.id))),
+    ...clusters.filter((cluster) => !clusters.some((outer) => outer.within?.includes(cluster.id))),
+  ];
+  for (const cluster of ordered) {
+    const inset = cluster.inset ?? CLUSTER_PAD;
+    const rects = cluster.members.flatMap((id) => {
       const node = byId.get(id);
-      return node && isItemNode(node) ? [node] : [];
+      if (!node || !isItemNode(node)) return [];
+      const p = absolutePosition(node, nodes);
+      return [
+        {
+          x: p.x,
+          y: p.y,
+          width: node.measured?.width ?? node.width ?? 280,
+          height: node.measured?.height ?? node.height ?? 160,
+        },
+      ];
     });
-    if (!members.length) continue;
+    if (!rects.length) continue;
+    const inner = (cluster.within ?? []).flatMap((id) => {
+      const box = boxes.get(id);
+      return box ? [box] : [];
+    });
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
     let maxY = -Infinity;
-    for (const node of members) {
-      const p = absolutePosition(node, nodes);
-      minX = Math.min(minX, p.x);
-      minY = Math.min(minY, p.y);
-      maxX = Math.max(maxX, p.x + (node.measured?.width ?? node.width ?? 280));
-      maxY = Math.max(maxY, p.y + (node.measured?.height ?? node.height ?? 160));
+    for (const rect of rects) {
+      minX = Math.min(minX, rect.x - inset);
+      minY = Math.min(minY, rect.y - inset - CLUSTER_CAPTION);
+      maxX = Math.max(maxX, rect.x + rect.width + inset);
+      maxY = Math.max(maxY, rect.y + rect.height + inset);
     }
-    const position = { x: Math.round(minX - CLUSTER_PAD), y: Math.round(minY - CLUSTER_PAD) };
-    const width = Math.round(maxX - minX + CLUSTER_PAD * 2);
-    const height = Math.round(maxY - minY + CLUSTER_PAD * 2);
+    for (const box of inner) {
+      minX = Math.min(minX, box.x);
+      minY = Math.min(minY, box.y);
+      maxX = Math.max(maxX, box.x + box.width + inset);
+      maxY = Math.max(maxY, box.y + box.height + inset);
+    }
+    const position = { x: Math.round(minX), y: Math.round(minY) };
+    const width = Math.round(maxX - minX);
+    const height = Math.round(maxY - minY);
+    boxes.set(cluster.id, { ...position, width, height });
     const data = {
       label: cluster.label,
       more: cluster.more,
       active: cluster.members.some((id) => active.has(id)),
+      inset,
     };
     const node = byId.get(cluster.id);
     derived.push(
@@ -517,7 +627,8 @@ export function withClusters(
         node.height === height &&
         node.data.label === data.label &&
         node.data.more === data.more &&
-        node.data.active === data.active
+        node.data.active === data.active &&
+        node.data.inset === data.inset
         ? node
         : {
             id: cluster.id,
@@ -537,6 +648,8 @@ export function withClusters(
           },
     );
   }
+  // Outer groups draw first, so an inner one sits on top of its plate.
+  derived.reverse();
   const others = nodes.filter((node) => !isClusterNode(node));
   const areas = others.filter(isAreaNode);
   const cards = others.filter((node) => !isAreaNode(node));

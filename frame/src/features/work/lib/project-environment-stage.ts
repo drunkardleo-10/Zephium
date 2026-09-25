@@ -1,6 +1,7 @@
 import type {
   WorkArtifactV1,
   WorkCommandRecordV1,
+  WorkEnvironmentElement,
   WorkEnvironmentSnapshot,
   WorkExecutionFact,
   WorkFileRecordV1,
@@ -8,7 +9,7 @@ import type {
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
 import { FILE_STEPS, isAgentExecution } from "./agent-steps";
-import { clipText, type CanvasItem, type CanvasSize } from "./canvas-model";
+import { clipText, type CanvasItem, type CanvasPosition, type CanvasSize } from "./canvas-model";
 import { findingsSize, resultSize, sourcesSize, stepSize, subjectSize } from "./card-size";
 import { resultPlan, stepId } from "./plan-steps";
 import { artifactView } from "./project-work";
@@ -326,24 +327,63 @@ export function subjectCardSize(
   );
 }
 
-/** What one message's runs put in each cluster, in projection order. */
+/**
+ * Whether an element's card stands in a lane: a request, or what one of the
+ * canvas's works found or made. The person's own elements keep absolute places.
+ */
+export function laneElement(
+  snapshot: WorkEnvironmentSnapshot,
+  element: WorkEnvironmentElement,
+): boolean {
+  const reference = element.reference;
+  if (reference.kind === "objective") return true;
+  if (reference.kind !== "subject" && reference.kind !== "finding" && reference.kind !== "artifact")
+    return false;
+  return snapshot.elements.some(
+    (candidate) =>
+      candidate.reference.kind === "objective" &&
+      candidate.reference.objective === reference.objective,
+  );
+}
+/** A placement written in lane terms: `x, y` are an offset from the lane place. */
+export const LANE_PLACEMENT = 2;
+export type LaneOffset = { offset: CanvasPosition; size: CanvasSize };
+/**
+ * What the person did to lane cards: moved them by an offset, resized them.
+ * A placement from before lanes says neither and is left out, so the card
+ * takes its lane place once and is saved in lane terms from then on.
+ */
+export function laneOffsets(snapshot: WorkEnvironmentSnapshot): Map<string, LaneOffset> {
+  const lane = new Set(
+    snapshot.elements.flatMap((element) => (laneElement(snapshot, element) ? [element.id] : [])),
+  );
+  const offsets = new Map<string, LaneOffset>();
+  for (const place of snapshot.view.placements)
+    if (lane.has(place.element) && place.revision === LANE_PLACEMENT)
+      offsets.set(place.element, {
+        offset: { x: place.x, y: place.y },
+        size: { width: place.width, height: place.height },
+      });
+  return offsets;
+}
+
+/** Lead results first: a comparison or a chart heads the Made group. */
+const leads = (artifact: WorkArtifactV1 | undefined) =>
+  artifact?.data.kind === "comparison_matrix" || artifact?.data.kind === "chart";
+
+/** What one message's runs put in each group, in projection order. */
 export function stageContents(
   snapshot: WorkEnvironmentSnapshot,
   projection: WorkRuntimeProjection,
   stage: { element: string; executions: readonly string[] },
   recorded: readonly WorkPageV1[] = [],
+  offsets: ReadonlyMap<string, LaneOffset> = laneOffsets(snapshot),
 ): StageContents {
-  const placements = new Map(snapshot.view.placements.map((place) => [place.element, place]));
-  const member = (id: string, size: CanvasSize): StageMember => {
-    const place = placements.get(id);
-    return place
-      ? {
-          id,
-          size: { width: place.width, height: place.height },
-          placed: { x: place.x, y: place.y },
-        }
-      : { id, size };
-  };
+  // A card the person resized keeps that size in its lane.
+  const member = (id: string, size: CanvasSize): StageMember => ({
+    id,
+    size: offsets.get(id)?.size ?? size,
+  });
   const runs = stage.executions.flatMap((id) => {
     const execution = projection.executions.find((entry) => entry.id === id);
     return execution ? [execution] : [];
@@ -363,7 +403,7 @@ export function stageContents(
   }
   const subjects: StageMember[] = [];
   const findings: StageMember[] = [];
-  const results: StageMember[] = [];
+  const results: (StageMember & { lead: boolean })[] = [];
   const plan: StageMember[] = [];
   const hubs = new Set<string>();
   for (const element of snapshot.elements) {
@@ -383,15 +423,23 @@ export function stageContents(
     } else if (reference.kind === "finding") findings.push(member(element.id, SIZES.findings));
     else if (reference.kind === "artifact") {
       const size = artifact && execution ? artifactSize(artifact, execution) : SIZES.result;
-      (artifact?.data.kind === "findings" ? findings : results).push(member(element.id, size));
+      if (artifact?.data.kind === "findings") {
+        findings.push(member(element.id, size));
+        continue;
+      }
+      results.push({ ...member(element.id, size), lead: leads(artifact) });
       // A result's plan stands beside it, one card per step.
       const view = artifact && execution ? artifactView(artifact, execution) : undefined;
       resultPlan(view?.content).forEach((step, index) =>
-        plan.push({ id: stepId(element.id, index), size: stepSize(step.text, step.detail) }),
+        plan.push({
+          id: stepId(element.id, index),
+          size: stepSize(step.text, step.detail),
+          of: element.id,
+        }),
       );
     }
   }
-  // Subjects the runs named that never earned a card only count on the label.
+  // Subjects the runs named that never earned a card only count on the caption.
   const named = new Set<string>();
   for (const execution of runs) {
     const listings = listingArtifacts(execution);
@@ -406,7 +454,12 @@ export function stageContents(
     work: { members: work },
     subjects: { members: subjects, more: subjects.length >= CLUSTER_CAP.subjects ? unshown : 0 },
     findings: { members: findings },
-    results: { members: results },
+    results: {
+      members: [
+        ...results.filter((result) => result.lead),
+        ...results.filter((result) => !result.lead),
+      ].map(({ id, size }) => ({ id, size })),
+    },
     plan: { members: plan },
   };
 }

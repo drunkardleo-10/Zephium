@@ -79,6 +79,7 @@
     environmentSteps,
     environmentView,
     fileEvidence,
+    viewPlacements,
   } from "../lib/project-environment";
   import {
     environmentRequests,
@@ -1522,17 +1523,7 @@
             ]
           : [];
       }),
-      placements: snapshot.elements.map((element) => {
-        const point = view.positions[element.id] ?? { x: 0, y: 0 };
-        const previous = snapshot.view.placements.find((place) => place.element === element.id);
-        return {
-          element: element.id,
-          x: Math.round(point.x),
-          y: Math.round(point.y),
-          width: view.sizes?.[element.id]?.width ?? previous?.width ?? 280,
-          height: view.sizes?.[element.id]?.height ?? previous?.height ?? 160,
-        };
-      }),
+      placements: viewPlacements(snapshot, view, stages),
     };
     if (
       JSON.stringify({ ...next, revision: "" }) !==

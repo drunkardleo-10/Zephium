@@ -114,7 +114,7 @@ export function pendingOrganize(
   return roots(execution).some((artifact) => !placed.has(artifact.id)) ? execution : null;
 }
 
-/** Deterministic first placement around the objective; user arrangement is never rewritten. */
+/** Deterministic first placement around the objective; lane cards then follow their lane. */
 export function organizeExecution(
   projection: WorkRuntimeProjection,
   execution: WorkExecutionFact,
@@ -308,8 +308,9 @@ function organizeAgentRun(
       for (const subject of subjects)
         relations.push({ from: subject, to: reference, kind: "uses" });
   }
-  const place = stage?.place ?? { x: 80, y: 120, ...SIZES.request };
-  const { positions } = stageLayout(place, contents);
+  // Where the lane would put them now; once saved, the lane places them itself.
+  const place = stage?.place ?? { x: 0, y: 0, ...SIZES.request };
+  const { positions } = stageLayout(place, contents, stage?.slots);
   // A card past its cluster's cap only counts on the cluster's label.
   const adds = pending.flatMap(({ reference, size }) => {
     const position = positions[JSON.stringify(reference)];

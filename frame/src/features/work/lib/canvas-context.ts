@@ -13,3 +13,5 @@ export const canvasAuthor = Symbol("canvas-author");
 export const canvasPictures = Symbol("canvas-pictures");
 /** An area's own actions: fit to members, rename in place, remove. */
 export const canvasAreaActions = Symbol("canvas-area-actions");
+/** How a node that just appeared arrives: with a group (`page`), into one (`base`), or not. */
+export const canvasArrival = Symbol("canvas-arrival");

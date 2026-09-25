@@ -15,151 +15,339 @@ export const SIZES = {
   file: { width: 248, height: 96 },
   command: { width: 248, height: 120 },
 } as const;
-const CARD_GAP = 20;
-const CLUSTER_GAP = 48;
-export const STAGE_GAP = 56;
-/** The air between the agent and the cluster it works beside. */
-const STAND_GAP = 16;
 
-/** A stage reads left to right in this order; empty clusters take no width. */
-const CLUSTER_ORDER = [
-  "sources",
-  "pages",
-  "work",
-  "subjects",
-  "findings",
-  "results",
-  "plan",
-] as const;
-export type ClusterKind = (typeof CLUSTER_ORDER)[number];
-/** Past these a cluster's cards stop and its label counts the rest. */
+/**
+ * The lane geometry: a request column, then canvas-wide slots a gutter apart;
+ * groups pad their cards and carry a caption above them; a group's steps sit
+ * in a smaller box of their own.
+ */
+export const LANE = {
+  column: 300,
+  gutter: 48,
+  slot: 320,
+  between: 96,
+  pad: 24,
+  gap: 16,
+  caption: 20,
+  inset: 16,
+} as const;
+
+/** What a group's cards are, by where they come from. */
+export type ClusterKind =
+  "sources" | "pages" | "work" | "subjects" | "findings" | "results" | "plan";
+/** Worked with, Found, Made: a lane fills its slots in this order. */
+type GroupKind = "worked" | "found" | "made";
+/** Past these a group's cards stop and its caption counts the rest. */
 export const CLUSTER_CAP = { pages: 8, subjects: 12 } as const;
-const GRID: Record<ClusterKind, { columns: number; cap: number }> = {
-  sources: { columns: 1, cap: Infinity },
-  pages: { columns: 2, cap: CLUSTER_CAP.pages },
-  work: { columns: 2, cap: Infinity },
-  subjects: { columns: 3, cap: CLUSTER_CAP.subjects },
-  findings: { columns: 1, cap: Infinity },
-  results: { columns: 1, cap: Infinity },
-  plan: { columns: 2, cap: Infinity },
-};
 
-/** One card of a cluster; `placed` is a saved placement, which is never rewritten. */
-export type StageMember = { id: string; size: CanvasSize; placed?: CanvasPosition };
+/** One card of a lane; a step names the result card it belongs to. */
+export type StageMember = { id: string; size: CanvasSize; of?: string };
 /** Members in projection order; `more` counts what the run knows but no card shows. */
 export type StageContents = Partial<
   Record<ClusterKind, { members: readonly StageMember[]; more?: number }>
 >;
-type StageCluster = {
-  kind: ClusterKind;
-  /** The members that are cards; the rest only count in `more`. */
-  members: string[];
+
+type Rect = Placement;
+/** A group laid out at the origin: its box, then its cards inside it. */
+type GroupShape = {
+  kind: GroupKind;
+  width: number;
+  height: number;
+  cards: { id: string; rect: Rect }[];
+  counts: Partial<Record<ClusterKind, number>>;
   more: number;
-  /** Where its cards stand now: saved placements and new slots together. */
+  local?: Rect;
+  steps?: { result: string; box: Rect; members: string[] }[];
+};
+/** A lane's groups before the canvas gives them slots. */
+export type LaneShape = GroupShape[];
+
+export type LaneGroup = {
+  kind: GroupKind;
   box: Placement;
+  /** The cards shown, in reading order; hidden ones only count. */
+  members: string[];
+  counts: Partial<Record<ClusterKind, number>>;
+  more: number;
+  /** Worked with: the row of folders, files and commands. */
+  local?: Placement;
+  /** Made: each result's steps, in a box to its right. */
+  steps?: { result: string; box: Placement; members: string[] }[];
 };
 export type StageLayout = {
-  clusters: StageCluster[];
-  /** Every visible member: its saved placement, or the slot a new card takes. */
+  request: Placement;
+  groups: LaneGroup[];
+  /** Where every shown card stands, derived from the lane alone. */
   positions: Record<string, CanvasPosition>;
-  /** The bottom of the tallest cluster; the next request stands under it. */
+  /** The bottom of the lane's tallest box; the next lane starts 96 px under it. */
   extent: number;
 };
 
-/**
- * Clusters left to right from the request, each a row-major grid anchored at
- * the stage's top. A cluster that already has cards keeps its x, and a cluster
- * to its left narrows rather than grow into it.
- */
-export function stageLayout(stage: Placement, contents: StageContents): StageLayout {
-  const present = CLUSTER_ORDER.filter((kind) => contents[kind]?.members.length);
-  const sticky = new Map<ClusterKind, number>();
-  for (const kind of present) {
-    const first = contents[kind]!.members[0]!.placed;
-    if (first) sticky.set(kind, first.x);
+const shown = (contents: StageContents, kind: ClusterKind) => {
+  const members = contents[kind]?.members ?? [];
+  const cap = kind === "pages" || kind === "subjects" ? CLUSTER_CAP[kind] : Infinity;
+  const visible = members.slice(0, cap);
+  return { visible, hidden: (contents[kind]?.more ?? 0) + members.length - visible.length };
+};
+
+function cells(members: readonly StageMember[], columns: number, origin: CanvasPosition): Rect[] {
+  return members.length
+    ? grid(
+        members.map((member) => member.size),
+        { columns: Math.min(columns, members.length), gap: LANE.gap, origin },
+      )
+    : [];
+}
+
+/** The group's box around its cards: padding on every side, the caption above them. */
+function frame(rects: Rect[]): { width: number; height: number } {
+  const box = bounds(rects)!;
+  return { width: box.x + box.width + LANE.pad, height: box.y + box.height + LANE.pad };
+}
+
+/** Worked with: the web row (Sources, then pages two across) above the local row. */
+function worked(contents: StageContents): GroupShape | null {
+  const sources = shown(contents, "sources");
+  const pages = shown(contents, "pages");
+  const local = shown(contents, "work");
+  if (!sources.visible.length && !pages.visible.length && !local.visible.length) return null;
+  const top = LANE.pad + LANE.caption;
+  const column = cells(sources.visible, 1, { x: LANE.pad, y: top });
+  const left = column.length ? bounds(column)!.x + bounds(column)!.width + LANE.gap : LANE.pad;
+  const read = cells(pages.visible, 2, { x: left, y: top });
+  const web = bounds([...column, ...read]);
+  const row = cells(local.visible, 2, {
+    x: LANE.pad,
+    y: web ? web.y + web.height + LANE.gap : top,
+  });
+  const rects = [...column, ...read, ...row];
+  const ids = [...sources.visible, ...pages.visible, ...local.visible].map((member) => member.id);
+  return {
+    kind: "worked",
+    ...frame(rects),
+    cards: ids.map((id, index) => ({ id, rect: rects[index]! })),
+    counts: {
+      sources: contents.sources?.members.length ?? 0,
+      pages: (contents.pages?.members.length ?? 0) + (contents.pages?.more ?? 0),
+      work: contents.work?.members.length ?? 0,
+    },
+    more: sources.hidden + pages.hidden + local.hidden,
+    ...(row.length ? { local: bounds(row)! } : {}),
+  };
+}
+
+/** Found: subjects three across, the findings under them. */
+function found(contents: StageContents): GroupShape | null {
+  const subjects = shown(contents, "subjects");
+  const findings = shown(contents, "findings");
+  if (!subjects.visible.length && !findings.visible.length) return null;
+  const top = LANE.pad + LANE.caption;
+  const named = cells(subjects.visible, 3, { x: LANE.pad, y: top });
+  const above = bounds(named);
+  const claims = cells(findings.visible, 2, {
+    x: LANE.pad,
+    y: above ? above.y + above.height + LANE.gap : top,
+  });
+  const rects = [...named, ...claims];
+  const ids = [...subjects.visible, ...findings.visible].map((member) => member.id);
+  return {
+    kind: "found",
+    ...frame(rects),
+    cards: ids.map((id, index) => ({ id, rect: rects[index]! })),
+    counts: {
+      subjects: subjects.visible.length + subjects.hidden,
+      findings: findings.visible.length,
+    },
+    more: subjects.hidden + findings.hidden,
+  };
+}
+
+/** Made: results in a column, each result's steps two across in a box to its right. */
+function made(contents: StageContents): GroupShape | null {
+  const results = shown(contents, "results").visible;
+  if (!results.length) return null;
+  const plan = contents.plan?.members ?? [];
+  const column = Math.max(...results.map((result) => result.size.width));
+  const cards: GroupShape["cards"] = [];
+  const steps: NonNullable<GroupShape["steps"]> = [];
+  let y = LANE.pad + LANE.caption;
+  for (const result of results) {
+    const rect = { x: LANE.pad, y, ...result.size };
+    cards.push({ id: result.id, rect });
+    let bottom = rect.y + rect.height;
+    const own = plan.filter((step) => step.of === result.id);
+    if (own.length) {
+      const x = LANE.pad + column + LANE.gutter;
+      const placed = cells(own, 2, { x: x + LANE.inset, y: y + LANE.inset + LANE.caption });
+      const inner = bounds(placed)!;
+      const box = {
+        x,
+        y,
+        width: inner.width + LANE.inset * 2,
+        height: inner.height + LANE.inset * 2 + LANE.caption,
+      };
+      own.forEach((step, index) => cards.push({ id: step.id, rect: placed[index]! }));
+      steps.push({ result: result.id, box, members: own.map((step) => step.id) });
+      bottom = Math.max(bottom, box.y + box.height);
+    }
+    y = bottom + LANE.gap;
   }
-  const clusters: StageCluster[] = [];
-  const positions: Record<string, CanvasPosition> = {};
-  let extent = stage.y + stage.height;
-  let x = stage.x + stage.width + CLUSTER_GAP;
-  for (const [order, kind] of present.entries()) {
-    const { members, more = 0 } = contents[kind]!;
-    const { columns, cap } = GRID[kind];
-    const visible = members.slice(0, cap);
-    const origin = sticky.get(kind) ?? x;
-    const width = Math.max(...visible.map((member) => member.size.width));
-    const limit = present
-      .slice(order + 1)
-      .map((next) => sticky.get(next))
-      .find((next): next is number => next !== undefined && next > origin);
-    const fits =
-      limit === undefined
-        ? columns
-        : Math.max(1, Math.floor((limit - CLUSTER_GAP - origin + CARD_GAP) / (width + CARD_GAP)));
-    const slots = grid(
-      visible.map((member) => member.size),
-      {
-        columns: Math.min(columns, visible.length, fits),
-        gap: CARD_GAP,
-        origin: { x: origin, y: stage.y },
-      },
-    );
-    const rects = visible.map((member, index) =>
-      member.placed ? { ...member.size, ...member.placed } : slots[index]!,
-    );
-    visible.forEach((member, index) => {
-      positions[member.id] = { x: rects[index]!.x, y: rects[index]!.y };
-    });
-    const box = bounds(rects)!;
-    extent = Math.max(extent, box.y + box.height);
-    clusters.push({
-      kind,
-      members: visible.map((member) => member.id),
-      more: more + members.length - visible.length,
-      box,
-    });
-    const reserved = bounds(slots)!;
-    x = Math.max(x, origin) + reserved.width + CLUSTER_GAP;
-  }
-  return { clusters, positions, extent };
+  const boxes = [...cards.map((card) => card.rect), ...steps.map((entry) => entry.box)];
+  return {
+    kind: "made",
+    ...frame(boxes),
+    cards,
+    counts: { results: results.length, plan: steps.reduce((n, s) => n + s.members.length, 0) },
+    more: 0,
+    ...(steps.length ? { steps } : {}),
+  };
+}
+
+/** A lane's groups in reading order, each measured at the origin; empty ones take no slot. */
+export function laneShape(contents: StageContents): LaneShape {
+  return [worked(contents), found(contents), made(contents)].filter(
+    (shape): shape is GroupShape => !!shape,
+  );
 }
 
 /**
- * Where the agent waits: right of the first cluster of `at` the stage has, level
- * with its top, else right of the request. A stand that would cover a card
- * steps right or down past it, whichever moves it less, until it is clear.
+ * Where each slot starts, canvas-wide: a slot is as wide as the widest group
+ * any lane puts in it, never under 320, and the request column comes first.
  */
-export function stageStand(
-  layout: StageLayout,
-  {
-    request,
-    at = [],
-    size,
-    avoid = [],
-  }: {
-    request: Placement;
-    at?: readonly ClusterKind[];
-    size: CanvasSize;
-    /** Other stages' boxes the stand keeps off as well. */
-    avoid?: readonly Placement[];
-  },
-): CanvasPosition {
-  const anchor =
-    at.map((kind) => layout.clusters.find((cluster) => cluster.kind === kind)?.box).find(Boolean) ??
-    request;
-  const blocks = [request, ...layout.clusters.map((cluster) => cluster.box), ...avoid];
-  const stand = { x: anchor.x + anchor.width + STAND_GAP, y: anchor.y };
-  const covers = (box: Placement) =>
-    stand.x < box.x + box.width + STAND_GAP &&
-    box.x < stand.x + size.width + STAND_GAP &&
-    stand.y < box.y + box.height + STAND_GAP &&
-    box.y < stand.y + size.height + STAND_GAP;
-  // Every step moves right or down, so the walk ends past the last box.
-  for (let hit = blocks.find(covers); hit; hit = blocks.find(covers)) {
-    const right = hit.x + hit.width + STAND_GAP - stand.x;
-    const down = hit.y + hit.height + STAND_GAP - stand.y;
-    if (right <= down) stand.x += right;
-    else stand.y += down;
+export function laneSlots(shapes: readonly LaneShape[]): number[] {
+  const widths: number[] = [];
+  for (const shape of shapes)
+    shape.forEach((group, slot) => {
+      widths[slot] = Math.max(widths[slot] ?? LANE.slot, group.width);
+    });
+  const starts: number[] = [];
+  let x = LANE.column + LANE.gutter;
+  for (const width of widths) {
+    starts.push(x);
+    x += width + LANE.gutter;
   }
-  return stand;
+  return starts;
+}
+
+const at = (rect: Rect, x: number, y: number): Placement => ({
+  x: rect.x + x,
+  y: rect.y + y,
+  width: rect.width,
+  height: rect.height,
+});
+
+/** A lane placed on the canvas: its request, then its groups in the slots it fills. */
+export function placeLane(request: Placement, shape: LaneShape, slots: readonly number[]) {
+  const positions: Record<string, CanvasPosition> = {};
+  let extent = request.y + request.height;
+  // A lane with more groups than the canvas has slots yet keeps going right.
+  let after = request.x + LANE.column + LANE.gutter;
+  const groups = shape.map((group, slot): LaneGroup => {
+    const x = slots[slot] ?? after;
+    after = x + Math.max(group.width, LANE.slot) + LANE.gutter;
+    const y = request.y;
+    for (const card of group.cards) positions[card.id] = { x: card.rect.x + x, y: card.rect.y + y };
+    extent = Math.max(extent, y + group.height);
+    return {
+      kind: group.kind,
+      box: { x, y, width: group.width, height: group.height },
+      members: group.cards.map((card) => card.id),
+      counts: group.counts,
+      more: group.more,
+      ...(group.local ? { local: at(group.local, x, y) } : {}),
+      ...(group.steps
+        ? {
+            steps: group.steps.map((entry) => ({
+              result: entry.result,
+              box: at(entry.box, x, y),
+              members: entry.members,
+            })),
+          }
+        : {}),
+    };
+  });
+  return { request, groups, positions, extent } satisfies StageLayout;
+}
+
+/** One lane on its own, in the slots it would take alone. */
+export function stageLayout(
+  request: Placement,
+  contents: StageContents,
+  slots?: readonly number[],
+): StageLayout {
+  const shape = laneShape(contents);
+  return placeLane(request, shape, slots ?? laneSlots([shape]));
+}
+
+/** The next lane's top: 96 px under the tallest box of the one above. */
+export const nextLane = (layout: StageLayout) => layout.extent + LANE.between;
+
+/** The orb is 24 px; a stand is its top-left corner. */
+const MARK = 24;
+const NEAR = 16;
+const OUT = 8;
+/** The orb centred on a box's top-left corner. */
+const corner = (box: Placement): CanvasPosition => ({ x: box.x - MARK / 2, y: box.y - MARK / 2 });
+/** The orb just outside a card's top-right corner. */
+const outside = (card: Placement): CanvasPosition => ({
+  x: card.x + card.width + OUT,
+  y: card.y - OUT - MARK,
+});
+
+export type MarkStand =
+  | { doing: "thinking" | "searching" | "working" | "writing" }
+  | { doing: "reading"; page?: string }
+  | { doing: "done"; result?: string };
+
+/**
+ * Where the agent's mark stands: beside the request while it thinks, at the
+ * corner of Worked with while it searches, just off the page it reads, at the
+ * local row while it works there, at the group it writes into, and at the
+ * result once it is done. A group not there yet is stood in for by its slot.
+ */
+export function markStand(
+  layout: StageLayout,
+  stand: MarkStand,
+  sizes: Readonly<Record<string, CanvasSize>> = {},
+  slots: readonly number[] = [],
+): CanvasPosition {
+  const { request } = layout;
+  const group = (kind: GroupKind) => layout.groups.find((entry) => entry.kind === kind);
+  const card = (id: string | undefined) => {
+    const position = id ? layout.positions[id] : undefined;
+    const size = id ? sizes[id] : undefined;
+    return position && size ? { ...position, ...size } : undefined;
+  };
+  const beside = { x: request.x + request.width + NEAR, y: request.y };
+  const next = () => {
+    const last = layout.groups.at(-1)?.box;
+    const x =
+      slots[layout.groups.length] ??
+      (last ? last.x + Math.max(last.width, LANE.slot) : request.x + LANE.column) + LANE.gutter;
+    return corner({ x, y: request.y, width: 0, height: 0 });
+  };
+  const worked = group("worked");
+  switch (stand.doing) {
+    case "thinking":
+      return beside;
+    case "searching":
+      return worked ? corner(worked.box) : next();
+    case "reading": {
+      const page = card(stand.page);
+      return page ? outside(page) : worked ? corner(worked.box) : next();
+    }
+    case "working": {
+      const row = worked?.local;
+      return row ? { x: row.x + row.width + OUT, y: row.y } : worked ? corner(worked.box) : next();
+    }
+    case "writing": {
+      const target = group("made") ?? group("found");
+      return target ? corner(target.box) : next();
+    }
+    case "done": {
+      const result = card(stand.result);
+      const target = group("made") ?? group("found") ?? worked;
+      return result ? outside(result) : target ? corner(target.box) : beside;
+    }
+  }
 }

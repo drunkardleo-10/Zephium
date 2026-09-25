@@ -42,20 +42,29 @@ test("a plan's steps stand beside their result, one card each, and never twice",
   expect(result?.type).toBe("result");
 });
 
-test("a pure result reads Request → Result → Plan with no empty gaps, and no tie reaches the request", () => {
+test("a pure result reads request → Made in slot 1, its steps boxed beside it, and no tie reaches the request", () => {
   const { scene, objectives } = planScene();
   const stages = environmentStages(scene, objectives);
   const layout = stages[0]!.layout;
-  expect(layout.clusters.map((cluster) => cluster.kind)).toEqual(["results", "plan"]);
+  expect(layout.groups.map((group) => group.kind)).toEqual(["made"]);
   const result = layout.positions["plan-card"]!;
-  expect(result).toEqual({ x: 300 + 48, y: 0 });
+  expect(result).toEqual({ x: 348 + 24, y: 44 });
   const width = stages[0]!.contents.results!.members[0]!.size.width;
-  expect(layout.positions["step:plan-card:0"]).toEqual({ x: result.x + width + 48, y: 0 });
-  expect(layout.positions["step:plan-card:1"]!.x).toBe(result.x + width + 48 + 248 + 20);
-  const { links } = environmentClusters(stages);
+  const steps = layout.groups[0]!.steps![0]!;
+  expect(steps.box).toMatchObject({ x: result.x + width + 48, y: 44 });
+  expect(layout.positions["step:plan-card:0"]).toEqual({
+    x: steps.box.x + 16,
+    y: steps.box.y + 16 + 20,
+  });
+  expect(layout.positions["step:plan-card:1"]!.x).toBe(steps.box.x + 16 + 248 + 16);
+  const { clusters, links } = environmentClusters(stages);
   expect(links.map((link) => [link.source, link.target])).toEqual([
-    ["objective-card", "plan-card"],
-    ["plan-card", "cluster:objective-card:plan"],
+    ["objective-card", "group:objective-card:made"],
+    ["plan-card", "group:objective-card:steps:plan-card"],
+  ]);
+  expect(clusters.map((cluster) => [cluster.id, cluster.label, cluster.within ?? []])).toEqual([
+    ["group:objective-card:steps:plan-card", "4 steps", []],
+    ["group:objective-card:made", "Result", ["group:objective-card:steps:plan-card"]],
   ]);
   expect(environmentLinks(scene)).toEqual([]);
 });

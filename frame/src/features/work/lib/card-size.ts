@@ -174,7 +174,7 @@ export function defaultSize(item: CanvasItem): CanvasSize {
     case "page":
       return { width: 248, height: 168 };
     case "agent":
-      return { width: 260, height: item.agent?.line ? 104 : 84 };
+      return { width: 24, height: 24 };
     default:
       return { width: 280, height: 160 };
   }

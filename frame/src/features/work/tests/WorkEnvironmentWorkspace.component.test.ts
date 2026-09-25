@@ -297,7 +297,8 @@ test("a real attached objective expands its historical responsibilities directly
   await expect.element(screen.getByText("Read evidence", { exact: true })).toBeVisible();
   await expect.element(screen.getByText("Compare findings", { exact: true })).toBeVisible();
   await expect.element(screen.getByText("Evidence shortlist", { exact: true })).toBeVisible();
-  expect(screen.container.querySelectorAll(".svelte-flow__node")).toHaveLength(4);
+  // The request, the result in its Made group, and the plan's two responsibilities.
+  expect(screen.container.querySelectorAll(".svelte-flow__node")).toHaveLength(5);
   expect(screen.container.textContent).not.toContain(
     "Operational prose should stay in optional details",
   );

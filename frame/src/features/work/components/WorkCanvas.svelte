@@ -21,10 +21,15 @@
     canvasAuthor,
     canvasPictures,
     canvasAreaActions,
+    canvasArrival,
   } from "../lib/canvas-context";
   import CanvasNode from "./CanvasNode.svelte";
   import AreaNode from "./AreaNode.svelte";
   import ClusterNode from "./ClusterNode.svelte";
+  import AgentMark from "./AgentMark.svelte";
+  import WorkEdge from "./WorkEdge.svelte";
+  import { arrivals } from "../lib/arrival";
+  import { duration, easing, reducedMotion } from "$shared/lib/motion";
   import CanvasControls from "./CanvasControls.svelte";
   import SelectionBar from "./SelectionBar.svelte";
   import {
@@ -42,6 +47,7 @@
     applyRemoteView,
     absolutePosition,
     containingArea,
+    isAgentNode,
     isAreaNode,
     isItemNode,
     nodesBounds,
@@ -49,8 +55,8 @@
     validScene,
     validViewport,
     withClusters,
-    edgeClass,
-    defaultSize,
+    relationLinks,
+    restLink,
     type CanvasArea,
     type CanvasCluster,
     type CanvasItem,
@@ -59,7 +65,6 @@
     type CanvasSize,
     type CanvasView,
     type WorkNode,
-    type WorkItemNode,
   } from "../lib/canvas-model";
   import * as m from "$shared/i18n/messages";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
@@ -173,7 +178,8 @@
   // One bad card never hides the canvas: the scene is repaired, then guarded.
   const scene = $derived(sanitizeScene(items, links, clusters));
   let valid = $derived(validScene(scene.items, scene.links, scene.clusters));
-  const nodeTypes = { work: CanvasNode, area: AreaNode, cluster: ClusterNode };
+  const nodeTypes = { work: CanvasNode, area: AreaNode, cluster: ClusterNode, agent: AgentMark };
+  const edgeTypes = { work: WorkEdge };
   let selection: string[] = [];
   let selectedIds = $state.raw<ReadonlySet<string>>(new Set());
   let hovered = $state<string | null>(null);
@@ -181,82 +187,100 @@
   const focused = $derived<ReadonlySet<string>>(
     hovered ? new Set([...selectedIds, hovered]) : selectedIds,
   );
-  /** When each path edge first appeared; only a new one draws itself in. */
-  const firstSeen: Record<string, number> = {};
-  let seeded = false;
-  /** Labelled ties at each focused card: a label shows only where it cannot land on another. */
-  const labelled = $derived.by(() => {
-    const count: Record<string, number> = {};
-    for (const link of scene.links)
-      if (link.label)
-        for (const end of [link.source, link.target])
-          if (focused.has(end)) count[end] = (count[end] ?? 0) + 1;
-    return count;
-  });
-  let edges = $derived<Edge[]>(
-    valid
-      ? scene.links.map((link) => {
-          const active = focused.has(link.source) || focused.has(link.target);
-          // The card under the pointer names its one tie; a hub of several shows lines only.
-          const named =
-            active &&
-            !!link.label &&
-            [link.source, link.target].some((end) => focused.has(end) && labelled[end] === 1);
-          const title = (id: string) =>
-            scene.items.find((item) => item.id === id)?.title ??
-            scene.clusters.find((cluster) => cluster.id === id)?.label ??
-            "";
-          let draw = false;
-          if (link.kind === "path" || link.kind === "thread") {
-            const now = performance.now();
-            firstSeen[link.id] ??= seeded ? now : -Infinity;
-            draw = now - firstSeen[link.id]! < EDGE_DRAW_MS;
-          }
-          return {
-            id: link.id,
-            source: link.source,
-            target: link.target,
-            type: "smoothstep",
-            ...(link.kind === "thread" ? { sourceHandle: "below", targetHandle: "above" } : {}),
-            animated: false,
-            deletable: false,
-            selectable: false,
-            focusable: false,
-            class: edgeClass(link, focused, draw),
-            label: named ? link.label : undefined,
-            ariaLabel:
-              link.kind === "dependency" || link.kind === "path" || link.kind === "thread"
-                ? m.work_env_dependency_label({
+  /** What arrived when: only what a live run adds after the canvas opened moves in. */
+  const arrival = arrivals();
+  setContext(canvasArrival, (id: string) => arrival.motion(id));
+  const byId = $derived(new Map(scene.items.map((item) => [item.id, item])));
+  const lit = $derived(relationLinks(scene.links, byId, focused));
+  const title = (id: string) =>
+    byId.get(id)?.title ?? scene.clusters.find((cluster) => cluster.id === id)?.label ?? "";
+  let edges = $derived.by<Edge[]>(() => {
+    if (!valid) return [];
+    arrival.see(scene.clusters, scene.items);
+    return scene.links.flatMap((link) => {
+      const rest = restLink(link);
+      if (!rest && !lit.has(link.id)) return [];
+      return [
+        {
+          id: link.id,
+          source: link.source,
+          target: link.target,
+          type: "work",
+          ...(link.kind === "thread" ? { sourceHandle: "below", targetHandle: "above" } : {}),
+          data: { tone: link.kind === "thread" ? "thread" : rest ? "rest" : "relation" },
+          deletable: false,
+          selectable: false,
+          focusable: false,
+          class: `work-edge kind-${link.kind}`,
+          ariaLabel:
+            link.kind === "dependency" || rest
+              ? m.work_env_dependency_label({
+                  source: title(link.source),
+                  target: title(link.target),
+                })
+              : link.label
+                ? `${title(link.source)} ${link.label} ${title(link.target)}`
+                : m.work_env_reference_label({
                     source: title(link.source),
                     target: title(link.target),
-                  })
-                : link.label
-                  ? `${title(link.source)} ${link.label} ${title(link.target)}`
-                  : m.work_env_reference_label({
-                      source: title(link.source),
-                      target: title(link.target),
-                    }),
-          };
-        })
-      : [],
-  );
-  const EDGE_DRAW_MS = 520;
-  $effect(() => {
-    // The first scene is already there when the canvas opens: nothing draws in.
-    if (valid && scene.links.length) seeded = true;
+                  }),
+        },
+      ];
+    });
   });
+  /** The positions the last reconcile was given: a card follows only a place that moved. */
+  let lastPositions: Readonly<Record<string, CanvasPosition>> = {};
+  /** An agent whose run ended rests where it finished, then fades. */
+  let resting: WorkNode[] = [];
+  const REST_MS = 1200;
+  function rest(previous: readonly WorkNode[], next: WorkNode[]): WorkNode[] {
+    const ids = new Set(next.map((node) => node.id));
+    resting = resting.filter((node) => !ids.has(node.id));
+    for (const node of previous) {
+      if (!isAgentNode(node) || ids.has(node.id) || resting.some((r) => r.id === node.id)) continue;
+      const still = {
+        ...node,
+        data: { ...node.data, agent: { ...node.data.agent!, caption: undefined } },
+        class: "resting",
+      };
+      resting.push(still);
+      setTimeout(() => {
+        resting = resting.map((r) => (r.id === node.id ? { ...r, class: "resting leaving" } : r));
+        nodes = nodes.map((candidate) =>
+          candidate.id === node.id ? { ...candidate, class: "resting leaving" } : candidate,
+        );
+        setTimeout(() => {
+          resting = resting.filter((r) => r.id !== node.id);
+          nodes = nodes.filter((candidate) => candidate.id !== node.id);
+        }, duration("slow"));
+      }, REST_MS);
+    }
+    if (!resting.length) return next;
+    const kept = [...next, ...resting.filter((r) => !ids.has(r.id))];
+    return kept.length === previous.length && kept.every((node, index) => node === previous[index])
+      ? (previous as WorkNode[])
+      : kept;
+  }
   $effect(() => {
     const next = scene.items;
     const grouping = areas;
     const ready = valid;
-    nodes = untrack(() =>
-      ready
-        ? reconcileNodes(nodes, next, initialView?.positions, initialView?.sizes, grouping, {
-            ...initialView?.areas,
-            ...pendingAreas,
-          })
-        : [],
-    );
+    const placed = initialView?.positions ?? {};
+    nodes = untrack(() => {
+      if (!ready) return [];
+      arrival.see(scene.clusters, next);
+      const reconciled = reconcileNodes(
+        nodes,
+        next,
+        placed,
+        initialView?.sizes,
+        grouping,
+        { ...initialView?.areas, ...pendingAreas },
+        lastPositions,
+      );
+      lastPositions = placed;
+      return rest(nodes, reconciled);
+    });
   });
   $effect(() => {
     const groups = scene.clusters;
@@ -403,11 +427,12 @@
     });
   });
 
-  // Camera follow. While a run is live and its agent walks to a stand out of
-  // sight, the view pans (never zooms) so the agent lands in the lower-right
-  // third. A manual pan, zoom or drag pauses it until a new stage or a new run.
-  const FOLLOW_MS = 420;
+  // Camera follow. While a run is live and its mark walks to a stand out of
+  // sight, the view pans (never zooms) so the mark lands in the lower-right
+  // third. A manual pan, zoom or drag pauses it until a new lane or a new run.
   const FOLLOW_AIR = 24;
+  /** The orb and the widest caption it usually carries. */
+  const MARK_REACH = { width: 220, height: 24 };
   let flow: ReturnType<typeof useSvelteFlow> | undefined;
   let following = $state(true);
   let fitted = false;
@@ -416,18 +441,22 @@
   function resumeFollow() {
     following = true;
   }
-  /** `--ease-smooth`, cubic-bezier(0.2, 0.8, 0.2, 1), as a function of time. */
-  function easeSmooth(t: number): number {
-    const bezier = (a: number, b: number, u: number) =>
-      3 * a * u * (1 - u) ** 2 + 3 * b * u ** 2 * (1 - u) + u ** 3;
-    let low = 0;
-    let high = 1;
-    for (let step = 0; step < 24; step++) {
-      const mid = (low + high) / 2;
-      if (bezier(0.2, 0.2, mid) < t) low = mid;
-      else high = mid;
-    }
-    return bezier(0.8, 1, (low + high) / 2);
+  /** A `cubic-bezier()` token as a function of time, for the flow's own tween. */
+  function curve(token: string): (t: number) => number {
+    const [a, b, c, d] = (token.match(/-?[\d.]+/gu) ?? []).map(Number);
+    if ([a, b, c, d].some((value) => value === undefined || Number.isNaN(value))) return (t) => t;
+    const bezier = (p: number, q: number, u: number) =>
+      3 * p * u * (1 - u) ** 2 + 3 * q * u ** 2 * (1 - u) + u ** 3;
+    return (t) => {
+      let low = 0;
+      let high = 1;
+      for (let step = 0; step < 24; step++) {
+        const mid = (low + high) / 2;
+        if (bezier(a!, c!, mid) < t) low = mid;
+        else high = mid;
+      }
+      return bezier(b!, d!, (low + high) / 2);
+    };
   }
   function followTo(position: CanvasPosition, size: CanvasSize) {
     const zoom = viewport.zoom;
@@ -448,22 +477,23 @@
       Math.max(min, Math.min(value, Math.max(min, max)));
     const x = clamp((width * 5) / 6 - w / 2, air, width - air - w);
     const y = clamp(top + ((bottom - top) * 5) / 6 - h / 2, top + air, bottom - air - h);
-    const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
     void flow?.setViewport(
       { x: x - position.x * zoom, y: y - position.y * zoom, zoom },
-      { duration: reduced ? 0 : FOLLOW_MS, ease: easeSmooth, interpolate: "linear" },
+      {
+        duration: reducedMotion() ? 0 : duration("page"),
+        ease: curve(easing("smooth")),
+        interpolate: "linear",
+      },
     );
   }
   $effect(() => {
-    const agents = nodes.filter(
-      (node): node is WorkItemNode => isItemNode(node) && !!node.data.agent,
-    );
+    const agents = nodes.filter(isAgentNode).filter((node) => !node.class);
     const cards = scene.items.flatMap((item) =>
       item.type === "request" || item.type === "objective" ? [item.id] : [],
     );
     const paused = still;
     untrack(() => {
-      // A new stage's request card, or the end of a run, resumes following.
+      // A new lane's request card, or the end of a run, resumes following.
       const seeded = Object.keys(requests).length > 0;
       for (const id of cards)
         if (!requests[id]) {
@@ -475,15 +505,12 @@
         following = true;
       }
       for (const node of agents) {
-        const position = absolutePosition(node, nodes);
+        const position = node.position;
         const key = `${position.x},${position.y}`;
         const moved = stands[node.id] !== key;
         stands[node.id] = key;
-        if (!moved || !fitted || !following || paused || node.dragging) continue;
-        followTo(position, {
-          width: node.width ?? defaultSize(node.data).width,
-          height: node.height ?? defaultSize(node.data).height,
-        });
+        if (!moved || !fitted || !following || paused) continue;
+        followTo(position, MARK_REACH);
       }
     });
   });
@@ -565,6 +592,7 @@
       bind:nodes
       {edges}
       {nodeTypes}
+      {edgeTypes}
       bind:viewport
       fitView={scene.items.length > 0 && !restoredViewport}
       fitViewOptions={{ padding: 0.2, duration: 0 }}
@@ -704,101 +732,23 @@
     transition: none;
   }
 
-  .work-canvas :global(.work-edge) {
-    opacity: 0.45;
-    transition: opacity var(--motion-fast) var(--ease-smooth);
-  }
-
-  .work-canvas :global(.work-edge.active) {
-    opacity: 1;
-  }
-
-  /* A relation shows only while one of its ends is focused. */
-  .work-canvas :global(.work-edge.latent) {
-    opacity: 0;
-    transition: opacity 140ms var(--ease-smooth);
-  }
-
-  .work-canvas :global(.work-edge.latent.active) {
-    opacity: 1;
-  }
-
   /* stylelint-disable-next-line selector-class-pattern */
   .work-canvas :global(.svelte-flow__node.cluster-node) {
     pointer-events: none;
   }
 
-  .work-canvas :global(.work-edge.kind-reference),
-  .work-canvas :global(.work-edge.kind-uses),
-  .work-canvas :global(.work-edge.kind-same-as) {
-    stroke-dasharray: 5 5;
-  }
-
-  .work-canvas :global(.work-edge.kind-contradicts) {
-    stroke: var(--color-danger);
-  }
-
-  /* A card that has just arrived settles in; it never bounces. */
-  .work-canvas :global(.work-node-enter) {
-    animation: work-node-in 260ms var(--ease-smooth);
-  }
-
-  @keyframes work-node-in {
-    from {
-      opacity: 0;
-      translate: 0 5px;
-    }
-
-    to {
-      opacity: 1;
-      translate: 0 0;
-    }
-  }
-
-  /* A path segment that just appeared strokes itself on from its stage. */
+  /* The agent's mark walks to its work on a spring; it never takes the pointer. */
   /* stylelint-disable-next-line selector-class-pattern */
-  .work-canvas :global(.work-edge.draw .svelte-flow__edge-path) {
-    animation: work-edge-draw 520ms var(--ease-smooth);
+  .work-canvas :global(.svelte-flow__node-agent) {
+    pointer-events: none;
+    transition:
+      transform var(--motion-slow) var(--ease-spring),
+      opacity var(--motion-slow) var(--ease-exit);
   }
 
-  @keyframes work-edge-draw {
-    from {
-      stroke-dasharray: 0 640;
-    }
-
-    to {
-      stroke-dasharray: 640 0;
-    }
-  }
-
-  /* An agent moves to its work; the tie to it is transient and alive. */
   /* stylelint-disable-next-line selector-class-pattern */
-  .work-canvas :global(.svelte-flow__node.agent-node) {
-    transition: transform 700ms var(--ease-smooth);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    /* stylelint-disable-next-line selector-class-pattern */
-    .work-canvas :global(.svelte-flow__node.agent-node) {
-      transition: none;
-    }
-  }
-
-  .work-canvas :global(.work-edge.kind-working) {
-    stroke: var(--color-accent);
-    stroke-dasharray: 4 6;
-    opacity: 0.9;
-    animation: work-edge-flow 1.2s linear infinite;
-  }
-
-  @keyframes work-edge-flow {
-    to {
-      stroke-dashoffset: -20;
-    }
-  }
-
-  .work-canvas :global(.work-edge.kind-supports.active) {
-    stroke: var(--color-success);
+  .work-canvas :global(.svelte-flow__node-agent.leaving) {
+    opacity: 0;
   }
 
   /* Several cards selected: one bar for all of them, not a toolbar and handles each. */

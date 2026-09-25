@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Handle, Position, NodeResizer, NodeToolbar, type NodeProps } from "@xyflow/svelte";
-  import { getContext, tick } from "svelte";
+  import { getContext, onMount, tick } from "svelte";
   import Icon from "$shared/ui/Icon";
   import type { WorkItemNode } from "../lib/canvas-model";
   import {
@@ -9,7 +9,10 @@
     canvasOpen,
     canvasFocusResult,
     canvasAreas,
+    canvasArrival,
   } from "../lib/canvas-context";
+  import { arrive } from "../lib/arrival";
+  import type { Duration } from "$shared/lib/motion";
   import { ArrowUpRight01Icon, MinusSignIcon, Target01Icon, Tick02Icon } from "../lib/icons";
   import TabCard from "./cards/TabCard.svelte";
   import NoteCard from "./cards/NoteCard.svelte";
@@ -25,7 +28,6 @@
   import SourcesCard from "./cards/SourcesCard.svelte";
   import CompareCard from "./cards/CompareCard.svelte";
   import FolderCard from "./cards/FolderCard.svelte";
-  import AgentCard from "./cards/AgentCard.svelte";
   import PageCard from "./cards/PageCard.svelte";
   import StepCard from "./cards/StepCard.svelte";
   import * as m from "$shared/i18n/messages";
@@ -36,14 +38,19 @@
   const areas = getContext<{ readonly list: readonly { id: string; title: string }[] }>(
     canvasAreas,
   );
+  const arrival = getContext<((id: string) => Duration | null) | undefined>(canvasArrival);
   let { id, data, selected }: NodeProps<WorkItemNode> = $props();
   let root = $state<HTMLDivElement>();
+  // A card the run just placed rises into its group; one that was there already does not.
+  onMount(() => {
+    const motion = arrival?.(id);
+    if (motion && root?.parentElement) arrive(root.parentElement, motion);
+  });
   const type = $derived(data.type ?? (data.artifact ? "result" : "objective"));
   /** A card the run drew, not an element the person placed: it takes no orders. */
   const inert = $derived(
     [
       "responsibility",
-      "agent",
       "page",
       "sources",
       "request",
@@ -139,7 +146,6 @@
   {:else if type === "sources"}<SourcesCard item={data} {selected} />
   {:else if type === "folder"}<FolderCard item={data} {selected} />
   {:else if type === "page"}<PageCard item={data} {selected} onhelp={() => action(id, "help")} />
-  {:else if type === "agent"}<AgentCard item={data} {selected} />
   {:else if type === "note"}<NoteCard item={data} {selected} />
   {:else if type === "media"}<MediaCard item={data} {selected} />
   {:else if type === "responsibility"}<ResponsibilityCard item={data} {selected} />
