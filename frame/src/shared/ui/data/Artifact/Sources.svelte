@@ -51,7 +51,12 @@
     {#each rows as row (row.evidence.key)}
       <li>
         <button type="button" disabled={!onevidence} onclick={() => onevidence?.(row.evidence)}>
-          <HostGlyph host={row.evidence.origin || row.title} file={!!row.evidence.file} size={20} />
+          <HostGlyph
+            host={row.evidence.origin || row.title}
+            url={row.evidence.url}
+            file={!!row.evidence.file}
+            size={20}
+          />
           <span class="text">
             <span class="title">{row.title}</span>
             <span class="origin">{[row.evidence.origin, row.role].filter(Boolean).join(" · ")}</span

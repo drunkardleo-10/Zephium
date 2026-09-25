@@ -1,12 +1,17 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
+  import FavIcon from "$shared/ui/FavIcon";
   import File01Icon from "@hugeicons/core-free-icons/File01Icon";
-  /** A neutral stand-in for a site's mark; a real favicon fills this slot later. */
+  import { siteMarks } from "./site-marks";
+  /** A site's real mark when its owner holds one; otherwise a neutral stand-in. */
   let {
     host = "",
+    url = "",
     file = false,
     size = 16,
-  }: { host?: string; file?: boolean; size?: number } = $props();
+  }: { host?: string; url?: string; file?: boolean; size?: number } = $props();
+  const resolve = siteMarks();
+  const mark = $derived(!file && resolve ? resolve(url || host) : null);
   const letter = $derived(
     host
       .replace(/^www\./u, "")
@@ -15,9 +20,14 @@
   );
 </script>
 
-<span class="glyph" class:file style:--glyph={`${size}px`} aria-hidden="true">
-  {#if file}<Icon icon={File01Icon} size={Math.round(size * 0.62)} />{:else}{letter}{/if}
-</span>
+{#if mark}<FavIcon image={mark.image} tone={mark.tone} {size} />{:else}<span
+    class="glyph"
+    class:file
+    style:--glyph={`${size}px`}
+    aria-hidden="true"
+  >
+    {#if file}<Icon icon={File01Icon} size={Math.round(size * 0.62)} />{:else}{letter}{/if}
+  </span>{/if}
 
 <style>
   .glyph {

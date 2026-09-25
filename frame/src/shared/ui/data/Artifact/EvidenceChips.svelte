@@ -10,7 +10,7 @@
     compact?: boolean;
     onevidence?: (reference: EvidenceReference) => void;
   } = $props();
-  /** A chip names where it came from: the site, or the file by its name. */
+  /** A chip is the site's mark and its host, or the file by its name; never a number. */
   const name = (reference: EvidenceReference) =>
     reference.file ? reference.label : reference.origin || reference.label;
 </script>
@@ -27,6 +27,7 @@
       >
         <HostGlyph
           host={reference.origin || reference.label}
+          url={reference.url}
           file={!!reference.file}
           size={compact ? 12 : 14}
         />
