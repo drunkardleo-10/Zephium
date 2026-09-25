@@ -32,7 +32,11 @@
         {#each columns as column (column.key)}
           <div class="subject">
             <span class="picture"
-              ><SubjectPicture picture={column.picture} name={column.name} /></span
+              ><SubjectPicture
+                picture={column.picture}
+                name={column.name}
+                homepage={column.homepage ?? ""}
+              /></span
             >
             <span class="name" title={column.name}>{column.name}</span>
             <span class="price"

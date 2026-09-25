@@ -43,7 +43,12 @@
         {#each model.columns as column (column.key)}
           <th scope="col" class="subject">
             <span class="picture">
-              <SubjectPicture picture={column.picture} name={column.name} large />
+              <SubjectPicture
+                picture={column.picture}
+                name={column.name}
+                homepage={column.homepage ?? ""}
+                large
+              />
             </span>
             <span class="name">{column.name}</span>
             {#if column.price}<span class="price"

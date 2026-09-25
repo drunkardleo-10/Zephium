@@ -8,7 +8,10 @@ import SubjectCard from "../components/cards/SubjectCard.svelte";
 import SourcesCard from "../components/cards/SourcesCard.svelte";
 import PageCard from "../components/cards/PageCard.svelte";
 import ResultCard from "../components/cards/ResultCard.svelte";
-import { canvasOpen } from "../lib/canvas-context";
+import CompareCard from "../components/cards/CompareCard.svelte";
+import Compare from "../components/compare/Compare.svelte";
+import { canvasOpen, canvasProbe } from "../lib/canvas-context";
+import { compareModel } from "../lib/compare";
 import type { CanvasItem } from "../lib/canvas-model";
 
 const base = { kind: "", detail: "", status: "" };
@@ -192,4 +195,51 @@ test("a chart result draws its plot in the card, without the basis line", async 
   expect(screen.container.querySelectorAll("svg .bar")).toHaveLength(3);
   expect(screen.container.textContent).not.toContain("Listed nightly rate");
   await screen.unmount();
+});
+
+test("a comparison whose subjects have no pictures shows each site's icon, asking native once for one it lacks", async () => {
+  await page.viewport(1200, 800);
+  await marks("https://aws.amazon.com", "https://www.hetzner.com");
+  const subjects = [
+    { name: "AWS Lightsail", homepage: "https://aws.amazon.com/lightsail/" },
+    { name: "Hetzner", homepage: "https://www.hetzner.com/cloud" },
+    { name: "Vercel", homepage: "https://vercel.com/pricing" },
+  ];
+  const content = {
+    kind: "matrix" as const,
+    subjects,
+    criteria: [{ name: "Price", kind: "text" as const }],
+    cells: subjects.map(() => [
+      { value: { kind: "text" as const, text: "$5" }, evidence: [], generalKnowledge: false },
+    ]),
+    notes: [],
+  };
+  const item: CanvasItem = {
+    ...base,
+    id: "compare",
+    type: "result",
+    title: "Hosts compared",
+    artifact: { key: "a", title: "Hosts compared", reviewLabel: "", evidence: [], content },
+  };
+  const probed: string[] = [];
+  const probe = (origin: string) => probed.push(origin);
+  const card = await render(CompareCard, {
+    props: { item, selected: false },
+    context: new Map([[canvasProbe, probe]]),
+  });
+  const tiles = [...card.container.querySelectorAll(".picture")];
+  expect(tiles).toHaveLength(3);
+  // Never a blank plate and never an initial: the held marks draw, the missing one waits on a globe.
+  expect(tiles.map((tile) => !!tile.querySelector(".favicon canvas"))).toEqual([true, true, false]);
+  expect(tiles[2]!.querySelector(".favicon svg")).not.toBeNull();
+  expect(card.container.querySelector(".picture img")).toBeNull();
+  expect(probed).toEqual(["https://vercel.com"]);
+  await card.unmount();
+  const lift = await render(Compare, {
+    props: { model: compareModel(content) },
+    context: new Map([[canvasProbe, probe]]),
+  });
+  const large = [...lift.container.querySelectorAll(".picture")];
+  expect(large.map((tile) => !!tile.querySelector(".favicon canvas"))).toEqual([true, true, false]);
+  await lift.unmount();
 });

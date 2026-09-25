@@ -1118,6 +1118,13 @@
     () => new WorkTasks(session.profile, stepTaskSession, () => stepPlans, openTask),
   );
   setContext(workTasksKey, workTasks);
+  // The lift asks for a site's icon as the canvas does: once per origin.
+  const probedOrigins: Record<string, true> = {};
+  setContext(canvasProbe, (origin: string) => {
+    if (probedOrigins[origin]) return;
+    probedOrigins[origin] = true;
+    void commands.faviconProbe(session.profile, [origin]).catch(() => false);
+  });
   /** A step's task opens in the Tasks panel, listed whatever its day. */
   function openTask(id: string) {
     chrome?.close();
