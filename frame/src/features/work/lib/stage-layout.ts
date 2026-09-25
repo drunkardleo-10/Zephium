@@ -34,7 +34,7 @@ export const LANE = {
 
 /** What a group's cards are, by where they come from. */
 export type ClusterKind =
-  "sources" | "pages" | "work" | "subjects" | "findings" | "results" | "plan";
+  "sources" | "pages" | "work" | "subjects" | "findings" | "results" | "plan" | "diagram";
 /** Worked with, Found, Made: a lane fills its slots in this order. */
 type GroupKind = "worked" | "found" | "made";
 /** The column each group belongs to when the lane has every group before it. */
@@ -42,8 +42,18 @@ const NATURAL: Record<GroupKind, number> = { worked: 0, found: 1, made: 2 };
 /** Past these a group's cards stop and its caption counts the rest. */
 export const CLUSTER_CAP = { pages: 8, subjects: 12 } as const;
 
-/** One card of a lane; a step names the result card it belongs to. */
-export type StageMember = { id: string; size: CanvasSize; of?: string };
+/**
+ * One card of a lane. A step or a diagram's part names the result card it
+ * belongs to; a part says where it stands in its diagram; the cover is the
+ * document the rest of Made hangs from.
+ */
+export type StageMember = {
+  id: string;
+  size: CanvasSize;
+  of?: string;
+  at?: CanvasPosition;
+  cover?: boolean;
+};
 /** Members in projection order; `more` counts what the run knows but no card shows. */
 export type StageContents = Partial<
   Record<ClusterKind, { members: readonly StageMember[]; more?: number }>
@@ -60,6 +70,7 @@ type GroupShape = {
   more: number;
   local?: Rect;
   steps?: { result: string; box: Rect; members: string[] }[];
+  diagrams?: { result: string; box: Rect; members: string[] }[];
 };
 /** A lane's groups before the canvas gives them slots. */
 export type LaneShape = GroupShape[];
@@ -75,6 +86,8 @@ export type LaneGroup = {
   local?: Placement;
   /** Made: each result's steps, in a box to its right. */
   steps?: { result: string; box: Placement; members: string[] }[];
+  /** Made: each diagram's parts, in an area beside its cover. */
+  diagrams?: { result: string; box: Placement; members: string[] }[];
 };
 export type StageLayout = {
   request: Placement;
@@ -164,16 +177,28 @@ function found(contents: StageContents): GroupShape | null {
   };
 }
 
-/** Made: results in a column, each result's steps two across in a box to its right. */
+/**
+ * Made as a set: the cover, each diagram with its area, and any result with
+ * steps stand on rows of their own, the steps or the area to the result's
+ * right; tables, charts, findings and comparisons follow two across.
+ */
 function made(contents: StageContents): GroupShape | null {
   const results = shown(contents, "results").visible;
   if (!results.length) return null;
   const plan = contents.plan?.members ?? [];
-  const column = Math.max(...results.map((result) => result.size.width));
+  const parts = contents.diagram?.members ?? [];
+  const alone = (result: StageMember) =>
+    !!result.cover ||
+    plan.some((step) => step.of === result.id) ||
+    parts.some((part) => part.of === result.id);
+  const rows = results.filter(alone);
+  const rest = results.filter((result) => !alone(result));
+  const column = Math.max(0, ...rows.map((result) => result.size.width));
   const cards: GroupShape["cards"] = [];
   const steps: NonNullable<GroupShape["steps"]> = [];
+  const diagrams: NonNullable<GroupShape["diagrams"]> = [];
   let y = LANE.pad + LANE.caption;
-  for (const result of results) {
+  for (const result of rows) {
     const rect = { x: LANE.pad, y, ...result.size };
     cards.push({ id: result.id, rect });
     let bottom = rect.y + rect.height;
@@ -192,9 +217,37 @@ function made(contents: StageContents): GroupShape | null {
       steps.push({ result: result.id, box, members: own.map((step) => step.id) });
       bottom = Math.max(bottom, box.y + box.height);
     }
+    const drawn = parts.filter((part) => part.of === result.id);
+    if (drawn.length) {
+      const x = LANE.pad + result.size.width + LANE.gap;
+      const left = x + LANE.inset;
+      const top = y + LANE.inset + LANE.caption;
+      const placed = drawn.map((part) => ({
+        x: left + (part.at?.x ?? 0),
+        y: top + (part.at?.y ?? 0),
+        ...part.size,
+      }));
+      const inner = bounds(placed)!;
+      const box = {
+        x,
+        y,
+        width: inner.x + inner.width - x + LANE.inset,
+        height: inner.y + inner.height - y + LANE.inset,
+      };
+      drawn.forEach((part, index) => cards.push({ id: part.id, rect: placed[index]! }));
+      diagrams.push({ result: result.id, box, members: drawn.map((part) => part.id) });
+      bottom = Math.max(bottom, box.y + box.height);
+    }
     y = bottom + LANE.gap;
   }
-  const boxes = [...cards.map((card) => card.rect), ...steps.map((entry) => entry.box)];
+  cells(rest, 2, { x: LANE.pad, y }).forEach((rect, index) =>
+    cards.push({ id: rest[index]!.id, rect }),
+  );
+  const boxes = [
+    ...cards.map((card) => card.rect),
+    ...steps.map((entry) => entry.box),
+    ...diagrams.map((entry) => entry.box),
+  ];
   return {
     kind: "made",
     ...frame(boxes),
@@ -202,6 +255,7 @@ function made(contents: StageContents): GroupShape | null {
     counts: { results: results.length, plan: steps.reduce((n, s) => n + s.members.length, 0) },
     more: 0,
     ...(steps.length ? { steps } : {}),
+    ...(diagrams.length ? { diagrams } : {}),
   };
 }
 
@@ -260,6 +314,15 @@ export function placeLane(request: Placement, shape: LaneShape, slots: readonly 
       counts: group.counts,
       more: group.more,
       ...(group.local ? { local: at(group.local, x, y) } : {}),
+      ...(group.diagrams
+        ? {
+            diagrams: group.diagrams.map((entry) => ({
+              result: entry.result,
+              box: at(entry.box, x, y),
+              members: entry.members,
+            })),
+          }
+        : {}),
       ...(group.steps
         ? {
             steps: group.steps.map((entry) => ({

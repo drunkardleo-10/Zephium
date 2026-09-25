@@ -37,6 +37,7 @@ import {
 import { fileName } from "./work-files";
 import { heldPage, humanPage, phaseLabel } from "./work-human";
 import { resultPlan, stepIcon, stepId } from "./plan-steps";
+import { DIAGRAM, diagramKindLabel, diagramLayout, diagramNodeId } from "./diagram";
 import { pageFrameUrl } from "$domain/resources";
 import {
   clipText,
@@ -431,7 +432,10 @@ export function viewPlacements(
     };
   });
 }
-const relationLabels: Record<Exclude<CanvasLink["kind"], "path" | "thread">, () => string> = {
+const relationLabels: Record<
+  Exclude<CanvasLink["kind"], "path" | "thread" | "diagram">,
+  () => string
+> = {
   dependency: m.work_env_relation_depends_on,
   reference: m.work_env_relation_uses,
   supports: m.work_env_relation_supports,
@@ -905,6 +909,93 @@ export function environmentSteps(
   return { items, links, positions };
 }
 
+/**
+ * A diagram's parts, one small card each in an area beside the diagram's
+ * cover, joined at rest by what flows between them. The area is captioned by
+ * the diagram's title and each layer by its name.
+ */
+export function environmentDiagrams(
+  snapshot: WorkEnvironmentSnapshot,
+  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+  stages: readonly WorkStage[],
+): {
+  items: CanvasItem[];
+  links: CanvasLink[];
+  positions: Record<string, CanvasPosition>;
+  clusters: CanvasCluster[];
+} {
+  const items: CanvasItem[] = [];
+  const links: CanvasLink[] = [];
+  const positions: Record<string, CanvasPosition> = {};
+  const clusters: CanvasCluster[] = [];
+  for (const stage of stages) {
+    const projection = objectives.get(stage.objective);
+    if (!projection) continue;
+    for (const element of snapshot.elements) {
+      const reference = element.reference;
+      if (reference.kind !== "artifact" || !stage.executions.includes(reference.execution))
+        continue;
+      const execution = projection.executions.find((entry) => entry.id === reference.execution);
+      const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
+      if (!execution || !artifact) continue;
+      const view = artifactView(artifact, execution);
+      if (view.content.kind !== "diagram") continue;
+      const content = view.content;
+      const id = (node: string) => diagramNodeId(element.id, node);
+      for (const node of content.nodes) {
+        const card = id(node.id);
+        items.push({
+          id: card,
+          type: "diagram",
+          kind: diagramKindLabel(node.kind),
+          title: clipText(node.name, TITLE_TEXT),
+          detail: clipText(node.note ?? "", DETAIL_TEXT),
+          status: "",
+          diagram: {
+            kind: node.kind,
+            ...(node.vendor ? { vendor: node.vendor } : {}),
+            ...(node.note ? { note: node.note } : {}),
+            ...(node.layer ? { layer: node.layer } : {}),
+          },
+        });
+        const position = stage.layout.positions[card];
+        if (position) positions[card] = position;
+      }
+      const { at, layers } = diagramLayout(content);
+      content.edges.forEach((edge, index) =>
+        links.push({
+          id: `diagram-edge:${element.id}:${index}`,
+          source: id(edge.from),
+          target: id(edge.to),
+          kind: "diagram",
+          ...(at[edge.from]?.x === at[edge.to]?.x ? { down: true } : {}),
+          ...(edge.label ? { label: clipText(edge.label, ROW_TEXT) } : {}),
+        }),
+      );
+      clusters.push({
+        id: diagramArea(stage.card, element.id),
+        label: artifact.title,
+        more: 0,
+        members: content.nodes.map((node) => id(node.id)),
+        inset: LANE.inset,
+        live: stage.live,
+        tone: "area",
+        ...(layers.length
+          ? {
+              caption: LANE.caption + DIAGRAM.layer,
+              layers: layers.map((layer) => ({
+                name: layer.name,
+                members: layer.nodes.map(id),
+              })),
+            }
+          : {}),
+      });
+    }
+  }
+  return { items, links, positions, clusters };
+}
+const diagramArea = (card: string, result: string) => `group:${card}:diagram:${result}`;
+
 /** A group's caption counts what it holds: "2 pages · 3 local steps", "4 subjects", "6 steps". */
 function caption(group: LaneGroup): string {
   const { pages = 0, work = 0, subjects = 0, findings = 0, results = 0 } = group.counts;
@@ -960,7 +1051,11 @@ export function environmentClusters(stages: readonly WorkStage[]): {
         ...entry,
         id: `group:${stage.card}:steps:${entry.result}`,
       }));
-      const steps = new Set(inner.flatMap((entry) => entry.members));
+      const areas = group.diagrams ?? [];
+      const steps = new Set([
+        ...inner.flatMap((entry) => entry.members),
+        ...areas.flatMap((entry) => entry.members),
+      ]);
       for (const entry of inner)
         clusters.push({
           id: entry.id,
@@ -975,7 +1070,14 @@ export function environmentClusters(stages: readonly WorkStage[]): {
         label: caption(group),
         more: group.more,
         members: group.members.filter((member) => !steps.has(member)),
-        ...(inner.length ? { within: inner.map((entry) => entry.id) } : {}),
+        ...(inner.length || areas.length
+          ? {
+              within: [
+                ...inner.map((entry) => entry.id),
+                ...areas.map((entry) => diagramArea(stage.card, entry.result)),
+              ],
+            }
+          : {}),
         inset: LANE.pad,
         live: stage.live,
       });

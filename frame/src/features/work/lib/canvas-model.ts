@@ -24,7 +24,8 @@ type CanvasKind =
   | "findings"
   | "file"
   | "command"
-  | "step";
+  | "step"
+  | "diagram";
 type RelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
 /** Display values only; deliberately independent from the generated Work wire contract. */
 export type CanvasItem = {
@@ -80,6 +81,8 @@ export type CanvasItem = {
     text: string;
     icon: "dates" | "flight" | "stay" | "entry" | "money" | "document" | "check";
   };
+  /** One part of a diagram result, standing in its diagram's area. */
+  diagram?: { kind: string; vendor?: string; note?: string; layer?: string };
   /** Transient agent presence: its orb's seed, what it does, where it stands, what it says. */
   agent?: {
     seed: number;
@@ -133,7 +136,9 @@ export type CanvasLink = {
    * `path` joins a lane's groups at rest and `thread` joins one request to the
    * next; relation kinds show only while an end is hovered or selected.
    */
-  kind: "dependency" | "reference" | "path" | "thread" | RelationKind;
+  kind: "dependency" | "reference" | "path" | "thread" | "diagram" | RelationKind;
+  /** A diagram's flow between parts of one column runs down, bottom to top. */
+  down?: boolean;
   /** Why a lane relation exists: a page is evidence for what was found, a step names a subject. */
   role?: "evidence" | "named";
   label?: string;
@@ -152,10 +157,12 @@ const QUIET = new Set<CanvasKind | undefined>([
   "file",
   "command",
   "responsibility",
+  "diagram",
 ]);
-/** Drawn at rest: a lane's group edges, the thread, and an expanded plan's own structure. */
+/** Drawn at rest: a lane's group edges, the thread, a diagram's flows, and a plan's own structure. */
 export const restLink = (link: CanvasLink) =>
   link.kind === "path" ||
+  link.kind === "diagram" ||
   link.kind === "thread" ||
   link.kind === "dependency" ||
   link.kind === "reference";
@@ -214,8 +221,22 @@ export type CanvasCluster = {
   inset?: number;
   /** Whether the lane's run is still going: only then does a new group arrive in motion. */
   live?: boolean;
+  /** An area of parts (a diagram): drawn as an area, taken whole by its caption. */
+  tone?: "area";
+  /** The caption band above the cards, when it is not the group's 20 px. */
+  caption?: number;
+  /** Faint captions above columns of members: a diagram's layers. */
+  layers?: readonly { name: string; members: readonly string[] }[];
 };
-export type ClusterData = { label: string; more: number; active: boolean; inset: number };
+export type ClusterData = {
+  label: string;
+  more: number;
+  active: boolean;
+  inset: number;
+  tone?: "area";
+  /** Where each layer's caption sits, from the box's top-left. */
+  layers?: { name: string; x: number; y: number }[];
+};
 export type WorkItemNode = Node<CanvasItem, "work">;
 type AgentNode = Node<CanvasItem, "agent">;
 type ClusterNode = Node<ClusterData, "cluster">;
@@ -452,7 +473,8 @@ export function reconcileNodes(
         JSON.stringify(node.data.findings) === JSON.stringify(item.findings) &&
         JSON.stringify(node.data.file) === JSON.stringify(item.file) &&
         JSON.stringify(node.data.command) === JSON.stringify(item.command) &&
-        JSON.stringify(node.data.step) === JSON.stringify(item.step);
+        JSON.stringify(node.data.step) === JSON.stringify(item.step) &&
+        JSON.stringify(node.data.diagram) === JSON.stringify(item.diagram);
       // The agent follows its work; a card follows its lane when the lane moves it.
       const target = positions[item.id];
       const followed =
@@ -460,18 +482,26 @@ export function reconcileNodes(
         (!parent &&
           !!target &&
           (before[item.id]?.x !== target.x || before[item.id]?.y !== target.y));
+      // A diagram's part keeps the person's offset: it moves by what its area moved.
+      const kept =
+        followed && item.diagram && before[item.id] && validPosition(target)
+          ? {
+              x: node.position.x + target!.x - before[item.id]!.x,
+              y: node.position.y + target!.y - before[item.id]!.y,
+            }
+          : target;
       const relocated =
         followed &&
-        validPosition(target) &&
+        validPosition(kept) &&
         !node.dragging &&
-        (node.position.x !== target.x || node.position.y !== target.y);
+        (node.position.x !== kept.x || node.position.y !== kept.y);
       if (same && !relocated) return node;
       if (isAgentNode(node))
         return {
           ...node,
           data: item,
           ariaLabel: item.status,
-          ...(relocated ? { position: { ...target! } } : {}),
+          ...(relocated ? { position: { ...kept! } } : {}),
         };
       // A card nobody sized follows what it says; a saved or resized one keeps its size.
       const was = defaultSize(node.data);
@@ -489,7 +519,7 @@ export function reconcileNodes(
           ...size,
           data: item,
           ariaLabel: `${item.title}. ${item.status}`,
-          ...(relocated ? { position: { ...target! } } : {}),
+          ...(relocated ? { position: { ...kept! } } : {}),
         };
       const absolute = absolutePosition(node, previous);
       return {
@@ -579,6 +609,7 @@ export function withClusters(
   ];
   for (const cluster of ordered) {
     const inset = cluster.inset ?? CLUSTER_PAD;
+    const caption = cluster.caption ?? CLUSTER_CAPTION;
     const rects = cluster.members.flatMap((id) => {
       const node = byId.get(id);
       if (!node || !isItemNode(node)) return [];
@@ -603,7 +634,7 @@ export function withClusters(
     let maxY = -Infinity;
     for (const rect of rects) {
       minX = Math.min(minX, rect.x - inset);
-      minY = Math.min(minY, rect.y - inset - CLUSTER_CAPTION);
+      minY = Math.min(minY, rect.y - inset - caption);
       maxX = Math.max(maxX, rect.x + rect.width + inset);
       maxY = Math.max(maxY, rect.y + rect.height + inset);
     }
@@ -617,11 +648,27 @@ export function withClusters(
     const width = Math.round(maxX - minX);
     const height = Math.round(maxY - minY);
     boxes.set(cluster.id, { ...position, width, height });
-    const data = {
+    const layers = cluster.layers?.flatMap((layer) => {
+      const column = layer.members.flatMap((id) => {
+        const node = byId.get(id);
+        return node && isItemNode(node) ? [absolutePosition(node, nodes)] : [];
+      });
+      if (!column.length) return [];
+      return [
+        {
+          name: layer.name,
+          x: Math.round(Math.min(...column.map((p) => p.x)) - position.x),
+          y: Math.round(Math.min(...column.map((p) => p.y)) - position.y),
+        },
+      ];
+    });
+    const data: ClusterData = {
       label: cluster.label,
       more: cluster.more,
       active: cluster.members.some((id) => active.has(id)),
       inset,
+      ...(cluster.tone ? { tone: cluster.tone } : {}),
+      ...(layers?.length ? { layers } : {}),
     };
     const node = byId.get(cluster.id);
     derived.push(
@@ -634,7 +681,8 @@ export function withClusters(
         node.data.label === data.label &&
         node.data.more === data.more &&
         node.data.active === data.active &&
-        node.data.inset === data.inset
+        node.data.inset === data.inset &&
+        JSON.stringify(node.data.layers) === JSON.stringify(data.layers)
         ? node
         : {
             id: cluster.id,

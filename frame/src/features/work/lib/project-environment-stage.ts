@@ -12,6 +12,7 @@ import { FILE_STEPS, isAgentExecution } from "./agent-steps";
 import { clipText, type CanvasItem, type CanvasPosition, type CanvasSize } from "./canvas-model";
 import { findingsSize, resultSize, sourcesSize, stepSize, subjectSize } from "./card-size";
 import { resultPlan, stepId } from "./plan-steps";
+import { DIAGRAM, diagramLayout, diagramNodeId } from "./diagram";
 import { artifactView } from "./project-work";
 import { CLUSTER_CAP, SIZES, type StageContents, type StageMember } from "./stage-layout";
 import { listingArtifacts, subjectFacts, subjectKey, subjectsOf } from "./subjects";
@@ -387,9 +388,9 @@ export function laneFacts(
   };
 }
 
-/** Lead results first: a comparison or a chart heads the Made group. */
-const leads = (artifact: WorkArtifactV1 | undefined) =>
-  artifact?.data.kind === "comparison_matrix" || artifact?.data.kind === "chart";
+/** Made reads as a set: documents first (the first is the cover), then diagrams, then the rest. */
+const rank = (artifact: WorkArtifactV1 | undefined) =>
+  artifact?.data.kind === "document" ? 0 : artifact?.data.kind === "diagram" ? 1 : 2;
 
 /** What one message's runs put in each group, in projection order. */
 export function stageContents(
@@ -423,8 +424,9 @@ export function stageContents(
   }
   const subjects: StageMember[] = [];
   const findings: StageMember[] = [];
-  const results: (StageMember & { lead: boolean })[] = [];
+  const results: (StageMember & { rank: number })[] = [];
   const plan: StageMember[] = [];
+  const diagram: StageMember[] = [];
   const hubs = new Set<string>();
   for (const element of snapshot.elements) {
     const reference = element.reference;
@@ -452,9 +454,20 @@ export function stageContents(
         findings.push(member(element.id, size));
         continue;
       }
-      results.push({ ...member(element.id, size), lead: leads(artifact) });
+      results.push({ ...member(element.id, size), rank: rank(artifact) });
       // A result's plan stands beside it, one card per step.
       const view = artifact && execution ? artifactView(artifact, execution) : undefined;
+      // A diagram's parts stand in an area beside its cover, one card per part.
+      if (view?.content.kind === "diagram") {
+        const { at } = diagramLayout(view.content);
+        for (const node of view.content.nodes)
+          diagram.push({
+            id: diagramNodeId(element.id, node.id),
+            size: DIAGRAM.node,
+            of: element.id,
+            at: at[node.id]!,
+          });
+      }
       resultPlan(view?.content).forEach((step, index) =>
         plan.push({
           id: stepId(element.id, index),
@@ -480,11 +493,17 @@ export function stageContents(
     subjects: { members: subjects, more: subjects.length >= CLUSTER_CAP.subjects ? unshown : 0 },
     findings: { members: findings },
     results: {
-      members: [
-        ...results.filter((result) => result.lead),
-        ...results.filter((result) => !result.lead),
-      ].map(({ id, size }) => ({ id, size })),
+      members: [0, 1, 2].flatMap((order) =>
+        results
+          .filter((result) => result.rank === order)
+          .map(({ id, size }, index) => ({
+            id,
+            size,
+            ...(order === 0 && !index ? { cover: true } : {}),
+          })),
+      ),
     },
     plan: { members: plan },
+    diagram: { members: diagram },
   };
 }

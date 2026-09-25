@@ -126,6 +126,8 @@ export type ArtifactView = {
   content: ArtifactContent;
   reviewLabel: string;
   evidence: readonly EvidenceReference[];
+  /** Drawn from what the agent knows, not from a source: a caption stands for the chips. */
+  knowledge?: boolean;
 };
 
 // Renderer ceilings, not runtime admission rules. Oversized inputs remain unavailable

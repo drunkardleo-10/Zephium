@@ -61,3 +61,19 @@ export function correctedMatrix(
     ),
   };
 }
+
+/** The same diagram with one part renamed; an unknown part or an unchanged name is refused. */
+export function renamedPart(
+  data: WorkArtifactDataV1,
+  node: string,
+  name: string,
+): WorkArtifactDataV1 | null {
+  const text = name.trim();
+  if (data.kind !== "diagram" || !text || text.length > 256) return null;
+  const part = data.nodes.find((entry) => entry.id === node);
+  if (!part || part.name === text) return null;
+  return {
+    ...data,
+    nodes: data.nodes.map((entry) => (entry === part ? { ...entry, name: text } : entry)),
+  };
+}

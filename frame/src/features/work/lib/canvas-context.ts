@@ -15,3 +15,9 @@ export const canvasPictures = Symbol("canvas-pictures");
 export const canvasAreaActions = Symbol("canvas-area-actions");
 /** How a node that just appeared arrives: with a group (`page`), into one (`base`), or not. */
 export const canvasArrival = Symbol("canvas-arrival");
+/** A diagram part's rename, where the result can still be corrected. */
+export const canvasRename = Symbol("canvas-rename");
+/** Asks native once for the icon of an origin no tab has shown. */
+export const canvasProbe = Symbol("canvas-probe");
+/** Selects a group's members at once: a diagram taken whole. */
+export const canvasSelectGroup = Symbol("canvas-select-group");

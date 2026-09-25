@@ -171,3 +171,74 @@ test("the mark stands by what the agent acts on", () => {
   const local = stageLayout(request, { work: { members: cards("file", 1, SIZES.file) } });
   expect(markStand(local, { doing: "working" })).toEqual({ x: 372 + 248 + 8, y: 44 });
 });
+
+test("Made reads as a set: the cover and its steps, the diagram and its area, then two across", () => {
+  const part = { width: 180, height: 56 };
+  const layout = stageLayout(request, {
+    results: {
+      members: [
+        { id: "cover", size: SIZES.document, cover: true },
+        { id: "diagram", size: { width: 300, height: 110 } },
+        { id: "table0", size: { width: 360, height: 200 } },
+        { id: "table1", size: { width: 420, height: 240 } },
+        { id: "chart", size: { width: 324, height: 250 } },
+      ],
+    },
+    plan: { members: cards("step", 2, step).map((member) => ({ ...member, of: "cover" })) },
+    diagram: {
+      members: [
+        { id: "a", size: part, of: "diagram", at: { x: 0, y: 0 } },
+        { id: "b", size: part, of: "diagram", at: { x: 212, y: 0 } },
+        { id: "c", size: part, of: "diagram", at: { x: 212, y: 68 } },
+      ],
+    },
+  });
+  const made = layout.groups[0]!;
+  const x = 348;
+  expect(made.box).toEqual({ x, y: 0, width: 1060, height: 1082 });
+  expect(layout.positions).toMatchObject({
+    cover: { x: x + 24, y: 44 },
+    step0: { x: x + 508, y: 80 },
+    step1: { x: x + 772, y: 80 },
+    // The diagram on its own row, its area 16 px to the right of its cover.
+    diagram: { x: x + 24, y: 360 },
+    a: { x: x + 356, y: 396 },
+    b: { x: x + 568, y: 396 },
+    c: { x: x + 568, y: 464 },
+    // Tables and the chart two across under the rows.
+    table0: { x: x + 24, y: 552 },
+    table1: { x: x + 400, y: 552 },
+    chart: { x: x + 24, y: 808 },
+  });
+  expect(made.steps?.map((entry) => entry.box)).toEqual([
+    { x: x + 492, y: 44, width: 544, height: 172 },
+  ]);
+  expect(made.diagrams).toEqual([
+    {
+      result: "diagram",
+      box: { x: x + 340, y: 360, width: 424, height: 176 },
+      members: ["a", "b", "c"],
+    },
+  ]);
+  expect(made.counts).toEqual({ results: 5, plan: 2 });
+});
+
+test("without a diagram, the cover's row is followed by the rest two across", () => {
+  const layout = stageLayout(request, {
+    results: {
+      members: [
+        { id: "cover", size: SIZES.document, cover: true },
+        { id: "table", size: { width: 360, height: 200 } },
+        { id: "chart", size: { width: 324, height: 250 } },
+      ],
+    },
+  });
+  const made = layout.groups[0]!;
+  expect(layout.positions).toMatchObject({
+    cover: { x: 348 + 24, y: 44 },
+    table: { x: 348 + 24, y: 360 },
+    chart: { x: 348 + 400, y: 360 },
+  });
+  expect(made.box).toEqual({ x: 348, y: 0, width: 748, height: 634 });
+  expect(made.diagrams).toBeUndefined();
+});

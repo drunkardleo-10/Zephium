@@ -240,8 +240,13 @@ export function artifactView(artifact: WorkArtifactV1, execution: WorkExecutionF
           ? m.work_rejected()
           : m.work_env_status_done(),
     evidence,
+    ...(knowledge(artifact, user?.edited_data ?? artifact.data) ? { knowledge: true } : {}),
   };
 }
+
+/** Marked as the agent's own knowledge rather than a source, as a whole or as a chart. */
+const knowledge = (artifact: WorkArtifactV1, data: WorkArtifactDataV1) =>
+  artifact.general_knowledge ?? (data.kind === "chart" && !!data.general_knowledge);
 
 /** Display derivation only. A historical execution must join its original plan. */
 export function projectWork(

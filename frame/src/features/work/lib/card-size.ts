@@ -1,4 +1,6 @@
 import { documentDigest, type ArtifactView } from "$shared/ui/data/Artifact/artifact";
+import { TABLE_CARD, tableGrid } from "$shared/ui/data/Artifact/table";
+import { DIAGRAM } from "./diagram";
 import type { CanvasItem, CanvasSize } from "./canvas-model";
 
 /**
@@ -32,15 +34,57 @@ function header(title: string, width: number, dense: boolean, glyph: number = FR
 const RESULT_CAP = 560;
 /** The kind caption above a result's title. */
 const KIND = 16;
+/** A mini table's rows: a one-line header, then up to six rows of at most two lines. */
+const TABLE_ROW = { pad: 8, header: 24 } as const;
+/** The chart card's plot box. */
+const CHART_PLOT = { width: 300, height: 160 } as const;
+
 /** A document is as tall as its kind caption, its whole summary and its section headings. */
 export function resultSize(
   title: string,
   view: ArtifactView | undefined,
   action = false,
 ): CanvasSize {
-  const end = action ? FRAME.footer : FRAME.end + 4;
+  const end = action || view?.knowledge ? FRAME.footer : FRAME.end + 4;
   switch (view?.content.kind) {
-    case "comparison":
+    case "table":
+    case "comparison": {
+      const grid = tableGrid(view.content);
+      const columns = Math.min(TABLE_CARD.columns, grid.columns.length);
+      const width = columns >= TABLE_CARD.columns ? 420 : 360;
+      const cell = (width - 24) / Math.max(1, columns) - 12;
+      let body = TABLE_ROW.header;
+      for (const row of grid.rows.slice(0, TABLE_CARD.rows))
+        body +=
+          Math.max(
+            1,
+            ...row.slice(0, columns).map((text) => textLines(text, cell, ADVANCE.label, 2)),
+          ) *
+            LINE.label +
+          TABLE_ROW.pad;
+      const more = grid.rows.length > TABLE_CARD.rows;
+      return {
+        width,
+        height: clamp(
+          KIND +
+            header(title, width - 24, false) +
+            body +
+            (more || action || view.knowledge ? FRAME.footer : end),
+          120,
+          440,
+        ),
+      };
+    }
+    case "chart":
+      return {
+        width: CHART_PLOT.width + 24,
+        height: KIND + header(title, CHART_PLOT.width, false) + CHART_PLOT.height + end,
+      };
+    case "diagram":
+      return {
+        width: 300,
+        height: clamp(KIND + header(title, 300 - 24, false) + LINE.label + end, 96, 176),
+      };
     case "matrix":
       return { width: 520, height: 320 };
     case "sources":
@@ -154,6 +198,7 @@ export function defaultSize(item: CanvasItem): CanvasSize {
   if (item.type === "findings")
     return findingsSize(item.findings?.items ?? [], item.findings?.total);
   if (item.type === "step") return stepSize(item.step?.text ?? item.title, item.detail);
+  if (item.type === "diagram") return { ...DIAGRAM.node };
   if (item.artifact) return resultSize(item.title, item.artifact, !!item.actionLabel);
   switch (item.type) {
     case "tab":
