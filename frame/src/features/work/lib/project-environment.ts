@@ -375,6 +375,12 @@ export function environmentView(snapshot: WorkEnvironmentSnapshot): CanvasView {
     snapshot.elements.flatMap((element) => (laneElement(snapshot, element) ? [element.id] : [])),
   );
   const own = snapshot.view.placements.filter((place) => !lane.has(place.element));
+  // A request card sizes to its words, whatever an older placement saved.
+  const requests = new Set(
+    snapshot.elements.flatMap((element) =>
+      element.reference.kind === "objective" ? [element.id] : [],
+    ),
+  );
   return {
     areas: Object.fromEntries(
       (snapshot.view.areas ?? []).map((place) => [
@@ -384,7 +390,11 @@ export function environmentView(snapshot: WorkEnvironmentSnapshot): CanvasView {
     ),
     sizes: Object.fromEntries(
       snapshot.view.placements
-        .filter((place) => !lane.has(place.element) || place.revision === LANE_PLACEMENT)
+        .filter(
+          (place) =>
+            !requests.has(place.element) &&
+            (!lane.has(place.element) || place.revision === LANE_PLACEMENT),
+        )
         .map((place) => [place.element, { width: place.width, height: place.height }]),
     ),
     positions: Object.fromEntries(own.map((place) => [place.element, { x: place.x, y: place.y }])),

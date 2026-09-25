@@ -123,7 +123,6 @@ export function environmentStages(
     const thread = threadOf(element.id, projection);
     const pages = recorded(projection.work.id);
     for (const draft of thread) {
-      const saved = offsets.get(draft.card)?.size;
       const facts = laneFacts(
         draft.executions.flatMap((id) => projection.executions.filter((entry) => entry.id === id)),
         pages,
@@ -139,7 +138,8 @@ export function environmentStages(
           pages,
           offsets,
         ),
-        size: saved ?? requestSize(draft.request, { footer: !!facts.counts }),
+        // A request is as tall as its words: a size saved by an older placement never clips them.
+        size: requestSize(draft.request, { footer: !!facts.counts }),
         facts,
       });
     }

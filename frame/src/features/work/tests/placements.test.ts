@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import type { WorkEnvironmentSnapshot, WorkRuntimeProjection } from "$shared/ipc/bindings";
 import { reconcileNodes, type CanvasItem } from "../lib/canvas-model";
+import { requestSize } from "../lib/card-size";
 import { environmentView, viewPlacements } from "../lib/project-environment";
 import { environmentRequests, environmentStages } from "../lib/project-environment-thread";
 import { projection, snapshot } from "./environment-fixtures";
@@ -106,6 +107,21 @@ test("a saved size still applies, to the card and to its lane", () => {
   expect(stages[0]!.contents.results!.members[0]!.size).toEqual({ width: 640, height: 480 });
   expect(stages[0]!.layout.groups[0]!.box.width).toBe(24 + 640 + 24);
   expect(environmentView(resized).sizes).toEqual({ "result-card": { width: 640, height: 480 } });
+});
+
+test("a request card is as tall as its words, whatever size an older placement saved", () => {
+  const saved = canvas([
+    { element: "objective-card", x: 0, y: 0, width: 300, height: 110, revision: 2 },
+  ]);
+  const state = structuredClone(projection);
+  state.executions[0]!.spec.request =
+    "Compare hosting for a small SaaS: prices, regions, managed Postgres, backups, bandwidth " +
+    "and support of AWS Lightsail, Hetzner, Hostinger and Vercel, then pick one.";
+  const stages = environmentStages(saved, new Map([["objective", state]]));
+  const words = requestSize(stages[0]!.request, { footer: !!stages[0]!.facts.counts });
+  expect(words.height).toBeGreaterThan(110);
+  expect(stages[0]!.place).toMatchObject(words);
+  expect(environmentView(saved).sizes).toEqual({});
 });
 
 test("a card follows its lane place when that place moves, and only then", () => {
