@@ -1,11 +1,17 @@
 import { expect, test, vi } from "vitest";
 import type { WorkEnvironmentSnapshot, WorkResponseV1, WorkCallV1 } from "$shared/ipc/bindings";
-const native = vi.hoisted(() => ({ call: vi.fn(), resources: vi.fn(), activity: vi.fn() }));
+const native = vi.hoisted(() => ({
+  call: vi.fn(),
+  resources: vi.fn(),
+  notes: vi.fn(),
+  activity: vi.fn(),
+}));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
     workCall: native.call,
     resourceCall: native.resources,
+    noteCall: native.notes,
     workActivity: native.activity,
   });
 });
@@ -13,6 +19,7 @@ vi.mock("$shared/ipc/native-events", () => ({
   events: {
     workChanged: { listen: async () => () => {} },
     resourceChanged: { listen: async () => () => {} },
+    notesChanged: { listen: async () => () => {} },
   },
 }));
 const profile = "00000000000000000000000001";
@@ -68,22 +75,26 @@ test("note labels resolve only attached IDs without starting an objective", asyn
   const { WorkEnvironmentContext } = await import("../context.svelte");
   native.call.mockReset();
   native.resources.mockReset();
-  native.resources.mockResolvedValue({
+  native.notes.mockReset();
+  native.notes.mockResolvedValue({
     profile,
     response: {
-      kind: "page",
-      items: [
-        {
+      kind: "record",
+      record: {
+        summary: {
           id: "note",
           revision: "1",
           title: "Saved findings",
+          preview: "",
           pinned: false,
-          updated_at: "1",
-          completed: null,
-          due_date: null,
+          trashed: false,
+          editable: true,
+          created_at: "1",
+          modified_at: "1",
+          path: "Saved findings.md",
         },
-      ],
-      next: null,
+        markdown: "# Saved findings\n",
+      },
     },
   });
   const context = new WorkEnvironmentContext(profile);
@@ -93,10 +104,8 @@ test("note labels resolve only attached IDs without starting an objective", asyn
   });
   await context.start();
   await vi.waitFor(() => expect(context.notes[0]?.title).toBe("Saved findings"));
-  expect(native.resources).toHaveBeenCalledExactlyOnceWith(profile, {
-    kind: "resolve_notes",
-    ids: ["note"],
-  });
+  expect(native.notes).toHaveBeenCalledExactlyOnceWith(profile, { kind: "get", id: "note" });
+  expect(native.resources).not.toHaveBeenCalled();
   expect(native.call).not.toHaveBeenCalled();
   context.dispose();
 });
