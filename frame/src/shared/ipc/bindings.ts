@@ -172,6 +172,12 @@ export const commands = {
 	resourceCall: (expectedProfile: string, call: ResourceCall_Deserialize) => __TAURI_INVOKE<ResourceReply_Serialize>("resource_call", { expectedProfile, call }),
 	noteCall: (expectedProfile: string, call: NoteCall) => __TAURI_INVOKE<NoteReply>("note_call", { expectedProfile, call }),
 	historyCall: (expectedProfile: string, call: HistoryCall) => __TAURI_INVOKE<HistoryResponse>("history_call", { expectedProfile, call }),
+	/**
+	 *  Asks for the site icons of origins chrome shows outside a tab. Held icons
+	 *  arrive on the ordinary favicon event; missing ones are probed anonymously.
+	 *  Returns whether the request was queued.
+	 */
+	faviconProbe: (expectedProfile: string, origins: string[]) => __TAURI_INVOKE<boolean>("favicon_probe", { expectedProfile, origins }),
 	downloadCall: (expectedProfile: string, call: DownloadCall) => __TAURI_INVOKE<DownloadResponse>("download_call", { expectedProfile, call }),
 	/**
 	 *  Opens an address in the focused window. The launcher panel and the history

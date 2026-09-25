@@ -1713,6 +1713,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             resource_call,
             notes::note_call,
             history_call,
+            favicon_probe,
             download_call,
             browser_open_url,
             resource_close_ready,
@@ -4090,6 +4091,34 @@ async fn download_call(
         Ok(Ok(response)) => response,
         _ => failed(DownloadError::Unavailable),
     }
+}
+
+/// Asks for the site icons of origins chrome shows outside a tab. Held icons
+/// arrive on the ordinary favicon event; missing ones are probed anonymously.
+/// Returns whether the request was queued.
+#[tauri::command]
+#[specta::specta]
+fn favicon_probe(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    origins: Vec<String>,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "favicon_probe") || shutdown_started(&app) {
+        return false;
+    }
+    let Some(profile) =
+        ProfileId::parse(&expected_profile).filter(|id| id.to_string() == expected_profile)
+    else {
+        return false;
+    };
+    if origins.len() > zephium_core::ports::store::MAX_FAVICON_BATCH_ORIGINS
+        || origins.iter().any(|origin| origin.len() > 2048)
+    {
+        return false;
+    }
+    app.state::<Handle>()
+        .dispatch(Command::ProbeFavicons { profile, origins })
 }
 
 #[tauri::command]
