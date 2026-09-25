@@ -137,14 +137,14 @@
     min-inline-size: 0;
   }
 
-  .name,
-  .caption {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
+  /* The name on up to two lines; what the part does on one. */
   .name {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
     font-size: var(--text-body);
     font-weight: 600;
     line-height: 17px;
@@ -152,6 +152,9 @@
   }
 
   .caption {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     color: var(--color-muted);
     font-size: var(--text-caption);
     line-height: 13px;

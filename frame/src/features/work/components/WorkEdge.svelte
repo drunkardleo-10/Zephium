@@ -3,6 +3,7 @@
   import { EdgeLabel, Position, type EdgeProps } from "@xyflow/svelte";
   import { canvasArrival } from "../lib/canvas-context";
   import { duration, easing, reducedMotion, type Duration } from "$shared/lib/motion";
+  import { curveY, levelCurve, type DiagramPlate } from "../lib/diagram";
   type Tone = "rest" | "thread" | "relation" | "diagram";
   let {
     target,
@@ -18,16 +19,26 @@
   const tone = $derived((data?.tone as Tone | undefined) ?? "relation");
   /** What flows along a diagram's edge, on a plate at its midpoint. */
   const label = $derived(typeof data?.label === "string" ? data.label : "");
+  const plate = $derived(data?.plate as DiagramPlate | undefined);
   /** A cubic that leaves and lands along its handles: level for a lane, upright for the thread. */
   const path = $derived.by(() => {
     const vertical = sourcePosition === Position.Bottom || targetPosition === Position.Top;
-    const reach = vertical
-      ? Math.max(24, Math.abs(targetY - sourceY) / 2)
-      : Math.max(24, Math.abs(targetX - sourceX) / 2);
+    const reach = Math.max(24, Math.abs(targetY - sourceY) / 2);
     const [c1x, c1y, c2x, c2y] = vertical
       ? [sourceX, sourceY + reach, targetX, targetY - reach]
-      : [sourceX + reach, sourceY, targetX - reach, targetY];
+      : levelCurve(sourceX, sourceY, targetX, targetY);
     return `M ${sourceX},${sourceY} C ${c1x},${c1y} ${c2x},${c2y} ${targetX},${targetY}`;
+  });
+  /**
+   * The plate stands in the gap before its target, on the curve, or at its
+   * offset from the target; a flow the person dragged backwards keeps the middle.
+   */
+  const spot = $derived.by(() => {
+    if (plate && "gap" in plate) {
+      const x = targetX - plate.gap / 2;
+      if (x > sourceX) return { x, y: curveY(sourceX, sourceY, targetX, targetY, x) + plate.shift };
+    } else if (plate) return { x: targetX + plate.dx, y: targetY + plate.dy };
+    return { x: (sourceX + targetX) / 2, y: (sourceY + targetY) / 2 };
   });
   let line = $state<SVGPathElement>();
   let dot = $state<SVGCircleElement>();
@@ -65,11 +76,7 @@
   fill="none"
 />
 <circle bind:this={dot} class="work-edge-dot {tone}" cx={targetX} cy={targetY} r="2" />
-{#if label}<EdgeLabel
-    x={(sourceX + targetX) / 2}
-    y={(sourceY + targetY) / 2}
-    class="work-edge-label">{label}</EdgeLabel
-  >{/if}
+{#if label}<EdgeLabel x={spot.x} y={spot.y} class="work-edge-label">{label}</EdgeLabel>{/if}
 
 <style>
   .work-edge-line {
@@ -86,10 +93,11 @@
     opacity: 0.6;
   }
 
-  /* A diagram's flow names itself on a plate, never over a card's words. */
+  /* A flow's name on a plate as wide as the room its layout left (PLATE.max). */
   /* stylelint-disable-next-line selector-class-pattern */
   :global(.svelte-flow__edge-label.work-edge-label) {
-    max-inline-size: 140px;
+    box-sizing: border-box;
+    max-inline-size: 220px;
     padding: 1px 6px;
     overflow: hidden;
     border-radius: var(--radius-capsule);
