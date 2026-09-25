@@ -28,6 +28,10 @@ If a change trades any of these away for convenience, it probably won't land. Wh
 
 See the README for prerequisites and how to build and run. Before opening a PR, run the project's full local check suite - the same one CI runs - and make sure it's green. If it passes locally, you've cleared most of the bar.
 
+For frontend work, start with [the frame guide](frame/README.md) and
+[the frontend contract](docs/frontend.md). They define ownership, import boundaries,
+colocated tests, native presentation rules, and the active migration gates.
+
 ## Where to discuss
 
 Discord: **Crynta OS** - https://discord.gg/tyveTUyEp7 

@@ -1,0 +1,459 @@
+/* Semantic tokens: the only names components may use. Dark is the base; the
+   light block below mirrors it by luminance. --color-canvas stays a literal
+   hex in both blocks because the native bootstrap paint is checked against it. */
+@theme static {
+  /* Tailwind's size-named radius scale is removed so that no component can
+     reach for a radius the system does not name. */
+  /* stylelint-disable-next-line custom-property-pattern -- Tailwind's namespace reset. */
+  --radius-*: initial;
+
+  /* The tonal ladder. This interface has no accent hue, so luminance carries
+     every state and each rung has to be separable at a glance: the old ladder
+     spanned five names across four points of L* and read as one flat field.
+     A card has to lift off its page without either of them going black. */
+  --color-canvas: #1a1a1d;
+  --color-page: #1a1a1d;
+  --color-chrome: #1f1f22;
+  --color-surface: #26262a;
+  --color-raised: #2c2c30;
+
+  /* The menu's own ground, and deliberately not the raised rung. Glass is only
+     visible as the difference between the sheet and what is under it, so a
+     panel mixed from a colour two points off the page reads as opaque no
+     matter how low the alpha goes — there is nothing to see through to. This
+     rung sits well above the page so the sheet stays legible while most of
+     what is behind it comes through. */
+  --color-float: #3d3d44;
+  --color-menu: color-mix(in srgb, var(--color-float) var(--wash-raised), transparent);
+
+  /* The menu layer. Rows here are taller than anywhere else in the product:
+     a menu is a thing you point at once, not a list you scan, and the air is
+     most of what separates a native menu from a web one. The item inset is
+     set so that the label lands exactly where the trigger's own label was —
+     6px of panel plus 7px of row is the pop-up button's 13px. The divider
+     needs its own colour because the chrome's hairline vanishes on a
+     translucent panel. */
+  --menu-pad: 6px;
+  --menu-row: 34px;
+  --menu-item-inset: 8px;
+  --menu-gutter: 16px;
+  --color-menu-separator: rgb(255 255 255 / 0.1);
+
+  /* One wash recipe, four native tiers. The alphas are the only thing a
+     material changes; every surface below composes against them, so Liquid
+     Glass, vibrancy, acrylic and a plain opaque window stay the same design.
+     100% is the opaque tier, which is the one the system must survive alone.
+     Neither the chrome nor the page has a wash: the chrome is the native
+     material and nothing else, and the page is solid. See global.css. */
+  --wash-raised: 62%;
+  --wash-launcher: 100%;
+
+  --color-fill: rgb(255 255 255 / 0.05);
+  --color-fill-hover: rgb(255 255 255 / 0.08);
+  --color-fill-active: var(--white-a12);
+  --color-fill-pressed: rgb(255 255 255 / 0.16);
+  --color-fill-strong: rgb(255 255 255 / 0.22);
+  --color-card: rgb(255 255 255 / 0.05);
+
+  --color-border: rgb(255 255 255 / 0.07);
+  --color-border-strong: rgb(255 255 255 / 0.13);
+
+  /* Sidebar rows. Hover is a whisper and the active row is a real plate, so
+     the two can never be confused. The generic fills stay where they are:
+     an icon button needs a heavier hover than a 34px row does. */
+  --row-hover: rgb(255 255 255 / 0.04);
+  --row-active: rgb(255 255 255 / 0.075);
+  --row-pressed: rgb(255 255 255 / 0.1);
+  --row-rim: inset 0 0 0 1px rgb(255 255 255 / 0.06);
+
+  /* The scroll thumb, which is the whole scrollbar: there is no track, no
+     buttons and no gutter shading anywhere in this product. */
+  --scroll-thumb: rgb(255 255 255 / 0.16);
+  --scroll-thumb-hover: rgb(255 255 255 / 0.28);
+
+  --color-text: #f4f4f6;
+  --color-label-secondary: #d8d8db;
+  --color-muted: rgb(244 244 246 / 0.68);
+  --color-faint: rgb(244 244 246 / 0.44);
+
+  /* Controls are fill and nothing else, on the same ladder as a field, so a
+     button, a chip, a checkbox and an input in one row are the same material
+     at the same weight. The old recipe put a hairline ring and a top-edge
+     light on all of them: at 6% fill the ring was the loudest thing in the
+     control, which is how a button ends up reading as an outline of a button.
+     The label is plain text — at 80% it reads as switched off. */
+  --color-control: rgb(255 255 255 / 0.09);
+  --color-control-hover: rgb(255 255 255 / 0.13);
+  --color-control-pressed: rgb(255 255 255 / 0.17);
+  --color-on-control: var(--color-text);
+  --color-on-control-strong: var(--color-text);
+
+  /* Fields and tracks sit level with the surface and only ring when editing. */
+  --color-field: rgb(255 255 255 / 0.09);
+  --color-field-hover: rgb(255 255 255 / 0.12);
+  --color-field-ring: rgb(255 255 255 / 0.16);
+
+  /* A raised fill is the one lit shape: the filled part of a value slider,
+     a selected segment, a switch thumb. */
+  --color-raise: rgb(255 255 255 / 0.08);
+  --color-raise-active: rgb(255 255 255 / 0.12);
+  --color-thumb: #e5e5e8;
+  --color-track: rgb(255 255 255 / 0.14);
+
+  /* Stepped down from the lit rung so a white thumb still separates from it. */
+  --color-track-on: var(--gray-400);
+  --color-switch-thumb: var(--gray-0);
+  --color-switch-thumb-off: var(--gray-200);
+  --color-switch-glass: rgb(255 255 255 / 0.1);
+  --color-switch-rim: rgb(255 255 255 / 0.85);
+
+  /* The top of the ladder, and the reason this interface needs no accent hue:
+     the thing that is on is simply the brightest thing in the frame. Reserved
+     for genuine state — never decoration — and neutral whatever tint is set,
+     so an on-state cannot drift with the wallpaper the way a hue does. */
+  --color-lit: #ededf0;
+  --color-lit-hover: #f7f7fa;
+  --color-on-lit: #161619;
+  --color-lit-soft: rgb(237 237 240 / 0.16);
+
+  /* The accent follows the space tint. It defaults to the lit rung, so the
+     product ships neutral and a chosen tint colours only what it should. */
+  --color-accent: var(--color-lit);
+  --color-accent-hover: var(--color-lit-hover);
+  --color-on-accent: var(--color-on-lit);
+  --color-accent-soft: color-mix(in srgb, var(--color-accent) 16%, transparent);
+  --color-ring: var(--white-a50);
+  --color-tint-graphite: var(--gray-400);
+  --color-tint-sky: #7fb3f5;
+  --color-tint-sage: #86c9a4;
+  --color-tint-rose: #ee8f95;
+  --color-danger: #ef8a8e;
+  --color-success: #7fcaa1;
+  --color-warning: #dcb977;
+  --color-info: #8fbcf7;
+
+  /* Shape is named by job, never by size. A size name asks "how round should
+     this be", which is a question of taste answered differently every time;
+     a role name asks "what is this", which has one answer. Two axes decide
+     the values: how tall the thing is, and whether it sits in a column.
+     Rows are flatter than controls on purpose — a column of 14px rows reads
+     as a stack of pills rather than as a list. */
+  --radius-inset: 8px; /* a glyph plate or keycap inside something else */
+  --radius-row: 12px; /* a row in a column, and a field sharing that column */
+  --radius-control-compact: 10px; /* a control around 24-26px */
+  --radius-control: 14px; /* a control around 30-34px: button, field, select */
+  --radius-control-large: 18px; /* a control around 40-46px */
+  --radius-card: 18px; /* a group of rows */
+  --radius-panel: 22px; /* a floating sheet */
+  --radius-capsule: 999px; /* only what is genuinely a pill, a disc or a hairline cap */
+  --radius-field: var(--radius-control);
+  --radius-menu: var(--radius-panel);
+
+  /* Matches the native content view's layer radius, so the new tab pane and a
+     live page occupy the same shape. Changing one requires changing both. */
+  --content-radius: 12px;
+
+  /* Traffic lights sit at window (7, 22) and the chrome WebView starts at the
+     8px window padding, so within the chrome they span y 14..28 and end near
+     x 53. The header centres on that band and clears that extent. */
+  --titlebar-height: 32px;
+  --traffic-light-inset: 60px;
+
+  /* How a control separates from the surface under it, which is a different
+     problem in each theme and so a different value, not a different rule. On a
+     dark ground a control is lighter than its surface and needs nothing; on a
+     light one it is lighter too, which reads as flat, so it takes a whisper of
+     a drop. Either way the separation is never a drawn edge. */
+  --shadow-control: none;
+  --shadow-control-strong: none;
+  --shadow-field: none;
+  --shadow-field-focus: inset 0 0 0 1px var(--color-field-ring);
+  --shadow-raise: inset 0 0 0 1px rgb(255 255 255 / 0.05), inset 0 1px 0 0 rgb(255 255 255 / 0.06);
+  --shadow-track: inset 0 1px 2px rgb(0 0 0 / 0.22), inset 0 0 0 1px rgb(0 0 0 / 0.08);
+
+  /* The thumb is the one moving part that genuinely sits above its track, and
+     it sits barely above it: a switch is a flat control, so the drop only has
+     to lift the thumb off the fill, never state a height. The track takes a
+     hairline and nothing else — an inset gradient reads as a groove pressed
+     into the surface, which is a different, older control. */
+  --shadow-switch-track: inset 0 0 0 1px rgb(0 0 0 / 0.07);
+  --shadow-thumb: 0 1px 2.5px rgb(0 0 0 / 0.2), 0 0 0 0.5px rgb(0 0 0 / 0.07);
+  --shadow-thumb-grab: 0 2px 6px rgb(0 0 0 / 0.3), 0 0 0 0.5px rgb(0 0 0 / 0.12);
+
+  /* Three elevations, and a surface only takes one if it genuinely floats
+     above what is behind it; everything else separates by fill. Each is a
+     single soft drop and a hairline rim, because stacked drops read as
+     weight rather than as height — which is what made the old set heavy. */
+  --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.16), 0 0 0 0.5px rgb(255 255 255 / 0.06);
+  --shadow-float: 0 6px 22px rgb(0 0 0 / 0.34), 0 0 0 0.5px rgb(255 255 255 / 0.08);
+  --shadow-overlay: 0 12px 36px rgb(0 0 0 / 0.3), 0 0 0 0.5px rgb(255 255 255 / 0.08);
+  --shadow-popover: var(--shadow-float);
+
+  /* A rim and one wide soft drop, and nothing else. Stacked or tight shadows
+     read as weight pressing down rather than as height, which is what makes a
+     floating panel look pasted on. The rim is what actually separates the
+     panel from the page; the drop only has to say which one is in front. */
+  --shadow-menu: 0 0 0 1px rgb(255 255 255 / 0.08), 0 14px 44px -10px rgb(0 0 0 / 0.34);
+
+  /* The platform face, and only the platform face. Native menus, alerts and
+     file dialogs open out of this chrome in SF and cannot be told otherwise,
+     so a webfont here changes typeface under the user's cursor. SF also
+     carries a real optical size axis, which `font-optical-sizing` needs to
+     mean anything at the 11px end of the scale. */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI Variable Text", "Segoe UI", "Noto Sans",
+    "Cantarell", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Menlo", "Consolas", monospace;
+
+  --text-caption: 11px;
+  --text-label: 12px;
+  --text-body: 13px;
+  --text-page-body: 13px;
+  --text-page-title: 14px;
+  --text-title: 22px;
+  --text-display: 36px;
+
+  --control-compact: 24px;
+  --control-regular: 30px;
+  --control-large: 34px;
+  --field-height: 30px;
+  --row-sidebar: 36px;
+  --row-page: 58px;
+
+  /* One optical axis for the whole chrome column. Every band measures its
+     horizontal position from this, so glyphs line up from the address field
+     down to the dock instead of each band inventing its own inset. It is
+     zero: the window already holds the chrome off its own edge, and a second
+     margin inside the first only makes the column look inset twice. */
+  --sidebar-inset: 0px;
+  --sidebar-row-gap: 4px;
+
+  /* Antialiased text on a dark ground renders a step lighter than its
+     nominal weight, so the column's rows carry medium and the current one
+     carries semibold. At 400 the list reads as a caption, not as chrome. */
+  --sidebar-row-text: 13px;
+  --sidebar-row-weight: 500;
+  --sidebar-row-weight-current: 550;
+
+  /* The dock's site tiles are wide rather than square, and share the row's
+     width evenly, so a single kept site fills the row. The shelf that leads
+     the row is the one square in it. */
+  --dock-tile: 44px;
+  --dock-gap: 6px;
+  --dock-shelf-gap: 10px;
+
+  /* Motion, named by what it is for rather than by how long it is. A state
+     the pointer is already on — a hover fill, a colour — arrives almost at
+     once, because anything slower feels like the interface catching up with
+     the cursor. Only things that travel, or that were not on screen a moment
+     ago, get the longer durations, and a surface arriving gets the longest:
+     on a strongly decelerating curve most of the distance is covered in the
+     first third, so a long duration reads as soft rather than as slow.
+     Leaving is always quicker than arriving. */
+  --motion-instant: 70ms;
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+  --motion-slow: 300ms;
+  --motion-page: 400ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-smooth: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-press: cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+
+  /* For a surface arriving: a page, a panel, the sidebar changing shape. */
+  --ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* A damped spring sampled at 40 points, overshooting by 2%: enough to read
+     as a physical object settling, never enough to read as a bounce. Only
+     small things that move take it — a thumb, a mark, a tile. */
+
+  /* For what answers a click directly: a spring launched rather than let go,
+     so it is already a third of the way there in the first frames and
+     settles with a trace of give (1.4%) instead of a bounce. */
+  --ease-snap: linear(
+    0,
+    0.1776,
+    0.3343,
+    0.4698,
+    0.5848,
+    0.6808,
+    0.7597,
+    0.8234,
+    0.8742,
+    0.9138,
+    0.9443,
+    0.9672,
+    0.9839,
+    0.9959,
+    1.004,
+    1.0092,
+    1.0123,
+    1.0137,
+    1.0141,
+    1.0136,
+    1.0127,
+    1.0115,
+    1.0101,
+    1.0088,
+    1.0075,
+    1.0062,
+    1.0051,
+    1.0041,
+    1.0033,
+    1.0026,
+    1.002,
+    1.0015,
+    1
+  );
+
+  --ease-spring: linear(
+    0,
+    0.0232,
+    0.0821,
+    0.1636,
+    0.2572,
+    0.3552,
+    0.452,
+    0.5438,
+    0.628,
+    0.7032,
+    0.7689,
+    0.825,
+    0.8719,
+    0.9103,
+    0.9412,
+    0.9653,
+    0.9838,
+    0.9974,
+    1.007,
+    1.0135,
+    1.0174,
+    1.0194,
+    1.0199,
+    1.0194,
+    1.0182,
+    1.0166,
+    1.0147,
+    1.0128,
+    1.0109,
+    1.009,
+    1.0074,
+    1.0059,
+    1.0046,
+    1.0035,
+    1.0025,
+    1.0018,
+    1.0012,
+    1.0007,
+    1.0003,
+    1
+  );
+
+  /* A clipped label dissolves into its row's edge instead of ending in an
+     ellipsis. Only the alpha ramp matters; the colour is never painted. */
+  --mask-fade-end: linear-gradient(to right, #000 calc(100% - 26px), transparent);
+  --mask-fade-end-rtl: linear-gradient(to left, #000 calc(100% - 26px), transparent);
+
+  /* Favicon plate. Inactive rows desaturate so mixed-brightness site icons
+     stop competing with each other and with the surface. */
+  --favicon-plate: color-mix(in srgb, var(--color-text) 88%, transparent);
+  --favicon-rest-opacity: 0.82;
+  --favicon-rest-saturation: 0.85;
+}
+
+[data-theme="light"] {
+  /* The same ladder read the other way: elevation is still "brighter", so a
+     card and a popover go white, but a page now sits above its chrome rather
+     than below it. That inversion is the platform convention in both themes
+     and it keeps chrome reading as the thing you look through. */
+  --color-page: #f1f1f3;
+  --color-canvas: #f1f1f3;
+  --color-chrome: var(--gray-150);
+  --color-surface: var(--gray-0);
+  --color-raised: var(--gray-0);
+  --color-float: var(--gray-0);
+  --color-menu: color-mix(in srgb, var(--color-float) var(--wash-raised), transparent);
+  --color-menu-separator: rgb(24 24 27 / 0.09);
+
+  /* Light chrome gains elevation by getting brighter, not darker, so the
+     active state is a white pill rather than a heavier overlay. */
+  --color-fill: var(--ink-a5);
+  --color-fill-hover: rgb(24 24 27 / 0.08);
+  --color-fill-active: rgb(255 255 255 / 0.92);
+  --color-fill-pressed: rgb(24 24 27 / 0.11);
+  --color-fill-strong: var(--ink-a16);
+  --color-card: rgb(255 255 255 / 0.92);
+
+  --color-border: var(--ink-a7);
+  --color-border-strong: rgb(24 24 27 / 0.13);
+
+  /* Light chrome gains elevation by getting brighter, so the active row is a
+     white plate rather than a heavier overlay. */
+  --row-hover: rgb(24 24 27 / 0.04);
+  --row-active: rgb(255 255 255 / 0.8);
+  --row-pressed: rgb(24 24 27 / 0.07);
+  --row-rim: inset 0 0 0 1px rgb(24 24 27 / 0.05);
+  --scroll-thumb: rgb(24 24 27 / 0.2);
+  --scroll-thumb-hover: rgb(24 24 27 / 0.34);
+
+  --color-text: #1c1c1f;
+  --color-label-secondary: #55555c;
+  --color-muted: rgb(28 28 31 / 0.62);
+  --color-faint: rgb(28 28 31 / 0.42);
+
+  --color-control: #ffffff;
+  --color-control-hover: #f9f9f9;
+  --color-control-pressed: #f0f0f0;
+  --color-on-control: #18181b;
+  --color-on-control-strong: #18181b;
+
+  --color-field: rgb(228 228 230 / 0.7);
+  --color-field-hover: rgb(170 170 170 / 0.2);
+  --color-field-ring: rgb(0 0 0 / 0.14);
+
+  --color-raise: rgb(219 219 219 / 0.4);
+  --color-raise-active: rgb(219 219 219 / 0.6);
+  --color-thumb: #ffffff;
+  --color-track: #d7d7da;
+  --color-track-on: var(--gray-500);
+  --color-switch-thumb: var(--gray-0);
+  --color-switch-thumb-off: var(--gray-0);
+  --color-switch-glass: rgb(255 255 255 / 0.3);
+  --color-switch-rim: rgb(255 255 255 / 0.95);
+
+  /* On a light ground the brightest rung cannot be the loudest one, so the
+     lit end of the ladder inverts to ink. Everything that reads it — the on
+     switch, the checked box, a primary button — inverts with it. */
+  --color-lit: #222226;
+  --color-lit-hover: #2e2e35;
+  --color-on-lit: var(--gray-0);
+  --color-lit-soft: rgb(34 34 38 / 0.12);
+  --color-ring: var(--ink-a40);
+  --color-tint-graphite: #5e5e64;
+  --color-tint-sky: #3b82e6;
+  --color-tint-sage: #2f8a5e;
+  --color-tint-rose: #d2545e;
+  --color-danger: #c0474f;
+  --color-success: #2f7f5a;
+  --color-warning: #8c6a2a;
+  --color-info: #2f6fd6;
+
+  --shadow-control: 0 0.5px 1.5px rgb(24 24 27 / 0.1), 0 0 0 0.5px rgb(24 24 27 / 0.07);
+  --shadow-control-strong: 0 1px 3px rgb(24 24 27 / 0.13), 0 0 0 0.5px rgb(24 24 27 / 0.09);
+  --shadow-field: none;
+  --shadow-field-focus: inset 0 0 0 1px var(--color-field-ring);
+  --shadow-raise: inset 0 0 0 1px rgb(24 24 27 / 0.07), inset 0 -1px 0 0 rgb(24 24 27 / 0.05);
+  --shadow-track: inset 0 1px 2px rgb(24 24 27 / 0.1), inset 0 0 0 1px rgb(24 24 27 / 0.04);
+  --shadow-switch-track: inset 0 0 0 1px rgb(24 24 27 / 0.06);
+  --shadow-thumb: 0 1px 2.5px rgb(24 24 27 / 0.16), 0 0 0 0.5px rgb(24 24 27 / 0.06);
+  --shadow-thumb-grab: 0 2px 6px rgb(24 24 27 / 0.22), 0 0 0 0.5px rgb(24 24 27 / 0.1);
+  --shadow-raised: 0 1px 2px rgb(24 24 27 / 0.08), 0 0 0 0.5px rgb(24 24 27 / 0.06);
+  --shadow-float: 0 6px 22px rgb(24 24 27 / 0.16), 0 0 0 0.5px rgb(24 24 27 / 0.1);
+  --shadow-overlay: 0 12px 36px rgb(24 24 27 / 0.14), 0 0 0 0.5px rgb(24 24 27 / 0.1);
+  --shadow-popover: var(--shadow-float);
+  --shadow-menu: 0 0 0 1px rgb(24 24 27 / 0.09), 0 14px 44px -10px rgb(24 24 27 / 0.16);
+
+  --favicon-rest-opacity: 0.9;
+  --favicon-rest-saturation: 0.92;
+}

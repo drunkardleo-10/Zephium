@@ -28,6 +28,16 @@ pub struct HistoryHit {
     pub last_visit: i64,
 }
 
+/// One recorded visit. Unlike `HistoryHit` these are not deduplicated by
+/// address: a history list shows every time a page was opened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryVisit {
+    pub id: i64,
+    pub url: String,
+    pub title: String,
+    pub visited_at: i64,
+}
+
 /// Maximum number of exact origins that browser chrome may hydrate in one
 /// favicon-cache read. The returned raster for each origin is independently
 /// fixed at `icon::RGBA32_BYTES`, bounding a batch to two MiB before small
@@ -622,7 +632,35 @@ pub enum StoreShutdownOutcome {
     Unclean,
 }
 
+pub type LegacyNotesDone = Box<dyn FnOnce(Option<Vec<crate::resources::ResourceRecord>>) + Send>;
+
 pub trait Store {
+    /// Bounded asynchronous access to durable Notes/Tasks. Caller owns authorization.
+    fn resource_call(
+        &self,
+        _profile: ProfileId,
+        _call: crate::resources::ResourceCall,
+        done: crate::resources::ResourceDone,
+    ) {
+        done(crate::resources::ResourceResponse::Error {
+            error: crate::resources::ResourceError::Unavailable,
+        });
+    }
+    /// Notes kept in the profile database before notes became Markdown
+    /// files, for their one-time move into the notes folder. `None` when they
+    /// cannot be read now.
+    fn legacy_notes(&self, _profile: ProfileId, done: LegacyNotesDone) {
+        done(None);
+    }
+    /// Deletes notes that now live in the notes folder.
+    fn retire_legacy_notes(
+        &self,
+        _profile: ProfileId,
+        _ids: Vec<String>,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) {
+        done(false);
+    }
     fn save_session(&self, session: SessionState);
     /// Ordered session-durability barrier for shutdown and other process
     /// boundaries. Returns only after the latest session snapshot queued
@@ -789,6 +827,24 @@ pub trait Store {
     ) -> bool {
         false
     }
+    /// Enumerates only registered durable profiles for startup download recovery.
+    /// False means the callback was not retained.
+    fn download_recovery_profiles(
+        &self,
+        _done: Box<dyn FnOnce(crate::downloads::DownloadStoreReply) + Send>,
+    ) -> bool {
+        false
+    }
+    /// Bounded asynchronous download persistence on the existing Store actor.
+    /// Private profiles must never call this port. False means no callback is retained.
+    fn download_call(
+        &self,
+        _profile: ProfileId,
+        _call: crate::downloads::DownloadStoreCall,
+        _done: Box<dyn FnOnce(crate::downloads::DownloadStoreReply) + Send>,
+    ) -> bool {
+        false
+    }
     /// History is per-profile; the adapter must ignore profiles it does not
     /// persist (incognito never reaches disk).
     fn record_visit(&self, profile: ProfileId, url: String, title: String);
@@ -798,9 +854,30 @@ pub trait Store {
     /// bounded adapter accepted the command; durability is established by a
     /// later `flush`/`flush_until` barrier. `false` is a definite rejection.
     fn set_app_setting(&self, key: String, value: String) -> bool;
+
+    /// Records an explicit submitted search, never a partial keystroke.
+    fn record_search(&self, _profile: ProfileId, _query: String, _url: String) -> bool {
+        false
+    }
     /// Prefix search over the profile's history FTS index, deduped by url,
     /// most recent first.
     fn search_history(&self, profile: ProfileId, query: &str, limit: u32) -> Vec<HistoryHit>;
+    /// One page of visits, newest first, optionally narrowed by a query and by
+    /// `since`. `before` is the id of the last visit already seen.
+    fn history_page(
+        &self,
+        profile: ProfileId,
+        query: &str,
+        since: Option<i64>,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Vec<HistoryVisit>;
+    /// Removes every visit to each address; returns how many rows went.
+    fn forget_history_urls(&self, profile: ProfileId, urls: &[String]) -> u32;
+    /// Removes visits at or after `since`, or all of them when it is absent.
+    fn clear_history(&self, profile: ProfileId, since: Option<i64>) -> u32;
+    /// Replaces the placeholder title on the newest recent visit to an address.
+    fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool;
     /// Bounded, deduplicated recent history for browser-owned consumers such
     /// as a reviewed extension compatibility adapter. Implementations must
     /// keep profile isolation and the same URL/title validation as search.
@@ -816,19 +893,13 @@ pub trait Store {
     );
     fn favicon_bytes(&self, profile: ProfileId, origin: &str) -> Option<(Option<String>, Vec<u8>)>;
 
-    /// Loads one already-decoded favicon only when it is no older than
-    /// `max_age_seconds`. Actor-backed adapters should implement this as one
-    /// bounded query rather than an age RPC followed by a bytes RPC.
-    fn fresh_favicon_raster(
-        &self,
-        profile: ProfileId,
-        origin: &str,
-        max_age_seconds: i64,
-    ) -> Option<Vec<u8>> {
-        if max_age_seconds < 0 || self.favicon_age(profile, origin)? > max_age_seconds {
-            return None;
-        }
-        self.favicon_bytes(profile, origin).map(|(_, bytes)| bytes)
+    /// Loads one already-decoded favicon with the age of the stored copy.
+    /// Age decides whether to refresh, never whether to display: an old
+    /// raster is still the right thing to draw while a newer one is fetched.
+    fn favicon_raster_with_age(&self, profile: ProfileId, origin: &str) -> Option<(Vec<u8>, i64)> {
+        let age = self.favicon_age(profile, origin)?;
+        self.favicon_bytes(profile, origin)
+            .map(|(_, bytes)| (bytes, age))
     }
 
     /// Loads already-decoded favicon rasters for a bounded authoritative set

@@ -61,7 +61,47 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
     };
     let extensions_staging = env::var_os("CARGO_FEATURE_STAGING_EXTENSION_CATALOG").is_some();
     let extension_lab = env::var_os("CARGO_FEATURE_LOCAL_EXTENSION_LAB").is_some();
+    let resource_ui_qa = env::var_os("CARGO_FEATURE_RESOURCE_UI_QA").is_some();
     let rendering_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_RENDERING_PROBE").is_some();
+    let file_workflows_qa = env::var_os("CARGO_FEATURE_FILE_WORKFLOWS_QA").is_some();
+    if resource_ui_qa && file_workflows_qa {
+        return Err("resource and file workflow QA identities are mutually exclusive".into());
+    }
+    if resource_ui_qa || file_workflows_qa {
+        let target = env::var("CARGO_CFG_TARGET_OS")?;
+        let supported_target = target == "macos" || (file_workflows_qa && target == "windows");
+        if !supported_target
+            || env::var("PROFILE").as_deref() != Ok("debug")
+            || extensions_staging
+            || extension_lab
+            || rendering_probe
+        {
+            return Err("product UI QA requires an isolated supported-platform debug build".into());
+        }
+        let (qa_id, qa_name) = if file_workflows_qa {
+            (
+                "app.zephium.files-integration-qa",
+                "Zephium Files Integration QA",
+            )
+        } else {
+            ("app.zephium.resources-qa", "Zephium Resources QA")
+        };
+        let config = config_override
+            .as_ref()
+            .ok_or("product UI QA requires an explicit isolated configuration")?;
+        if config.get("identifier").and_then(Value::as_str) != Some(qa_id)
+            || config.get("productName").and_then(Value::as_str) != Some(qa_name)
+            || config
+                .pointer("/app/windows/0/title")
+                .and_then(Value::as_str)
+                != Some(qa_name)
+            || config.pointer("/build/devUrl") != Some(&Value::Null)
+        {
+            return Err(
+                "product UI QA requires its exact isolated identity and bundled frontend".into(),
+            );
+        }
+    }
     if rendering_probe {
         if env::var_os("CARGO_FEATURE_MACOS_WORK_RESOURCE_PROBE").is_some()
             && env::var_os("CARGO_FEATURE_MACOS_WORK_RETAINED_CONTROLLER_PROBE").is_some()
@@ -123,6 +163,8 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
                 && !extensions_staging
                 && !extension_lab
                 && !rendering_probe
+                && !resource_ui_qa
+                && !file_workflows_qa
             {
                 validate_linux_identity("effective", &config, &root)?;
             }

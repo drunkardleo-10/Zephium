@@ -1,4 +1,4 @@
-import type { ItemsState, TabView } from "../../shared/ipc/bindings";
+import type { ItemsState, TabView } from "$shared/ipc/bindings";
 
 export const ZERO_PROJECTION_REVISION = "00000000000000000000000000000000";
 

@@ -1240,6 +1240,14 @@ impl Engine for FakeEngine {
     fn set_drop_indicator(&self, _window: WindowId, _zone: Option<Rect>) -> NativeDispatch {
         self.native_admission()
     }
+    fn hint_stage_motion(
+        &self,
+        window: WindowId,
+        motion: zephium_core::ports::engine::StageMotion,
+    ) -> NativeDispatch {
+        self.log(format!("motion@{window} {motion:?}"));
+        self.native_admission()
+    }
     fn zoom(&self, id: ItemId, scale: f64, request: ZoomRequestId) -> NativeDispatch {
         self.log(format!("zoom {id} {scale}"));
         let admission = self.native_admission();
@@ -1390,6 +1398,7 @@ pub(crate) struct FakeStore {
     history_delay_ms: std::sync::atomic::AtomicU64,
     history_started: std::sync::atomic::AtomicBool,
     visits: Mutex<Vec<String>>,
+    recorded_visits: Mutex<Vec<zephium_core::ports::store::HistoryVisit>>,
     icon_ages: Mutex<std::collections::HashMap<String, i64>>,
     icons: Mutex<Vec<(String, Vec<u8>)>>,
     reject_settings: std::sync::atomic::AtomicBool,
@@ -1656,7 +1665,15 @@ impl Store for FakeStore {
         done(outcome);
         true
     }
-    fn record_visit(&self, _profile: ProfileId, url: String, _title: String) {
+    fn record_visit(&self, _profile: ProfileId, url: String, title: String) {
+        let mut visits = self.recorded_visits.lock().unwrap();
+        let id = i64::try_from(visits.len()).unwrap_or(i64::MAX) + 1;
+        visits.push(zephium_core::ports::store::HistoryVisit {
+            id,
+            url: url.clone(),
+            title,
+            visited_at: id,
+        });
         self.visits.lock().unwrap().push(url);
     }
     fn app_setting(&self, _key: &str) -> Option<String> {
@@ -1683,6 +1700,57 @@ impl Store for FakeStore {
         }
         self.history.clone()
     }
+    fn history_page(
+        &self,
+        _profile: ProfileId,
+        query: &str,
+        since: Option<i64>,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Vec<zephium_core::ports::store::HistoryVisit> {
+        let needle = query.trim().to_lowercase();
+        self.recorded_visits
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .filter(|visit| before.is_none_or(|cursor| visit.id < cursor))
+            .filter(|visit| since.is_none_or(|floor| visit.visited_at >= floor))
+            .filter(|visit| {
+                needle.is_empty()
+                    || visit.title.to_lowercase().contains(&needle)
+                    || visit.url.to_lowercase().contains(&needle)
+            })
+            .take(limit as usize)
+            .cloned()
+            .collect()
+    }
+
+    fn forget_history_urls(&self, _profile: ProfileId, urls: &[String]) -> u32 {
+        let mut visits = self.recorded_visits.lock().unwrap();
+        let before = visits.len();
+        visits.retain(|visit| !urls.contains(&visit.url));
+        u32::try_from(before - visits.len()).unwrap_or(u32::MAX)
+    }
+
+    fn clear_history(&self, _profile: ProfileId, since: Option<i64>) -> u32 {
+        let mut visits = self.recorded_visits.lock().unwrap();
+        let before = visits.len();
+        match since {
+            Some(since) => visits.retain(|visit| visit.visited_at < since),
+            None => visits.clear(),
+        }
+        u32::try_from(before - visits.len()).unwrap_or(u32::MAX)
+    }
+
+    fn amend_visit_title(&self, _profile: ProfileId, url: String, title: String) -> bool {
+        let mut visits = self.recorded_visits.lock().unwrap();
+        if let Some(visit) = visits.iter_mut().rev().find(|visit| visit.url == url) {
+            visit.title = title;
+        }
+        true
+    }
+
     fn recent_history(
         &self,
         _profile: ProfileId,
@@ -1724,17 +1792,10 @@ impl Store for FakeStore {
                 )
             })
     }
-    fn fresh_favicon_raster(
-        &self,
-        profile: ProfileId,
-        origin: &str,
-        max_age_seconds: i64,
-    ) -> Option<Vec<u8>> {
-        self.favicon_age(profile, origin)
-            .is_some_and(|age| age <= max_age_seconds)
-            .then(|| self.favicon_bytes(profile, origin))
-            .flatten()
-            .map(|(_, bytes)| bytes)
+    fn favicon_raster_with_age(&self, profile: ProfileId, origin: &str) -> Option<(Vec<u8>, i64)> {
+        let age = self.favicon_age(profile, origin)?;
+        self.favicon_bytes(profile, origin)
+            .map(|(_, bytes)| (bytes, age))
     }
     fn pending_profile_deletions(&self) -> ProfileDeletionLoad {
         self.pending_deletion_load_calls
@@ -1834,6 +1895,15 @@ impl GeometryChrome for FakeChrome {
     }
 }
 impl PresentationChrome for FakeChrome {
+    fn restore_browser_chrome(
+        &self,
+        _revision: u64,
+        _items: ItemsState,
+        _done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        ChromePresentationDispatch::Applied
+    }
+
     fn apply_tab_for_presentation(
         &self,
         _presentation: ChromePresentation,
@@ -1914,12 +1984,15 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::ExtensionDistribution(_) => {}
         Projection::ExtensionRuntimeGrantPrompt(_) => {}
         Projection::PagePermissionPrompt(_) => {}
+        Projection::Favicons(_) => {}
+        Projection::PanelOwner(_) => {}
         Projection::UiCommand(_) => {}
         Projection::Search(_) => {}
         Projection::Layout(_) => {}
         Projection::RuntimeStatus(_) => {}
         Projection::BlockerStatus(_) => {}
         Projection::OperationProcessed(_) => {}
+        Projection::OpenNote { .. } => {}
     }
 }
 
@@ -1957,6 +2030,41 @@ fn setup_with_extension_lifecycle(
 
 fn setup() -> (Shell, Arc<FakeEngine>, Screen) {
     setup_with(Arc::new(FakeStore::default()))
+}
+
+type IconLog = Arc<Mutex<Vec<zephium_ipc::FaviconsView>>>;
+
+/// Records the raster deltas chrome would receive alongside the usual screen.
+fn setup_with_icon_log(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen, IconLog) {
+    let engine = Arc::new(FakeEngine::default());
+    let screen: Screen = Arc::new(Mutex::new(ItemsState {
+        projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
+        tabs: Vec::new(),
+        active: None,
+        split_group: None,
+    }));
+    let icons: IconLog = Arc::new(Mutex::new(Vec::new()));
+    let sink = screen.clone();
+    let icon_sink = icons.clone();
+    let mut shell = Shell::new_with_extension_lifecycle(
+        engine.clone(),
+        store,
+        Arc::new(ImmediateAllowAllCompiler),
+        clean_extension_lifecycle(),
+        Arc::new(FakeChrome),
+        Box::new(move |p| {
+            if let Projection::Favicons(view) = &p {
+                icon_sink.lock().unwrap().push(view.clone());
+            }
+            apply_projection(&mut sink.lock().unwrap(), p);
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    (shell, engine, screen, icons)
 }
 
 fn setup_with_async_chrome() -> (Shell, Arc<FakeEngine>, Arc<AsyncChrome>, Screen) {
@@ -2168,8 +2276,10 @@ mod extension_distribution;
 mod extension_repository_maintenance;
 mod extension_runtime_grants;
 mod favicons;
+mod history;
 #[path = "navigation.rs"]
 mod navigation_tests;
+mod notes;
 mod operations;
 mod page_permissions;
 mod persistence;

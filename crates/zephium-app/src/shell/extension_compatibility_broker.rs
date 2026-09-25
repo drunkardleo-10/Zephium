@@ -93,7 +93,11 @@ impl Shell {
         disposition: ExtensionCompatibilitySearchDisposition,
         query: String,
     ) -> bool {
-        let Some(target) = navigation::search_query(&query) else {
+        let Some(target) = self
+            .search
+            .engine
+            .configured_search(&query, &self.search.custom_url)
+        else {
             return false;
         };
         let Some(window) = self
@@ -111,7 +115,7 @@ impl Shell {
                     operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope)
                 }),
             ExtensionCompatibilitySearchDisposition::NewTab => {
-                self.operation_open_url(target.to_string())
+                self.operation_open_url(target.to_string(), true)
             }
         };
         matches!(

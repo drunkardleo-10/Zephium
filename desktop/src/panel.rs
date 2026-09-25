@@ -8,7 +8,7 @@ use objc2_foundation::MainThreadMarker;
 use tauri::WebviewWindow;
 
 /// Matches the launcher's CSS corner and the vibrancy view's own radius.
-const PANEL_CORNER_RADIUS: f64 = 16.0;
+const PANEL_CORNER_RADIUS: f64 = super::overlay::PANEL_RADIUS as f64;
 
 fn with_window(window: &WebviewWindow, f: impl FnOnce(&NSWindow)) {
     if MainThreadMarker::new().is_none() {
@@ -67,4 +67,19 @@ pub fn is_visible(window: &WebviewWindow) -> bool {
     let mut visible = false;
     with_window(window, |window| visible = window.isVisible());
     visible
+}
+
+pub fn set_tool_mode(window: &WebviewWindow, tool: bool) {
+    with_window(window, |window| window.setHidesOnDeactivate(tool));
+}
+
+pub fn show_unfocused(window: &WebviewWindow) {
+    with_window(window, |window| window.orderFrontRegardless());
+}
+
+pub fn application_active() -> bool {
+    let Some(main) = MainThreadMarker::new() else {
+        return false;
+    };
+    objc2_app_kit::NSApplication::sharedApplication(main).isActive()
 }

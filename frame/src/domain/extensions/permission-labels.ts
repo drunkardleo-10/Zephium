@@ -1,4 +1,4 @@
-import type { ExtensionManagementLimitationView } from "../../shared/ipc/bindings";
+import type { ExtensionManagementLimitationView } from "$shared/ipc/bindings";
 
 const API_PERMISSION_LABELS: Readonly<Record<string, string>> = {
   activeTab: "Access the current tab after you use the extension",

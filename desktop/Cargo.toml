@@ -1,10 +1,15 @@
 [package]
 name = "zephium-desktop"
+default-run = "zephium-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [features]
+# Isolated actual-product file workflow verification, never a shipping app.
+file-workflows-qa = ["tauri/custom-protocol"]
+# Isolated user-resource UI verification; never a shipping application.
+resource-ui-qa = ["tauri/custom-protocol"]
 # Same release-excluded retained path, one closed real-public product-brief task.
 macos-work-retained-public-probe = [
     "macos-work-retained-controller-probe",
@@ -69,6 +74,8 @@ serde_json.workspace = true
 json-patch = "3"
 
 [dependencies]
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream", "system-proxy"] }
+tokio = { workspace = true, features = ["time"] }
 tauri.workspace = true
 zephium-core.workspace = true
 zephium-ipc.workspace = true
@@ -81,14 +88,16 @@ zephium-extension-authority = { workspace = true, optional = true }
 zephium-extension-distribution = { workspace = true, optional = true }
 zephium-extension-updater = { workspace = true, optional = true }
 zephium-store.workspace = true
+zephium-notes.workspace = true
 zephium-blocker-service.workspace = true
 tauri-plugin-single-instance.workspace = true
-window-vibrancy = "0.7"
+window-vibrancy = "=0.8.0"
 serde.workspace = true
 serde_json.workspace = true
 specta.workspace = true
 specta-typescript.workspace = true
 tauri-specta.workspace = true
+tauri-plugin-dialog = "2"
 
 [dev-dependencies]
 async-io = "=2.6.0"
@@ -129,8 +138,10 @@ tauri-plugin-global-shortcut.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 zephium-blocker = { workspace = true, features = ["webkit"] }
 block2 = "0.6"
+dispatch2 = { version = "0.3.1", default-features = false, features = ["block2", "std"] }
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
+objc2-quartz-core = "0.3"
 objc2-web-kit = "0.3"
 raw-window-handle.workspace = true

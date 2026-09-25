@@ -1,0 +1,100 @@
+/* What a portalled menu adds to the shared surface: floating geometry, the
+   mount animation, and the list parts only a full menu has. Shared by Menu
+   and Select, which both portal their content, so these classes are global by
+   necessity. */
+@import "./surface.css";
+
+.ui-menu {
+  display: flex;
+  flex-direction: column;
+
+  /* Sized to what is in it. A floor tied to the anchor made a three-word menu
+     open as a slab twice the width of the control it belongs to, which is the
+     single thing that stops a menu reading as part of its trigger. */
+  min-width: 168px;
+  max-height: var(--bits-floating-available-height, 420px);
+  transform-origin: var(--bits-floating-transform-origin, top);
+  animation:
+    ui-menu-fade var(--motion-fast) var(--ease-out),
+    ui-menu-in var(--motion-base) var(--ease-out);
+}
+
+.ui-menu[data-state="closed"] {
+  animation: ui-menu-out var(--motion-instant) var(--ease-exit) forwards;
+}
+
+@keyframes ui-menu-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes ui-menu-in {
+  from {
+    transform: scale(0.96) translateY(-4px);
+  }
+}
+
+@keyframes ui-menu-out {
+  to {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-menu,
+  .ui-menu[data-state="closed"] {
+    animation: ui-menu-fade var(--motion-instant) linear;
+  }
+}
+
+/* The list scrolls, the panel does not: padding stays put and the rounded
+   corners keep clipping while the rows travel under them. */
+.ui-menu-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.ui-menu-separator {
+  flex: none;
+  height: 1px;
+
+  /* Full bleed, because a divider that stops short of the edge reads as a
+     misaligned row rather than as a break in the list. */
+  margin: 5px calc(var(--menu-pad) * -1);
+  background: var(--color-menu-separator);
+}
+
+.ui-menu-heading {
+  padding: 10px var(--menu-item-inset) 5px;
+  font-size: var(--text-caption);
+  font-weight: 550;
+  line-height: 14px;
+  letter-spacing: 0.01em;
+  color: var(--color-faint);
+}
+
+/* A shortcut is a caption on the row it belongs to, not a key to press here.
+   Keycaps are for the launcher, where the keys are the interface. */
+.ui-menu-hint {
+  margin-inline-start: auto;
+  padding-inline-start: 28px;
+  color: var(--color-faint);
+  font-size: var(--text-label);
+  font-variant-numeric: tabular-nums;
+  transition: color var(--motion-instant) var(--ease-smooth);
+}
+
+.ui-menu-item[data-highlighted] .ui-menu-hint {
+  color: var(--color-muted);
+}
+
+/* A menu long enough to need scrolling keeps its own padding in the scroller:
+   Select brings a viewport of its own, a dropdown has no reason to. */
+.ui-menu-scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}

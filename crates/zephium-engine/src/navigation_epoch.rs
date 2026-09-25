@@ -252,7 +252,9 @@ impl NavigationEpochTracker {
             // Terminal phases are correlated by native identity. Their URL
             // can legitimately describe the prior document or native error
             // surface, and is never committed into browser chrome here.
-            NavigationEventPhase::Finished | NavigationEventPhase::Failed => None,
+            NavigationEventPhase::Finished
+            | NavigationEventPhase::Failed
+            | NavigationEventPhase::Cancelled => None,
         };
         if matches!(
             event.phase,
@@ -366,7 +368,7 @@ impl NavigationEpochTracker {
                 current.previous_committed = None;
                 Some(NavigationTransition::Finished(current.epoch))
             }
-            NavigationEventPhase::Failed => {
+            NavigationEventPhase::Failed | NavigationEventPhase::Cancelled => {
                 let current = state.current.as_mut()?;
                 if current.native_id != Some(event.id) {
                     return None;
@@ -624,6 +626,39 @@ fn same_document_origin(current: &str, observed: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_cancellation_restores_previous_document_without_committing_download_url() {
+        let tracker = NavigationEpochTracker::new();
+        let visible = commit(
+            &tracker,
+            1,
+            "https://fixture.test/",
+            "https://fixture.test/",
+        );
+        let pending = tracker.begin("https://fixture.test/download").unwrap();
+        tracker.observe_navigation(&event(
+            2,
+            NavigationEventPhase::Started,
+            "https://fixture.test/download",
+        ));
+        assert_eq!(
+            tracker.observe_navigation(&event(
+                2,
+                NavigationEventPhase::Cancelled,
+                "https://fixture.test/download"
+            )),
+            Some(NavigationTransition::Failed {
+                failed: pending,
+                restored: Some(visible),
+                request: None
+            })
+        );
+        assert_eq!(
+            tracker.committed_snapshot(),
+            Some((visible, "https://fixture.test/".into()))
+        );
+    }
 
     fn event(id: u64, phase: NavigationEventPhase, url: &str) -> NavigationEvent {
         NavigationEvent {

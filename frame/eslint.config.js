@@ -1,3 +1,5 @@
+import moduleRoles from "./module-roles.js";
+import { architecture, primitiveArchitecture, ipcArchitecture } from "./architecture.config.js";
 import eslint from "@eslint/js";
 import svelte from "eslint-plugin-svelte";
 import globals from "globals";
@@ -7,6 +9,9 @@ export default tseslint.config(
   {
     ignores: [
       "dist/**",
+      "dist-work-preview/**",
+      "project.inlang/cache/**",
+      "src/shared/i18n/**",
       "src/shared/ipc/bindings.ts",
       "src/vite-env.d.ts",
       "svelte.config.js",
@@ -17,6 +22,14 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   ...svelte.configs.recommended,
   ...svelte.configs.prettier,
+  architecture,
+  {
+    files: ["src/features/**/*.{ts,svelte}"],
+    plugins: { "zephium-modules": moduleRoles },
+    rules: { "zephium-modules/structure": "error" },
+  },
+  primitiveArchitecture,
+  ipcArchitecture,
   {
     files: ["**/*.ts", "**/*.svelte.ts"],
     languageOptions: {
@@ -35,7 +48,12 @@ export default tseslint.config(
     },
     rules: {
       "no-console": ["error", { allow: ["error", "warn"] }],
-      "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-explicit-any": "error",
+      // Svelte snippets may require an unused positional parameter before a used one.
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        { varsIgnorePattern: "^_", argsIgnorePattern: "^_" },
+      ],
     },
   },
   {
@@ -47,7 +65,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["tests/**/*.ts"],
+    files: ["*.{js,ts}", "scripts/**/*.mjs", "src/**/*.test.ts"],
     languageOptions: {
       globals: globals.node,
     },

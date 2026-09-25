@@ -4,6 +4,11 @@ use crate::geometry::Rect;
 pub struct ChromeFrame {
     pub rect: Rect,
     pub fill_width: bool,
+    /// The frame belongs to a deliberate change of the window's shape that
+    /// the content travels through. A chrome that would narrow keeps its
+    /// width until the content has arrived, so what the chrome draws during
+    /// the journey is never cut away beneath it.
+    pub travel: bool,
 }
 
 pub trait Chrome {

@@ -1,0 +1,5 @@
+:root[data-contrast="true"] {
+  --color-muted: var(--color-text);
+  --color-faint: var(--color-text);
+  --color-border: var(--color-border-strong);
+}

@@ -11,3 +11,10 @@ gen/schemas
 /eval/agentic-browsing/local-results/
 __pycache__/
 *.py[cod]
+
+/frame/src/shared/i18n/
+/frame/project.inlang/cache/
+
+/frame/.vitest-attachments/
+
+/frame/dist-work-preview/

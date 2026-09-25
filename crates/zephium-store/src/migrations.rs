@@ -47,6 +47,13 @@ static EXPECTED_MANIFESTS: OnceLock<Mutex<ManifestCache>> = OnceLock::new();
 
 pub fn apply(conn: &mut Connection, migrations: &[Migration]) -> rusqlite::Result<()> {
     let current = validate_current(conn, migrations)?;
+    if accepts_legacy_profile_v14(migrations)
+        && current == 14
+        && schema_manifest(conn)? == expected_legacy_profile_v14_manifest()?
+    {
+        integrate_legacy_profile_v14(conn)?;
+        return apply(conn, migrations);
+    }
     for m in migrations.iter().filter(|m| m.version > current) {
         let tx = conn.transaction()?;
         (m.up)(&tx)?;
@@ -90,8 +97,67 @@ pub(crate) fn validate_current(
     // trigger, then validate again after every committed step. The trusted
     // reference is generated once from these same immutable migrations in a
     // fresh in-memory database, including FTS shadow objects and triggers.
+    if accepts_legacy_profile_v14(migrations)
+        && current == 14
+        && schema_manifest(conn)? == expected_legacy_profile_v14_manifest()?
+    {
+        return Ok(current);
+    }
     validate_manifest(conn, migrations, current)?;
     Ok(current)
+}
+
+fn accepts_legacy_profile_v14(migrations: &[Migration]) -> bool {
+    std::ptr::eq(migrations.as_ptr(), PROFILE.as_ptr())
+        && migrations
+            .last()
+            .is_some_and(|migration| migration.version >= 22)
+}
+
+// The extension branch shipped a different PROFILE v14. Identify it by the
+// complete schema, not its ambiguous version number or a few table names.
+fn expected_legacy_profile_v14_manifest() -> rusqlite::Result<Vec<SchemaObject>> {
+    let cache = EXPECTED_MANIFESTS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(manifest) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&(3, 14))
+        .cloned()
+    {
+        return Ok(manifest);
+    }
+
+    let mut reference = Connection::open_in_memory()?;
+    for migration in &PROFILE[..13] {
+        let tx = reference.transaction()?;
+        (migration.up)(&tx)?;
+        tx.commit()?;
+    }
+    let tx = reference.transaction()?;
+    create_extension_profile_provenance(&tx)?;
+    tx.commit()?;
+    let manifest = schema_manifest(&reference)?;
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert((3, 14), manifest.clone());
+    Ok(manifest)
+}
+
+// Apply the main lineage and extension provenance in one transaction. No
+// intermediate user_version can claim one lineage's schema with the other's
+// tables after a crash or a failed migration.
+fn integrate_legacy_profile_v14(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    for migration in PROFILE
+        .iter()
+        .filter(|migration| (14..=22).contains(&migration.version))
+    {
+        (migration.up)(&tx)?;
+    }
+    tx.pragma_update(None, "user_version", 22)?;
+    validate_manifest(&tx, PROFILE, 22)?;
+    tx.commit()
 }
 
 fn validate_manifest(
@@ -1422,6 +1488,41 @@ pub static META: &[Migration] = &[
     },
 ];
 
+// These statements are the exact extension-branch PROFILE v14 artifact. The
+// schema manifest uses their stored CREATE text to recognize existing files.
+fn create_extension_profile_provenance(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        // No source authority is inferred for existing reviewed installs.
+        // History deliberately has no install FK: uninstall is not a
+        // rollback-protection reset. Profile deletion removes both tables.
+        "CREATE TABLE extension_upstream_history (
+                 publisher BLOB PRIMARY KEY CHECK (typeof(publisher) = 'blob' AND length(publisher) = 32),
+                 checkpoint BLOB NOT NULL CHECK (typeof(checkpoint) = 'blob' AND length(checkpoint) = 105)
+             ) STRICT, WITHOUT ROWID;
+             CREATE TRIGGER extension_upstream_history_capacity BEFORE INSERT ON extension_upstream_history
+             WHEN NOT EXISTS (SELECT 1 FROM extension_upstream_history WHERE publisher = NEW.publisher)
+                  AND (SELECT count(*) FROM extension_upstream_history) >= 128
+             BEGIN SELECT RAISE(ABORT, 'extension upstream history capacity exceeded'); END;
+             CREATE TABLE extension_install_provenance (
+                 install_id BLOB PRIMARY KEY REFERENCES extension_installs(id) ON DELETE CASCADE
+                    CHECK (typeof(install_id) = 'blob' AND length(install_id) = 16),
+                 provenance BLOB NOT NULL CHECK (typeof(provenance) = 'blob' AND length(provenance) BETWEEN 1 AND 1024)
+             ) STRICT, WITHOUT ROWID;",
+    )
+}
+
+fn migrate_extension_profile_provenance(tx: &Transaction) -> rusqlite::Result<()> {
+    let already_created: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE name='extension_upstream_history'",
+        [],
+        |row| row.get(0),
+    )?;
+    if already_created == 0 {
+        create_extension_profile_provenance(tx)?;
+    }
+    Ok(())
+}
+
 pub static PROFILE: &[Migration] = &[
     Migration {
         version: 1,
@@ -1924,24 +2025,157 @@ pub static PROFILE: &[Migration] = &[
         version: 14,
         up: |tx| {
             tx.execute_batch(
-            // No source authority is inferred for existing reviewed installs.
-            // History deliberately has no install FK: uninstall is not a
-            // rollback-protection reset. Profile deletion removes both tables.
-            "CREATE TABLE extension_upstream_history (
-                 publisher BLOB PRIMARY KEY CHECK (typeof(publisher) = 'blob' AND length(publisher) = 32),
-                 checkpoint BLOB NOT NULL CHECK (typeof(checkpoint) = 'blob' AND length(checkpoint) = 105)
-             ) STRICT, WITHOUT ROWID;
-             CREATE TRIGGER extension_upstream_history_capacity BEFORE INSERT ON extension_upstream_history
-             WHEN NOT EXISTS (SELECT 1 FROM extension_upstream_history WHERE publisher = NEW.publisher)
-                  AND (SELECT count(*) FROM extension_upstream_history) >= 128
-             BEGIN SELECT RAISE(ABORT, 'extension upstream history capacity exceeded'); END;
-             CREATE TABLE extension_install_provenance (
-                 install_id BLOB PRIMARY KEY REFERENCES extension_installs(id) ON DELETE CASCADE
-                    CHECK (typeof(install_id) = 'blob' AND length(install_id) = 16),
-                 provenance BLOB NOT NULL CHECK (typeof(provenance) = 'blob' AND length(provenance) BETWEEN 1 AND 1024)
-             ) STRICT, WITHOUT ROWID;"
+            "CREATE TABLE user_resources (
+                id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=26),
+                kind TEXT NOT NULL CHECK(kind IN ('note','task')),
+                revision INTEGER NOT NULL CHECK(revision>0),
+                title TEXT NOT NULL,
+                completed INTEGER CHECK(completed IS NULL OR completed IN (0,1)),
+                due_date TEXT,
+                pinned INTEGER NOT NULL CHECK(pinned IN (0,1)),
+                trashed INTEGER NOT NULL CHECK(trashed IN (0,1)),
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                body TEXT NOT NULL CHECK(length(CAST(body AS BLOB))<=524288),
+                search_text TEXT NOT NULL
+            ) STRICT;
+            CREATE TABLE user_resource_usage (id INTEGER PRIMARY KEY CHECK(id=1),bytes INTEGER NOT NULL CHECK(bytes>=0)) STRICT;
+            INSERT INTO user_resource_usage VALUES(1,0);
+            CREATE TRIGGER user_resource_usage_insert AFTER INSERT ON user_resources BEGIN
+                UPDATE user_resource_usage SET bytes=bytes+length(CAST(NEW.body AS BLOB)) WHERE id=1; END;
+            CREATE TRIGGER user_resource_usage_update AFTER UPDATE OF body ON user_resources BEGIN
+                UPDATE user_resource_usage SET bytes=bytes-length(CAST(OLD.body AS BLOB))+length(CAST(NEW.body AS BLOB)) WHERE id=1; END;
+            CREATE TRIGGER user_resource_usage_delete AFTER DELETE ON user_resources BEGIN
+                UPDATE user_resource_usage SET bytes=bytes-length(CAST(OLD.body AS BLOB)) WHERE id=1; END;
+            CREATE INDEX user_resources_listing ON user_resources(kind,trashed,pinned DESC,id DESC);
+            CREATE TABLE user_resource_receipts (
+                request_id TEXT PRIMARY KEY NOT NULL,
+                digest BLOB NOT NULL CHECK(length(digest)=32),
+                retained INTEGER NOT NULL CHECK(retained IN (0,1)),
+                resource_id TEXT NOT NULL REFERENCES user_resources(id),
+                revision INTEGER NOT NULL CHECK(revision>0)
+            ) STRICT;
+            CREATE TRIGGER user_resources_capacity BEFORE INSERT ON user_resources
+            WHEN (SELECT count(*) FROM user_resources)>=10000
+            BEGIN SELECT RAISE(ABORT,'resource capacity'); END;
+            CREATE TRIGGER user_resource_receipts_capacity BEFORE INSERT ON user_resource_receipts
+            WHEN (SELECT count(*) FROM user_resource_receipts)>=100000
+            BEGIN SELECT RAISE(ABORT,'resource receipt capacity'); END;"
         )
         },
+    },
+    Migration {
+        version: 15,
+        up: |tx| {
+            // Titles only. Note and task bodies are deliberately outside the
+            // index so search never reaches document contents.
+            //
+            // SQLite stores a CREATE statement verbatim in sqlite_schema, and
+            // the migration manifest compares that text. Reformatting any
+            // statement below would fail the manifest on every database that
+            // already applied this version, degrading it permanently. Treat
+            // this SQL as a released artifact, not as source to tidy.
+            tx.execute_batch(
+                "CREATE VIRTUAL TABLE resource_titles_fts USING fts5(title, content='user_resources', content_rowid='rowid', prefix='2 3');
+                 INSERT INTO resource_titles_fts(resource_titles_fts) VALUES ('rebuild');
+                 INSERT INTO resource_titles_fts(resource_titles_fts, rank) VALUES ('secure-delete', 1);
+                 CREATE TRIGGER resource_titles_insert AFTER INSERT ON user_resources BEGIN INSERT INTO resource_titles_fts(rowid,title) VALUES(NEW.rowid,NEW.title); END;
+                 CREATE TRIGGER resource_titles_delete AFTER DELETE ON user_resources BEGIN INSERT INTO resource_titles_fts(resource_titles_fts,rowid,title) VALUES('delete',OLD.rowid,OLD.title); END;
+                 CREATE TRIGGER resource_titles_update AFTER UPDATE OF title ON user_resources WHEN OLD.title IS NOT NEW.title BEGIN
+        INSERT INTO resource_titles_fts(resource_titles_fts,rowid,title) VALUES('delete',OLD.rowid,OLD.title);
+        INSERT INTO resource_titles_fts(rowid,title) VALUES(NEW.rowid,NEW.title); END;
+                 CREATE TABLE search_queries (query_key TEXT PRIMARY KEY NOT NULL, query TEXT NOT NULL CHECK(length(CAST(query AS BLOB))<=512), url TEXT NOT NULL CHECK(length(CAST(url AS BLOB))<=8192), last_used INTEGER NOT NULL, use_count INTEGER NOT NULL CHECK(use_count>0)) STRICT;",
+            )
+        },
+    },
+    Migration {
+        version: 16,
+        up: |tx| {
+            // A task list row draws status, who holds it, where it came from
+            // and its manual position. Projecting those out of the JSON body
+            // keeps a populated list one query instead of one query plus a
+            // fetch per row. The body stays authoritative; these are an index.
+            //
+            // Existing tasks predate the lifecycle, so they adopt the state
+            // their stored `completed` already implies, in the body as well as
+            // the columns: a task whose two representations of done-ness
+            // disagreed would no longer validate, and so would stop loading.
+            // A body that is not JSON was already unreadable and is left alone
+            // rather than aborting every other profile's migration.
+            //
+            // `work` is reserved for the Work runtime track and carries no
+            // reference constraint here.
+            tx.execute_batch(
+                "ALTER TABLE user_resources ADD COLUMN status TEXT;
+                 ALTER TABLE user_resources ADD COLUMN assignee TEXT;
+                 ALTER TABLE user_resources ADD COLUMN origin TEXT;
+                 ALTER TABLE user_resources ADD COLUMN context_url TEXT;
+                 ALTER TABLE user_resources ADD COLUMN context_title TEXT;
+                 ALTER TABLE user_resources ADD COLUMN sort_key TEXT;
+                 ALTER TABLE user_resources ADD COLUMN work TEXT;
+                 UPDATE user_resources SET status=CASE WHEN completed=1 THEN 'done' ELSE 'open' END, assignee='user', origin='user' WHERE kind='task';
+                 UPDATE user_resources SET body=json_set(body,'$.content.status',CASE WHEN completed=1 THEN 'done' ELSE 'open' END,'$.content.assignee','user','$.content.origin','user') WHERE kind='task' AND json_valid(body);",
+            )
+        },
+    },
+    Migration {
+        version: 17,
+        up: |tx| {
+            // A due time is optional and only ever set alongside a day, so there
+            // is nothing to backfill: every existing task simply has none.
+            tx.execute_batch("ALTER TABLE user_resources ADD COLUMN due_time TEXT;")
+        },
+    },
+    Migration {
+        version: 18,
+        up: |tx| {
+            tx.execute_batch(
+            "CREATE TABLE task_lists(id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=26),title TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0,1))) STRICT;
+             CREATE TABLE task_list_receipts(request_id TEXT PRIMARY KEY NOT NULL,digest BLOB NOT NULL CHECK(length(digest)=32),list_id TEXT NOT NULL REFERENCES task_lists(id),retained INTEGER NOT NULL CHECK(retained IN (0,1))) STRICT;
+             ALTER TABLE user_resources ADD COLUMN task_list TEXT;
+             ALTER TABLE user_resources ADD COLUMN task_inbox INTEGER NOT NULL DEFAULT 0 CHECK(task_inbox IN (0,1));
+             ALTER TABLE user_resources ADD COLUMN task_priority TEXT NOT NULL DEFAULT 'none';
+             ALTER TABLE user_resources ADD COLUMN task_steps INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE user_resources ADD COLUMN task_steps_done INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE user_resources ADD COLUMN task_completed_at TEXT;
+             CREATE INDEX user_tasks_list ON user_resources(task_list,trashed,completed);
+             CREATE INDEX user_tasks_date ON user_resources(kind,trashed,completed,due_date);")
+        },
+    },
+    Migration {
+        version: 19,
+        up: |tx| {
+            // Deadline and estimate are new and optional; no task has either yet.
+            tx.execute_batch(
+                "ALTER TABLE user_resources ADD COLUMN task_deadline TEXT;
+                 ALTER TABLE user_resources ADD COLUMN task_duration INTEGER;
+                 CREATE INDEX user_tasks_deadline ON user_resources(kind,trashed,completed,task_deadline);",
+            )
+        },
+    },
+    Migration {
+        version: 20,
+        up: |tx| {
+            tx.execute_batch(
+            "CREATE TABLE downloads (id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=26), session TEXT NOT NULL CHECK(length(session)=26), revision INTEGER NOT NULL CHECK(revision>0), terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=24576 AND json_valid(payload))) STRICT;
+             CREATE TABLE download_preferences (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=8192 AND json_valid(payload))) STRICT;
+             CREATE TRIGGER downloads_capacity BEFORE INSERT ON downloads WHEN NOT EXISTS(SELECT 1 FROM downloads WHERE id=NEW.id) AND (SELECT count(*) FROM downloads)>=10000 BEGIN SELECT RAISE(ABORT,'download history capacity'); END;"
+        )
+        },
+    },
+    Migration {
+        version: 21,
+        up: |tx| {
+            tx.execute_batch(
+            "CREATE TABLE download_cleanup (id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=26), session TEXT NOT NULL CHECK(length(session)=26), terminal INTEGER NOT NULL CHECK(terminal IN (0,1)), payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB))<=24576 AND json_valid(payload))) STRICT;
+             INSERT INTO download_cleanup(id,session,terminal,payload) SELECT id,session,terminal,payload FROM downloads WHERE json_type(payload,'$.staging')='text' AND json_type(payload,'$.staging_identity')='object';
+             CREATE TRIGGER download_cleanup_capacity BEFORE INSERT ON download_cleanup WHEN NOT EXISTS(SELECT 1 FROM download_cleanup WHERE id=NEW.id) AND (SELECT count(*) FROM download_cleanup)>=10000 BEGIN SELECT RAISE(ABORT,'download cleanup capacity'); END;"
+        )
+        },
+    },
+    Migration {
+        version: 22,
+        up: migrate_extension_profile_provenance,
     },
 ];
 
@@ -1949,26 +2183,304 @@ pub static PROFILE: &[Migration] = &[
 mod tests {
     use super::*;
 
-    #[test]
-    fn profile_v14_adds_empty_bounded_provenance_without_inventing_legacy_evidence() {
+    /// Fingerprint of the schema each shipped version produces.
+    ///
+    /// SQLite stores a CREATE statement verbatim, and `validate_current`
+    /// compares that text, so editing an already-released migration -- even
+    /// its whitespace -- fails the manifest on every database that applied the
+    /// old text and degrades it permanently. These constants exist so that
+    /// mistake breaks this test instead of a user's profile.
+    ///
+    /// A new migration appends one line. An existing line never changes.
+    const META_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
+        (1, 0xa62c_2e08_66e8_0dd2),
+        (2, 0x4e66_f2fb_22b8_70d5),
+        (3, 0x2910_38e3_a32e_7be3),
+        (4, 0x2910_38e3_a32e_7be3),
+        (5, 0x0284_7c35_b4c0_e297),
+        (6, 0xac6c_b5d7_b66c_6da2),
+        (7, 0x0816_09d3_99f0_7c45),
+        (8, 0xea74_9bb2_69f4_5506),
+        (9, 0x000a_33fa_6b52_c5f2),
+        (10, 0xe187_684a_35da_7d8e),
+        (11, 0xfe6f_079b_1c21_7cde),
+        (12, 0x7367_0d0b_3f1f_9c96),
+        (13, 0xbf7c_627a_b150_22ae),
+        (14, 0x3a07_c3c5_e4cf_25fc),
+        (15, 0x8c12_efd7_c942_f404),
+        (16, 0x2dc6_d332_0299_d29b),
+        (17, 0xc06b_3cdd_2a6e_9fc6),
+        (18, 0xf8c3_1606_d301_f467),
+    ];
+    const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
+        (1, 0x10b8_b7a3_094f_23d7),
+        (2, 0xd36a_6ccd_26cd_8ab3),
+        (3, 0xfa38_77ec_ded0_391e),
+        (4, 0xfa38_77ec_ded0_391e),
+        (5, 0xfa38_77ec_ded0_391e),
+        (6, 0x6133_6034_2097_64ef),
+        (7, 0xc545_b0e1_65b2_9c87),
+        (8, 0x441d_75af_3edb_d1fb),
+        (9, 0x52da_c9e7_ce8a_4d9b),
+        (10, 0x163b_4df0_050f_285e),
+        (11, 0x1831_eb77_6cbd_8ea1),
+        (12, 0x0d0b_cc00_2fd0_8fc9),
+        (13, 0x128f_f07d_8b37_6bc9),
+        (14, 0x0bb9_e89a_39c2_fb9f),
+        (15, 0x2f78_2c71_a646_acaf),
+        (16, 0x119a_472e_4564_25df),
+        (17, 0x8b55_d4bb_445e_7756),
+        (18, 0xa412_5523_e2ac_aef7),
+        (19, 0x321a_2e79_d8d2_77da),
+        (20, 0x4b37_b9cf_91e8_b507),
+        (21, 0x3483_1796_92c9_33a6),
+        (22, 0xd5d5_eec8_ddc1_ca18),
+    ];
+
+    fn extension_profile_v14_fixture() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
         apply(&mut conn, &PROFILE[..13]).unwrap();
-        let before: i64 = conn
-            .query_row("PRAGMA page_count", [], |row| row.get(0))
-            .unwrap();
+        let tx = conn.transaction().unwrap();
+        create_extension_profile_provenance(&tx).unwrap();
+        tx.pragma_update(None, "user_version", 14).unwrap();
+        tx.commit().unwrap();
+        conn
+    }
+
+    #[test]
+    fn extension_profile_v14_keeps_install_provenance_and_history_on_upgrade() {
+        let mut conn = extension_profile_v14_fixture();
+        let install_id = [1_u8; 16];
+        let publisher = [2_u8; 32];
+        let checkpoint = [3_u8; 105];
+        let provenance = [4_u8; 64];
+        conn.execute(
+            "INSERT INTO extension_installs(id,revision,authority,package_key,package_revision,payload_kind,manifest_sha256,tree_sha256,desired_enabled)
+             VALUES(?1,1,?2,?3,1,1,?4,?5,1)",
+            rusqlite::params![install_id, [5_u8; 32], [6_u8; 32], [7_u8; 32], [8_u8; 32]],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO extension_install_provenance(install_id,provenance) VALUES(?1,?2)",
+            rusqlite::params![install_id, provenance],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO extension_upstream_history(publisher,checkpoint) VALUES(?1,?2)",
+            rusqlite::params![publisher, checkpoint],
+        )
+        .unwrap();
+
+        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 14);
         apply(&mut conn, PROFILE).unwrap();
-        let after: i64 = conn
-            .query_row("PRAGMA page_count", [], |row| row.get(0))
-            .unwrap();
-        let page_size: i64 = conn
-            .query_row("PRAGMA page_size", [], |row| row.get(0))
-            .unwrap();
-        eprintln!(
-            "profile v14 empty provenance schema: {} bytes ({} pages)",
-            (after - before) * page_size,
-            after - before
+        apply(&mut conn, PROFILE).unwrap();
+        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 22);
+        assert_eq!(
+            conn.query_row(
+                "SELECT provenance FROM extension_install_provenance WHERE install_id=?1",
+                [install_id],
+                |row| row.get::<_, Vec<u8>>(0)
+            )
+            .unwrap(),
+            provenance
         );
-        for table in ["extension_install_provenance", "extension_upstream_history"] {
+        assert_eq!(
+            conn.query_row(
+                "SELECT checkpoint FROM extension_upstream_history WHERE publisher=?1",
+                [publisher],
+                |row| row.get::<_, Vec<u8>>(0)
+            )
+            .unwrap(),
+            checkpoint
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name IN ('user_resources','downloads','download_cleanup')",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn extension_profile_v14_with_an_unexpected_trigger_is_preserved() {
+        let mut conn = extension_profile_v14_fixture();
+        conn.execute_batch(
+            "CREATE TRIGGER unexpected_extension_trigger BEFORE INSERT ON extension_upstream_history
+             BEGIN SELECT RAISE(ABORT,'unexpected'); END;",
+        )
+        .unwrap();
+        assert!(validate_current(&conn, PROFILE).is_err());
+        assert!(apply(&mut conn, PROFILE).is_err());
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            14
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='user_resources'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn main_profile_v21_adds_extension_schema_without_changing_resources() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &PROFILE[..21]).unwrap();
+        conn.execute(
+            "INSERT INTO user_resources(id,kind,revision,title,completed,pinned,trashed,created_at,updated_at,body,search_text)
+             VALUES('00000000000000000000000001','note',3,'Keep this note',NULL,0,0,10,20,'body','keep this note')",
+            [],
+        )
+        .unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 22);
+        assert_eq!(
+            conn.query_row(
+                "SELECT title,body,revision FROM user_resources",
+                [],
+                |row| Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?
+                ))
+            )
+            .unwrap(),
+            ("Keep this note".into(), "body".into(), 3)
+        );
+    }
+
+    fn schema_fingerprint(migrations: &[Migration], version: i64) -> u64 {
+        let manifest = expected_manifest(migrations, version).expect("shipped migrations apply");
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for object in &manifest {
+            for part in [
+                object.kind.as_str(),
+                object.name.as_str(),
+                object.table.as_str(),
+                object.sql.as_deref().unwrap_or("\u{0}"),
+            ] {
+                for byte in part.as_bytes().iter().chain(std::iter::once(&0x1f)) {
+                    hash ^= u64::from(*byte);
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+        }
+        hash
+    }
+
+    #[test]
+    #[ignore]
+    fn print_schema_fingerprints() {
+        for (migrations, family) in [(META, "META"), (PROFILE, "PROFILE")] {
+            println!("const {family}_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[");
+            for migration in migrations {
+                println!(
+                    "        ({}, {:#018x}),",
+                    migration.version,
+                    schema_fingerprint(migrations, migration.version)
+                );
+            }
+            println!("    ];");
+        }
+    }
+
+    #[test]
+    fn standalone_download_qa_v16_is_not_mistaken_for_the_task_schema() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &PROFILE[..15]).unwrap();
+        let transaction = conn.transaction().unwrap();
+        (PROFILE
+            .iter()
+            .find(|migration| migration.version == 20)
+            .unwrap()
+            .up)(&transaction)
+        .unwrap();
+        transaction.pragma_update(None, "user_version", 16).unwrap();
+        transaction.commit().unwrap();
+        // The old standalone QA assigned download tables to version 16.
+        // The release lineage assigned Tasks to that version. Never rewrite
+        // the version or partially migrate a foreign schema into this lineage.
+        assert!(apply(&mut conn, PROFILE).is_err());
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            16
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM pragma_table_info('user_resources') WHERE name='status'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='downloads'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn profile_v20_adds_downloads_without_changing_existing_tasks_or_receipts() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let previous = PROFILE
+            .iter()
+            .position(|migration| migration.version == 20)
+            .unwrap();
+        apply(&mut conn, &PROFILE[..previous]).unwrap();
+        let id = "00000000000000000000000001";
+        let list = "00000000000000000000000002";
+        let body = r#"{"title":"Keep this task","content":{"kind":"task","description":"Original description","details":{"list":"00000000000000000000000002"}}}"#;
+        conn.execute(
+            "INSERT INTO task_lists(id,title,revision) VALUES(?1,'Release',3)",
+            [list],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO user_resources(id,kind,revision,title,completed,pinned,trashed,created_at,updated_at,body,search_text,task_list,task_deadline,task_duration) VALUES(?1,'task',7,'Keep this task',0,0,0,10,20,?2,'keep this task',?3,'2026-10-01',45)", rusqlite::params![id,body,list]).unwrap();
+        conn.execute("INSERT INTO user_resource_receipts(request_id,digest,retained,resource_id,revision) VALUES('request-1',zeroblob(32),1,?1,7)", [id]).unwrap();
+        conn.execute("INSERT INTO task_list_receipts(request_id,digest,list_id,retained) VALUES('list-request-1',zeroblob(32),?1,1)", [list]).unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        let saved: (String, i64, String, i64) = conn
+            .query_row(
+                "SELECT body,revision,task_deadline,task_duration FROM user_resources WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(saved, (body.into(), 7, "2026-10-01".into(), 45));
+        assert_eq!(
+            conn.query_row(
+                "SELECT bytes FROM user_resource_usage WHERE id=1",
+                [],
+                |row| row.get::<_, usize>(0)
+            )
+            .unwrap(),
+            body.len()
+        );
+        for table in ["task_lists", "task_list_receipts", "user_resource_receipts"] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+        for table in ["downloads", "download_preferences"] {
             assert_eq!(
                 conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
                     .get::<_, i64>(0))
@@ -1976,19 +2488,38 @@ mod tests {
                 0
             );
         }
-        for bytes in [0, 104, 106] {
-            assert!(conn
-                .execute(
-                    "INSERT INTO extension_upstream_history(publisher, checkpoint) VALUES (?1, ?2)",
-                    rusqlite::params![vec![3_u8; 32], vec![0_u8; bytes]]
-                )
-                .is_err());
-        }
+        apply(&mut conn, PROFILE).unwrap();
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            14
+            22
         );
+    }
+
+    #[test]
+    fn released_migrations_keep_the_exact_schema_text_they_shipped_with() {
+        for (migrations, expected, family) in [
+            (META, META_SCHEMA_FINGERPRINTS, "meta"),
+            (PROFILE, PROFILE_SCHEMA_FINGERPRINTS, "profile"),
+        ] {
+            let versions: Vec<i64> = migrations.iter().map(|m| m.version).collect();
+            assert_eq!(
+                expected
+                    .iter()
+                    .map(|(version, _)| *version)
+                    .collect::<Vec<_>>(),
+                versions,
+                "{family}: every shipped version needs a recorded fingerprint"
+            );
+            for (version, fingerprint) in expected {
+                assert_eq!(
+                    schema_fingerprint(migrations, *version),
+                    *fingerprint,
+                    "{family} migration {version} no longer produces the schema it shipped with; \
+                     a released migration's SQL text is an artifact, not source to reformat"
+                );
+            }
+        }
     }
 
     fn insert_native_ownership_test_row(
@@ -3111,6 +3642,7 @@ mod tests {
                 .unwrap(),
             14
         );
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(22));
     }
 
     #[test]

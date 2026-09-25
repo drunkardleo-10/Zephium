@@ -217,15 +217,25 @@ impl Shell {
             self.cancel_exact_pending_presentation(id, navigation);
             return;
         };
-        let projection =
-            self.presentation_tab_view(id, tab, self.favicon_key(tab, self.profile_of_item(id)));
+        let projection = self.presentation_tab_view(
+            id,
+            tab,
+            self.icon_ref(
+                zephium_ipc::IconSurface::Chrome,
+                tab,
+                self.profile_of_item(id),
+            ),
+        );
         let projection_revision = projection.projection_revision.clone();
         self.record_tab_projection_revision(id, &projection_revision);
+        self.publish_icons();
         let active = self.windows.focused().and_then(|window| window.active);
         let Some(queue) = self.self_queue.clone() else {
             let synchronous_projection = projection.clone();
             let dispatch = self.chrome.apply_tab_for_presentation(
                 ChromePresentation {
+                    settings_visible: self.active_browser_page()
+                        == Some(crate::BrowserPage::Settings),
                     id,
                     navigation,
                     url: pending.url.clone(),
@@ -273,6 +283,7 @@ impl Shell {
         let synchronous_projection = projection.clone();
         let dispatch = self.chrome.apply_tab_for_presentation(
             ChromePresentation {
+                settings_visible: self.active_browser_page() == Some(crate::BrowserPage::Settings),
                 id,
                 navigation,
                 url: pending.url.clone(),
@@ -432,6 +443,7 @@ impl Shell {
                     .insert(id, (navigation, pending.url.clone()));
                 self.presentation.deferred_first_content_layout.remove(&id);
                 self.cancel_exact_pending_presentation(id, navigation);
+                self.activate_presented_native_tab(id);
             }
             NativeDispatch::Rejected => {
                 self.schedule_exact_presentation_retry(

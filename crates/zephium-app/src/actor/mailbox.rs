@@ -70,7 +70,9 @@ impl CoalescedKey {
             | EngineEvent::PresentationReady { id, .. } => Self::Presentation(*id),
             EngineEvent::NavState { id, .. } => Self::Navigation(*id),
             EngineEvent::ZoomSettled { id, .. } => Self::Zoom(*id),
-            EngineEvent::NativeActionFailed { id, .. } => Self::NativeAction(*id),
+            EngineEvent::NativeActionFailed { id, .. } | EngineEvent::PageOpenBlocked { id } => {
+                Self::NativeAction(*id)
+            }
             EngineEvent::ExtensionActionsInvalidated { profile } => {
                 Self::ExtensionActions(*profile)
             }
@@ -1106,9 +1108,13 @@ fn command_is_critical(command: &Command) -> bool {
             | Command::PagePermissionCatalogLoaded { .. }
             | Command::PagePermissionCatalogMutated { .. }
             | Command::PagePermissionTimeout { .. }
+            | Command::BrowserChromeRestored { .. }
             | Command::ChromePresentationApplied { .. }
             | Command::Engine(
-                EngineEvent::UrlChanged { .. }
+                EngineEvent::NativeTabCloseRequested { .. }
+                    | EngineEvent::NativeTabOpened { .. }
+                    | EngineEvent::LinkedDownloadStarted { .. }
+                    | EngineEvent::UrlChanged { .. }
                     | EngineEvent::PresentationPending { .. }
                     | EngineEvent::PresentationReady { .. }
                     | EngineEvent::RuntimeRestartRequired
@@ -1146,10 +1152,10 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
         Command::Engine(event) => CoalescedKey::of(event),
         Command::SetWindowSize(_) => Some(CoalescedKey::WindowSize),
         Command::SetWindowVisible(_) => Some(CoalescedKey::WindowVisible),
-        Command::SetSidebarWidth(_) => Some(CoalescedKey::SidebarWidth),
+        Command::SetSidebarWidth(..) => Some(CoalescedKey::SidebarWidth),
         Command::DragOver { .. } => Some(CoalescedKey::DragOver),
         Command::DividerDrag { .. } => Some(CoalescedKey::DividerDrag),
-        Command::Search(_) => Some(CoalescedKey::Search),
+        Command::Search(_) | Command::SearchScoped { .. } => Some(CoalescedKey::Search),
         Command::ExtensionDistributionStatusChanged(_) => {
             Some(CoalescedKey::ExtensionDistributionStatus)
         }

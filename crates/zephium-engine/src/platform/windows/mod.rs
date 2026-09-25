@@ -291,10 +291,10 @@ pub fn configure(
                 windows::Win32::Foundation::E_ACCESSDENIED,
             ));
         }
-        // WebView2's built-in Save/Save image context-menu paths do not all
-        // raise DownloadStarting. Until Zephium owns a complete destination
-        // and quarantine broker, disabling the default menu is part of the
-        // mandatory download-deny boundary rather than a UI preference.
+        // Generic and agent views retain download/menu denial. The human-view
+        // constructor may enable a bounded native menu only after installing
+        // its download broker and a separate SaveAsUIShowing denial hook;
+        // document SaveAs is not part of the DownloadStarting protocol.
         settings.SetAreDefaultContextMenusEnabled(false)?;
         // Native modal dialogs are likewise disabled until browser chrome has
         // an origin-labelled, rate-limited dialog broker.

@@ -1,0 +1,105 @@
+@import "./axes/bootstrap.css";
+@import "tailwindcss" source(none);
+@import "./tokens/primitive.css";
+@import "./tokens.css";
+@import "./axes/tint.css";
+@import "./axes/density.css";
+@import "./axes/contrast.css";
+@import "./axes/material.css";
+@import "./axes/motion.css";
+@import "./controls.css";
+@import "./favicon.css";
+@source "../features/panel";
+@source "../app/panel/PanelApp.svelte";
+@source "../features/search";
+@source "../shared/ui/Icon/Icon.svelte";
+@source "../shared/ui/IconButton/IconButton.svelte";
+@source "../shared/ui/FavIcon/FavIcon.svelte";
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+html {
+  color-scheme: dark;
+}
+html[data-theme="light"] {
+  color-scheme: light;
+}
+body {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--color-text);
+  background: var(--color-canvas);
+  font-synthesis: none;
+  font-kerning: normal;
+  font-optical-sizing: auto;
+  text-rendering: optimizelegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+button,
+input,
+textarea {
+  font: inherit;
+}
+button {
+  cursor: default;
+}
+button:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+}
+
+/* The launcher floats over arbitrary desktop content rather than over a page
+   of ours, so it carries its own wash: bare material leaves it unreadable
+   against a bright wallpaper and tinted by whatever happens to be behind. */
+.panel-root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+
+  /* The native window's own corner, handed down by the host; the role token
+     only covers the frame before that value arrives. */
+  border-radius: var(--panel-radius, var(--radius-panel));
+  box-sizing: border-box;
+  border: 1px solid var(--color-border-strong);
+  background: color-mix(in srgb, var(--color-chrome) var(--wash-launcher), transparent);
+}
+.panel-root[data-visible="true"] > .launcher-view {
+  animation: panel-enter var(--motion-base) var(--ease-emphasized);
+}
+@keyframes panel-enter {
+  from {
+    opacity: 0.5;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.tool-load-state {
+  display: grid;
+  place-content: center;
+  gap: 12px;
+  height: 100%;
+  color: var(--color-label-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+@media (forced-colors: active) {
+  body,
+  .panel-root {
+    background: Canvas;
+    color: CanvasText;
+  }
+  .panel-root {
+    border: 1px solid CanvasText;
+  }
+  .panel-result-selected {
+    outline: 1px solid Highlight;
+  }
+}

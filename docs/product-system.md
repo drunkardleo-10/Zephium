@@ -297,10 +297,11 @@ an AI answer is not a task unless it has a durable task identity.
 
 ### 5.2 Notes and documents
 
-Notes are lightweight user artifacts and context. Rich editing uses Tiptap
-directly with a deliberately limited schema and versioned ProseMirror JSON.
-Only the active document mounts an editor; read-only and spatial projections
-use lightweight renderers. Collaboration packages and heavy extensions are
+Notes are lightweight user artifacts and context, kept as Markdown files the
+person owns rather than records in a Zephium database. Rich editing uses Tiptap
+directly over a Markdown bridge that writes unchanged text back exactly as it
+was. Only the active document mounts an editor; read-only and spatial
+projections use lightweight renderers. Collaboration packages and heavy extensions are
 not loaded until a real product requirement exists. Notes are a well-built
 unit in the system, not a second product or a reason to build an editor engine.
 

@@ -1,0 +1,1394 @@
+/* Product compositions. Shared controls live in shared/ui; native
+   material belongs to the host, never to a CSS backdrop filter. */
+[hidden] {
+  display: none !important;
+}
+.internal-stage {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding-inline-start: 8px;
+}
+/* The new tab sits above the sidebar, as a native page does: whatever the
+   column lets go of while it changes shape passes beneath it. The sidebar's
+   own floating panels still rise above it. Browser pages are left alone: a
+   layer here would trap their full-window dialogs beneath those panels. */
+[data-zephium-new-tab] {
+  position: relative;
+  z-index: 1;
+}
+.stage-page {
+  height: 100%;
+  transform-origin: 50% 40%;
+  animation: stage-in var(--motion-page) var(--ease-emphasized) both;
+}
+@keyframes stage-in {
+  from {
+    opacity: 0;
+    scale: 0.985;
+  }
+}
+.settings-shell,
+.library-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: var(--content-radius);
+  background: var(--color-page);
+}
+.internal-toolbar {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 8px;
+  height: 44px;
+  padding-inline: 10px;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.toolbar-current {
+  color: var(--color-text);
+}
+.settings-navigation-list {
+  overflow-y: auto;
+  min-height: 0;
+}
+.settings-nav-group {
+  margin-block: 10px 16px;
+}
+.settings-nav-group h2 {
+  font-size: 10px;
+  font-weight: 550;
+  letter-spacing: 0.035em;
+  color: var(--color-faint);
+  padding-inline: 11px;
+  margin-block: 0 7px;
+}
+.settings-nav-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  margin-block: 2px;
+  border: 0;
+  border-radius: var(--radius-row);
+  text-align: start;
+  background: transparent;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: default;
+}
+/* Positioned so its label stays drawn above a plate travelling beneath it. */
+.settings-nav-item {
+  position: relative;
+}
+.settings-nav-item > svg {
+  flex: none;
+}
+.settings-nav-item,
+.settings-back {
+  transition:
+    background-color var(--motion-instant) var(--ease-smooth),
+    color var(--motion-instant) var(--ease-smooth),
+    scale var(--motion-fast) var(--ease-smooth);
+}
+.settings-nav-item,
+.settings-back,
+.settings-nav-group h2,
+.ui-settings-section > h2 {
+  /* stylelint-disable-next-line property-no-vendor-prefix */
+  -webkit-user-select: none;
+  user-select: none;
+}
+.settings-nav-item:active,
+.settings-back:active {
+  scale: 0.97;
+  transition-duration: var(--motion-fast);
+}
+/* A section change lands like a native settings pane: the new content rises
+   into place while it fades in, on the same curve as the menus. */
+.settings-view {
+  animation: settings-view-in var(--motion-page) var(--ease-emphasized) both;
+}
+@keyframes settings-view-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+.browse-tab {
+  transition: scale var(--motion-fast) var(--ease-smooth);
+}
+.browse-tab:active {
+  scale: 0.985;
+  transition-duration: var(--motion-fast);
+}
+/* The same row vocabulary the sidebar uses. A ring around the current item
+   makes a selection read as a button that happens to be stuck down; every
+   selected row in the product is a plate of light and nothing else, so the
+   two columns of this window finally agree with each other. */
+.settings-nav-item:hover {
+  background: var(--row-hover);
+  color: var(--color-text);
+}
+.settings-nav-item[aria-current="page"] {
+  background: var(--row-active);
+  box-shadow: var(--row-rim);
+  color: var(--color-text);
+}
+/* The shell owns the page ground for both of its columns, so the content
+   column adds nothing but its own edge. */
+.settings-content {
+  min-width: 0;
+  flex: 1;
+  overflow-y: auto;
+  border-radius: var(--radius-control) 0 0 0;
+  background: transparent;
+  box-shadow: -1px 0 0 var(--color-border);
+  container-type: inline-size;
+}
+
+/* Pages read at the roomier scale; every primitive inside follows. */
+.settings-page {
+  --text-body: var(--text-page-body);
+  --text-label: 12px;
+
+  max-width: 850px;
+  margin-inline: auto;
+  padding: 52px clamp(22px, 5cqi, 60px) 64px;
+}
+.settings-page-heading {
+  margin-block-end: 34px;
+}
+.settings-page-heading h1 {
+  margin: 0;
+  font-size: 27px;
+  line-height: 1.25;
+  letter-spacing: -0.035em;
+  font-weight: 550;
+  outline: none;
+}
+.settings-page-heading > p {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.settings-page .ui-settings-copy p {
+  max-width: 440px;
+}
+.settings-value {
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.settings-feedback {
+  padding: 12px 16px;
+  margin-block-end: 20px;
+  border-radius: var(--radius-control);
+  background: var(--color-fill);
+  color: var(--color-danger);
+  font-size: 12px;
+}
+.appearance-previews {
+  display: flex;
+  gap: 12px;
+  padding: 20px 20px 6px;
+}
+.appearance-preview {
+  flex: 1;
+  min-width: 0;
+  padding: 3px;
+  border-radius: var(--radius-control);
+  border: 1px solid transparent;
+}
+.appearance-preview[data-selected="true"] {
+  border-color: var(--color-accent);
+}
+.mini-window {
+  height: 90px;
+  display: flex;
+  padding: 6px;
+  gap: 6px;
+  background: #e2e3e8;
+  border-radius: var(--radius-row);
+  overflow: hidden;
+}
+.mini-sidebar {
+  display: flex;
+  flex: 0 0 26%;
+  flex-direction: column;
+  gap: 5px;
+  padding-block: 3px;
+}
+.mini-sidebar span {
+  display: block;
+  width: 20px;
+  height: 4px;
+  background: #a5a6ae;
+  border-radius: 3px;
+  margin-bottom: 8px;
+}
+.mini-sidebar i {
+  height: 5px;
+  border-radius: 3px;
+  background: #c1c2ca;
+}
+.mini-sidebar i:nth-child(2) {
+  background: #f4f4f6;
+  height: 9px;
+}
+.mini-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 4px;
+  background: #f7f7f9;
+}
+.mini-page span {
+  width: 34%;
+  height: 6px;
+  border-radius: 3px;
+  background: #b9bac4;
+  margin-bottom: 3px;
+}
+.mini-page i {
+  width: 60%;
+  height: 4px;
+  border-radius: 3px;
+  background: #dedee5;
+}
+.appearance-preview[data-preview-theme="dark"] .mini-window {
+  background: #303137;
+}
+.appearance-preview[data-preview-theme="dark"] .mini-page,
+.appearance-preview[data-preview-theme="system"] .mini-page {
+  background: #1c1d22;
+}
+.appearance-preview[data-preview-theme="dark"] .mini-sidebar i {
+  background: #494a52;
+}
+.appearance-preview[data-preview-theme="dark"] .mini-page i,
+.appearance-preview[data-preview-theme="system"] .mini-page i {
+  background: #383941;
+}
+.accent-choices {
+  display: flex;
+  gap: 9px;
+}
+.accent-swatch {
+  display: grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  border: 0;
+  border-radius: 50%;
+  color: #fff;
+  background: var(--swatch);
+  outline: 2px solid transparent;
+  outline-offset: 3px;
+  cursor: default;
+}
+.accent-swatch[aria-pressed="true"] {
+  outline-color: var(--swatch);
+}
+.settings-results {
+  display: grid;
+  gap: 8px;
+}
+.settings-results > button {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: start;
+  border: 0;
+  background: var(--color-surface);
+  color: var(--color-muted);
+  border-radius: var(--radius-control);
+  padding: 18px;
+  cursor: default;
+}
+.settings-results > button:hover {
+  background: var(--color-raised);
+}
+.settings-results > button > span {
+  flex: 1;
+}
+.settings-results strong {
+  display: block;
+  color: var(--color-text);
+  font-weight: 500;
+  font-size: 13px;
+}
+.settings-results small {
+  display: block;
+  margin-block-start: 5px;
+  font-size: 12px;
+}
+.identity-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 0 30px;
+}
+.identity-avatar {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--color-fill);
+  color: var(--color-muted);
+}
+.identity-card h2,
+.settings-intro h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+.identity-card p {
+  margin: 4px 0 0;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+.settings-intro {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+  padding-block: 8px 32px;
+  color: var(--color-muted);
+}
+.settings-intro h2 {
+  color: var(--color-text);
+}
+.settings-intro p {
+  max-width: 450px;
+  font-size: 13px;
+  line-height: 1.7;
+  margin: 0;
+}
+.settings-about {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 34px 0 44px;
+  gap: 22px;
+}
+.settings-about p {
+  max-width: 310px;
+  text-align: center;
+  color: var(--color-muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.zephium-wordmark {
+  display: block;
+  width: 260px;
+  height: 38px;
+  flex: none;
+  background: var(--color-text);
+  opacity: 0.9;
+  mask: url(/zephium-wordmark.svg) center / contain no-repeat;
+  -webkit-mask: url(/zephium-wordmark.svg) center / contain no-repeat;
+}
+.newtab-page {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 24px 32px 60px;
+}
+.newtab-search {
+  width: 100%;
+  max-width: 520px;
+  margin-top: 28px;
+}
+.newtab-customize {
+  position: absolute;
+  inset-inline-end: 16px;
+  bottom: 16px;
+  color: var(--color-faint);
+}
+.newtab-preview {
+  min-height: 210px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  margin-block-end: 28px;
+}
+.newtab-preview .zephium-wordmark {
+  width: 150px;
+  height: 50px;
+}
+.preview-search {
+  padding: 10px 20px;
+  width: 65%;
+  border-radius: var(--radius-card);
+  background: var(--color-fill);
+  font-size: 10px;
+  color: var(--color-faint);
+  box-shadow: var(--shadow-field);
+}
+.preview-favorites {
+  display: flex;
+  gap: 6px;
+}
+.preview-favorites i {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-row);
+  background: var(--color-fill);
+}
+.essentials-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 37px;
+  padding: 8px;
+  margin: 4px 0 8px;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-control);
+  color: var(--color-faint);
+  font-size: 11px;
+}
+.essentials-hint[data-dropping="true"] {
+  background: var(--color-fill);
+  border-color: var(--color-accent);
+}
+.library-content {
+  width: 100%;
+  max-width: 920px;
+  margin-inline: auto;
+  padding: 40px clamp(24px, 6vw, 72px);
+}
+.library-empty {
+  min-height: 350px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.library-icon {
+  display: grid;
+  place-items: center;
+  height: 64px;
+  width: 64px;
+  border-radius: var(--radius-card);
+  background: var(--color-fill);
+  color: var(--color-muted);
+  margin-block-end: 20px;
+}
+.library-empty h2 {
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+}
+.library-empty p {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--color-muted);
+  max-width: 340px;
+}
+@container (max-width: 450px) {
+  .settings-page .ui-settings-row {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .settings-page .ui-settings-control {
+    max-width: 100%;
+  }
+  .appearance-previews {
+    gap: 6px;
+    padding-inline: 12px;
+  }
+  .mini-window {
+    height: 70px;
+  }
+}
+@media (max-width: 1000px) {
+  .settings-nav-item {
+    font-size: 11px;
+    gap: 7px;
+  }
+}
+@media (max-width: 820px) {
+  .settings-page {
+    padding: 24px 20px 40px;
+  }
+  .settings-content {
+    border-radius: 0;
+  }
+  .newtab-page {
+    padding-inline: 22px;
+  }
+  .zephium-wordmark {
+    max-width: 65%;
+  }
+}
+@media (forced-colors: active) {
+  .settings-nav-item[aria-current="page"] {
+    outline: 1px solid Highlight;
+  }
+  .accent-swatch {
+    border: 1px solid ButtonText;
+  }
+  .settings-page .ui-settings-group {
+    border: 1px solid CanvasText;
+  }
+  .zephium-wordmark {
+    background: CanvasText;
+  }
+}
+.navigation-error {
+  position: fixed;
+  z-index: 60;
+  inset-inline: 16px;
+  bottom: 60px;
+  padding: 12px;
+  border-radius: var(--radius-control);
+  background: var(--color-raised);
+  color: var(--color-danger);
+  font-size: 12px;
+  box-shadow: var(--shadow-popover);
+}
+
+/* The sidebar owns navigation; Settings gets one uninterrupted reading pane. */
+.browser-sidebar {
+  padding-block-start: 0;
+}
+.sidebar-columns {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 8px;
+}
+.sidebar-browser-column {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.sidebar-tool-rail {
+  flex: 0 0 56px;
+}
+.settings-sidebar-navigation {
+  position: relative;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 8px 0;
+}
+.settings-back {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  padding: 8px;
+  margin-bottom: 10px;
+  border: 0;
+  border-radius: var(--radius-row);
+  color: var(--color-muted);
+  background: transparent;
+  font-size: 12px;
+  text-align: start;
+  cursor: default;
+}
+.settings-back:hover {
+  background: var(--color-fill);
+  color: var(--color-text);
+}
+.settings-sidebar-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding-inline: 10px;
+  background: var(--color-fill);
+  border-radius: var(--radius-row);
+  box-shadow: var(--shadow-field);
+  margin-bottom: 12px;
+  color: var(--color-faint);
+}
+.settings-sidebar-search input {
+  min-width: 0;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--color-text);
+  font-size: 12px;
+}
+.settings-sidebar-search:focus-within {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+}
+.settings-sidebar-navigation .settings-nav-item {
+  font-size: 13px;
+  padding-block: 8px;
+}
+.settings-shell > .settings-content {
+  border-radius: inherit;
+  box-shadow: none;
+}
+.settings-eyebrow {
+  display: block;
+  font-size: 11px;
+  color: var(--color-faint);
+  margin-bottom: 10px;
+}
+.settings-page .ui-settings-group > [data-setting] + [data-setting],
+.settings-page .ui-settings-group > [data-setting] + .ui-settings-row,
+.settings-page .ui-settings-group > .ui-settings-row + [data-setting] {
+  border-top: 1px solid var(--color-border);
+}
+[data-setting] {
+  border-radius: var(--radius-control);
+  scroll-margin-block: 32px;
+}
+[data-setting][data-highlighted="true"] {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
+}
+.preview-notice {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  border-inline-start: 2px solid var(--color-border-strong);
+  padding-inline-start: 12px;
+  margin-bottom: 28px;
+}
+.preview-notice > span {
+  flex: none;
+  font-size: 10px;
+  font-weight: 550;
+  color: var(--color-muted);
+}
+.preview-notice p {
+  margin: 0;
+  color: var(--color-faint);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.settings-collection {
+  margin-block: 0 28px;
+}
+.settings-collection > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 2px 12px;
+}
+.settings-collection h2 {
+  font-size: 13px;
+  margin: 0;
+  font-weight: 500;
+}
+.settings-collection header p {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-muted);
+  margin: 5px 0 0;
+}
+.collection-empty {
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-control);
+  padding: 24px 16px;
+  font-size: 12px;
+  text-align: center;
+  color: var(--color-faint);
+}
+.settings-collection ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  background: var(--color-surface);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+}
+.settings-collection li {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 14px;
+}
+.settings-collection li + li {
+  border-top: 1px solid var(--color-border);
+}
+.collection-entry {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  text-align: start;
+  background: none;
+  border: 0;
+  color: var(--color-text);
+  cursor: default;
+}
+.collection-entry strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+.collection-entry span {
+  color: var(--color-muted);
+  font-size: 11px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-help {
+  display: block;
+  margin: 0;
+  font-size: var(--text-label);
+  line-height: 1.6;
+  color: var(--color-muted);
+}
+.settings-help[data-error="true"] {
+  color: var(--color-danger);
+}
+.settings-inline-form {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  background: var(--color-surface);
+  border-radius: var(--radius-control);
+  margin-bottom: 26px;
+}
+.settings-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgb(0 0 0 / 0.3);
+  animation: interface-fade var(--motion-base) var(--ease-out);
+}
+.settings-dialog {
+  position: fixed;
+  z-index: 81;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(480px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  border-radius: var(--radius-card);
+  padding: 26px;
+  color: var(--color-text);
+  background: var(--color-raised);
+  box-shadow: var(--shadow-overlay);
+  border: 1px solid var(--color-border-strong);
+  outline: none;
+  animation: interface-fade var(--motion-base) var(--ease-out);
+}
+.settings-dialog-title {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.3;
+  letter-spacing: -0.02em;
+  font-weight: 550;
+}
+.settings-dialog-description {
+  font-size: 12px;
+  color: var(--color-muted);
+  line-height: 1.6;
+  margin: 10px 0 22px;
+}
+.settings-dialog-body {
+  display: grid;
+  gap: 18px;
+}
+.settings-dialog-body > p {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--color-muted);
+}
+.settings-dialog footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 28px;
+}
+.profile-editor-hero {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin-bottom: 30px;
+}
+.profile-editor-hero h2 {
+  font-size: 21px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+.profile-editor-hero p {
+  font-size: 12px;
+  color: var(--color-muted);
+  margin: 5px 0 0;
+}
+.profile-photo-preview {
+  width: 86px;
+  height: 86px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--color-fill);
+  border: 1px solid var(--color-border);
+  color: var(--color-muted);
+  font-size: 32px;
+}
+.profile-photo-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.profile-icon-choices {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 26px;
+}
+.profile-icon-choices button {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  background: var(--color-fill);
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  color: var(--color-muted);
+}
+.profile-icon-choices button[aria-pressed="true"] {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+.profile-range {
+  display: grid;
+  gap: 10px;
+}
+.diagnostic-preview {
+  background: var(--color-fill);
+  border-radius: var(--radius-control);
+  padding: 16px;
+  color: var(--color-muted);
+}
+.newtab-greeting {
+  font-size: 15px;
+  font-weight: 400;
+  color: var(--color-muted);
+  margin: 20px 0 0;
+  letter-spacing: -0.01em;
+}
+.newtab-clock {
+  position: absolute;
+  top: 26px;
+  inset-inline-end: 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  color: var(--color-faint);
+  font-size: 11px;
+}
+.newtab-clock time {
+  color: var(--color-muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+@keyframes interface-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (max-width: 820px) {
+  .settings-page {
+    padding: 34px 24px 44px;
+  }
+  .preview-notice {
+    flex-direction: column;
+    gap: 4px;
+  }
+}
+@media (forced-colors: active) {
+  .settings-dialog {
+    border: 1px solid CanvasText;
+  }
+  .settings-sidebar-search {
+    border: 1px solid ButtonText;
+  }
+}
+/* A change of shape: the column's width travels on the page's curve, while
+   what it holds keeps its final width, so the morph's measured positions
+   stay true and only the space beside the column moves. */
+.browser-sidebar[data-reshaping="true"] {
+  transition: width var(--motion-page) var(--ease-emphasized);
+}
+/* Width only: the column still fills the sidebar's height, or the dock at
+   its foot rides up under the tabs for the length of the change. */
+.browser-sidebar[data-reshaping="true"] > .sidebar-columns {
+  width: var(--sidebar-width);
+}
+/* The header is one shape or the other, never both; the new one fades in. */
+.browser-sidebar[data-header-fresh="true"] > header {
+  animation: interface-fade var(--motion-slow) var(--ease-out) both;
+}
+
+/* The launch cascade: the column's contents settle in from the top, one
+   beat apart, so the window arrives as a list being laid out rather than as
+   a picture of one. Past the first screenful every row shares the last
+   beat — nobody watches row forty arrive. */
+.sidebar-columns:is([data-launch="armed"], [data-launch="running"]) [data-cascade] {
+  animation: cascade-in var(--motion-page) var(--ease-emphasized) both;
+  animation-delay: calc(min(var(--cascade), 14) * 20ms);
+}
+/* Armed: every row waits at the start of its entrance until the window is
+   on screen, so none is ever seen before it arrives. */
+.sidebar-columns[data-launch="armed"] [data-cascade] {
+  animation-play-state: paused;
+}
+@keyframes cascade-in {
+  from {
+    opacity: 0;
+    translate: 0 8px;
+  }
+}
+.folder-row {
+  width: 100%;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-row);
+  color: var(--color-muted);
+  font: inherit;
+  font-size: 12px;
+  padding-inline-end: 8px;
+  text-align: start;
+  cursor: default;
+}
+.folder-row:hover {
+  background: var(--color-fill);
+  color: var(--color-text);
+}
+.folder-row > span:first-of-type {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.folder-chevron {
+  display: flex;
+  transition: transform var(--motion-base) var(--ease-out);
+}
+.folder-chevron[data-expanded="true"] {
+  transform: rotate(90deg);
+}
+/* The environment switch, heading the column above the field it governs.
+   Flush left like every other band in the column. */
+.sidebar-head {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--sidebar-inset) 6px;
+}
+
+/* The current tab's plate in flight between two rows (selection-glide.ts).
+   It sits under everything the rows draw; the rows it leaves and reaches
+   stop painting their own plate while it travels. */
+.selection-glide {
+  position: absolute;
+  z-index: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+.selection-glide-fill {
+  position: absolute;
+  inset: 0;
+}
+[data-plate][data-gliding] {
+  background-color: transparent !important;
+  box-shadow: none !important;
+}
+
+/* A row being dragged to a new place in its list: lifted off the column,
+   the one thing in it that casts a shadow, until it is set down. */
+.browse-tab[data-lifted][data-lifted] {
+  z-index: 2;
+  scale: 1.02;
+  background: var(--row-active);
+  box-shadow: var(--shadow-float);
+}
+
+/* The dock's site row. */
+.dock-sites {
+  border-radius: var(--radius-card);
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+/* With nothing kept, the row still holds a tile's worth of space on the
+   tiles' own ground: an empty slot, not a dashed outline of one. A line of
+   grey text alone would read as a bug; a wireframe reads as unfinished. */
+.dock-sites[data-empty="true"] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--dock-tile);
+  background: var(--color-card);
+}
+.dock-sites[data-over="true"] {
+  background: var(--color-fill-hover);
+  box-shadow: inset 0 0 0 1px var(--color-border-strong);
+}
+.dock-sites-hint {
+  padding-inline: 10px;
+  color: var(--color-faint);
+  font-size: 11.5px;
+  line-height: 1.3;
+  text-align: center;
+}
+.sidebar-move-error {
+  margin: 5px 8px;
+  color: var(--color-danger);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* Settings compositions: deliberate hierarchy, quiet controls, readable detail. */
+.settings-callout {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 22px;
+  margin-bottom: 26px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
+}
+.settings-callout-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-card);
+  background: var(--color-fill);
+  color: var(--color-text);
+}
+.settings-callout > div {
+  flex: 1;
+  min-width: 0;
+}
+.settings-callout h2 {
+  font-size: 15px;
+  font-weight: 550;
+  letter-spacing: -0.02em;
+  line-height: 1.45;
+  margin: 0;
+}
+.settings-callout p {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-muted);
+  margin: 5px 0 0;
+}
+.settings-action-control {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.settings-action-control .settings-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+  white-space: nowrap;
+}
+.settings-inline-note {
+  margin: 10px 4px 24px;
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--color-muted);
+}
+.language-order {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  background: var(--color-surface);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+}
+.language-order li {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+}
+.language-order li + li {
+  border-top: 1px solid var(--color-border);
+}
+.language-index {
+  width: 18px;
+  flex: none;
+  color: var(--color-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.language-label {
+  flex: 1;
+  min-width: 0;
+}
+.language-label strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 450;
+}
+.language-label > span {
+  display: block;
+  font-size: 11px;
+  color: var(--color-muted);
+  margin-top: 4px;
+}
+.language-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.language-picker {
+  overflow-y: auto;
+  max-height: min(320px, 38vh);
+  overscroll-behavior: contain;
+}
+.language-picker-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 2px;
+}
+.language-picker-row small {
+  color: var(--color-faint);
+  font-size: 10px;
+}
+.language-picker > p {
+  font-size: 12px;
+  color: var(--color-muted);
+  padding: 20px;
+  text-align: center;
+}
+.version-pill {
+  color: var(--color-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.update-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 18px 8px;
+}
+.update-state > span {
+  display: grid;
+  place-items: center;
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  background: var(--color-fill);
+  color: var(--color-text);
+  margin-bottom: 16px;
+}
+.update-state h3 {
+  margin: 0;
+  font-size: 17px;
+  letter-spacing: -0.02em;
+  font-weight: 500;
+}
+.update-state p {
+  font-size: 12px;
+  color: var(--color-muted);
+  line-height: 1.6;
+}
+.update-state small {
+  font-size: 11px;
+  color: var(--color-faint);
+  line-height: 1.6;
+}
+.settings-guide-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.settings-guide-grid > button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  text-align: start;
+  padding: 22px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: default;
+}
+.settings-guide-grid > button:hover {
+  background: var(--color-raised);
+}
+.guide-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-control);
+  background: var(--color-fill);
+  color: var(--color-muted);
+}
+.settings-guide-grid strong {
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+}
+.settings-guide-grid p {
+  font-size: 12px;
+  color: var(--color-muted);
+  line-height: 1.6;
+  margin: 0;
+}
+.guide-action {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--color-muted);
+  padding-top: 8px;
+  margin-top: auto;
+}
+.settings-guide-body {
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--color-muted);
+  margin: 18px 0 26px;
+}
+.settings-result-section {
+  display: block;
+  font-size: 10px;
+  color: var(--color-faint);
+  margin-bottom: 6px;
+}
+@container (max-width:520px) {
+  .settings-callout {
+    flex-wrap: wrap;
+    padding: 18px;
+    gap: 12px;
+  }
+  .settings-callout > .ui-button {
+    margin-inline-start: 60px;
+  }
+  .language-order li {
+    padding: 12px;
+    gap: 10px;
+  }
+  .settings-guide-grid {
+    grid-template-columns: 1fr;
+  }
+}
+:root[data-density="compact"] .browser-sidebar {
+  --row-sidebar: 32px;
+}
+:root[data-contrast="true"] :is(.browser-sidebar, .settings-shell) {
+  --color-muted: var(--color-text);
+  --color-faint: var(--color-text);
+}
+:root[data-contrast="true"] .settings-page .ui-settings-group {
+  outline: 1px solid var(--color-border-strong);
+}
+:root[data-text="large"]
+  :is(.settings-nav-item, .ui-input, .ui-button, .settings-page .ui-settings-copy h3) {
+  font-size: 14px;
+}
+:root[data-text="small"]
+  :is(.settings-nav-item, .ui-input, .ui-button, .settings-page .ui-settings-copy h3) {
+  font-size: 12px;
+}
+:root[data-text="large"] .browser-sidebar {
+  --sidebar-row-text: 14px;
+}
+:root[data-text="small"] .browser-sidebar {
+  --sidebar-row-text: 12px;
+}
+/* Sidebar labels sit a step below full white so they belong to the material;
+   only the current item is fully lit. */
+.settings-sidebar-navigation .settings-nav-item,
+.settings-sidebar-navigation .settings-back,
+.browser-sidebar .folder-row {
+  color: var(--color-label-secondary);
+}
+.settings-sidebar-navigation .settings-nav-item:hover,
+.settings-sidebar-navigation .settings-nav-item[aria-current="page"],
+.settings-sidebar-navigation .settings-back:hover {
+  color: var(--color-text);
+}
+.settings-sidebar-navigation .settings-nav-group h2 {
+  font-size: 11px;
+  letter-spacing: 0.015em;
+  color: var(--color-muted);
+}
+.settings-page-heading > p,
+.settings-page .ui-settings-copy p,
+.settings-page .ui-settings-section > h2,
+.settings-page .settings-eyebrow,
+.settings-page .settings-value {
+  color: var(--color-label-secondary);
+}
+.browser-sidebar input::placeholder {
+  color: var(--color-label-secondary);
+  opacity: 1;
+}
+.sidebar-tool-host {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: var(--radius-control);
+  background: var(--color-fill);
+  animation: tool-host-in var(--motion-page) var(--ease-emphasized) both;
+}
+/* A tool grows out of the rail it was opened from. */
+@keyframes tool-host-in {
+  from {
+    opacity: 0;
+    translate: -8px 0;
+  }
+}

@@ -1,5 +1,5 @@
-import type { RuntimeStatus } from "../../shared/ipc/bindings";
-import { events } from "../../shared/ipc/native-events";
+import type { RuntimeStatus } from "$shared/ipc/bindings";
+import { events } from "$shared/ipc/native-events";
 
 let state = $state.raw<RuntimeStatus>({
   restart_required: false,

@@ -1,0 +1,25 @@
+import type { SettingsSection } from "./settings-model";
+let revision = $state(0);
+export const selectionRevision = () => revision;
+let current = $state<SettingsSection>("general");
+let search = $state("");
+let target = $state<string | null>(null);
+export const section = () => current;
+export const query = () => search;
+export const highlighted = () => target;
+export function setQuery(value: string) {
+  search = value;
+  target = null;
+}
+export function select(value: SettingsSection, field: string | null = null) {
+  revision++;
+  current = value;
+  search = "";
+  target = field;
+}
+
+export function handleNativeSection(id: string) {
+  const section = id.slice("settings.section.".length);
+  if (id.startsWith("settings.section.") && ["profiles", "account", "newtab"].includes(section))
+    select(section as SettingsSection);
+}

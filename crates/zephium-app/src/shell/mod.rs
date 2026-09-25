@@ -13,6 +13,7 @@ mod extension_management;
 mod extension_repository_maintenance;
 mod extension_runtime_grants;
 mod favicons;
+mod history;
 mod operations;
 mod page_permissions;
 mod persistence;
@@ -101,7 +102,7 @@ use zephium_core::ports::chrome::ChromeFrame;
 use zephium_core::ports::engine::Engine;
 use zephium_core::ports::engine::{
     ContentScope, DiscardProbeId, EngineEvent, NativeAction, NativeDispatch,
-    NavigationPresentationId, Partition, ProfileDataErasureOutcome, ZoomRequestId,
+    NavigationPresentationId, Partition, ProfileDataErasureOutcome, StageMotion, ZoomRequestId,
 };
 use zephium_core::ports::extensions::{
     ExtensionDistributionState, ExtensionDistributionStatus, ExtensionManagementCompatibility,
@@ -181,6 +182,13 @@ impl AgentLifecycleOwner {
     }
 }
 
+mod browser_pages;
+
+struct NativeOpener {
+    source: ItemId,
+    activate_when_presentable: bool,
+}
+
 pub struct Shell {
     #[cfg(feature = "work-execution")]
     work: Option<Box<crate::work::ApplicationWork>>,
@@ -191,6 +199,7 @@ pub struct Shell {
     windows: Windows,
     pending_size: Size,
     favicons: FaviconState,
+    history: history::HistoryState,
     search: SearchState,
     presentation: PresentationState,
     zoom: ZoomState,
@@ -198,10 +207,15 @@ pub struct Shell {
     residency: ResidencyState,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     window_visible: bool,
+    browser_page: Option<(WindowId, crate::BrowserPage)>,
+    browser_return_revision: u64,
+    browser_after_return: Option<Box<Command>>,
+    browser_return: Option<browser_pages::PendingBrowserReturn>,
     runtime_restart_required: bool,
     user_content_status: user_content_status::UserContentStatus,
     crash: CrashState,
     bootstrapped: bool,
+    native_openers: std::collections::HashMap<ItemId, NativeOpener>,
     persistence: PersistenceState,
     shutdown_result: Option<ShutdownOutcome>,
     self_queue: Option<CommandQueue>,
@@ -236,6 +250,7 @@ pub struct Shell {
     engine: SharedEngine,
     store: SharedStore,
     store_reads: Option<StoreReadQueue>,
+    notes: Option<zephium_core::ports::notes::SharedNotes>,
     chrome: SharedChrome,
     emit: EmitFn,
     #[cfg(test)]
@@ -445,17 +460,31 @@ impl Shell {
             windows: Windows::default(),
             pending_size: Size::default(),
             favicons: FaviconState::default(),
-            search: SearchState::default(),
+            history: history::HistoryState::default(),
+            search: SearchState {
+                custom_url: store.app_setting("search.custom-url").unwrap_or_default(),
+                engine: store
+                    .app_setting("search.engine")
+                    .as_deref()
+                    .and_then(zephium_core::search::SearchEngine::from_id)
+                    .unwrap_or_default(),
+                ..SearchState::default()
+            },
             presentation: PresentationState::default(),
             zoom: ZoomState::default(),
             divider: None,
             residency: ResidencyState::default(),
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
+            browser_page: None,
+            browser_return_revision: 0,
+            browser_after_return: None,
+            browser_return: None,
             runtime_restart_required: false,
             user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
             bootstrapped: false,
+            native_openers: std::collections::HashMap::new(),
             persistence: PersistenceState::default(),
             shutdown_result: None,
             self_queue: None,
@@ -483,6 +512,7 @@ impl Shell {
             engine,
             store,
             store_reads: store_reads.into(),
+            notes: None,
             chrome,
             emit,
             #[cfg(test)]
@@ -670,6 +700,13 @@ impl Shell {
             Command::Activate(id) => {
                 let _ = self.operation_activate(id);
             }
+            Command::SetTabEssential {
+                id,
+                essential,
+                before,
+            } => {
+                let _ = self.operation_set_tab_essential(id, essential, before);
+            }
             Command::Close(id) => {
                 let _ = self.operation_close(id);
             }
@@ -719,15 +756,141 @@ impl Shell {
                     self.maintain_views();
                 }
             }
-            Command::SetSidebarWidth(width) => {
+            Command::BrowserChromeRestored { revision, applied } => {
+                self.browser_chrome_restored(revision, applied)
+            }
+            Command::ShowBrowserPage(page) => {
+                let _ = self.operation_show_browser_page(page);
+            }
+            Command::SetSidebarWidth(width, animate) => {
                 if let Some(win) = self.windows.focused_mut() {
                     win.metrics.sidebar_width = zephium_core::layout::clamp_sidebar_width(width);
                 }
-                let _ = self.relayout();
+                if animate {
+                    if let Some(win) = self.windows.focused() {
+                        let _ = self.engine.hint_stage_motion(win.id, StageMotion::Slide);
+                    }
+                }
+                let _ = self.relayout_with(animate);
             }
-            Command::DragOver { x, y } => {
+            Command::DownloadCall {
+                expected_profile,
+                call,
+                done,
+            } => {
+                use zephium_core::downloads::{DownloadError, DownloadResponse};
+                let authorized = self
+                    .windows
+                    .focused()
+                    .is_some_and(|window| window.profile == expected_profile)
+                    && !self.profile_deletion_quarantines(expected_profile)
+                    && call.validate();
+                if !authorized {
+                    done.finish(DownloadResponse::Error {
+                        error: DownloadError::Invalid,
+                    });
+                } else {
+                    let partition = match self
+                        .profiles
+                        .get(expected_profile)
+                        .map(|profile| profile.kind)
+                    {
+                        Some(zephium_core::profiles::ProfileKind::Incognito) => {
+                            zephium_core::ports::engine::Partition::Ephemeral(expected_profile)
+                        }
+                        Some(_) => {
+                            zephium_core::ports::engine::Partition::Persistent(expected_profile)
+                        }
+                        None => {
+                            done.finish(DownloadResponse::Error {
+                                error: DownloadError::Invalid,
+                            });
+                            return;
+                        }
+                    };
+                    self.engine.download_call(partition, *call, done);
+                }
+            }
+            Command::HistoryCall {
+                expected_profile,
+                call,
+                done,
+            } => self.history_call(expected_profile, *call, done),
+            Command::AttachNotes(attachment) => {
+                self.notes.get_or_insert(attachment.0);
+            }
+            Command::NoteCall {
+                expected_profile,
+                call,
+                done,
+            } => {
+                use zephium_core::notes::{NoteError, NoteReply, NoteResponse};
+                // Private profiles keep nothing on disk, notes included.
+                let profile = self
+                    .windows
+                    .focused()
+                    .map(|window| window.profile)
+                    .filter(|profile| *profile == expected_profile)
+                    .filter(|profile| {
+                        self.profiles.get(*profile).is_some_and(|p| {
+                            p.kind != zephium_core::profiles::ProfileKind::Incognito
+                        })
+                    });
+                match (profile, &self.notes) {
+                    (Some(profile), Some(notes)) => notes.call(
+                        profile,
+                        Arc::unwrap_or_clone(call),
+                        Box::new(move |response| {
+                            done.finish(NoteReply {
+                                profile: Some(profile.to_string()),
+                                response,
+                            })
+                        }),
+                    ),
+                    _ => done.finish(NoteReply {
+                        profile: None,
+                        response: NoteResponse::Error {
+                            error: NoteError::Unavailable,
+                        },
+                    }),
+                }
+            }
+            Command::ResourceCall {
+                expected_profile,
+                call,
+                done,
+            } => {
+                use zephium_core::resources::{ResourceError, ResourceReply, ResourceResponse};
+                if let Some(profile) = self
+                    .windows
+                    .focused()
+                    .map(|window| window.profile)
+                    .filter(|profile| *profile == expected_profile)
+                {
+                    self.store.resource_call(
+                        profile,
+                        Arc::unwrap_or_clone(call),
+                        Box::new(move |response| {
+                            done.finish(ResourceReply {
+                                profile: Some(profile.to_string()),
+                                response,
+                            })
+                        }),
+                    );
+                } else {
+                    done.finish(ResourceReply {
+                        profile: None,
+                        response: ResourceResponse::Error {
+                            error: ResourceError::Unavailable,
+                        },
+                    });
+                }
+            }
+            Command::DragOver { point } => {
                 if let Some(win) = self.windows.focused().map(|w| w.id) {
-                    let zone = self.resolve_drop(x, y).map(|d| d.zone);
+                    let zone = point
+                        .and_then(|(x, y)| self.resolve_drop(x, y))
+                        .map(|d| d.zone);
                     let _ = self.engine.set_drop_indicator(win, zone);
                 }
             }
@@ -804,9 +967,25 @@ impl Shell {
             Command::ExtensionDistributionStatusChanged(status) => {
                 self.observe_extension_distribution_status(status)
             }
-            Command::Search(query) => self.search(&query),
-            Command::OpenUrl(input) => {
-                let _ = self.operation_open_url(input);
+            Command::Search(query) => {
+                self.search.context = None;
+                self.search(&query);
+            }
+            Command::SearchSupplementaryFinished { context, query } => {
+                self.search_supplementary_finished(*context, query)
+            }
+            Command::SearchAdditional {
+                context,
+                query,
+                results,
+            } => self.search_additional(*context, query, results),
+            Command::SearchScoped { query, context } => self.search_scoped(&query, *context),
+            Command::CancelSearch { session_id } => self.cancel_scoped_search(&session_id),
+            Command::RunSearchAction { context, action } => {
+                let _ = self.operation_run_search_action(*context, action);
+            }
+            Command::OpenUrl { input, new_tab } => {
+                let _ = self.operation_open_url(input, new_tab);
             }
             Command::SetAppSetting { key, value } => {
                 let _ = self.operation_set_app_setting(key, value);
@@ -1027,6 +1206,7 @@ impl Shell {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.discard_blocker_inbox_for_shutdown();
                 self.finish_pending_blocker_operations_for_shutdown();
+                self.fail_pending_history_calls();
             }))
             .is_ok();
         if !post_store_coordination_clean {
@@ -1429,7 +1609,8 @@ impl Shell {
                 profile,
                 origin,
                 rgba,
-            } => self.on_favicon_read(generation, id, profile, origin, rgba),
+                stale,
+            } => self.on_favicon_read(generation, id, profile, origin, rgba, stale),
             StoreReadResult::FaviconBatch {
                 generation,
                 profile,
@@ -1437,6 +1618,13 @@ impl Shell {
                 origins,
                 rasters,
             } => self.on_favicon_batch_read(generation, profile, space, origins, rasters),
+            StoreReadResult::HistorySurface {
+                token,
+                profile,
+                visits,
+                next,
+                removed,
+            } => self.on_history_surface_read(token, profile, visits, next, removed),
         }
     }
 }

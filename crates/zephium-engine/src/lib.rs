@@ -9,6 +9,8 @@ mod diagnostics;
 mod erasure;
 mod host;
 mod layout_queue;
+#[cfg(any(target_os = "windows", test))]
+mod motion_curve;
 mod navigation_epoch;
 mod pane_geometry;
 mod platform;
@@ -560,7 +562,7 @@ use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::permissions::{PagePermissionRequestId, PagePermissionRequestSettlement};
 use zephium_core::ports::engine::{
     ContentScope, DiscardProbeId, Engine, EngineEvent, NativeDispatch, NavigationPresentationId,
-    NavigationRequestId, Partition, ProfileDataErasureOutcome, Shortcut, UserContent,
+    NavigationRequestId, Partition, ProfileDataErasureOutcome, Shortcut, StageMotion, UserContent,
     UserContentGeneration, ZoomRequestId,
 };
 use zephium_core::ports::extensions::{
@@ -1058,6 +1060,10 @@ impl RetirementGate {
             | event @ EngineEvent::FaviconPixels { id, .. }
             | event @ EngineEvent::DiscardSafety { id, .. }
             | event @ EngineEvent::NavState { id, .. }
+            | event @ EngineEvent::NativeTabCloseRequested { id }
+            | event @ EngineEvent::PageOpenBlocked { id }
+            | event @ EngineEvent::NativeTabOpened { id, .. }
+            | event @ EngineEvent::LinkedDownloadStarted { id }
             | event @ EngineEvent::NewWindowRequested { id, .. }
             | event @ EngineEvent::DownloadRequested { id, .. }
             | event @ EngineEvent::Captured { id, .. }
@@ -1185,6 +1191,7 @@ fn require_native_layout_application(
 fn dispatch_layout_turn(
     dispatch: MainThreadDispatch,
     updates: Arc<layout_queue::LatestLayouts<PendingLayout>>,
+    motion: StageMotionHints,
     retirement: Arc<Mutex<RetirementGate>>,
     event_delivery: Arc<EventDeliveryGate>,
     fatal: Arc<dyn Fn(&'static str) + Send + Sync>,
@@ -1197,6 +1204,7 @@ fn dispatch_layout_turn(
                 continue;
             }
             let host_item_tokens = update.item_tokens.clone();
+            let motion = motion.clone();
             let application_retirement = retirement.clone();
             let application_delivery = event_delivery.clone();
             let application_fatal = fatal.clone();
@@ -1205,7 +1213,13 @@ fn dispatch_layout_turn(
                     .iter()
                     .all(|(_, token)| token.load(Ordering::Acquire))
                 {
-                    let applied = host.set_content(update.window, update.tree, update.region);
+                    // A hint belongs to the first layout of its window that
+                    // is actually applied, however many were coalesced first.
+                    let hint = motion
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&update.window);
+                    let applied = host.set_content(update.window, update.tree, update.region, hint);
                     let _ = require_native_layout_application(
                         applied,
                         &application_delivery,
@@ -1237,6 +1251,7 @@ fn dispatch_layout_turn(
             && !dispatch_layout_turn(
                 next_dispatch,
                 updates.clone(),
+                motion.clone(),
                 retirement.clone(),
                 event_delivery.clone(),
                 fatal.clone(),
@@ -1291,6 +1306,66 @@ fn retirement_filtering_sink(
     })
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) struct NativeOpenAuthority {
+    retirement: Arc<Mutex<RetirementGate>>,
+    dispatch: MainThreadDispatch,
+    fatal: Arc<dyn Fn(&'static str) + Send + Sync>,
+}
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl NativeOpenAuthority {
+    pub(crate) fn reserve(
+        &self,
+        source: ItemId,
+        source_token: &Arc<AtomicBool>,
+        child: ItemId,
+        profile: ProfileId,
+    ) -> Option<Arc<AtomicBool>> {
+        let mut gate = lock_retirement_gate(&self.retirement);
+        if !gate.allows_item_token(source, source_token)
+            || gate.active_profile(source) != Some(profile)
+        {
+            return None;
+        }
+        gate.reserve_item(child, profile)
+    }
+    pub(crate) fn release_failed(&self, child: ItemId, token: &Arc<AtomicBool>) {
+        lock_retirement_gate(&self.retirement).forget_item_if_token(child, token);
+    }
+    pub(crate) fn adoption(
+        &self,
+        child: ItemId,
+        token: Arc<AtomicBool>,
+    ) -> zephium_core::ports::engine::NativeTabAdoption {
+        let retirement = self.retirement.clone();
+        let dispatch = self.dispatch.clone();
+        let fatal = self.fatal.clone();
+        zephium_core::ports::engine::NativeTabAdoption::new(move |accepted| {
+            if !token.load(Ordering::Acquire) {
+                return;
+            }
+            if !accepted {
+                token.store(false, Ordering::Release);
+            }
+            let inner_fatal = fatal.clone();
+            if !dispatch(Box::new(move || {
+                if !host::try_with(move |host| {
+                    if accepted {
+                        host.finish_native_tab_adoption(child, &token);
+                    } else {
+                        host.close(child);
+                        lock_retirement_gate(&retirement).forget_item_if_token(child, &token);
+                    }
+                }) {
+                    inner_fatal("native tab adoption cleanup was rejected");
+                }
+            })) {
+                fatal("native tab adoption cleanup dispatch was rejected");
+            }
+        })
+    }
+}
+
 pub struct WebviewEngine {
     dispatch: MainThreadDispatch,
     sink: EngineEventIngressSink,
@@ -1299,6 +1374,7 @@ pub struct WebviewEngine {
     fatal_security_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
     runtime_security_advisories: RuntimeSecurityAdvisories,
     layout_updates: Arc<layout_queue::LatestLayouts<PendingLayout>>,
+    stage_motion: StageMotionHints,
     user_content_dispatch: Arc<UserContentDispatchGate>,
     extension_runtime_host: host::extension_runtime::ExtensionRuntimeHostFactorySlot,
     #[cfg(feature = "agentic-browser")]
@@ -1428,6 +1504,9 @@ fn valid_page_zoom(scale: f64) -> bool {
     scale.is_finite() && (MIN_PAGE_ZOOM..=MAX_PAGE_ZOOM).contains(&scale)
 }
 
+/// Motion requested for the next applied layout of each window.
+type StageMotionHints = Arc<Mutex<HashMap<WindowId, StageMotion>>>;
+
 struct PendingLayout {
     window: WindowId,
     tree: Option<Pane>,
@@ -1489,6 +1568,12 @@ pub fn install(
         initial_user_content.generation,
         initial_user_content.content,
         extension_runtime_host.gate(),
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        Arc::new(NativeOpenAuthority {
+            retirement: retirement.clone(),
+            dispatch: dispatch.clone(),
+            fatal: native_terminal_failure.clone(),
+        }),
         sink.clone(),
         native_terminal_failure,
     )?;
@@ -1500,6 +1585,7 @@ pub fn install(
         fatal_security_failure,
         runtime_security_advisories,
         layout_updates: Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS)),
+        stage_motion: StageMotionHints::default(),
         user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
         extension_runtime_host,
         #[cfg(feature = "agentic-browser")]
@@ -1522,6 +1608,30 @@ pub fn enforce_runtime_security_floor() -> Result<RuntimeSecurityAdvisories, Str
 }
 
 impl WebviewEngine {
+    /// Installs the profile-scoped download service before raw views are made.
+    pub fn initialize_downloads(
+        &self,
+        store: Arc<dyn zephium_core::ports::store::Store + Send + Sync>,
+        notify: impl Fn(ProfileId) + Send + Sync + 'static,
+    ) -> bool {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run(move || {
+                host::try_with(move |host| {
+                    if host.downloads.is_none() {
+                        host.downloads =
+                            Some(host::downloads::Downloads::new(store, Arc::new(notify)));
+                    }
+                });
+            })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (store, notify);
+            true
+        }
+    }
+
     /// Takes the process-unique sequential native lifetime factory. This is
     /// mutually exclusive with `take_agent_browser_port`; no old port reopens.
     /// Merely taking the factory creates no native page, worker or timer.
@@ -1605,6 +1715,36 @@ impl WebviewEngine {
 }
 
 impl Engine for WebviewEngine {
+    fn download_call(
+        &self,
+        partition: Partition,
+        call: zephium_core::downloads::DownloadCall,
+        done: zephium_core::downloads::DownloadCompletion,
+    ) -> bool {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run(move || {
+                host::try_with(move |host| {
+                    if let Some(downloads) = &host.downloads {
+                        downloads.call(partition, call, done);
+                    } else {
+                        done.finish(zephium_core::downloads::DownloadResponse::Error {
+                            error: zephium_core::downloads::DownloadError::Unavailable,
+                        });
+                    }
+                });
+            })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (partition, call);
+            done.finish(zephium_core::downloads::DownloadResponse::Error {
+                error: zephium_core::downloads::DownloadError::Unsupported,
+            });
+            true
+        }
+    }
+
     fn runtime_restart_required(&self) -> bool {
         lock_retirement_gate(&self.retirement).runtime_restart_required
     }
@@ -2119,6 +2259,7 @@ impl Engine for WebviewEngine {
                 let scheduled = dispatch_layout_turn(
                     self.dispatch.clone(),
                     self.layout_updates.clone(),
+                    self.stage_motion.clone(),
                     self.retirement.clone(),
                     self.event_delivery.clone(),
                     self.fatal_security_failure.clone(),
@@ -2135,6 +2276,14 @@ impl Engine for WebviewEngine {
                 NativeDispatch::from_scheduled(scheduled)
             }
         }
+    }
+
+    fn hint_stage_motion(&self, window: WindowId, motion: StageMotion) -> NativeDispatch {
+        self.stage_motion
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(window, motion);
+        NativeDispatch::Scheduled
     }
 
     fn set_drop_indicator(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch {
@@ -2543,6 +2692,7 @@ mod tests {
             fatal_security_failure: Arc::new(|_| {}),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host: host::extension_runtime::ExtensionRuntimeHostFactorySlot::new(
                 Arc::new(|_| false),
@@ -2686,6 +2836,7 @@ mod tests {
             fatal_security_failure: Arc::new(|_| {}),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            stage_motion: StageMotionHints::default(),
             user_content_dispatch: gate.clone(),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
@@ -2733,6 +2884,7 @@ mod tests {
             fatal_security_failure: Arc::new(|_| {}),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
@@ -2818,6 +2970,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
@@ -2859,6 +3012,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
@@ -2946,6 +3100,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
@@ -3317,6 +3472,7 @@ mod tests {
             fatal_security_failure: Arc::new(|_| {}),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
@@ -3639,6 +3795,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
@@ -3674,6 +3831,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
@@ -3744,6 +3902,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
@@ -3795,6 +3954,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
@@ -3861,6 +4021,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),

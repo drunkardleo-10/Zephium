@@ -113,6 +113,48 @@ impl Items {
 
     /// Removes an item and its whole subtree. Returns `Close` effects for
     /// every removed tab that had a live view.
+    /// Reparents one existing tab without recreating its native identity or
+    /// cancelling navigation. The caller authorizes the profile/space scope.
+    pub fn move_tab_to_root(
+        &mut self,
+        id: ItemId,
+        placement: Placement,
+        before: Option<ItemId>,
+    ) -> bool {
+        let Some(item) = self.items.get(&id).filter(|item| item.tab().is_some()) else {
+            return false;
+        };
+        if before == Some(id) {
+            return item.placement == placement && item.parent.is_none();
+        }
+        if before.is_some_and(|target| {
+            self.items
+                .get(&target)
+                .is_none_or(|item| item.parent.is_some() || item.placement != placement)
+        }) {
+            return false;
+        }
+        let parent = item.parent;
+        let old_placement = item.placement;
+        let siblings = match parent {
+            Some(parent) => self.children.get_mut(&parent),
+            None => self.roots.get_mut(&old_placement),
+        };
+        if let Some(siblings) = siblings {
+            siblings.retain(|item| *item != id);
+        }
+        let target = self.roots.entry(placement).or_default();
+        let index = before
+            .and_then(|before| target.iter().position(|item| *item == before))
+            .unwrap_or(target.len());
+        target.insert(index, id);
+        if let Some(item) = self.items.get_mut(&id) {
+            item.parent = None;
+            item.placement = placement;
+        }
+        true
+    }
+
     pub fn remove(&mut self, id: ItemId) -> Vec<Effect> {
         let Some(item) = self.items.get(&id) else {
             return Vec::new();
@@ -250,6 +292,20 @@ impl Items {
         }
     }
 
+    /// Attach a preconfigured native popup without issuing Create/Navigate or
+    /// claiming a URL commit. Only later native observations attribute content.
+    pub fn adopt_native_view(&mut self, id: ItemId) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        if tab.view || tab.url.is_some() {
+            return false;
+        }
+        tab.view = true;
+        tab.loading = true;
+        true
+    }
+
     pub fn ensure_view(&mut self, id: ItemId) -> Vec<Effect> {
         if let Some(tab) = self.tab_mut(id) {
             if !tab.view {
@@ -330,9 +386,15 @@ impl Items {
         }
     }
 
+    pub fn set_popup_blocked(&mut self, id: ItemId, blocked: bool) {
+        if let Some(tab) = self.tab_mut(id) {
+            tab.popup_blocked = blocked;
+        }
+    }
     pub fn set_committed_url(&mut self, id: ItemId, url: Url) -> bool {
         if let Some(tab) = self.tab_mut(id) {
             tab.url = Some(url);
+            tab.popup_blocked = false;
             self.pending_navigations.remove(&id);
             true
         } else {

@@ -1,0 +1,93 @@
+/* Chrome icon controls are flat: a translucent fill appears on hover and
+   settles a step stronger while held. Only the press moves them. */
+.chrome-button,
+.window-button,
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border-radius: var(--radius-control-compact);
+  color: var(--color-muted);
+  outline: none;
+  /* stylelint-disable-next-line property-no-vendor-prefix */
+  -webkit-user-select: none;
+  user-select: none;
+  transition:
+    color var(--motion-instant) var(--ease-smooth),
+    background-color var(--motion-instant) var(--ease-smooth),
+    transform var(--motion-fast) var(--ease-smooth);
+}
+
+.chrome-button:active:not(:disabled),
+.window-button:active:not(:disabled),
+.icon-button:active:not(:disabled) {
+  transform: scale(0.94);
+  transition-duration: var(--motion-fast), var(--motion-fast), var(--motion-fast);
+}
+
+.press {
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    transform var(--motion-slow) var(--ease-out);
+}
+
+.press:active:not(:disabled) {
+  transform: scale(0.96);
+  transition-duration: var(--motion-fast), var(--motion-fast);
+}
+
+.chrome-button {
+  width: 28px;
+  height: 28px;
+}
+
+.window-button {
+  width: 28px;
+  height: 22px;
+}
+
+.icon-button {
+  width: var(--icon-button-size, 28px);
+  height: var(--icon-button-size, 28px);
+}
+
+.icon-button[data-shape="circle"] {
+  border-radius: var(--radius-capsule);
+}
+
+.chrome-button:hover,
+.window-button:hover,
+.icon-button:hover,
+.chrome-button-active {
+  background: var(--color-fill-hover);
+  color: var(--color-text);
+}
+
+.chrome-button:active,
+.window-button:active,
+.icon-button:active {
+  background: var(--color-fill-pressed);
+}
+
+.icon-button-active {
+  background: var(--row-active);
+  box-shadow: var(--row-rim);
+  color: var(--color-text);
+}
+
+.icon-button:disabled {
+  cursor: default;
+  color: var(--color-faint);
+  opacity: 0.45;
+}
+
+.icon-button:disabled:hover {
+  background: transparent;
+  color: var(--color-faint);
+}
+
+.window-button-close:hover {
+  background: color-mix(in srgb, var(--color-danger) 20%, transparent);
+  color: var(--color-danger);
+}

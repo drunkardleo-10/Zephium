@@ -1,10 +1,25 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
+import { alias } from "./aliases";
+import { bootstrapReport } from "./bootstrap-report";
+import { paraglideVitePlugin } from "@inlang/paraglide-js";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
-  appType: "spa",
-  plugins: [svelte(), tailwindcss()],
+  appType: "mpa",
+  resolve: { alias },
+  plugins: [
+    bootstrapReport(),
+    paraglideVitePlugin({
+      project: "./project.inlang",
+      outdir: "./src/shared/i18n",
+      emitTsDeclarations: true,
+      strategy: ["baseLocale"],
+    }),
+    svelte(),
+    tailwindcss(),
+  ],
   clearScreen: false,
   server: {
     port: 1420,
@@ -12,5 +27,37 @@ export default defineConfig({
   },
   build: {
     target: "es2022",
+    rolldownOptions: {
+      output: {
+        // Bound the native custom-protocol startup burst without making lazy
+        // tools load the entire initial UI. Translation chunks follow their
+        // consumers; only small shared controls and runtimes are consolidated.
+        codeSplitting: {
+          groups: [
+            {
+              name: "messages",
+              test: /[\\/]src[\\/]shared[\\/]i18n[\\/]/u,
+              entriesAware: true,
+              entriesAwareMergeThreshold: 0,
+            },
+            {
+              name: "ui-core",
+              test: /[\\/]src[\\/]shared[\\/]ui[\\/](Icon|Button|FavIcon)[\\/]/u,
+              tags: ["$initial"],
+            },
+            {
+              name: "chrome-shared",
+              priority: 2,
+              test: /[\\/]src[\\/]shared[\\/](ipc[\\/]|platform\.ts|lib[\\/]motion\.ts|i18n[\\/]runtime\.js)/u,
+              tags: ["$initial"],
+            },
+          ],
+        },
+      },
+      input: {
+        browser: fileURLToPath(new URL("./browser.html", import.meta.url)),
+        panel: fileURLToPath(new URL("./panel.html", import.meta.url)),
+      },
+    },
   },
 });

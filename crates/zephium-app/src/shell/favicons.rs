@@ -2,6 +2,8 @@
 
 use super::*;
 
+use zephium_ipc::IconSurface;
+
 pub(super) const TRACKED_ICON_ORIGIN_CAPACITY: usize = 2048;
 pub(super) const ICON_CACHE_CAPACITY: usize = 512;
 pub(super) const FAVICON_POLL_DELAYS: [std::time::Duration; 7] = [
@@ -36,11 +38,25 @@ pub(super) struct PendingFaviconBatch {
     pub(super) requested: std::collections::HashSet<String>,
 }
 
+pub(super) type IconKey = (IconSurface, ProfileId, String);
+
+/// One cached raster: the pixels chrome needs, plus the tag it caches them by.
+#[derive(Clone)]
+pub(super) struct IconRecord {
+    pub(super) revision: String,
+    pub(super) encoded: String,
+}
+
 #[derive(Default)]
 pub(super) struct FaviconState {
     pub(super) icons_checked: std::collections::HashSet<(ProfileId, String)>,
-    pub(super) icon_values: std::collections::HashMap<(ProfileId, String), String>,
+    pub(super) icon_values: std::collections::HashMap<(ProfileId, String), IconRecord>,
     pub(super) icon_cache_order: std::collections::VecDeque<(ProfileId, String)>,
+    /// Revision each privileged surface currently holds for an origin.
+    /// Interior mutability because the paths that reference icons take `&self`.
+    pub(super) delivered: std::cell::RefCell<std::collections::HashMap<IconKey, String>>,
+    /// References made since the last publish whose pixels the surface lacks.
+    pub(super) undelivered: std::cell::RefCell<Vec<IconKey>>,
     pub(super) icon_attempts: std::collections::HashMap<ItemId, IconAttempt>,
     pub(super) icon_load_completion_pending: std::collections::HashMap<ItemId, (ProfileId, String)>,
     pub(super) store_reads: std::collections::HashMap<ItemId, PendingFaviconStoreRead>,
@@ -60,10 +76,31 @@ impl Shell {
         Some((profile, origin))
     }
 
-    pub(super) fn hydrate_favicon_cache(&mut self, profile: ProfileId, space: SpaceId) {
-        let mut requested = std::collections::HashSet::new();
+    /// Every origin the sidebar is about to draw for this window: Favourites,
+    /// Pinned and Today, folder contents included.
+    fn sidebar_origins(&self, profile: ProfileId, space: SpaceId) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
         let mut origins = Vec::new();
-        for id in self.today_tabs(space) {
+        let mut frontier: Vec<ItemId> = [
+            Placement::Favorites { profile },
+            Placement::Space {
+                space,
+                section: SpaceSection::Pinned,
+            },
+            Placement::Space {
+                space,
+                section: SpaceSection::Today,
+            },
+        ]
+        .into_iter()
+        .flat_map(|placement| self.items.roots(placement).iter().copied())
+        .collect();
+        let mut visited = std::collections::HashSet::new();
+        while let Some(id) = frontier.pop() {
+            if !visited.insert(id) || origins.len() == MAX_FAVICON_BATCH_ORIGINS {
+                continue;
+            }
+            frontier.extend(self.items.children(id).iter().copied());
             let Some(origin) = self
                 .items
                 .tab(id)
@@ -72,16 +109,19 @@ impl Shell {
             else {
                 continue;
             };
-            if requested.insert(origin.clone()) {
+            if seen.insert(origin.clone()) {
                 origins.push(origin);
-                if origins.len() == MAX_FAVICON_BATCH_ORIGINS {
-                    break;
-                }
             }
         }
+        origins
+    }
+
+    pub(super) fn hydrate_favicon_cache(&mut self, profile: ProfileId, space: SpaceId) {
+        let origins = self.sidebar_origins(profile, space);
         if origins.is_empty() {
             return;
         }
+        let requested: std::collections::HashSet<String> = origins.iter().cloned().collect();
         self.favicons.batch_generation = self.favicons.batch_generation.wrapping_add(1);
         if self.favicons.batch_generation == 0 {
             self.favicons.batch_generation = 1;
@@ -123,6 +163,7 @@ impl Shell {
         profile: ProfileId,
         origin: String,
         rgba: Option<Vec<u8>>,
+        stale: bool,
     ) {
         let exact = self.favicons.store_reads.get(&id).is_some_and(|pending| {
             pending.generation == generation
@@ -140,14 +181,18 @@ impl Shell {
             return;
         }
         let key = (profile, origin.clone());
-        if rgba
+        let shown = rgba
             .as_deref()
-            .is_some_and(|bytes| self.cache_icon(key.clone(), bytes))
-        {
-            self.favicons.icons_checked.insert(key);
+            .is_some_and(|bytes| self.cache_icon(key.clone(), bytes));
+        if shown {
             self.project_tab(id);
-        } else {
+        }
+        // A stored raster is drawn whatever its age; age only decides whether
+        // the renderer is asked for a newer one.
+        if stale {
             self.start_favicon_discovery(id, profile, origin);
+        } else if shown {
+            self.favicons.icons_checked.insert(key);
         }
     }
 
@@ -217,11 +262,7 @@ impl Shell {
         // Persistent profiles can hydrate the already-decoded fixed raster.
         // Private profiles deliberately bypass SQLite but still use the same
         // renderer-side decoder and a bounded in-memory cache.
-        let incognito = self
-            .profiles
-            .get(profile)
-            .is_some_and(|profile| profile.kind == ProfileKind::Incognito);
-        if incognito {
+        if self.incognito_profile(profile) {
             self.start_favicon_discovery(id, profile, origin);
             return;
         }
@@ -263,17 +304,17 @@ impl Shell {
         } else {
             #[cfg(test)]
             {
-                let rgba = self.store.fresh_favicon_raster(
-                    profile,
-                    &origin,
-                    FAVICON_CACHE_MAX_AGE_SECONDS,
-                );
+                let stored = self.store.favicon_raster_with_age(profile, &origin);
+                let stale = stored
+                    .as_ref()
+                    .is_none_or(|(_, age)| *age > FAVICON_CACHE_MAX_AGE_SECONDS);
                 self.on_store_read(StoreReadResult::Favicon {
                     generation,
                     id,
                     profile,
                     origin,
-                    rgba,
+                    rgba: stored.map(|(bytes, _)| bytes),
+                    stale,
                 });
                 return;
             }
@@ -428,11 +469,7 @@ impl Shell {
         }
         self.favicons.icons_checked.insert(key);
         self.cancel_favicon_attempt(id);
-        if self
-            .profiles
-            .get(profile)
-            .is_some_and(|profile| profile.kind != ProfileKind::Incognito)
-        {
+        if !self.incognito_profile(profile) {
             self.store.save_favicon(
                 profile,
                 origin,
@@ -444,7 +481,10 @@ impl Shell {
     }
 
     pub(super) fn cache_icon(&mut self, key: (ProfileId, String), rgba: &[u8]) -> bool {
-        let Some(value) = zephium_core::icon::chrome_value(rgba) else {
+        let (Some(revision), Some(encoded)) = (
+            zephium_core::icon::revision(rgba),
+            zephium_core::icon::encode_rgba32(rgba),
+        ) else {
             return false;
         };
         self.favicons
@@ -457,15 +497,103 @@ impl Shell {
                 break;
             };
             self.favicons.icon_values.remove(&evicted);
+            self.favicons
+                .delivered
+                .borrow_mut()
+                .retain(|(_, profile, origin), _| {
+                    (*profile, origin.as_str()) != (evicted.0, evicted.1.as_str())
+                });
             // `icons_checked` also carries terminal negative results. A
             // positive entry that leaves the bounded raster cache must lose
             // only its positive terminal marker so a later visit may hydrate
             // it from SQLite (or rediscover it for a private profile).
             self.favicons.icons_checked.remove(&evicted);
         }
-        self.favicons.icon_values.insert(key.clone(), value);
+        self.favicons
+            .icon_values
+            .insert(key.clone(), IconRecord { revision, encoded });
         self.favicons.icon_cache_order.push_back(key);
         true
+    }
+
+    /// Sends each surface the pixels behind every icon reference it does not
+    /// already hold at the current revision. Projections name icons rather than
+    /// carrying them, so this is the one path rasters travel.
+    pub(super) fn publish_icons(&self) {
+        let pending = std::mem::take(&mut *self.favicons.undelivered.borrow_mut());
+        if pending.is_empty() {
+            return;
+        }
+        let mut delivered = self.favicons.delivered.borrow_mut();
+        let mut grouped: std::collections::HashMap<
+            (IconSurface, ProfileId),
+            Vec<zephium_ipc::FaviconEntry>,
+        > = std::collections::HashMap::new();
+        for key in pending {
+            let Some(record) = self.favicons.icon_values.get(&(key.1, key.2.clone())) else {
+                continue;
+            };
+            if delivered.get(&key) == Some(&record.revision) {
+                continue;
+            }
+            delivered.insert(key.clone(), record.revision.clone());
+            grouped
+                .entry((key.0, key.1))
+                .or_default()
+                .push(zephium_ipc::FaviconEntry {
+                    origin: key.2,
+                    revision: record.revision.clone(),
+                    rgba: record.encoded.clone(),
+                });
+        }
+        drop(delivered);
+        for ((surface, profile), entries) in grouped {
+            (self.emit)(Projection::Favicons(zephium_ipc::FaviconsView {
+                surface,
+                profile_id: profile.to_string(),
+                entries,
+            }));
+        }
+    }
+
+    /// Names the cached icon for an origin and queues its pixels when the
+    /// surface does not already hold that exact revision.
+    pub(super) fn icon_ref_for(
+        &self,
+        surface: IconSurface,
+        profile: ProfileId,
+        origin: &str,
+    ) -> Option<zephium_ipc::IconRef> {
+        let record = self
+            .favicons
+            .icon_values
+            .get(&(profile, origin.to_owned()))?;
+        let key = (surface, profile, origin.to_owned());
+        if self.favicons.delivered.borrow().get(&key) != Some(&record.revision) {
+            let mut undelivered = self.favicons.undelivered.borrow_mut();
+            if !undelivered.contains(&key) {
+                undelivered.push(key);
+            }
+        }
+        Some(zephium_ipc::IconRef {
+            origin: origin.to_owned(),
+            revision: record.revision.clone(),
+        })
+    }
+
+    /// A surface reattached with an empty raster cache, so nothing it
+    /// previously received can be assumed present.
+    pub(super) fn forget_delivered_icons(&self, surface: IconSurface) {
+        self.favicons
+            .delivered
+            .borrow_mut()
+            .retain(|(owner, _, _), _| *owner != surface);
+    }
+
+    fn incognito_profile(&self, profile: ProfileId) -> bool {
+        self.profiles
+            .get(profile)
+            .is_some_and(|profile| profile.kind == ProfileKind::Incognito)
     }
 }
 

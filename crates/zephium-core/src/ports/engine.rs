@@ -502,7 +502,32 @@ pub struct Shortcut {
     pub key: u32,
 }
 
+/// How a content layout that follows a deliberate change of the window's
+/// shape is carried out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageMotion {
+    /// The content keeps its size for the journey and slides to its new
+    /// place, so a page is laid out at most once.
+    Slide,
+    /// The content was hidden behind a browser page and returns to view.
+    Arrive,
+}
+
 pub trait Engine {
+    /// Browser-owned file actions. Only trusted Shell admission supplies the
+    /// profile partition; the caller supplies IDs, never filesystem paths.
+    fn download_call(
+        &self,
+        _partition: Partition,
+        _call: crate::downloads::DownloadCall,
+        done: crate::downloads::DownloadCompletion,
+    ) -> bool {
+        done.finish(crate::downloads::DownloadResponse::Error {
+            error: crate::downloads::DownloadError::Unsupported,
+        });
+        true
+    }
+
     /// Schedules creation on the native UI thread. `false` means the request
     /// was not admitted at all, so the shell must roll back its live-view bit.
     fn create_view(&self, id: ItemId, partition: Partition, url: &str, bounds: Rect) -> bool;
@@ -539,6 +564,13 @@ pub trait Engine {
         region: Option<Rect>,
     ) -> NativeDispatch;
     fn set_drop_indicator(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch;
+    /// Asks the next content layout applied to `window` to move rather than
+    /// jump, because it follows a deliberate change of the window's shape
+    /// and not a resize. Consumed by that layout whether or not it moved
+    /// anything; an engine without native motion ignores it.
+    fn hint_stage_motion(&self, _window: WindowId, _motion: StageMotion) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Requests an exact page zoom for the current native-view generation.
     /// Queue admission is not application: the authoritative native scale
     /// arrives as [`EngineEvent::ZoomSettled`] carrying the same `request`.
@@ -792,6 +824,51 @@ pub enum ContentRuleSettlement {
     },
 }
 
+type NativeTabDecision = Box<dyn FnOnce(bool) + Send>;
+struct NativeTabAdoptionInner(std::sync::Mutex<Option<NativeTabDecision>>);
+#[derive(Clone)]
+pub struct NativeTabAdoption(Arc<NativeTabAdoptionInner>);
+impl NativeTabAdoption {
+    pub fn new(done: impl FnOnce(bool) + Send + 'static) -> Self {
+        Self(Arc::new(NativeTabAdoptionInner(std::sync::Mutex::new(
+            Some(Box::new(done)),
+        ))))
+    }
+    pub fn finish(&self, accepted: bool) {
+        let done = self
+            .0
+             .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(accepted);
+        }
+    }
+}
+impl Drop for NativeTabAdoptionInner {
+    fn drop(&mut self) {
+        if let Some(done) = self
+            .0
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            done(false);
+        }
+    }
+}
+impl std::fmt::Debug for NativeTabAdoption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NativeTabAdoption")
+    }
+}
+impl PartialEq for NativeTabAdoption {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineEvent {
     /// A native browser environment reported that a newer runtime is
@@ -960,6 +1037,23 @@ pub enum EngineEvent {
         id: ItemId,
         can_go_back: bool,
         can_go_forward: bool,
+    },
+    /// The engine already owns this fully configured native child. Shell must
+    /// adopt the exact id or reject the lease; it must never replay the URL.
+    NativeTabOpened {
+        id: ItemId,
+        child: ItemId,
+        foreground: bool,
+        adoption: NativeTabAdoption,
+    },
+    NativeTabCloseRequested {
+        id: ItemId,
+    },
+    PageOpenBlocked {
+        id: ItemId,
+    },
+    LinkedDownloadStarted {
+        id: ItemId,
     },
     NewWindowRequested {
         id: ItemId,
@@ -1189,5 +1283,33 @@ mod user_content_tests {
             content.validate(),
             Err(UserContentApplyFailure::OwnerBudgetExceeded)
         );
+    }
+}
+
+#[cfg(test)]
+mod native_tab_adoption_tests {
+    use super::*;
+    #[test]
+    fn abandoned_native_tabs_are_rejected_once_after_the_last_clone() {
+        let (send, receive) = std::sync::mpsc::channel();
+        let lease = NativeTabAdoption::new(move |accepted| send.send(accepted).unwrap());
+        let retained = lease.clone();
+        drop(lease);
+        assert!(receive.try_recv().is_err());
+        drop(retained);
+        assert!(!receive.recv().unwrap());
+        assert!(receive.try_recv().is_err());
+    }
+    #[test]
+    fn a_settled_adoption_cannot_be_rejected_by_a_late_clone() {
+        let (send, receive) = std::sync::mpsc::channel();
+        let lease = NativeTabAdoption::new(move |accepted| send.send(accepted).unwrap());
+        let retained = lease.clone();
+        lease.finish(true);
+        retained.finish(false);
+        drop(lease);
+        drop(retained);
+        assert!(receive.recv().unwrap());
+        assert!(receive.try_recv().is_err());
     }
 }

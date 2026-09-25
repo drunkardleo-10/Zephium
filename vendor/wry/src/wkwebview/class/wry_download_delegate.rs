@@ -15,6 +15,8 @@ use objc2_web_kit::{WKDownload, WKDownloadDelegate};
 use crate::wkwebview::download::{download_did_fail, download_did_finish, download_policy};
 
 pub struct WryDownloadDelegateIvars {
+  #[cfg(target_os = "macos")]
+  pub native: Option<Box<dyn Fn(&WKDownload)>>,
   pub started: Option<RefCell<Box<dyn FnMut(String, &mut PathBuf) -> bool + 'static>>>,
   pub completed: Option<Rc<dyn Fn(String, Option<PathBuf>, bool) + 'static>>,
 }
@@ -45,7 +47,12 @@ define_class!(
     }
 
     #[unsafe(method(download:didFailWithError:resumeData:))]
-    fn download_did_fail(&self, download: &WKDownload, error: &NSError, resume_data: &NSData) {
+    fn download_did_fail(
+      &self,
+      download: &WKDownload,
+      error: &NSError,
+      resume_data: Option<&NSData>,
+    ) {
       download_did_fail(self, download, error, resume_data);
     }
 
@@ -74,11 +81,14 @@ impl WryDownloadDelegate {
   pub fn new(
     download_started_handler: Option<Box<dyn FnMut(String, &mut PathBuf) -> bool + 'static>>,
     download_completed_handler: Option<Rc<dyn Fn(String, Option<PathBuf>, bool) + 'static>>,
+    #[cfg(target_os = "macos")] native: Option<Box<dyn Fn(&WKDownload)>>,
     mtm: MainThreadMarker,
   ) -> Retained<Self> {
     let delegate = mtm
       .alloc::<WryDownloadDelegate>()
       .set_ivars(WryDownloadDelegateIvars {
+        #[cfg(target_os = "macos")]
+        native,
         started: download_started_handler.map(|handler| RefCell::new(handler)),
         completed: download_completed_handler,
       });

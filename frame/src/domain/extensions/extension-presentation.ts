@@ -1,7 +1,7 @@
 import type {
   ExtensionManagementProvenanceView,
   ExtensionManagementSourceView,
-} from "../../shared/ipc/bindings";
+} from "$shared/ipc/bindings";
 
 export type ExtensionSourcePresentation = {
   label: string;

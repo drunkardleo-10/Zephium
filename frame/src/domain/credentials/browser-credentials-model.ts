@@ -1,4 +1,4 @@
-import type { BrowserPasskeyAuthorizationView } from "../../shared/ipc/bindings";
+import type { BrowserPasskeyAuthorizationView } from "$shared/ipc/bindings";
 
 /** Closed user copy for one browser-native passkey capability state. */
 export function browserPasskeyStatus(

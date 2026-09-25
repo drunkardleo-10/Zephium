@@ -393,6 +393,8 @@ impl InnerWebView {
       });
 
       let _preference = config.preferences();
+      // WebKit admits script-created windows only during native user activation.
+      _preference.setJavaScriptCanOpenWindowsAutomatically(false);
       let _yes = NSNumber::numberWithBool(true);
       let _no = NSNumber::numberWithBool(false);
 
@@ -656,15 +658,23 @@ impl InnerWebView {
 
       let pending_scripts = Arc::new(Mutex::new(Some(Vec::new())));
       let downloads_denied = attributes.download_policy.inspect_metadata(|| ()).is_none();
-      let has_download_handler = !downloads_denied && attributes.download_started_handler.is_some();
+      #[cfg(target_os = "macos")]
+      let native_downloads = pl_attrs.native_download_handler.is_some();
+      #[cfg(not(target_os = "macos"))]
+      let native_downloads = false;
+      let has_download_handler =
+        !downloads_denied && (native_downloads || attributes.download_started_handler.is_some());
       // Download handler
       let download_delegate = if !downloads_denied
-        && (attributes.download_started_handler.is_some()
+        && (native_downloads
+          || attributes.download_started_handler.is_some()
           || attributes.download_completed_handler.is_some())
       {
         let delegate = WryDownloadDelegate::new(
           attributes.download_started_handler,
           attributes.download_completed_handler,
+          #[cfg(target_os = "macos")]
+          pl_attrs.native_download_handler,
           mtm,
         );
         Some(delegate)
@@ -672,10 +682,15 @@ impl InnerWebView {
         None
       };
 
+      let new_window_req_handler: Option<
+        std::rc::Rc<dyn Fn(String, crate::NewWindowFeatures) -> crate::NewWindowResponse>,
+      > = attributes.new_window_req_handler.map(std::rc::Rc::from);
       let navigation_policy_delegate = WryNavigationDelegate::new(
         webview.clone(),
         pending_scripts.clone(),
         has_download_handler,
+        #[cfg(target_os = "macos")]
+        new_window_req_handler.clone(),
         attributes.navigation_handler,
         download_delegate.clone(),
         attributes.on_page_load_handler,
@@ -690,10 +705,14 @@ impl InnerWebView {
 
       let ui_delegate: Retained<WryWebViewUIDelegate> = WryWebViewUIDelegate::new(
         mtm,
-        attributes.new_window_req_handler,
+        #[cfg(target_os = "macos")]
+        attributes.page_close_handler,
+        new_window_req_handler,
         attributes.permission_handler,
         #[cfg(target_os = "macos")]
         pl_attrs.permission_request_handler,
+        #[cfg(target_os = "macos")]
+        pl_attrs.file_upload_handler,
       );
       let proto_ui_delegate = ProtocolObject::from_ref(&*ui_delegate);
       webview.setUIDelegate(Some(proto_ui_delegate));

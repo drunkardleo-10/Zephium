@@ -5,7 +5,7 @@ use std::{
 
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::{DeclaredClass, Message};
-use objc2_foundation::{MainThreadMarker, NSError, NSObjectProtocol, NSString};
+use objc2_foundation::{MainThreadMarker, NSError, NSHTTPURLResponse, NSObjectProtocol, NSString};
 use objc2_web_kit::{
   WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationResponse,
   WKNavigationResponsePolicy,
@@ -445,7 +445,7 @@ fn drain_record(
     }
   }
   if let Some(native_terminal) = record.terminal {
-    let phase = if record.committed_emitted {
+    let phase = if record.committed_emitted || native_terminal == NavigationEventPhase::Cancelled {
       native_terminal
     } else {
       // A native "finished" callback without a preceding commit violates the
@@ -582,14 +582,36 @@ pub(crate) fn did_receive_server_redirect(
   apply_navigation_update(this, Some(webview), update);
 }
 
+// WebKit policy interruption includes conversion to WKDownload. Keep the
+// exact WKNavigation identity and restore prior presentation without inventing
+// a committed URL or treating cancellation as a controller-construction error.
+fn navigation_error_phase(domain: Option<&str>, code: isize) -> NavigationEventPhase {
+  if matches!(
+    (domain, code),
+    (Some("WebKitErrorDomain"), 102) | (Some("NSURLErrorDomain"), -999)
+  ) {
+    NavigationEventPhase::Cancelled
+  } else {
+    NavigationEventPhase::Failed
+  }
+}
+
 pub(crate) fn did_fail_navigation(
   this: &WryNavigationDelegate,
   webview: &WKWebView,
   navigation: &WKNavigation,
-  _error: &NSError,
+  error: &NSError,
 ) {
+  let domain = bounded_nsstring(
+    &error.domain(),
+    crate::native_bounds::NativeStringLimit {
+      max_utf16_units: 128,
+      max_utf8_bytes: 128,
+    },
+  );
+  let phase = navigation_error_phase(domain.as_deref(), error.code());
   let update = with_navigation_state(&this.ivars().navigation_event_state, |state| {
-    state.terminal(navigation_key(navigation), NavigationEventPhase::Failed)
+    state.terminal(navigation_key(navigation), phase)
   });
   apply_navigation_update(this, Some(webview), update);
 }
@@ -665,7 +687,7 @@ pub(crate) fn did_finish_navigation(
 // Navigation handler
 pub(crate) fn navigation_policy(
   this: &WryNavigationDelegate,
-  _webview: &WKWebView,
+  webview: &WKWebView,
   action: &WKNavigationAction,
   handler: &block2::Block<dyn Fn(WKNavigationActionPolicy)>,
 ) {
@@ -695,6 +717,47 @@ pub(crate) fn navigation_policy(
         (*handler).call((WKNavigationActionPolicy::Cancel,));
         return;
       };
+      #[cfg(target_os = "macos")]
+      if action.navigationType() == objc2_web_kit::WKNavigationType::LinkActivated
+        && action.targetFrame().is_some()
+      {
+        use objc2_app_kit::NSEventModifierFlags as Flags;
+        let flags = action.modifierFlags();
+        if flags.contains(Flags::Command) || action.buttonNumber() == 2 {
+          if let Some(open) = &this.ivars().new_window_req_handler {
+            let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+              open(
+                url.clone(),
+                crate::NewWindowFeatures {
+                  user_initiated: true,
+                  foreground: flags.contains(Flags::Shift),
+                  size: None,
+                  position: None,
+                  opener: crate::NewWindowOpener {
+                    webview: objc2::rc::Retained::retain(webview as *const _ as *mut _)
+                      .expect("borrowed live webview"),
+                    target_configuration: webview.configuration(),
+                  },
+                },
+              )
+            }))
+            .unwrap_or(crate::NewWindowResponse::Deny);
+            match response {
+              crate::NewWindowResponse::Create { webview: created } => {
+                // Preserve method, body, referrer and native cookie context.
+                created.loadRequest(&request);
+                (*handler).call((WKNavigationActionPolicy::Cancel,));
+                return;
+              }
+              crate::NewWindowResponse::Deny => {
+                (*handler).call((WKNavigationActionPolicy::Cancel,));
+                return;
+              }
+              crate::NewWindowResponse::Allow => {}
+            }
+          }
+        }
+      }
       // The embedder's navigation callback owns browser-level top-frame URL
       // admission. It cannot authenticate a WebExtension child resource and
       // must not preempt WebKit's controller-bound URL scheme handler, which
@@ -725,7 +788,15 @@ pub(crate) fn navigation_policy_response(
   unsafe {
     let can_show_mime_type = response.canShowMIMEType();
 
-    if !can_show_mime_type {
+    let native_response = response.response();
+    let attachment = native_response
+      .downcast_ref::<NSHTTPURLResponse>()
+      .and_then(|response| {
+        response.valueForHTTPHeaderField(&NSString::from_str("Content-Disposition"))
+      })
+      .and_then(|value| bounded_nsstring(&value, crate::native_bounds::DOWNLOAD_FILENAME_LIMIT))
+      .is_some_and(|value| is_attachment_disposition(&value));
+    if !can_show_mime_type || attachment {
       let has_download_handler = this.ivars().has_download_handler;
       if has_download_handler {
         (*handler).call((WKNavigationResponsePolicy::Download,));
@@ -1169,5 +1240,71 @@ mod navigation_event_state_tests {
     let duplicate = state.committed(91, Some("https://final.example/".into()));
     assert!(!duplicate.guard_presentation);
     assert!(duplicate.stop_loading);
+  }
+}
+
+fn is_attachment_disposition(value: &str) -> bool {
+  value
+    .split(';')
+    .next()
+    .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("attachment"))
+}
+
+#[cfg(test)]
+mod attachment_tests {
+  use super::is_attachment_disposition;
+  #[test]
+  fn only_the_disposition_token_selects_downloads() {
+    assert!(is_attachment_disposition("attachment; filename=report.txt"));
+    assert!(is_attachment_disposition(
+      " Attachment ; filename=report.txt"
+    ));
+    assert!(!is_attachment_disposition(
+      "inline; filename=attachment.txt"
+    ));
+    assert!(!is_attachment_disposition("attachment-invalid"));
+  }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+  use super::*;
+  #[test]
+  fn native_cancellation_is_domain_scoped_and_never_a_commit() {
+    assert_eq!(
+      navigation_error_phase(Some("WebKitErrorDomain"), 102),
+      NavigationEventPhase::Cancelled
+    );
+    assert_eq!(
+      navigation_error_phase(Some("NSURLErrorDomain"), -999),
+      NavigationEventPhase::Cancelled
+    );
+    assert_eq!(
+      navigation_error_phase(Some("NSURLErrorDomain"), 102),
+      NavigationEventPhase::Failed
+    );
+    assert_eq!(
+      navigation_error_phase(None, 102),
+      NavigationEventPhase::Failed
+    );
+    let mut state = AppleNavigationEventState::default();
+    assert!(state.begin_programmatic());
+    state.register_programmatic(41, "https://fixture.test/download".into());
+    let update = state.terminal(41, NavigationEventPhase::Cancelled);
+    assert_eq!(
+      update
+        .events
+        .iter()
+        .map(|event| event.phase)
+        .collect::<Vec<_>>(),
+      vec![
+        NavigationEventPhase::Started,
+        NavigationEventPhase::Cancelled
+      ]
+    );
+    assert!(state
+      .terminal(41, NavigationEventPhase::Failed)
+      .events
+      .is_empty());
   }
 }

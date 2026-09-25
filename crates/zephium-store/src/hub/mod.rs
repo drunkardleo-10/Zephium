@@ -10,6 +10,7 @@ mod agent_work;
 mod blocker;
 mod compatibility;
 mod deletion;
+mod downloads;
 mod extension_grants;
 mod extension_profile_policy;
 mod extension_provenance;
@@ -19,6 +20,7 @@ mod filesystem;
 mod history;
 mod native_ownership;
 mod page_permissions;
+mod resources;
 mod session;
 mod settings;
 mod userscripts;
@@ -55,7 +57,10 @@ pub(crate) use compatibility::LEGACY_IMPORT_STATE_KEY;
 pub(crate) use compatibility::{LEGACY_HISTORY_MARKER, MAX_SPLIT_JSON_BYTES};
 use deletion::deletion_process_generation;
 pub(crate) use favicons::{valid_favicon_origin, validated_favicon};
-pub(crate) use history::{MAX_HISTORY_BYTES, MAX_HISTORY_QUERY_BYTES, MAX_HISTORY_RESULTS};
+pub(crate) use history::{
+    MAX_HISTORY_BYTES, MAX_HISTORY_FORGET_URLS, MAX_HISTORY_PAGE, MAX_HISTORY_QUERY_BYTES,
+    MAX_HISTORY_RESULTS,
+};
 pub(crate) use settings::{MAX_APP_SETTINGS, MAX_SETTING_KEY_BYTES, MAX_SETTING_VALUE_BYTES};
 
 use filesystem::{

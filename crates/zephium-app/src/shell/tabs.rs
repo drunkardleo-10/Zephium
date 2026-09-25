@@ -41,6 +41,11 @@ impl Shell {
         if !self.item_in_scope(id, profile, space) {
             return Vec::new();
         }
+        // Explicit selection supersedes a pending native foreground request.
+        // Returning to its opener later must not resurrect focus stealing.
+        for opener in self.native_openers.values_mut() {
+            opener.activate_when_presentable = false;
+        }
         let Some(win) = self.windows.focused_mut() else {
             return Vec::new();
         };
@@ -61,6 +66,7 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return NativeWork::default();
         }
+        self.native_openers.remove(&id);
         let closed = self.windows.focused().and_then(|window| {
             self.items.tab(id).and_then(|tab| {
                 tab.url
@@ -255,6 +261,114 @@ impl Shell {
         }
         native.merge(self.commit(Vec::new()));
         mutation_result(native)
+    }
+
+    pub(super) fn adopt_linked_native_tab(
+        &mut self,
+        source: ItemId,
+        child: ItemId,
+        foreground: bool,
+        adoption: zephium_core::ports::engine::NativeTabAdoption,
+    ) {
+        let Some((profile, space)) = self.windows.focused().map(|win| (win.profile, win.space))
+        else {
+            return;
+        };
+        if !self.item_in_scope(source, profile, space)
+            || self.items.view_ids().len() >= LIVE_VIEW_ABSOLUTE_LIMIT
+            || self.items.get(child).is_some()
+        {
+            return;
+        }
+        if !self.items.insert_tab(
+            child,
+            Placement::Space {
+                space,
+                section: SpaceSection::Today,
+            },
+        ) {
+            return;
+        }
+        if !self.items.adopt_native_view(child) {
+            let _ = self.items.remove(child);
+            return;
+        }
+        self.items.set_popup_blocked(source, false);
+        self.project_tab(source);
+        self.native_openers.insert(
+            child,
+            NativeOpener {
+                source,
+                activate_when_presentable: foreground,
+            },
+        );
+        let placement = Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        };
+        let siblings = self.items.roots(placement);
+        let next = siblings
+            .iter()
+            .position(|id| *id == source)
+            .and_then(|index| siblings.get(index + 1))
+            .copied();
+        self.items.move_tab_to_root(child, placement, next);
+        // Keep the source selected while the native response is unresolved.
+        // A download never presents a document and therefore never selects
+        // this transient tab or flashes the privileged New Tab surface.
+        self.commit(Vec::new());
+        adoption.finish(true);
+    }
+
+    pub(super) fn activate_presented_native_tab(&mut self, child: ItemId) {
+        let source = self.native_openers.get_mut(&child).and_then(|opener| {
+            std::mem::take(&mut opener.activate_when_presentable).then_some(opener.source)
+        });
+        if source.is_some_and(|source| {
+            self.windows
+                .focused()
+                .is_some_and(|window| window.active == Some(source))
+        }) {
+            let effects = self.focus_tab(child);
+            self.commit(effects);
+        }
+    }
+
+    /// Internal native ownership settlement, including after a space switch.
+    /// User-facing Close retains its focused-scope authorization above.
+    pub(super) fn close_owned_native_tab(&mut self, child: ItemId) {
+        let Some(opener) = self.native_openers.remove(&child) else {
+            return;
+        };
+        if self.item_in_focused_scope(child) {
+            if self
+                .windows
+                .focused()
+                .is_some_and(|window| window.active == Some(child))
+            {
+                let effects = self.focus_tab(opener.source);
+                self.commit(effects);
+            }
+            self.close(child);
+            return;
+        }
+        self.cancel_page_permission_for_item(child);
+        self.cancel_pending_presentation(child);
+        self.cancel_favicon_attempt(child);
+        self.cancel_discard_probe(child);
+        let windows: Vec<_> = self.windows.iter().map(|window| window.id).collect();
+        for id in windows {
+            if let Some(window) = self.windows.get_mut(id) {
+                if window.active == Some(child) {
+                    window.active = None;
+                }
+                if let Some(tree) = window.splits.take() {
+                    window.splits = tree.remove(child);
+                }
+            }
+        }
+        let effects = self.items.remove(child);
+        self.commit(effects);
     }
 
     /// `x`/`y` are window coords (the desktop layer normalizes per platform).

@@ -43,6 +43,8 @@ enum EventPermitState {
     #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
     Inactive,
     Bound(Weak<AtomicBool>),
+    #[cfg(any(target_os = "windows", test))]
+    DownloadOnly,
     Revoked,
 }
 
@@ -72,8 +74,22 @@ impl EventPermit {
                 *state = EventPermitState::Bound(Arc::downgrade(token));
                 true
             }
+            #[cfg(any(target_os = "windows", test))]
+            EventPermitState::DownloadOnly => false,
             EventPermitState::Bound(_) | EventPermitState::Revoked => false,
         }
+    }
+
+    /// Terminal retirement: only a blank parking navigation remains possible;
+    /// no shell events, new downloads or rebinding can regain page authority.
+    #[cfg(any(target_os = "windows", test))]
+    pub(super) fn retire_for_download(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if !matches!(*state, EventPermitState::Bound(_)) {
+            return false;
+        }
+        *state = EventPermitState::DownloadOnly;
+        true
     }
 
     pub(super) fn revoke(&self) {
@@ -94,6 +110,8 @@ impl EventPermit {
                 .filter(|token| token.load(Ordering::Acquire)),
             #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
             EventPermitState::Inactive => None,
+            #[cfg(any(target_os = "windows", test))]
+            EventPermitState::DownloadOnly => None,
             EventPermitState::Revoked => None,
         }
     }
@@ -121,6 +139,8 @@ impl EventPermit {
             EventPermitState::Bound(token) => token
                 .upgrade()
                 .is_some_and(|token| token.load(Ordering::Acquire)),
+            #[cfg(any(target_os = "windows", test))]
+            EventPermitState::DownloadOnly => target == "about:blank",
             EventPermitState::Revoked => false,
         }
     }
@@ -264,6 +284,7 @@ pub(super) fn queue_navigation_failure(
     navigation: &NavigationEpochTracker,
     failed: NavigationEpoch,
     restored: Option<NavigationEpoch>,
+    cancelled: bool,
 ) {
     if permit.active_token().is_none() {
         return;
@@ -271,7 +292,14 @@ pub(super) fn queue_navigation_failure(
     let queued_permit = permit.clone();
     let queued_navigation = navigation.clone();
     with_navigation_settlement(id, move |host| {
-        host.settle_navigation_failure(id, &queued_permit, &queued_navigation, failed, restored);
+        host.settle_navigation_failure(
+            id,
+            &queued_permit,
+            &queued_navigation,
+            failed,
+            restored,
+            cancelled,
+        );
     });
 }
 

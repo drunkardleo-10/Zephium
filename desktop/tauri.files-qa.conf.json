@@ -1,0 +1,23 @@
+{
+  "productName": "Zephium Files Integration QA",
+  "identifier": "app.zephium.files-integration-qa",
+  "build": { "devUrl": null },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "title": "Zephium Files Integration QA",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 680,
+        "minHeight": 480,
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay",
+        "transparent": true,
+        "trafficLightPosition": { "x": 7, "y": 25 },
+        "url": "browser.html"
+      }
+    ]
+  }
+}

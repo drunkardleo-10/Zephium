@@ -1,118 +1,38 @@
-@import "tailwindcss";
+@import "./axes/bootstrap.css";
+@import "tailwindcss" source("../");
+@import "./tokens/primitive.css";
+@import "./tokens.css";
+@import "./axes/tint.css";
+@import "./axes/density.css";
+@import "./axes/contrast.css";
+@import "./axes/material.css";
+@import "./axes/motion.css";
+@import "./controls.css";
+@import "./favicon.css";
+@import "./browser.css";
+@source not "../**/*.test.ts";
+@source not "../**/tests";
+@source not "../features/work";
+@source not "../shared/testing";
+@source not "../features/notes";
+@source not "../features/tasks";
+@source not "../domain/resources";
+
+/* "blur" is an event name in the chrome's code, never a class: the blur
+   utility is forbidden here, and must not be generated from the word. */
+@source not inline("blur");
 
 /*
- * Zephium's chrome is deliberately quiet: material, shape, density and
- * typography carry the interface instead of decorative color.
- *
- * Interaction surfaces are translucent overlays, never solid fills. The
- * sidebar is transparent over native vibrancy and acrylic, so an opaque fill
- * punches a hole through the material and flattens the whole column.
+ * Zephium's chrome is tonal. Surfaces step by luminance, not by outline;
+ * depth exists only where something genuinely floats or is physically moved
+ * (a popover, the launcher, a switch thumb, a segmented pill). Everything
+ * else is a flat translucent fill on a real native material, so the same
+ * recipe reads the same over Liquid Glass, vibrancy, acrylic and opaque
+ * pages.
  *
  * --color-canvas must stay byte-identical to the bootstrap paint in
- * index.html; it is the startup presentation background.
+ * bootstrap.css; it is the startup presentation background.
  */
-@theme {
-  --color-canvas: #1b1b1f;
-  --color-chrome: #17171b;
-  --color-surface: #212128;
-  --color-raised: #2a2a32;
-
-  --color-fill: #ffffff0d;
-  --color-fill-hover: #ffffff17;
-  --color-fill-active: #ffffff29;
-  --color-fill-pressed: #ffffff33;
-
-  --color-border: #ffffff14;
-  --color-border-strong: #ffffff2b;
-
-  --color-text: #f2f2f5;
-  --color-muted: #a2a2ac;
-  --color-faint: #6e6e78;
-
-  --color-accent: #9db2d4;
-  --color-accent-soft: #9db2d43d;
-  --color-danger: #e08186;
-  --color-success: #7cc09c;
-  --color-warning: #d3b177;
-  --color-info: #8bb0dc;
-
-  --radius-xs: 5px;
-  --radius-sm: 7px;
-  --radius-md: 9px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
-
-  /* Matches the native content view's layer radius, so the new tab pane and a
-     live page occupy the same shape. Changing one requires changing both. */
-  --content-radius: 12px;
-
-  /* Traffic lights sit at window (7, 22) and the chrome WebView starts at the
-     8px window padding, so within the chrome they span y 14..28 and end near
-     x 53. The header centres on that band and clears that extent. */
-  --titlebar-height: 42px;
-  --traffic-light-inset: 60px;
-
-  --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.22);
-  --shadow-field: inset 0 1px 0 rgb(255 255 255 / 0.03);
-  --shadow-focus: 0 0 0 2px var(--color-accent-soft);
-  --shadow-overlay:
-    0 20px 48px rgb(0 0 0 / 0.44), 0 4px 12px rgb(0 0 0 / 0.22),
-    inset 0 1px 0 rgb(255 255 255 / 0.06);
-
-  --font-sans:
-    "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  --font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", monospace;
-
-  --ease-out-quiet: cubic-bezier(0.22, 0.61, 0.36, 1);
-  --ease-inout-quiet: cubic-bezier(0.4, 0, 0.2, 1);
-
-  --motion-fast: 120ms;
-  --motion-base: 180ms;
-  --motion-slow: 240ms;
-
-  /* Favicon plate. Inactive rows desaturate so mixed-brightness site icons
-     stop competing with each other and with the surface. */
-  --favicon-rest-opacity: 0.82;
-  --favicon-rest-saturation: 0.85;
-}
-
-[data-theme="light"] {
-  --color-canvas: #f4f4f6;
-  --color-chrome: #ebebee;
-  --color-surface: #fafafb;
-  --color-raised: #ffffff;
-
-  /* Light chrome gains elevation by getting brighter, not darker, so the
-     active state is a raised white surface rather than a heavier overlay. */
-  --color-fill: #17171c0a;
-  --color-fill-hover: #17171c14;
-  --color-fill-active: #ffffffe6;
-  --color-fill-pressed: #17171c1f;
-
-  --color-border: #17171c14;
-  --color-border-strong: #17171c2e;
-
-  --color-text: #1d1d21;
-  --color-muted: #5f5f69;
-  --color-faint: #8d8d97;
-
-  --color-accent: #4a6285;
-  --color-accent-soft: #4a628533;
-  --color-danger: #b34a51;
-  --color-success: #3b7b5c;
-  --color-warning: #8a682e;
-  --color-info: #4a6a95;
-
-  --shadow-raised: 0 1px 2px rgb(22 22 28 / 0.09), 0 0 0 1px rgb(22 22 28 / 0.04);
-  --shadow-field: inset 0 1px 0 rgb(255 255 255 / 0.6);
-  --shadow-overlay:
-    0 20px 48px rgb(28 28 34 / 0.18), 0 4px 12px rgb(28 28 34 / 0.08),
-    inset 0 1px 0 rgb(255 255 255 / 0.7);
-
-  --favicon-rest-opacity: 0.9;
-  --favicon-rest-saturation: 0.92;
-}
-
 html,
 body,
 #root {
@@ -133,9 +53,11 @@ body {
   background: var(--color-canvas);
   color: var(--color-text);
   font-family: var(--font-sans);
-  font-size: 13.5px;
+  font-size: 13px;
   font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  font-kerning: normal;
+  font-optical-sizing: auto;
+  text-rendering: optimizelegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -149,190 +71,114 @@ button {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Material activates only after native capability discovery. The bootstrap
-   document stays byte-for-byte opaque until that privileged query settles. */
-:root[data-material="vibrancy"],
-:root[data-material="vibrancy"] body,
-:root[data-material="vibrancy"] #root,
-:root[data-material="acrylic"],
-:root[data-material="acrylic"] body,
-:root[data-material="acrylic"] #root {
-  background: transparent;
+/* The chrome is the native material and nothing else. A wash here paints a
+   rectangle that does not reach the window's own edges, so the tint stops
+   short of the frame and the seam it was meant to remove reappears as a
+   visible plate. Tinting the window belongs to the native layer, not to us.
+   The opaque tier is the exception: with no material there is nothing to
+   look through, so the column has to supply its own ground. */
+:root[data-material="none"] .browser-sidebar {
+  background: var(--color-chrome);
 }
 
-:root[data-material="vibrancy"] aside,
-:root[data-material="vibrancy"] .launcher-shell,
-:root[data-material="acrylic"] aside,
-:root[data-material="acrylic"] .launcher-shell {
-  background: transparent;
-}
-
-/* Acrylic on Win11 22H2+ ignores the native tint parameter entirely, so the
-   interface color layer is ours. This wash is the premium lever. */
-:root[data-material="acrylic"] aside {
-  background: color-mix(in srgb, var(--color-chrome) 74%, transparent);
-}
-
-/* The launcher floats over arbitrary desktop content, so bare vibrancy leaves
-   it too thin to read against a bright wallpaper. A small wash restores
-   contrast without flattening the material. */
-:root[data-material="vibrancy"] .launcher-shell {
-  background: color-mix(in srgb, var(--color-chrome) 52%, transparent);
-}
-
-:root[data-material="acrylic"] .launcher-shell {
-  background: color-mix(in srgb, var(--color-chrome) 82%, transparent);
-}
-
+/* Only the opaque tier draws its own window edge; the others get one from the
+   native material's own rounded layer. */
 :root[data-material="none"] .shell {
   overflow: hidden;
   border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-card);
   background: var(--color-canvas);
 }
 
-:root[data-material="none"] aside,
-:root[data-material="none"] .launcher-shell {
-  background: var(--color-chrome);
-}
-
-.chrome-button,
-.window-button,
-.icon-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  border-radius: var(--radius-sm);
-  color: var(--color-muted);
-  outline: none;
-  transition:
-    color var(--motion-fast) var(--ease-out-quiet),
-    background-color var(--motion-fast) var(--ease-out-quiet);
-}
-
-.chrome-button {
-  width: 28px;
-  height: 28px;
-}
-
-.window-button {
-  width: 28px;
-  height: 22px;
-}
-
-.icon-button {
-  width: var(--icon-button-size, 28px);
-  height: var(--icon-button-size, 28px);
-}
-
-.chrome-button:hover,
-.window-button:hover,
-.icon-button:hover,
-.chrome-button-active {
-  background: var(--color-fill-hover);
-  color: var(--color-text);
-}
-
-.chrome-button:active,
-.window-button:active,
-.icon-button:active {
-  background: var(--color-fill-pressed);
-}
-
-.icon-button-active {
-  background: var(--color-fill-active);
-  color: var(--color-text);
-  box-shadow: inset 0 0 0 1px var(--color-border);
-}
-
-.icon-button:disabled {
-  cursor: default;
-  color: var(--color-faint);
-  opacity: 0.45;
-}
-
-.icon-button:disabled:hover {
-  background: transparent;
-  color: var(--color-faint);
-}
-
-.window-button-close:hover {
-  background: color-mix(in srgb, var(--color-danger) 20%, transparent);
-  color: var(--color-danger);
-}
-
 /* Stands in for the content WebView when a tab has no page yet, so switching
-   between a live page and the new tab never changes the window's shape. */
+   between a live page and the new tab never changes the window's shape.
+   Solid, and deliberately: a live page is opaque, so a translucent new tab or
+   settings sheet makes the same rectangle change substance depending on what
+   is inside it. The chrome is the part you look through; the page is the part
+   you look at, and it reads as a page only if it is one colour.
+   No outline either. A 1px rectangle drawn around the content was the single
+   thing making this window read as a slab dropped into a frame: an edge states
+   a boundary the material has already made, and states it hard. */
 .content-pane {
   border-radius: var(--content-radius);
-  background: var(--color-fill);
-  box-shadow: inset 0 0 0 1px var(--color-border);
-}
-
-:root[data-material="none"] .content-pane {
-  background: var(--color-chrome);
-}
-
-/* Site icons are arbitrary third-party artwork. Resting rows dim and
-   desaturate them so the column reads as one surface. */
-.favicon-plate {
-  opacity: var(--favicon-rest-opacity);
-  filter: saturate(var(--favicon-rest-saturation));
-  transition:
-    opacity var(--motion-fast) var(--ease-out-quiet),
-    filter var(--motion-fast) var(--ease-out-quiet);
-}
-
-.favicon-plate-lit {
-  opacity: 1;
-  filter: none;
+  background: var(--color-page);
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--color-accent) 32%, transparent);
+  background: color-mix(in srgb, var(--color-text) 22%, transparent);
 }
 
+/* Pointer focus is shown by the control's own state. Only keyboard focus
+   draws a ring, and it is neutral. */
 :where(button, [role="button"], [role="separator"], [role="option"]):focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--color-accent) 72%, transparent);
-  outline-offset: -2px;
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
 }
 
-input:focus-visible {
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
   outline: none;
+}
+
+/*
+ * Scrollbars are off everywhere and opted into by name. A browser chrome is
+ * full of things that scroll — a tab column, a menu, a task list, a composer —
+ * and a bar on each one turns the window into a grid of gutters. Content still
+ * scrolls; the bar is simply not drawn.
+ *
+ * Where one is warranted it is the thumb and nothing else: no track, no
+ * buttons, no corner. The gutter is 12px so the layout never shifts when the
+ * thumb appears, and the thumb is painted inside a 4px transparent border, so
+ * what you see is a 4px capsule floating in the margin rather than a bar
+ * bolted to the edge. It is invisible until the pointer is in the region,
+ * which is what the platform's own overlay bars do — and unlike them it
+ * cannot land on top of the content, because the gutter was always there.
+ */
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.scrolls::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.scrolls::-webkit-scrollbar-track,
+.scrolls::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.scrolls::-webkit-scrollbar-thumb {
+  border: 4px solid transparent;
+  border-radius: var(--radius-capsule);
+  background-color: transparent;
+  background-clip: padding-box;
+  transition: background-color var(--motion-base) var(--ease-smooth);
+}
+
+.scrolls:hover::-webkit-scrollbar-thumb,
+.scrolls:focus-within::-webkit-scrollbar-thumb {
+  background-color: var(--scroll-thumb);
+}
+
+.scrolls::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scroll-thumb-hover);
 }
 
 kbd {
   min-width: 19px;
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-inset);
   background: var(--color-fill);
   padding: 1px 5px;
-  color: var(--color-faint);
+  color: var(--color-muted);
   font-family: var(--font-sans);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
   line-height: 15px;
   text-align: center;
   box-shadow: inset 0 0 0 1px var(--color-border);
-}
-
-/*
- * Scrollbars are deliberately left to the platform. WebKit and WebView2 both
- * render auto-hiding overlay scrollbars that consume no layout width; any
- * `scrollbar-width`, `scrollbar-color` or `::-webkit-scrollbar` rule opts out
- * of that and forces a classic space-consuming gutter on Windows and Linux.
- * See docs round 12. Do not reintroduce scrollbar styling here.
- */
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    scroll-behavior: auto !important;
-    transition-duration: 0.01ms !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-  }
 }
 
 @media (forced-colors: active) {
@@ -344,4 +190,37 @@ kbd {
   .icon-button-active {
     border: 1px solid Highlight;
   }
+}
+
+@media (forced-colors: active) {
+  :root body,
+  :root #root,
+  :root .browser-sidebar {
+    background: Canvas;
+    color: CanvasText;
+  }
+}
+
+/* Live Browse adopts the same focus, selection and control vocabulary. */
+.browse-tab:focus-within {
+  background: var(--row-hover);
+}
+.browse-tab[data-selected="true"]:focus-within {
+  background: var(--row-active);
+}
+@media (forced-colors: active) {
+  .browse-tab[data-selected="true"] {
+    outline: 1px solid Highlight;
+  }
+}
+
+/* Native material samples arbitrary content. Keep text stronger than on solid
+   surfaces, with hierarchy carried by shape and weight rather than opacity. */
+:root[data-material="liquid_glass"] .browser-sidebar {
+  --color-muted: rgb(244 244 246 / 0.78);
+  --color-faint: rgb(244 244 246 / 0.55);
+}
+:root[data-material="liquid_glass"][data-theme="light"] .browser-sidebar {
+  --color-muted: rgb(27 28 33 / 0.72);
+  --color-faint: rgb(27 28 33 / 0.55);
 }
