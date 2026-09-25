@@ -10,7 +10,13 @@
   import type { CanvasItem } from "../lib/canvas-model";
   import AgentOrb from "./cards/AgentOrb.svelte";
   import Icon from "$shared/ui/Icon";
-  import { ArrowDown01Icon, ArrowRight02Icon, ArrowUp02Icon, StopIcon } from "../lib/icons";
+  import {
+    ArrowDown01Icon,
+    ArrowRight02Icon,
+    ArrowUp02Icon,
+    NoteAddIcon,
+    StopIcon,
+  } from "../lib/icons";
   import * as m from "$shared/i18n/messages";
   let {
     session,
@@ -19,6 +25,7 @@
     waiting = null,
     problem = null,
     ondismissproblem,
+    writeup,
     onfocusagent,
     onwaitingpage,
     onopenpage,
@@ -40,6 +47,8 @@
     /** One line about something the person asked for that did not land. */
     problem?: string | null;
     ondismissproblem?: () => void;
+    /** A document result can be written up as the person's note: an action, not a follow-up. */
+    writeup?: () => void;
     onfocusagent?: (id: string) => void;
     /** Pans to the waiting page card and focuses it. */
     onwaitingpage?: (card: string) => void;
@@ -235,6 +244,8 @@
   });
   const settled = $derived(!live && !question && !proposal);
   const followups = $derived(settled ? session.followups.slice(0, 3) : []);
+  const writeupOffer = $derived(settled ? writeup : undefined);
+  const nextRows = $derived(followups.length > 0 || !!writeupOffer);
   const preview = $derived(draft.trim().slice(0, 60));
 
   /** What the person opened the capsule for; a question takes it whenever it is open. */
@@ -251,7 +262,7 @@
         ? "agents"
         : question
           ? "question"
-          : want === "next" && followups.length
+          : want === "next" && nextRows
             ? "next"
             : want === "full" && clipped
               ? "full"
@@ -375,6 +386,19 @@
                   >
                 </li>
               {/each}
+              {#if writeupOffer}{#if followups.length}<li class="rule" aria-hidden="true"></li>{/if}
+                <li>
+                  <button
+                    type="button"
+                    class="row writeup"
+                    onclick={() => {
+                      want = null;
+                      writeupOffer?.();
+                    }}
+                    ><Icon icon={NoteAddIcon} size={14} /><span>{m.work_line_write_note()}</span
+                    ></button
+                  >
+                </li>{/if}
             </ul>
           {:else if held === "full"}
             <p class="full">{headline}</p>
@@ -485,7 +509,7 @@
             <button type="button" class="action" onclick={() => (want = "answer")}
               >{m.work_line_answer()}</button
             >
-          {:else if followups.length}
+          {:else if nextRows}
             <!-- The disclosure of the capsule's growth, not a second surface. -->
             <button
               type="button"
@@ -857,6 +881,22 @@
 
   .row:disabled {
     color: var(--color-faint);
+  }
+
+  .rule {
+    block-size: 1px;
+    margin: 3px 10px;
+    background: var(--color-border);
+  }
+
+  /* An action of the frontend's own, not words for the agent: its glyph leads. */
+  .writeup {
+    justify-content: flex-start;
+  }
+
+  .writeup span {
+    flex: 1;
+    text-align: start;
   }
 
   .row:hover:not(:disabled) {

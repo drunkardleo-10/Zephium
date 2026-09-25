@@ -28,6 +28,7 @@
     onopen,
     onfile,
     primary,
+    secondary,
   }: {
     session: WorkSession;
     reference: ResultReference;
@@ -39,6 +40,8 @@
     onfile?: (record: string) => void;
     /** Make tasks for a plan, Save as note for a document. */
     primary?: LiftAction;
+    /** Save as note beside a plan's Make tasks. */
+    secondary?: LiftAction;
   } = $props();
   const execution = $derived(
     session.projection?.work.id === reference.objective
@@ -182,7 +185,14 @@
 
 {#if view}
   <section class="result">
-    <LiftHeader {kind} title={view.title} {meta} {icon} {primary} />
+    <LiftHeader {kind} title={view.title} {meta} {icon} {primary}>
+      {#snippet actions()}{#if secondary}<Button
+            size="compact"
+            disabled={secondary.disabled}
+            title={secondary.title}
+            onclick={secondary.onclick}>{secondary.label}</Button
+          >{/if}{/snippet}
+    </LiftHeader>
     {#if compare}<Compare
         model={compare}
         correctable={settled}

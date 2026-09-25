@@ -66,6 +66,8 @@
   import { youtubeThumbnail } from "../lib/link-media";
   import { resultPlan, stepResult } from "../lib/plan-steps";
   import { stepPlan, WorkTasks, workTasksKey, type StepPlan } from "../lib/work-tasks";
+  import { documentMarkdown, resultKey, WorkNotes } from "../lib/work-notes";
+  import type { LiftAction } from "./LiftHeader.svelte";
   import { isAgentExecution, isLive } from "../lib/agent-steps";
   import { environmentPlan } from "../lib/project-environment-plan";
   import {
@@ -1095,10 +1097,59 @@
     void taskList.load(id);
     tasksOpen = true;
   }
-  /** The lift's one action for a result: Make tasks for a plan. */
-  function resultAction(id: string) {
+  const workNotes = new WorkNotes();
+  /** A document result written as the person's note, only when they ask. */
+  async function saveNote(id: string) {
+    const reference = results.references.get(id);
+    const view = items.find((item) => item.id === id)?.artifact;
+    const markdown = view ? documentMarkdown(view) : null;
+    if (!reference || !markdown) return;
+    await workNotes.save(resultKey(reference), markdown, notes);
+  }
+  function openNote(id: string) {
+    chrome?.close();
+    lifted = null;
+    notesOpen = true;
+    void notes?.open(id);
+  }
+  /** Save as note until the note exists, then Open note. */
+  function noteAction(id: string): LiftAction | undefined {
+    const reference = results.references.get(id);
+    if (!reference || items.find((item) => item.id === id)?.artifact?.content.kind !== "document")
+      return undefined;
+    const key = resultKey(reference);
+    const note = workNotes.note(key);
+    if (note) return { label: m.work_open_note(), onclick: () => openNote(note) };
+    const saving = workNotes.saving(key);
+    return {
+      label: saving ? m.work_saving_note() : m.work_save_note(),
+      disabled: saving,
+      onclick: () => void saveNote(id),
+    };
+  }
+  /** The document the agent line's run just wrote, if it wrote one. */
+  const lineDocument = $derived.by(() => {
+    const projection = objectiveSession?.projection;
+    const execution = projection?.executions.at(-1);
+    if (!projection || !execution) return null;
+    for (const [id, reference] of results.references)
+      if (
+        reference.objective === projection.work.id &&
+        reference.execution === execution.id &&
+        items.find((item) => item.id === id)?.artifact?.content.kind === "document"
+      )
+        return { id, key: resultKey(reference) };
+    return null;
+  });
+  const writeup = $derived(
+    lineDocument && !workNotes.note(lineDocument.key) && !workNotes.saving(lineDocument.key)
+      ? () => void saveNote(lineDocument.id)
+      : undefined,
+  );
+  /** The lift's one action for a result: Make tasks for a plan, Save as note for a document. */
+  function resultAction(id: string): LiftAction | undefined {
     const state = workTasks.state(id);
-    if (state === "none") return undefined;
+    if (state === "none") return noteAction(id);
     return {
       label:
         state === "made"
@@ -1999,8 +2050,16 @@
             lifted = { id: "", origin: null, proposal: step };
           }}
           waiting={agentWaiting}
-          problem={workTasks.failed ? m.work_tasks_failed() : null}
-          ondismissproblem={() => workTasks.dismiss()}
+          problem={workTasks.failed
+            ? m.work_tasks_failed()
+            : workNotes.failed
+              ? m.work_note_failed()
+              : null}
+          ondismissproblem={() => {
+            workTasks.dismiss();
+            workNotes.dismiss();
+          }}
+          {writeup}
           onwaitingpage={(card: string) => {
             chrome?.close();
             canvasRef?.focusCard(card);
@@ -2386,6 +2445,9 @@
                   reference={results.references.get(liftedItem!.id)!}
                   source={liftSource}
                   primary={resultAction(liftedItem!.id)}
+                  secondary={workTasks.state(liftedItem!.id) === "none"
+                    ? undefined
+                    : noteAction(liftedItem!.id)}
                   {pictures}
                   onopen={openCitation}
                   onfile={(record: string) =>
