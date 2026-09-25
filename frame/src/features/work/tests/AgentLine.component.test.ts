@@ -177,6 +177,20 @@ test("follow-ups wait behind Next and open as rows, one whole request each", asy
   await expect.element(next).toHaveAttribute("aria-expanded", "true");
   const rows = screen.container.querySelectorAll(".expand.shown .rows li button");
   expect([...rows].map((row) => row.textContent?.trim())).toEqual(followups);
+  // The capsule itself grew: one element holds the rows above its line.
+  const capsules = screen.container.querySelectorAll(".capsule");
+  expect(capsules).toHaveLength(1);
+  expect(capsules[0]!.querySelector(".expand.shown")).not.toBeNull();
+  expect(capsules[0]!.lastElementChild?.classList.contains("line")).toBe(true);
+  await expect
+    .poll(() => screen.container.querySelector<HTMLElement>(".expand")!.offsetHeight)
+    .toBeGreaterThan(80);
+  await next.click();
+  await expect.element(next).toHaveAttribute("aria-expanded", "false");
+  await expect
+    .poll(() => screen.container.querySelector<HTMLElement>(".expand")!.offsetHeight)
+    .toBe(0);
+  await next.click();
   await screen.getByRole("button", { name: "Compare the two cheapest", exact: true }).click();
   expect(continueWith).toHaveBeenCalledExactlyOnceWith("Compare the two cheapest");
   await screen.unmount();

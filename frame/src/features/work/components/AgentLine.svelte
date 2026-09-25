@@ -232,9 +232,8 @@
   const followups = $derived(settled ? session.followups.slice(0, 3) : []);
   const preview = $derived(draft.trim().slice(0, 60));
 
-  let open = $state(false);
-  /** What the person opened the panel for; a question takes the panel whenever it is open. */
-  let want = $state<"answer" | "next" | "full" | null>(null);
+  /** What the person opened the capsule for; a question takes it whenever it is open. */
+  let want = $state<"agents" | "answer" | "next" | "full" | null>(null);
   let answer = $state("");
   let host = $state<HTMLElement>();
   /** The headline is one line; when it is clipped its words open the whole of it. */
@@ -243,15 +242,22 @@
   const panel = $derived(
     want === null
       ? null
-      : question
-        ? "question"
-        : want === "next" && followups.length
-          ? "next"
-          : want === "full" && clipped
-            ? "full"
-            : null,
+      : want === "agents"
+        ? "agents"
+        : question
+          ? "question"
+          : want === "next" && followups.length
+            ? "next"
+            : want === "full" && clipped
+              ? "full"
+              : null,
   );
   const expanded = $derived(panel !== null);
+  /** What the capsule holds while it closes, so it shrinks around its rows, not around nothing. */
+  let held = $state<NonNullable<typeof panel> | null>(null);
+  $effect(() => {
+    if (panel) held = panel;
+  });
   $effect(() => {
     if (want && !panel) want = null;
   });
@@ -266,7 +272,7 @@
     return () => observer.disconnect();
   });
   $effect(() => {
-    if (!live) open = false;
+    if (!live && want === "agents") untrack(() => (want = null));
   });
   // The oldest queued message rides on as soon as the run in flight closes.
   let sending = false;
@@ -314,189 +320,198 @@
 
 <svelte:window
   onpointerdown={(event) => {
-    if (open && event.target instanceof Node && host && !host.contains(event.target)) open = false;
+    if (expanded && event.target instanceof Node && host && !host.contains(event.target))
+      want = null;
   }}
   onkeydown={(event) => {
-    if (event.key !== "Escape" || (!open && !expanded)) return;
+    if (event.key !== "Escape" || !expanded) return;
     event.stopPropagation();
-    open = false;
     want = null;
   }}
 />
 
 {#if work}
   <section class="agent-line" class:settled bind:this={host} aria-label={m.work_agent_line()}>
-    {#if open}
-      <ul class="roster" aria-label={m.work_line_agents()}>
-        {#each agents as agent (agent.id)}
-          <li>
-            <button
-              type="button"
-              onclick={() => {
-                open = false;
-                onfocusagent?.(agent.id);
+    <!-- One capsule: it grows upward into its list and folds back into the line. -->
+    <div class="capsule" class:open={expanded}>
+      <div class="expand" class:shown={expanded} aria-hidden={!expanded} inert={!expanded}>
+        <div class="expand-inner">
+          {#if held === "agents"}
+            <ul class="rows" aria-label={m.work_line_agents()}>
+              {#each agents as agent (agent.id)}
+                <li>
+                  <button
+                    type="button"
+                    class="row"
+                    onclick={() => {
+                      want = null;
+                      onfocusagent?.(agent.id);
+                    }}
+                  >
+                    <AgentAvatar seed={agent.agent?.seed ?? 0} size={18} active={live} />
+                    <span class="who">{agent.title}</span>
+                    <span class="doing">{agent.status}</span>
+                  </button>
+                </li>
+              {:else}<li class="none">{m.work_line_no_agents()}</li>{/each}
+            </ul>
+          {:else if held === "next"}
+            <ul class="rows" aria-label={m.work_line_next()}>
+              {#each followups as followup, index (index)}
+                <li>
+                  <button
+                    type="button"
+                    class="row"
+                    disabled={blocked}
+                    onclick={() => {
+                      want = null;
+                      void session.continueWith(followup);
+                    }}><span>{followup}</span><Icon icon={ArrowRight02Icon} size={13} /></button
+                  >
+                </li>
+              {/each}
+            </ul>
+          {:else if held === "full"}
+            <p class="full">{headline}</p>
+          {:else if held === "question" && question}
+            <form
+              onsubmit={(event) => {
+                event.preventDefault();
+                void submitAnswer();
               }}
             >
-              <AgentAvatar seed={agent.agent?.seed ?? 0} size={18} active={live} />
-              <span class="who">{agent.title}</span>
-              <span class="doing">{agent.status}</span>
+              <label for={`${id}-answer`}>{question.prompt}</label>
+              <div class="options">
+                {#each question.options as option, index (index)}
+                  <button
+                    type="button"
+                    class="chip"
+                    disabled={blocked}
+                    onclick={() => (answer = option)}>{option}</button
+                  >
+                {/each}
+              </div>
+              <div class="answer">
+                <input
+                  id={`${id}-answer`}
+                  maxlength="8192"
+                  placeholder={m.work_line_answer_placeholder()}
+                  bind:value={answer}
+                  disabled={blocked}
+                />
+                <button
+                  type="submit"
+                  class="send"
+                  aria-label={m.work_line_send_answer()}
+                  disabled={blocked || !answer.trim()}
+                >
+                  <Icon icon={ArrowUp02Icon} size={15} strokeWidth={2} />
+                </button>
+              </div>
+            </form>
+          {/if}
+        </div>
+      </div>
+      <div class="line">
+        <button
+          type="button"
+          class="avatar"
+          aria-expanded={panel === "agents"}
+          aria-label={m.work_line_agents()}
+          onclick={() => (want = want === "agents" ? null : "agents")}
+        >
+          <AgentAvatar seed={agents[0]?.agent?.seed ?? 0} size={22} active={live} />
+        </button>
+        <div class="state">
+          {#if waiting}
+            <button
+              type="button"
+              class="words waiting"
+              onclick={() => onwaitingpage?.(waiting.card)}
+            >
+              {headline}{#if cardCountdown(waiting.remaining)}<span class="left"
+                  >{cardCountdown(waiting.remaining)}</span
+                >{/if}
             </button>
-          </li>
-        {:else}<li class="none">{m.work_line_no_agents()}</li>{/each}
-      </ul>
-    {/if}
-    <div class="expand" class:shown={expanded} aria-hidden={!expanded}>
-      <div class="expand-inner">
-        {#if panel === "next"}
-          <ul class="rows" aria-label={m.work_line_next()}>
-            {#each followups as followup, index (index)}
-              <li>
+          {:else}
+            {#key headline}
+              {#if clipped}
                 <button
                   type="button"
-                  class="row"
-                  disabled={blocked}
-                  onclick={() => {
-                    want = null;
-                    void session.continueWith(followup);
-                  }}><span>{followup}</span><Icon icon={ArrowRight02Icon} size={13} /></button
+                  class="words more"
+                  aria-expanded={panel === "full"}
+                  onclick={() => (want = want === "full" ? null : "full")}
+                  ><span class="text" bind:this={words}>{headline}</span><Icon
+                    icon={ArrowDown01Icon}
+                    size={12}
+                  /></button
                 >
-              </li>
-            {/each}
-          </ul>
-        {:else if panel === "full"}
-          <p class="full">{headline}</p>
-        {:else if panel === "question" && question}
-          <form
-            onsubmit={(event) => {
-              event.preventDefault();
-              void submitAnswer();
-            }}
-          >
-            <label for={`${id}-answer`}>{question.prompt}</label>
-            <div class="options">
-              {#each question.options as option, index (index)}
-                <button
-                  type="button"
-                  class="chip"
-                  disabled={blocked}
-                  onclick={() => (answer = option)}>{option}</button
-                >
-              {/each}
-            </div>
-            <div class="answer">
-              <input
-                id={`${id}-answer`}
-                maxlength="8192"
-                placeholder={m.work_line_answer_placeholder()}
-                bind:value={answer}
-                disabled={blocked}
-              />
-              <button
-                type="submit"
-                class="send"
-                aria-label={m.work_line_send_answer()}
-                disabled={blocked || !answer.trim()}
-              >
-                <Icon icon={ArrowUp02Icon} size={15} strokeWidth={2} />
-              </button>
-            </div>
-          </form>
-        {/if}
-      </div>
-    </div>
-    <div class="line">
-      <button
-        type="button"
-        class="avatar"
-        aria-expanded={open}
-        aria-label={m.work_line_agents()}
-        onclick={() => (open = !open)}
-      >
-        <AgentAvatar seed={agents[0]?.agent?.seed ?? 0} size={22} active={live} />
-      </button>
-      <div class="state">
-        {#if waiting}
-          <button type="button" class="words waiting" onclick={() => onwaitingpage?.(waiting.card)}>
-            {headline}{#if cardCountdown(waiting.remaining)}<span class="left"
-                >{cardCountdown(waiting.remaining)}</span
-              >{/if}
-          </button>
-        {:else}
-          {#key headline}
-            {#if clipped}
-              <button
-                type="button"
-                class="words more"
-                aria-expanded={panel === "full"}
-                onclick={() => (want = want === "full" ? null : "full")}
-                ><span class="text" bind:this={words}>{headline}</span><Icon
-                  icon={ArrowDown01Icon}
-                  size={12}
-                /></button
-              >
-            {:else}
-              <span class="words"><span class="text" bind:this={words}>{headline}</span></span>
-            {/if}
-          {/key}
-        {/if}
-        {#if live && preview}<span class="draft">{preview}</span>{/if}
-      </div>
-      <div class="controls">
-        {#if live && preview}
-          <button
-            type="button"
-            class="action"
-            title={m.work_line_steer_hint()}
-            onclick={() => void steer()}>{m.work_line_steer()}</button
-          >
-        {:else if proposal}
-          <button
-            type="button"
-            class="action"
-            disabled={blocked}
-            onclick={() => onreview?.(proposal.id)}>{m.work_line_review()}</button
-          >
-        {:else if question && !expanded}
-          <button type="button" class="action" onclick={() => (want = "answer")}
-            >{m.work_line_answer()}</button
-          >
-        {:else if followups.length}
-          <button
-            type="button"
-            class="action"
-            aria-expanded={panel === "next"}
-            onclick={() => (want = want === "next" ? null : "next")}>{m.work_line_next()}</button
-          >
-        {:else if pageHandoff}
-          <button type="button" class="action" disabled={blocked} onclick={() => void openPage()}
-            >{m.work_line_open()}</button
-          >
-        {:else if approvalDraft && !live}
-          <button
-            type="button"
-            class="action"
-            disabled={blocked}
-            onclick={() => {
-              if (approvalDraft)
-                void session.execute(
-                  { kind: "approve", spec: approvalDraft.spec },
-                  approvalDraft.expected_revision,
-                );
-            }}>{m.work_line_approve()}</button
-          >
-        {/if}
-        {#if live}
-          <button
-            type="button"
-            class="quiet"
-            aria-label={m.work_line_stop()}
-            title={m.work_line_stop()}
-            disabled={blocked}
-            onclick={() => void stop()}
-          >
-            <Icon icon={StopIcon} size={14} />
-          </button>
-        {/if}
+              {:else}
+                <span class="words"><span class="text" bind:this={words}>{headline}</span></span>
+              {/if}
+            {/key}
+          {/if}
+          {#if live && preview}<span class="draft">{preview}</span>{/if}
+        </div>
+        <div class="controls">
+          {#if live && preview}
+            <button
+              type="button"
+              class="action"
+              title={m.work_line_steer_hint()}
+              onclick={() => void steer()}>{m.work_line_steer()}</button
+            >
+          {:else if proposal}
+            <button
+              type="button"
+              class="action"
+              disabled={blocked}
+              onclick={() => onreview?.(proposal.id)}>{m.work_line_review()}</button
+            >
+          {:else if question && !expanded}
+            <button type="button" class="action" onclick={() => (want = "answer")}
+              >{m.work_line_answer()}</button
+            >
+          {:else if followups.length}
+            <!-- The disclosure of the capsule's growth, not a second surface. -->
+            <button
+              type="button"
+              class="action disclosure"
+              aria-expanded={panel === "next"}
+              onclick={() => (want = want === "next" ? null : "next")}
+              >{m.work_line_next()}<Icon icon={ArrowDown01Icon} size={12} /></button
+            >
+          {:else if pageHandoff}
+            <button type="button" class="action" disabled={blocked} onclick={() => void openPage()}
+              >{m.work_line_open()}</button
+            >
+          {:else if approvalDraft && !live}
+            <button
+              type="button"
+              class="action"
+              disabled={blocked}
+              onclick={() => {
+                if (approvalDraft)
+                  void session.execute(
+                    { kind: "approve", spec: approvalDraft.spec },
+                    approvalDraft.expected_revision,
+                  );
+              }}>{m.work_line_approve()}</button
+            >
+          {/if}
+          {#if live}
+            <button
+              type="button"
+              class="quiet"
+              aria-label={m.work_line_stop()}
+              title={m.work_line_stop()}
+              disabled={blocked}
+              onclick={() => void stop()}
+            >
+              <Icon icon={StopIcon} size={14} />
+            </button>
+          {/if}
+        </div>
       </div>
     </div>
   </section>
@@ -506,8 +521,42 @@
   .agent-line {
     display: flex;
     flex-direction: column;
-    gap: 6px;
     min-inline-size: 0;
+  }
+
+  /* The same element at rest and grown: a pill while it is one line (the panel
+     radius clamps to half its height), a sheet once it holds rows. */
+  .capsule {
+    display: flex;
+    flex-direction: column;
+    min-inline-size: 0;
+    border-radius: var(--radius-panel);
+    background: var(--color-float);
+    box-shadow: var(--shadow-popover);
+  }
+
+  /* Grows on the arrival curve, folds on the exit curve; the rows fade with it. */
+  .expand {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows var(--motion-base) var(--ease-exit);
+  }
+
+  .expand.shown {
+    grid-template-rows: 1fr;
+    transition-timing-function: var(--ease-emphasized);
+  }
+
+  .expand-inner {
+    min-block-size: 0;
+    overflow: hidden;
+    opacity: 0;
+    transition: opacity var(--motion-fast) var(--ease-exit);
+  }
+
+  .shown .expand-inner {
+    opacity: 1;
+    transition: opacity var(--motion-base) var(--ease-out);
   }
 
   .line {
@@ -517,10 +566,10 @@
     box-sizing: border-box;
     block-size: 36px;
     padding: 0 6px 0 7px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-menu);
-    backdrop-filter: blur(12px) saturate(1.2);
-    box-shadow: var(--shadow-float);
+  }
+
+  .open .line {
+    border-block-start: 1px solid var(--color-border);
   }
 
   .avatar {
@@ -560,7 +609,7 @@
     align-items: baseline;
     min-inline-size: 0;
     max-inline-size: 100%;
-    animation: line-in var(--motion-base) var(--ease-smooth);
+    animation: line-in var(--motion-base) var(--ease-out);
   }
 
   .words .text {
@@ -587,10 +636,14 @@
     outline-offset: 2px;
   }
 
-  button.more :global(svg) {
+  button.more :global(svg),
+  .disclosure :global(svg) {
     flex: none;
+    transition: rotate var(--motion-base) var(--ease-emphasized);
+  }
+
+  button.more :global(svg) {
     color: var(--color-muted);
-    transition: rotate var(--motion-base) var(--ease-smooth);
   }
 
   button.more[aria-expanded="true"] :global(svg) {
@@ -619,7 +672,7 @@
   }
 
   button.waiting:hover {
-    text-decoration-color: var(--color-accent);
+    text-decoration-color: var(--color-lit);
   }
 
   button.waiting .left {
@@ -644,17 +697,20 @@
   }
 
   .action {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     block-size: 26px;
     padding: 0 12px;
     border: 0;
     border-radius: var(--radius-capsule);
-    background: var(--color-accent);
-    color: var(--color-on-accent);
+    background: var(--color-lit);
+    color: var(--color-on-lit);
     font: inherit;
     font-size: var(--text-label);
     font-weight: 550;
     cursor: default;
-    transition: background-color var(--motion-fast) var(--ease-smooth);
+    transition: background-color var(--motion-fast) var(--ease-out);
   }
 
   .action:focus-visible {
@@ -663,12 +719,31 @@
   }
 
   .action:disabled {
-    background: var(--color-fill);
+    background: var(--color-control);
     color: var(--color-faint);
   }
 
   .action:hover:not(:disabled) {
-    background: var(--color-accent-hover);
+    background: var(--color-lit-hover);
+  }
+
+  /* Next opens the capsule upward: its chevron points where the rows will be. */
+  .action.disclosure {
+    padding-inline-end: 10px;
+    background: var(--color-control);
+    color: var(--color-text);
+  }
+
+  .action.disclosure:hover:not(:disabled) {
+    background: var(--color-control-hover);
+  }
+
+  .disclosure :global(svg) {
+    rotate: 180deg;
+  }
+
+  .disclosure[aria-expanded="true"] :global(svg) {
+    rotate: 0deg;
   }
 
   .quiet {
@@ -682,8 +757,8 @@
     color: var(--color-muted);
     cursor: default;
     transition:
-      background-color var(--motion-fast) var(--ease-smooth),
-      color var(--motion-fast) var(--ease-smooth);
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out);
   }
 
   .quiet:focus-visible {
@@ -692,50 +767,26 @@
   }
 
   .quiet:hover:not(:disabled) {
-    background: var(--color-fill-hover);
+    background: var(--color-control-hover);
     color: var(--color-text);
   }
 
-  .expand {
-    display: grid;
-    grid-template-rows: 0fr;
-    opacity: 0;
-    transition:
-      grid-template-rows var(--motion-base) var(--ease-smooth),
-      opacity var(--motion-base) var(--ease-smooth);
-  }
-
-  .expand.shown {
-    grid-template-rows: 1fr;
-    opacity: 1;
-  }
-
-  .expand-inner {
-    min-block-size: 0;
-    overflow: hidden;
-  }
-
-  form,
-  .rows,
   .full {
     margin: 0;
-    border-radius: var(--radius-control);
-    background: var(--color-menu);
-    backdrop-filter: blur(12px) saturate(1.2);
-    box-shadow: var(--shadow-float);
-  }
-
-  .full {
     padding: 12px 14px;
     font-size: var(--text-label);
+    line-height: 16px;
   }
 
   .rows {
-    list-style: none;
     display: flex;
     flex-direction: column;
     gap: 2px;
+    max-block-size: 220px;
+    margin: 0;
     padding: 6px;
+    overflow: auto;
+    list-style: none;
   }
 
   .row {
@@ -746,16 +797,16 @@
     inline-size: 100%;
     box-sizing: border-box;
     min-block-size: 32px;
-    padding: 6px 8px;
+    padding: 6px 10px;
     border: 0;
-    border-radius: var(--radius-control-compact);
+    border-radius: var(--radius-row);
     background: transparent;
     color: var(--color-text);
     font: inherit;
     font-size: var(--text-label);
     text-align: start;
     cursor: default;
-    transition: background-color var(--motion-fast) var(--ease-smooth);
+    transition: background-color var(--motion-fast) var(--ease-out);
   }
 
   .row :global(svg) {
@@ -765,7 +816,7 @@
 
   .row:focus-visible {
     outline: 2px solid var(--color-ring);
-    outline-offset: 2px;
+    outline-offset: -2px;
   }
 
   .row:disabled {
@@ -773,13 +824,37 @@
   }
 
   .row:hover:not(:disabled) {
-    background: var(--color-control-hover);
+    background: var(--row-hover);
+  }
+
+  .row:active:not(:disabled) {
+    background: var(--row-pressed);
+  }
+
+  .who {
+    flex: none;
+  }
+
+  .doing,
+  .none {
+    flex: 1;
+    min-inline-size: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-muted);
+  }
+
+  .none {
+    padding: 6px 10px;
+    font-size: var(--text-label);
   }
 
   form {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    margin: 0;
     padding: 12px 14px;
   }
 
@@ -800,7 +875,7 @@
     padding: 0 12px;
     border: 0;
     border-radius: var(--radius-capsule);
-    background: var(--color-fill);
+    background: var(--color-control);
     color: var(--color-text);
     font: inherit;
     font-size: var(--text-label);
@@ -808,7 +883,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     cursor: default;
-    transition: background-color var(--motion-fast) var(--ease-smooth);
+    transition: background-color var(--motion-fast) var(--ease-out);
   }
 
   .chip:focus-visible {
@@ -821,7 +896,7 @@
   }
 
   .chip:hover:not(:disabled) {
-    background: var(--color-fill-hover);
+    background: var(--color-control-hover);
   }
 
   .answer {
@@ -837,7 +912,7 @@
     block-size: 30px;
     padding: 0 10px;
     border: 0;
-    border-radius: var(--radius-control-compact);
+    border-radius: var(--radius-control);
     background: var(--color-field);
     color: var(--color-text);
     font: inherit;
@@ -850,8 +925,7 @@
   }
 
   input:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: 2px;
+    box-shadow: var(--shadow-field-focus);
   }
 
   .send {
@@ -862,8 +936,8 @@
     block-size: 28px;
     border: 0;
     border-radius: 50%;
-    background: var(--color-accent);
-    color: var(--color-on-accent);
+    background: var(--color-lit);
+    color: var(--color-on-lit);
     cursor: default;
   }
 
@@ -873,86 +947,13 @@
   }
 
   .send:disabled {
-    background: var(--color-fill);
+    background: var(--color-control);
     color: var(--color-faint);
-  }
-
-  .roster {
-    list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin: 0;
-    padding: 6px;
-    max-block-size: 220px;
-    overflow: auto;
-    border-radius: var(--radius-menu);
-    background: var(--color-menu);
-    backdrop-filter: blur(12px) saturate(1.2);
-    box-shadow: var(--shadow-popover);
-    animation: line-in var(--motion-base) var(--ease-smooth);
-  }
-
-  .roster button {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    inline-size: 100%;
-    box-sizing: border-box;
-    min-block-size: 32px;
-    padding: 4px 8px;
-    border: 0;
-    border-radius: var(--radius-control-compact);
-    background: transparent;
-    color: var(--color-text);
-    font: inherit;
-    font-size: var(--text-label);
-    text-align: start;
-    cursor: default;
-    transition: background-color var(--motion-instant) ease;
-  }
-
-  .roster button:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: 2px;
-  }
-
-  .roster button:hover {
-    background: var(--color-control-hover);
-  }
-
-  .who {
-    flex: none;
-  }
-
-  .doing,
-  .none {
-    min-inline-size: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--color-muted);
-  }
-
-  .none {
-    padding: 6px 8px;
-    font-size: var(--text-label);
   }
 
   @keyframes line-in {
     from {
       opacity: 0;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .expand {
-      transition: none;
-    }
-
-    .words,
-    .roster {
-      animation: none;
     }
   }
 </style>
