@@ -59,6 +59,7 @@ impl WorkCallV1 {
                 call: request,
                 space_available: false,
                 browser_available: false,
+                note_available: false,
             },
             Self::Environment { .. } => return Err(WorkError::Invalid),
             Self::Query { request } => request.into_request()?,

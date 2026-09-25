@@ -89,9 +89,12 @@ fn validate_reference(
     tx: &Transaction<'_>,
     profile: ProfileId,
     reference: &WorkEnvironmentReference,
+    note_available: bool,
 ) -> Result<(), WorkError> {
     match reference {
         WorkEnvironmentReference::Resource { resource } => {
+            // A note is a file outside this store; the application actor
+            // attests it. Any other resource must be live here.
             let exists: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM user_resources WHERE id=?1 AND trashed=0)",
@@ -99,7 +102,7 @@ fn validate_reference(
                     |r| r.get(0),
                 )
                 .map_err(db)?;
-            if !exists {
+            if !exists && !note_available {
                 return Err(WorkError::NotFound);
             }
         }
@@ -185,6 +188,7 @@ pub(super) fn apply(
     call: WorkEnvironmentCall,
     space_available: bool,
     browser_available: bool,
+    note_available: bool,
 ) -> Result<(WorkEnvironmentReply, bool), WorkError> {
     call.validate()?;
     match call {
@@ -282,6 +286,7 @@ pub(super) fn apply(
             intent,
             space_available,
             browser_available,
+            note_available,
         ),
     }
 }
@@ -293,6 +298,7 @@ fn command_apply(
     intent: WorkEnvironmentIntent,
     space_available: bool,
     browser_available: bool,
+    note_available: bool,
 ) -> Result<(WorkEnvironmentReply, bool), WorkError> {
     let bytes = serde_json::to_vec(&intent).map_err(|_| WorkError::Invalid)?;
     if bytes.len() > MAX_ENVIRONMENT_BODY_BYTES {
@@ -354,7 +360,7 @@ fn command_apply(
                 {
                     return Err(WorkError::NotFound);
                 }
-                validate_reference(tx, profile, reference)?;
+                validate_reference(tx, profile, reference, note_available)?;
             }
             current.edit(
                 edit,

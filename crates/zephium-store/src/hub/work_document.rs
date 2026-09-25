@@ -230,9 +230,16 @@ fn apply(
             call,
             space_available,
             browser_available,
+            note_available,
         } => {
-            let (reply, write) =
-                environment_store::apply(tx, profile, call, space_available, browser_available)?;
+            let (reply, write) = environment_store::apply(
+                tx,
+                profile,
+                call,
+                space_available,
+                browser_available,
+                note_available,
+            )?;
             (WorkReply::Environment(reply), write)
         }
         WorkRequest::AuthoringCommand { command, intent } => {

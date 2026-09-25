@@ -20,6 +20,7 @@ async fn environment(
                 call,
                 space_available: true,
                 browser_available: true,
+                note_available: false,
             },
             Some(profile),
         )
@@ -29,6 +30,48 @@ async fn environment(
         WorkReply::Environment(WorkEnvironmentReply::Applied { snapshot, .. })
         | WorkReply::Environment(WorkEnvironmentReply::Snapshot { snapshot }) => *snapshot,
         _ => panic!("expected an environment snapshot"),
+    }
+}
+
+struct OneNote {
+    id: String,
+    revision: String,
+}
+
+impl zephium_core::ports::notes::Notes for OneNote {
+    fn call(
+        &self,
+        _: zephium_core::ids::ProfileId,
+        call: zephium_core::notes::NoteCall,
+        done: zephium_core::notes::NoteDone,
+    ) {
+        use zephium_core::notes::*;
+        done(match call {
+            NoteCall::Get { id } if id == self.id => NoteResponse::Record {
+                record: NoteRecord {
+                    summary: NoteSummary {
+                        id,
+                        revision: self.revision.clone(),
+                        title: "Keyboard notes".into(),
+                        preview: "Budget 150 EUR, tenkeyless".into(),
+                        pinned: false,
+                        trashed: false,
+                        editable: true,
+                        created_at: "0".into(),
+                        modified_at: "0".into(),
+                        path: "Keyboard notes.md".into(),
+                    },
+                    markdown: "# Keyboard notes\n\nBudget 150 EUR, tenkeyless\n".into(),
+                },
+            },
+            _ => NoteResponse::Error {
+                error: NoteError::NotFound,
+            },
+        });
+    }
+
+    fn release(&self, _: zephium_core::ids::ProfileId, done: Box<dyn FnOnce() + Send>) {
+        done();
     }
 }
 
@@ -51,60 +94,16 @@ async fn context_admission_binds_digests_and_refuses_stale_or_private_public_rea
         title: "Guide".into(),
     }));
 
-    let receiver = handle.resource_call(
-        profile,
-        ResourceCall::Mutate {
-            command: Box::new(ResourceCommand {
-                version: 1,
-                request_id: "context-admission-note-0001".into(),
-                intent: ResourceIntent::Create {
-                    draft: ResourceDraft {
-                        title: "Keyboard notes".into(),
-                        pinned: false,
-                        content: ResourceContent::Note {
-                            document: NoteDocument {
-                                version: 1,
-                                document: DocumentNode {
-                                    kind: "doc".into(),
-                                    content: vec![DocumentNode {
-                                        kind: "paragraph".into(),
-                                        content: vec![DocumentNode {
-                                            kind: "text".into(),
-                                            content: vec![],
-                                            text: Some("Budget 150 EUR, tenkeyless".into()),
-                                            attrs: None,
-                                            marks: vec![],
-                                        }],
-                                        text: None,
-                                        attrs: None,
-                                        marks: vec![],
-                                    }],
-                                    text: None,
-                                    attrs: None,
-                                    marks: vec![],
-                                },
-                            },
-                        },
-                        related: vec![],
-                    },
-                },
-            }),
-        },
-    );
-    let reply = drive(&mut shell, &queue, async {
-        loop {
-            if let Ok(reply) = receiver.try_recv() {
-                break reply;
-            }
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await;
-    let ResourceResponse::Applied { record, .. } = reply.response else {
-        panic!("note must persist");
-    };
-    let note_revision = record.revision.clone();
-    let resource = ResourceId::parse(&record.id).unwrap();
+    // Notes are Markdown files served by the notes service, not store rows.
+    let resource = ResourceId::generate();
+    shell.self_queue = Some(queue.clone());
+    let note_revision = "0123456789abcdef0123456789abcdef".to_owned();
+    shell.handle(Command::AttachNotes(crate::api::NotesAttachment(
+        std::sync::Arc::new(OneNote {
+            id: resource.to_string(),
+            revision: note_revision.clone(),
+        }),
+    )));
 
     let created = environment(
         &mut shell,

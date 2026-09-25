@@ -9,6 +9,7 @@ impl crate::Shell {
             owner,
             reply,
             permit,
+            notes_checked,
         }) = submission.take()
         else {
             return;
@@ -36,8 +37,11 @@ impl crate::Shell {
             call,
             space_available,
             browser_available,
+            note_available,
         } = &mut request
         {
+            // Only this actor's own notes lookup may attest a note.
+            *note_available &= notes_checked;
             use zephium_core::work::environment::{
                 WorkEnvironmentCall, WorkEnvironmentEdit, WorkEnvironmentIntent,
                 WorkEnvironmentReference,
@@ -73,6 +77,54 @@ impl crate::Shell {
                 }),
                 _ => false,
             };
+        }
+        if let Some(note) = attested_note(&request).filter(|_| !notes_checked) {
+            if let (Some(notes), Some(queue)) = (&self.notes, &self.self_queue) {
+                let queue = queue.clone();
+                let mut payload = crate::work_authoring::Payload {
+                    owner,
+                    request,
+                    expected_owner: Some(profile),
+                    pinned_owner: true,
+                    reply,
+                    permit,
+                    notes_checked: true,
+                };
+                notes.call(
+                    profile,
+                    zephium_core::notes::NoteCall::Get { id: note },
+                    Box::new(move |response| {
+                        let live = matches!(
+                            &response,
+                            zephium_core::notes::NoteResponse::Record { record }
+                                if !record.summary.trashed
+                        );
+                        if let zephium_core::work::port::WorkRequest::Environment {
+                            note_available,
+                            ..
+                        } = &mut payload.request
+                        {
+                            *note_available = live;
+                        }
+                        let command = crate::Command::WorkDocument(
+                            crate::work_authoring::WorkDocumentSubmission::resume(payload),
+                        );
+                        if let Err(
+                            crate::actor::TryPushError::Full(command)
+                            | crate::actor::TryPushError::Sealed(command)
+                            | crate::actor::TryPushError::Closed(command),
+                        ) = queue.try_push(command)
+                        {
+                            if let crate::Command::WorkDocument(submission) = command {
+                                if let Some(payload) = submission.take() {
+                                    payload.reply.try_send(Err(WorkError::Unavailable));
+                                }
+                            }
+                        }
+                    }),
+                );
+                return;
+            }
         }
         let refused = reply.clone();
         use zephium_core::work::port::{WorkReply, WorkRequest};
@@ -154,6 +206,33 @@ impl crate::Shell {
         if let Err(error) = result {
             refused.try_send(Err(error));
         }
+    }
+}
+
+/// The resource an environment edit adds, which may be a note file.
+fn attested_note(request: &zephium_core::work::port::WorkRequest) -> Option<String> {
+    use zephium_core::work::environment::{
+        WorkEnvironmentCall, WorkEnvironmentEdit, WorkEnvironmentIntent, WorkEnvironmentReference,
+    };
+    match request {
+        zephium_core::work::port::WorkRequest::Environment {
+            call:
+                WorkEnvironmentCall::Command {
+                    intent:
+                        WorkEnvironmentIntent::Edit {
+                            edit:
+                                WorkEnvironmentEdit::Add {
+                                    reference: WorkEnvironmentReference::Resource { resource },
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                },
+            note_available: false,
+            ..
+        } => Some(resource.to_string()),
+        _ => None,
     }
 }
 
@@ -257,6 +336,7 @@ mod tests {
                     call,
                     space_available: true,
                     browser_available: true,
+                    note_available: true,
                 },
                 Some(profile),
             )

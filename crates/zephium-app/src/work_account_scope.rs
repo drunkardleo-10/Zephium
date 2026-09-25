@@ -163,6 +163,7 @@ impl WorkAccountApproval {
                 call: WorkEnvironmentCall::Read { id: environment },
                 space_available: false,
                 browser_available: false,
+                note_available: false,
             },
             Some(profile),
         )?;

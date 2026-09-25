@@ -16,6 +16,9 @@ pub enum WorkRequest {
         /// them after receipt lookup so replay survives resource retirement.
         space_available: bool,
         browser_available: bool,
+        /// A resource reference names a live note of this profile. Notes are
+        /// files outside the store, so only the application actor can say.
+        note_available: bool,
     },
     AuthoringCommand {
         command: WorkCommandId,

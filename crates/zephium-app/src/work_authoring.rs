@@ -142,6 +142,9 @@ pub(crate) struct Payload {
     pub(crate) pinned_owner: bool,
     pub(crate) reply: WorkReplySender,
     pub(crate) permit: Permit,
+    /// The application actor has already asked the notes service about a
+    /// resource reference, so a second pass goes straight to the store.
+    pub(crate) notes_checked: bool,
 }
 #[derive(Clone)]
 pub struct WorkDocumentSubmission(std::sync::Arc<std::sync::Mutex<Option<Payload>>>);
@@ -151,6 +154,10 @@ impl std::fmt::Debug for WorkDocumentSubmission {
     }
 }
 impl WorkDocumentSubmission {
+    /// Re-queues a payload the actor paused on, keeping its reply and permit.
+    pub(crate) fn resume(payload: Payload) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(Some(payload))))
+    }
     #[cfg(feature = "work-runtime")]
     pub(crate) fn prepare_pinned(
         request: WorkRequest,
@@ -223,6 +230,7 @@ impl WorkDocumentSubmission {
                 pinned_owner: false,
                 reply,
                 permit: Permit,
+                notes_checked: false,
             })))),
             WorkDocumentRequest {
                 owner,

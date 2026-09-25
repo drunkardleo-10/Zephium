@@ -112,6 +112,7 @@ impl WorkContextAdmission {
                 call: WorkEnvironmentCall::Read { id },
                 space_available: false,
                 browser_available: false,
+                note_available: false,
             },
             Some(profile),
         )?;
