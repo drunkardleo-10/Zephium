@@ -53,7 +53,9 @@ export default defineConfig({
             {
               name: "chrome-shared",
               priority: 2,
-              test: /[\\/]src[\\/]shared[\\/](ipc[\\/]|platform\.ts|lib[\\/]motion\.ts|i18n[\\/]runtime\.js)/u,
+              // Preferences are read by lazy destinations too; kept here they never
+              // make a destination import the browser entry.
+              test: /[\\/]src[\\/](?:shared[\\/](ipc[\\/]|platform\.ts|lib[\\/]motion\.ts|i18n[\\/]runtime\.js)|domain[\\/]preferences[\\/])/u,
               tags: ["$initial"],
             },
           ],
