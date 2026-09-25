@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { render } from "vitest-browser-svelte";
-import CodeBlock from "../index";
+import CodeBlock from "../CodeBlock.svelte";
 
 const text = 'fn main() {\n    let x = 1; // one\n    println!("{x}");\n}';
 const notes = [{ from: 2, to: 3, text: "Binds and prints x" }];

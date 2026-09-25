@@ -1,4 +1,6 @@
-export type TokenKind = "keyword" | "string" | "comment" | "number" | "punctuation" | "plain";
+import { codeLines } from "./code";
+
+type TokenKind = "keyword" | "string" | "comment" | "number" | "punctuation" | "plain";
 export type Token = { kind: TokenKind; text: string };
 
 type Spec = {
@@ -100,11 +102,7 @@ function scan(line: string, at: number, spec: Spec): Token {
 }
 
 export function tokenize(language: string, text: string, limit = Infinity): Token[][] {
-  const lines = text
-    .slice(0, MAX_TEXT)
-    .replace(/\r?\n$/u, "")
-    .split(/\r?\n/u);
-  const rows = lines.slice(0, Math.max(0, limit));
+  const rows = codeLines(text.slice(0, MAX_TEXT)).slice(0, Math.max(0, limit));
   const spec = SPECS[language];
   if (!spec) return rows.map((line) => (line ? [{ kind: "plain", text: line }] : []));
   let open = false;
