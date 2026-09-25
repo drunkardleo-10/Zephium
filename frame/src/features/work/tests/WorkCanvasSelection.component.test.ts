@@ -78,10 +78,10 @@ test("Grid arranges three cards into two columns and publishes the placements", 
     { onviewchange },
   );
   await expect.poll(() => screen.container.querySelectorAll(".work-drag-handle").length).toBe(3);
-  // The select tool draws the marquee without a key.
-  await screen.getByRole("button", { name: "Select (V)" }).click();
   const box = origin(screen.container);
+  await userEvent.keyboard("{Shift>}");
   await marquee(screen.container, [box.left + 20, box.top + 60], [box.left + 1140, box.top + 520]);
+  await userEvent.keyboard("{/Shift}");
   await expect.poll(() => selected(screen.container).length).toBe(3);
   await screen.getByRole("button", { name: "Arrange" }).click();
   await page.getByRole("menuitem", { name: "Grid" }).click();
@@ -92,7 +92,6 @@ test("Grid arranges three cards into two columns and publishes the placements", 
       b: { x: 360, y: 100 },
       c: { x: 40, y: 320 },
     });
-  await screen.getByRole("button", { name: "Hand (H)" }).click();
   await screen.unmount();
 });
 

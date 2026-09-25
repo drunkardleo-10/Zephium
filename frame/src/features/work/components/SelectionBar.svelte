@@ -129,14 +129,14 @@
 </div>
 
 <style>
+  /* A floating bar of controls on main's control recipe: fill, and only fill. */
   .selection-bar {
     display: flex;
     align-items: center;
     gap: 2px;
     padding: 4px;
     border-radius: var(--radius-control);
-    background: var(--color-menu);
-    backdrop-filter: blur(12px) saturate(1.2);
+    background: var(--color-float);
     box-shadow: var(--shadow-popover);
     outline: none;
   }
@@ -150,13 +150,14 @@
     border: 0;
     border-radius: var(--radius-control-compact);
     background: transparent;
-    color: var(--color-text);
+    box-shadow: none;
+    color: var(--color-on-control);
     font: inherit;
     font-size: var(--text-label);
     font-weight: 500;
     white-space: nowrap;
     cursor: default;
-    transition: background-color var(--motion-instant) ease;
+    transition: background-color var(--motion-fast) var(--ease-out);
   }
 
   .popover button {
@@ -164,18 +165,23 @@
     inline-size: 100%;
   }
 
-  .selection-bar button:focus-visible,
-  .selection-bar button.open {
-    background: var(--color-control-hover);
-    outline: none;
+  .selection-bar button:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: -2px;
   }
 
   .selection-bar button:disabled {
-    color: var(--color-muted);
+    color: var(--color-faint);
   }
 
   .selection-bar button:hover:not(:disabled) {
-    background: var(--color-control-hover);
+    background: var(--color-control);
+    box-shadow: var(--shadow-control);
+  }
+
+  .selection-bar button.open,
+  .selection-bar button:active:not(:disabled) {
+    background: var(--color-control-pressed);
   }
 
   .selection-bar button.danger:hover:not(:disabled) {
@@ -195,15 +201,23 @@
     min-inline-size: 140px;
     padding: 4px;
     border-radius: var(--radius-control);
-    background: var(--color-menu);
-    backdrop-filter: blur(12px) saturate(1.2);
+    background: var(--color-float);
     box-shadow: var(--shadow-popover);
+    transform-origin: top left;
+    animation: popover-in var(--motion-fast) var(--ease-out);
   }
 
   .separator {
     inline-size: 1px;
-    block-size: 18px;
+    block-size: 16px;
     margin-inline: 4px;
     background: var(--color-border);
+  }
+
+  @keyframes popover-in {
+    from {
+      opacity: 0;
+      transform: scale(0.97);
+    }
   }
 </style>
