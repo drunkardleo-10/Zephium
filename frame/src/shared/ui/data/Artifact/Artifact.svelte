@@ -180,6 +180,16 @@
       <p>{content.summary}</p>
       {#if !card}<small>{m.work_browser_preview_only()}</small>{/if}
     </section>
+  {:else if content.kind === "diagram" && card}<p class="count">
+      {content.nodes.length === 1
+        ? m.work_card_diagram_part_one()
+        : m.work_card_diagram_parts({ count: content.nodes.length })}
+    </p>
+  {:else if content.kind === "diagram"}<ul class="checklist">
+      {#each content.nodes as node (node.id)}<li>
+          <span>{node.name}</span>{#if node.note}<small>{node.note}</small>{/if}
+        </li>{/each}
+    </ul>
   {:else if content.kind === "unavailable"}<p role="status">{content.reason}</p>{/if}
   {#if valid && !card && artifact.evidence.length && content.kind !== "sources" && content.kind !== "matrix" && content.kind !== "findings"}<footer
       aria-label={m.work_sources()}

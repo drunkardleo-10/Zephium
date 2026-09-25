@@ -40,6 +40,8 @@
         return m.work_env_sources();
       case "browser":
         return m.work_env_page();
+      case "diagram":
+        return m.work_card_kind_diagram();
       default:
         return item.kind;
     }

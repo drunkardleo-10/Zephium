@@ -169,6 +169,24 @@ function content(data: WorkArtifactDataV1, refs: Refs): ArtifactContent {
       };
     case "browser_resource_preview":
       return { kind: "browser", title: data.title, location: data.url, summary: data.summary };
+    case "diagram":
+      return {
+        kind: "diagram",
+        nodes: data.nodes.map((node) => ({
+          id: node.id,
+          name: node.name,
+          kind: node.kind,
+          ...(node.vendor ? { vendor: node.vendor } : {}),
+          ...(node.note ? { note: node.note } : {}),
+          ...(node.layer ? { layer: node.layer } : {}),
+        })),
+        edges: data.edges.map((edge) => ({
+          from: edge.from,
+          to: edge.to,
+          ...(edge.label ? { label: edge.label } : {}),
+        })),
+        layers: data.layers ?? [],
+      };
   }
 }
 

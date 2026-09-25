@@ -70,6 +70,17 @@ export type MeasurementBasisView = {
   versions?: string;
   observedAt?: string;
 };
+/** A system as the agent drew it: parts, what flows between them, and optional layers. */
+type DiagramNodeView = {
+  id: string;
+  name: string;
+  kind: string;
+  /** A bare public host, only ever used to draw the vendor's mark. */
+  vendor?: string;
+  note?: string;
+  layer?: string;
+};
+type DiagramEdgeView = { from: string; to: string; label?: string };
 export type ArtifactContent =
   | { kind: "document"; paragraphs: readonly string[]; formatted?: NoteDocumentView | null }
   | { kind: "table"; columns: readonly string[]; rows: readonly (readonly string[])[] }
@@ -102,6 +113,12 @@ export type ArtifactContent =
       entries: readonly SourceEntryView[];
     }
   | { kind: "browser"; title: string; location: string; summary: string }
+  | {
+      kind: "diagram";
+      nodes: readonly DiagramNodeView[];
+      edges: readonly DiagramEdgeView[];
+      layers: readonly { id: string; name: string }[];
+    }
   | { kind: "unavailable"; reason: string };
 export type ArtifactView = {
   key: string;
@@ -243,6 +260,30 @@ export function artifactRenderable(view: ArtifactView): boolean {
       );
     case "browser":
       return text(data.title) && text(data.location) && text(data.summary);
+    case "diagram": {
+      const ids = new Set(data.nodes.map((node) => node.id));
+      return (
+        data.nodes.length > 0 &&
+        data.nodes.length <= 64 &&
+        ids.size === data.nodes.length &&
+        data.nodes.every(
+          (node) =>
+            node.id.length <= 64 &&
+            node.name.length <= 256 &&
+            (node.note === undefined || node.note.length <= 512) &&
+            (node.vendor === undefined || node.vendor.length <= 253),
+        ) &&
+        data.edges.length <= 256 &&
+        data.edges.every(
+          (edge) =>
+            ids.has(edge.from) &&
+            ids.has(edge.to) &&
+            (edge.label === undefined || edge.label.length <= 128),
+        ) &&
+        data.layers.length <= 16 &&
+        data.layers.every((layer) => layer.name.length <= 128)
+      );
+    }
     case "unavailable":
       return text(data.reason);
     default:
