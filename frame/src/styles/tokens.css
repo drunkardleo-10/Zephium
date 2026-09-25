@@ -132,6 +132,20 @@
   --color-warning: #dcb977;
   --color-info: #8fbcf7;
 
+  /* The chart ladder: eight categorical tones for series identity, in a fixed
+     order that is never cycled. The tints above are pastel and too few to
+     separate eight series, so this set is stepped for data: every adjacent pair
+     clears the colour-vision-deficiency floor against the surface it sits on,
+     and each tone stays muted enough to live beside a neutral interface. */
+  --chart-1: #6193db;
+  --chart-2: #b37046;
+  --chart-3: #2da58f;
+  --chart-4: #a47d00;
+  --chart-5: #b77094;
+  --chart-6: #679936;
+  --chart-7: #7e68ab;
+  --chart-8: #c6685b;
+
   /* Shape is named by job, never by size. A size name asks "how round should
      this be", which is a question of taste answered differently every time;
      a role name asks "what is this", which has one answer. Two axes decide
@@ -438,6 +452,14 @@
   --color-success: #2f7f5a;
   --color-warning: #8c6a2a;
   --color-info: #2f6fd6;
+  --chart-1: #5d8fcc;
+  --chart-2: #a6531e;
+  --chart-3: #449d7a;
+  --chart-4: #7f5f0a;
+  --chart-5: #bc6082;
+  --chart-6: #3e6f25;
+  --chart-7: #7b68af;
+  --chart-8: #9d4547;
 
   --shadow-control: 0 0.5px 1.5px rgb(24 24 27 / 0.1), 0 0 0 0.5px rgb(24 24 27 / 0.07);
   --shadow-control-strong: 0 1px 3px rgb(24 24 27 / 0.13), 0 0 0 0.5px rgb(24 24 27 / 0.09);
