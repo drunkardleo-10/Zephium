@@ -42,35 +42,6 @@ function fitted(container: HTMLElement, root: string, parts: string) {
 }
 
 for (const host of ["sidebar", "floating"] as const) {
-  test(`notes fit the ${host} ToolSlot through list, editor and back navigation`, async () => {
-    await page.viewport(1000, 800);
-    document.head.append(style);
-    const profile = "00000000000000000000000003";
-    const server = resourceTestServer(profile);
-    native.call.mockImplementation(server.call);
-    const onback = vi.fn();
-    const screen = await render(ResourceHost, { profile, host, tool: "notes", onback });
-    await expect.element(screen.getByRole("region", { name: "Notes", exact: true })).toBeVisible();
-    const fits = () =>
-      fitted(
-        screen.container,
-        ".resource-panel",
-        ".resource-list, .resource-editor, .note-toolbar",
-      );
-    await expect.poll(fits).toBe(true);
-    await screen.getByRole("button", { name: "New", exact: true }).click();
-    await screen.getByRole("textbox", { name: "Title", exact: true }).fill(LONG);
-    await expect.poll(fits).toBe(true);
-    if (host === "sidebar") {
-      await screen.getByRole("button", { name: "Back to list", exact: true }).click();
-      await expect.poll(() => screen.container.querySelector(".resource-editor")).toBeNull();
-    } else {
-      await screen.getByRole("button", { name: "Back to search", exact: true }).click();
-      expect(onback).toHaveBeenCalledOnce();
-    }
-    expect([...server.records.values()][0]?.draft.title).toContain("A long title");
-  });
-
   test(`tasks fit the ${host} ToolSlot while capturing and completing in place`, async () => {
     await page.viewport(1000, 800);
     document.head.append(style);

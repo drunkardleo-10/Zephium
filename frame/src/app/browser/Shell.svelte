@@ -1,5 +1,8 @@
 <script lang="ts">
   const loadWorkWorkspace = () => import("./WorkWorkspace.svelte");
+  // Dynamic like the panel's own path to Notes, so the feature's entry is
+  // never a startup request.
+  const loadNotesPage = () => import("$features/notes").then((notes) => notes.loadNotesPage());
   import { theme } from "$domain/appearance";
   import LazyView from "$shared/ui/LazyView";
   import RenderBoundary from "$shared/ui/RenderBoundary";
@@ -38,22 +41,36 @@
   import { ModePicker, ModeTabs, Sidebar, UtilityTray } from "$features/sidebar";
   import { IS_MAC } from "$shared/platform";
   import { tabs } from "$domain/tabs";
+  /** New Note, from the menu or its shortcut: a note starts where notes are open. */
+  async function newNote() {
+    const profile = tabs.profile()?.id;
+    if (!profile) return;
+    const page = browserPage.currentPage() === "notes";
+    if (!page) toolHost.open("notes");
+    const { noteSession } = await import("$domain/notes");
+    await noteSession(profile, page ? "page" : "sidebar")?.create();
+  }
   onMount(() => {
     let disposed = false;
     let stop: (() => void) | undefined;
     void events.uiCommand
-      .listen((event) => handleNativeSection(event.payload))
+      .listen((event) => {
+        if (event.payload === "note.new") void newNote();
+        else handleNativeSection(event.payload);
+      })
       .then((unsubscribe) => {
         if (disposed) unsubscribe();
         else stop = unsubscribe;
       });
+    // A note chosen in the launcher opens where notes already are: the page
+    // if it is showing, the sidebar otherwise.
     const noteListener = events.noteOpenRequested.listen(({ payload: { profile, id } }) => {
       if (profile !== tabs.profile()?.id) return;
-      toolHost.open("notes");
-      void import("$domain/resources").then(async ({ resourceSession }) => {
+      const page = browserPage.currentPage() === "notes";
+      if (!page) toolHost.open("notes");
+      void import("$domain/notes").then(async ({ noteSession }) => {
         if (disposed || tabs.profile()?.id !== profile) return;
-        const session = resourceSession(profile, "note", "sidebar");
-        await session?.requestOpen(id);
+        await noteSession(profile, page ? "page" : "sidebar")?.requestOpen(id);
       });
     });
     return () => {
@@ -297,6 +314,17 @@
                   failureLabel={m.surface_render_failed()}
                   retryLabel={m.surface_retry()}
                   >{#snippet children(View)}<View />{/snippet}</LazyView
+                >{/key}
+            {:else if browserPage.currentPage() === "notes"}
+              {#key tabs.profile()?.id}<LazyView
+                  loader={loadNotesPage}
+                  loadingLabel={m.surface_loading()}
+                  failureLabel={m.surface_render_failed()}
+                  retryLabel={m.surface_retry()}
+                  >{#snippet children(View)}<View
+                      profile={tabs.profile()?.id ?? ""}
+                      onclose={() => void browserPage.open(null)}
+                    />{/snippet}</LazyView
                 >{/key}
             {:else if browserPage.currentPage() === "tasks"}
               <LazyView

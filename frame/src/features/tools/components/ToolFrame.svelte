@@ -21,6 +21,7 @@
     host,
     onclose,
     onback,
+    backLabel,
     ondrag,
     searchLabel,
     searchOpen = true,
@@ -37,6 +38,8 @@
     children,
     footer,
   }: ToolHostProps & {
+    /** Names where the launcher's back control leads, when not to search. */
+    backLabel?: string;
     searchLabel?: string;
     /** False keeps the search field out of the frame until it is asked for, so
      *  a tool that rarely needs it does not spend a band on it. */
@@ -97,7 +100,7 @@
          close button, only the way back to its menu; the sidebar is the reverse. -->
     {#if host === "floating" && onback}<IconButton
         icon={ArrowLeft02Icon}
-        label={m.panel_back()}
+        label={backLabel ?? m.panel_back()}
         onclick={onback}
       />{/if}
     {#if marked}<span class="shared-tool-icon"><Icon icon={meta.icon} size={16} /></span>{/if}

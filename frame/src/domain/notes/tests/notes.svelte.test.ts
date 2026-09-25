@@ -1,0 +1,235 @@
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import type { ChangedNote, NoteCall } from "$shared/ipc/bindings";
+import { notesTestServer } from "$shared/testing/notes/server";
+
+const host = vi.hoisted(() => ({
+  call: null as null | ((profile: string, call: NoteCall) => Promise<unknown>),
+  listener: null as null | ((event: { payload: unknown }) => void),
+}));
+vi.mock("$shared/ipc/bindings", async () => {
+  const { mockBindings } = await import("$shared/testing/bindings");
+  return mockBindings({ noteCall: (profile, call) => host.call!(profile, call) as never });
+});
+vi.mock("$shared/ipc/native-events", () => ({
+  events: {
+    notesChanged: {
+      listen: (listener: typeof host.listener) => {
+        host.listener = listener;
+        return Promise.resolve(() => {
+          host.listener = null;
+        });
+      },
+    },
+  },
+}));
+vi.mock("$shared/lib/close", () => ({ registerCloseTask: () => () => {} }));
+
+const { NoteSession } = await import("../notes.svelte");
+
+const profile = "01J9ZQ3V6Q4M8Y2K7T5R1N0B3P";
+let server: ReturnType<typeof notesTestServer>;
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  server = notesTestServer(profile, (notes: ChangedNote[], reset: boolean) =>
+    queueMicrotask(() => host.listener?.({ payload: { profile, notes, reset } })),
+  );
+  host.call = server.call;
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+async function settle(ms = 0) {
+  await vi.advanceTimersByTimeAsync(ms);
+}
+
+async function started() {
+  const session = new NoteSession(profile, "test");
+  await session.start();
+  return session;
+}
+
+test("a new note has no file until it has something in it, then exactly one", async () => {
+  const session = await started();
+  await session.create();
+  expect(session.note?.id).toBeNull();
+  await session.close();
+  expect(server.writes()).toEqual([]);
+
+  await session.create();
+  session.edit("# Groceries");
+  session.edit("# Groceries\n\nMilk");
+  await settle(700);
+  expect(server.writes().map((call) => call.kind)).toEqual(["create"]);
+  expect(session.note?.id).toBeTruthy();
+  expect(session.items[0]?.title).toBe("Groceries");
+  expect(session.saveState).toBe("saved");
+});
+
+test("typing saves after a pause, and at least every few seconds while it goes on", async () => {
+  const session = await started();
+  const note = server.seed("# Plans\n");
+  await session.open(note.id);
+  for (let tick = 1; tick <= 20; tick++) {
+    session.edit(`# Plans\n\n${"a".repeat(tick)}`);
+    await settle(300);
+  }
+  const during = server.writes().length;
+  expect(during).toBeGreaterThanOrEqual(1);
+  expect(during).toBeLessThanOrEqual(3);
+  await settle(700);
+  expect(server.notes.get(note.id)?.markdown).toBe(`# Plans\n\n${"a".repeat(20)}`);
+  expect(session.saveState).toBe("saved");
+});
+
+test("the list follows the title as it is typed", async () => {
+  const note = server.seed("# Old title\n");
+  const session = await started();
+  await session.open(note.id);
+  session.edit("# New title\n\nBody");
+  expect(session.items.find((item) => item.id === note.id)?.title).toBe("New title");
+  expect(session.note?.summary?.preview).toBe("Body");
+});
+
+test("a change made elsewhere reloads a note with nothing unsaved", async () => {
+  const session = await started();
+  const note = server.seed("# Shared\n");
+  await session.open(note.id);
+  const version = session.note!.version;
+  server.editOnDisk(note.id, "# Shared\n\nFrom another app");
+  await settle(10);
+  expect(session.note!.version).toBeGreaterThan(version);
+  expect(session.note!.source).toBe("# Shared\n\nFrom another app");
+});
+
+test("the browser's own saves do not reload the editor", async () => {
+  const session = await started();
+  const note = server.seed("# Mine\n");
+  await session.open(note.id);
+  const version = session.note!.version;
+  session.edit("# Mine\n\nTyped here");
+  await settle(700);
+  await settle(200);
+  expect(session.note!.version).toBe(version);
+});
+
+test("a save that meets another app's change keeps both until one is chosen", async () => {
+  const session = await started();
+  const note = server.seed("# Draft\n");
+  await session.open(note.id);
+  session.edit("# Draft\n\nmine");
+  server.editOnDisk(note.id, "# Draft\n\ntheirs");
+  await settle(700);
+  expect(session.saveState).toBe("conflict");
+  expect(session.conflict?.markdown).toBe("# Draft\n\ntheirs");
+  expect(server.notes.get(note.id)?.markdown).toBe("# Draft\n\ntheirs");
+
+  await session.resolve("mine");
+  expect(server.notes.get(note.id)?.markdown).toBe("# Draft\n\nmine");
+  expect(session.saveState).toBe("saved");
+});
+
+test("choosing the other version replaces the editor's text", async () => {
+  const session = await started();
+  const note = server.seed("# Draft\n");
+  await session.open(note.id);
+  session.edit("# Draft\n\nmine");
+  server.editOnDisk(note.id, "# Draft\n\ntheirs");
+  await settle(700);
+  await session.resolve("theirs");
+  expect(session.note?.source).toBe("# Draft\n\ntheirs");
+  expect(session.saveState).toBe("saved");
+});
+
+test("text whose file disappeared is saved as a new note", async () => {
+  const session = await started();
+  const note = server.seed("# Doomed\n");
+  await session.open(note.id);
+  session.edit("# Doomed\n\nstill typing");
+  server.removeOnDisk(note.id);
+  await settle(700);
+  await settle(700);
+  const saved = [...server.notes.values()].find((stored) =>
+    stored.markdown.includes("still typing"),
+  );
+  expect(saved).toBeTruthy();
+  expect(saved!.summary.id).not.toBe(note.id);
+  expect(session.note?.id).toBe(saved!.summary.id);
+});
+
+test("an unknown outcome is retried with the same request, never duplicated", async () => {
+  const session = await started();
+  await session.create();
+  let dropped = false;
+  host.call = async (expected: string, call: NoteCall) => {
+    const reply = await server.call(expected, call);
+    if (!dropped) {
+      dropped = true;
+      return { profile, response: { kind: "error", error: "outcome_unknown" } };
+    }
+    return reply;
+  };
+  session.edit("# Once\n");
+  await settle(700);
+  expect(session.saveState).toBe("retrying");
+  await settle(2000);
+  const creates = server.calls.filter((call) => call.kind === "create");
+  expect(creates).toHaveLength(2);
+  expect(creates[0]).toMatchObject({
+    request_id: (creates[1] as { request_id: string }).request_id,
+  });
+  expect(server.notes.size).toBe(1);
+  expect(session.saveState).toBe("saved");
+});
+
+test("a note emptied and left goes to the trash, and trash can be undone", async () => {
+  const session = await started();
+  const note = server.seed("# Temporary\n\ntext");
+  await session.open(note.id);
+  session.edit("");
+  await session.close();
+  expect(server.notes.get(note.id)?.summary.trashed).toBe(true);
+
+  const kept = server.seed("# Kept\n");
+  await session.reload();
+  await session.moveToTrash(kept.id);
+  expect(session.items.some((item) => item.id === kept.id)).toBe(false);
+  expect(session.notice?.id).toBe(kept.id);
+  await session.undo();
+  expect(server.notes.get(kept.id)?.summary.trashed).toBe(false);
+  expect(session.items.some((item) => item.id === kept.id)).toBe(true);
+});
+
+test("hiding the host saves pending text before letting go", async () => {
+  const session = await started();
+  const note = server.seed("# Hidden\n");
+  await session.open(note.id);
+  session.edit("# Hidden\n\nlast words");
+  session.stop();
+  await settle(10);
+  expect(server.notes.get(note.id)?.markdown).toBe("# Hidden\n\nlast words");
+});
+
+test("its own saves cost no listing and no link lookups", async () => {
+  const session = await started();
+  const note = server.seed("# Plans\n\nSee [[Roadmap]]");
+  await session.open(note.id);
+  await session.resolveTargets(["Roadmap"]);
+  await settle(200);
+  const before = server.calls.filter((call) => call.kind !== "write").length;
+  for (let tick = 1; tick <= 5; tick++) {
+    session.edit(`# Plans\n\nSee [[Roadmap]] ${tick}`);
+    await settle(700);
+  }
+  expect(server.writes().length).toBe(5);
+  expect(server.calls.filter((call) => call.kind !== "write")).toHaveLength(before);
+  expect(session.items.find((item) => item.id === note.id)?.revision).toBe(
+    server.notes.get(note.id)?.summary.revision,
+  );
+
+  // A new title can change where links lead, so everyone looks again.
+  session.edit("# Roadmap notes\n\nSee [[Roadmap]]");
+  await settle(900);
+  expect(server.calls.at(-1)?.kind).toBe("list");
+});

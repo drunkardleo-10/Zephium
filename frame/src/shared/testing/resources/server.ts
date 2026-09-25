@@ -93,7 +93,7 @@ function write(draft: ResourceDraft_Serialize, field: TaskField): ResourceDraft_
 }
 /** Mirrors the defaults Rust applies to task fields a stored body may predate, so
  *  a draft written without them lands exactly as native would store it. */
-export const adoptDraft = (draft: ResourceDraft_Deserialize): ResourceDraft_Serialize =>
+const adoptDraft = (draft: ResourceDraft_Deserialize): ResourceDraft_Serialize =>
   draft.content.kind === "task"
     ? {
         ...draft,
@@ -191,15 +191,6 @@ export function resourceTestServer(profile: string) {
           : { kind: "error", error: "not_found" },
       );
     }
-    if (call.kind === "resolve_notes")
-      return response({
-        kind: "page",
-        items: call.ids.flatMap((id) => {
-          const record = records.get(id);
-          return record && !record.trashed ? [summary(record)] : [];
-        }),
-        next: null,
-      });
     if (call.kind === "list_tasks") {
       const query = call.query;
       const due = (record: ResourceRecord_Serialize) =>
@@ -290,20 +281,6 @@ export function resourceTestServer(profile: string) {
           )
           .map(summary),
         next: null,
-      });
-    if (call.kind === "search_titles")
-      return response({
-        kind: "page",
-        next: null,
-        items: [...records.values()]
-          .filter(
-            (record) =>
-              !record.trashed &&
-              record.draft.content.kind === "note" &&
-              record.draft.title.toLowerCase().includes(call.query.toLowerCase()),
-          )
-          .slice(0, 6)
-          .map(summary),
       });
     const cached = receipts.get(call.command.request_id);
     if (cached) return structuredClone(cached);

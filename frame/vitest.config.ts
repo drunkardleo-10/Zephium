@@ -41,6 +41,13 @@ export default defineConfig({
             "@tiptap/extension-blockquote",
             "@tiptap/extension-code-block",
             "@tiptap/extension-hard-break",
+            "@tiptap/extension-strike",
+            "@tiptap/extension-horizontal-rule",
+            "@tiptap/pm/history",
+            "@tiptap/pm/model",
+            "@tiptap/pm/state",
+            "@tiptap/pm/view",
+            "marked",
           ],
         },
         test: {

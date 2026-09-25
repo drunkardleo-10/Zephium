@@ -6,3 +6,4 @@
  * platforms run undecorated and draw their own window controls in the sidebar.
  */
 export const IS_MAC = navigator.userAgent.includes("Mac");
+export const IS_WINDOWS = navigator.userAgent.includes("Windows");

@@ -29,10 +29,12 @@
     dock: Snippet<[boolean]>;
   } = $props();
   let settings = $derived(browserPage.currentPage() === "settings");
-  let taskPage = $derived(browserPage.currentPage() === "tasks");
-  // Settings takes the column for its own navigation. Tasks is part of
-  // browsing, so the column stays as the tab rail: a tab is one click away and
-  // choosing it returns to that page.
+  let taskPage = $derived(
+    browserPage.currentPage() === "tasks" || browserPage.currentPage() === "notes",
+  );
+  // Settings takes the column for its own navigation. Tasks and Notes are part
+  // of browsing, so the column stays as the tab rail: a tab is one click away
+  // and choosing it returns to that page.
   let navigating = $derived(settings);
   let compact = $derived(!navigating && (taskPage || isCompact() || tools.activeTool() !== null));
 

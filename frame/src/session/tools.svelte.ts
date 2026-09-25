@@ -44,9 +44,13 @@ async function initialize(owner: number) {
     }
     if (payload === "browser.return-failed") queued = null;
     if (
-      ["browser.settings", "browser.history", "browser.downloads", "browser.tasks"].includes(
-        payload,
-      )
+      [
+        "browser.settings",
+        "browser.history",
+        "browser.downloads",
+        "browser.tasks",
+        "browser.notes",
+      ].includes(payload)
     ) {
       tool = null;
       setPanelExtent(0);

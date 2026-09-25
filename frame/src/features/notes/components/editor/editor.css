@@ -1,0 +1,563 @@
+/* stylelint-disable selector-class-pattern -- ProseMirror names its own
+   state classes (selected node, gap cursor); they are not ours to rename. */
+
+/* The note as it is read. Page density is a reading column; panel density
+   the same rhythm set smaller for the sidebar. Everything that is not text
+   (checks, rules, raw Markdown) stays quieter than the words around it. */
+.note-editor {
+  --note-size: 15px;
+  --note-line: 1.62;
+  --note-title: 28px;
+  --note-heading: 20px;
+  --note-subheading: 16.5px;
+  --note-gap: 0.7em;
+  --note-indent: 1.55em;
+
+  /* Code reads as its own material: a set-in plate, monospaced, the ink
+     warmed a shade so it separates from prose without turning into colour. */
+  --note-code-fill: var(--color-fill-hover);
+  --note-code-rim: var(--color-border);
+  --note-code-ink: color-mix(in oklab, var(--color-text) 84%, var(--color-tint-rose));
+
+  /* Fills its note to the bottom, so what follows it — the formatting
+     control — starts at the bottom of the view even under a short note,
+     and a press anywhere below the last line lands in the text. */
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+  color: var(--color-text);
+  font-size: var(--note-size);
+  line-height: var(--note-line);
+  /* stylelint-disable-next-line property-no-vendor-prefix */
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+
+.note-editor[data-density="panel"] {
+  --note-size: 14px;
+  --note-line: 1.55;
+  --note-title: 21px;
+  --note-heading: 17px;
+  --note-subheading: 15px;
+}
+
+.note-editor .note-document {
+  flex: 1 0 auto;
+  padding-block-end: 40vh;
+  outline: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  font-feature-settings: "kern", "calt";
+  caret-color: var(--color-text);
+}
+
+.note-editor[data-density="panel"] .note-document {
+  padding-block-end: 30vh;
+}
+
+.note-editor .note-document > * + * {
+  margin-block-start: var(--note-gap);
+}
+
+.note-editor p {
+  margin: 0;
+}
+
+.note-editor h1,
+.note-editor h2,
+.note-editor h3,
+.note-editor h4,
+.note-editor h5,
+.note-editor h6 {
+  margin: 0;
+  color: var(--color-text);
+  font-weight: 650;
+  letter-spacing: -0.012em;
+}
+
+.note-editor h1 {
+  font-size: var(--note-title);
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: -0.028em;
+}
+
+.note-editor h2 {
+  font-size: var(--note-heading);
+  line-height: 1.3;
+  letter-spacing: -0.02em;
+}
+
+.note-editor h3 {
+  font-size: var(--note-subheading);
+  line-height: 1.35;
+}
+
+.note-editor h4,
+.note-editor h5,
+.note-editor h6 {
+  font-size: 1em;
+}
+
+.note-editor h5,
+.note-editor h6 {
+  color: var(--color-label-secondary);
+}
+
+.note-editor .note-document > * + h1,
+.note-editor .note-document > * + h2 {
+  margin-block-start: 1.35em;
+}
+
+.note-editor .note-document > * + h3,
+.note-editor .note-document > * + h4 {
+  margin-block-start: 1.1em;
+}
+
+/* The title sits apart from what follows it, as a title does. */
+.note-editor .note-document > h1:first-child {
+  margin-block-end: 0.35em;
+}
+
+.note-editor strong {
+  font-weight: 650;
+}
+
+.note-editor s {
+  color: var(--color-muted);
+  text-decoration-color: var(--color-faint);
+}
+
+.note-editor a {
+  color: var(--color-text);
+  text-decoration: underline;
+  text-decoration-color: var(--color-border-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+  cursor: pointer;
+  transition: text-decoration-color var(--motion-fast) var(--ease-out);
+}
+
+.note-editor a:hover {
+  text-decoration-color: var(--color-text);
+}
+
+.note-editor code {
+  padding: 0.12em 0.38em 0.1em;
+  border-radius: 0.36em;
+  background: var(--note-code-fill);
+  box-shadow: inset 0 0 0 1px var(--note-code-rim);
+  color: var(--note-code-ink);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  font-weight: 500;
+  /* stylelint-disable-next-line property-no-vendor-prefix */
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* Placeholders: drawn, never typed, never saved. */
+.note-editor .note-hint {
+  margin: 0;
+  color: var(--color-faint);
+  cursor: text;
+  /* stylelint-disable-next-line property-no-vendor-prefix */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.note-editor .is-empty::before {
+  content: attr(data-placeholder);
+  float: inline-start;
+  height: 0;
+  color: var(--color-faint);
+  pointer-events: none;
+}
+
+/* Lists hang their markers in the margin so text aligns with the paragraph
+   above it. */
+.note-editor ul,
+.note-editor ol {
+  margin: 0;
+  padding-inline-start: var(--note-indent);
+}
+
+.note-editor ul {
+  list-style: disc;
+}
+
+.note-editor ul ul {
+  list-style: circle;
+}
+
+.note-editor ol {
+  list-style: decimal;
+}
+
+.note-editor li {
+  position: relative;
+}
+
+.note-editor li > .note-item > * + * {
+  margin-block-start: 0.35em;
+}
+
+.note-editor li + li {
+  margin-block-start: 0.2em;
+}
+
+.note-editor li::marker {
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.note-editor .note-check[hidden] {
+  display: none;
+}
+
+/* A task drops the bullet and hangs its check where the bullet was. */
+.note-editor li[data-checked] {
+  list-style: none;
+}
+
+.note-editor .note-check {
+  position: absolute;
+  inset-inline-start: calc(-1 * var(--note-indent) + 0.05em);
+  top: calc((1em * var(--note-line) - 1.05em) / 2);
+  display: grid;
+  place-items: center;
+  width: 1.05em;
+  height: 1.05em;
+  padding: 0;
+  border: 1.5px solid var(--color-border-strong);
+  border-radius: 50%;
+  background: transparent;
+  cursor: default;
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    scale var(--motion-base) var(--ease-spring);
+}
+
+.note-editor .note-check:hover {
+  border-color: var(--color-muted);
+}
+
+.note-editor .note-check:active {
+  scale: 0.88;
+}
+
+.note-editor li[data-checked="true"] > .note-check {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+}
+
+.note-editor .note-check::after {
+  content: "";
+  width: 0.28em;
+  height: 0.5em;
+  margin-block-start: -0.1em;
+  border: solid var(--color-on-accent);
+  border-width: 0 1.6px 1.6px 0;
+  opacity: 0;
+  rotate: 45deg;
+  scale: 0.4;
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    scale var(--motion-base) var(--ease-spring);
+}
+
+.note-editor li[data-checked="true"] > .note-check::after {
+  opacity: 1;
+  scale: 1;
+}
+
+.note-editor li[data-checked="true"] > .note-item {
+  color: var(--color-muted);
+  transition: color var(--motion-base) var(--ease-out);
+}
+
+.note-editor blockquote {
+  margin-inline: 0;
+  padding-inline-start: 0.95em;
+  border-inline-start: 3px solid var(--color-border-strong);
+  color: var(--color-label-secondary);
+}
+
+.note-editor pre {
+  margin-inline: 0;
+  padding: 0.95em 1.1em;
+  overflow-x: auto;
+  border-radius: var(--radius-control-compact);
+  background: var(--color-fill);
+  box-shadow: inset 0 0 0 1px var(--note-code-rim);
+  color: var(--color-label-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.84em;
+  line-height: 1.6;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.note-editor pre code {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  color: inherit;
+  font-size: inherit;
+  font-weight: 400;
+}
+
+/* Code colours, painted by the engine over ranges rather than drawn with
+   elements (see lib/editor/highlight.ts). Only colour applies here, and
+   from global tokens: a highlight does not see the editor's own variables. */
+::highlight(note-code-comment) {
+  color: var(--color-faint);
+}
+
+::highlight(note-code-string) {
+  color: color-mix(in oklab, var(--color-tint-sage) 88%, var(--color-text));
+}
+
+::highlight(note-code-number) {
+  color: color-mix(in oklab, var(--color-tint-sky) 88%, var(--color-text));
+}
+
+::highlight(note-code-keyword) {
+  color: color-mix(in oklab, var(--color-tint-rose) 88%, var(--color-text));
+}
+
+.note-editor hr {
+  height: 1px;
+  margin-block: 1.4em;
+  border: 0;
+  background: var(--color-border);
+}
+
+.note-editor hr.ProseMirror-selectednode {
+  background: var(--color-ring);
+}
+
+/* A link to another note: its words, set apart without a chip. */
+.note-editor .note-wiki {
+  border-radius: 4px;
+  color: var(--color-text);
+  font-weight: 550;
+  text-decoration: underline;
+  text-decoration-color: var(--color-accent-soft);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
+  transition: text-decoration-color var(--motion-fast) var(--ease-out);
+}
+
+.note-editor .note-wiki:hover {
+  text-decoration-color: var(--color-text);
+}
+
+.note-editor .note-wiki[data-state="missing"] {
+  color: var(--color-muted);
+  font-weight: 450;
+  text-decoration-style: dashed;
+  text-decoration-color: var(--color-border-strong);
+  text-decoration-thickness: 1px;
+}
+
+.note-editor .note-wiki.ProseMirror-selectednode,
+.note-editor .note-raw-inline.ProseMirror-selectednode {
+  background: var(--color-accent-soft);
+}
+
+/* Markdown kept as written. */
+.note-editor .note-raw {
+  padding: 0.7em 0.9em;
+  border-radius: var(--radius-inset);
+  background: var(--color-fill);
+  color: var(--color-label-secondary);
+  cursor: default;
+}
+
+.note-editor .note-raw pre {
+  margin: 0;
+  padding: 0;
+  background: none;
+  font-size: 0.82em;
+  white-space: pre-wrap;
+}
+
+.note-editor .note-raw.ProseMirror-selectednode {
+  box-shadow: 0 0 0 2px var(--color-ring);
+}
+
+.note-editor .note-raw.is-table {
+  padding: 0;
+  overflow-x: auto;
+  background: none;
+}
+
+.note-editor table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--color-text);
+  font-size: 0.93em;
+  font-variant-numeric: tabular-nums;
+}
+
+.note-editor th,
+.note-editor td {
+  padding: 0.45em 0.7em;
+  border-block-end: 1px solid var(--color-border);
+  text-align: start;
+  vertical-align: top;
+}
+
+.note-editor th {
+  color: var(--color-label-secondary);
+  font-weight: 600;
+}
+
+.note-editor .note-raw-inline {
+  padding: 0 0.2em;
+  border-radius: 4px;
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+
+.note-editor .ProseMirror-gapcursor {
+  display: none;
+}
+
+/* The layers that float over a note: opaque, since they sit on the very text
+   they act on, and kept inside the notes area by their own placement. */
+.note-float {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  padding: var(--menu-pad);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-radius: var(--radius-menu);
+  background: var(--color-float);
+  box-shadow: var(--shadow-float);
+  outline: none;
+  transform-origin: 50% 0;
+  animation: note-float-in var(--motion-fast) var(--ease-out);
+}
+
+.note-float.above {
+  transform-origin: 50% 100%;
+}
+
+@keyframes note-float-in {
+  from {
+    opacity: 0;
+    scale: 0.97;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .note-float {
+    animation-name: note-float-fade;
+  }
+
+  @keyframes note-float-fade {
+    from {
+      opacity: 0;
+    }
+  }
+}
+
+.note-float-item {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: calc(var(--radius-menu) - var(--menu-pad));
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-body);
+  line-height: 18px;
+  text-align: start;
+  cursor: default;
+  outline: none;
+  /* stylelint-disable-next-line property-no-vendor-prefix */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.note-float-item[data-highlighted],
+.note-float-item:hover,
+.note-float-item:focus-visible {
+  background: var(--row-active);
+}
+
+.note-float-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 16px;
+  color: var(--color-muted);
+}
+
+.note-float-item[data-highlighted] .note-float-icon,
+.note-float-item:hover .note-float-icon,
+.note-float-item[aria-checked="true"] .note-float-icon {
+  color: var(--color-text);
+}
+
+.note-float-item[aria-checked="true"] {
+  font-weight: 590;
+}
+
+.note-float-label {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.note-float-label > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note-float .note-float-detail {
+  color: var(--color-faint);
+  font-size: var(--text-label);
+  font-weight: 400;
+}
+
+.note-float-hint {
+  flex: none;
+  margin-inline-start: auto;
+  padding-inline-start: 12px;
+  color: var(--color-faint);
+  font: inherit;
+  font-size: var(--text-label);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.note-float-separator {
+  flex: none;
+  height: 1px;
+  margin: 4px calc(var(--menu-pad) * -1);
+  background: var(--color-menu-separator);
+}
+
+.note-block-menu {
+  width: 236px;
+}
