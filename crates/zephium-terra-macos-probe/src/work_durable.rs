@@ -36,6 +36,11 @@ const AGENT_DETAILS_OBJECTIVE: &str = "Open https://www.lego.com/en-us/themes/ar
 const AGENT_MONEY_OBJECTIVE: &str = "Read https://demo.vercel.store/product/acme-geometric-circles-t-shirt in the browser and collect the Acme Circles T-Shirt with its explicitly displayed price, currency code and product image. Return only the target product with its observed amount and currency. Use one responsibility with one source-mapped output. Do not buy, sign in or change the cart. Do not substitute search snippets for the page.";
 const AGENT_READ_OBJECTIVE: &str = "From SQLite's official WAL documentation page, list every situation in which WAL mode does not work or has drawbacks, as cited findings with the page itself as the source. Read the actual page rather than relying on search snippets; use only sqlite.org.";
 const AGENT_GOVERNMENT_OBJECTIVE: &str = "Read https://travel.state.gov/ in the browser and report the passport and travel advisory services shown there, citing the actual page. Use one page read. Do not substitute search results, another page or prior knowledge. If verification prevents reading, report that honestly and stop; do not interact with verification controls, sign in or submit forms.";
+const AGENT_ARCHITECTURE_OBJECTIVE: &str = "Create me a full modern AI SaaS architecture and in general system design, technologies, stack, how much it will cost, etc.";
+/// A making request answers from knowledge: a bounded wall time for the loop.
+const ARCHITECTURE_DEADLINE: Duration = Duration::from_secs(180);
+/// Wall time of the last agent loop, in milliseconds.
+static AGENT_ELAPSED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const AGENT_OBJECTIVE: &str = "Compare Svelte Flow and React Flow as the canvas library for a desktop app: bundle size, license, and how actively each is maintained in 2026. Place the two libraries as subjects with cited findings, and finish with a short comparison.";
 
 struct WorkflowResult {
@@ -69,6 +74,8 @@ enum Mode {
     AgentPage,
     AgentMoney,
     MoneyNode,
+    /// A making request: a design answered from knowledge as a set.
+    AgentArchitecture,
 }
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
@@ -93,6 +100,10 @@ pub(super) fn run_agent() -> Result<(), super::ProbeFailure> {
 
 pub(super) fn run_money_node() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::MoneyNode)
+}
+
+pub(super) fn run_agent_architecture() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentArchitecture)
 }
 
 pub(super) fn run_agent_money() -> Result<(), super::ProbeFailure> {
@@ -364,6 +375,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentListing
             | Mode::AgentPage
             | Mode::AgentMoney
+            | Mode::AgentArchitecture
     ) {
         6
     } else {
@@ -389,7 +401,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         | Mode::AgentAirbnb
         | Mode::AgentListing
         | Mode::AgentPage
-        | Mode::AgentMoney => 720,
+        | Mode::AgentMoney
+        | Mode::AgentArchitecture => 720,
         Mode::Public => 160,
         _ => 240,
     });
@@ -621,6 +634,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentListing
             | Mode::AgentPage
             | Mode::AgentMoney
+            | Mode::AgentArchitecture
     ) {
         let execution = &state.executions[0];
         let counts = |kind: &str| {
@@ -720,6 +734,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         }
         _ => true,
     };
+    let design_accepted =
+        mode != Mode::AgentArchitecture || architecture_accepted(&state.executions[0]);
     if mode == Mode::AgentListing {
         // The read asked for ?adults=1; only the page's canonical address,
         // not the admitted one, cites the listing without that query.
@@ -787,6 +803,12 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             } else {
                 "agent-money-incomplete.json"
             }
+        } else if mode == Mode::AgentArchitecture {
+            if design_accepted {
+                "agent-architecture-run.json"
+            } else {
+                "agent-architecture-incomplete.json"
+            }
         } else if mode == Mode::AgentTrip {
             "agent-trip-run.json"
         } else if mode == Mode::AgentAirbnb {
@@ -825,6 +847,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             "money_accepted": money_accepted,
             "collection_accepted": collection_accepted,
             "travel_accepted": travel_accepted,
+            "design_accepted": design_accepted,
             "projection": state,
             "historical_evidence": evidence,
         }))
@@ -838,9 +861,9 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     }
     let _ = writeln!(
         std::io::stdout().lock(),
-        "agent-acceptance: collection={collection_accepted} money={money_accepted} travel={travel_accepted}"
+        "agent-acceptance: collection={collection_accepted} money={money_accepted} travel={travel_accepted} design={design_accepted}"
     );
-    if !collection_accepted || !money_accepted || !travel_accepted {
+    if !collection_accepted || !money_accepted || !travel_accepted || !design_accepted {
         return Err(Error::Runtime);
     }
     writeln!(std::io::stdout().lock(), "durable-work: fixed_collection_assignment={}; native_browser=true; artifacts={}; resource_closed=true; reopened=true; semantic_status={:?}; content=redacted", mode == Mode::AgentMoney, state.executions[0].artifacts.len(), state.executions[0].status).map_err(|_| Error::Output)?;
@@ -898,6 +921,7 @@ async fn workflow(
             | Mode::AgentListing
             | Mode::AgentPage
             | Mode::AgentMoney
+            | Mode::AgentArchitecture
             | Mode::AgentFiles
     ) {
         return agent_workflow(
@@ -1442,6 +1466,63 @@ async fn review_product_results(
     Ok(state)
 }
 
+/// A making request answered from knowledge as a set: a diagram of at least
+/// six nodes, five edges and one vendor host, a table, findings and a
+/// checklist, each marked knowledge; at most two reads, none failed, and the
+/// loop under its deadline.
+fn architecture_accepted(execution: &WorkExecutionFact) -> bool {
+    use zephium_core::work::artifact::WorkArtifactDataV1 as Data;
+    let known = |test: &dyn Fn(&Data) -> bool| {
+        execution
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.general_knowledge && test(&artifact.data))
+    };
+    let diagram = known(&|data| {
+        matches!(data, Data::Diagram { nodes, edges, .. }
+            if nodes.len() >= 6 && edges.len() >= 5 && nodes.iter().any(|node| node.vendor.is_some()))
+    });
+    let table = known(&|data| matches!(data, Data::Table { .. }));
+    let findings = known(&|data| matches!(data, Data::Findings { .. }));
+    let checklist = known(&|data| matches!(data, Data::Checklist { .. }));
+    let reads: Vec<_> = execution
+        .steps
+        .iter()
+        .filter(|step| matches!(step.kind, WorkStepKindV1::Read { .. }))
+        .collect();
+    let failed_reads = reads
+        .iter()
+        .filter(|step| step.status != WorkStepStatus::Succeeded)
+        .count();
+    let elapsed_ms = AGENT_ELAPSED_MS.load(std::sync::atomic::Ordering::Relaxed);
+    let marked = execution
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.general_knowledge)
+        .count();
+    let mut kinds: Vec<_> = execution
+        .artifacts
+        .iter()
+        .map(|artifact| zephium_core::work::agent::artifact_kind(&artifact.data))
+        .collect();
+    kinds.sort_unstable();
+    let accepted = diagram
+        && table
+        && findings
+        && checklist
+        && reads.len() <= 2
+        && failed_reads == 0
+        && u128::from(elapsed_ms) < ARCHITECTURE_DEADLINE.as_millis();
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "design_qualification diagram={diagram} table={table} findings={findings} checklist={checklist} knowledge={marked}/{} reads={} failed_reads={failed_reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
+        execution.artifacts.len(),
+        reads.len(),
+        kinds.join(","),
+    );
+    accepted
+}
+
 /// The routine loop on a public comparison objective. Every step, source and
 /// object is durable before the next turn; the proof file keeps the projection.
 async fn agent_workflow(
@@ -1472,6 +1553,7 @@ async fn agent_workflow(
         Mode::AgentTrip => "Plan a trip from Poland to San Francisco for a YC batch as a solo founder; for flats check Airbnb. Use public sources for batch timing, travel logistics and practical accommodation tradeoffs, with cited findings. Read Airbnb itself before making any claim about its listings. Dates and budget are unspecified: state planning assumptions and leave live availability and total stay cost unknown unless the pages establish them. Do not book, submit forms, sign in, create accounts, send messages or interact with verification controls. Report blocked pages honestly.",
         Mode::AgentAirbnb => "Find three good Airbnb options in San Francisco for a solo founder attending a YC batch, compare and recommend one using cited public page evidence. Inspect Airbnb itself and observed listing links. Dates and budget are unspecified: state assumptions, distinguish nightly prices from total stay costs, and leave unavailable details unknown. Include observed pictures when available. Do not book, submit forms, sign in, create accounts, send messages or interact with verification controls. If access prevents three verified options, report that limitation instead of inventing options.",
         Mode::AgentMoney => AGENT_MONEY_OBJECTIVE,
+        Mode::AgentArchitecture => AGENT_ARCHITECTURE_OBJECTIVE,
         Mode::AgentListing => "Read https://www.airbnb.com/rooms/23813739?adults=1 in one browser read and collect this one listing: its name, displayed nightly price, displayed monthly total, stay dates or minimum stay, its own page address as an optional url column named listing_url, and picture. Dates are unspecified, so leave any value the page does not show unknown. Do not search, follow links, book, sign in or interact with verification controls.",
         Mode::AgentRead => AGENT_READ_OBJECTIVE,
         Mode::AgentPage => PAGE_OBJECTIVE.get().map(String::as_str).unwrap_or_default(),
@@ -1753,6 +1835,7 @@ async fn agent_workflow(
             )
             .await
     };
+    let started = Instant::now();
     let state = if mode == Mode::AgentHumanGovernment {
         tokio::select! {
             result = agent_run => result,
@@ -1766,6 +1849,10 @@ async fn agent_workflow(
             );
             "agent_run"
         })?;
+    AGENT_ELAPSED_MS.store(
+        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let execution = state.executions.first().ok_or("agent_execution")?;
     for step in &execution.steps {
         let _ = writeln!(

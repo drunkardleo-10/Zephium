@@ -7,12 +7,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-const SCENARIOS: [(&str, &str); 5] = [
+const SCENARIOS: [(&str, &str); 6] = [
     ("read_gate", "--live-agent-read-work"),
     ("lego_collection", "--live-agent-collection-work"),
     ("lego_details", "--live-agent-product-details-work"),
     ("trip_plan", "--live-agent-trip-work"),
     ("airbnb_three", "--live-agent-airbnb-work"),
+    ("architecture_design", "--live-agent-architecture-work"),
 ];
 const RUNS: usize = 3;
 /// Every scenario's own deadline: its 720 s execution plus the 30 s host
@@ -32,6 +33,8 @@ enum FailureReason {
     Collection,
     /// The travel or Airbnb criteria were unmet.
     Travel,
+    /// The making set, its knowledge marks, reads or time were unmet.
+    Design,
     /// The agent loop itself failed.
     RunFailure,
     /// The native host or the probe process failed.
@@ -126,6 +129,7 @@ fn measure(output: &str, wall_ms: u128) -> (Row, Option<FailureReason>, bool) {
             accepted = Some((
                 rest.contains("collection=true"),
                 rest.contains("travel=true"),
+                rest.contains("design=true"),
             ));
         } else if line.contains("agent-work: run_failure=") {
             run_failure = true;
@@ -141,8 +145,9 @@ fn measure(output: &str, wall_ms: u128) -> (Row, Option<FailureReason>, bool) {
         Some(FailureReason::Outcome)
     } else {
         match accepted {
-            Some((false, _)) => Some(FailureReason::Collection),
-            Some((_, false)) => Some(FailureReason::Travel),
+            Some((false, _, _)) => Some(FailureReason::Collection),
+            Some((_, false, _)) => Some(FailureReason::Travel),
+            Some((_, _, false)) => Some(FailureReason::Design),
             Some(_) => None,
             None => Some(FailureReason::Host),
         }
