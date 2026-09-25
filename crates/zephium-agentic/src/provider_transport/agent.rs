@@ -220,7 +220,7 @@ impl OpenAiWorkAgent {
                     title: artifact.title,
                     data,
                     evidence: artifact.evidence,
-                    general_knowledge: false,
+                    general_knowledge: artifact.general_knowledge,
                 }),
                 Err(()) => {
                     malformed += 1;
@@ -317,7 +317,8 @@ fn schema() -> Value {
     let maybe_text = json!({"type":["string","null"]});
     let artifact = object(json!({
         "title":text,"data":artifact_data_schema_with_evidence_limit(127),
-        "evidence":array(json!({"type":"integer","minimum":0,"maximum":127}),1,64)
+        "evidence":array(json!({"type":"integer","minimum":0,"maximum":127}),0,64),
+        "general_knowledge":{"type":"boolean"}
     }));
     let fetch = json!({"anyOf":[
         object(json!({"kind":{"type":"string","enum":["search"]},"query":text})),
@@ -430,8 +431,9 @@ mod tests {
         ] {
             assert!(INSTRUCTIONS.contains(sentence), "{sentence}");
         }
-        let schema = serde_json::to_string(&schema()).unwrap();
-        assert!(schema.contains("\"checklist\"") && schema.contains("\"followups\""));
+        let schema = schema();
+        let text = serde_json::to_string(&schema).unwrap();
+        assert!(text.contains("\"checklist\"") && text.contains("\"followups\""));
         let turn = wire::decode_turn(&json!({
             "say":"Plan ready.",
             "artifacts":[{"title":"Trip steps","evidence":[0],"data":{"kind":"checklist","value":{"items":[{"text":"Book the LOT fare","completed":false}]}}}],
@@ -439,7 +441,21 @@ mod tests {
         }).to_string(), &mut Vec::new())
         .unwrap();
         let artifact = turn.artifacts.into_iter().next().unwrap();
+        assert!(!artifact.general_knowledge);
         assert!(matches!(artifact.data.resolve(), Ok(zephium_core::work::artifact::WorkArtifactDataV1::Checklist { .. })));
+        let known = |mark: Value| json!({
+            "say":null,"fetch":[],"ask":null,"finish":false,
+            "artifacts":[{"title":"Next steps","evidence":[],"general_knowledge":mark,"data":{"kind":"checklist","value":{"items":[{"text":"Pick a region","completed":false}]}}}]
+        }).to_string();
+        let turn = wire::decode_turn(&known(json!(true)), &mut Vec::new()).unwrap();
+        assert!(turn.artifacts[0].general_knowledge && turn.artifacts[0].evidence.is_empty());
+        let mut faults = Vec::new();
+        let turn = wire::decode_turn(&known(json!("yes")), &mut faults).unwrap();
+        assert!(turn.artifacts.is_empty());
+        assert_eq!((faults[0].path.as_str(), faults[0].expected), ("artifacts[0].general_knowledge", "boolean"));
+        let artifact = &schema["properties"]["artifacts"]["items"];
+        assert_eq!(artifact["properties"]["evidence"]["minItems"], 0);
+        assert_eq!(artifact["properties"]["general_knowledge"]["type"], "boolean");
     }
     #[test]
     fn the_turn_offers_search_and_read_but_no_native_discovery() {

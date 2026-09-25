@@ -36,6 +36,8 @@ pub(super) struct WireAgentArtifact {
     pub(super) title: String,
     pub(super) data: WireData,
     pub(super) evidence: Vec<u16>,
+    #[serde(default)]
+    pub(super) general_knowledge: bool,
 }
 
 const TURN_FIELDS: [&str; 6] = ["say", "artifacts", "fetch", "ask", "finish", "followups"];
@@ -267,7 +269,11 @@ fn column_fault(value: &Value) -> Option<(String, &'static str)> {
 }
 
 fn artifact_fault(value: &Value) -> (String, &'static str) {
-    if let Some(fault) = fields_fault(value, &[("title", Shape::Text)], &["data", "evidence"]) {
+    if let Some(fault) = fields_fault(
+        value,
+        &[("title", Shape::Text)],
+        &["data", "evidence", "general_knowledge"],
+    ) {
         return fault;
     }
     let data = value.get("data").and_then(Value::as_object);
@@ -287,6 +293,9 @@ fn artifact_fault(value: &Value) -> (String, &'static str) {
         })
     {
         return ("evidence".into(), "source_key_array");
+    }
+    if !value.get("general_knowledge").is_none_or(Value::is_boolean) {
+        return ("general_knowledge".into(), "boolean");
     }
     (String::new(), "artifact")
 }
