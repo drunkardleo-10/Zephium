@@ -6,7 +6,7 @@
   const outputs = $derived(item.responsibility?.outputs ?? []);
 </script>
 
-<CardFrame kind={item.kind} title={item.title} icon={Task01Icon} {selected}>
+<CardFrame id={item.id} kind={item.kind} title={item.title} icon={Task01Icon} {selected}>
   {#if outputs.length}<ul class="outputs">
       {#each outputs.slice(0, 3) as output, index (index)}<li>{output}</li>{/each}
       {#if outputs.length > 3}<li class="more">+{outputs.length - 3}</li>{/if}

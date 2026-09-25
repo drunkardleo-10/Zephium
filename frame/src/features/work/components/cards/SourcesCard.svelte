@@ -1,11 +1,10 @@
 <script lang="ts">
   import CardFrame from "./CardFrame.svelte";
   import HostGlyph from "./HostGlyph.svelte";
-  import { Link04Icon } from "../../lib/icons";
   import type { CanvasItem } from "../../lib/canvas-model";
   import { SOURCE_ROWS } from "../../lib/card-size";
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
-  const MARKS = 8;
+  const MARKS = 5;
   const rows = $derived(item.sources ?? []);
   /** One mark per site: eleven pages of one shop are one shop. */
   const mark = (row: (typeof rows)[number]) => (row.file ? `file:${row.key}` : row.where);
@@ -14,18 +13,16 @@
   );
 </script>
 
-<CardFrame title={item.title} icon={Link04Icon} {selected} active={item.active} dense>
-  {#if marks.length}<div class="marks" aria-hidden="true">
-      {#each marks.slice(0, MARKS) as row (row.key)}<HostGlyph
-          host={row.where}
-          file={!!row.file}
-          size={18}
-        />{/each}
-      {#if marks.length > MARKS}<span class="extra">+{marks.length - MARKS}</span>{/if}
-    </div>{/if}
+<CardFrame id={item.id} title={item.title} {selected} active={item.active} lines={1} dense>
+  {#snippet leading()}<span class="strip" aria-hidden="true">
+      {#each marks.slice(0, MARKS) as row (row.key)}<span class="mark"
+          ><HostGlyph host={row.where} url={row.url} file={!!row.file} /></span
+        >{/each}
+    </span>{/snippet}
   <ul class="rows">
     {#each rows.slice(0, SOURCE_ROWS) as row (row.key)}
       <li>
+        <HostGlyph host={row.where} url={row.url} file={!!row.file} size={14} />
         <span class="where">{row.where}</span>
         <span class="title" class:refused={!!row.note} title={row.note || row.title}
           >{row.note || row.title}</span
@@ -36,43 +33,49 @@
 </CardFrame>
 
 <style>
-  .marks {
+  /* Real marks, overlapping by 4 px, each cut out of the card by its own ring. */
+  .strip {
     display: flex;
     align-items: center;
-    gap: 4px;
-    margin-block-end: 10px;
+    padding-inline-start: 4px;
   }
 
-  .extra {
-    padding: 0 6px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill);
-    color: var(--color-muted);
-    font-size: var(--text-caption);
-    font-variant-numeric: tabular-nums;
-    line-height: 18px;
+  .mark {
+    display: grid;
+    margin-inline-start: -4px;
+    border-radius: calc(var(--radius-inset) / 2);
+    box-shadow: 0 0 0 1.5px var(--color-surface);
+    background: var(--color-surface);
   }
 
   .rows {
-    list-style: none;
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    margin: 0;
-    padding: 0 0 4px;
+    gap: 4px;
+    margin: 0 -4px;
+    padding: 0;
+    list-style: none;
     overflow: hidden;
   }
 
   li {
     display: flex;
-    align-items: baseline;
-    gap: 6px;
+    align-items: center;
+    gap: 8px;
     min-inline-size: 0;
+    min-block-size: 20px;
+    padding-inline: 4px;
+    border-radius: var(--radius-row);
+    transition: background-color var(--motion-fast) var(--ease-out);
+  }
+
+  li:hover {
+    background: var(--row-hover);
   }
 
   .where {
     flex: none;
-    max-inline-size: 45%;
+    max-inline-size: 40%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

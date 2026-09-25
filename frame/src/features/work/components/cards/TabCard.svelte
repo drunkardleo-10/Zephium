@@ -1,9 +1,8 @@
 <script lang="ts">
-  import FavIcon from "$shared/ui/FavIcon";
-  import { favicons } from "$domain/favicons";
   import Icon from "$shared/ui/Icon";
   import CardFrame from "./CardFrame.svelte";
   import SubjectPicture from "./SubjectPicture.svelte";
+  import HostGlyph from "./HostGlyph.svelte";
   import { displayHost } from "$shared/ui/data/Artifact";
   import { PlayIcon } from "../../lib/icons";
   import type { CanvasItem } from "../../lib/canvas-model";
@@ -26,15 +25,18 @@
   </div>{/snippet}
 
 <CardFrame
+  id={item.id}
   title={item.title}
   {selected}
   unavailable={item.unavailable}
   hero={item.image ? thumbnail : undefined}
   dense
 >
-  {#snippet leading()}<FavIcon
-      image={favicons.image(item.icon ?? null)}
-      tone={favicons.tone(item.icon ?? null)}
+  {#snippet leading()}<HostGlyph
+      {host}
+      url={item.detail}
+      icon={item.icon ?? null}
+      initial={false}
     />{/snippet}
   {#snippet footer()}<span class="host" title={item.detail}>{host || item.status}</span
     >{#if playable}<button
@@ -61,7 +63,8 @@
     inline-size: 32px;
     block-size: 32px;
     border-radius: 50%;
-    background: var(--color-menu);
+    background: var(--color-float);
+    box-shadow: var(--shadow-raised);
     color: var(--color-text);
     translate: -50% -50%;
   }
@@ -81,17 +84,17 @@
     padding: 1px 8px 1px 6px;
     border: 0;
     border-radius: var(--radius-capsule);
-    background: var(--color-fill);
+    background: var(--color-control);
     color: var(--color-muted);
     font: inherit;
     cursor: default;
     transition:
-      background-color var(--motion-fast) var(--ease-smooth),
-      color var(--motion-fast) var(--ease-smooth);
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out);
   }
 
   .play:hover {
-    background: var(--color-fill-hover);
+    background: var(--color-control-hover);
     color: var(--color-text);
   }
 

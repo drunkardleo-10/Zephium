@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
+  import CardFrame from "./CardFrame.svelte";
   import {
     AirplaneTakeOff01Icon,
     Calendar03Icon,
@@ -24,59 +25,26 @@
 </script>
 
 <!-- One thing to do, whole: what it is at a glance, then its words. -->
-<article class="step" class:selected data-icon={item.step?.icon ?? "check"}>
-  <div class="work-drag-handle grip"></div>
-  <header>
-    <span class="tile" aria-hidden="true"><Icon icon={glyph} size={15} /></span>
-    {#if item.step}<span class="index">{item.step.index}</span>{/if}
-  </header>
-  <p class="text">{item.step?.text ?? item.title}</p>
-  {#if item.detail}<p class="detail">{item.detail}</p>{/if}
-</article>
+<CardFrame id={item.id} {selected} plain>
+  <div class="step" data-icon={item.step?.icon ?? "check"}>
+    <header>
+      <span class="tile" aria-hidden="true"><Icon icon={glyph} size={15} /></span>
+      {#if item.step}<span class="index">{item.step.index}</span>{/if}
+    </header>
+    <p class="text">{item.step?.text ?? item.title}</p>
+    {#if item.detail}<p class="detail">{item.detail}</p>{/if}
+  </div>
+</CardFrame>
 
 <style>
   .step {
-    position: relative;
     display: flex;
     flex-direction: column;
     gap: 8px;
     box-sizing: border-box;
     block-size: 100%;
-    padding: 14px;
-    border-radius: var(--radius-card);
-    background: var(--color-surface);
-    box-shadow: inset 0 0 0 1px var(--color-border);
-    color: var(--color-text);
-    overflow: hidden;
-    transition: box-shadow var(--motion-fast) var(--ease-smooth);
-  }
-
-  .step:hover {
-    box-shadow: inset 0 0 0 1px var(--color-border-strong);
-  }
-
-  .step.selected {
-    box-shadow:
-      inset 0 0 0 1px var(--color-border-strong),
-      0 0 0 2px var(--color-accent-soft),
-      0 0 0 3px var(--color-accent);
-  }
-
-  /* stylelint-disable-next-line selector-class-pattern */
-  :global(.svelte-flow__node.dragging) .step {
-    box-shadow:
-      inset 0 0 0 1px var(--color-border-strong),
-      var(--shadow-popover);
-  }
-
-  .grip {
-    position: absolute;
-    inset: 0;
-    cursor: grab;
-  }
-
-  .grip:active {
-    cursor: grabbing;
+    min-block-size: 0;
+    padding: 12px 12px 16px;
   }
 
   header {
@@ -84,7 +52,6 @@
     align-items: flex-start;
     justify-content: space-between;
     flex: none;
-    pointer-events: none;
   }
 
   .tile {
@@ -92,9 +59,9 @@
     place-items: center;
     inline-size: 28px;
     block-size: 28px;
-    border-radius: var(--radius-row);
-    background: var(--color-accent-soft);
-    color: var(--color-accent);
+    border-radius: var(--radius-inset);
+    background: var(--color-fill);
+    color: var(--color-label-secondary);
   }
 
   .index {
@@ -107,11 +74,9 @@
 
   .text,
   .detail {
-    position: relative;
     margin: 0;
     overflow-wrap: anywhere;
     text-wrap: pretty;
-    pointer-events: none;
   }
 
   .text {

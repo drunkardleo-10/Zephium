@@ -15,7 +15,14 @@
   );
 </script>
 
-<CardFrame kind={item.kind} title={item.title} {icon} {selected} unavailable={item.unavailable}>
+<CardFrame
+  id={item.id}
+  kind={item.kind}
+  title={item.title}
+  {icon}
+  {selected}
+  unavailable={item.unavailable}
+>
   {#if url && !failed}
     <div class="preview">
       <img src={url} alt={item.title} loading="lazy" onerror={() => (failed = true)} />

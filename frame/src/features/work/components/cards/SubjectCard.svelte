@@ -1,11 +1,13 @@
 <script lang="ts">
   import CardFrame from "./CardFrame.svelte";
   import SubjectPicture from "./SubjectPicture.svelte";
+  import HostGlyph from "./HostGlyph.svelte";
   import { displayHost } from "$shared/ui/data/Artifact";
   import { factBeside, SUBJECT_FACTS } from "../../lib/card-size";
   import type { CanvasItem } from "../../lib/canvas-model";
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
-  const host = $derived(displayHost(item.subject?.homepage));
+  const homepage = $derived(item.subject?.homepage ?? "");
+  const host = $derived(displayHost(homepage));
   /** The lead fact (the price, when there is one) and the rest, each whole. */
   const facts = $derived((item.facts ?? []).slice(0, SUBJECT_FACTS));
 </script>
@@ -13,16 +15,22 @@
 {#snippet picture()}<div class="picture">
     <SubjectPicture picture={item.image} name={item.title} large />
   </div>{/snippet}
-{#snippet initial()}<SubjectPicture name={item.title} />{/snippet}
+{#snippet mark()}<HostGlyph
+    {host}
+    url={homepage}
+    icon={item.icon ?? null}
+    size={20}
+    initial={false}
+  />{/snippet}
 
-<!-- A picture when the run admitted one; otherwise the initial beside the name. -->
+<!-- A picture when the run admitted one; otherwise the site's own mark beside the name. -->
 <CardFrame
+  id={item.id}
   title={item.title}
   {selected}
   unavailable={item.unavailable}
   hero={item.image ? picture : undefined}
-  leading={item.image ? undefined : initial}
-  tile={!item.image}
+  leading={item.image ? undefined : mark}
   dense
 >
   {#if facts.length}
@@ -39,8 +47,17 @@
 </CardFrame>
 
 <style>
+  /* The hero sits inside the card on its own inset corner. */
   .picture {
+    box-sizing: border-box;
     block-size: 112px;
+    padding: 4px 4px 0;
+    background: var(--color-surface);
+  }
+
+  .picture > :global(*) {
+    border-radius: var(--radius-inset);
+    overflow: hidden;
   }
 
   .facts {

@@ -31,10 +31,11 @@ test("a settled page shows its frame on first mount and follows it when it chang
   expect(screen.container.querySelector<HTMLImageElement>(".frame img")?.getAttribute("src")).toBe(
     PNG,
   );
-  // Nothing recorded yet: the card keeps the host's initial, not a broken image.
+  // Nothing recorded yet: the card keeps the site's mark, not a broken image or an initial.
   await screen.rerender({ item: card(null), selected: false });
   expect(screen.container.querySelector(".frame img")).toBeNull();
-  expect(screen.container.querySelector(".placeholder")?.textContent).toBe("s");
+  expect(screen.container.querySelector(".placeholder .favicon")).not.toBeNull();
+  expect(screen.container.querySelector(".placeholder")?.textContent?.trim()).toBe("");
   await screen.unmount();
 });
 

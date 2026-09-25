@@ -53,7 +53,7 @@ test("explicit result focus restores readable zoom without moving nodes and supp
   await expect.poll(() => onviewchange.mock.lastCall?.[0].viewport.zoom).toBe(1);
   expect(onviewchange.mock.lastCall?.[0].positions.result).toEqual({ x: 800, y: 400 });
   expect(onviewchange.mock.lastCall?.[0].sizes.result).toEqual({ width: 480, height: 360 });
-  const body = screen.getByRole("region", { name: "Research", exact: true });
+  const body = screen.getByRole("button", { name: "Research", exact: true });
   await expect.element(body).toHaveFocus();
   // The card reads as the answer: its lead, not the whole text, and no citation chips.
   const card = screen.container.querySelector(".artifact-body")!;

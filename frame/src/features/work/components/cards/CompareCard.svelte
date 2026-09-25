@@ -24,7 +24,7 @@
   const rest = $derived(Math.max(0, (model?.columns.length ?? 0) - COLUMNS));
 </script>
 
-<CardFrame title={item.title} icon={GitCompareIcon} {selected} dense>
+<CardFrame id={item.id} title={item.title} icon={GitCompareIcon} {selected} dense>
   {#if model}
     <div class="compare" style:--columns={columns.length} class:stub={rest > 0}>
       <div class="head">

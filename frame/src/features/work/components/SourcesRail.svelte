@@ -32,7 +32,12 @@
     <button type="button" class="summary" aria-expanded={open} onclick={() => (open = !open)}>
       <span class="glyphs" aria-hidden="true">
         {#each glyphs.slice(0, GLYPHS) as reference (reference.key)}<span class="glyph"
-            ><HostGlyph host={where(reference)} file={!!reference.file} size={16} /></span
+            ><HostGlyph
+              host={where(reference)}
+              url={reference.url}
+              file={!!reference.file}
+              size={16}
+            /></span
           >{/each}
       </span>
       <span class="label"
@@ -51,7 +56,12 @@
               title={reference.url ?? reference.label}
               onclick={() => onpick(reference)}
             >
-              <HostGlyph host={where(reference)} file={!!reference.file} size={16} />
+              <HostGlyph
+                host={where(reference)}
+                url={reference.url}
+                file={!!reference.file}
+                size={16}
+              />
               <span class="host">{where(reference)}</span>
               {#if reference.label && reference.label !== where(reference)}<span class="title"
                   >{reference.label}</span
@@ -79,18 +89,22 @@
     box-sizing: border-box;
     padding: 6px 8px;
     border: 0;
-    border-radius: var(--radius-control-compact);
+    border-radius: var(--radius-row);
     background: transparent;
     color: var(--color-text);
     font: inherit;
     font-size: var(--text-label);
     text-align: start;
     cursor: default;
-    transition: background-color var(--motion-instant) ease;
+    transition: background-color var(--motion-fast) var(--ease-out);
   }
 
   button:hover {
-    background: var(--color-fill-hover);
+    background: var(--row-hover);
+  }
+
+  button:active {
+    background: var(--row-pressed);
   }
 
   button:focus-visible {
@@ -110,8 +124,9 @@
   .glyph {
     display: inline-grid;
     margin-inline-start: -4px;
-    border-radius: 50%;
-    box-shadow: 0 0 0 2px var(--color-surface);
+    border-radius: calc(var(--radius-inset) / 2);
+    background: var(--color-surface);
+    box-shadow: 0 0 0 1.5px var(--color-surface);
   }
 
   .glyph:first-child {
@@ -125,7 +140,7 @@
 
   .chevron {
     display: inline-grid;
-    transition: rotate var(--motion-fast) var(--ease-smooth);
+    transition: rotate var(--motion-base) var(--ease-emphasized);
   }
 
   .chevron.open {

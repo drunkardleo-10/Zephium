@@ -2,11 +2,15 @@
   import type { Snippet } from "svelte";
   import type { IconSvgElement } from "@hugeicons/svelte";
   import Icon from "$shared/ui/Icon";
+  import { provideSiteMarks } from "$shared/ui/data/Artifact/site-marks";
+  import { siteMark } from "./HostGlyph.svelte";
   let {
+    id,
     kind = "",
-    title,
+    title = "",
     icon,
     leading,
+    aside,
     hero,
     count,
     lines = 2,
@@ -15,16 +19,22 @@
     active = false,
     unavailable = false,
     dense = false,
-    tile = false,
+    row = false,
+    plain = false,
     children,
     footer,
   }: {
+    /** The canvas item this card draws; the lift finds its source by it. */
+    id?: string;
     /** Said only where the card does not already say what it is. */
     kind?: string;
-    title: string;
+    title?: string;
     icon?: IconSvgElement;
+    /** A mark in place of the icon plate: a favicon, a strip of them. */
     leading?: Snippet;
-    /** A full-bleed picture above the header. */
+    /** The header's other end: an elapsed time, a count. */
+    aside?: Snippet;
+    /** A picture above the header. */
     hero?: Snippet;
     /** A tally beside the title, in tabular numerals. */
     count?: number;
@@ -35,34 +45,50 @@
     active?: boolean;
     unavailable?: boolean;
     dense?: boolean;
-    /** The leading glyph is a 40 px tile: a subject's initial where it has no picture. */
-    tile?: boolean;
+    /** A local thing (folder, file, command): its header is a row on main's row plate. */
+    row?: boolean;
+    /** The card draws its own layout inside the frame. */
+    plain?: boolean;
     children?: Snippet;
     footer?: Snippet;
   } = $props();
+  // Evidence chips and source rows inside a card draw the sites' real marks.
+  provideSiteMarks(siteMark);
 </script>
 
-<article class="card" class:selected class:active class:unavailable class:dense>
-  {#if hero}<div class="hero work-drag-handle">{@render hero()}</div>{/if}
-  <header class="work-drag-handle" class:tile>
-    {#if leading || icon}<span class="glyph">
-        {#if leading}{@render leading()}{:else if icon}<Icon {icon} size={14} />{/if}
-      </span>{/if}
-    <span class="titles">
-      {#if kind}<span class="kind">{kind}</span>{/if}
-      <span class="line">
-        <strong class="title" class:one={lines === 1} class:mono {title}>{title}</strong>
-        {#if count !== undefined}<span class="count">{count}</span>{/if}
+<!-- The whole card carries it; controls inside opt out with nodrag. -->
+<article
+  class="card work-drag-handle"
+  data-card-id={id}
+  class:selected
+  class:active
+  class:unavailable
+  class:dense
+  class:row
+  class:plain
+>
+  {#if plain}{@render children?.()}{:else}
+    {#if hero}<div class="hero">{@render hero()}</div>{/if}
+    <header>
+      {#if leading}<span class="leading">{@render leading()}</span>
+      {:else if icon}<span class="glyph"><Icon {icon} size={14} /></span>{/if}
+      <span class="titles">
+        {#if kind}<span class="kind">{kind}</span>{/if}
+        <span class="line">
+          <strong class="title" class:one={lines === 1} class:mono {title}>{title}</strong>
+          {#if count !== undefined}<span class="count">{count}</span>{/if}
+        </span>
       </span>
-    </span>
-  </header>
-  {#if children}<div class="body">{@render children()}</div>{/if}
-  {#if footer}<footer>{@render footer()}</footer>{/if}
+      {#if aside}<span class="aside">{@render aside()}</span>{/if}
+    </header>
+    {#if children}<div class="body">{@render children()}</div>{/if}
+    {#if footer}<footer>{@render footer()}</footer>{/if}
+  {/if}
 </article>
 
 <style>
-  /* One card language: a hairline at rest, a firmer one under the pointer,
-     the accent when chosen, and a lift only while the card is carried. */
+  /* One card on the tonal ladder: the surface rung and a hairline at rest, a
+     lit ring when chosen, the float shadow only while carried. */
   .card {
     display: flex;
     flex-direction: column;
@@ -74,41 +100,26 @@
     box-shadow: inset 0 0 0 1px var(--color-border);
     color: var(--color-text);
     overflow: hidden;
-    transition: box-shadow var(--motion-fast) var(--ease-smooth);
+    transition: box-shadow var(--motion-fast) var(--ease-out);
   }
 
-  .card:hover {
+  .card:hover,
+  .card.active {
     box-shadow: inset 0 0 0 1px var(--color-border-strong);
   }
 
   .card.selected {
     box-shadow:
-      inset 0 0 0 1px var(--color-border-strong),
-      0 0 0 2px var(--color-accent-soft),
-      0 0 0 3px var(--color-accent);
+      0 0 0 1px var(--color-lit),
+      var(--shadow-raised);
   }
 
   /* stylelint-disable-next-line selector-class-pattern */
   :global(.svelte-flow__node.dragging) .card {
     box-shadow:
-      inset 0 0 0 1px var(--color-border-strong),
-      var(--shadow-popover);
-  }
-
-  /* The stage the run is working in breathes; it never flashes. */
-  .card.active {
-    animation: card-active 2.4s var(--ease-smooth) infinite;
-  }
-
-  @keyframes card-active {
-    0%,
-    100% {
-      box-shadow: inset 0 0 0 1px var(--color-border);
-    }
-
-    50% {
-      box-shadow: inset 0 0 0 1px var(--color-accent);
-    }
+      inset 0 0 0 1px var(--color-border),
+      var(--shadow-float);
+    cursor: grabbing;
   }
 
   .card.unavailable {
@@ -119,7 +130,6 @@
     flex: none;
     overflow: hidden;
     background: var(--color-fill);
-    cursor: grab;
   }
 
   header {
@@ -127,17 +137,27 @@
     align-items: center;
     gap: 8px;
     flex: none;
-    padding: 12px 14px 8px;
-    cursor: grab;
+    min-inline-size: 0;
+    padding: 12px 12px 8px;
   }
 
   .dense header {
-    padding: 10px 12px 6px;
+    padding-block: 8px;
   }
 
-  header:active,
-  .hero:active {
-    cursor: grabbing;
+  .row header {
+    margin: 4px 4px 0;
+    padding: 8px;
+    border-radius: var(--radius-row);
+    transition: background-color var(--motion-fast) var(--ease-out);
+  }
+
+  .row:hover header {
+    background: var(--row-hover);
+  }
+
+  .row.selected header {
+    background: var(--row-active);
   }
 
   .glyph {
@@ -149,14 +169,12 @@
     border-radius: var(--radius-inset);
     background: var(--color-fill);
     color: var(--color-label-secondary);
-    overflow: hidden;
   }
 
-  .tile .glyph {
-    inline-size: 40px;
-    block-size: 40px;
-    border-radius: var(--radius-row);
-    font-size: var(--text-body);
+  .leading {
+    display: flex;
+    align-items: center;
+    flex: none;
   }
 
   .titles {
@@ -203,29 +221,35 @@
   }
 
   .title.mono {
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: var(--text-label);
     font-weight: 500;
     letter-spacing: 0;
     word-break: break-all;
   }
 
-  .count {
+  .count,
+  .aside {
     flex: none;
     color: var(--color-faint);
-    font-size: var(--text-label);
+    font-size: var(--text-caption);
     font-variant-numeric: tabular-nums;
     line-height: 17px;
+  }
+
+  .aside {
+    align-self: flex-start;
+    line-height: 13px;
   }
 
   .body {
     flex: 1;
     min-block-size: 0;
-    padding: 0 14px;
+    padding: 0 12px;
   }
 
-  .dense .body {
-    padding: 0 12px;
+  .body:last-child {
+    padding-block-end: 12px;
   }
 
   footer {
@@ -235,13 +259,9 @@
     gap: 8px;
     flex: none;
     min-inline-size: 0;
-    padding: 6px 14px 10px;
+    padding: 4px 12px 12px;
     color: var(--color-faint);
     font-size: var(--text-caption);
     line-height: 13px;
-  }
-
-  .dense footer {
-    padding: 6px 12px 9px;
   }
 </style>

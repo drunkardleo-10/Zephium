@@ -474,8 +474,8 @@ test("prompt submission keeps work on canvas and clarification choices above the
   expect(screen.container.querySelector(".detail")).toBeNull();
   // The card carries the answer; its citations live in the lift, named by kind, never numbered.
   expect(screen.container.querySelector(".work-canvas .chip")).toBeNull();
+  // The result is a cover: a click anywhere on it opens the lift.
   await screen.getByText("Reviewed findings", { exact: true }).click();
-  await screen.getByRole("button", { name: "Open", exact: true }).click();
   // The lift names its sources in one collapsed rail, not chips under the text.
   await screen.getByRole("button", { name: "Based on 1 source" }).click();
   await screen.getByRole("button", { name: "Page", exact: true }).first().click();

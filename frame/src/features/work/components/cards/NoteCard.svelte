@@ -12,6 +12,7 @@
 </script>
 
 <CardFrame
+  id={item.id}
   kind={item.kind}
   title={item.title}
   icon={Note01Icon}

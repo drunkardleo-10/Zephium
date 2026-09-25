@@ -124,7 +124,12 @@
                       title={reference.label}
                       onclick={() => onevidence?.(reference)}
                     >
-                      <HostGlyph host={reference.origin ?? ""} file={!!reference.file} size={14} />
+                      <HostGlyph
+                        host={reference.origin ?? ""}
+                        url={reference.url}
+                        file={!!reference.file}
+                        size={14}
+                      />
                       <span>{reference.origin || reference.label}</span>
                     </button>
                   {/each}

@@ -10,6 +10,7 @@
 </script>
 
 <CardFrame
+  id={item.id}
   title={m.work_card_findings()}
   count={total}
   icon={Tick02Icon}

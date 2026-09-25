@@ -8,7 +8,7 @@
   const path = $derived(homePath(item.detail));
 </script>
 
-<CardFrame title={item.title} icon={FolderAddIcon} {selected} lines={1} dense>
+<CardFrame id={item.id} title={item.title} icon={FolderAddIcon} {selected} lines={1} dense row>
   {#snippet footer()}<span class="path" title={path}><bdi>{path}</bdi></span><span class="granted"
       >{m.work_env_folder_granted()}</span
     >{/snippet}

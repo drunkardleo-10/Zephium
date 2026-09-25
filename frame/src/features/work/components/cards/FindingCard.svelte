@@ -7,7 +7,14 @@
 </script>
 
 <!-- A claim the person placed on its own; the run folds its claims into one Findings card. -->
-<CardFrame title={item.title} icon={Tick02Icon} {selected} unavailable={item.unavailable} dense>
+<CardFrame
+  id={item.id}
+  title={item.title}
+  icon={Tick02Icon}
+  {selected}
+  unavailable={item.unavailable}
+  dense
+>
   {#if item.detail}<p class="detail">{item.detail}</p>{/if}
   {#snippet footer()}<span class={`confidence ${confidence}`}
       ><span class="dot" aria-hidden="true"></span>{item.kind}</span

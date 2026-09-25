@@ -1,6 +1,8 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { mediaUrl } from "$domain/resources";
+  import Icon from "$shared/ui/Icon";
+  import { Image01Icon } from "../../lib/icons";
   import type { ComparePicture } from "../../lib/compare";
   let {
     picture,
@@ -13,7 +15,7 @@
     large?: boolean;
   } = $props();
   const source = $derived(picture ? mediaUrl(picture.profile, picture.digest) : null);
-  // A picture that will not load leaves the tile, never a broken glyph.
+  // A picture that will not load leaves a quiet plate: never a broken glyph, never an initial.
   let failed = $state<string | null>(null);
   $effect(() => {
     const current = source;
@@ -26,7 +28,9 @@
 {#if source && failed !== source}
   <img src={source} alt="" decoding="async" draggable="false" onerror={() => (failed = source)} />
 {:else}
-  <span class="mark" class:large aria-hidden="true">{name.slice(0, 1)}</span>
+  <span class="mark" aria-hidden="true" title={name}
+    ><Icon icon={Image01Icon} size={large ? 20 : 14} /></span
+  >
 {/if}
 
 <style>
@@ -44,11 +48,5 @@
     block-size: 100%;
     background: var(--color-fill);
     color: var(--color-faint);
-    font-weight: 600;
-    text-transform: uppercase;
-  }
-
-  .mark.large {
-    font-size: var(--text-title);
   }
 </style>

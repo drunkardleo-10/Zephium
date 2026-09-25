@@ -38,7 +38,16 @@
   const folder = $derived(homePath(file?.folder ?? item.detail));
 </script>
 
-<CardFrame title={name} {icon} {selected} unavailable={item.unavailable} lines={1} dense>
+<CardFrame
+  id={item.id}
+  title={name}
+  {icon}
+  {selected}
+  unavailable={item.unavailable}
+  lines={1}
+  dense
+  row
+>
   {#snippet footer()}<span class="folder" title={folder}><bdi>{folder}</bdi></span><span
       class="what"
       >{what}{#if file?.delta}<span class="delta"

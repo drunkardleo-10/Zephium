@@ -1,60 +1,76 @@
 <script lang="ts">
   import { getContext } from "svelte";
   import CardFrame from "./CardFrame.svelte";
-  import Artifact from "$shared/ui/data/Artifact";
+  import Artifact, { documentDigest } from "$shared/ui/data/Artifact";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
-  import {
-    ChartColumnIcon,
-    CheckListIcon,
-    Doc01Icon,
-    GitCompareIcon,
-    GlobalIcon,
-    Link04Icon,
-    Table01Icon,
-  } from "../../lib/icons";
-  import { canvasEvidence, canvasOpenLink } from "../../lib/canvas-context";
+  import { canvasEvidence, canvasOpen, canvasOpenLink } from "../../lib/canvas-context";
   import type { CanvasItem } from "../../lib/canvas-model";
+  import * as m from "$shared/i18n/messages";
   let {
     id,
     item,
     selected,
     onaction,
   }: { id: string; item: CanvasItem; selected: boolean; onaction: () => void } = $props();
+  const open = getContext<((id: string) => void) | undefined>(canvasOpen);
   const openLink = getContext<((href: string) => void) | undefined>(canvasOpenLink);
   const evidence = getContext<{ open?: (id: string, reference: EvidenceReference) => void }>(
     canvasEvidence,
   );
-  const icon = $derived.by(() => {
-    switch (item.artifact?.content.kind) {
-      case "comparison":
-        return GitCompareIcon;
-      case "table":
-        return Table01Icon;
-      case "chart":
-        return ChartColumnIcon;
+  /** What the cover is, in one word. */
+  const kind = $derived.by(() => {
+    const content = item.artifact?.content;
+    switch (content?.kind) {
+      case "document":
+        return documentDigest(content).steps.length
+          ? m.work_card_kind_plan()
+          : m.work_card_kind_document();
       case "checklist":
-        return CheckListIcon;
+        return m.work_card_kind_checklist();
+      case "chart":
+        return m.work_env_component_chart();
+      case "table":
+        return m.work_env_component_table();
+      case "comparison":
+      case "matrix":
+        return m.work_lift_comparison();
+      case "findings":
+        return m.work_card_findings();
       case "sources":
-        return Link04Icon;
+        return m.work_env_sources();
       case "browser":
-        return GlobalIcon;
+        return m.work_env_page();
       default:
-        return Doc01Icon;
+        return item.kind;
     }
   });
+  // A press that moved was a drag; a control inside the cover keeps its own click.
+  let pressed: { x: number; y: number } | null = null;
+  function openCover(event: MouseEvent) {
+    const from = pressed;
+    pressed = null;
+    if (from && Math.hypot(event.clientX - from.x, event.clientY - from.y) > 4) return;
+    if ((event.target as Element).closest("button:not(:disabled), a, input, select")) return;
+    open?.(id);
+  }
 </script>
 
-<!-- The hero of a stage: the answer itself, not the sources it cites. -->
-<!-- State belongs to the agent line: the card says only the answer, and its one action. -->
-<CardFrame title={item.title} {icon} {selected} footer={item.actionLabel ? action : undefined}>
+<!-- A cover: what it is, its title, the whole summary and its sections; the lift has the rest. -->
+<CardFrame {id} {kind} title={item.title} {selected} footer={item.actionLabel ? action : undefined}>
   {#if item.artifact}
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <div
-      class="artifact-body nodrag nopan"
-      class:end={!item.actionLabel}
-      role="region"
+      class="artifact-body"
+      role="button"
       aria-label={item.title}
       tabindex="0"
+      onpointerdown={(event) => (pressed = { x: event.clientX, y: event.clientY })}
+      onclick={openCover}
+      onkeydown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        open?.(id);
+      }}
     >
       <Artifact
         artifact={item.artifact}
@@ -81,16 +97,13 @@
     block-size: 100%;
     overflow: hidden;
     font-size: var(--text-label);
-  }
-
-  .artifact-body.end {
-    padding-block-end: 14px;
+    cursor: default;
   }
 
   .artifact-body:focus-visible {
     outline: 2px solid var(--color-ring);
-    outline-offset: -2px;
-    border-radius: var(--radius-row);
+    outline-offset: 2px;
+    border-radius: var(--radius-inset);
   }
 
   .summary {
@@ -109,15 +122,20 @@
     border: 0;
     padding: 2px 8px;
     border-radius: var(--radius-capsule);
-    background: var(--color-fill);
+    background: var(--color-control);
     color: var(--color-text);
     font: inherit;
     font-size: var(--text-caption);
     cursor: default;
-    transition: background-color var(--motion-fast) var(--ease-smooth);
+    transition: background-color var(--motion-fast) var(--ease-out);
   }
 
   .link:hover {
-    background: var(--color-fill-hover);
+    background: var(--color-control-hover);
+  }
+
+  .link:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
   }
 </style>
