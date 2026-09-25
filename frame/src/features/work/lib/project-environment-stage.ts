@@ -428,7 +428,12 @@ export function stageContents(
   const hubs = new Set<string>();
   for (const element of snapshot.elements) {
     const reference = element.reference;
-    if (!("execution" in reference) || !stage.executions.includes(reference.execution)) continue;
+    if (
+      !("execution" in reference) ||
+      reference.objective !== projection.work.id ||
+      !stage.executions.includes(reference.execution)
+    )
+      continue;
     const execution = runs.find((run) => run.id === reference.execution);
     const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
     if (reference.kind === "subject") {
