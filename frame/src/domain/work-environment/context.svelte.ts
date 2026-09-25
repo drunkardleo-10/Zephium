@@ -231,10 +231,13 @@ export class WorkEnvironmentContext {
         this.lifetime.signal,
       );
       if (!this.active || read !== this.noteRead) return;
-      if (response.state !== "received" || response.value.profile !== this.profile) continue;
-      const reply = response.value.response;
-      if (reply.kind === "record" && !reply.record.summary.trashed) rows.push(reply.record.summary);
-      else if (reply.kind === "error" && reply.error === "not_found") others.push(id);
+      const reply =
+        response.state === "received" && response.value.profile === this.profile
+          ? response.value.response
+          : null;
+      if (reply?.kind === "record") {
+        if (!reply.record.summary.trashed) rows.push(reply.record.summary);
+      } else others.push(id);
     }
     if (!this.active || read !== this.noteRead) return;
     this.notes = rows;
