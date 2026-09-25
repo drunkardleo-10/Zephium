@@ -1058,8 +1058,8 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     assert_eq!(
         admitted.refusals,
         vec![
-            WorkAgentArtifactRefusal::Malformed,
-            WorkAgentArtifactRefusal::Malformed
+            WorkAgentArtifactRefusal::Malformed(None),
+            WorkAgentArtifactRefusal::Malformed(None)
         ]
     );
     assert_eq!(admitted.fetch.len(), 1);
@@ -1550,4 +1550,164 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
             ..
         }
     ));
+}
+
+#[test]
+fn charts_of_nothing_second_findings_and_malformed_objects_are_refused_by_cause() {
+    use super::{agent::*, artifact::*, runtime::*};
+    let disclosure = WorkAgentTurnDisclosure::try_new(
+        "Compare SQLite, DuckDB and RocksDB",
+        vec![],
+        vec![],
+        &[],
+        &[],
+        &[],
+        WorkAgentBudget {
+            turns_left: 6,
+            steps_left: 20,
+            browse_available: true,
+        },
+        WorkExecutionLimits {
+            model_tokens: 1000,
+            cost_micro_usd: 1000,
+            operations: 2,
+            timeout_seconds: 60,
+            max_workers: 2,
+        },
+        vec![],
+    )
+    .unwrap();
+    let object = |data: WorkArtifactDataV1| WorkAgentArtifactOutput {
+        title: "Object".into(),
+        data,
+        evidence: vec![],
+        general_knowledge: true,
+    };
+    let turn = |data: Vec<WorkArtifactDataV1>| WorkAgentTurnOutput {
+        say: None,
+        artifacts: data.into_iter().map(object).collect(),
+        fetch: vec![],
+        ask: None,
+        finish: false,
+        followups: vec![],
+        malformed: 0,
+    };
+    let chart = |values: &[&str]| WorkArtifactDataV1::Chart {
+        x_label: "Engine".into(),
+        y_label: "Queries per second".into(),
+        series: vec![WorkChartSeries {
+            name: "Throughput".into(),
+            points: values
+                .iter()
+                .zip(["SQLite", "DuckDB", "RocksDB"])
+                .map(|(value, label)| WorkChartPoint {
+                    label: label.into(),
+                    value: (*value).into(),
+                    evidence: vec![],
+                })
+                .collect(),
+        }],
+        basis: Some(WorkMeasurementBasis {
+            method: "Typical published figures, not measurements".into(),
+            conditions: None,
+            versions: None,
+            observed_at: None,
+        }),
+        general_knowledge: true,
+    };
+    for values in [
+        &["0", "0.0", "0"][..],
+        &["unknown", "n/a", "—"],
+        &["0", "unknown", "0"],
+    ] {
+        let refused = disclosure.resolve(turn(vec![chart(values)])).unwrap();
+        assert!(refused.artifacts.is_empty(), "{values:?}");
+        assert_eq!(refused.refusals, [WorkAgentArtifactRefusal::EmptyChart]);
+    }
+    assert!(WorkAgentArtifactRefusal::EmptyChart
+        .notice()
+        .contains("say so in one finding"));
+    let drawn = disclosure
+        .resolve(turn(vec![chart(&["0", "120000", "80000"])]))
+        .unwrap();
+    assert_eq!(drawn.artifacts.len(), 1);
+    let priced = disclosure
+        .resolve(turn(vec![chart(&["20", "$50–500", "30"])]))
+        .unwrap();
+    assert_eq!(
+        priced.refusals,
+        [WorkAgentArtifactRefusal::Malformed(Some(
+            WorkArtifactFault {
+                kind: "chart",
+                field: WorkArtifactField::ChartPointValue,
+            }
+        ))]
+    );
+    assert_eq!(
+        priced.refusals[0].notice(),
+        "is a chart with invalid content: chart point value must be a plain number, such as 250 or 0.5, with units in the axis label"
+    );
+    let node = |id: &str| WorkDiagramNode {
+        id: id.into(),
+        name: id.into(),
+        kind: WorkDiagramNodeKind::Service,
+        vendor: None,
+        note: None,
+        layer: None,
+    };
+    let dangling = WorkArtifactDataV1::Diagram {
+        nodes: vec![node("api"), node("db")],
+        edges: vec![WorkDiagramEdge {
+            from: "api".into(),
+            to: "cache".into(),
+            label: None,
+        }],
+        layers: vec![],
+    };
+    let refused = disclosure.resolve(turn(vec![dangling])).unwrap();
+    assert_eq!(
+        refused.refusals[0].notice(),
+        "is a diagram with invalid content: diagram edge refers to an unknown node"
+    );
+    let findings = |subjects: &[&str], claim: &str| WorkArtifactDataV1::Findings {
+        subjects: subjects
+            .iter()
+            .map(|name| WorkSubject {
+                name: (*name).into(),
+                descriptor: None,
+                homepage: None,
+                image_candidates: vec![],
+            })
+            .collect(),
+        items: vec![WorkFinding {
+            claim: claim.into(),
+            subject: None,
+            evidence: vec![],
+            confidence: WorkConfidence::Inferred,
+            detail: None,
+            general_knowledge: false,
+        }],
+    };
+    let repeated = disclosure
+        .resolve(turn(vec![
+            findings(
+                &["SQLite", "DuckDB"],
+                "SQLite FTS5 has a built-in full-text index",
+            ),
+            findings(&["duckdb "], "Run a controlled benchmark before choosing"),
+            findings(&[], "No measured winner"),
+            findings(&["RocksDB"], "RocksDB is a key-value store"),
+        ]))
+        .unwrap();
+    assert_eq!(repeated.artifacts.len(), 2);
+    assert_eq!(
+        repeated.refusals,
+        [
+            WorkAgentArtifactRefusal::DuplicateFindings,
+            WorkAgentArtifactRefusal::DuplicateFindings
+        ]
+    );
+    assert!(repeated.refusals[0]
+        .notice()
+        .starts_with("is a second findings object this turn"));
 }

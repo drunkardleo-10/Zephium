@@ -345,16 +345,34 @@ impl WorkAgentTurnDisclosure {
         let mut artifacts = Vec::new();
         let mut unknown = 0;
         let mut refusals = vec![
-            WorkAgentArtifactRefusal::Malformed;
+            WorkAgentArtifactRefusal::Malformed(None);
             output.malformed.min(MAX_AGENT_ARTIFACTS_PER_TURN)
         ];
+        // One findings object per turn: a later one stands only when it is
+        // about subjects none of the earlier ones name.
+        let mut findings_subjects: Vec<BTreeSet<String>> = Vec::new();
         for artifact in output
             .artifacts
             .into_iter()
             .take(MAX_AGENT_ARTIFACTS_PER_TURN)
         {
             match self.resolve_artifact(artifact, &mut unknown) {
-                Ok(artifact) => artifacts.push(artifact),
+                Ok(artifact) => {
+                    if let WorkArtifactDataV1::Findings { subjects, .. } = &artifact.data {
+                        let names: BTreeSet<String> = subjects
+                            .iter()
+                            .map(|subject| subject.name.trim().to_lowercase())
+                            .collect();
+                        if findings_subjects.iter().any(|earlier| {
+                            names.is_empty() || earlier.is_empty() || !earlier.is_disjoint(&names)
+                        }) {
+                            refusals.push(WorkAgentArtifactRefusal::DuplicateFindings);
+                            continue;
+                        }
+                        findings_subjects.push(names);
+                    }
+                    artifacts.push(artifact)
+                }
                 Err(refusal) => refusals.push(refusal),
             }
         }
@@ -751,26 +769,47 @@ fn requested_page_punctuation_preserves_explicit_urls_and_query_bytes() {
     assert!(requested_pages("Read https://example.test/#a.b.").is_empty());
 }
 
+/// The kind of a refused object and the first part of it that failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkArtifactFault {
+    pub kind: &'static str,
+    pub field: WorkArtifactField,
+}
 /// Why one proposed object was refused; wording for the model is closed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkAgentArtifactRefusal {
     Uncited,
     UnknownEvidenceKey,
     UnlistedLink,
-    Malformed,
+    /// None when the transport could not decode the object at all.
+    Malformed(Option<WorkArtifactFault>),
     /// Marked general knowledge yet names a page or picture that only an
     /// observed source can supply.
     KnowledgeLink,
+    /// A chart whose every point is zero or has no number.
+    EmptyChart,
+    /// A second findings object in one turn about the same subjects.
+    DuplicateFindings,
 }
 impl WorkAgentArtifactRefusal {
-    pub fn notice(self) -> &'static str {
+    pub fn notice(self) -> String {
         match self {
+            Self::Malformed(Some(fault)) => {
+                return format!(
+                    "is a {} with invalid content: {}",
+                    fault.kind,
+                    fault.field.phrase()
+                )
+            }
             Self::Uncited => "cites no evidence keys and is not marked general_knowledge",
             Self::KnowledgeLink => "is marked general_knowledge but names a homepage, image or link, which only a cited source can supply",
             Self::UnknownEvidenceKey => "cites an evidence key that is not in the sources list",
             Self::UnlistedLink => "links to a URL that is not a listed source",
-            Self::Malformed => "has invalid content: measurement cells hold a plain number only (the criterion carries the unit), cell and finding evidence must cite listed source keys, subject indexes must exist, diagram node ids must be unique and every edge and layer must name an existing one, and text must fit its limits",
+            Self::EmptyChart => "is a chart whose points are all zero or unknown, which shows nothing: when the sources give no comparable numbers, say so in one finding, or chart typical published figures marked general_knowledge with a basis that says they are typical figures, not measurements",
+            Self::DuplicateFindings => "is a second findings object this turn about the same subjects: put a turn's claims in one findings object, add only claims not already on the canvas, and publish nothing when nothing is new",
+            Self::Malformed(None) => "has invalid content: measurement cells hold a plain number only (the criterion carries the unit), cell and finding evidence must cite listed source keys, subject indexes must exist, diagram node ids must be unique and every edge and layer must name an existing one, and text must fit its limits",
         }
+        .into()
     }
 }
 impl WorkAgentTurnDisclosure {
@@ -783,13 +822,18 @@ impl WorkAgentTurnDisclosure {
         unknown: &mut usize,
     ) -> Result<WorkSynthesisArtifact, WorkAgentArtifactRefusal> {
         use WorkAgentArtifactRefusal as Refusal;
-        validate_text(&artifact.title, 512).map_err(|_| Refusal::Malformed)?;
+        let kind = artifact_kind(&artifact.data);
+        let malformed = |field| Refusal::Malformed(Some(WorkArtifactFault { kind, field }));
+        validate_text(&artifact.title, 512).map_err(|_| malformed(WorkArtifactField::Title))?;
+        if empty_chart(&artifact.data) {
+            return Err(Refusal::EmptyChart);
+        }
         let knowledge = artifact.general_knowledge;
         if artifact.evidence.is_empty() && !knowledge {
             return Err(Refusal::Uncited);
         }
         if artifact.evidence.len() > 64 {
-            return Err(Refusal::Malformed);
+            return Err(malformed(WorkArtifactField::Evidence));
         }
         let known = |key: u16| usize::from(key) < self.links.len();
         let cited = artifact.evidence.len();
@@ -805,7 +849,7 @@ impl WorkAgentTurnDisclosure {
                 return Ok(index as u16);
             }
             if artifact.evidence.len() == 64 {
-                return Err(Refusal::Malformed);
+                return Err(malformed(WorkArtifactField::Evidence));
             }
             artifact.evidence.push(key);
             Ok((artifact.evidence.len() - 1) as u16)
@@ -828,10 +872,9 @@ impl WorkAgentTurnDisclosure {
         }
         normalize_measurements(&mut artifact.data);
         normalize_vendors(&mut artifact.data);
-        artifact
-            .data
-            .validate(artifact.evidence.len())
-            .map_err(|_| Refusal::Malformed)?;
+        if let Some(field) = artifact.data.fault(artifact.evidence.len()) {
+            return Err(malformed(field));
+        }
         if let WorkArtifactDataV1::Document {
             formatted: Some(document),
             ..
@@ -850,7 +893,7 @@ impl WorkAgentTurnDisclosure {
             .into_iter()
             .map(|key| {
                 if !cited.insert(key) {
-                    return Err(Refusal::Malformed);
+                    return Err(malformed(WorkArtifactField::Evidence));
                 }
                 self.links
                     .get(usize::from(key))
@@ -866,6 +909,20 @@ impl WorkAgentTurnDisclosure {
             general_knowledge: knowledge,
         })
     }
+}
+/// A chart of nothing: every point is zero or holds no digit at all.
+fn empty_chart(data: &WorkArtifactDataV1) -> bool {
+    let WorkArtifactDataV1::Chart { series, .. } = data else {
+        return false;
+    };
+    series
+        .iter()
+        .flat_map(|series| &series.points)
+        .all(|point| {
+            let value = point.value.trim();
+            !value.bytes().any(|b| b.is_ascii_digit())
+                || value.parse::<f64>().is_ok_and(|n| n == 0.0)
+        })
 }
 /// In a knowledge object every uncited value is knowledge, never an
 /// observation: it carries the mark and no observed date.
