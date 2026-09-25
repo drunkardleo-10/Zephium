@@ -141,7 +141,7 @@
           xLabel={content.xLabel}
           yLabel={content.yLabel}
           series={content.series}
-          basis={content.basis}
+          basis={card ? undefined : content.basis}
           generalKnowledge={content.generalKnowledge}
           compact={compact || card}
           {onevidence}

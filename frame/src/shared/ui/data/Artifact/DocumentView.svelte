@@ -85,20 +85,16 @@
 {/if}
 
 <style>
+  /* The card's cover: the whole summary, then one row per section. */
   .digest {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
     min-block-size: 0;
   }
 
   .lead {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 14;
-    line-clamp: 14;
     margin: 0;
-    overflow: hidden;
     font-size: var(--text-label);
     line-height: 16px;
     text-wrap: pretty;
@@ -107,29 +103,37 @@
   .sections {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    margin: 4px 0 0;
+    gap: 0;
+    margin: 0 -8px;
     padding: 0;
     list-style: none;
   }
 
   .sections li {
-    position: relative;
-    padding-inline-start: 12px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    min-block-size: 20px;
+    padding: 2px 8px;
+    border-radius: var(--radius-row);
     color: var(--color-label-secondary);
     font-size: var(--text-label);
     font-weight: 500;
     line-height: 16px;
+    transition: background-color var(--motion-fast) var(--ease-out);
+  }
+
+  .sections li:hover {
+    background: var(--row-hover);
   }
 
   .sections li::before {
-    position: absolute;
-    inset-block-start: 7px;
-    inset-inline-start: 1px;
+    flex: none;
+    margin-block-start: 6px;
     inline-size: 4px;
     block-size: 4px;
     border-radius: 50%;
-    background: var(--color-border-strong);
+    background: var(--color-faint);
     content: "";
   }
 
@@ -191,7 +195,7 @@
     padding: 0 3px;
     border-radius: 4px;
     background: var(--color-fill);
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: 0.92em;
   }
 
