@@ -6,7 +6,7 @@
   import Findings from "./Findings.svelte";
   import Sources from "./Sources.svelte";
   import EvidenceChips from "./EvidenceChips.svelte";
-  import { loadChart } from "../Chart";
+  import HostGlyph from "./HostGlyph.svelte";
   import {
     artifactRenderable,
     displayLocation,
@@ -49,6 +49,8 @@
     range: (first: number, last: number, total: number) =>
       m.work_table_range({ first, last, total }),
   };
+  /** The chart and its Work conversion arrive together, only when a chart is shown. */
+  const loadWorkChart = () => import("./WorkChart.svelte");
   const matrixLabels = {
     unknown: m.work_cell_unknown(),
     generalKnowledge: m.work_general_knowledge(),
@@ -132,20 +134,23 @@
       {more}
     />
   {:else if content.kind === "chart"}<LazyView
-      loader={loadChart}
+      loader={loadWorkChart}
       loadingLabel={m.surface_loading()}
       failureLabel={m.work_artifact_unavailable()}
       retryLabel={m.surface_retry()}
-      >{#snippet children(Chart)}<Chart
+      >{#snippet children(WorkChart)}<WorkChart
           title={artifact.title}
-          xLabel={content.xLabel}
-          yLabel={content.yLabel}
-          series={content.series}
-          basis={card ? undefined : content.basis}
-          generalKnowledge={content.generalKnowledge}
+          chart={content}
           compact={compact || card}
           {onevidence}
-        />{/snippet}</LazyView
+        >
+          {#snippet glyph(reference)}<HostGlyph
+              host={reference.origin || reference.label}
+              url={reference.url}
+              file={!!reference.file}
+              size={12}
+            />{/snippet}
+        </WorkChart>{/snippet}</LazyView
     >
   {:else if content.kind === "checklist" && card}<p class="count">
       {content.items.length === 1

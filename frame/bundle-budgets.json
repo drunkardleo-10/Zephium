@@ -199,9 +199,9 @@
     "css": 4000
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
-    "js": 90800,
-    "css": 5800,
-    "description": "Measured 65242 JS and 2553 CSS bytes: a hand-written SVG plot with no chart library. Merged with main: 89897 JS and 5712 CSS measured."
+    "js": 152000,
+    "css": 10000,
+    "description": "Measured 65242 JS and 2553 CSS bytes: a hand-written SVG plot with no chart library. Merged with main: 89897 JS and 5712 CSS measured. The chart kit (one spec, eight kinds on d3-scale, d3-shape, d3-array and d3-time) is loaded through WorkChart today; this entry is emitted again once Activity loads the kit through loadChart, and is bounded by WorkChart's measured graph."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
     "js": 720700,
@@ -256,5 +256,10 @@
   "lazy:features/notes/components/NoteHost.svelte": {
     "js": 169400,
     "css": 7700
+  },
+  "lazy:shared/ui/data/Artifact/WorkChart.svelte": {
+    "js": 152000,
+    "css": 10000,
+    "description": "Measured 149109 JS and 9549 CSS bytes: the chart kit and Work's conversion, loaded only when a chart result is shown. Kit-own chunks are 70552 bytes (59941 kit and d3, 9231 d3-interpolate and d3-color, 1380 messages); the rest is the shared runtime chunk the old Chart entry already carried (75354)."
   }
 }

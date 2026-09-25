@@ -1,4 +1,3 @@
-import type { ChartSeries } from "../Chart";
 /** Structural view of the constrained note schema; the owner supplies the wire value. */
 type DocumentMarkView = { type: string; attrs?: { href?: string | null } | null };
 export type DocumentNodeView = {
@@ -60,7 +59,12 @@ export type SourceEntryView = {
   role: string;
   subject?: number;
 };
-type MeasurementBasisView = {
+/** A Work chart as the runtime states it: exact decimals, drawn through the shared chart spec. */
+export type WorkChartSeriesView = {
+  name: string;
+  points: readonly { label: string; value: string; evidence?: readonly EvidenceReference[] }[];
+};
+export type MeasurementBasisView = {
   method: string;
   conditions?: string;
   versions?: string;
@@ -86,7 +90,7 @@ export type ArtifactContent =
       kind: "chart";
       xLabel: string;
       yLabel: string;
-      series: readonly ChartSeries[];
+      series: readonly WorkChartSeriesView[];
       basis?: MeasurementBasisView;
       generalKnowledge?: boolean;
     }
