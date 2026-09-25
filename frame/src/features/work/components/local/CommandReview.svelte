@@ -84,7 +84,7 @@
   pre {
     margin: 0;
     padding: 12px;
-    border-radius: var(--radius-control);
+    border-radius: var(--radius-row);
     color: var(--color-text);
     background: var(--color-fill);
     font-family: var(--font-mono);

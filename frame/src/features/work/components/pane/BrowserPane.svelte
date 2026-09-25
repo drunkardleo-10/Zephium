@@ -363,7 +363,6 @@
       >
       <IconButton icon={Cancel01Icon} label={m.work_pane_close()} onclick={close} />
     </span>
-    {#if tab?.loading}<span class="progress" aria-hidden="true"></span>{/if}
   </header>
   <div bind:this={body} class="body" aria-live="polite">
     {#if !presented}
@@ -489,32 +488,12 @@
     background: transparent;
     color: var(--color-text);
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--text-label);
     outline: none;
   }
 
   .address input::placeholder {
     color: var(--color-faint);
-  }
-
-  .progress {
-    position: absolute;
-    inset-inline: 0;
-    inset-block-end: 0;
-    block-size: 2px;
-    background: linear-gradient(90deg, transparent, var(--color-accent), transparent);
-    background-size: 40% 100%;
-    animation: pane-progress 1.1s var(--ease-in-out) infinite;
-  }
-
-  @keyframes pane-progress {
-    from {
-      background-position: -40% 0;
-    }
-
-    to {
-      background-position: 140% 0;
-    }
   }
 
   .body {
@@ -606,12 +585,5 @@
     inset-block-start: 0;
     inset-inline-start: 0;
     cursor: nwse-resize;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .progress {
-      animation: none;
-      background: var(--color-accent);
-    }
   }
 </style>

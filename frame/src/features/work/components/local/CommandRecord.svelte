@@ -73,7 +73,7 @@
   .output {
     margin: 0;
     padding: 12px;
-    border-radius: var(--radius-control);
+    border-radius: var(--radius-row);
     background: var(--color-fill);
     color: var(--color-text);
     font-family: var(--font-mono);
@@ -91,7 +91,7 @@
   }
 
   .output:focus-visible {
-    outline: 2px solid var(--color-text);
+    outline: 2px solid var(--color-ring);
     outline-offset: 2px;
   }
 </style>

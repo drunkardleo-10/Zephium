@@ -274,7 +274,7 @@
     -webkit-user-select: none;
     user-select: none;
     outline: none;
-    animation: takeover-chrome var(--motion-base) var(--ease-smooth) both;
+    animation: takeover-chrome var(--motion-base) var(--ease-emphasized) both;
   }
 
   .head:active {
@@ -311,7 +311,7 @@
     flex-direction: column;
     gap: 10px;
     padding: 12px 14px 14px;
-    animation: takeover-chrome var(--motion-base) var(--ease-smooth) 40ms both;
+    animation: takeover-chrome var(--motion-base) var(--ease-emphasized) 40ms both;
   }
 
   .left {
