@@ -93,6 +93,22 @@ test("lanes that share a shape align their groups into columns, sized by the wid
   expect(slots).toEqual([348, 1272, 2060]);
 });
 
+test("a compacted lane never widens another lane's slot, and never overlaps itself", () => {
+  const research = laneShape(full());
+  const pure = laneShape({
+    results: { members: cards("result", 1, SIZES.document) },
+    plan: { members: cards("step", 4, step).map((member) => ({ ...member, of: "result0" })) },
+  });
+  expect(laneSlots([research, pure])).toEqual(laneSlots([research]));
+  const only = laneShape({
+    subjects: { members: cards("subject", 6, SIZES.subject) },
+    results: { members: cards("result", 1, SIZES.comparison) },
+  });
+  const layout = placeLane(request, only, laneSlots([research, only]));
+  const [found, made] = layout.groups;
+  expect(made!.box.x).toBeGreaterThanOrEqual(found!.box.x + found!.box.width + 48);
+});
+
 test("a lane that only worked locally has one row of files and commands", () => {
   const layout = stageLayout(request, {
     work: { members: [...cards("file", 3, SIZES.file), ...cards("command", 1, SIZES.command)] },

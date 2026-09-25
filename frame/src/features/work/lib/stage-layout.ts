@@ -37,6 +37,8 @@ export type ClusterKind =
   "sources" | "pages" | "work" | "subjects" | "findings" | "results" | "plan";
 /** Worked with, Found, Made: a lane fills its slots in this order. */
 type GroupKind = "worked" | "found" | "made";
+/** The column each group belongs to when the lane has every group before it. */
+const NATURAL: Record<GroupKind, number> = { worked: 0, found: 1, made: 2 };
 /** Past these a group's cards stop and its caption counts the rest. */
 export const CLUSTER_CAP = { pages: 8, subjects: 12 } as const;
 
@@ -218,7 +220,10 @@ export function laneSlots(shapes: readonly LaneShape[]): number[] {
   const widths: number[] = [];
   for (const shape of shapes)
     shape.forEach((group, slot) => {
-      widths[slot] = Math.max(widths[slot] ?? LANE.slot, group.width);
+      // A group widens a slot only from its own column; a lane missing earlier
+      // groups compacts left and runs right on its own instead.
+      const width = NATURAL[group.kind] === slot ? group.width : LANE.slot;
+      widths[slot] = Math.max(widths[slot] ?? LANE.slot, width);
     });
   const starts: number[] = [];
   let x = LANE.column + LANE.gutter;
@@ -243,7 +248,7 @@ export function placeLane(request: Placement, shape: LaneShape, slots: readonly 
   // A lane with more groups than the canvas has slots yet keeps going right.
   let after = request.x + LANE.column + LANE.gutter;
   const groups = shape.map((group, slot): LaneGroup => {
-    const x = slots[slot] ?? after;
+    const x = Math.max(slots[slot] ?? after, after);
     after = x + Math.max(group.width, LANE.slot) + LANE.gutter;
     const y = request.y;
     for (const card of group.cards) positions[card.id] = { x: card.rect.x + x, y: card.rect.y + y };
