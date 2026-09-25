@@ -14,6 +14,7 @@
     GitCompareIcon,
     Table01Icon,
     ChartColumnIcon,
+    CubeIcon,
   } from "../lib/icons";
   import { artifactView } from "../lib/project-work";
   import { compareModel, type CompareCell, type ComparePicture } from "../lib/compare";
@@ -93,7 +94,7 @@
   /** Everything the result cites, once each, for the rail. */
   const cited = $derived.by(() => {
     const content = view?.content;
-    if (!view || !content || content.kind === "sources") return [];
+    if (!view || !content || content.kind === "sources" || view.knowledge) return [];
     const all: EvidenceReference[] = [...view.evidence];
     if (content.kind === "matrix")
       for (const row of content.cells) for (const cell of row) all.push(...cell.evidence);
@@ -109,14 +110,18 @@
           ? Table01Icon
           : view?.content.kind === "chart"
             ? ChartColumnIcon
-            : Doc01Icon,
+            : view?.content.kind === "diagram"
+              ? CubeIcon
+              : Doc01Icon,
   );
   const kind = $derived(
     compare || view?.content.kind === "comparison"
       ? m.work_lift_comparison()
       : view?.content.kind === "findings"
         ? m.work_env_findings()
-        : m.work_env_result(),
+        : view?.content.kind === "diagram"
+          ? m.work_card_kind_diagram()
+          : m.work_env_result(),
   );
   const meta = $derived.by(() => {
     const content = view?.content;
@@ -185,7 +190,7 @@
 
 {#if view}
   <section class="result">
-    <LiftHeader {kind} title={view.title} {meta} {icon} {primary}>
+    <LiftHeader {kind} title={view.title} {meta} {icon} {primary} knowledge={!!view.knowledge}>
       {#snippet actions()}{#if secondary}<Button
             size="compact"
             disabled={secondary.disabled}

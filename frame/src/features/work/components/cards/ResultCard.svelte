@@ -1,6 +1,10 @@
 <script lang="ts">
   import { getContext } from "svelte";
   import CardFrame from "./CardFrame.svelte";
+  import TableCard from "./TableCard.svelte";
+  import Icon from "$shared/ui/Icon";
+  import { SparklesIcon } from "../../lib/icons";
+  import { TABLE_CARD, tableGrid } from "$shared/ui/data/Artifact/table";
   import Artifact, { documentDigest } from "$shared/ui/data/Artifact";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import { canvasEvidence, canvasOpen, canvasOpenLink } from "../../lib/canvas-context";
@@ -46,6 +50,13 @@
         return item.kind;
     }
   });
+  const content = $derived(item.artifact?.content);
+  const tabular = $derived(
+    content?.kind === "table" || content?.kind === "comparison" ? content : undefined,
+  );
+  /** Rows past the six a table card shows. */
+  const hidden = $derived(tabular ? tableGrid(tabular).rows.length - TABLE_CARD.rows : 0);
+  const knowledge = $derived(!!item.artifact?.knowledge);
   // A press that moved was a drag; a control inside the cover keeps its own click.
   let pressed: { x: number; y: number } | null = null;
   function openCover(event: MouseEvent) {
@@ -58,7 +69,13 @@
 </script>
 
 <!-- A cover: what it is, its title, the whole summary and its sections; the lift has the rest. -->
-<CardFrame {id} {kind} title={item.title} {selected} footer={item.actionLabel ? action : undefined}>
+<CardFrame
+  {id}
+  {kind}
+  title={item.title}
+  {selected}
+  footer={item.actionLabel || knowledge || hidden > 0 ? action : undefined}
+>
   {#if item.artifact}
     <div
       class="artifact-body"
@@ -74,24 +91,33 @@
         open?.(id);
       }}
     >
-      <Artifact
-        artifact={item.artifact}
-        embedded
-        card
-        onevidence={evidence?.open ? (reference) => evidence.open?.(id, reference) : undefined}
-        onlink={openLink}
-      />
+      {#if tabular}<TableCard content={tabular} />{:else}<Artifact
+          artifact={item.artifact}
+          embedded
+          card
+          onevidence={evidence?.open ? (reference) => evidence.open?.(id, reference) : undefined}
+          onlink={openLink}
+        />{/if}
     </div>
   {:else}<p class="summary">{item.detail || item.status}</p>{/if}
 </CardFrame>
-{#snippet action()}<span></span><button
-    type="button"
-    class="link nodrag nopan"
-    onclick={(event) => {
-      event.stopPropagation();
-      onaction();
-    }}>{item.actionLabel}</button
-  >{/snippet}
+{#snippet action()}<span class="notes">
+    {#if knowledge}<span class="knowledge"
+        ><Icon icon={SparklesIcon} size={11} />{m.work_knowledge_caption()}</span
+      >{/if}
+    {#if hidden > 0}<span class="rows"
+        >{hidden === 1
+          ? m.work_table_more_row_one()
+          : m.work_table_more_rows({ count: hidden })}</span
+      >{/if}
+  </span>{#if item.actionLabel}<button
+      type="button"
+      class="link nodrag nopan"
+      onclick={(event) => {
+        event.stopPropagation();
+        onaction();
+      }}>{item.actionLabel}</button
+    >{/if}{/snippet}
 
 <style>
   .artifact-body {
@@ -118,6 +144,24 @@
     color: var(--color-muted);
     font-size: var(--text-label);
     line-height: 16px;
+  }
+
+  .notes {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-inline-size: 0;
+  }
+
+  .knowledge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--color-muted);
+  }
+
+  .rows {
+    font-variant-numeric: tabular-nums;
   }
 
   .link {

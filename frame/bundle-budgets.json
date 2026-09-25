@@ -204,9 +204,9 @@
     "description": "Measured 65242 JS and 2553 CSS bytes: a hand-written SVG plot with no chart library. Merged with main: 89897 JS and 5712 CSS measured. The chart kit (one spec, eight kinds on d3-scale, d3-shape, d3-array and d3-time) is loaded through WorkChart today; this entry is emitted again once Activity loads the kit through loadChart, and is bounded by WorkChart's measured graph."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 720700,
+    "js": 731000,
     "css": 122400,
-    "description": "Measured 588440 JS and 110023 CSS bytes: the agent stands beside what it acts on; one stage layout places the run's cards and the projected ones in clusters, with the Work cluster's file and command cards; subject pictures admit through a per-canvas queue with fallback and one retry. Selection bar and area actions add 1.1 KB JS (589516 measured). One lift header for every kind, the folded pages under Sources, video thumbnails through the picture queue and Play here over the card add 4.6 KB JS and 0.8 KB CSS (594774 and 110792 measured). Live command cards with their policy reason, observed link titles and the command lift add 2.8 KB JS (597603 measured). Content sizing in the stage layout, the Plan cluster and step projection, and the plain-word takeover add 9.5 KB JS (607106 measured). Merged with main: 698328 JS and 118545 CSS measured. Cards on the tonal system with real favicons, the lift morph (view transition rules) and the growing agent line add 2.6 KB CSS (121148 measured). Lanes with canvas-wide slots, group edges drawn by one edge component, arrival motion and the agent mark in place of its card add 4.7 KB JS (710078 measured). Make tasks through the resource boundary with each step's task check, Save as note with the document's Markdown projection, and the line's write-up row add 8.1 KB JS (718150 measured)."
+    "description": "Measured 588440 JS and 110023 CSS bytes: the agent stands beside what it acts on; one stage layout places the run's cards and the projected ones in clusters, with the Work cluster's file and command cards; subject pictures admit through a per-canvas queue with fallback and one retry. Selection bar and area actions add 1.1 KB JS (589516 measured). One lift header for every kind, the folded pages under Sources, video thumbnails through the picture queue and Play here over the card add 4.6 KB JS and 0.8 KB CSS (594774 and 110792 measured). Live command cards with their policy reason, observed link titles and the command lift add 2.8 KB JS (597603 measured). Content sizing in the stage layout, the Plan cluster and step projection, and the plain-word takeover add 9.5 KB JS (607106 measured). Merged with main: 698328 JS and 118545 CSS measured. Cards on the tonal system with real favicons, the lift morph (view transition rules) and the growing agent line add 2.6 KB CSS (121148 measured). Lanes with canvas-wide slots, group edges drawn by one edge component, arrival motion and the agent mark in place of its card add 4.7 KB JS (710078 measured). Make tasks through the resource boundary with each step's task check, Save as note with the document's Markdown projection, and the line's write-up row add 8.1 KB JS (718150 measured). The Made group as a set, the diagram area with its parts, layers and flows, part rename through the artifact edit, table and chart card sizing, and the knowledge caption in the lift header add 10.4 KB JS (729135 measured)."
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 189400,
@@ -214,9 +214,9 @@
     "description": "Measured 113866 JS and 8299 CSS bytes: a clipped headline opens whole, and follow-ups wait behind Next as rows in the line's panel; every ending of a run and every refused request has its own line. The local-work commits grow the shared graph to 114551 JS (measured on 236b43c4). Merged with main: 187486 JS and 12262 CSS measured."
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
-    "js": 241200,
-    "css": 24500,
-    "description": "Measured 21835 CSS bytes: the card mode of the result renderers and source glyphs on evidence chips; account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog. The request lift's header and its run as a timeline of steps add 10.1 KB JS and 2.4 KB CSS (168962 and 24212 measured). Merged with main: 235567 JS and 23448 CSS measured. Site marks in the lift header and evidence chips (favicon cache and FavIcon) add 3.3 KB JS (238836 measured)."
+    "js": 243900,
+    "css": 25200,
+    "description": "Measured 21835 CSS bytes: the card mode of the result renderers and source glyphs on evidence chips; account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog. The request lift's header and its run as a timeline of steps add 10.1 KB JS and 2.4 KB CSS (168962 and 24212 measured). Merged with main: 235567 JS and 23448 CSS measured. Site marks in the lift header and evidence chips (favicon cache and FavIcon) add 3.3 KB JS (238836 measured). Diagram and table projection in the result renderer, the whole table with its sticky header and first column, and the knowledge caption add 3.4 KB JS and 1.2 KB CSS (243278 and 24974 measured)."
   },
   "lazy:features/work/components/local/CommandInspector.svelte": {
     "js": 88100,
@@ -234,9 +234,9 @@
     "description": "Measured 64732 JS and 5077 CSS bytes: one file record or proposed change, opened from the lift. Merged with main: 154092 JS and 5622 CSS measured."
   },
   "lazy:features/work/components/WorkResultInspector.svelte": {
-    "js": 244000,
-    "css": 25000,
-    "description": "Measured 147677 JS and 22233 CSS bytes: the lift renders the result itself, the quiet per-cell correction and the one Accept the review state needs; the card mode of the result renderers, source glyphs on chips, and bars for numeric compare rows add 6.6 KB. Reading mode, the lift header and the collapsed sources rail add 9.3 KB JS and 2.5 KB CSS (158031 and 24772 measured). Compare check rows and best-value dots add 1.4 KB JS (159821 measured). Merged with main: 237582 JS and 24558 CSS measured. Site marks in the lift header and evidence chips add 3.9 KB JS (241532 measured)."
+    "js": 248400,
+    "css": 26300,
+    "description": "Measured 147677 JS and 22233 CSS bytes: the lift renders the result itself, the quiet per-cell correction and the one Accept the review state needs; the card mode of the result renderers, source glyphs on chips, and bars for numeric compare rows add 6.6 KB. Reading mode, the lift header and the collapsed sources rail add 9.3 KB JS and 2.5 KB CSS (158031 and 24772 measured). Compare check rows and best-value dots add 1.4 KB JS (159821 measured). Merged with main: 237582 JS and 24558 CSS measured. Site marks in the lift header and evidence chips add 3.9 KB JS (241532 measured). Diagram and table projection, the whole table with its sticky header and first column, and the knowledge caption in the lift header add 4.8 KB JS and 1.2 KB CSS (247665 and 26101 measured)."
   },
   "lazy:features/work/components/WorkSubjectInspector.svelte": {
     "js": 203800,

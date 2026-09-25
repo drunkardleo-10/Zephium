@@ -71,7 +71,7 @@ test("explicit result focus restores readable zoom without moving nodes and supp
   await screen.unmount();
 });
 
-test("a nine-column comparison stays readable and scrollable with one visible canvas title", async () => {
+test("a nine-column comparison is a mini table of four columns under one visible canvas title", async () => {
   await page.viewport(1100, 750);
   const title =
     "A detailed comparison of nine research criteria across the shortlisted alternatives and their documented limitations";
@@ -129,19 +129,22 @@ test("a nine-column comparison stays readable and scrollable with one visible ca
   screen.container.style.height = "750px";
   await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
   await screen.getByRole("button", { name: "Focus result", exact: true }).click();
-  const table = screen.getByRole("table", { name: title, exact: true });
+  // The card is the table's opening: the names and the first three criteria; the lift has the rest.
+  const table = screen.container.querySelector<HTMLTableElement>(".mini")!;
   await expect.element(table).toBeVisible();
-  const scroll = screen.container.querySelector(".table-scroll")!;
-  expect(scroll.scrollWidth).toBeGreaterThan(scroll.clientWidth * 2);
-  for (const heading of screen.container.querySelectorAll("th"))
-    expect(heading.getBoundingClientRect().width).toBeGreaterThanOrEqual(160);
+  expect([...table.querySelectorAll("thead th")].map((cell) => cell.textContent)).toEqual([
+    "",
+    "Purchase price",
+    "Regional availability",
+    "Mechanical construction",
+  ]);
+  expect(table.textContent).toContain("Second alternative");
+  expect(table.textContent).not.toContain("Delivery conditions");
   expect(screen.container.querySelector(".artifact h2")).toBeNull();
-  expect(screen.container.querySelector("caption")?.classList.contains("sr-only")).toBe(true);
+  expect(screen.getByText(title, { exact: true }).elements()).toHaveLength(1);
   const viewport = screen.container.querySelector<HTMLElement>(".svelte-flow__viewport")!;
   const transform = viewport.style.transform;
-  await table.getByRole("columnheader", { name: "Delivery conditions", exact: true }).click();
+  await screen.getByText("Purchase price", { exact: true }).click();
   expect(viewport.style.transform).toBe(transform);
-  expect(scroll.scrollLeft).toBeGreaterThan(0);
-  expect(scroll.textContent).toContain("Further evidence for Delivery conditions");
   await screen.unmount();
 });

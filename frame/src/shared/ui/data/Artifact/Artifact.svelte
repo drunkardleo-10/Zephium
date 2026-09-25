@@ -2,6 +2,8 @@
   import DataTable from "../DataTable";
   import LazyView from "$shared/ui/LazyView";
   import Matrix from "./Matrix.svelte";
+  import Table from "./Table.svelte";
+  import { tableGrid } from "./table";
   import DocumentView from "./DocumentView.svelte";
   import Findings from "./Findings.svelte";
   import Sources from "./Sources.svelte";
@@ -87,6 +89,10 @@
             {m.work_empty_data()}
           </p>{/each}{/if}
     </div>
+  {:else if (content.kind === "table" || content.kind === "comparison") && !card}<Table
+      caption={artifact.title}
+      {...tableGrid(content)}
+    />
   {:else if content.kind === "table"}<DataTable
       caption={artifact.title}
       showCaption={!embedded}
@@ -140,7 +146,7 @@
       retryLabel={m.surface_retry()}
       >{#snippet children(WorkChart)}<WorkChart
           title={artifact.title}
-          chart={content}
+          chart={artifact.knowledge ? { ...content, generalKnowledge: false } : content}
           compact={compact || card}
           {onevidence}
         >
@@ -191,7 +197,7 @@
         </li>{/each}
     </ul>
   {:else if content.kind === "unavailable"}<p role="status">{content.reason}</p>{/if}
-  {#if valid && !card && artifact.evidence.length && content.kind !== "sources" && content.kind !== "matrix" && content.kind !== "findings"}<footer
+  {#if valid && !card && !artifact.knowledge && artifact.evidence.length && content.kind !== "sources" && content.kind !== "matrix" && content.kind !== "findings"}<footer
       aria-label={m.work_sources()}
     >
       <EvidenceChips references={artifact.evidence} {onevidence} />
