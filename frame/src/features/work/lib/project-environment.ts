@@ -961,8 +961,9 @@ export function environmentDiagrams(
         const position = stage.layout.positions[card];
         if (position) positions[card] = position;
       }
-      const { at, layers } = diagramLayout(content);
-      content.edges.forEach((edge, index) =>
+      const { at, layers, plates, width, height } = diagramLayout(content);
+      content.edges.forEach((edge, index) => {
+        const plate = plates[index];
         links.push({
           id: `diagram-edge:${element.id}:${index}`,
           source: id(edge.from),
@@ -970,16 +971,25 @@ export function environmentDiagrams(
           kind: "diagram",
           ...(at[edge.from]?.x === at[edge.to]?.x ? { down: true } : {}),
           ...(edge.label ? { label: clipText(edge.label, ROW_TEXT) } : {}),
-        }),
-      );
+          ...(edge.label && plate ? { plate } : {}),
+        });
+      });
+      const band = layers.length ? DIAGRAM.layer : 0;
       clusters.push({
         id: diagramArea(stage.card, element.id),
-        label: artifact.title,
+        label:
+          content.nodes.length === 1
+            ? m.work_card_diagram_part_one()
+            : m.work_card_diagram_parts({ count: content.nodes.length }),
+        title: clipText(artifact.title, TITLE_TEXT),
+        opens: element.id,
+        ...(view.knowledge ? { knowledge: true } : {}),
         more: 0,
         members: content.nodes.map((node) => id(node.id)),
         inset: LANE.inset,
         live: stage.live,
         tone: "area",
+        extent: { width, height: height - band },
         ...(layers.length
           ? {
               caption: LANE.caption + DIAGRAM.layer,
@@ -995,6 +1005,33 @@ export function environmentDiagrams(
   return { items, links, positions, clusters };
 }
 const diagramArea = (card: string, result: string) => `group:${card}:diagram:${result}`;
+
+/** Each bare result's title and whether it is drawn from what the agent knows. */
+export function resultHeads(
+  snapshot: WorkEnvironmentSnapshot,
+  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+  stages: readonly WorkStage[],
+): Map<string, { title: string; knowledge: boolean }> {
+  const bare = new Set(
+    stages.flatMap(
+      (stage) =>
+        stage.contents.results?.members.flatMap((member) => (member.bare ? [member.id] : [])) ?? [],
+    ),
+  );
+  const heads = new Map<string, { title: string; knowledge: boolean }>();
+  for (const element of snapshot.elements) {
+    const reference = element.reference;
+    if (reference.kind !== "artifact" || !bare.has(element.id)) continue;
+    const execution = objectives
+      .get(reference.objective)
+      ?.executions.find((entry) => entry.id === reference.execution);
+    const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
+    if (!execution || !artifact) continue;
+    const view = artifactView(artifact, execution);
+    heads.set(element.id, { title: clipText(view.title, TITLE_TEXT), knowledge: !!view.knowledge });
+  }
+  return heads;
+}
 
 /** A group's caption counts what it holds: "2 pages · 3 local steps", "4 subjects", "6 steps". */
 function caption(group: LaneGroup): string {
@@ -1037,7 +1074,11 @@ const stepsCaption = (count: number) =>
  * with → Found → Made, skipping what the lane lacks, and each result into its
  * steps. Edges end at a group's box, never at a card inside it.
  */
-export function environmentClusters(stages: readonly WorkStage[]): {
+export function environmentClusters(
+  stages: readonly WorkStage[],
+  /** A bare result's title and knowledge: its steps caption carries them. */
+  heads: ReadonlyMap<string, { title: string; knowledge: boolean }> = new Map(),
+): {
   clusters: CanvasCluster[];
   links: CanvasLink[];
 } {
@@ -1056,7 +1097,11 @@ export function environmentClusters(stages: readonly WorkStage[]): {
         ...inner.flatMap((entry) => entry.members),
         ...areas.flatMap((entry) => entry.members),
       ]);
-      for (const entry of inner)
+      const bare = new Set(
+        stage.contents.results?.members.flatMap((member) => (member.bare ? [member.id] : [])),
+      );
+      for (const entry of inner) {
+        const head = bare.has(entry.result) ? heads.get(entry.result) : undefined;
         clusters.push({
           id: entry.id,
           label: stepsCaption(entry.members.length),
@@ -1064,7 +1109,15 @@ export function environmentClusters(stages: readonly WorkStage[]): {
           members: entry.members,
           inset: LANE.inset,
           live: stage.live,
+          ...(head
+            ? {
+                title: head.title,
+                opens: entry.result,
+                ...(head.knowledge ? { knowledge: true } : {}),
+              }
+            : {}),
         });
+      }
       clusters.push({
         id,
         label: caption(group),
@@ -1087,7 +1140,7 @@ export function environmentClusters(stages: readonly WorkStage[]): {
         target: id,
         kind: "path",
       });
-      for (const entry of inner)
+      for (const entry of inner.filter((entry) => !bare.has(entry.result)))
         links.push({
           id: `path:${stage.card}:steps:${entry.result}`,
           source: entry.result,

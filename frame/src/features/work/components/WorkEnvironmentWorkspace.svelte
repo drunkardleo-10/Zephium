@@ -85,8 +85,10 @@
     environmentDiagrams,
     environmentView,
     fileEvidence,
+    resultHeads,
     viewPlacements,
   } from "../lib/project-environment";
+  import { canvasProbe } from "../lib/canvas-context";
   import {
     environmentRequests,
     environmentStages,
@@ -817,7 +819,10 @@
       : { items: [], links: [], positions: {}, clusters: [] },
   );
   const clusters = $derived.by(() => {
-    const lanes = environmentClusters(stages);
+    const lanes = environmentClusters(
+      stages,
+      snapshot ? resultHeads(snapshot, context.objectives, stages) : new Map(),
+    );
     return { ...lanes, clusters: [...diagrams.clusters, ...lanes.clusters] };
   });
   const items = $derived([
@@ -830,6 +835,17 @@
     ...diagrams.items,
     ...agents.items,
   ]);
+  /** Results drawn without a card: a diagram's area or a checklist's steps stand for them. */
+  const bare = $derived(
+    new Set(
+      stages.flatMap(
+        (stage) =>
+          stage.contents.results?.members.flatMap((member) => (member.bare ? [member.id] : [])) ??
+          [],
+      ),
+    ),
+  );
+  const canvasItems = $derived(bare.size ? items.filter((item) => !bare.has(item.id)) : items);
   const links = $derived([
     ...scene.links,
     ...(snapshot ? environmentLinks(snapshot) : []),
@@ -2149,7 +2165,7 @@
           failureLabel={m.surface_render_failed()}
           retryLabel={m.surface_retry()}
           >{#snippet children(Canvas)}<Canvas
-              {items}
+              items={canvasItems}
               {links}
               clusters={clusters.clusters}
               areas={snapshot.areas}

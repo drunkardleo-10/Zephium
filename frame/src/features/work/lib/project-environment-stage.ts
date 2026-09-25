@@ -11,7 +11,7 @@ import type {
 import { FILE_STEPS, isAgentExecution } from "./agent-steps";
 import { clipText, type CanvasItem, type CanvasPosition, type CanvasSize } from "./canvas-model";
 import { findingsSize, resultSize, sourcesSize, stepSize, subjectSize } from "./card-size";
-import { resultPlan, stepId } from "./plan-steps";
+import { bareResult, resultPlan, stepId } from "./plan-steps";
 import { DIAGRAM, diagramLayout, diagramNodeId } from "./diagram";
 import { artifactView } from "./project-work";
 import { CLUSTER_CAP, SIZES, type StageContents, type StageMember } from "./stage-layout";
@@ -454,21 +454,27 @@ export function stageContents(
         findings.push(member(element.id, size));
         continue;
       }
-      results.push({ ...member(element.id, size), rank: rank(artifact) });
       // A result's plan stands beside it, one card per step.
       const view = artifact && execution ? artifactView(artifact, execution) : undefined;
-      // A diagram's parts stand in an area beside its cover, one card per part.
-      if (view?.content.kind === "diagram") {
-        const { at } = diagramLayout(view.content);
+      const own = resultPlan(view?.content);
+      const bare = !!view && bareResult(view.content);
+      // A diagram's parts stand in an area of their own, one card per part.
+      const layout = view?.content.kind === "diagram" ? diagramLayout(view.content) : undefined;
+      results.push({
+        ...member(element.id, size),
+        rank: rank(artifact),
+        ...(bare ? { bare: true } : {}),
+        ...(bare && layout ? { extent: { width: layout.width, height: layout.height } } : {}),
+      });
+      if (view?.content.kind === "diagram" && layout)
         for (const node of view.content.nodes)
           diagram.push({
             id: diagramNodeId(element.id, node.id),
             size: DIAGRAM.node,
             of: element.id,
-            at: at[node.id]!,
+            at: layout.at[node.id]!,
           });
-      }
-      resultPlan(view?.content).forEach((step, index) =>
+      own.forEach((step, index) =>
         plan.push({
           id: stepId(element.id, index),
           size: stepSize(step.text, step.detail),
@@ -496,9 +502,11 @@ export function stageContents(
       members: [0, 1, 2].flatMap((order) =>
         results
           .filter((result) => result.rank === order)
-          .map(({ id, size }, index) => ({
-            id,
-            size,
+          .map((result, index) => ({
+            id: result.id,
+            size: result.size,
+            ...(result.bare ? { bare: true } : {}),
+            ...(result.extent ? { extent: result.extent } : {}),
             ...(order === 0 && !index ? { cover: true } : {}),
           })),
       ),

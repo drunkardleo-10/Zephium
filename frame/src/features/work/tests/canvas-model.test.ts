@@ -7,6 +7,7 @@ import {
   sanitizeScene,
   validScene,
   validViewport,
+  withClusters,
   type CanvasItem,
 } from "../lib/canvas-model";
 const item = (id: string): CanvasItem => ({
@@ -118,4 +119,31 @@ test("areas render first as parents and members keep absolute durable positions"
   expect(remote[1]!.position).toEqual({ x: 200, y: 200 });
   expect(remote[2]).toBe(nodes[2]);
   expect(nodesBounds(["a", "b"], nodes)).toEqual({ x: 128, y: -28, width: 1084, height: 400 });
+});
+
+test("a tall Made group attaches its lines at its first row, and holds an area with no card of its own", () => {
+  const nodes = reconcileNodes(
+    [],
+    ["a", "b", "c"].map(item),
+    { a: { x: 40, y: 80 }, b: { x: 40, y: 400 }, c: { x: 40, y: 800 } },
+    { a: { width: 200, height: 64 }, b: { width: 200, height: 64 }, c: { width: 200, height: 64 } },
+  );
+  const clusters = [
+    { id: "area", label: "3 parts", more: 0, members: ["a", "b", "c"], inset: 16 },
+    { id: "made", label: "Result", more: 0, members: [], within: ["area"], inset: 24 },
+  ];
+  const kept = sanitizeScene(["a", "b", "c"].map(item), [], clusters).clusters;
+  expect(kept.map((cluster) => cluster.id)).toEqual(["area", "made"]);
+  const next = withClusters(nodes, kept);
+  const made = next.find((node) => node.id === "made")!;
+  // Padded and captioned around the area as it would be around a card.
+  expect(made.position).toEqual({ x: 40 - 16 - 24, y: 80 - 16 - 20 - 24 - 20 });
+  expect(made.height).toBeGreaterThan(240);
+  // The first row is the area itself, from the caption down.
+  const area = next.find((node) => node.id === "area")!;
+  expect((made.data as { anchor?: number }).anchor).toBe(
+    Math.round((24 + area.position.y + area.height! - made.position.y) / 2),
+  );
+  const short = withClusters(nodes.slice(0, 1), [{ ...clusters[0]!, members: ["a"] }]);
+  expect((short[0]!.data as { anchor?: number }).anchor).toBeUndefined();
 });

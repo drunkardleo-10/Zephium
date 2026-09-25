@@ -3,7 +3,9 @@ import type { IconRef } from "$shared/ipc/bindings";
 import type { ArtifactView, FindingView, SubjectView } from "$shared/ui/data/Artifact";
 import type { Node } from "@xyflow/svelte";
 import type { HumanPage } from "./work-human";
+import type { DiagramPlate } from "./diagram";
 import { defaultSize } from "./card-size";
+import { firstRowAnchor } from "./stage-layout";
 export { defaultSize };
 
 type CanvasKind =
@@ -142,6 +144,8 @@ export type CanvasLink = {
   /** Why a lane relation exists: a page is evidence for what was found, a step names a subject. */
   role?: "evidence" | "named";
   label?: string;
+  /** Where a diagram flow's name stands so it never covers a part. */
+  plate?: DiagramPlate;
 };
 /** Past this many ties a focused card lights none: a fan of lines says nothing. */
 const RELATION_CAP = 6;
@@ -227,6 +231,13 @@ export type CanvasCluster = {
   caption?: number;
   /** Faint captions above columns of members: a diagram's layers. */
   layers?: readonly { name: string; members: readonly string[] }[];
+  /** The least room the members take from the first one: a diagram's plates. */
+  extent?: CanvasSize;
+  /** The result this group stands for: its title leads the caption and opens it. */
+  opens?: string;
+  title?: string;
+  /** The result is drawn from what the agent knows. */
+  knowledge?: boolean;
 };
 export type ClusterData = {
   label: string;
@@ -236,6 +247,11 @@ export type ClusterData = {
   tone?: "area";
   /** Where each layer's caption sits, from the box's top-left. */
   layers?: { name: string; x: number; y: number }[];
+  opens?: string;
+  title?: string;
+  knowledge?: boolean;
+  /** Where the group's lines attach, from its top; its centre when absent. */
+  anchor?: number;
 };
 export type WorkItemNode = Node<CanvasItem, "work">;
 type AgentNode = Node<CanvasItem, "agent">;
@@ -320,11 +336,13 @@ export function sanitizeScene(
   for (const cluster of clusters) {
     if (!cluster.id || cluster.id.length > TEXT_LIMIT.id || endpoints.has(cluster.id)) continue;
     const members = cluster.members.filter((member) => ids.has(member));
-    if (!members.length) continue;
+    // A group of groups (Made holding only an area or steps) has no cards of its own.
+    if (!members.length && !cluster.within?.some((id) => endpoints.has(id))) continue;
     endpoints.add(cluster.id);
     groups.push({
       ...cluster,
       label: clipText(cluster.label, TEXT_LIMIT.title),
+      ...(cluster.title ? { title: clipText(cluster.title, TEXT_LIMIT.title) } : {}),
       members,
     });
   }
@@ -623,11 +641,11 @@ export function withClusters(
         },
       ];
     });
-    if (!rects.length) continue;
     const inner = (cluster.within ?? []).flatMap((id) => {
       const box = boxes.get(id);
       return box ? [box] : [];
     });
+    if (!rects.length && !inner.length) continue;
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
@@ -638,9 +656,16 @@ export function withClusters(
       maxX = Math.max(maxX, rect.x + rect.width + inset);
       maxY = Math.max(maxY, rect.y + rect.height + inset);
     }
+    if (cluster.extent && rects.length) {
+      const left = Math.min(...rects.map((rect) => rect.x));
+      const top = Math.min(...rects.map((rect) => rect.y));
+      maxX = Math.max(maxX, left + cluster.extent.width + inset);
+      maxY = Math.max(maxY, top + cluster.extent.height + inset);
+    }
+    // An inner group is padded like a card, so a group holding only one reads the same.
     for (const box of inner) {
-      minX = Math.min(minX, box.x);
-      minY = Math.min(minY, box.y);
+      minX = Math.min(minX, box.x - inset);
+      minY = Math.min(minY, box.y - inset - caption);
       maxX = Math.max(maxX, box.x + box.width + inset);
       maxY = Math.max(maxY, box.y + box.height + inset);
     }
@@ -662,6 +687,7 @@ export function withClusters(
         },
       ];
     });
+    const anchor = firstRowAnchor({ y: position.y, height }, [...rects, ...inner], inset);
     const data: ClusterData = {
       label: cluster.label,
       more: cluster.more,
@@ -669,6 +695,10 @@ export function withClusters(
       inset,
       ...(cluster.tone ? { tone: cluster.tone } : {}),
       ...(layers?.length ? { layers } : {}),
+      ...(cluster.opens ? { opens: cluster.opens } : {}),
+      ...(cluster.title ? { title: cluster.title } : {}),
+      ...(cluster.knowledge ? { knowledge: true } : {}),
+      ...(anchor === undefined ? {} : { anchor }),
     };
     const node = byId.get(cluster.id);
     derived.push(
@@ -682,6 +712,10 @@ export function withClusters(
         node.data.more === data.more &&
         node.data.active === data.active &&
         node.data.inset === data.inset &&
+        node.data.title === data.title &&
+        node.data.opens === data.opens &&
+        node.data.knowledge === data.knowledge &&
+        node.data.anchor === data.anchor &&
         JSON.stringify(node.data.layers) === JSON.stringify(data.layers)
         ? node
         : {

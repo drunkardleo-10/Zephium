@@ -1,11 +1,13 @@
 import { expect, test } from "vitest";
 import {
   SIZES,
+  firstRowAnchor,
   laneShape,
   laneSlots,
   markStand,
   placeLane,
   stageLayout,
+  stepColumns,
   type StageContents,
   type StageMember,
 } from "../lib/stage-layout";
@@ -241,4 +243,94 @@ test("without a diagram, the cover's row is followed by the rest two across", ()
   });
   expect(made.box).toEqual({ x: 348, y: 0, width: 748, height: 634 });
   expect(made.diagrams).toBeUndefined();
+});
+
+test("steps read as a landscape grid: two, three, then four across", () => {
+  expect([1, 2, 4].map(stepColumns)).toEqual([2, 2, 2]);
+  expect([5, 7, 9].map(stepColumns)).toEqual([3, 3, 3]);
+  expect([10, 11, 12].map(stepColumns)).toEqual([4, 4, 4]);
+  const size = { width: 220, height: 120 };
+  const across = (count: number) => {
+    const layout = stageLayout(request, {
+      results: { members: [{ id: "list", size: SIZES.result, bare: true }] },
+      plan: { members: cards("step", count, size).map((member) => ({ ...member, of: "list" })) },
+    });
+    return new Set(Array.from({ length: count }, (_, index) => layout.positions[`step${index}`]!.x))
+      .size;
+  };
+  expect([across(4), across(6), across(11)]).toEqual([2, 3, 4]);
+});
+
+test("a bare checklist is its steps alone, standing where its cover would", () => {
+  const layout = stageLayout(request, {
+    results: { members: [{ id: "list", size: SIZES.result, bare: true }] },
+    plan: {
+      members: cards("step", 11, { width: 220, height: 120 }).map((member) => ({
+        ...member,
+        of: "list",
+      })),
+    },
+  });
+  const made = layout.groups[0]!;
+  expect(layout.positions.list).toBeUndefined();
+  expect(made.members).not.toContain("list");
+  const box = made.steps![0]!.box;
+  expect(box).toEqual({
+    x: 348 + 24,
+    y: 44,
+    width: 4 * 220 + 3 * 16 + 32,
+    height: 3 * 120 + 2 * 16 + 32 + 20,
+  });
+  // Landscape: the group is wider than it is tall.
+  expect(made.box.width).toBeGreaterThan(made.box.height);
+});
+
+test("a bare diagram's area stands in its place and holds its whole extent, plates included", () => {
+  const part = { width: 200, height: 64 };
+  const layout = stageLayout(request, {
+    results: {
+      members: [
+        { id: "diagram", size: SIZES.result, bare: true, extent: { width: 900, height: 300 } },
+      ],
+    },
+    diagram: {
+      members: [
+        { id: "a", size: part, of: "diagram", at: { x: 0, y: 0 } },
+        { id: "b", size: part, of: "diagram", at: { x: 300, y: 0 } },
+      ],
+    },
+  });
+  const made = layout.groups[0]!;
+  expect(layout.positions.diagram).toBeUndefined();
+  expect(layout.positions.a).toEqual({ x: 348 + 24 + 16, y: 44 + 16 + 20 });
+  expect(made.diagrams![0]!.box).toEqual({
+    x: 348 + 24,
+    y: 44,
+    width: 16 + 900 + 16,
+    height: 16 + 20 + 300 + 16,
+  });
+  // The group is measured around the area, never narrower than it.
+  expect(made.box.width).toBe(24 + 932 + 24);
+  expect(made.box.height).toBe(44 + 352 + 24);
+});
+
+test("a tall group's lines meet its first row; a short one keeps its centre", () => {
+  const layout = stageLayout(request, {
+    results: {
+      members: [
+        { id: "cover", size: SIZES.document, cover: true },
+        { id: "table", size: { width: 360, height: 200 } },
+        { id: "chart", size: { width: 324, height: 250 } },
+      ],
+    },
+  });
+  const made = layout.groups[0]!;
+  expect(made.box.height).toBeGreaterThan(600);
+  const rects = made.members.map((id) => ({
+    y: layout.positions[id]!.y,
+    height: id === "cover" ? SIZES.document.height : id === "table" ? 200 : 250,
+  }));
+  // The caption and the cover: from 24 down to the cover's bottom, 44 + 300.
+  expect(firstRowAnchor(made.box, rects, 24)).toBe((24 + 344) / 2);
+  expect(firstRowAnchor({ y: 0, height: 200 }, rects, 24)).toBeUndefined();
 });

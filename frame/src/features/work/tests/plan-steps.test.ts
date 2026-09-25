@@ -6,6 +6,7 @@ import {
   environmentItems,
   environmentLinks,
   environmentSteps,
+  resultHeads,
 } from "../lib/project-environment";
 import { environmentStages } from "../lib/project-environment-thread";
 import { planScene } from "./environment-fixtures";
@@ -56,7 +57,7 @@ test("a pure result reads request → Made in slot 1, its steps boxed beside it,
     x: steps.box.x + 16,
     y: steps.box.y + 16 + 20,
   });
-  expect(layout.positions["step:plan-card:1"]!.x).toBe(steps.box.x + 16 + 248 + 16);
+  expect(layout.positions["step:plan-card:1"]!.x).toBe(steps.box.x + 16 + 220 + 16);
   const { clusters, links } = environmentClusters(stages);
   expect(links.map((link) => [link.source, link.target])).toEqual([
     ["objective-card", "group:objective-card:made"],
@@ -67,6 +68,46 @@ test("a pure result reads request → Made in slot 1, its steps boxed beside it,
     ["group:objective-card:made", "Result", ["group:objective-card:steps:plan-card"]],
   ]);
   expect(environmentLinks(scene)).toEqual([]);
+});
+
+test("a checklist draws no cover: its steps stand in its place, their caption carrying its title", () => {
+  const { scene, objectives } = planScene();
+  const run = objectives.get("objective")!.executions[0]!;
+  run.artifacts[0]!.title = "Implementation roadmap";
+  run.artifacts[0]!.general_knowledge = true;
+  run.artifacts[0]!.data = {
+    kind: "checklist",
+    items: Array.from({ length: 11 }, (_, index) => ({
+      text: `Step ${index + 1}`,
+      completed: false,
+    })),
+  };
+  const stages = environmentStages(scene, objectives);
+  const layout = stages[0]!.layout;
+  expect(layout.positions["plan-card"]).toBeUndefined();
+  const box = layout.groups[0]!.steps![0]!.box;
+  expect(box.x).toBe(348 + 24);
+  // Eleven steps four across.
+  const lefts = new Set(
+    Array.from({ length: 11 }, (_, index) => layout.positions[`step:plan-card:${index}`]!.x),
+  );
+  expect(lefts.size).toBe(4);
+  const { clusters, links } = environmentClusters(stages, resultHeads(scene, objectives, stages));
+  expect(links.map((link) => [link.source, link.target])).toEqual([
+    ["objective-card", "group:objective-card:made"],
+  ]);
+  expect(clusters[0]).toMatchObject({
+    id: "group:objective-card:steps:plan-card",
+    label: "11 steps",
+    title: "Implementation roadmap",
+    opens: "plan-card",
+    knowledge: true,
+  });
+  expect(clusters[1]).toMatchObject({
+    id: "group:objective-card:made",
+    members: [],
+    within: ["group:objective-card:steps:plan-card"],
+  });
 });
 
 test("cards are as tall as what they say, up to their cap", () => {

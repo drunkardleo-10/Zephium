@@ -178,8 +178,12 @@
   let canvasWidth = $state(0);
   let canvasHeight = $state(0);
   let host = $state<HTMLDivElement>();
+  /** A card, or the group that stands for a result drawn without one. */
+  const nodeFor = (id: string) =>
+    nodes.find((node) => node.id === id) ??
+    nodes.find((node) => node.type === "cluster" && node.data.opens === id);
   function center(id: string) {
-    const node = nodes.find((node) => node.id === id);
+    const node = nodeFor(id);
     if (!node) return;
     const position = absolutePosition(node, nodes);
     viewport = {
@@ -238,7 +242,9 @@
                   : rest
                     ? "rest"
                     : "relation",
-            ...(link.kind === "diagram" && link.label ? { label: link.label } : {}),
+            ...(link.kind === "diagram" && link.label
+              ? { label: link.label, ...(link.plate ? { plate: link.plate } : {}) }
+              : {}),
           },
           deletable: false,
           selectable: false,
@@ -417,7 +423,7 @@
     return bounds ? { ...bounds, ids } : null;
   }
   function screenRect(id: string): DOMRect | null {
-    const node = nodes.find((node) => node.id === id);
+    const node = nodeFor(id);
     const origin = host?.getBoundingClientRect();
     if (!node || !origin) return null;
     const z = viewport.zoom;

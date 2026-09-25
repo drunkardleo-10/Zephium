@@ -9,7 +9,7 @@ import WorkCanvas from "../components/WorkCanvas.svelte";
 import DiagramNodeCard from "../components/cards/DiagramNodeCard.svelte";
 import ResultCard from "../components/cards/ResultCard.svelte";
 import { environmentStages, environmentRequests } from "../lib/project-environment-thread";
-import { environmentClusters, environmentDiagrams } from "../lib/project-environment";
+import { environmentClusters, environmentDiagrams, resultHeads } from "../lib/project-environment";
 import { artifactView } from "../lib/project-work";
 import type { CanvasItem } from "../lib/canvas-model";
 import { projection, snapshot } from "./environment-fixtures";
@@ -45,28 +45,22 @@ function scene(data: WorkArtifactDataV1) {
   const objectives = new Map([["objective", state]]);
   const stages = environmentStages(snapshot, objectives);
   const diagrams = environmentDiagrams(snapshot, objectives, stages);
-  const lanes = environmentClusters(stages);
-  const view = artifactView(execution.artifacts[0]!, execution);
-  const cover: CanvasItem = {
-    id: "result-card",
-    type: "result",
-    title: view.title,
-    kind: "Result",
-    detail: "",
-    status: "",
-    artifact: view,
-  };
+  const lanes = environmentClusters(stages, resultHeads(snapshot, objectives, stages));
+  // The diagram draws no cover: its area stands for it.
   return {
-    items: [cover, ...diagrams.items],
+    items: diagrams.items,
     links: [...lanes.links, ...diagrams.links],
     clusters: [...diagrams.clusters, ...lanes.clusters],
     positions: { ...environmentRequests(stages).positions, ...diagrams.positions },
+    stages,
   };
 }
 
-test("a diagram result is its cover beside an area of parts, layered left to right and joined", async () => {
+test("a diagram result is its area of parts alone, layered left to right, joined, and captioned by its title", async () => {
   await page.viewport(1400, 900);
-  const { items, links, clusters, positions } = scene(DIAGRAM);
+  const { items, links, clusters, positions, stages } = scene(DIAGRAM);
+  expect(stages[0]!.layout.positions["result-card"]).toBeUndefined();
+  const opened: string[] = [];
   const screen = await render(WorkCanvas, {
     items,
     links,
@@ -74,6 +68,7 @@ test("a diagram result is its cover beside an area of parts, layered left to rig
     authoritative: new Set(["result-card"]),
     initialView: { positions, viewport: { x: 0, y: 40, zoom: 0.8 } },
     oninspect: () => {},
+    onopen: (id: string) => opened.push(id),
   });
   screen.container.style.width = "1400px";
   screen.container.style.height = "900px";
@@ -81,7 +76,9 @@ test("a diagram result is its cover beside an area of parts, layered left to rig
     screen.container.querySelector(
       '.svelte-flow__node[data-id="group:objective-card:diagram:result-card"]',
     );
-  await expect.poll(() => area()?.querySelector(".take")?.textContent).toBe("Checkout system");
+  await expect.poll(() => area()?.querySelector(".title")?.textContent).toBe("Checkout system");
+  expect(area()!.querySelector(".take")?.textContent).toBe("4 parts");
+  expect(screen.container.querySelector('[data-id="result-card"]')).toBeNull();
   const parts = [...screen.container.querySelectorAll<HTMLElement>(".part")];
   expect(parts.map((part) => part.querySelector(".name")?.textContent)).toEqual(
     expect.arrayContaining(["Postgres", "Browser", "API", "Jobs"]),
@@ -104,11 +101,114 @@ test("a diagram result is its cover beside an area of parts, layered left to rig
   expect(
     [...document.querySelectorAll(".work-edge-label")].map((label) => label.textContent),
   ).toEqual(expect.arrayContaining(["HTTPS", "SQL"]));
-  // The caption takes the diagram whole.
+  // The title opens the diagram; the count takes it whole.
+  await screen.getByRole("button", { name: "Checkout system" }).click();
+  expect(opened).toEqual(["result-card"]);
   await screen.getByTitle("Select the whole diagram").click();
   await expect
     .poll(() => screen.container.querySelectorAll(".svelte-flow__node.selected").length)
     .toBe(4);
+  await screen.unmount();
+});
+
+/** The person's architecture: six layers, fourteen parts, nineteen named flows. */
+const TRIP: WorkArtifactDataV1 = {
+  kind: "diagram",
+  layers: [
+    { id: "clients", name: "Clients" },
+    { id: "edge", name: "Edge" },
+    { id: "gateway", name: "Gateway" },
+    { id: "services", name: "Services" },
+    { id: "data", name: "Data" },
+    { id: "external", name: "External" },
+  ],
+  nodes: [
+    { id: "web", name: "Web app", kind: "client", layer: "clients" },
+    { id: "mobile", name: "Mobile app", kind: "client", layer: "clients" },
+    { id: "cdn", name: "CDN and static hosting", kind: "edge", layer: "edge" },
+    { id: "lb", name: "Load balancer", kind: "edge", layer: "edge" },
+    { id: "api", name: "API gateway", kind: "gateway", layer: "gateway" },
+    { id: "auth", name: "Identity and authentication", kind: "gateway", layer: "gateway" },
+    { id: "trips", name: "Trip service", kind: "service", layer: "services" },
+    { id: "booking", name: "Booking service", kind: "service", layer: "services" },
+    { id: "worker", name: "Background workers and schedulers", kind: "worker", layer: "services" },
+    { id: "notify", name: "Notification service", kind: "service", layer: "services" },
+    { id: "pg", name: "PostgreSQL", kind: "store", layer: "data" },
+    { id: "redis", name: "Redis", kind: "cache", layer: "data" },
+    { id: "storage", name: "Object storage", kind: "storage", layer: "data" },
+    { id: "payments", name: "Payment provider", kind: "external", layer: "external" },
+  ],
+  edges: [
+    { from: "web", to: "cdn", label: "static assets" },
+    { from: "mobile", to: "lb", label: "HTTPS" },
+    { from: "web", to: "lb", label: "HTTPS" },
+    { from: "cdn", to: "api", label: "API requests" },
+    { from: "lb", to: "api", label: "API requests" },
+    { from: "api", to: "auth", label: "token checks" },
+    { from: "api", to: "trips", label: "authenticated requests" },
+    { from: "api", to: "booking", label: "authenticated requests" },
+    { from: "trips", to: "pg", label: "tenant and user checks" },
+    { from: "booking", to: "pg", label: "reads and writes" },
+    { from: "trips", to: "redis", label: "cache" },
+    { from: "booking", to: "payments", label: "charges" },
+    { from: "worker", to: "pg", label: "jobs" },
+    { from: "booking", to: "worker", label: "enqueue" },
+    { from: "worker", to: "notify", label: "events" },
+    { from: "notify", to: "storage", label: "templates" },
+    { from: "trips", to: "storage", label: "uploads" },
+    { from: "auth", to: "pg", label: "sessions" },
+    { from: "payments", to: "booking", label: "webhooks" },
+  ],
+};
+
+test("the person's architecture fits its group, and no flow's name sits on a part", async () => {
+  await page.viewport(1600, 1000);
+  const { items, links, clusters, positions } = scene(TRIP);
+  const screen = await render(WorkCanvas, {
+    items,
+    links,
+    clusters,
+    authoritative: new Set(["result-card"]),
+    initialView: { positions, viewport: { x: 0, y: 40, zoom: 0.5 } },
+    virtualizeFrom: 1000,
+    oninspect: () => {},
+  });
+  screen.container.style.width = "1600px";
+  screen.container.style.height = "1000px";
+  await expect.poll(() => document.querySelectorAll(".work-edge-label").length).toBe(19);
+  const rect = (element: Element) => element.getBoundingClientRect();
+  const cards = [
+    ...screen.container.querySelectorAll('.svelte-flow__node[data-id^="diagram:result-card:"]'),
+  ].map(rect);
+  expect(cards).toHaveLength(14);
+  const overlaps = (a: DOMRect, b: DOMRect) =>
+    a.left < b.right - 0.5 &&
+    b.left < a.right - 0.5 &&
+    a.top < b.bottom - 0.5 &&
+    b.top < a.bottom - 0.5;
+  const plates = [...document.querySelectorAll(".work-edge-label")];
+  for (const plate of plates)
+    for (const card of cards)
+      expect(overlaps(rect(plate), card), `"${plate.textContent}" over a part`).toBe(false);
+  // The area holds every part and plate, and the Made group holds the area.
+  const node = (id: string) =>
+    rect(screen.container.querySelector(`.svelte-flow__node[data-id="${id}"]`)!);
+  const area = node("group:objective-card:diagram:result-card");
+  const made = node("group:objective-card:made");
+  for (const inner of [...cards, ...plates.map(rect)]) {
+    expect(inner.left).toBeGreaterThanOrEqual(area.left);
+    expect(inner.right).toBeLessThanOrEqual(area.right + 0.5);
+    expect(inner.bottom).toBeLessThanOrEqual(area.bottom + 0.5);
+  }
+  expect(area.left).toBeGreaterThan(made.left);
+  expect(area.right).toBeLessThan(made.right);
+  expect(area.bottom).toBeLessThan(made.bottom);
+  // A long name wraps to a second line instead of clipping.
+  const name = screen.container.querySelector<HTMLElement>(
+    '[data-id="diagram:result-card:worker"] .name',
+  )!;
+  expect(name.textContent).toBe("Background workers and schedulers");
+  expect(name.scrollHeight).toBeLessThanOrEqual(name.clientHeight + 1);
   await screen.unmount();
 });
 

@@ -35,3 +35,10 @@ export const stepId = (result: string, index: number) => `step:${result}:${index
 /** The result card a step card belongs to. */
 export const stepResult = (id: string) =>
   id.startsWith("step:") ? id.slice(5, id.lastIndexOf(":")) : null;
+/**
+ * A diagram or a checklist draws no cover: its area of parts or its steps
+ * stand for it, captioned with its title. A document keeps its cover.
+ */
+export const bareResult = (content: ArtifactContent) =>
+  (content.kind === "diagram" && content.nodes.length > 0) ||
+  (content.kind === "checklist" && resultPlan(content).length > 0);

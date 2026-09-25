@@ -175,12 +175,13 @@ export function subjectSize(
 }
 
 /** A plan step: its glyph and number, then the whole step and its first line of detail. */
+const STEP_WIDTH = 220;
 export function stepSize(text: string, detail = ""): CanvasSize {
-  const inner = 248 - 28;
+  const inner = STEP_WIDTH - 28;
   const body =
     Math.max(1, textLines(text, inner, ADVANCE.strong, 8)) * LINE.label +
     (detail ? textLines(detail, inner, ADVANCE.caption, 4) * 15 + 4 : 0);
-  return { width: 248, height: clamp(14 + 28 + 8 + body + 14, 96, 240) };
+  return { width: STEP_WIDTH, height: clamp(14 + 28 + 8 + body + 14, 96, 240) };
 }
 
 /** A caption, the person's words up to eight lines, then the lane's counts once it has any. */

@@ -43,9 +43,11 @@ const NATURAL: Record<GroupKind, number> = { worked: 0, found: 1, made: 2 };
 export const CLUSTER_CAP = { pages: 8, subjects: 12 } as const;
 
 /**
- * One card of a lane. A step or a diagram's part names the result card it
- * belongs to; a part says where it stands in its diagram; the cover is the
- * document the rest of Made hangs from.
+ * One card of a lane. A step or a diagram's part names the result it belongs
+ * to; a part says where it stands in its diagram; the cover is the document
+ * the rest of Made hangs from. A bare result draws no card of its own: its
+ * area or its steps stand in its place, and `extent` is its diagram's whole
+ * room, plates included, from the first part.
  */
 export type StageMember = {
   id: string;
@@ -53,6 +55,8 @@ export type StageMember = {
   of?: string;
   at?: CanvasPosition;
   cover?: boolean;
+  bare?: boolean;
+  extent?: CanvasSize;
 };
 /** Members in projection order; `more` counts what the run knows but no card shows. */
 export type StageContents = Partial<
@@ -177,10 +181,14 @@ function found(contents: StageContents): GroupShape | null {
   };
 }
 
+/** Steps read as a landscape grid: two across up to four, three up to nine, then four. */
+export const stepColumns = (count: number) => (count <= 4 ? 2 : count <= 9 ? 3 : 4);
+
 /**
  * Made as a set: the cover, each diagram with its area, and any result with
  * steps stand on rows of their own, the steps or the area to the result's
- * right; tables, charts, findings and comparisons follow two across.
+ * right, or in its place when the result is bare; tables, charts, findings
+ * and comparisons follow two across.
  */
 function made(contents: StageContents): GroupShape | null {
   const results = shown(contents, "results").visible;
@@ -193,19 +201,28 @@ function made(contents: StageContents): GroupShape | null {
     parts.some((part) => part.of === result.id);
   const rows = results.filter(alone);
   const rest = results.filter((result) => !alone(result));
-  const column = Math.max(0, ...rows.map((result) => result.size.width));
+  const column = Math.max(
+    0,
+    ...rows.filter((result) => !result.bare).map((result) => result.size.width),
+  );
   const cards: GroupShape["cards"] = [];
   const steps: NonNullable<GroupShape["steps"]> = [];
   const diagrams: NonNullable<GroupShape["diagrams"]> = [];
   let y = LANE.pad + LANE.caption;
   for (const result of rows) {
-    const rect = { x: LANE.pad, y, ...result.size };
-    cards.push({ id: result.id, rect });
-    let bottom = rect.y + rect.height;
+    let bottom = y;
+    if (!result.bare) {
+      const rect = { x: LANE.pad, y, ...result.size };
+      cards.push({ id: result.id, rect });
+      bottom = rect.y + rect.height;
+    }
     const own = plan.filter((step) => step.of === result.id);
     if (own.length) {
-      const x = LANE.pad + column + LANE.gutter;
-      const placed = cells(own, 2, { x: x + LANE.inset, y: y + LANE.inset + LANE.caption });
+      const x = result.bare ? LANE.pad : LANE.pad + column + LANE.gutter;
+      const placed = cells(own, stepColumns(own.length), {
+        x: x + LANE.inset,
+        y: y + LANE.inset + LANE.caption,
+      });
       const inner = bounds(placed)!;
       const box = {
         x,
@@ -219,7 +236,7 @@ function made(contents: StageContents): GroupShape | null {
     }
     const drawn = parts.filter((part) => part.of === result.id);
     if (drawn.length) {
-      const x = LANE.pad + result.size.width + LANE.gap;
+      const x = result.bare ? LANE.pad : LANE.pad + result.size.width + LANE.gap;
       const left = x + LANE.inset;
       const top = y + LANE.inset + LANE.caption;
       const placed = drawn.map((part) => ({
@@ -228,11 +245,13 @@ function made(contents: StageContents): GroupShape | null {
         ...part.size,
       }));
       const inner = bounds(placed)!;
+      // The area holds its parts and every plate between and under them.
       const box = {
         x,
         y,
-        width: inner.x + inner.width - x + LANE.inset,
-        height: inner.y + inner.height - y + LANE.inset,
+        width: Math.max(inner.x + inner.width, left + (result.extent?.width ?? 0)) - x + LANE.inset,
+        height:
+          Math.max(inner.y + inner.height, top + (result.extent?.height ?? 0)) - y + LANE.inset,
       };
       drawn.forEach((part, index) => cards.push({ id: part.id, rect: placed[index]! }));
       diagrams.push({ result: result.id, box, members: drawn.map((part) => part.id) });
@@ -257,6 +276,25 @@ function made(contents: StageContents): GroupShape | null {
     ...(steps.length ? { steps } : {}),
     ...(diagrams.length ? { diagrams } : {}),
   };
+}
+
+/** Past this height a group's lines meet its first row, not its middle. */
+const ANCHOR_FROM = 240;
+/**
+ * Where a group's lines attach, from its top: the middle of its first row,
+ * caption included, once the group is tall; otherwise nothing, its centre.
+ */
+export function firstRowAnchor(
+  box: { y: number; height: number },
+  rows: readonly { y: number; height: number }[],
+  inset: number,
+): number | undefined {
+  if (box.height < ANCHOR_FROM || !rows.length) return undefined;
+  const first = Math.min(...rows.map((rect) => rect.y));
+  const bottom = Math.max(
+    ...rows.filter((rect) => rect.y - first < LANE.gap).map((rect) => rect.y + rect.height),
+  );
+  return Math.round((inset + bottom - box.y) / 2);
 }
 
 /** A lane's groups in reading order, each measured at the origin; empty ones take no slot. */
