@@ -1840,11 +1840,7 @@ fn code_review_accepted(execution: &WorkExecutionFact) -> bool {
     }
     let named = execution.artifacts.iter().any(|artifact| {
         matches!(&artifact.data, Data::Findings { items, .. } if items.iter().any(|item| {
-            let claim = format!("{} {}", item.claim, item.detail.as_deref().unwrap_or_default())
-                .to_ascii_lowercase();
-            ["off-by-one", "off by one", "out of bounds", "out-of-bounds", "past the end", "..="]
-                .iter()
-                .any(|phrase| claim.contains(phrase))
+            names_off_by_one(&item.claim, item.detail.as_deref().unwrap_or_default())
         }))
     });
     let (reads, elapsed_ms) = reads_and_elapsed(execution);
@@ -1859,6 +1855,23 @@ fn code_review_accepted(execution: &WorkExecutionFact) -> bool {
         sorted_kinds(execution),
     );
     accepted
+}
+
+fn names_off_by_one(claim: &str, detail: &str) -> bool {
+    let text = format!("{claim} {detail}").to_ascii_lowercase();
+    [
+        "off-by-one",
+        "off by one",
+        "out of bounds",
+        "out-of-bounds",
+        "past the end",
+        "..=",
+        "panic",
+        "panics",
+        "inclusive range",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase))
 }
 
 /// The routine loop on a public comparison objective. Every step, source and
@@ -2541,6 +2554,21 @@ async fn human_government_input(
                 std::future::pending::<()>().await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod code_review_tests {
+    #[test]
+    fn a_finding_that_the_loop_panics_names_the_off_by_one() {
+        assert!(super::names_off_by_one(
+            "The rolling loop panics at the final iteration",
+            "The inclusive range reaches readings.len(), then indexes readings[i]. Use `window..readings.len()` instead.",
+        ));
+        assert!(!super::names_off_by_one(
+            "The snapshot clone is unused",
+            "Remove `let snapshot = readings.to_vec();` to avoid an unnecessary allocation.",
+        ));
     }
 }
 
