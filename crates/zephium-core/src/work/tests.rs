@@ -1669,6 +1669,35 @@ fn charts_of_nothing_second_findings_and_malformed_objects_are_refused_by_cause(
         refused.refusals[0].notice(),
         "is a diagram with invalid content: diagram edge refers to an unknown node"
     );
+    let code = |language: &str, from: u32, to: u32| WorkArtifactDataV1::Code {
+        language: language.into(),
+        text: "fn main() {\r\n    run();\r\n}\r\n".into(),
+        notes: vec![WorkCodeNote {
+            from,
+            to,
+            text: "Calls the loop".into(),
+        }],
+    };
+    let excerpt = disclosure.resolve(turn(vec![code(" Rust", 2, 3)])).unwrap();
+    let WorkArtifactDataV1::Code { language, text, .. } = &excerpt.artifacts[0].data else {
+        panic!("code refused: {:?}", excerpt.refusals);
+    };
+    assert_eq!((language.as_str(), text.lines().count()), ("rust", 3));
+    assert!(!text.contains('\r'));
+    for (data, notice) in [
+        (
+            code("brainfuck", 1, 1),
+            "is a code with invalid content: code language must be one of rust,",
+        ),
+        (
+            code("rust", 2, 4),
+            "is a code with invalid content: code note lines need 1 <= from <= to",
+        ),
+    ] {
+        let refused = disclosure.resolve(turn(vec![data])).unwrap();
+        assert!(refused.artifacts.is_empty());
+        assert!(refused.refusals[0].notice().starts_with(notice));
+    }
     let findings = |subjects: &[&str], claim: &str| WorkArtifactDataV1::Findings {
         subjects: subjects
             .iter()

@@ -807,7 +807,7 @@ impl WorkAgentArtifactRefusal {
             Self::UnlistedLink => "links to a URL that is not a listed source",
             Self::EmptyChart => "is a chart whose points are all zero or unknown, which shows nothing: when the sources give no comparable numbers, say so in one finding, or chart typical published figures marked general_knowledge with a basis that says they are typical figures, not measurements",
             Self::DuplicateFindings => "is a second findings object this turn about the same subjects: put a turn's claims in one findings object, add only claims not already on the canvas, and publish nothing when nothing is new",
-            Self::Malformed(None) => "has invalid content: measurement cells hold a plain number only (the criterion carries the unit), cell and finding evidence must cite listed source keys, subject indexes must exist, diagram node ids must be unique and every edge and layer must name an existing one, and text must fit its limits",
+            Self::Malformed(None) => "has invalid content: measurement cells hold a plain number only (the criterion carries the unit), cell and finding evidence must cite listed source keys, subject indexes must exist, diagram node ids must be unique and every edge and layer must name an existing one, code notes must point at lines of the text, and text must fit its limits",
         }
         .into()
     }
@@ -872,6 +872,7 @@ impl WorkAgentTurnDisclosure {
         }
         normalize_measurements(&mut artifact.data);
         normalize_vendors(&mut artifact.data);
+        normalize_code(&mut artifact.data);
         if let Some(field) = artifact.data.fault(artifact.evidence.len()) {
             return Err(malformed(field));
         }
@@ -1007,6 +1008,15 @@ fn normalize_vendors(data: &mut WorkArtifactDataV1) {
         });
     }
 }
+fn normalize_code(data: &mut WorkArtifactDataV1) {
+    let WorkArtifactDataV1::Code { language, text, .. } = data else {
+        return;
+    };
+    *language = language.trim().to_ascii_lowercase();
+    if text.contains('\r') {
+        *text = text.replace("\r\n", "\n").replace('\r', "\n");
+    }
+}
 /// Removes claim-level citations of unknown keys and returns how many went.
 /// A finding or source entry left citing nothing but unknown keys goes too.
 fn drop_unknown_citations(data: &mut WorkArtifactDataV1, known: impl Fn(u16) -> bool) -> usize {
@@ -1039,7 +1049,8 @@ fn drop_unknown_citations(data: &mut WorkArtifactDataV1, known: impl Fn(u16) -> 
         | WorkArtifactDataV1::Comparison { .. }
         | WorkArtifactDataV1::Checklist { .. }
         | WorkArtifactDataV1::BrowserResourcePreview { .. }
-        | WorkArtifactDataV1::Diagram { .. } => {}
+        | WorkArtifactDataV1::Diagram { .. }
+        | WorkArtifactDataV1::Code { .. } => {}
     }
     dropped
 }
@@ -1080,7 +1091,8 @@ fn remap_citations(
         | WorkArtifactDataV1::Comparison { .. }
         | WorkArtifactDataV1::Checklist { .. }
         | WorkArtifactDataV1::BrowserResourcePreview { .. }
-        | WorkArtifactDataV1::Diagram { .. } => {}
+        | WorkArtifactDataV1::Diagram { .. }
+        | WorkArtifactDataV1::Code { .. } => {}
     }
     Ok(())
 }
@@ -1103,6 +1115,7 @@ pub fn artifact_kind(data: &WorkArtifactDataV1) -> &'static str {
         WorkArtifactDataV1::Findings { .. } => "findings",
         WorkArtifactDataV1::BrowserResourcePreview { .. } => "browser_resource_preview",
         WorkArtifactDataV1::Diagram { .. } => "diagram",
+        WorkArtifactDataV1::Code { .. } => "code",
     }
 }
 

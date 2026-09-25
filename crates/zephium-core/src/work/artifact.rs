@@ -12,6 +12,35 @@ pub const MAX_ARTIFACT_EVIDENCE: usize = 64;
 pub const MAX_DIAGRAM_NODES: usize = 40;
 pub const MAX_DIAGRAM_EDGES: usize = 80;
 pub const MAX_DIAGRAM_LAYERS: usize = 8;
+pub const MAX_CODE_TEXT_BYTES: usize = 16 * 1024;
+pub const MAX_CODE_LINES: usize = 400;
+pub const MAX_CODE_NOTES: usize = 24;
+pub const CODE_LANGUAGES: [&str; 24] = [
+    "rust",
+    "typescript",
+    "javascript",
+    "svelte",
+    "python",
+    "go",
+    "java",
+    "kotlin",
+    "swift",
+    "c",
+    "cpp",
+    "csharp",
+    "ruby",
+    "php",
+    "sql",
+    "html",
+    "css",
+    "json",
+    "yaml",
+    "toml",
+    "bash",
+    "markdown",
+    "dockerfile",
+    "text",
+];
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -291,6 +320,14 @@ pub enum WorkArtifactDataV1 {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         layers: Vec<WorkDiagramLayer>,
     },
+    /// An excerpt of source code with notes on line ranges.
+    Code {
+        /// One of `CODE_LANGUAGES`.
+        language: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        notes: Vec<WorkCodeNote>,
+    },
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -373,6 +410,15 @@ pub struct WorkDiagramEdge {
 pub struct WorkDiagramLayer {
     pub id: String,
     pub name: String,
+}
+/// Lines `from..=to` of the code text, counted from 1.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkCodeNote {
+    pub from: u32,
+    pub to: u32,
+    pub text: String,
 }
 
 impl WorkArtifactV1 {
@@ -539,6 +585,11 @@ pub enum WorkArtifactField {
     DiagramEdgeLabel,
     DiagramEdgeNode,
     DiagramEdgeRepeat,
+    CodeLanguage,
+    CodeText,
+    CodeNotes,
+    CodeNoteRange,
+    CodeNoteText,
 }
 impl WorkArtifactField {
     pub fn phrase(self) -> &'static str {
@@ -580,6 +631,11 @@ impl WorkArtifactField {
             Self::DiagramEdgeLabel => "diagram edge label must be at most 40 characters",
             Self::DiagramEdgeNode => "diagram edge refers to an unknown node",
             Self::DiagramEdgeRepeat => "diagram edge must join two different nodes, once",
+            Self::CodeLanguage => "code language must be one of rust, typescript, javascript, svelte, python, go, java, kotlin, swift, c, cpp, csharp, ruby, php, sql, html, css, json, yaml, toml, bash, markdown, dockerfile or text",
+            Self::CodeText => "code text must be non-empty, at most 16 KB and 400 lines",
+            Self::CodeNotes => "code has at most 24 notes",
+            Self::CodeNoteRange => "code note lines need 1 <= from <= to <= the number of lines in the text",
+            Self::CodeNoteText => "code note text must be one line of at most 160 characters",
         }
     }
 }
@@ -977,6 +1033,35 @@ impl WorkArtifactDataV1 {
                     }
                 }
             }
+            Self::Code {
+                language,
+                text,
+                notes,
+            } => {
+                *at = F::CodeLanguage;
+                if !CODE_LANGUAGES.contains(&language.as_str()) {
+                    return Err(WorkError::Invalid);
+                }
+                *at = F::CodeText;
+                validate_text(text, MAX_CODE_TEXT_BYTES)?;
+                let lines = text.lines().count();
+                if lines > MAX_CODE_LINES {
+                    return Err(WorkError::Invalid);
+                }
+                budget.text(text)?;
+                *at = F::CodeNotes;
+                if notes.len() > MAX_CODE_NOTES {
+                    return Err(WorkError::Invalid);
+                }
+                for note in notes {
+                    *at = F::CodeNoteRange;
+                    if note.from == 0 || note.from > note.to || note.to as usize > lines {
+                        return Err(WorkError::Invalid);
+                    }
+                    *at = F::CodeNoteText;
+                    short_text(&mut budget, &note.text, 160)?;
+                }
+            }
         }
         Ok(())
     }
@@ -1084,6 +1169,10 @@ impl WorkArtifactDataV1 {
                     .iter()
                     .filter_map(|e| e.label.as_deref())
                     .for_each(push);
+            }
+            Self::Code { text, notes, .. } => {
+                push(text);
+                notes.iter().for_each(|n| push(&n.text));
             }
         }
         out
@@ -1352,6 +1441,111 @@ mod tests {
             change(nodes, edges, layers);
         }
         data
+    }
+    #[test]
+    fn a_code_excerpt_is_bounded_and_its_notes_address_its_lines() {
+        let note = |from: u32, to: u32, text: &str| WorkCodeNote {
+            from,
+            to,
+            text: text.into(),
+        };
+        let code =
+            |language: &str, text: String, notes: Vec<WorkCodeNote>| WorkArtifactDataV1::Code {
+                language: language.into(),
+                text,
+                notes,
+            };
+        let lines = |count: usize| (1..=count).map(|i| format!("let x{i} = {i};\n")).collect();
+        let base = code(
+            "rust",
+            lines(3),
+            vec![note(1, 1, "Binds x1"), note(2, 3, "The rest")],
+        );
+        assert_eq!(base.validate(0), Ok(()));
+        for language in CODE_LANGUAGES {
+            assert_eq!(code(language, lines(1), vec![]).validate(0), Ok(()));
+        }
+        let wire = serde_json::to_value(&base).unwrap();
+        assert_eq!(wire["kind"], "code");
+        assert_eq!(
+            wire["notes"][1],
+            serde_json::json!({"from":2,"to":3,"text":"The rest"})
+        );
+        let bare = code("text", "plain".into(), vec![]);
+        assert!(serde_json::to_value(&bare).unwrap().get("notes").is_none());
+        let legacy: WorkArtifactDataV1 =
+            serde_json::from_str(r#"{"kind":"code","language":"sql","text":"select 1;"}"#).unwrap();
+        assert_eq!(legacy.validate(0), Ok(()));
+        let long_line = format!("// {}", "x".repeat(MAX_CODE_TEXT_BYTES));
+        let cases = [
+            (
+                code("Rust", lines(1), vec![]),
+                WorkArtifactField::CodeLanguage,
+            ),
+            (
+                code("rs", lines(1), vec![]),
+                WorkArtifactField::CodeLanguage,
+            ),
+            (code("", lines(1), vec![]), WorkArtifactField::CodeLanguage),
+            (
+                code("rust", " \n".into(), vec![]),
+                WorkArtifactField::CodeText,
+            ),
+            (
+                code("rust", "a\0b".into(), vec![]),
+                WorkArtifactField::CodeText,
+            ),
+            (code("rust", long_line, vec![]), WorkArtifactField::CodeText),
+            (
+                code("rust", lines(MAX_CODE_LINES + 1), vec![]),
+                WorkArtifactField::CodeText,
+            ),
+            (
+                code(
+                    "rust",
+                    lines(1),
+                    (0..=MAX_CODE_NOTES).map(|_| note(1, 1, "n")).collect(),
+                ),
+                WorkArtifactField::CodeNotes,
+            ),
+            (
+                code("rust", lines(3), vec![note(0, 1, "n")]),
+                WorkArtifactField::CodeNoteRange,
+            ),
+            (
+                code("rust", lines(3), vec![note(3, 2, "n")]),
+                WorkArtifactField::CodeNoteRange,
+            ),
+            (
+                code("rust", lines(3), vec![note(3, 4, "n")]),
+                WorkArtifactField::CodeNoteRange,
+            ),
+            (
+                code("rust", lines(3), vec![note(1, 1, " ")]),
+                WorkArtifactField::CodeNoteText,
+            ),
+            (
+                code("rust", lines(3), vec![note(1, 1, "a\nb")]),
+                WorkArtifactField::CodeNoteText,
+            ),
+            (
+                code("rust", lines(3), vec![note(1, 1, &"x".repeat(161))]),
+                WorkArtifactField::CodeNoteText,
+            ),
+        ];
+        for (index, (data, field)) in cases.into_iter().enumerate() {
+            assert_eq!(data.fault(0), Some(field), "case {index}");
+        }
+        assert_eq!(
+            code("rust", lines(MAX_CODE_LINES), vec![]).validate(0),
+            Ok(())
+        );
+        assert_eq!(
+            code("rust", lines(3), vec![note(1, 1, &"x".repeat(160))]).validate(0),
+            Ok(())
+        );
+        let text = base.plain_text();
+        assert!(text.contains("let x3 = 3;") && text.contains("The rest"));
     }
     #[test]
     fn a_diagram_is_bounded_and_every_reference_resolves() {
