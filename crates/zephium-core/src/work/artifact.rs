@@ -944,7 +944,7 @@ impl WorkArtifactDataV1 {
                 edges
                     .iter()
                     .filter_map(|e| e.label.as_deref())
-                    .for_each(|l| push(l));
+                    .for_each(push);
             }
         }
         out
@@ -1055,7 +1055,10 @@ mod tests {
             formatted: None,
         };
         artifact.general_knowledge = false;
-        assert!(serde_json::to_value(&artifact).unwrap().get("general_knowledge").is_none());
+        assert!(serde_json::to_value(&artifact)
+            .unwrap()
+            .get("general_knowledge")
+            .is_none());
         let evidence = WorkEvidenceLink {
             extraction_id: 17_u128.into(),
             source_id: 1,

@@ -890,14 +890,12 @@ fn mark_uncited_knowledge(data: &mut WorkArtifactDataV1) {
             series,
             general_knowledge,
             ..
-        } => {
-            if series
-                .iter()
-                .flat_map(|series| &series.points)
-                .any(|point| point.evidence.is_empty())
-            {
-                *general_knowledge = true;
-            }
+        } if series
+            .iter()
+            .flat_map(|series| &series.points)
+            .any(|point| point.evidence.is_empty()) =>
+        {
+            *general_knowledge = true;
         }
         _ => {}
     }
