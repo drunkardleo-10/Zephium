@@ -61,7 +61,7 @@ test("a subject shows its hero picture, or else its site's mark beside the name,
   await pictured.unmount();
 });
 
-test("a sources card draws a strip of real site marks and six rows of mark, host and title", async () => {
+test("a sources card heads with its count only, then six rows of mark, host and title", async () => {
   await page.viewport(1200, 800);
   await marks("https://a.example", "https://b.example");
   const hosts = ["a.example", "b.example", "c.example", "a.example", "b.example", "c.example"];
@@ -78,9 +78,9 @@ test("a sources card draws a strip of real site marks and six rows of mark, host
     })),
   };
   const screen = await render(SourcesCard, { item, selected: false });
-  // One mark per site: two real favicons, and a neutral stand-in where the cache has none.
-  expect(screen.container.querySelectorAll(".strip .mark")).toHaveLength(4);
-  expect(screen.container.querySelectorAll(".strip .favicon canvas")).toHaveLength(2);
+  // The rows already show each site's mark: the header repeats none of them.
+  expect(screen.container.querySelector(".strip")).toBeNull();
+  expect(screen.container.querySelector("header .favicon")).toBeNull();
   const rows = [...screen.container.querySelectorAll(".rows li")];
   expect(rows).toHaveLength(6);
   expect(rows[0]!.querySelector(".favicon canvas")).not.toBeNull();

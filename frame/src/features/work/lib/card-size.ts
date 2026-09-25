@@ -138,7 +138,7 @@ export function findingsSize(
   return { width: 300, height: clamp(header("", 276, true) + body + 6 + FRAME.end, 96, 420) };
 }
 
-/** A favicon row and up to six host · title rows. */
+/** The count, then up to six rows of mark, host and title. */
 export const SOURCE_ROWS = 6;
 export function sourcesSize(rows: number): CanvasSize {
   const shown = Math.min(SOURCE_ROWS, rows);

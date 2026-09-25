@@ -4,21 +4,11 @@
   import type { CanvasItem } from "../../lib/canvas-model";
   import { SOURCE_ROWS } from "../../lib/card-size";
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
-  const MARKS = 5;
   const rows = $derived(item.sources ?? []);
-  /** One mark per site: eleven pages of one shop are one shop. */
-  const mark = (row: (typeof rows)[number]) => (row.file ? `file:${row.key}` : row.where);
-  const marks = $derived(
-    rows.filter((row, index) => rows.findIndex((other) => mark(other) === mark(row)) === index),
-  );
 </script>
 
+<!-- The count heads the card; each row carries its own site's mark. -->
 <CardFrame id={item.id} title={item.title} {selected} active={item.active} lines={1} dense>
-  {#snippet leading()}<span class="strip" aria-hidden="true">
-      {#each marks.slice(0, MARKS) as row (row.key)}<span class="mark"
-          ><HostGlyph host={row.where} url={row.url} file={!!row.file} /></span
-        >{/each}
-    </span>{/snippet}
   <ul class="rows">
     {#each rows.slice(0, SOURCE_ROWS) as row (row.key)}
       <li>
@@ -33,21 +23,6 @@
 </CardFrame>
 
 <style>
-  /* Real marks, overlapping by 4 px, each cut out of the card by its own ring. */
-  .strip {
-    display: flex;
-    align-items: center;
-    padding-inline-start: 4px;
-  }
-
-  .mark {
-    display: grid;
-    margin-inline-start: -4px;
-    border-radius: calc(var(--radius-inset) / 2);
-    box-shadow: 0 0 0 1.5px var(--color-surface);
-    background: var(--color-surface);
-  }
-
   .rows {
     display: flex;
     flex-direction: column;
