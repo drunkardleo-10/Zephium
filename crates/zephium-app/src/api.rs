@@ -723,6 +723,21 @@ pub enum Command {
         ids: Vec<ItemId>,
         reply: SyncSender<Vec<TabMetadata>>,
     },
+    /// Hands the shell the anonymous origin prober, once, after startup.
+    AttachFaviconProber(FaviconProberAttachment),
+    /// Icons for origins shown outside a tab: cached or stored rasters are
+    /// delivered to chrome, the rest are queued for the origin probe.
+    ProbeFavicons {
+        profile: ProfileId,
+        origins: Vec<String>,
+    },
+    /// The prober's single answer for one requested origin: an exact 32x32
+    /// RGBA raster, or `None` when the origin gave no usable icon.
+    FaviconProbed {
+        profile: ProfileId,
+        origin: String,
+        rgba: Option<Vec<u8>>,
+    },
     /// Bounded retry for the renderer-owned asynchronous favicon decode.
     FaviconPoll {
         id: ItemId,
@@ -824,6 +839,18 @@ impl ResourceCompletion {
 impl fmt::Debug for ResourceCompletion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ResourceCompletion")
+    }
+}
+
+/// Fetches one origin's icon anonymously and answers exactly once with
+/// [`Command::FaviconProbed`] for the same profile and origin.
+pub type FaviconProber = Arc<dyn Fn(ProfileId, String) + Send + Sync>;
+
+#[derive(Clone)]
+pub struct FaviconProberAttachment(pub FaviconProber);
+impl fmt::Debug for FaviconProberAttachment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FaviconProberAttachment")
     }
 }
 

@@ -287,6 +287,9 @@ impl WorkNodeAttempt {
             .await
             {
                 Ok(WorkReply::Runtime(state)) => {
+                    if let Some(record) = &provider_evidence {
+                        probe_source_icons(&self.handle, self.profile, record);
+                    }
                     self.settled = true;
                     return Ok(WorkNodeSettlement {
                         profile: self.profile,
@@ -763,7 +766,20 @@ impl WorkAttemptProbe {
             )
             .await
             {
-                Ok(WorkReply::Runtime(state)) => return Ok(*state),
+                Ok(WorkReply::Runtime(state)) => {
+                    if let WorkRuntimeUpdate::SettleStep {
+                        evidence: Some(record),
+                        ..
+                    }
+                    | WorkRuntimeUpdate::BeginStep {
+                        evidence: Some(record),
+                        ..
+                    } = &update
+                    {
+                        probe_source_icons(&self.handle, self.profile, record);
+                    }
+                    return Ok(*state);
+                }
                 Err(WorkError::Conflict) => continue,
                 Err(WorkError::Capacity) => match &mut update {
                     WorkRuntimeUpdate::SettleStep {
@@ -802,6 +818,22 @@ impl WorkAttemptProbe {
             }
         }
         Err(WorkError::Conflict)
+    }
+}
+/// Sources a search admitted get their site icons without being opened.
+fn probe_source_icons(
+    handle: &crate::Handle,
+    profile: ProfileId,
+    record: &WorkProviderSearchRecordV1,
+) {
+    let origins: Vec<String> = record
+        .evidence
+        .citations
+        .iter()
+        .map(|citation| citation.url.clone())
+        .collect();
+    if !origins.is_empty() {
+        let _ = handle.dispatch(crate::Command::ProbeFavicons { profile, origins });
     }
 }
 /// A step whose result the execution record had no room left to keep.

@@ -67,6 +67,8 @@ compile_error!("staging-extension-catalog and local-extension-lab are mutually e
 
 mod blocker_service;
 mod browser_credentials;
+#[cfg(feature = "work-product")]
+mod favicon_probe;
 #[cfg(feature = "curated-extension-distribution")]
 mod extension_distribution;
 #[cfg(target_os = "linux")]
@@ -5629,6 +5631,8 @@ pub fn run() {
                 return Err(error.into());
             }
             notes::install(app.handle(), &data_dir, store.clone(), &shell);
+            #[cfg(feature = "work-product")]
+            favicon_probe::install(&shell);
             #[cfg(feature = "macos-work")]
             if !work::install(app.handle(), engine.clone(), store.clone()) {
                 let error = std::io::Error::other("Work composition owner is already installed");

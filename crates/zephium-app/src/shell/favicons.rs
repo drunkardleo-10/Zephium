@@ -63,6 +63,7 @@ pub(super) struct FaviconState {
     pub(super) store_generation: u64,
     pub(super) pending_batch: Option<PendingFaviconBatch>,
     pub(super) batch_generation: u64,
+    pub(super) probe: super::favicon_probe::FaviconProbeState,
 }
 
 impl Shell {

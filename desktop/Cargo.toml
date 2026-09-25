@@ -18,6 +18,7 @@ work-product = [
     "dep:zephium-agent-runtime",
     "dep:zephium-work-composition",
     "zephium-work-composition/durable-runtime",
+    "dep:image",
 ]
 # Explicit inspectable public development runs through the ordinary Work UI.
 # The dependency feature rejects optimized builds.
@@ -139,6 +140,7 @@ json-patch = "3"
 
 [dependencies]
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream", "system-proxy"] }
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "ico", "bmp"], optional = true }
 tokio = { workspace = true, features = ["time"] }
 tauri.workspace = true
 zephium-core.workspace = true

@@ -12,6 +12,7 @@ mod extension_distribution;
 mod extension_management;
 mod extension_repository_maintenance;
 mod extension_runtime_grants;
+mod favicon_probe;
 mod favicons;
 mod history;
 mod operations;
@@ -916,6 +917,13 @@ impl Shell {
                 call,
                 done,
             } => self.history_call(expected_profile, *call, done),
+            Command::AttachFaviconProber(attachment) => self.attach_favicon_prober(attachment.0),
+            Command::ProbeFavicons { profile, origins } => self.probe_favicons(profile, origins),
+            Command::FaviconProbed {
+                profile,
+                origin,
+                rgba,
+            } => self.favicon_probed(profile, origin, rgba),
             Command::AttachNotes(attachment) => {
                 self.notes.get_or_insert(attachment.0);
             }
@@ -1899,6 +1907,7 @@ impl Shell {
     }
 
     fn clear_pending_store_reads(&mut self) {
+        self.clear_pending_favicon_probe_lookups();
         self.search.pending = None;
         self.favicons.pending_batch = None;
         self.favicons.store_reads.clear();
@@ -1932,6 +1941,12 @@ impl Shell {
                 origins,
                 rasters,
             } => self.on_favicon_batch_read(generation, profile, space, origins, rasters),
+            StoreReadResult::FaviconProbe {
+                generation,
+                profile,
+                origins,
+                rasters,
+            } => self.on_favicon_probe_read(generation, profile, origins, rasters),
             StoreReadResult::HistorySurface {
                 token,
                 profile,

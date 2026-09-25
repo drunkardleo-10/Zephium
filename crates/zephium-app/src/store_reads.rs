@@ -16,6 +16,7 @@ use zephium_core::{icon, navigation};
 use crate::{CallbackHandle, Command, SharedStore};
 
 const MAX_PENDING_FAVICON_READS: usize = 64;
+const MAX_PENDING_FAVICON_PROBE_READS: usize = 8;
 const MAX_PENDING_HISTORY_CALLS: usize = 8;
 const MAX_SEARCH_QUERY_BYTES: usize = 4 * 1024;
 const MAX_CONSECUTIVE_EXTENSION_HISTORY_READS: usize = 4;
@@ -56,6 +57,13 @@ pub enum StoreReadResult {
         origins: Vec<String>,
         rasters: Vec<(String, Vec<u8>)>,
     },
+    /// Stored rasters with their age in seconds, for origins a probe asked about.
+    FaviconProbe {
+        generation: u64,
+        profile: ProfileId,
+        origins: Vec<String>,
+        rasters: Vec<(String, Vec<u8>, i64)>,
+    },
     HistorySurface {
         token: u64,
         profile: ProfileId,
@@ -88,6 +96,11 @@ enum Request {
         space: SpaceId,
         origins: Vec<String>,
     },
+    FaviconProbe {
+        generation: u64,
+        profile: ProfileId,
+        origins: Vec<String>,
+    },
     HistorySurface {
         token: u64,
         profile: ProfileId,
@@ -116,6 +129,7 @@ struct State {
     favicon_batch: Option<Request>,
     favicons: HashMap<ItemId, Request>,
     favicon_order: VecDeque<ItemId>,
+    favicon_probes: VecDeque<Request>,
 }
 
 impl Default for State {
@@ -132,6 +146,7 @@ impl Default for State {
             favicon_batch: None,
             favicons: HashMap::new(),
             favicon_order: VecDeque::new(),
+            favicon_probes: VecDeque::new(),
         }
     }
 }
@@ -333,6 +348,35 @@ impl StoreReadQueue {
         true
     }
 
+    pub(crate) fn request_favicon_probe(
+        &self,
+        generation: u64,
+        profile: ProfileId,
+        origins: Vec<String>,
+    ) -> bool {
+        if origins.len() > zephium_core::ports::store::MAX_FAVICON_BATCH_ORIGINS {
+            return false;
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.stopped
+            || !state.accepting
+            || state.favicon_probes.len() >= MAX_PENDING_FAVICON_PROBE_READS
+        {
+            return false;
+        }
+        state.favicon_probes.push_back(Request::FaviconProbe {
+            generation,
+            profile,
+            origins,
+        });
+        self.inner.ready.notify_one();
+        true
+    }
+
     fn recv(&self) -> Option<Lease> {
         let mut state = self
             .inner
@@ -346,7 +390,8 @@ impl StoreReadQueue {
             if state.accepting && !state.in_flight {
                 let browser_read_pending = state.history.is_some()
                     || state.favicon_batch.is_some()
-                    || !state.favicons.is_empty();
+                    || !state.favicons.is_empty()
+                    || !state.favicon_probes.is_empty();
                 let extension_first = state.consecutive_extension_history_reads
                     < MAX_CONSECUTIVE_EXTENSION_HISTORY_READS
                     || !browser_read_pending;
@@ -406,6 +451,7 @@ impl StoreReadQueue {
         state.favicon_batch = None;
         state.favicons.clear();
         state.favicon_order.clear();
+        state.favicon_probes.clear();
         while state.in_flight {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -452,6 +498,7 @@ impl StoreReadQueue {
         state.favicon_batch = None;
         state.favicons.clear();
         state.favicon_order.clear();
+        state.favicon_probes.clear();
         self.inner.ready.notify_all();
     }
 }
@@ -479,6 +526,7 @@ fn pop_browser_read(state: &mut State) -> Option<Request> {
             }
             None
         })
+        .or_else(|| state.favicon_probes.pop_front())
 }
 
 struct Lease {
@@ -670,6 +718,26 @@ fn run_with(
                     generation,
                     profile,
                     space,
+                    origins,
+                    rasters,
+                }
+            }
+            Request::FaviconProbe {
+                generation,
+                profile,
+                origins,
+            } => {
+                let rasters = origins
+                    .iter()
+                    .filter_map(|origin| {
+                        let (bytes, age) = store.favicon_raster_with_age(profile, origin)?;
+                        icon::validated_rgba32(&bytes)?;
+                        Some((origin.clone(), bytes, age))
+                    })
+                    .collect();
+                StoreReadResult::FaviconProbe {
+                    generation,
+                    profile,
                     origins,
                     rasters,
                 }

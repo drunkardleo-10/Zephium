@@ -549,3 +549,136 @@ fn work_page_read_feeds_the_favicon_cache_by_origin() {
     );
     assert_eq!(delivered_origins(&icons), ["https://docs.example"]);
 }
+
+type ProbeLog = Arc<Mutex<Vec<String>>>;
+
+fn attach_prober(shell: &mut Shell) -> ProbeLog {
+    let log: ProbeLog = Arc::new(Mutex::new(Vec::new()));
+    let sink = log.clone();
+    shell.handle(Command::AttachFaviconProber(
+        crate::FaviconProberAttachment(Arc::new(move |_, origin| {
+            sink.lock().unwrap().push(origin)
+        })),
+    ));
+    log
+}
+
+#[test]
+fn favicon_probe_delivers_held_icons_and_asks_four_origins_at_a_time() {
+    let store = Arc::new(FakeStore::default());
+    let held = vec![5; zephium_core::icon::RGBA32_BYTES];
+    store.icons.lock().unwrap().extend([
+        ("https://held.example".to_owned(), held.clone()),
+        ("https://old.example".to_owned(), held.clone()),
+    ]);
+    store.icon_ages.lock().unwrap().extend([
+        ("https://held.example".to_owned(), 60),
+        (
+            "https://old.example".to_owned(),
+            FAVICON_CACHE_MAX_AGE_SECONDS + 1,
+        ),
+    ]);
+    let (mut shell, _engine, _screen, icons) = setup_with_icon_log(store.clone());
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+    let probed = attach_prober(&mut shell);
+
+    let origins = [
+        "https://held.example/a",
+        "https://old.example/",
+        "https://a.example/x",
+        "https://b.example/",
+        "https://c.example/",
+        "https://d.example/",
+        "https://a.example/y",
+        "http://plain.example/",
+    ];
+    shell.handle(Command::ProbeFavicons {
+        profile,
+        origins: origins.iter().map(|origin| origin.to_string()).collect(),
+    });
+    let delivered = delivered_origins(&icons);
+    assert!(delivered.contains(&"https://held.example".to_owned()));
+    assert!(delivered.contains(&"https://old.example".to_owned()));
+    assert_eq!(
+        probed.lock().unwrap().as_slice(),
+        [
+            "https://old.example",
+            "https://a.example",
+            "https://b.example",
+            "https://c.example"
+        ]
+    );
+
+    let rgba = vec![9; zephium_core::icon::RGBA32_BYTES];
+    shell.handle(Command::FaviconProbed {
+        profile,
+        origin: "https://a.example".into(),
+        rgba: Some(rgba.clone()),
+    });
+    assert!(shell
+        .favicons
+        .icon_values
+        .contains_key(&(profile, "https://a.example".to_owned())));
+    assert!(store
+        .icons
+        .lock()
+        .unwrap()
+        .contains(&("https://a.example".to_owned(), rgba)));
+    assert!(delivered_origins(&icons).contains(&"https://a.example".to_owned()));
+    assert_eq!(probed.lock().unwrap().last().unwrap(), "https://d.example");
+
+    // An answer nobody asked for is ignored.
+    shell.handle(Command::FaviconProbed {
+        profile,
+        origin: "https://unasked.example".into(),
+        rgba: Some(vec![1; zephium_core::icon::RGBA32_BYTES]),
+    });
+    assert!(!shell
+        .favicons
+        .icon_values
+        .contains_key(&(profile, "https://unasked.example".to_owned())));
+}
+
+#[test]
+fn a_failed_origin_is_not_probed_again_within_the_hour() {
+    let (mut shell, _engine, _screen, _icons) = setup_with_icon_log(Arc::new(FakeStore::default()));
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+    let probed = attach_prober(&mut shell);
+    let ask = |shell: &mut Shell| {
+        shell.handle(Command::ProbeFavicons {
+            profile,
+            origins: vec!["https://quiet.example/".into()],
+        })
+    };
+
+    ask(&mut shell);
+    // Still in flight: a second request does not start another probe.
+    ask(&mut shell);
+    assert_eq!(probed.lock().unwrap().len(), 1);
+    shell.handle(Command::FaviconProbed {
+        profile,
+        origin: "https://quiet.example".into(),
+        rgba: None,
+    });
+    ask(&mut shell);
+    assert_eq!(probed.lock().unwrap().len(), 1);
+
+    // A raster that is not the fixed shape counts as a failure too.
+    shell.handle(Command::ProbeFavicons {
+        profile,
+        origins: vec!["https://odd.example/".into()],
+    });
+    shell.handle(Command::FaviconProbed {
+        profile,
+        origin: "https://odd.example".into(),
+        rgba: Some(vec![1; 16]),
+    });
+    shell.handle(Command::ProbeFavicons {
+        profile,
+        origins: vec!["https://odd.example/".into()],
+    });
+    assert_eq!(probed.lock().unwrap().len(), 2);
+    assert!(shell.favicons.icon_values.is_empty());
+}
