@@ -9,6 +9,9 @@ pub const MAX_ARTIFACT_CRITERIA: usize = 16;
 pub const MAX_ARTIFACT_FINDINGS: usize = 64;
 pub const MAX_ARTIFACT_SOURCE_ENTRIES: usize = 64;
 pub const MAX_ARTIFACT_EVIDENCE: usize = 64;
+pub const MAX_DIAGRAM_NODES: usize = 40;
+pub const MAX_DIAGRAM_EDGES: usize = 80;
+pub const MAX_DIAGRAM_LAYERS: usize = 8;
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -277,6 +280,13 @@ pub enum WorkArtifactDataV1 {
         url: String,
         summary: String,
     },
+    /// Boxes and arrows: an architecture, system, flow or pipeline.
+    Diagram {
+        nodes: Vec<WorkDiagramNode>,
+        edges: Vec<WorkDiagramEdge>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        layers: Vec<WorkDiagramLayer>,
+    },
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -308,6 +318,57 @@ pub struct WorkChartPoint {
 pub struct WorkChecklistItem {
     pub text: String,
     pub completed: bool,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkDiagramNodeKind {
+    Client,
+    Edge,
+    Gateway,
+    Service,
+    Worker,
+    Model,
+    Store,
+    Queue,
+    Cache,
+    Storage,
+    External,
+    Other,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkDiagramNode {
+    /// ASCII identifier edges refer to; never shown.
+    pub id: String,
+    pub name: String,
+    pub kind: WorkDiagramNodeKind,
+    /// A bare public host (postgresql.org), used only to fetch the vendor's
+    /// icon; never a link or a navigation grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// A layer id of this diagram.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<String>,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkDiagramEdge {
+    pub from: String,
+    pub to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkDiagramLayer {
+    pub id: String,
+    pub name: String,
 }
 
 impl WorkArtifactV1 {
@@ -374,6 +435,42 @@ fn validate_subjects(
         }
     }
     Ok(())
+}
+fn identifier(value: &str) -> bool {
+    value.len() <= 32
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+fn short_text(budget: &mut TextBudget, value: &str, max_chars: usize) -> Result<(), WorkError> {
+    validate_text(value, max_chars * 4)?;
+    if value.chars().count() > max_chars || value.contains('\n') {
+        return Err(WorkError::Invalid);
+    }
+    budget.text(value)
+}
+/// A bare lowercase public DNS name: dotted labels, an alphabetic top-level
+/// label, no scheme, port, path or address literal.
+pub fn public_host(value: &str) -> bool {
+    let labels: Vec<&str> = value.split('.').collect();
+    value.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+        && labels
+            .last()
+            .is_some_and(|tld| tld.len() >= 2 && tld.bytes().all(|b| b.is_ascii_lowercase()))
 }
 fn decimal(value: &str) -> bool {
     value.len() <= 64 && value.parse::<f64>().is_ok_and(f64::is_finite)
@@ -679,6 +776,57 @@ impl WorkArtifactDataV1 {
                 budget.text(summary)?;
                 super::runtime::validate_public_url(url)?;
             }
+            Self::Diagram {
+                nodes,
+                edges,
+                layers,
+            } => {
+                bounded(nodes.len(), MAX_DIAGRAM_NODES)?;
+                if edges.len() > MAX_DIAGRAM_EDGES || layers.len() > MAX_DIAGRAM_LAYERS {
+                    return Err(WorkError::Invalid);
+                }
+                let mut layer_ids = BTreeSet::new();
+                for layer in layers {
+                    short_text(&mut budget, &layer.name, 40)?;
+                    if !identifier(&layer.id) || !layer_ids.insert(layer.id.as_str()) {
+                        return Err(WorkError::Invalid);
+                    }
+                }
+                let mut ids = BTreeSet::new();
+                for node in nodes {
+                    short_text(&mut budget, &node.name, 64)?;
+                    if !identifier(&node.id) || !ids.insert(node.id.as_str()) {
+                        return Err(WorkError::Invalid);
+                    }
+                    if let Some(note) = &node.note {
+                        short_text(&mut budget, note, 120)?;
+                    }
+                    if node
+                        .vendor
+                        .as_deref()
+                        .is_some_and(|host| !public_host(host))
+                        || node
+                            .layer
+                            .as_deref()
+                            .is_some_and(|layer| !layer_ids.contains(layer))
+                    {
+                        return Err(WorkError::Invalid);
+                    }
+                }
+                let mut seen = BTreeSet::new();
+                for edge in edges {
+                    if let Some(label) = &edge.label {
+                        short_text(&mut budget, label, 40)?;
+                    }
+                    if edge.from == edge.to
+                        || !ids.contains(edge.from.as_str())
+                        || !ids.contains(edge.to.as_str())
+                        || !seen.insert((&edge.from, &edge.to, &edge.label))
+                    {
+                        return Err(WorkError::Invalid);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -756,6 +904,18 @@ impl WorkArtifactDataV1 {
             Self::BrowserResourcePreview { title, summary, .. } => {
                 push(title);
                 push(summary);
+            }
+            Self::Diagram { nodes, edges, .. } => {
+                for node in nodes {
+                    push(&node.name);
+                    if let Some(note) = &node.note {
+                        push(note);
+                    }
+                }
+                edges
+                    .iter()
+                    .filter_map(|e| e.label.as_deref())
+                    .for_each(|l| push(l));
             }
         }
         out
@@ -954,6 +1114,151 @@ mod tests {
         .validate(0)
         .is_ok());
         assert_eq!(matrix(vec![]).validate(0), Err(WorkError::Invalid));
+    }
+    fn diagram(nodes: usize, edges: Vec<(&str, &str)>) -> WorkArtifactDataV1 {
+        WorkArtifactDataV1::Diagram {
+            nodes: (0..nodes)
+                .map(|i| WorkDiagramNode {
+                    id: format!("n{i}"),
+                    name: format!("Node {i}"),
+                    kind: WorkDiagramNodeKind::Service,
+                    vendor: None,
+                    note: None,
+                    layer: None,
+                })
+                .collect(),
+            edges: edges
+                .into_iter()
+                .map(|(from, to)| WorkDiagramEdge {
+                    from: from.into(),
+                    to: to.into(),
+                    label: None,
+                })
+                .collect(),
+            layers: vec![],
+        }
+    }
+    fn edit(
+        mut data: WorkArtifactDataV1,
+        change: impl FnOnce(
+            &mut Vec<WorkDiagramNode>,
+            &mut Vec<WorkDiagramEdge>,
+            &mut Vec<WorkDiagramLayer>,
+        ),
+    ) -> WorkArtifactDataV1 {
+        if let WorkArtifactDataV1::Diagram {
+            nodes,
+            edges,
+            layers,
+        } = &mut data
+        {
+            change(nodes, edges, layers);
+        }
+        data
+    }
+    #[test]
+    fn a_diagram_is_bounded_and_every_reference_resolves() {
+        let base = diagram(3, vec![("n0", "n1"), ("n1", "n2")]);
+        assert_eq!(base.validate(0), Ok(()));
+        let layered = edit(base.clone(), |nodes, edges, layers| {
+            layers.push(WorkDiagramLayer {
+                id: "app".into(),
+                name: "Application".into(),
+            });
+            nodes[0].layer = Some("app".into());
+            nodes[0].vendor = Some("postgresql.org".into());
+            nodes[0].note = Some("Primary store".into());
+            edges[0].label = Some("SQL".into());
+        });
+        assert_eq!(layered.validate(0), Ok(()));
+        let wire = serde_json::to_value(&layered).unwrap();
+        assert_eq!(wire["kind"], "diagram");
+        assert_eq!(wire["nodes"][0]["kind"], "service");
+        assert!(wire["nodes"][1].get("vendor").is_none());
+        assert!(serde_json::to_value(&base).unwrap().get("layers").is_none());
+        let legacy: WorkArtifactDataV1 = serde_json::from_str(
+            r#"{"kind":"diagram","nodes":[{"id":"a","name":"A","kind":"client"}],"edges":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.validate(0), Ok(()));
+        let invalid = [
+            diagram(0, vec![]),
+            diagram(MAX_DIAGRAM_NODES + 1, vec![]),
+            diagram(2, vec![("n0", "n9")]),
+            diagram(2, vec![("n0", "n0")]),
+            diagram(2, vec![("n0", "n1"), ("n0", "n1")]),
+            diagram(2, (0..=MAX_DIAGRAM_EDGES).map(|_| ("n0", "n1")).collect()),
+            edit(base.clone(), |nodes, _, _| nodes[1].id = "n0".into()),
+            edit(base.clone(), |nodes, _, _| {
+                nodes[0].id = "api-gateway".into()
+            }),
+            edit(base.clone(), |nodes, _, _| nodes[0].id = "x".repeat(33)),
+            edit(base.clone(), |nodes, _, _| nodes[0].name = "x".repeat(65)),
+            edit(base.clone(), |nodes, _, _| nodes[0].name = " ".into()),
+            edit(base.clone(), |nodes, _, _| {
+                nodes[0].note = Some("x".repeat(121))
+            }),
+            edit(base.clone(), |nodes, _, _| {
+                nodes[0].layer = Some("data".into())
+            }),
+            edit(base.clone(), |_, edges, _| {
+                edges[0].label = Some("x".repeat(41))
+            }),
+            edit(base.clone(), |_, _, layers| {
+                for i in 0..=MAX_DIAGRAM_LAYERS {
+                    layers.push(WorkDiagramLayer {
+                        id: format!("l{i}"),
+                        name: "Tier".into(),
+                    });
+                }
+            }),
+            edit(base.clone(), |_, _, layers| {
+                layers.push(WorkDiagramLayer {
+                    id: "l".into(),
+                    name: "A".into(),
+                });
+                layers.push(WorkDiagramLayer {
+                    id: "l".into(),
+                    name: "B".into(),
+                });
+            }),
+            edit(base.clone(), |_, _, layers| {
+                layers.push(WorkDiagramLayer {
+                    id: "l".into(),
+                    name: "x".repeat(41),
+                })
+            }),
+        ];
+        for (index, data) in invalid.into_iter().enumerate() {
+            assert!(data.validate(0).is_err(), "case {index}");
+        }
+        for host in [
+            "https://vercel.com",
+            "vercel.com/",
+            "Vercel.com",
+            "localhost",
+            "10.0.0.1",
+            "vercel.com:443",
+            "-a.com",
+            "a..com",
+            "a.c0m",
+        ] {
+            let data = edit(base.clone(), |nodes, _, _| {
+                nodes[0].vendor = Some(host.into())
+            });
+            assert!(data.validate(0).is_err(), "{host}");
+        }
+        for host in ["vercel.com", "aws.amazon.com", "openai.com", "k8s.io"] {
+            let data = edit(base.clone(), |nodes, _, _| {
+                nodes[0].vendor = Some(host.into())
+            });
+            assert_eq!(data.validate(0), Ok(()), "{host}");
+        }
+        assert!(serde_json::from_str::<WorkArtifactDataV1>(
+            r#"{"kind":"diagram","nodes":[{"id":"a","name":"A","kind":"server"}],"edges":[]}"#
+        )
+        .is_err());
+        assert!(base.plain_text().contains("Node 2"));
     }
     #[test]
     fn findings_and_source_entries_address_the_artifact_evidence() {

@@ -1791,21 +1791,25 @@ export type WorkAreaPlacement = {
 
 export type WorkArtifactDataV1 = WorkArtifactDataV1_Serialize | WorkArtifactDataV1_Deserialize;
 
-export type WorkArtifactDataV1_Deserialize = ({ kind: "document"; paragraphs: string[]; formatted?: NoteDocument_Deserialize | null }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; general_knowledge?: never; items?: never; notes?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "table"; columns: string[]; rows: string[][] }) & { alternatives?: never; basis?: never; cells?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] }) & { basis?: never; cells?: never; columns?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | 
+export type WorkArtifactDataV1_Deserialize = ({ kind: "document"; paragraphs: string[]; formatted?: NoteDocument_Deserialize | null }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; edges?: never; entries?: never; general_knowledge?: never; items?: never; layers?: never; nodes?: never; notes?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "table"; columns: string[]; rows: string[][] }) & { alternatives?: never; basis?: never; cells?: never; criteria?: never; edges?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; layers?: never; nodes?: never; notes?: never; paragraphs?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] }) & { basis?: never; cells?: never; columns?: never; edges?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; layers?: never; nodes?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | 
 /**  Decimal strings preserve values independently of renderer floating point. */
-({ kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries_Deserialize[]; basis?: WorkMeasurementBasis_Deserialize | null; general_knowledge?: boolean }) & { alternatives?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; subjects?: never; summary?: never; title?: never; url?: never } | ({ kind: "checklist"; items: WorkChecklistItem[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "evidence_collection"; summary: string; subjects?: WorkSubject_Deserialize[]; entries?: WorkSourceEntry_Deserialize[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "comparison_matrix"; subjects: WorkSubject_Deserialize[]; criteria: WorkCriterion[]; 
+({ kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries_Deserialize[]; basis?: WorkMeasurementBasis_Deserialize | null; general_knowledge?: boolean }) & { alternatives?: never; cells?: never; columns?: never; criteria?: never; edges?: never; entries?: never; formatted?: never; items?: never; layers?: never; nodes?: never; notes?: never; paragraphs?: never; rows?: never; subjects?: never; summary?: never; title?: never; url?: never } | ({ kind: "checklist"; items: WorkChecklistItem[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; edges?: never; entries?: never; formatted?: never; general_knowledge?: never; layers?: never; nodes?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "evidence_collection"; summary: string; subjects?: WorkSubject_Deserialize[]; entries?: WorkSourceEntry_Deserialize[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; edges?: never; formatted?: never; general_knowledge?: never; items?: never; layers?: never; nodes?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "comparison_matrix"; subjects: WorkSubject_Deserialize[]; criteria: WorkCriterion[]; 
 /**  Dense: `cells[subject][criterion]`. */
-cells: WorkCell_Deserialize[][]; notes?: string[] }) & { alternatives?: never; basis?: never; columns?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; paragraphs?: never; rows?: never; series?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "findings"; subjects?: WorkSubject_Deserialize[]; items: WorkFinding_Deserialize[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | 
+cells: WorkCell_Deserialize[][]; notes?: string[] }) & { alternatives?: never; basis?: never; columns?: never; edges?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; layers?: never; nodes?: never; paragraphs?: never; rows?: never; series?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "findings"; subjects?: WorkSubject_Deserialize[]; items: WorkFinding_Deserialize[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; edges?: never; entries?: never; formatted?: never; general_knowledge?: never; layers?: never; nodes?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | 
 /**  A descriptive card, not an interactive native context or navigation grant. */
-({ kind: "browser_resource_preview"; title: string; url: string; summary: string }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; x_label?: never; y_label?: never };
+({ kind: "browser_resource_preview"; title: string; url: string; summary: string }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; edges?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; layers?: never; nodes?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; x_label?: never; y_label?: never } | 
+/**  Boxes and arrows: an architecture, system, flow or pipeline. */
+({ kind: "diagram"; nodes: WorkDiagramNode_Deserialize[]; edges: WorkDiagramEdge_Deserialize[]; layers?: WorkDiagramLayer[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never };
 
-export type WorkArtifactDataV1_Serialize = ({ kind: "document"; paragraphs: string[]; formatted?: NoteDocument_Serialize | null }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; general_knowledge?: never; items?: never; notes?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "table"; columns: string[]; rows: string[][] }) & { alternatives?: never; basis?: never; cells?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] }) & { basis?: never; cells?: never; columns?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | 
+export type WorkArtifactDataV1_Serialize = ({ kind: "document"; paragraphs: string[]; formatted?: NoteDocument_Serialize | null }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; edges?: never; entries?: never; general_knowledge?: never; items?: never; layers?: never; nodes?: never; notes?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "table"; columns: string[]; rows: string[][] }) & { alternatives?: never; basis?: never; cells?: never; criteria?: never; edges?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; layers?: never; nodes?: never; notes?: never; paragraphs?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] }) & { basis?: never; cells?: never; columns?: never; edges?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; layers?: never; nodes?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | 
 /**  Decimal strings preserve values independently of renderer floating point. */
-({ kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries_Serialize[]; basis?: WorkMeasurementBasis_Serialize | null; general_knowledge?: boolean }) & { alternatives?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; subjects?: never; summary?: never; title?: never; url?: never } | ({ kind: "checklist"; items: WorkChecklistItem[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "evidence_collection"; summary: string; subjects?: WorkSubject_Serialize[]; entries?: WorkSourceEntry_Serialize[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "comparison_matrix"; subjects: WorkSubject_Serialize[]; criteria: WorkCriterion[]; 
+({ kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries_Serialize[]; basis?: WorkMeasurementBasis_Serialize | null; general_knowledge?: boolean }) & { alternatives?: never; cells?: never; columns?: never; criteria?: never; edges?: never; entries?: never; formatted?: never; items?: never; layers?: never; nodes?: never; notes?: never; paragraphs?: never; rows?: never; subjects?: never; summary?: never; title?: never; url?: never } | ({ kind: "checklist"; items: WorkChecklistItem[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; edges?: never; entries?: never; formatted?: never; general_knowledge?: never; layers?: never; nodes?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "evidence_collection"; summary: string; subjects?: WorkSubject_Serialize[]; entries?: WorkSourceEntry_Serialize[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; edges?: never; formatted?: never; general_knowledge?: never; items?: never; layers?: never; nodes?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "comparison_matrix"; subjects: WorkSubject_Serialize[]; criteria: WorkCriterion[]; 
 /**  Dense: `cells[subject][criterion]`. */
-cells: WorkCell_Serialize[][]; notes?: string[] }) & { alternatives?: never; basis?: never; columns?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; paragraphs?: never; rows?: never; series?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "findings"; subjects?: WorkSubject_Serialize[]; items: WorkFinding_Serialize[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | 
+cells: WorkCell_Serialize[][]; notes?: string[] }) & { alternatives?: never; basis?: never; columns?: never; edges?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; layers?: never; nodes?: never; paragraphs?: never; rows?: never; series?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | ({ kind: "findings"; subjects?: WorkSubject_Serialize[]; items: WorkFinding_Serialize[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; edges?: never; entries?: never; formatted?: never; general_knowledge?: never; layers?: never; nodes?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never } | 
 /**  A descriptive card, not an interactive native context or navigation grant. */
-({ kind: "browser_resource_preview"; title: string; url: string; summary: string }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; x_label?: never; y_label?: never };
+({ kind: "browser_resource_preview"; title: string; url: string; summary: string }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; edges?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; layers?: never; nodes?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; x_label?: never; y_label?: never } | 
+/**  Boxes and arrows: an architecture, system, flow or pipeline. */
+({ kind: "diagram"; nodes: WorkDiagramNode_Serialize[]; edges: WorkDiagramEdge_Serialize[]; layers?: WorkDiagramLayer[] }) & { alternatives?: never; basis?: never; cells?: never; columns?: never; criteria?: never; entries?: never; formatted?: never; general_knowledge?: never; items?: never; notes?: never; paragraphs?: never; rows?: never; series?: never; subjects?: never; summary?: never; title?: never; url?: never; x_label?: never; y_label?: never };
 
 export type WorkArtifactDecision = "accepted" | "rejected";
 
@@ -2360,6 +2364,59 @@ export type WorkDecisionPreferenceV1 = {
 	effective: WorkDecisionChoiceV1,
 	typesafe_key_present: boolean,
 	error: WorkFailureV1 | null,
+};
+
+export type WorkDiagramEdge = WorkDiagramEdge_Serialize | WorkDiagramEdge_Deserialize;
+
+export type WorkDiagramEdge_Deserialize = {
+	from: string,
+	to: string,
+	label?: string | null,
+};
+
+export type WorkDiagramEdge_Serialize = {
+	from: string,
+	to: string,
+	label?: string | null,
+};
+
+export type WorkDiagramLayer = {
+	id: string,
+	name: string,
+};
+
+export type WorkDiagramNode = WorkDiagramNode_Serialize | WorkDiagramNode_Deserialize;
+
+export type WorkDiagramNodeKind = "client" | "edge" | "gateway" | "service" | "worker" | "model" | "store" | "queue" | "cache" | "storage" | "external" | "other";
+
+export type WorkDiagramNode_Deserialize = {
+	/**  ASCII identifier edges refer to; never shown. */
+	id: string,
+	name: string,
+	kind: WorkDiagramNodeKind,
+	/**
+	 *  A bare public host (postgresql.org), used only to fetch the vendor's
+	 *  icon; never a link or a navigation grant.
+	 */
+	vendor?: string | null,
+	note?: string | null,
+	/**  A layer id of this diagram. */
+	layer?: string | null,
+};
+
+export type WorkDiagramNode_Serialize = {
+	/**  ASCII identifier edges refer to; never shown. */
+	id: string,
+	name: string,
+	kind: WorkDiagramNodeKind,
+	/**
+	 *  A bare public host (postgresql.org), used only to fetch the vendor's
+	 *  icon; never a link or a navigation grant.
+	 */
+	vendor?: string | null,
+	note?: string | null,
+	/**  A layer id of this diagram. */
+	layer?: string | null,
 };
 
 /** One resource representation in a Work environment. */

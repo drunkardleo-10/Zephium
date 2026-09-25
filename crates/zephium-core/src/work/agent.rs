@@ -762,7 +762,7 @@ impl WorkAgentArtifactRefusal {
             Self::Uncited => "cites no evidence keys",
             Self::UnknownEvidenceKey => "cites an evidence key that is not in the sources list",
             Self::UnlistedLink => "links to a URL that is not a listed source",
-            Self::Malformed => "has invalid content: measurement cells hold a plain number only (the criterion carries the unit), cell and finding evidence must cite listed source keys, subject indexes must exist, and text must fit its limits",
+            Self::Malformed => "has invalid content: measurement cells hold a plain number only (the criterion carries the unit), cell and finding evidence must cite listed source keys, subject indexes must exist, diagram node ids must be unique and every edge and layer must name an existing one, and text must fit its limits",
         }
     }
 }
@@ -810,6 +810,7 @@ impl WorkAgentTurnDisclosure {
             });
         }
         normalize_measurements(&mut artifact.data);
+        normalize_vendors(&mut artifact.data);
         artifact
             .data
             .validate(artifact.evidence.len())
@@ -879,6 +880,25 @@ fn normalize_measurements(data: &mut WorkArtifactDataV1) {
         }
     }
 }
+/// A vendor only picks an icon: write it as a bare host, or drop it rather
+/// than refuse the diagram.
+fn normalize_vendors(data: &mut WorkArtifactDataV1) {
+    let WorkArtifactDataV1::Diagram { nodes, .. } = data else {
+        return;
+    };
+    for node in nodes {
+        node.vendor = node.vendor.take().and_then(|vendor| {
+            let host = vendor.trim().to_ascii_lowercase();
+            let host = host
+                .strip_prefix("https://")
+                .or_else(|| host.strip_prefix("http://"))
+                .unwrap_or(&host)
+                .trim_end_matches('/')
+                .to_owned();
+            public_host(&host).then_some(host)
+        });
+    }
+}
 /// Removes claim-level citations of unknown keys and returns how many went.
 /// A finding or source entry left citing nothing but unknown keys goes too.
 fn drop_unknown_citations(data: &mut WorkArtifactDataV1, known: impl Fn(u16) -> bool) -> usize {
@@ -910,7 +930,8 @@ fn drop_unknown_citations(data: &mut WorkArtifactDataV1, known: impl Fn(u16) -> 
         | WorkArtifactDataV1::Table { .. }
         | WorkArtifactDataV1::Comparison { .. }
         | WorkArtifactDataV1::Checklist { .. }
-        | WorkArtifactDataV1::BrowserResourcePreview { .. } => {}
+        | WorkArtifactDataV1::BrowserResourcePreview { .. }
+        | WorkArtifactDataV1::Diagram { .. } => {}
     }
     dropped
 }
@@ -950,7 +971,8 @@ fn remap_citations(
         | WorkArtifactDataV1::Table { .. }
         | WorkArtifactDataV1::Comparison { .. }
         | WorkArtifactDataV1::Checklist { .. }
-        | WorkArtifactDataV1::BrowserResourcePreview { .. } => {}
+        | WorkArtifactDataV1::BrowserResourcePreview { .. }
+        | WorkArtifactDataV1::Diagram { .. } => {}
     }
     Ok(())
 }
@@ -972,6 +994,7 @@ pub fn artifact_kind(data: &WorkArtifactDataV1) -> &'static str {
         WorkArtifactDataV1::ComparisonMatrix { .. } => "comparison_matrix",
         WorkArtifactDataV1::Findings { .. } => "findings",
         WorkArtifactDataV1::BrowserResourcePreview { .. } => "browser_resource_preview",
+        WorkArtifactDataV1::Diagram { .. } => "diagram",
     }
 }
 
