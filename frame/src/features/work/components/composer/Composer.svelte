@@ -187,7 +187,7 @@
   .send {
     background: var(--color-accent);
     color: var(--color-on-accent);
-    box-shadow: var(--shadow-primary);
+    box-shadow: var(--shadow-control);
   }
 
   .send:disabled {

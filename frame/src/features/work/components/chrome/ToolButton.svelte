@@ -49,7 +49,7 @@
     block-size: 46px;
     padding: 0 8px;
     border: 0;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-control);
     background: transparent;
     color: var(--color-label-secondary);
     font: inherit;

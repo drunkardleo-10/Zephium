@@ -181,7 +181,7 @@
 
   pre {
     padding: 8px 10px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     background: var(--color-fill);
     overflow: auto;
     font-size: var(--text-caption);

@@ -2613,7 +2613,7 @@
     max-inline-size: 100%;
     max-block-size: 100%;
     object-fit: contain;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
   }
 
   .lift-plain p {
@@ -2683,7 +2683,7 @@
     overflow: hidden;
     white-space: nowrap;
     border: 0;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     background: transparent;
     color: var(--color-muted);
     font: inherit;

@@ -160,7 +160,7 @@
     align-items: center;
     gap: 10px;
     padding: 6px 8px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
   }
 
   .row:hover {

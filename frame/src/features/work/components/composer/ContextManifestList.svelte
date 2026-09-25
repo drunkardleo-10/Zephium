@@ -57,7 +57,7 @@
 
   .kind {
     padding: 1px 6px;
-    border-radius: var(--radius-xs);
+    border-radius: var(--radius-inset);
     background: var(--color-fill);
     color: var(--color-muted);
     font-size: 11px;

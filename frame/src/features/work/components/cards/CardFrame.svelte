@@ -69,7 +69,7 @@
     box-sizing: border-box;
     block-size: 100%;
     min-block-size: 0;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     background: var(--color-surface);
     box-shadow: inset 0 0 0 1px var(--color-border);
     color: var(--color-text);
@@ -146,7 +146,7 @@
     flex: none;
     inline-size: 24px;
     block-size: 24px;
-    border-radius: var(--radius-xs);
+    border-radius: var(--radius-inset);
     background: var(--color-fill);
     color: var(--color-label-secondary);
     overflow: hidden;
@@ -155,7 +155,7 @@
   .tile .glyph {
     inline-size: 40px;
     block-size: 40px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     font-size: var(--text-body);
   }
 

@@ -114,7 +114,7 @@
     inline-size: 64px;
     block-size: 64px;
     margin-block-end: 4px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     background: var(--color-fill);
     overflow: hidden;
   }

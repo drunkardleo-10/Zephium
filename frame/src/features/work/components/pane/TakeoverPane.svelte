@@ -249,7 +249,7 @@
     display: flex;
     flex-direction: column;
     box-sizing: border-box;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     background: var(--color-surface);
     box-shadow:
       0 0 0 1px var(--color-border-strong),
@@ -359,7 +359,7 @@
     flex: 1 1 auto;
     min-block-size: 64px;
     margin: 0 1px 1px;
-    border-radius: 0 0 calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px);
+    border-radius: 0 0 calc(var(--radius-card) - 1px) calc(var(--radius-card) - 1px);
     background: var(--color-page);
     box-shadow: inset 0 0 0 1px var(--color-border);
   }

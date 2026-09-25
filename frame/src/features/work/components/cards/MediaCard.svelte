@@ -39,7 +39,7 @@
     block-size: 100%;
     min-block-size: 0;
     margin-block-end: 6px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     background: var(--color-fill);
     overflow: hidden;
   }

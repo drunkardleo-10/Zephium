@@ -210,7 +210,7 @@
     inline-size: 96px;
     block-size: 96px;
     margin-block-end: 8px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     background: var(--color-fill);
     overflow: hidden;
   }
@@ -364,7 +364,7 @@
     box-sizing: border-box;
     padding: 2px 6px;
     border: 0;
-    border-radius: var(--radius-xs);
+    border-radius: var(--radius-inset);
     background: var(--color-field);
     color: var(--color-text);
     font: inherit;

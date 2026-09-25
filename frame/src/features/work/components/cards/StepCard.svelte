@@ -43,7 +43,7 @@
     box-sizing: border-box;
     block-size: 100%;
     padding: 14px;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     background: var(--color-surface);
     box-shadow: inset 0 0 0 1px var(--color-border);
     color: var(--color-text);
@@ -92,7 +92,7 @@
     place-items: center;
     inline-size: 28px;
     block-size: 28px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     background: var(--color-accent-soft);
     color: var(--color-accent);
   }

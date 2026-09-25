@@ -194,7 +194,7 @@
     inline-size: 28px;
     block-size: 28px;
     border: 0;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     background: transparent;
     color: var(--color-muted);
     cursor: default;
@@ -217,7 +217,7 @@
     block-size: 30px;
     padding: 0 8px 0 10px;
     border: 0;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     background: transparent;
     color: var(--color-text);
     font: inherit;

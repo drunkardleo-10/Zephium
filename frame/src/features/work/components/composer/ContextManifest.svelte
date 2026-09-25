@@ -156,7 +156,7 @@
 
   .details {
     padding: 6px 8px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     background: var(--color-fill);
   }
 </style>

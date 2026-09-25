@@ -155,7 +155,7 @@
     display: block;
     inline-size: 160px;
     block-size: 160px;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     background: var(--color-fill);
     overflow: hidden;
   }
@@ -190,7 +190,7 @@
     block-size: 34px;
     padding: 0;
     border: 0;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     background: var(--color-fill);
     box-shadow: inset 0 0 0 1px var(--color-border);
     overflow: hidden;

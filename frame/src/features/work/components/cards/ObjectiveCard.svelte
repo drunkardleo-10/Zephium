@@ -35,7 +35,7 @@
     box-sizing: border-box;
     block-size: 100%;
     padding: 14px 16px;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     background: var(--color-raised);
     box-shadow: inset 0 0 0 1px var(--color-border);
     color: var(--color-text);

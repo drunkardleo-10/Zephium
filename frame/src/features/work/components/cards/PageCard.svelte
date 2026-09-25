@@ -76,7 +76,7 @@
     flex-direction: column;
     box-sizing: border-box;
     block-size: 100%;
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     background: var(--color-surface);
     box-shadow: inset 0 0 0 1px var(--color-border);
     color: var(--color-text);
@@ -140,7 +140,7 @@
     flex: 1;
     min-block-size: 0;
     margin: 0 8px 8px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-row);
     background: var(--color-fill);
     overflow: hidden;
     display: grid;
@@ -215,7 +215,7 @@
     border: 0;
     border-radius: var(--radius-capsule);
     background: var(--color-accent);
-    color: var(--color-on-primary);
+    color: var(--color-on-lit);
     font: inherit;
     font-size: var(--text-caption);
     font-weight: 600;
