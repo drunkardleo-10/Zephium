@@ -346,7 +346,8 @@ pub(super) fn artifact_data_schema_with_evidence_limit(maximum: u16) -> Value {
         variant("checklist", json!({"items":array(object(json!({"text":text,"completed":boolean})),1,128)})),
         variant("evidence_collection", json!({"summary":text,"subjects":array(subject,0,32),"entries":array(object(json!({"evidence":key,"title":text,"role":text,"subject":subject_index})),0,64)})),
         variant("browser_resource_preview", json!({"title":text,"url":text,"summary":text})),
-        variant("diagram", diagram_schema())
+        variant("diagram", diagram_schema()),
+        variant("code", code_schema())
     ]});
     data
 }
@@ -373,6 +374,21 @@ fn diagram_schema() -> Value {
     })
 }
 
+/// An excerpt with notes on 1-based inclusive line ranges.
+fn code_schema() -> Value {
+    use zephium_core::work::artifact::{
+        CODE_LANGUAGES, MAX_CODE_LINES, MAX_CODE_NOTES, MAX_CODE_TEXT_BYTES,
+    };
+    let line = json!({"type":"integer","minimum":1,"maximum":MAX_CODE_LINES});
+    json!({
+        "language":{"type":"string","enum":CODE_LANGUAGES},
+        "text":{"type":"string","minLength":1,"maxLength":MAX_CODE_TEXT_BYTES},
+        "notes":array(object(json!({
+            "from":line,"to":line,"text":{"type":"string","minLength":1,"maxLength":160}
+        })),0,MAX_CODE_NOTES)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,7 +399,7 @@ mod tests {
         let variants = schema["properties"]["artifacts"]["items"]["properties"]["data"]["anyOf"]
             .as_array()
             .unwrap();
-        assert_eq!(variants.len(), 9);
+        assert_eq!(variants.len(), 10);
         for variant in variants {
             let keys = variant["properties"]
                 .as_object()
@@ -459,6 +475,22 @@ mod tests {
         let schema_text = serde_json::to_string(&schema).unwrap();
         assert!(
             schema_text.contains("\"gateway\"") && schema_text.contains("^[A-Za-z][A-Za-z0-9_]*$")
+        );
+        assert!(
+            schema_text.contains("\"dockerfile\"") && schema_text.contains("\"maxLength\":16384")
+        );
+        let code = json!({"output":0,"title":"Parser loop","evidence":[],"data":{"kind":"code","value":{
+            "language":"rust","text":"for i in 0..=n {\n    step(i);\n}",
+            "notes":[{"from":1,"to":1,"text":"Runs one step past the end"}]
+        }}});
+        let resolved = serde_json::from_value::<WireArtifact>(code)
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert!(resolved.data.validate(0).is_ok());
+        assert_eq!(
+            serde_json::to_value(&resolved.data).unwrap(),
+            json!({"kind":"code","language":"rust","text":"for i in 0..=n {\n    step(i);\n}","notes":[{"from":1,"to":1,"text":"Runs one step past the end"}]})
         );
         for (pointer, value) in [
             ("/data/value", json!([])),
