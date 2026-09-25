@@ -234,14 +234,14 @@
     "description": "Measured 64732 JS and 5077 CSS bytes: one file record or proposed change, opened from the lift. Merged with main: 154092 JS and 5622 CSS measured."
   },
   "lazy:features/work/components/WorkResultInspector.svelte": {
-    "js": 248400,
+    "js": 249800,
     "css": 26300,
-    "description": "Measured 147677 JS and 22233 CSS bytes: the lift renders the result itself, the quiet per-cell correction and the one Accept the review state needs; the card mode of the result renderers, source glyphs on chips, and bars for numeric compare rows add 6.6 KB. Reading mode, the lift header and the collapsed sources rail add 9.3 KB JS and 2.5 KB CSS (158031 and 24772 measured). Compare check rows and best-value dots add 1.4 KB JS (159821 measured). Merged with main: 237582 JS and 24558 CSS measured. Site marks in the lift header and evidence chips add 3.9 KB JS (241532 measured). Diagram and table projection, the whole table with its sticky header and first column, and the knowledge caption in the lift header add 4.8 KB JS and 1.2 KB CSS (247665 and 26101 measured)."
+    "description": "Measured 147677 JS and 22233 CSS bytes: the lift renders the result itself, the quiet per-cell correction and the one Accept the review state needs; the card mode of the result renderers, source glyphs on chips, and bars for numeric compare rows add 6.6 KB. Reading mode, the lift header and the collapsed sources rail add 9.3 KB JS and 2.5 KB CSS (158031 and 24772 measured). Compare check rows and best-value dots add 1.4 KB JS (159821 measured). Merged with main: 237582 JS and 24558 CSS measured. Site marks in the lift header and evidence chips add 3.9 KB JS (241532 measured). Diagram and table projection, the whole table with its sticky header and first column, and the knowledge caption in the lift header add 4.8 KB JS and 1.2 KB CSS (247665 and 26101 measured). A source glyph asking native once for an icon the cache lacks adds under 1 KB JS (248590 measured)."
   },
   "lazy:features/work/components/WorkSubjectInspector.svelte": {
-    "js": 203800,
+    "js": 205400,
     "css": 10200,
-    "description": "Measured 107031 JS and 7994 CSS bytes: the product view of one subject, its admitted pictures, facts with sources, and the pages behind them. The lift header and the sources rail add 7.2 KB JS and 1.1 KB CSS (117296 and 9141 measured). Sentence-case fact labels and compare best values add 1.1 KB JS (118845 measured). Merged with main: 198659 JS and 9616 CSS measured. Site marks in the lift header and source rows add 3.1 KB JS and 0.4 KB CSS (201792 and 9994 measured)."
+    "description": "Measured 107031 JS and 7994 CSS bytes: the product view of one subject, its admitted pictures, facts with sources, and the pages behind them. The lift header and the sources rail add 7.2 KB JS and 1.1 KB CSS (117296 and 9141 measured). Sentence-case fact labels and compare best values add 1.1 KB JS (118845 measured). Merged with main: 198659 JS and 9616 CSS measured. Site marks in the lift header and source rows add 3.1 KB JS and 0.4 KB CSS (201792 and 9994 measured). A source glyph asking native once for an icon the cache lacks adds under 1 KB JS (204278 measured)."
   },
   "lazy:features/work/components/pane/TakeoverPane.svelte": {
     "js": 92600,
