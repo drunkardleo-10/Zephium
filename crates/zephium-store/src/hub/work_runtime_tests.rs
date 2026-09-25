@@ -118,6 +118,7 @@ fn coordination_requires_exact_live_parent_and_complete_children() {
         evidence: vec![],
         review: WorkOutputReview::UserAcceptance,
         presentation: artifact::WorkArtifactPresentationV1::Automatic,
+        general_knowledge: false,
     };
     assert!(matches!(
         update(
@@ -958,6 +959,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         }],
         review: WorkOutputReview::SourceMappedNeedsReview,
         presentation: artifact::WorkArtifactPresentationV1::Automatic,
+        general_knowledge: false,
     };
     // A settled search publishes its sources and record atomically.
     assert!(update(

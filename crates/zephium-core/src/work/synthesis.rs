@@ -259,6 +259,7 @@ impl WorkSynthesisDisclosure {
                 title: output.title,
                 data: output.data,
                 evidence,
+                general_knowledge: false,
             });
         }
         Ok(resolved)
@@ -278,6 +279,8 @@ pub struct WorkSynthesisArtifact {
     pub title: String,
     pub data: WorkArtifactDataV1,
     pub evidence: Vec<WorkEvidenceLink>,
+    /// Answered from the model's own knowledge; see `WorkArtifactV1`.
+    pub general_knowledge: bool,
 }
 pub struct WorkSynthesisResult {
     pub outputs: Vec<WorkSynthesisOutput>,
@@ -394,6 +397,7 @@ mod tests {
             evidence: vec![link.clone()],
             review: WorkOutputReview::SourceMappedNeedsReview,
             presentation: WorkArtifactPresentationV1::Automatic,
+            general_knowledge: false,
         };
         let preview = WorkEvidencePreviewV1 {
             link_destination: None,

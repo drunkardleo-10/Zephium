@@ -91,6 +91,10 @@ pub struct WorkArtifactV1 {
     pub evidence: Vec<WorkEvidenceLink>,
     pub review: WorkOutputReview,
     pub presentation: WorkArtifactPresentationV1,
+    /// The whole object answers from the model's own knowledge, shown once on
+    /// the canvas; it never stands in for an observed source.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub general_knowledge: bool,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -384,8 +388,15 @@ impl WorkArtifactV1 {
                 return Err(WorkError::Invalid);
             }
         }
-        if self.review == WorkOutputReview::SourceMappedNeedsReview && self.evidence.is_empty() {
-            return Err(WorkError::Invalid);
+        if self.evidence.is_empty() {
+            if self.general_knowledge {
+                // Knowledge has no observed source, so nothing may claim one.
+                if self.data.claims_observed_links() {
+                    return Err(WorkError::Invalid);
+                }
+            } else if self.review == WorkOutputReview::SourceMappedNeedsReview {
+                return Err(WorkError::Invalid);
+            }
         }
         self.data.validate(self.evidence.len())
     }
@@ -830,6 +841,24 @@ impl WorkArtifactDataV1 {
         }
         Ok(())
     }
+    /// Whether any part names a page or picture only an observed source can
+    /// supply: a subject homepage or image, or a document link.
+    pub fn claims_observed_links(&self) -> bool {
+        let subjects: &[WorkSubject] = match self {
+            Self::ComparisonMatrix { subjects, .. }
+            | Self::Findings { subjects, .. }
+            | Self::EvidenceCollection { subjects, .. } => subjects,
+            Self::Document {
+                formatted: Some(document),
+                ..
+            } => return !super::document::document_links(document).is_empty(),
+            Self::BrowserResourcePreview { .. } => return true,
+            _ => &[],
+        };
+        subjects
+            .iter()
+            .any(|subject| subject.homepage.is_some() || !subject.image_candidates.is_empty())
+    }
 }
 
 impl WorkArtifactDataV1 {
@@ -999,8 +1028,34 @@ mod tests {
             evidence: vec![],
             review: WorkOutputReview::SourceMappedNeedsReview,
             presentation: WorkArtifactPresentationV1::Automatic,
+            general_knowledge: false,
         };
         assert_eq!(artifact.validate(), Err(WorkError::Invalid));
+        artifact.general_knowledge = true;
+        assert_eq!(artifact.validate(), Ok(()));
+        let wire = serde_json::to_value(&artifact).unwrap();
+        assert_eq!(wire["general_knowledge"], true);
+        artifact.data = WorkArtifactDataV1::Findings {
+            subjects: vec![WorkSubject {
+                homepage: Some("https://example.com/".into()),
+                ..subject("Example")
+            }],
+            items: vec![WorkFinding {
+                claim: "Known".into(),
+                subject: Some(0),
+                evidence: vec![],
+                confidence: WorkConfidence::Supported,
+                detail: None,
+                general_knowledge: true,
+            }],
+        };
+        assert_eq!(artifact.validate(), Err(WorkError::Invalid));
+        artifact.data = WorkArtifactDataV1::Document {
+            paragraphs: vec!["An interpretation requiring review".into()],
+            formatted: None,
+        };
+        artifact.general_knowledge = false;
+        assert!(serde_json::to_value(&artifact).unwrap().get("general_knowledge").is_none());
         let evidence = WorkEvidenceLink {
             extraction_id: 17_u128.into(),
             source_id: 1,

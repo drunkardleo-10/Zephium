@@ -84,6 +84,7 @@ fn finishing() -> WorkAgentTurnOutput {
                 formatted: None,
             },
             evidence: vec![1],
+            general_knowledge: false,
         }],
         finish: true,
         ..output(vec![])

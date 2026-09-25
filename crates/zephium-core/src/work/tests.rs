@@ -768,6 +768,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         }],
         review: WorkOutputReview::SourceMappedNeedsReview,
         presentation: artifact::WorkArtifactPresentationV1::Automatic,
+        general_knowledge: false,
     };
     fact.steps[1].status = WorkStepStatus::Succeeded;
     fact.steps[1].usage = Some(usage);
@@ -927,6 +928,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
                 }],
             },
             evidence: vec![0],
+            general_knowledge: false,
         }],
         fetch,
         ask,
@@ -1148,6 +1150,7 @@ fn agent_citations_round_trip_source_keys_without_model_renumbering() {
                 title: "Comparison".into(),
                 data: serde_json::from_value(data.clone()).unwrap(),
                 evidence: vec![1],
+                general_knowledge: false,
             }],
         };
         let resolved = disclosure.resolve(output()).unwrap();
@@ -1174,6 +1177,7 @@ fn agent_citations_round_trip_source_keys_without_model_renumbering() {
             evidence: proposed.evidence.clone(),
             review: WorkOutputReview::SourceMappedNeedsReview,
             presentation: WorkArtifactPresentationV1::Automatic,
+            general_knowledge: false,
         };
         assert!(stored.validate().is_ok());
         let shown = disclose(&previews, std::slice::from_ref(&stored));
@@ -1405,4 +1409,145 @@ fn step_measurements_name_their_cost_basis_and_read_older_records() {
         "{{{fields},\"cost_basis\":\"priced\",\"other\":1}}"
     ))
     .is_err());
+}
+
+#[test]
+fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
+    use super::{agent::*, artifact::*, runtime::*};
+    let disclosure = WorkAgentTurnDisclosure::try_new(
+        "Design an AI SaaS architecture",
+        vec![],
+        vec![],
+        &[],
+        &[],
+        &[],
+        WorkAgentBudget {
+            turns_left: 6,
+            steps_left: 20,
+            browse_available: true,
+        },
+        WorkExecutionLimits {
+            model_tokens: 1000,
+            cost_micro_usd: 1000,
+            operations: 2,
+            timeout_seconds: 60,
+            max_workers: 2,
+        },
+        vec![],
+    )
+    .unwrap();
+    let findings = |homepage: Option<&str>| WorkArtifactDataV1::Findings {
+        subjects: vec![WorkSubject {
+            name: "Postgres".into(),
+            descriptor: None,
+            homepage: homepage.map(Into::into),
+            image_candidates: vec![],
+        }],
+        items: vec![WorkFinding {
+            claim: "Row-level security isolates tenants".into(),
+            subject: Some(0),
+            evidence: vec![],
+            confidence: WorkConfidence::Supported,
+            detail: None,
+            general_knowledge: false,
+        }],
+    };
+    let turn = |data: WorkArtifactDataV1, general_knowledge: bool| WorkAgentTurnOutput {
+        say: None,
+        artifacts: vec![WorkAgentArtifactOutput {
+            title: "Practices".into(),
+            data,
+            evidence: vec![],
+            general_knowledge,
+        }],
+        fetch: vec![],
+        ask: None,
+        finish: false,
+        followups: vec![],
+        malformed: 0,
+    };
+    let cited = disclosure.resolve(turn(findings(None), false)).unwrap();
+    assert!(cited.artifacts.is_empty());
+    assert_eq!(cited.refusals, [WorkAgentArtifactRefusal::Uncited]);
+    let known = disclosure.resolve(turn(findings(None), true)).unwrap();
+    let [artifact] = known.artifacts.as_slice() else {
+        panic!("knowledge object refused: {:?}", known.refusals);
+    };
+    assert!(artifact.general_knowledge && artifact.evidence.is_empty());
+    let WorkArtifactDataV1::Findings { items, .. } = &artifact.data else {
+        panic!("kind changed");
+    };
+    assert!(items[0].general_knowledge);
+    let linked = disclosure
+        .resolve(turn(findings(Some("https://www.postgresql.org/")), true))
+        .unwrap();
+    assert!(linked.artifacts.is_empty());
+    assert_eq!(linked.refusals, [WorkAgentArtifactRefusal::KnowledgeLink]);
+    let diagram = WorkArtifactDataV1::Diagram {
+        nodes: vec![
+            WorkDiagramNode {
+                id: "web".into(),
+                name: "Web app".into(),
+                kind: WorkDiagramNodeKind::Client,
+                vendor: Some(" https://Vercel.com/ ".into()),
+                note: None,
+                layer: None,
+            },
+            WorkDiagramNode {
+                id: "db".into(),
+                name: "Postgres".into(),
+                kind: WorkDiagramNodeKind::Store,
+                vendor: Some("not a host".into()),
+                note: None,
+                layer: None,
+            },
+        ],
+        edges: vec![WorkDiagramEdge {
+            from: "web".into(),
+            to: "db".into(),
+            label: Some("SQL".into()),
+        }],
+        layers: vec![],
+    };
+    let drawn = disclosure.resolve(turn(diagram, true)).unwrap();
+    let WorkArtifactDataV1::Diagram { nodes, .. } = &drawn.artifacts[0].data else {
+        panic!("diagram refused: {:?}", drawn.refusals);
+    };
+    assert_eq!(nodes[0].vendor.as_deref(), Some("vercel.com"));
+    assert_eq!(nodes[1].vendor, None);
+    let matrix = WorkArtifactDataV1::ComparisonMatrix {
+        subjects: vec![WorkSubject {
+            name: "Starter".into(),
+            descriptor: None,
+            homepage: None,
+            image_candidates: vec![],
+        }],
+        criteria: vec![WorkCriterion {
+            name: "Monthly".into(),
+            kind: WorkCriterionKind::Text,
+        }],
+        cells: vec![vec![WorkCell {
+            value: WorkCellValue::Money {
+                amount: "300".into(),
+                currency: "USD".into(),
+                observed_at: Some("2026-09-01".into()),
+            },
+            evidence: vec![],
+            note: None,
+            general_knowledge: false,
+        }]],
+        notes: vec![],
+    };
+    let priced = disclosure.resolve(turn(matrix, true)).unwrap();
+    let WorkArtifactDataV1::ComparisonMatrix { cells, .. } = &priced.artifacts[0].data else {
+        panic!("matrix refused: {:?}", priced.refusals);
+    };
+    assert!(cells[0][0].general_knowledge);
+    assert!(matches!(
+        &cells[0][0].value,
+        WorkCellValue::Money {
+            observed_at: None,
+            ..
+        }
+    ));
 }

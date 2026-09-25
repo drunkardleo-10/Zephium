@@ -719,6 +719,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                                     formatted: None,
                                 },
                                 evidence: vec![],
+                                general_knowledge: false,
                             }]
                         } else {
                             vec![]

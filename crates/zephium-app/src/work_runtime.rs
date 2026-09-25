@@ -127,6 +127,15 @@ impl WorkNodeAttempt {
         &self,
         draft: WorkArtifactDraft,
     ) -> Result<WorkArtifactV1, WorkError> {
+        self.mint_marked_artifact(draft, false)
+    }
+    /// `general_knowledge` marks an object answered from the model's own
+    /// knowledge; it may then stand without evidence.
+    pub(crate) fn mint_marked_artifact(
+        &self,
+        draft: WorkArtifactDraft,
+        general_knowledge: bool,
+    ) -> Result<WorkArtifactV1, WorkError> {
         let expected = self
             .node
             .outputs
@@ -145,6 +154,7 @@ impl WorkNodeAttempt {
             evidence: draft.evidence,
             review: expected.review,
             presentation: WorkArtifactPresentationV1::Automatic,
+            general_knowledge,
         };
         artifact.validate()?;
         Ok(artifact)

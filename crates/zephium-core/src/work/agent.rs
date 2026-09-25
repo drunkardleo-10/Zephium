@@ -41,6 +41,8 @@ pub struct WorkAgentArtifactView {
     /// Source keys in this turn, shared by every citation in the disclosed data.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<u16>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub general_knowledge: bool,
 }
 #[derive(Clone, Copy, Serialize)]
 pub struct WorkAgentBudget {
@@ -264,6 +266,7 @@ impl WorkAgentTurnDisclosure {
                     kind: artifact_kind(&artifact.data),
                     data: complete.then_some(data),
                     evidence: source_keys.into_iter().flatten().collect(),
+                    general_knowledge: artifact.general_knowledge,
                 }
             })
             .collect();
@@ -755,11 +758,15 @@ pub enum WorkAgentArtifactRefusal {
     UnknownEvidenceKey,
     UnlistedLink,
     Malformed,
+    /// Marked general knowledge yet names a page or picture that only an
+    /// observed source can supply.
+    KnowledgeLink,
 }
 impl WorkAgentArtifactRefusal {
     pub fn notice(self) -> &'static str {
         match self {
-            Self::Uncited => "cites no evidence keys",
+            Self::Uncited => "cites no evidence keys and is not marked general_knowledge",
+            Self::KnowledgeLink => "is marked general_knowledge but names a homepage, image or link, which only a cited source can supply",
             Self::UnknownEvidenceKey => "cites an evidence key that is not in the sources list",
             Self::UnlistedLink => "links to a URL that is not a listed source",
             Self::Malformed => "has invalid content: measurement cells hold a plain number only (the criterion carries the unit), cell and finding evidence must cite listed source keys, subject indexes must exist, diagram node ids must be unique and every edge and layer must name an existing one, and text must fit its limits",
@@ -777,7 +784,8 @@ impl WorkAgentTurnDisclosure {
     ) -> Result<WorkSynthesisArtifact, WorkAgentArtifactRefusal> {
         use WorkAgentArtifactRefusal as Refusal;
         validate_text(&artifact.title, 512).map_err(|_| Refusal::Malformed)?;
-        if artifact.evidence.is_empty() {
+        let knowledge = artifact.general_knowledge;
+        if artifact.evidence.is_empty() && !knowledge {
             return Err(Refusal::Uncited);
         }
         if artifact.evidence.len() > 64 {
@@ -803,11 +811,20 @@ impl WorkAgentTurnDisclosure {
             Ok((artifact.evidence.len() - 1) as u16)
         })?;
         if artifact.evidence.is_empty() {
-            return Err(if dropped > 0 {
-                Refusal::UnknownEvidenceKey
-            } else {
-                Refusal::Uncited
-            });
+            if !knowledge {
+                return Err(if dropped > 0 {
+                    Refusal::UnknownEvidenceKey
+                } else {
+                    Refusal::Uncited
+                });
+            }
+            // A knowledge object stands without review but claims no source.
+            if artifact.data.claims_observed_links() {
+                return Err(Refusal::KnowledgeLink);
+            }
+        }
+        if knowledge {
+            mark_uncited_knowledge(&mut artifact.data);
         }
         normalize_measurements(&mut artifact.data);
         normalize_vendors(&mut artifact.data);
@@ -846,7 +863,43 @@ impl WorkAgentTurnDisclosure {
             title: artifact.title,
             data: artifact.data,
             evidence,
+            general_knowledge: knowledge,
         })
+    }
+}
+/// In a knowledge object every uncited value is knowledge, never an
+/// observation: it carries the mark and no observed date.
+fn mark_uncited_knowledge(data: &mut WorkArtifactDataV1) {
+    match data {
+        WorkArtifactDataV1::ComparisonMatrix { cells, .. } => {
+            for cell in cells.iter_mut().flatten() {
+                if cell.evidence.is_empty() {
+                    cell.general_knowledge = true;
+                    if let WorkCellValue::Money { observed_at, .. } = &mut cell.value {
+                        *observed_at = None;
+                    }
+                }
+            }
+        }
+        WorkArtifactDataV1::Findings { items, .. } => {
+            for item in items.iter_mut().filter(|item| item.evidence.is_empty()) {
+                item.general_knowledge = true;
+            }
+        }
+        WorkArtifactDataV1::Chart {
+            series,
+            general_knowledge,
+            ..
+        } => {
+            if series
+                .iter()
+                .flat_map(|series| &series.points)
+                .any(|point| point.evidence.is_empty())
+            {
+                *general_knowledge = true;
+            }
+        }
+        _ => {}
     }
 }
 /// Models write measurements the way pages show them ("4,383 pieces"). A
@@ -1005,6 +1058,9 @@ pub struct WorkAgentArtifactOutput {
     pub title: String,
     pub data: WorkArtifactDataV1,
     pub evidence: Vec<u16>,
+    /// Answered from the model's own knowledge; evidence may then be empty.
+    #[serde(default)]
+    pub general_knowledge: bool,
 }
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

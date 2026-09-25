@@ -277,6 +277,11 @@ export type WorkArtifactV1_Deserialize = {
 	evidence: WorkEvidenceLink[],
 	review: WorkOutputReview,
 	presentation: WorkArtifactPresentationV1,
+	/**
+	 *  The whole object answers from the model's own knowledge, shown once on
+	 *  the canvas; it never stands in for an observed source.
+	 */
+	general_knowledge?: boolean,
 };
 
 export type WorkArtifactV1_Serialize = {
@@ -291,6 +296,11 @@ export type WorkArtifactV1_Serialize = {
 	evidence: WorkEvidenceLink[],
 	review: WorkOutputReview,
 	presentation: WorkArtifactPresentationV1,
+	/**
+	 *  The whole object answers from the model's own knowledge, shown once on
+	 *  the canvas; it never stands in for an observed source.
+	 */
+	general_knowledge?: boolean,
 };
 
 export type WorkAttemptFact = {

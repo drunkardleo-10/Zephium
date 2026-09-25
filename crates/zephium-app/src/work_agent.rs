@@ -915,12 +915,15 @@ impl Driver {
                     .take(headroom)
                     .filter_map(|artifact| {
                         attempt
-                            .mint_artifact(WorkArtifactDraft {
-                                output: self.output.clone(),
-                                title: artifact.title,
-                                data: artifact.data,
-                                evidence: artifact.evidence,
-                            })
+                            .mint_marked_artifact(
+                                WorkArtifactDraft {
+                                    output: self.output.clone(),
+                                    title: artifact.title,
+                                    data: artifact.data,
+                                    evidence: artifact.evidence,
+                                },
+                                artifact.general_knowledge,
+                            )
                             .ok()
                     })
                     .collect();
@@ -2340,6 +2343,7 @@ mod tests {
                 .collect(),
             review: WorkOutputReview::SourceMappedNeedsReview,
             presentation: WorkArtifactPresentationV1::Automatic,
+            general_knowledge: false,
         };
         let first = artifact(10);
         let second = artifact(20);
@@ -2381,6 +2385,7 @@ mod tests {
                 .collect(),
             review: WorkOutputReview::SourceMappedNeedsReview,
             presentation: WorkArtifactPresentationV1::Automatic,
+            general_knowledge: false,
         };
         let document = || WorkArtifactDataV1::Document {
             paragraphs: vec!["x".repeat(3000)],

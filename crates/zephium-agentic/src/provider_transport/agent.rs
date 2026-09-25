@@ -220,6 +220,7 @@ impl OpenAiWorkAgent {
                     title: artifact.title,
                     data,
                     evidence: artifact.evidence,
+                    general_knowledge: false,
                 }),
                 Err(()) => {
                     malformed += 1;

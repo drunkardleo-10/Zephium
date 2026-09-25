@@ -153,6 +153,7 @@ mod tests {
             title: "Catalog".into(),
             kind: "comparison_matrix",
             evidence: vec![0, 1],
+            general_knowledge: false,
             data: Some(
                 serde_json::from_value(json!({"kind":"comparison_matrix","subjects":[
                 {"name":"A","homepage":"https://example.com/a","image_candidates":[]},
