@@ -498,10 +498,109 @@ fn evidence_indices(indices: &[u16], evidence_len: usize) -> Result<(), WorkErro
     }
     Ok(())
 }
+/// The first part of an object that failed validation, in closed words the
+/// model can act on; never the value itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkArtifactField {
+    Content,
+    Text,
+    Title,
+    Evidence,
+    DocumentText,
+    DocumentBlocks,
+    Subjects,
+    MatrixCriterion,
+    MatrixShape,
+    CellEvidence,
+    CellValue,
+    MatrixNotes,
+    FindingItems,
+    FindingClaim,
+    FindingEvidence,
+    FindingSubject,
+    FindingConfidence,
+    FindingDetail,
+    TableShape,
+    ComparisonShape,
+    ChartLabels,
+    ChartSeries,
+    ChartBasis,
+    ChartPointValue,
+    ChartPointEvidence,
+    ChartPointGrounding,
+    ChecklistItems,
+    CollectionSummary,
+    CollectionEntry,
+    PreviewFields,
+    DiagramSize,
+    DiagramLayer,
+    DiagramNode,
+    DiagramNodeLayer,
+    DiagramEdgeLabel,
+    DiagramEdgeNode,
+    DiagramEdgeRepeat,
+}
+impl WorkArtifactField {
+    pub fn phrase(self) -> &'static str {
+        match self {
+            Self::Content => "its content is outside the object schema",
+            Self::Text => "its text is too long in total; keep titles, claims and cells short",
+            Self::Title => "title must be non-empty text of at most 512 bytes",
+            Self::Evidence => "evidence lists more than 64 source keys or repeats one",
+            Self::DocumentText => "document needs 1 to 128 paragraphs of non-empty text",
+            Self::DocumentBlocks => "document blocks are malformed",
+            Self::Subjects => "subjects need unique non-empty names, at most 32, with at most three image candidates and public HTTPS links",
+            Self::MatrixCriterion => "comparison_matrix criteria need 1 to 16 unique names; a measurement names a unit and a basis, a rating a rubric and a scale_max of 2 to 10",
+            Self::MatrixShape => "comparison_matrix cells need one row per subject and one cell per criterion",
+            Self::CellEvidence => "cell evidence must cite listed source keys, at most eight, without repeats",
+            Self::CellValue => "comparison_matrix cell value must match its criterion: a measurement or money amount is a plain number with a cited source or general_knowledge, money has a three-letter currency code, a rating stays within scale_max",
+            Self::MatrixNotes => "comparison_matrix notes are at most eight short texts",
+            Self::FindingItems => "findings need 1 to 64 items",
+            Self::FindingClaim => "finding claim must be non-empty text",
+            Self::FindingEvidence => "finding evidence must cite listed source keys, at most eight, without repeats",
+            Self::FindingSubject => "finding subject index must name one of its subjects",
+            Self::FindingConfidence => "a supported or contradicted finding must cite a source or be general knowledge",
+            Self::FindingDetail => "finding detail is too long",
+            Self::TableShape => "table needs 1 to 16 unique columns and 1 to 128 rows, each row with one cell per column",
+            Self::ComparisonShape => "comparison needs 1 to 16 unique criteria and 1 to 32 uniquely named alternatives, each with one value per criterion",
+            Self::ChartLabels => "chart axis labels must be non-empty text",
+            Self::ChartSeries => "chart needs 1 to 8 series of 1 to 128 points each",
+            Self::ChartBasis => "chart basis needs a non-empty method",
+            Self::ChartPointValue => "chart point value must be a plain number, such as 250 or 0.5, with units in the axis label",
+            Self::ChartPointEvidence => "chart point evidence must cite listed source keys, at most eight, without repeats",
+            Self::ChartPointGrounding => "chart point needs a cited source, a basis or general_knowledge",
+            Self::ChecklistItems => "checklist needs 1 to 128 items of non-empty text",
+            Self::CollectionSummary => "evidence_collection summary must be non-empty text",
+            Self::CollectionEntry => "evidence_collection entry must cite a listed source key once, with a title, a role and an existing subject index",
+            Self::PreviewFields => "browser_resource_preview needs a title, a summary and a public HTTPS url",
+            Self::DiagramSize => "diagram needs 1 to 40 nodes, at most 80 edges and at most 8 layers",
+            Self::DiagramLayer => "diagram layer ids must be unique ASCII identifiers, with names of at most 40 characters",
+            Self::DiagramNode => "diagram node ids must be unique ASCII identifiers, names at most 64 characters and notes at most 120",
+            Self::DiagramNodeLayer => "diagram node names a layer that does not exist",
+            Self::DiagramEdgeLabel => "diagram edge label must be at most 40 characters",
+            Self::DiagramEdgeNode => "diagram edge refers to an unknown node",
+            Self::DiagramEdgeRepeat => "diagram edge must join two different nodes, once",
+        }
+    }
+}
 impl WorkArtifactDataV1 {
     /// `evidence_len` is the artifact's evidence array length; claim-level
     /// indices must address it.
     pub fn validate(&self, evidence_len: usize) -> Result<(), WorkError> {
+        self.check(evidence_len, &mut WorkArtifactField::Content)
+    }
+    /// The first part that fails `validate`, for a notice the model can act on.
+    pub fn fault(&self, evidence_len: usize) -> Option<WorkArtifactField> {
+        let mut at = WorkArtifactField::Content;
+        match self.check(evidence_len, &mut at) {
+            Ok(()) => None,
+            Err(WorkError::Capacity) => Some(WorkArtifactField::Text),
+            Err(_) => Some(at),
+        }
+    }
+    /// `at` names the part under check when an error returns.
+    fn check(&self, evidence_len: usize, at: &mut WorkArtifactField) -> Result<(), WorkError> {
+        use WorkArtifactField as F;
         let mut budget = TextBudget(0);
         let subjects_ok = validate_subjects;
         match self {
@@ -509,11 +608,13 @@ impl WorkArtifactDataV1 {
                 paragraphs,
                 formatted,
             } => {
+                *at = F::DocumentText;
                 bounded(paragraphs.len(), 128)?;
                 for paragraph in paragraphs {
                     budget.text(paragraph)?;
                 }
                 if let Some(document) = formatted {
+                    *at = F::DocumentBlocks;
                     if !document.validate() {
                         return Err(WorkError::Invalid);
                     }
@@ -532,7 +633,9 @@ impl WorkArtifactDataV1 {
                 cells,
                 notes,
             } => {
+                *at = F::Subjects;
                 subjects_ok(&mut budget, subjects, true)?;
+                *at = F::MatrixCriterion;
                 bounded(criteria.len(), MAX_ARTIFACT_CRITERIA)?;
                 let mut names = BTreeSet::new();
                 for criterion in criteria {
@@ -560,15 +663,19 @@ impl WorkArtifactDataV1 {
                         WorkCriterionKind::Text | WorkCriterionKind::Presence => {}
                     }
                 }
+                *at = F::MatrixShape;
                 if cells.len() != subjects.len() {
                     return Err(WorkError::Invalid);
                 }
                 for row in cells {
+                    *at = F::MatrixShape;
                     if row.len() != criteria.len() {
                         return Err(WorkError::Invalid);
                     }
                     for (cell, criterion) in row.iter().zip(criteria) {
+                        *at = F::CellEvidence;
                         evidence_indices(&cell.evidence, evidence_len)?;
+                        *at = F::CellValue;
                         if let Some(note) = &cell.note {
                             validate_text(note, 512)?;
                             budget.text(note)?;
@@ -617,6 +724,7 @@ impl WorkArtifactDataV1 {
                         }
                     }
                 }
+                *at = F::MatrixNotes;
                 if notes.len() > 8 {
                     return Err(WorkError::Invalid);
                 }
@@ -626,21 +734,27 @@ impl WorkArtifactDataV1 {
                 }
             }
             Self::Findings { subjects, items } => {
+                *at = F::Subjects;
                 subjects_ok(&mut budget, subjects, false)?;
+                *at = F::FindingItems;
                 bounded(items.len(), MAX_ARTIFACT_FINDINGS)?;
                 for finding in items {
+                    *at = F::FindingClaim;
                     validate_text(&finding.claim, 1024)?;
                     budget.text(&finding.claim)?;
                     if finding.claim.trim().is_empty() {
                         return Err(WorkError::Invalid);
                     }
+                    *at = F::FindingEvidence;
                     evidence_indices(&finding.evidence, evidence_len)?;
+                    *at = F::FindingSubject;
                     if finding
                         .subject
                         .is_some_and(|index| usize::from(index) >= subjects.len())
                     {
                         return Err(WorkError::Invalid);
                     }
+                    *at = F::FindingConfidence;
                     if matches!(
                         finding.confidence,
                         WorkConfidence::Supported | WorkConfidence::Contradicted
@@ -650,12 +764,14 @@ impl WorkArtifactDataV1 {
                         return Err(WorkError::Invalid);
                     }
                     if let Some(detail) = &finding.detail {
+                        *at = F::FindingDetail;
                         validate_text(detail, 4096)?;
                         budget.text(detail)?;
                     }
                 }
             }
             Self::Table { columns, rows } => {
+                *at = F::TableShape;
                 bounded(columns.len(), 16)?;
                 bounded(rows.len(), 128)?;
                 if columns.iter().collect::<BTreeSet<_>>().len() != columns.len() {
@@ -679,6 +795,7 @@ impl WorkArtifactDataV1 {
                 criteria,
                 alternatives,
             } => {
+                *at = F::ComparisonShape;
                 bounded(criteria.len(), 16)?;
                 bounded(alternatives.len(), 32)?;
                 if criteria.iter().collect::<BTreeSet<_>>().len() != criteria.len()
@@ -711,10 +828,13 @@ impl WorkArtifactDataV1 {
                 basis,
                 general_knowledge,
             } => {
+                *at = F::ChartLabels;
                 budget.text(x_label)?;
                 budget.text(y_label)?;
+                *at = F::ChartSeries;
                 bounded(series.len(), 8)?;
                 if let Some(basis) = basis {
+                    *at = F::ChartBasis;
                     validate_text(&basis.method, 512)?;
                     if basis.method.trim().is_empty() {
                         return Err(WorkError::Invalid);
@@ -729,15 +849,20 @@ impl WorkArtifactDataV1 {
                     }
                 }
                 for series in series {
+                    *at = F::ChartSeries;
                     budget.text(&series.name)?;
                     bounded(series.points.len(), 128)?;
                     for point in &series.points {
+                        *at = F::ChartSeries;
                         budget.text(&point.label)?;
+                        *at = F::ChartPointValue;
                         budget.text(&point.value)?;
                         if !decimal(&point.value) {
                             return Err(WorkError::Invalid);
                         }
+                        *at = F::ChartPointEvidence;
                         evidence_indices(&point.evidence, evidence_len)?;
+                        *at = F::ChartPointGrounding;
                         if point.evidence.is_empty() && !*general_knowledge && basis.is_none() {
                             return Err(WorkError::Invalid);
                         }
@@ -745,6 +870,7 @@ impl WorkArtifactDataV1 {
                 }
             }
             Self::Checklist { items } => {
+                *at = F::ChecklistItems;
                 bounded(items.len(), 128)?;
                 for item in items {
                     budget.text(&item.text)?;
@@ -755,8 +881,11 @@ impl WorkArtifactDataV1 {
                 subjects,
                 entries,
             } => {
+                *at = F::CollectionSummary;
                 budget.text(summary)?;
+                *at = F::Subjects;
                 subjects_ok(&mut budget, subjects, false)?;
+                *at = F::CollectionEntry;
                 if entries.len() > MAX_ARTIFACT_SOURCE_ENTRIES {
                     return Err(WorkError::Invalid);
                 }
@@ -782,6 +911,7 @@ impl WorkArtifactDataV1 {
                 url,
                 summary,
             } => {
+                *at = F::PreviewFields;
                 budget.text(title)?;
                 budget.text(url)?;
                 budget.text(summary)?;
@@ -792,12 +922,14 @@ impl WorkArtifactDataV1 {
                 edges,
                 layers,
             } => {
+                *at = F::DiagramSize;
                 bounded(nodes.len(), MAX_DIAGRAM_NODES)?;
                 if edges.len() > MAX_DIAGRAM_EDGES || layers.len() > MAX_DIAGRAM_LAYERS {
                     return Err(WorkError::Invalid);
                 }
                 let mut layer_ids = BTreeSet::new();
                 for layer in layers {
+                    *at = F::DiagramLayer;
                     short_text(&mut budget, &layer.name, 40)?;
                     if !identifier(&layer.id) || !layer_ids.insert(layer.id.as_str()) {
                         return Err(WorkError::Invalid);
@@ -805,6 +937,7 @@ impl WorkArtifactDataV1 {
                 }
                 let mut ids = BTreeSet::new();
                 for node in nodes {
+                    *at = F::DiagramNode;
                     short_text(&mut budget, &node.name, 64)?;
                     if !identifier(&node.id) || !ids.insert(node.id.as_str()) {
                         return Err(WorkError::Invalid);
@@ -816,10 +949,14 @@ impl WorkArtifactDataV1 {
                         .vendor
                         .as_deref()
                         .is_some_and(|host| !public_host(host))
-                        || node
-                            .layer
-                            .as_deref()
-                            .is_some_and(|layer| !layer_ids.contains(layer))
+                    {
+                        return Err(WorkError::Invalid);
+                    }
+                    *at = F::DiagramNodeLayer;
+                    if node
+                        .layer
+                        .as_deref()
+                        .is_some_and(|layer| !layer_ids.contains(layer))
                     {
                         return Err(WorkError::Invalid);
                     }
@@ -827,13 +964,15 @@ impl WorkArtifactDataV1 {
                 let mut seen = BTreeSet::new();
                 for edge in edges {
                     if let Some(label) = &edge.label {
+                        *at = F::DiagramEdgeLabel;
                         short_text(&mut budget, label, 40)?;
                     }
-                    if edge.from == edge.to
-                        || !ids.contains(edge.from.as_str())
-                        || !ids.contains(edge.to.as_str())
-                        || !seen.insert((&edge.from, &edge.to, &edge.label))
-                    {
+                    *at = F::DiagramEdgeNode;
+                    if !ids.contains(edge.from.as_str()) || !ids.contains(edge.to.as_str()) {
+                        return Err(WorkError::Invalid);
+                    }
+                    *at = F::DiagramEdgeRepeat;
+                    if edge.from == edge.to || !seen.insert((&edge.from, &edge.to, &edge.label)) {
                         return Err(WorkError::Invalid);
                     }
                 }
