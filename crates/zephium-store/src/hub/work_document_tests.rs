@@ -403,7 +403,7 @@ fn work_document_profile_deletion_erases_work_and_blocks_late_edits() {
 fn work_document_profile_v14_upgrade_preserves_existing_data_and_rejects_rollback() {
     let mut conn = Connection::open_in_memory().unwrap();
     crate::hub::filesystem::configure(&conn).unwrap();
-    crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..13]).unwrap();
+    crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..21]).unwrap();
     conn.execute(
         "INSERT INTO settings(key, value) VALUES ('existing', 'preserved')",
         [],
@@ -424,7 +424,7 @@ fn work_document_profile_v14_upgrade_preserves_existing_data_and_rejects_rollbac
             .unwrap(),
         0
     );
-    assert!(crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..13]).is_err());
+    assert!(crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..21]).is_err());
 }
 
 #[test]
@@ -699,7 +699,7 @@ fn work_document_v15_migration_preserves_history_with_explicit_unknown_legacy_pr
     let old = read_plan(&conn, migrated.id, WorkRevision::new(4).unwrap()).unwrap();
     assert_eq!(old.author, WorkAuthor::LegacyUnknown);
     assert_eq!(old.draft, draft());
-    assert!(crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..14]).is_err());
+    assert!(crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..22]).is_err());
     let actual: i64 = conn.query_row("SELECT (SELECT sum(length(CAST(objective AS BLOB))) FROM works) + (SELECT sum(length(CAST(body AS BLOB))) FROM work_questions) + (SELECT sum(length(CAST(body AS BLOB))) FROM work_plan_nodes)", [], |r| r.get(0)).unwrap();
     assert_eq!(
         conn.query_row("SELECT bytes FROM work_payload_usage", [], |r| r
@@ -721,7 +721,7 @@ fn work_document_v15_migration_refuses_corruption_atomically() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        14
+        22
     );
     assert_eq!(
         conn.query_row("SELECT body FROM work_questions", [], |r| r
@@ -729,13 +729,13 @@ fn work_document_v15_migration_refuses_corruption_atomically() {
             .unwrap(),
         "{\"unexpected\":true}"
     );
-    crate::migrations::validate_current(&conn, &crate::migrations::PROFILE[..14]).unwrap();
+    crate::migrations::validate_current(&conn, &crate::migrations::PROFILE[..22]).unwrap();
 }
 
 fn legacy_work_fixture() -> Connection {
     let mut conn = Connection::open_in_memory().unwrap();
     crate::hub::filesystem::configure(&conn).unwrap();
-    crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..14]).unwrap();
+    crate::migrations::apply(&mut conn, &crate::migrations::PROFILE[..22]).unwrap();
     let id = WorkId::from(10).to_string();
     conn.execute("INSERT INTO works(id, schema_version, revision, status, objective, created_unix_ms, updated_unix_ms) VALUES (?1, 1, 4, 'plan_ready', 'Legacy objective', 0, 0)", [&id]).unwrap();
     conn.execute(
