@@ -17,6 +17,7 @@ fn placement(element: WorkElementId) -> WorkElementPlacement {
         y: 0,
         width: 300,
         height: 200,
+        revision: 0,
     }
 }
 
@@ -210,6 +211,7 @@ fn view_admits_boundary_geometry_and_rejects_overflow_duplicates_and_capacity() 
             y: -1_000_000,
             width: 120,
             height: 80,
+            revision: 2,
         }],
         areas: vec![WorkAreaPlacement {
             area: 1.into(),
@@ -224,6 +226,13 @@ fn view_admits_boundary_geometry_and_rejects_overflow_duplicates_and_capacity() 
         serde_json::from_str(r#"{"revision":"1","x":0,"y":0,"zoom_milli":1000,"placements":[]}"#)
             .unwrap();
     assert!(legacy.areas.is_empty());
+    // A placement saved before lanes has no revision; it reads as 0 and writes back as it was.
+    let absolute = serde_json::to_string(&placement(10.into())).unwrap();
+    assert!(!absolute.contains("revision"));
+    let read: WorkElementPlacement = serde_json::from_str(&absolute).unwrap();
+    assert_eq!(read.revision, 0);
+    let lane = serde_json::to_string(&valid.placements[0]).unwrap();
+    assert!(lane.contains(r#""revision":2"#));
     for mutate in [
         |v: &mut WorkEnvironmentView| v.x = -1_000_001,
         |v: &mut WorkEnvironmentView| v.y = 1_000_001,
@@ -235,6 +244,7 @@ fn view_admits_boundary_geometry_and_rejects_overflow_duplicates_and_capacity() 
         |v: &mut WorkEnvironmentView| v.placements[0].width = 4097,
         |v: &mut WorkEnvironmentView| v.placements[0].height = 79,
         |v: &mut WorkEnvironmentView| v.placements[0].height = 4097,
+        |v: &mut WorkEnvironmentView| v.placements[0].revision = 1,
         |v: &mut WorkEnvironmentView| v.areas[0].width = 239,
         |v: &mut WorkEnvironmentView| v.areas[0].width = 8193,
         |v: &mut WorkEnvironmentView| v.areas[0].height = 159,

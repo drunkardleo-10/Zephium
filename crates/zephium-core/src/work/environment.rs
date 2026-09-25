@@ -135,6 +135,13 @@ pub struct WorkElementPlacement {
     pub y: i32,
     pub width: u16,
     pub height: u16,
+    /// 0: an absolute position from before lanes, which the canvas re-derives;
+    /// 2: `x, y` are the card's offset from its lane-derived position.
+    #[serde(default, skip_serializing_if = "is_legacy_placement")]
+    pub revision: u8,
+}
+fn is_legacy_placement(revision: &u8) -> bool {
+    *revision == 0
 }
 
 /// Area geometry is presentation; membership stays on the element.
@@ -191,6 +198,7 @@ impl WorkEnvironmentView {
                 || !coordinate(p.y)
                 || !(120..=4096).contains(&p.width)
                 || !(80..=4096).contains(&p.height)
+                || !matches!(p.revision, 0 | 2)
             {
                 return Err(WorkError::Invalid);
             }

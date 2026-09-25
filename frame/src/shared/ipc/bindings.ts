@@ -2369,12 +2369,40 @@ export type WorkElementId = string;
  *  Integer canvas coordinates avoid non-finite or precision-dependent values.
  *  They are descriptive geometry, never native-page geometry or authority.
  */
-export type WorkElementPlacement = {
+export type WorkElementPlacement = WorkElementPlacement_Serialize | WorkElementPlacement_Deserialize;
+
+/**
+ *  Integer canvas coordinates avoid non-finite or precision-dependent values.
+ *  They are descriptive geometry, never native-page geometry or authority.
+ */
+export type WorkElementPlacement_Deserialize = {
 	element: WorkElementId,
 	x: number,
 	y: number,
 	width: number,
 	height: number,
+	/**
+	 *  0: an absolute position from before lanes, which the canvas re-derives;
+	 *  2: `x, y` are the card's offset from its lane-derived position.
+	 */
+	revision?: number,
+};
+
+/**
+ *  Integer canvas coordinates avoid non-finite or precision-dependent values.
+ *  They are descriptive geometry, never native-page geometry or authority.
+ */
+export type WorkElementPlacement_Serialize = {
+	element: WorkElementId,
+	x: number,
+	y: number,
+	width: number,
+	height: number,
+	/**
+	 *  0: an absolute position from before lanes, which the canvas re-derives;
+	 *  2: `x, y` are the card's offset from its lane-derived position.
+	 */
+	revision?: number,
 };
 
 export type WorkEnvironmentCall = WorkEnvironmentCall_Serialize | WorkEnvironmentCall_Deserialize;
@@ -2493,7 +2521,7 @@ export type WorkEnvironmentView_Deserialize = {
 	x: number,
 	y: number,
 	zoom_milli: number,
-	placements: WorkElementPlacement[],
+	placements: WorkElementPlacement_Deserialize[],
 	areas?: WorkAreaPlacement[],
 };
 
@@ -2502,7 +2530,7 @@ export type WorkEnvironmentView_Serialize = {
 	x: number,
 	y: number,
 	zoom_milli: number,
-	placements: WorkElementPlacement[],
+	placements: WorkElementPlacement_Serialize[],
 	areas?: WorkAreaPlacement[],
 };
 

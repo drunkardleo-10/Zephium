@@ -427,6 +427,7 @@ fn checkpoint_revision_is_separate_and_cannot_resurrect_removed_elements() {
         y: 140,
         width: 320,
         height: 200,
+        revision: 2,
     });
     let request = WorkEnvironmentCall::Checkpoint {
         id: attached.id,
@@ -444,6 +445,7 @@ fn checkpoint_revision_is_separate_and_cannot_resurrect_removed_elements() {
         attached.view.revision.next().unwrap()
     );
     assert_eq!(checkpoint.view.x, 45);
+    assert_eq!(checkpoint.view.placements[0].revision, 2);
     // An unrelated semantic edit does not make presentation stale.
     let renamed = edit(
         &mut conn,
