@@ -65,7 +65,7 @@ production graphs reject fixtures and test modules.
 | `shared/ui/data/DataTable` | Lightweight accessible paginated table |
 | `shared/ui/data/DocumentEditor` | Lazy, constrained paragraph/text Tiptap draft editor |
 | `shared/ui/data/Evidence` | Bounded historical excerpts, truncation and original byte counts |
-| `features/notes` | Rich note editor and resource list, available through its lazy loader |
+| `features/notes` | Markdown notes: list, note view, lazy editor, panel body and `browser.notes` page |
 | `features/tasks` | Inline capture with date/time reading, due-date sections, scheduling, multiple selection, keyboard operation and undo at panel, rail or page density; a full destination with list and board views, available through its lazy loaders |
 
 Svelte XYFlow provides canvas interaction. Inputs are bounded to 500 items and
@@ -94,15 +94,86 @@ Chart support is bounded SVG bars, not a general chart suite. TanStack Table is
 not a dependency. The artifact document editor is intentionally narrower than
 the independent rich Notes editor.
 
-## Notes and Tasks resources
+## Notes
+
+Notes are Markdown files the person owns, one `.md` file per note. The files are
+the record; everything else describes them and can be rebuilt from them.
+
+- **Storage.** `crates/zephium-notes` owns a profile's folder at
+  `<app data>/notes/<profile>/Notes` and a SQLite index beside it
+  (`notes/<profile>/index.sqlite`, never inside the folder, so moving or syncing
+  the folder never carries a database). The index keeps identities (ULIDs),
+  titles, previews, pins, `[[link]]` targets and an FTS5 index of titles and
+  bodies. Losing it loses pins and identities, never a note.
+- **Thread.** File work runs on its own `zephium-notes` thread, never the Store
+  actor. Saves are atomic (temporary file, plain `fsync`, rename) and preserve a
+  file's line endings, byte-order mark and permissions. Nothing follows a symbolic
+  link or writes outside the folder. Files over 1 MiB or not UTF-8 are listed but
+  read-only.
+- **Outside edits.** A recursive watcher (FSEvents, ReadDirectoryChangesW,
+  inotify) settles bursts for 250 ms. Events the index already explains, such as
+  the browser's own saves, cost a `stat`, not a scan. Opening a profile reconciles
+  changes made while the browser was closed; a moved file keeps its identity by
+  inode or content.
+- **Contract.** `note_call(expected_profile, NoteCall)` is routed by the shell
+  after the same focused-profile check as `resource_call`; private profiles are
+  refused. A write carries the content revision it edited (a hash of the bytes on
+  disk) and returns `Conflict` with the file's current text rather than
+  overwriting a change made elsewhere; replaying a write or a create (by
+  `request_id`) never duplicates it. `NoteChanges` (`zephium:notes-changed`)
+  names changed notes with their new revisions; `reset` is set only when titles,
+  names or the folder changed, since those move where links lead. A session
+  ignores events for its own saves. The main window always
+  receives it; the launcher only while it is showing Notes, so a hidden
+  launcher is never woken by a save. A surface that holds notes while hidden
+  must list them again when shown rather than rely on events it missed.
+- **Titles and names.** A note's title is its leading heading, else its file
+  name. A file's name follows its title only while it still matches the title it
+  was named after, so a name chosen in Finder or another editor is never changed.
+  Trash is the folder's `.trash/`, emptied after 30 days. Launcher search covers
+  note bodies.
+- **Migration and deletion.** On first open, notes stored as ProseMirror JSON in
+  the profile database become files under their old IDs, and the rows are
+  retired. The resource store now refuses new note rows. Profile deletion
+  releases the profile's notes, then erases `notes/<profile>` (renamed aside
+  first) inside the journal-authorized purge.
+
+The frontend reads and writes Markdown directly. `features/notes/lib/markdown`
+parses with `marked` (GFM plus `[[wiki links]]` and footnotes) into the editor's
+Tiptap schema and writes Markdown back:
+
+- Blocks the editor has not changed are written back byte for byte.
+- Changed blocks are rewritten with the delimiters they were read with, and each
+  rewritten paragraph is re-parsed to prove it reads back as the same content.
+- Anything the editor does not render (tables, HTML, footnotes, front matter,
+  images) is kept verbatim as a raw node.
+- Serialization is cached per block, so a keystroke rewrites one block.
+- Code blocks labelled with a language are coloured by `lib/editor/highlight.ts`:
+  a one-pass scanner (comments, strings, numbers, keywords) whose ranges go to
+  the CSS Custom Highlight API, so no elements are added. It runs when a note
+  opens and 300 ms after an edit, for changed blocks only; engines without the
+  API show plain code.
+
+`domain/notes` holds the session: autosave (600 ms idle, at least every 4 s while
+typing, one background write at a time), idempotent retries, conflict choice, and
+recreating a note whose file vanished while it was open. The panel (`NotesView`)
+and the `browser.notes` page share the list, note view and lazy editor chunk.
+
+For Work: a note is a Markdown string plus a `NoteSummary`. A canvas projection
+should render with `MarkdownDocument` and `noteSchemaExtensions`, read-only, or
+from `marked` tokens, and write through `note_call` with `base_revision`. It must
+not keep its own copy of note content. Merge areas: `zephium-core` (`notes.rs`,
+`ports/notes.rs`, two Store trait methods), shell commands `AttachNotes` and
+`NoteCall`, `desktop/src/notes.rs`, profile deletion and the regenerated
+bindings. No PROFILE migration was added.
+
+## Tasks resources
 
 Authoritative resource types live in `crates/zephium-core/src/resources.rs`.
 Persistence lives in `crates/zephium-store/src/hub/resources.rs`, through the Store
-actor. `domain/resources` supplies profile-bound projections and transient drafts.
-Native IPC supports bounded lists, reads, note-reference resolution and idempotent,
-revision-checked mutations. Identity, revisions and saved state come from Rust.
+actor. Native IPC supports bounded lists, reads and idempotent, revision-checked
+mutations. Identity, revisions and saved state come from Rust.
 
-Notes contain validated Tiptap data, formatting and same-profile note references.
 Tasks contain title, description, due date, an optional due time, and pin state, plus a lifecycle
 (`open`/`active`/`blocked`/`done`), who holds the next move and who created it
 (`user`/`agent`), the page a task came from, and a manual sort key. `completed`
@@ -137,20 +208,6 @@ tab gesture has not been migrated onto it and remains its own code.
 Not implemented here: reminders (there is no notification plugin in the tree, so
 a due time does not notify), recurrence, any grouping beyond scopes and search,
 and a keyboard equivalent for board reordering — cards move by pointer only.
-
-Resource drafts autosave after one second of inactivity. Writes are single-flight;
-background saves coalesce further edits while explicit navigation drains them.
-Unknown outcomes retain request identity for reconciliation, and conflicts retain
-local drafts. Ordinary native close has a scoped flush/acknowledgement gate.
-Unsaved transient edits are not a durable process-crash journal.
-
-The note editor caches canonical projections and size/reference summaries by
-immutable ProseMirror node. Unchanged branches are reused rather than repeatedly
-serializing the entire document while typing. Exact bounds and independent Rust
-validation remain in place. Reference labels use inert node views and resolve only
-when IDs or their metadata revision change. Editor teardown releases history/cache.
-Hidden hosts stop observation/timers and release list metadata and saved bodies;
-unresolved drafts remain available for close/retry handling.
 
 Resource persistence appends **profile migration 14** in this checkout. The
 separate runtime stream may have its own later migrations; version/order agreement

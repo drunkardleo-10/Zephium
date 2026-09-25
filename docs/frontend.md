@@ -193,26 +193,20 @@ Notes or Work implementations. No placeholder entity directories are created.
 
 The Notes/Tasks root is both a flex item and an inline-size query container. Give
 it an explicit width, flex growth and a zero minimum width; size containment
-otherwise collapses it inside the native sidebar. Test both ToolSlot hosts with
-production sidebar CSS, including list/detail navigation and launcher return.
+otherwise collapses it inside the native sidebar, and without it a long title or
+preview widens the whole panel. Test both ToolSlot hosts with production sidebar
+CSS, including list/detail navigation and launcher return.
 
-Resource drafts autosave after one second of inactivity. Background saves remain
-single-flight and defer edits made during a write to the next idle interval;
-explicit navigation and normal app close drain pending edits. Native change events
-and write replies coalesce their metadata refresh. Routine save feedback reserves
-space and only shows Saving after an 800 ms wait; conflicts, uncertain outcomes
-and failures remain explicit. Hidden features stop observation and timers while
-retaining their transient draft. This does not promise crash recovery for edits
-that have not reached Rust.
+Notes save on their own cadence (see the handoff): a background save is one
+write, explicit navigation and app close drain everything typed, and conflicts,
+retries and read-only notes are shown in place. Hidden hosts stop observation and
+release saved text, retaining the open note's ID for a fresh read on return.
 
-The note editor projects immutable ProseMirror nodes through an editor-lifetime
-WeakMap. Unchanged branches reuse canonical payloads and size/reference summaries;
-validation does not serialize the full document on every keystroke. The resulting
-payload still passes independent Rust validation. Reference labels use inert node
-views and resolve only when reference IDs or their metadata revision change.
-Hidden hosts release list metadata and fully saved bodies, retaining the selected
-ID for fresh native reads on reopening. Unresolved drafts retain their bodies.
-Editor teardown releases its history and cache.
+Only the open note mounts an editor, in its own lazy chunk with `marked`. Lists,
+the panel and the page never parse Markdown: titles and previews come from the
+native index, and the list derives only the open note's row as it is typed.
+Notes-only icons are imported per icon (`@hugeicons/core-free-icons/<Name>`) so
+they stay in notes chunks instead of the startup icon chunk.
 The 1,800-paragraph projection test is a local CPU sample, not native latency or
 process-memory qualification.
 
