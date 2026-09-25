@@ -17,7 +17,11 @@ const SCENARIOS: [(&str, &str); 6] = [
 ];
 /// Run only by name with --live-acceptance-only until the person admits
 /// them to the suite.
-const ON_REQUEST: [(&str, &str); 1] = [("engine_chart", "--live-agent-engine-chart-work")];
+const ON_REQUEST: [(&str, &str); 3] = [
+    ("engine_chart", "--live-agent-engine-chart-work"),
+    ("explain_mechanism", "--live-agent-explain-mechanism-work"),
+    ("code_review", "--live-agent-code-review-work"),
+];
 const RUNS: usize = 3;
 /// Every scenario's own deadline: its 720 s execution plus the 30 s host
 /// allowance the probe gives it.

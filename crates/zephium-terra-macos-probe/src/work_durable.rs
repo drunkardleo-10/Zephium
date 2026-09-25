@@ -38,6 +38,75 @@ const AGENT_READ_OBJECTIVE: &str = "From SQLite's official WAL documentation pag
 const AGENT_GOVERNMENT_OBJECTIVE: &str = "Read https://travel.state.gov/ in the browser and report the passport and travel advisory services shown there, citing the actual page. Use one page read. Do not substitute search results, another page or prior knowledge. If verification prevents reading, report that honestly and stop; do not interact with verification controls, sign in or submit forms.";
 const AGENT_ENGINE_CHART_OBJECTIVE: &str = "Compare SQLite, DuckDB and RocksDB for a local-first desktop app with millions of records and frequent full-text search, then make a chart of their performance and resource use.";
 const AGENT_ARCHITECTURE_OBJECTIVE: &str = "Create me a full modern AI SaaS architecture and in general system design, technologies, stack, how much it will cost, etc.";
+/// A pasted function to review: the window loop reads one element past the
+/// end, and `snapshot` is a clone nothing uses.
+const CODE_REVIEW_FUNCTION: &str = r#"pub fn rolling_report(readings: &[Reading], window: usize) -> Report {
+    let mut report = Report::default();
+    if readings.is_empty() || window == 0 {
+        return report;
+    }
+    let snapshot = readings.to_vec();
+    let mut total = 0.0;
+    let mut peak = f64::MIN;
+    let mut low = f64::MAX;
+    let mut spikes = Vec::new();
+    for reading in readings {
+        total += reading.value;
+        if reading.value > peak {
+            peak = reading.value;
+        }
+        if reading.value < low {
+            low = reading.value;
+        }
+    }
+    report.mean = total / readings.len() as f64;
+    report.peak = peak;
+    report.low = low;
+    let mut window_sum = 0.0;
+    for (index, reading) in readings.iter().enumerate().take(window) {
+        window_sum += reading.value;
+        report.averages.push(Average {
+            at: index,
+            value: window_sum / (index + 1) as f64,
+        });
+    }
+    for i in window..=readings.len() {
+        window_sum += readings[i].value - readings[i - window].value;
+        let average = window_sum / window as f64;
+        report.averages.push(Average { at: i, value: average });
+        if readings[i].value > average * 1.5 {
+            spikes.push(Spike {
+                at: i,
+                value: readings[i].value,
+                average,
+            });
+        }
+    }
+    let mut run = 0;
+    for pair in readings.windows(2) {
+        if pair[1].value > pair[0].value {
+            run += 1;
+            report.longest_rise = report.longest_rise.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    report.spikes = spikes;
+    report.flat = (peak - low).abs() < f64::EPSILON;
+    report.label = match report.spikes.len() {
+        0 => "steady".to_string(),
+        1..=3 => "noisy".to_string(),
+        _ => "unstable".to_string(),
+    };
+    report
+}"#;
+/// The line of the off-by-one, found by its text in whatever excerpt the
+/// agent publishes.
+const CODE_REVIEW_BUG: &str = "window..=readings.len()";
+const AGENT_EXPLAIN_MECHANISM_OBJECTIVE: &str =
+    "Explain how virtual memory works, with the prerequisites first.";
+/// Explanation and review answer from knowledge: a tighter wall time.
+const EXPLANATION_DEADLINE: Duration = Duration::from_secs(120);
 /// A making request answers from knowledge: a bounded wall time for the loop.
 const ARCHITECTURE_DEADLINE: Duration = Duration::from_secs(180);
 /// Wall time of the last agent loop, in milliseconds.
@@ -79,6 +148,10 @@ enum Mode {
     AgentArchitecture,
     /// A research comparison asking for a chart of numbers sources rarely give.
     AgentEngineChart,
+    /// How something works, answered as a set in learning order.
+    AgentExplainMechanism,
+    /// A pasted function reviewed as a code excerpt with line notes.
+    AgentCodeReview,
 }
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
@@ -111,6 +184,14 @@ pub(super) fn run_agent_architecture() -> Result<(), super::ProbeFailure> {
 
 pub(super) fn run_agent_engine_chart() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::AgentEngineChart)
+}
+
+pub(super) fn run_agent_explain_mechanism() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentExplainMechanism)
+}
+
+pub(super) fn run_agent_code_review() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentCodeReview)
 }
 
 pub(super) fn run_agent_money() -> Result<(), super::ProbeFailure> {
@@ -384,6 +465,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentMoney
             | Mode::AgentArchitecture
             | Mode::AgentEngineChart
+            | Mode::AgentExplainMechanism
+            | Mode::AgentCodeReview
     ) {
         6
     } else {
@@ -411,7 +494,9 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         | Mode::AgentPage
         | Mode::AgentMoney
         | Mode::AgentArchitecture
-        | Mode::AgentEngineChart => 720,
+        | Mode::AgentEngineChart
+        | Mode::AgentExplainMechanism
+        | Mode::AgentCodeReview => 720,
         Mode::Public => 160,
         _ => 240,
     });
@@ -645,6 +730,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentMoney
             | Mode::AgentArchitecture
             | Mode::AgentEngineChart
+            | Mode::AgentExplainMechanism
+            | Mode::AgentCodeReview
     ) {
         let execution = &state.executions[0];
         let counts = |kind: &str| {
@@ -744,8 +831,12 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         }
         _ => true,
     };
-    let design_accepted =
-        mode != Mode::AgentArchitecture || architecture_accepted(&state.executions[0]);
+    let design_accepted = match mode {
+        Mode::AgentArchitecture => architecture_accepted(&state.executions[0]),
+        Mode::AgentExplainMechanism => mechanism_accepted(&state.executions[0]),
+        Mode::AgentCodeReview => code_review_accepted(&state.executions[0]),
+        _ => true,
+    };
     let chart_accepted =
         mode != Mode::AgentEngineChart || engine_chart_accepted(&state.executions[0]);
     if mode == Mode::AgentListing {
@@ -820,6 +911,18 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
                 "agent-architecture-run.json"
             } else {
                 "agent-architecture-incomplete.json"
+            }
+        } else if mode == Mode::AgentExplainMechanism {
+            if design_accepted {
+                "agent-explain-mechanism-run.json"
+            } else {
+                "agent-explain-mechanism-incomplete.json"
+            }
+        } else if mode == Mode::AgentCodeReview {
+            if design_accepted {
+                "agent-code-review-run.json"
+            } else {
+                "agent-code-review-incomplete.json"
             }
         } else if mode == Mode::AgentEngineChart {
             if chart_accepted {
@@ -947,6 +1050,8 @@ async fn workflow(
             | Mode::AgentMoney
             | Mode::AgentArchitecture
             | Mode::AgentEngineChart
+            | Mode::AgentExplainMechanism
+            | Mode::AgentCodeReview
             | Mode::AgentFiles
     ) {
         return agent_workflow(
@@ -1655,6 +1760,107 @@ fn architecture_accepted(execution: &WorkExecutionFact) -> bool {
     accepted
 }
 
+fn reads_and_elapsed(execution: &WorkExecutionFact) -> (usize, u64) {
+    let reads = execution
+        .steps
+        .iter()
+        .filter(|step| matches!(step.kind, WorkStepKindV1::Read { .. }))
+        .count();
+    (
+        reads,
+        AGENT_ELAPSED_MS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+fn sorted_kinds(execution: &WorkExecutionFact) -> String {
+    let mut kinds: Vec<_> = execution
+        .artifacts
+        .iter()
+        .map(|artifact| zephium_core::work::agent::artifact_kind(&artifact.data))
+        .collect();
+    kinds.sort_unstable();
+    kinds.join(",")
+}
+
+/// How something works, as a set: a knowledge-marked diagram of at least six
+/// nodes, findings of at least five items, a brief, at most one read, and the
+/// loop under its deadline.
+fn mechanism_accepted(execution: &WorkExecutionFact) -> bool {
+    use zephium_core::work::artifact::WorkArtifactDataV1 as Data;
+    let data = || execution.artifacts.iter();
+    let diagram = data().any(|artifact| {
+        artifact.general_knowledge
+            && matches!(&artifact.data, Data::Diagram { nodes, .. } if nodes.len() >= 6)
+    });
+    let findings = data()
+        .filter_map(|artifact| match &artifact.data {
+            Data::Findings { items, .. } => Some(items.len()),
+            _ => None,
+        })
+        .sum::<usize>();
+    let brief = data().any(|artifact| matches!(artifact.data, Data::Document { .. }));
+    let terms = data().any(|artifact| matches!(artifact.data, Data::Table { .. }));
+    let (reads, elapsed_ms) = reads_and_elapsed(execution);
+    let accepted = diagram
+        && findings >= 5
+        && brief
+        && reads <= 1
+        && u128::from(elapsed_ms) < EXPLANATION_DEADLINE.as_millis();
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "mechanism_qualification diagram={diagram} findings_items={findings} brief={brief} terms={terms} reads={reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
+        sorted_kinds(execution),
+    );
+    accepted
+}
+
+/// A pasted function reviewed: a code excerpt with at least two notes, one of
+/// them on the off-by-one line, findings that name the bug, no reads, and the
+/// loop under its deadline.
+fn code_review_accepted(execution: &WorkExecutionFact) -> bool {
+    use zephium_core::work::artifact::WorkArtifactDataV1 as Data;
+    let (mut notes, mut bug_noted) = (0, false);
+    for artifact in &execution.artifacts {
+        let Data::Code {
+            text, notes: marks, ..
+        } = &artifact.data
+        else {
+            continue;
+        };
+        let bug = text
+            .lines()
+            .position(|line| line.contains(CODE_REVIEW_BUG))
+            .map(|index| index as u32 + 1);
+        notes = notes.max(marks.len());
+        bug_noted |= bug.is_some_and(|line| {
+            marks
+                .iter()
+                .any(|note| note.from <= line && line <= note.to)
+        });
+    }
+    let named = execution.artifacts.iter().any(|artifact| {
+        matches!(&artifact.data, Data::Findings { items, .. } if items.iter().any(|item| {
+            let claim = format!("{} {}", item.claim, item.detail.as_deref().unwrap_or_default())
+                .to_ascii_lowercase();
+            ["off-by-one", "off by one", "out of bounds", "out-of-bounds", "past the end", "..="]
+                .iter()
+                .any(|phrase| claim.contains(phrase))
+        }))
+    });
+    let (reads, elapsed_ms) = reads_and_elapsed(execution);
+    let accepted = notes >= 2
+        && bug_noted
+        && named
+        && reads == 0
+        && u128::from(elapsed_ms) < EXPLANATION_DEADLINE.as_millis();
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "code_review_qualification notes={notes} bug_noted={bug_noted} bug_named={named} reads={reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
+        sorted_kinds(execution),
+    );
+    accepted
+}
+
 /// The routine loop on a public comparison objective. Every step, source and
 /// object is durable before the next turn; the proof file keeps the projection.
 async fn agent_workflow(
@@ -1678,6 +1884,9 @@ async fn agent_workflow(
             folder.display()
         )
     });
+    let code_review_objective = format!(
+        "Review this Rust function: find its bugs and say what to change.\n\n{CODE_REVIEW_FUNCTION}"
+    );
     let objective = match mode {
         Mode::AgentFiles => files_objective.as_deref().unwrap_or_default(),
         Mode::AgentCollection => AGENT_COLLECTION_OBJECTIVE,
@@ -1687,6 +1896,8 @@ async fn agent_workflow(
         Mode::AgentMoney => AGENT_MONEY_OBJECTIVE,
         Mode::AgentArchitecture => AGENT_ARCHITECTURE_OBJECTIVE,
         Mode::AgentEngineChart => AGENT_ENGINE_CHART_OBJECTIVE,
+        Mode::AgentExplainMechanism => AGENT_EXPLAIN_MECHANISM_OBJECTIVE,
+        Mode::AgentCodeReview => code_review_objective.as_str(),
         Mode::AgentListing => "Read https://www.airbnb.com/rooms/23813739?adults=1 in one browser read and collect this one listing: its name, displayed nightly price, displayed monthly total, stay dates or minimum stay, its own page address as an optional url column named listing_url, and picture. Dates are unspecified, so leave any value the page does not show unknown. Do not search, follow links, book, sign in or interact with verification controls.",
         Mode::AgentRead => AGENT_READ_OBJECTIVE,
         Mode::AgentPage => PAGE_OBJECTIVE.get().map(String::as_str).unwrap_or_default(),

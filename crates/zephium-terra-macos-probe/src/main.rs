@@ -159,6 +159,14 @@ fn main() {
             work_durable::run_agent_engine_chart()
         }
         #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-explain-mechanism-work" => {
+            work_durable::run_agent_explain_mechanism()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-code-review-work" => {
+            work_durable::run_agent_code_review()
+        }
+        #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-trip-work" => work_durable::run_agent_trip(),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-airbnb-work" => work_durable::run_agent_airbnb(),
