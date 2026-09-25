@@ -59,6 +59,8 @@ pub struct NavigationObserverIvars {
 /// availability only asks ordinary browser chrome to refresh; it does not
 /// prove that the current document or its serialized URL changed.
 pub enum NavigationObservation {
+    /// Read by the Work agent context; ordinary chrome only refreshes on it.
+    #[cfg_attr(not(feature = "agentic-browser"), allow(dead_code))]
     Url(Option<String>),
     HistoryAvailability,
 }
