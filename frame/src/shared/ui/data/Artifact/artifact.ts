@@ -1,3 +1,5 @@
+import { codeLines, type CodeNoteView } from "../Code/code";
+
 /** Structural view of the constrained note schema; the owner supplies the wire value. */
 type DocumentMarkView = { type: string; attrs?: { href?: string | null } | null };
 export type DocumentNodeView = {
@@ -119,6 +121,7 @@ export type ArtifactContent =
       edges: readonly DiagramEdgeView[];
       layers: readonly { id: string; name: string }[];
     }
+  | { kind: "code"; language: string; text: string; notes: readonly CodeNoteView[] }
   | { kind: "unavailable"; reason: string };
 export type ArtifactView = {
   key: string;
@@ -288,6 +291,25 @@ export function artifactRenderable(view: ArtifactView): boolean {
         ) &&
         data.layers.length <= 16 &&
         data.layers.every((layer) => layer.name.length <= 128)
+      );
+    }
+    case "code": {
+      const lines = codeLines(data.text).length;
+      return (
+        data.text.length > 0 &&
+        text(data.text) &&
+        lines <= 400 &&
+        data.language.length <= 32 &&
+        data.notes.length <= 24 &&
+        data.notes.every(
+          (note) =>
+            Number.isInteger(note.from) &&
+            Number.isInteger(note.to) &&
+            note.from >= 1 &&
+            note.from <= note.to &&
+            note.to <= lines &&
+            note.text.length <= 160,
+        )
       );
     }
     case "unavailable":

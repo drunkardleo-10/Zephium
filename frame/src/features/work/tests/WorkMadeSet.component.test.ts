@@ -336,3 +336,30 @@ test("a chart card is compact, and says it is from what the agent knows only whe
     await both.unmount();
   }
 });
+
+test("a code card numbers its first fourteen lines, bars a note and says what is past them", async () => {
+  await page.viewport(1200, 800);
+  const text = Array.from({ length: 20 }, (_, index) => `let x${index + 1} = ${index + 1};`).join(
+    "\n",
+  );
+  const screen = await render(ResultCard, {
+    id: "result",
+    item: result({
+      kind: "code",
+      language: "rust",
+      text,
+      notes: [{ from: 2, to: 3, text: "The second and third bindings" }],
+    }),
+    selected: false,
+    onaction: () => {},
+  });
+  await expect.element(screen.getByText("Code · rust")).toBeVisible();
+  await expect.poll(() => screen.container.querySelectorAll(".row").length).toBe(14);
+  expect(screen.container.querySelector(".row:last-child .n")?.textContent).toBe("14");
+  expect(screen.container.querySelectorAll(".row.noted")).toHaveLength(2);
+  await expect.element(screen.getByText("+6 lines")).toBeVisible();
+  await expect.element(screen.getByText("1 note")).toBeVisible();
+  await page.elementLocator(screen.container.querySelectorAll(".row")[2]!).hover();
+  await expect.element(screen.getByRole("note")).toHaveTextContent("The second and third bindings");
+  await screen.unmount();
+});

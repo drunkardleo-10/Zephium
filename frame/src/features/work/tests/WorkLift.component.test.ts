@@ -87,6 +87,30 @@ test("a result lifts in reading mode with one collapsed sources rail and no chip
   session.dispose();
 });
 
+test("code lifts whole with its notes as a rail and copies through the clipboard", async () => {
+  await page.viewport(900, 700);
+  const copy = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+  const text = 'fn main() {\n    let x = 1;\n    println!("{x}");\n}\n';
+  const session = state({
+    kind: "code",
+    language: "rust",
+    text,
+    notes: [{ from: 2, to: 3, text: "Binds and prints x" }],
+  });
+  const screen = await render(WorkResultInspector, { session, reference, source: null });
+  await expect.element(screen.getByText("Code · rust")).toBeVisible();
+  await expect.poll(() => screen.container.querySelectorAll(".row").length).toBe(4);
+  const entry = screen.getByRole("button", { name: /Lines 2–3/u });
+  await entry.click();
+  expect(screen.container.querySelectorAll(".row.lit")).toHaveLength(2);
+  await screen.getByRole("button", { name: "Copy" }).click();
+  expect(copy).toHaveBeenCalledExactlyOnceWith(text);
+  await expect.element(screen.getByRole("button", { name: "Copied" })).toBeVisible();
+  copy.mockRestore();
+  await screen.unmount();
+  session.dispose();
+});
+
 test("a findings card lifts with every claim, its detail and its evidence", async () => {
   await page.viewport(900, 700);
   const claims = ["One", "Two", "Three", "Four", "Five", "Six"].map((word, index) => ({

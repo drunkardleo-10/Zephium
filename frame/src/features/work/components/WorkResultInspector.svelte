@@ -15,6 +15,7 @@
     Table01Icon,
     ChartColumnIcon,
     CubeIcon,
+    SourceCodeIcon,
   } from "../lib/icons";
   import { artifactView } from "../lib/project-work";
   import { compareModel, type CompareCell, type ComparePicture } from "../lib/compare";
@@ -112,7 +113,9 @@
             ? ChartColumnIcon
             : view?.content.kind === "diagram"
               ? CubeIcon
-              : Doc01Icon,
+              : view?.content.kind === "code"
+                ? SourceCodeIcon
+                : Doc01Icon,
   );
   const kind = $derived(
     compare || view?.content.kind === "comparison"
@@ -121,7 +124,9 @@
         ? m.work_env_findings()
         : view?.content.kind === "diagram"
           ? m.work_card_kind_diagram()
-          : m.work_env_result(),
+          : view?.content.kind === "code"
+            ? `${m.work_card_kind_code()} · ${view.content.language}`
+            : m.work_env_result(),
   );
   const meta = $derived.by(() => {
     const content = view?.content;
@@ -135,6 +140,20 @@
         ? m.work_lift_claims_one()
         : m.work_lift_claims({ count: content.items.length });
     return session.projection?.work.objective ?? "";
+  });
+  let copied = $state<"idle" | "copied" | "failed">("idle");
+  /** Code's primary action copies the whole text. */
+  const copy = $derived.by((): LiftAction | undefined => {
+    const content = view?.content;
+    if (content?.kind !== "code") return undefined;
+    return {
+      label: copied === "copied" ? m.work_code_copied() : m.work_code_copy(),
+      onclick: () =>
+        void navigator.clipboard.writeText(content.text).then(
+          () => (copied = "copied"),
+          () => (copied = "failed"),
+        ),
+    };
   });
   let evidence = $state.raw<EvidenceView | null>(null);
   let selectedSource = $derived(source);
@@ -190,7 +209,14 @@
 
 {#if view}
   <section class="result">
-    <LiftHeader {kind} title={view.title} {meta} {icon} {primary} knowledge={!!view.knowledge}>
+    <LiftHeader
+      {kind}
+      title={view.title}
+      {meta}
+      {icon}
+      primary={primary ?? copy}
+      knowledge={!!view.knowledge}
+    >
       {#snippet actions()}{#if secondary}<Button
             size="compact"
             disabled={secondary.disabled}
@@ -214,6 +240,7 @@
             </p>{/each}{/if}
       </div>
     {:else}<Artifact artifact={view} embedded onevidence={pick} onlink={onopen} />{/if}
+    {#if copied === "failed"}<p role="alert">{m.work_code_copy_failed()}</p>{/if}
     {#if evidence}<Evidence {evidence} {onopen} />{/if}
     <SourcesRail references={cited} onpick={pick} />
     {#if accepting}<footer>

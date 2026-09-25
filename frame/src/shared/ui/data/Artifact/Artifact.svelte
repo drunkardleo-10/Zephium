@@ -15,6 +15,7 @@
     type ArtifactView,
     type EvidenceReference,
   } from "./artifact";
+  import { CODE_CARD_LINES, loadCodeBlock } from "../Code";
   import * as m from "$shared/i18n/messages";
   let {
     artifact,
@@ -196,6 +197,20 @@
           <span>{node.name}</span>{#if node.note}<small>{node.note}</small>{/if}
         </li>{/each}
     </ul>
+  {:else if content.kind === "code"}<LazyView
+      loader={loadCodeBlock}
+      loadingLabel={m.surface_loading()}
+      failureLabel={m.work_artifact_unavailable()}
+      retryLabel={m.surface_retry()}
+      >{#snippet children(CodeBlock)}<CodeBlock
+          language={content.language}
+          text={content.text}
+          notes={content.notes}
+          label={artifact.title}
+          variant={card ? "card" : "lift"}
+          limit={card ? CODE_CARD_LINES : undefined}
+        />{/snippet}</LazyView
+    >
   {:else if content.kind === "unavailable"}<p role="status">{content.reason}</p>{/if}
   {#if valid && !card && !artifact.knowledge && artifact.evidence.length && content.kind !== "sources" && content.kind !== "matrix" && content.kind !== "findings"}<footer
       aria-label={m.work_sources()}

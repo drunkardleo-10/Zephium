@@ -187,6 +187,17 @@ function content(data: WorkArtifactDataV1, refs: Refs): ArtifactContent {
         })),
         layers: data.layers ?? [],
       };
+    case "code":
+      return {
+        kind: "code",
+        language: data.language,
+        text: data.text,
+        notes: (data.notes ?? []).map((note) => ({
+          from: note.from,
+          to: note.to,
+          text: note.text,
+        })),
+      };
   }
 }
 

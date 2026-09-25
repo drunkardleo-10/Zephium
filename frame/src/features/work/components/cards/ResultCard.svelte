@@ -2,11 +2,13 @@
   import { getContext } from "svelte";
   import CardFrame from "./CardFrame.svelte";
   import TableCard from "./TableCard.svelte";
+  import CodeCard from "./CodeCard.svelte";
   import Icon from "$shared/ui/Icon";
   import { SparklesIcon } from "../../lib/icons";
   import { TABLE_CARD, tableGrid } from "$shared/ui/data/Artifact/table";
   import Artifact, { documentDigest } from "$shared/ui/data/Artifact";
   import { cardKnowledge } from "$shared/ui/data/Artifact/artifact";
+  import { CODE_CARD_LINES, codeLines } from "$shared/ui/data/Code";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import { canvasEvidence, canvasOpen, canvasOpenLink } from "../../lib/canvas-context";
   import type { CanvasItem } from "../../lib/canvas-model";
@@ -47,6 +49,8 @@
         return m.work_env_page();
       case "diagram":
         return m.work_card_kind_diagram();
+      case "code":
+        return `${m.work_card_kind_code()} · ${content.language}`;
       default:
         return item.kind;
     }
@@ -55,8 +59,12 @@
   const tabular = $derived(
     content?.kind === "table" || content?.kind === "comparison" ? content : undefined,
   );
+  const code = $derived(content?.kind === "code" ? content : undefined);
   /** Rows past the six a table card shows. */
   const hidden = $derived(tabular ? tableGrid(tabular).rows.length - TABLE_CARD.rows : 0);
+  /** Lines past the fourteen a code card shows. */
+  const lines = $derived(code ? codeLines(code.text).length - CODE_CARD_LINES : 0);
+  const notes = $derived(code?.notes.length ?? 0);
   // One caption per card: the card's own, never the chart's as well.
   const knowledge = $derived(!!item.artifact && cardKnowledge(item.artifact));
   // A press that moved was a drag; a control inside the cover keeps its own click.
@@ -76,7 +84,9 @@
   {kind}
   title={item.title}
   {selected}
-  footer={item.actionLabel || knowledge || hidden > 0 ? action : undefined}
+  footer={item.actionLabel || knowledge || hidden > 0 || lines > 0 || notes > 0
+    ? action
+    : undefined}
 >
   {#if item.artifact}
     <div
@@ -93,7 +103,10 @@
         open?.(id);
       }}
     >
-      {#if tabular}<TableCard content={tabular} />{:else}<Artifact
+      {#if tabular}<TableCard content={tabular} />{:else if code}<CodeCard
+          content={code}
+          label={item.title}
+        />{:else}<Artifact
           artifact={item.artifact}
           embedded
           card
@@ -111,6 +124,14 @@
         >{hidden === 1
           ? m.work_table_more_row_one()
           : m.work_table_more_rows({ count: hidden })}</span
+      >{/if}
+    {#if lines > 0}<span class="rows"
+        >{lines === 1
+          ? m.work_code_more_line_one()
+          : m.work_code_more_lines({ count: lines })}</span
+      >{/if}
+    {#if notes > 0}<span class="rows"
+        >{notes === 1 ? m.work_code_note_one() : m.work_code_note_count({ count: notes })}</span
       >{/if}
   </span>{#if item.actionLabel}<button
       type="button"

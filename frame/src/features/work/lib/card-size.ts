@@ -4,6 +4,7 @@ import {
   type ArtifactView,
 } from "$shared/ui/data/Artifact/artifact";
 import { TABLE_CARD, tableGrid } from "$shared/ui/data/Artifact/table";
+import { CODE_CARD_LINES, codeLines } from "$shared/ui/data/Code";
 import { DIAGRAM } from "./diagram";
 import type { CanvasItem, CanvasSize } from "./canvas-model";
 
@@ -40,6 +41,8 @@ const RESULT_CAP = 560;
 const KIND = 16;
 /** A mini table's rows: a one-line header, then up to six rows of at most two lines. */
 const TABLE_ROW = { pad: 8, header: 24 } as const;
+/** A code card's line: the label size at the block's 1.6 line height. */
+const CODE_LINE = 19.2;
 /** The chart card's plot box. */
 const CHART_PLOT = { width: 300, height: 160 } as const;
 
@@ -85,6 +88,19 @@ export function resultSize(
         width: CHART_PLOT.width + 24,
         height: KIND + header(title, CHART_PLOT.width, false) + CHART_PLOT.height + end,
       };
+    case "code": {
+      const lines = codeLines(view.content.text).length;
+      const more = lines > CODE_CARD_LINES || view.content.notes.length > 0;
+      return {
+        width: 420,
+        height: Math.ceil(
+          KIND +
+            header(title, 420 - 24, false) +
+            Math.min(lines, CODE_CARD_LINES) * CODE_LINE +
+            (more || action || known ? FRAME.footer : end),
+        ),
+      };
+    }
     case "diagram":
       return {
         width: 300,
