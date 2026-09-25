@@ -345,9 +345,32 @@ pub(super) fn artifact_data_schema_with_evidence_limit(maximum: u16) -> Value {
         variant("chart", json!({"x_label":text,"y_label":text,"series":array(object(json!({"name":text,"points":array(object(json!({"label":text,"value":text,"evidence":keys})),1,128)})),1,8),"basis":basis,"general_knowledge":boolean})),
         variant("checklist", json!({"items":array(object(json!({"text":text,"completed":boolean})),1,128)})),
         variant("evidence_collection", json!({"summary":text,"subjects":array(subject,0,32),"entries":array(object(json!({"evidence":key,"title":text,"role":text,"subject":subject_index})),0,64)})),
-        variant("browser_resource_preview", json!({"title":text,"url":text,"summary":text}))
+        variant("browser_resource_preview", json!({"title":text,"url":text,"summary":text})),
+        variant("diagram", diagram_schema())
     ]});
     data
+}
+
+/// Boxes and arrows; ids are identifiers the edges refer to.
+fn diagram_schema() -> Value {
+    let id = json!({"type":"string","pattern":"^[A-Za-z][A-Za-z0-9_]*$","maxLength":32});
+    let maybe_id =
+        json!({"type":["string","null"],"pattern":"^[A-Za-z][A-Za-z0-9_]*$","maxLength":32});
+    let bounded = |max: usize| json!({"type":"string","minLength":1,"maxLength":max});
+    let maybe_bounded = |max: usize| json!({"type":["string","null"],"maxLength":max});
+    let kinds = [
+        "client", "edge", "gateway", "service", "worker", "model", "store", "queue", "cache",
+        "storage", "external", "other",
+    ];
+    json!({
+        "nodes":array(object(json!({
+            "id":id,"name":bounded(64),"kind":{"type":"string","enum":kinds},
+            "vendor":{"type":["string","null"],"maxLength":253},
+            "note":maybe_bounded(120),"layer":maybe_id
+        })),1,40),
+        "edges":array(object(json!({"from":id,"to":id,"label":maybe_bounded(40)})),0,80),
+        "layers":array(object(json!({"id":id,"name":bounded(40)})),0,8)
+    })
 }
 
 #[cfg(test)]
@@ -360,7 +383,7 @@ mod tests {
         let variants = schema["properties"]["artifacts"]["items"]["properties"]["data"]["anyOf"]
             .as_array()
             .unwrap();
-        assert_eq!(variants.len(), 8);
+        assert_eq!(variants.len(), 9);
         for variant in variants {
             let keys = variant["properties"]
                 .as_object()
@@ -415,6 +438,27 @@ mod tests {
         assert_eq!(
             data["formatted"]["document"]["content"][1]["content"][1]["marks"][1]["attrs"]["href"],
             json!("https://docs.example/guide")
+        );
+        let diagram = json!({"output":0,"title":"Reference architecture","evidence":[],"data":{"kind":"diagram","value":{
+            "nodes":[
+                {"id":"web","name":"Web app","kind":"client","vendor":"vercel.com","note":null,"layer":"edge"},
+                {"id":"db","name":"Postgres","kind":"store","vendor":null,"note":"Tenant rows","layer":null}
+            ],
+            "edges":[{"from":"web","to":"db","label":"SQL"}],
+            "layers":[{"id":"edge","name":"Edge"}]
+        }}});
+        let resolved = serde_json::from_value::<WireArtifact>(diagram)
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert!(resolved.data.validate(0).is_ok());
+        assert_eq!(
+            serde_json::to_value(&resolved.data).unwrap()["nodes"][0],
+            json!({"id":"web","name":"Web app","kind":"client","vendor":"vercel.com","layer":"edge"})
+        );
+        let schema_text = serde_json::to_string(&schema).unwrap();
+        assert!(
+            schema_text.contains("\"gateway\"") && schema_text.contains("^[A-Za-z][A-Za-z0-9_]*$")
         );
         for (pointer, value) in [
             ("/data/value", json!([])),
