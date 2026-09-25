@@ -227,6 +227,14 @@
     }
     lift(id);
   }
+  /** A lifted tab card's one action: the tab opens in the pane, over its card. */
+  function openLiftedTab() {
+    const element = liftedElement;
+    const reference = element?.reference;
+    lifted = null;
+    if (reference?.kind === "browser" && tabs.some((tab) => tab.id === reference.tab))
+      openPane({ kind: "tab", id: reference.tab }, element!.id);
+  }
   /** A video plays in the pane, opened over its card and at least the pane's minimum. */
   function playHere(id: string) {
     const reference = snapshot?.elements.find((element) => element.id === id)?.reference;
@@ -2125,6 +2133,7 @@
   {#if lifted && cardBounds}
     <Lift
       origin={lifted.origin}
+      source={lifted.id || null}
       bounds={cardBounds}
       preferred={liftSize(liftedItem)}
       title={lifted.proposal ? m.work_line_review() : (liftedItem?.title ?? "")}
@@ -2339,21 +2348,10 @@
             title={liftedItem.title}
             meta={[liftedItem.detail, liftedItem.status].filter(Boolean).join(" · ")}
             icon={liftedElement?.reference.kind === "browser" ? GlobalIcon : undefined}
-          >
-            {#snippet actions()}{#if liftedElement?.reference.kind === "browser"}<Button
-                  size="compact"
-                  onclick={() => {
-                    const reference = liftedElement?.reference;
-                    const id = liftedElement?.id ?? null;
-                    lifted = null;
-                    if (
-                      reference?.kind === "browser" &&
-                      tabs.some((tab) => tab.id === reference.tab)
-                    )
-                      openPane({ kind: "tab", id: reference.tab }, id);
-                  }}>{m.work_env_open_here()}</Button
-                >{/if}{/snippet}
-          </LiftHeader>
+            primary={liftedElement?.reference.kind === "browser"
+              ? { label: m.work_env_open_page(), onclick: openLiftedTab }
+              : undefined}
+          />
         </div>
       {/if}
     </Lift>

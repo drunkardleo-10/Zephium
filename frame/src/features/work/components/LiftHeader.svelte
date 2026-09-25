@@ -1,3 +1,13 @@
+<script lang="ts" module>
+  /** The one thing to do with what is lifted: Open page, Save as note, Make tasks. */
+  export type LiftAction = {
+    label: string;
+    onclick?: () => void;
+    disabled?: boolean;
+    title?: string;
+  };
+</script>
+
 <script lang="ts">
   import type { Snippet } from "svelte";
   import type { IconSvgElement } from "@hugeicons/svelte";
@@ -27,8 +37,7 @@
     leading?: Snippet;
     /** A request reads whole; every other title clamps to two lines. */
     whole?: boolean;
-    /** The one thing to do with it: Open page, Save as note, Make tasks. */
-    primary?: { label: string; onclick?: () => void; disabled?: boolean; title?: string };
+    primary?: LiftAction;
     actions?: Snippet;
   } = $props();
 </script>

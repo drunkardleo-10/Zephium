@@ -339,7 +339,7 @@
     inline-size: 28px;
     block-size: 28px;
     border: 0;
-    border-radius: 50%;
+    border-radius: var(--radius-capsule);
     background: var(--color-control);
     color: var(--color-muted);
     cursor: default;

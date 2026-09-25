@@ -2,7 +2,6 @@
   import type { WorkEnvironmentReference, WorkRuntimeProjection } from "$shared/ipc/bindings";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import { mediaUrl } from "$domain/resources";
-  import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
   import HostGlyph from "./cards/HostGlyph.svelte";
   import LiftHeader from "./LiftHeader.svelte";
@@ -53,15 +52,18 @@
 
 {#if subject}
   <section class="product">
-    <LiftHeader kind={m.work_env_subject()} title={subject.name} {meta}>
+    <LiftHeader
+      kind={m.work_env_subject()}
+      title={subject.name}
+      {meta}
+      primary={subject.homepage
+        ? { label: m.work_env_open_page(), onclick: () => onopen?.(subject!.homepage!) }
+        : undefined}
+    >
       {#snippet leading()}<HostGlyph
           host={subject?.homepage ? displayHost(subject.homepage) : ""}
           size={16}
         />{/snippet}
-      {#snippet actions()}{#if subject?.homepage}<Button
-            size="compact"
-            onclick={() => onopen?.(subject!.homepage!)}>{m.work_env_open_page()}</Button
-          >{/if}{/snippet}
     </LiftHeader>
     <div class="body">
       <div class="gallery">
