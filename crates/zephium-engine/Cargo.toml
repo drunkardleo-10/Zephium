@@ -151,6 +151,7 @@ zephium-agentic = { workspace = true, optional = true }
 zephium-core.workspace = true
 zephium-extension-runtime-api.workspace = true
 wry.workspace = true
+dirs = "6"
 serde_json.workspace = true
 serde = { workspace = true, optional = true }
 sha2 = { version = "=0.10.9", optional = true }
@@ -168,6 +169,11 @@ windows = { version = "0.61", features = [
     "Wdk_System_SystemServices",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_System_Com",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_LibraryLoader",
@@ -212,6 +218,8 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "objc2-app-kit",
     "WKBackForwardList",
     "WKBackForwardListItem",
+    "WKDownload",
+    "WKDownloadDelegate",
     "WKContentWorld",
     "WKContentRuleList",
     "WKContentRuleListStore",

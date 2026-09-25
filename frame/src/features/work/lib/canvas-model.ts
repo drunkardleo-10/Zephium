@@ -1,4 +1,5 @@
 import type { MediaAssetV1 } from "$domain/resources";
+import type { IconRef } from "$shared/ipc/bindings";
 import type { ArtifactView, FindingView, SubjectView } from "$shared/ui/data/Artifact";
 import type { Node } from "@xyflow/svelte";
 import type { HumanPage } from "./work-human";
@@ -34,8 +35,8 @@ export type CanvasItem = {
   detail: string;
   status: string;
   area?: string | null;
-  /** Fixed-raster native favicon only; never a remote image URL. */
-  favicon?: string | null;
+  /** A cached native site icon by origin; never a remote image URL. */
+  icon?: IconRef | null;
   artifact?: ArtifactView;
   layout?: "artifact";
   actionLabel?: string;
@@ -371,7 +372,8 @@ export function reconcileNodes(
         node.data.unavailable === item.unavailable &&
         node.data.detail === item.detail &&
         node.data.status === item.status &&
-        node.data.favicon === item.favicon &&
+        node.data.icon?.origin === item.icon?.origin &&
+        node.data.icon?.revision === item.icon?.revision &&
         node.data.artifact === item.artifact &&
         node.data.layout === item.layout &&
         node.data.actionLabel === item.actionLabel &&

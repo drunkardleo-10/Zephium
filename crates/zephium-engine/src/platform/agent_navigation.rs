@@ -1322,7 +1322,9 @@ impl AgentNavigationController {
             }
             if !matches!(
                 event.phase,
-                wry::NavigationEventPhase::Committed | wry::NavigationEventPhase::Failed
+                wry::NavigationEventPhase::Committed
+                    | wry::NavigationEventPhase::Failed
+                    | wry::NavigationEventPhase::Cancelled
             ) || state.bootstrap_native_id != Some(event.id)
             {
                 return Ok(AgentNavigationObservation::none());
@@ -1333,7 +1335,9 @@ impl AgentNavigationController {
                 wry::NavigationEventPhase::Committed if event.url == "about:blank" => {
                     Ok(AgentNavigationObservation::document_committed())
                 }
-                wry::NavigationEventPhase::Failed => Ok(AgentNavigationObservation::none()),
+                wry::NavigationEventPhase::Failed | wry::NavigationEventPhase::Cancelled => {
+                    Ok(AgentNavigationObservation::none())
+                }
                 wry::NavigationEventPhase::Committed => Err(()),
                 wry::NavigationEventPhase::Started
                 | wry::NavigationEventPhase::Redirected
@@ -1426,7 +1430,11 @@ impl AgentNavigationController {
             wry::NavigationEventPhase::Committed => {
                 expected.commit(&event.url, armed.redirects_observed)
             }
-            wry::NavigationEventPhase::Failed => Err(ContextPortFailure::NativeRefused),
+            // A cancelled navigation (a download handoff, a policy refusal)
+            // ends without a document, exactly as a failed one does.
+            wry::NavigationEventPhase::Failed | wry::NavigationEventPhase::Cancelled => {
+                Err(ContextPortFailure::NativeRefused)
+            }
             wry::NavigationEventPhase::Started
             | wry::NavigationEventPhase::Redirected
             | wry::NavigationEventPhase::Finished => return Ok(AgentNavigationObservation::none()),

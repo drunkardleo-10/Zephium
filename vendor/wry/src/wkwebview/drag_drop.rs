@@ -55,6 +55,35 @@ pub(crate) fn collect_paths(drag_info: &ProtocolObject<dyn NSDraggingInfo>) -> V
   drag_drop_paths
 }
 
+// Validate the complete native cohort before falling back to WebKit. A
+// truncated Rust path list must never authorize an unbounded original drop.
+fn native_drop_is_bounded(
+  this: &WryWebView,
+  drag_info: &ProtocolObject<dyn NSDraggingInfo>,
+) -> bool {
+  if this.isHiddenOrHasHiddenAncestor() {
+    return false;
+  }
+  let Some(items) = drag_info.draggingPasteboard().pasteboardItems() else {
+    return true;
+  };
+  if items.len() > MAX_DRAG_DROP_FILES {
+    return false;
+  }
+  let file_url_type = unsafe { NSPasteboardTypeFileURL };
+  for item in items.iter() {
+    if let Some(value) = item.stringForType(file_url_type) {
+      let Some(value) = bounded_nsstring(&value, DRAG_DROP_FILE_URL_LIMIT) else {
+        return false;
+      };
+      if !NSURL::URLWithString(&NSString::from_str(&value)).is_some_and(|url| url.isFileURL()) {
+        return false;
+      }
+    }
+  }
+  true
+}
+
 pub(crate) fn dragging_entered(
   this: &WryWebView,
   drag_info: &ProtocolObject<dyn NSDraggingInfo>,
@@ -70,6 +99,9 @@ pub(crate) fn dragging_entered(
   let position = (dl.x as i32, (frame.size.height - dl.y) as i32);
 
   if !listener(DragDropEvent::Enter { paths, position }) {
+    if !native_drop_is_bounded(this, drag_info) {
+      return NSDragOperation::None;
+    }
     // Reject the Wry file drop (invoke the OS default behaviour)
     unsafe { objc2::msg_send![super(this), draggingEntered: drag_info] }
   } else {
@@ -89,18 +121,10 @@ pub(crate) fn dragging_updated(
   let position = (dl.x as i32, (frame.size.height - dl.y) as i32);
 
   if !listener(DragDropEvent::Over { position }) {
-    unsafe {
-      let os_operation = objc2::msg_send![super(this), draggingUpdated: drag_info];
-      if os_operation == NSDragOperation::None {
-        // 0 will be returned for a drop on any arbitrary location on the webview.
-        // We'll override that with NSDragOperationCopy.
-        NSDragOperation::Copy
-      } else {
-        // A different NSDragOperation is returned when a file is hovered over something like
-        // a <input type="file">, so we'll make sure to preserve that behaviour.
-        os_operation
-      }
+    if this.isHiddenOrHasHiddenAncestor() {
+      return NSDragOperation::None;
     }
+    unsafe { objc2::msg_send![super(this), draggingUpdated: drag_info] }
   } else {
     NSDragOperation::Copy
   }
@@ -119,6 +143,9 @@ pub(crate) fn perform_drag_operation(
   let position = (dl.x as i32, (frame.size.height - dl.y) as i32);
 
   if !listener(DragDropEvent::Drop { paths, position }) {
+    if !native_drop_is_bounded(this, drag_info) {
+      return Bool::NO;
+    }
     // Reject the Wry drop (invoke the OS default behaviour)
     unsafe { objc2::msg_send![super(this), performDragOperation: drag_info] }
   } else {

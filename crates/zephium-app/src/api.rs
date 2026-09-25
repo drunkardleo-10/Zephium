@@ -352,6 +352,8 @@ pub enum BrowserPage {
     Settings,
     History,
     Downloads,
+    Tasks,
+    Notes,
 }
 
 impl BrowserPage {
@@ -361,6 +363,8 @@ impl BrowserPage {
             Self::Settings => "browser.settings",
             Self::History => "browser.history",
             Self::Downloads => "browser.downloads",
+            Self::Tasks => "browser.tasks",
+            Self::Notes => "browser.notes",
         }
     }
 }
@@ -396,6 +400,23 @@ pub enum Command {
         expected_profile: ProfileId,
         import: Box<zephium_core::resources::MediaImport>,
         done: ResourceCompletion,
+    },
+    DownloadCall {
+        expected_profile: ProfileId,
+        call: Box<zephium_core::downloads::DownloadCall>,
+        done: zephium_core::downloads::DownloadCompletion,
+    },
+    HistoryCall {
+        expected_profile: ProfileId,
+        call: Box<zephium_ipc::HistoryCall>,
+        done: HistoryCompletion,
+    },
+    /// Hands the shell its notes service, once, after startup.
+    AttachNotes(NotesAttachment),
+    NoteCall {
+        expected_profile: ProfileId,
+        call: Arc<zephium_core::notes::NoteCall>,
+        done: NoteCompletion,
     },
     #[cfg(feature = "work-execution")]
     AttachWork(crate::work::WorkAttachment),
@@ -438,7 +459,10 @@ pub enum Command {
     /// windows hide native content views so the engine can lower their memory
     /// priority and, after the normal idle grace, suspend them.
     SetWindowVisible(bool),
-    SetSidebarWidth(f64),
+    /// The sidebar's width, and whether it changed by a deliberate change of
+    /// shape — a toggle, a snap, a tool opening — that the content should
+    /// travel with, rather than by a drag that it should simply follow.
+    SetSidebarWidth(f64, bool),
     ShowBrowserPage(Option<BrowserPage>),
     /// Shows the transient Work browser pane over an existing Space tab or a
     /// fresh tab navigated to `Url`. `rect` is window-local and clamped.
@@ -621,6 +645,15 @@ pub enum Command {
     /// Latest redacted state from the explicitly constructed product
     /// distribution worker. This is replaceable observation, not authority.
     ExtensionDistributionStatusChanged(ExtensionDistributionStatus),
+    SearchSupplementaryFinished {
+        context: Box<zephium_ipc::SearchContext>,
+        query: String,
+    },
+    SearchAdditional {
+        context: Box<zephium_ipc::SearchContext>,
+        query: String,
+        results: Vec<zephium_ipc::SearchResult>,
+    },
     Search(String),
     SearchScoped {
         query: String,
@@ -633,7 +666,10 @@ pub enum Command {
         context: Box<zephium_ipc::SearchContext>,
         action: zephium_ipc::SearchAction,
     },
-    OpenUrl(String),
+    OpenUrl {
+        input: String,
+        new_tab: bool,
+    },
     SetAppSetting {
         key: String,
         value: String,
@@ -766,9 +802,10 @@ pub enum Command {
     },
 }
 
-type ResourceCallback = Box<dyn FnOnce(zephium_core::resources::ResourceReply) + Send>;
+type Completion<T> = Arc<Mutex<Option<Box<dyn FnOnce(T) + Send>>>>;
+
 #[derive(Clone)]
-pub struct ResourceCompletion(Arc<Mutex<Option<ResourceCallback>>>);
+pub struct ResourceCompletion(Completion<zephium_core::resources::ResourceReply>);
 impl ResourceCompletion {
     pub fn new(done: impl FnOnce(zephium_core::resources::ResourceReply) + Send + 'static) -> Self {
         Self(Arc::new(Mutex::new(Some(Box::new(done)))))
@@ -787,5 +824,59 @@ impl ResourceCompletion {
 impl fmt::Debug for ResourceCompletion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ResourceCompletion")
+    }
+}
+
+#[derive(Clone)]
+pub struct NotesAttachment(pub zephium_core::ports::notes::SharedNotes);
+impl fmt::Debug for NotesAttachment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NotesAttachment")
+    }
+}
+
+#[derive(Clone)]
+pub struct NoteCompletion(Completion<zephium_core::notes::NoteReply>);
+impl NoteCompletion {
+    pub fn new(done: impl FnOnce(zephium_core::notes::NoteReply) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, reply: zephium_core::notes::NoteReply) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(reply);
+        }
+    }
+}
+impl fmt::Debug for NoteCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NoteCompletion")
+    }
+}
+
+#[derive(Clone)]
+pub struct HistoryCompletion(Completion<zephium_ipc::HistoryResponse>);
+impl HistoryCompletion {
+    pub fn new(done: impl FnOnce(zephium_ipc::HistoryResponse) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, response: zephium_ipc::HistoryResponse) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(response);
+        }
+    }
+}
+impl fmt::Debug for HistoryCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HistoryCompletion")
     }
 }

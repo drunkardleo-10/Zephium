@@ -25,6 +25,7 @@ impl Shell {
         // HMR, crash recovery); state and native surfaces must not be rebuilt.
         if self.windows.focused().is_some() {
             let _ = self.relayout();
+            self.forget_delivered_icons(zephium_ipc::IconSurface::Chrome);
             self.project_items();
             self.project_browser_page();
             return;

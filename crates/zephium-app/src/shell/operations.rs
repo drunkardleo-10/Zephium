@@ -33,7 +33,7 @@ impl Shell {
                 revision,
                 anchor,
             } => self.operation_invoke_extension_action(runtime, revision, anchor),
-            Command::OpenUrl(input) => self.operation_open_url(input),
+            Command::OpenUrl { input, new_tab } => self.operation_open_url(input, new_tab),
             Command::SetAppSetting { key, value } => self.operation_set_app_setting(key, value),
             Command::RetryContentPolicy {
                 profile,
@@ -150,16 +150,33 @@ impl Shell {
         mutation_result(self.commit(effects))
     }
 
-    pub(super) fn operation_open_url(&mut self, input: String) -> OperationDisposition {
-        if navigation::classify(&input).is_none() {
+    /// Opens an address in the focused window without naming a tab, which the
+    /// launcher panel and the history surfaces cannot do.
+    pub(super) fn operation_open_url(
+        &mut self,
+        input: String,
+        new_tab: bool,
+    ) -> OperationDisposition {
+        let Some(input) = self
+            .search
+            .engine
+            .configured_classify(&input, &self.search.custom_url)
+            .map(|url| url.to_string())
+        else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
-        }
-        if self.active_browser_page().is_some() {
-            self.browser_after_return = Some(Box::new(Command::OpenUrl(input)));
+        };
+        // Work hands an address back to Browse rather than opening it behind itself.
+        if self.active_browser_page() == Some(crate::BrowserPage::Work) {
+            self.browser_after_return = Some(Box::new(Command::OpenUrl { input, new_tab }));
             return self.operation_show_browser_page(None);
         }
-        if self.windows.focused().is_none() {
+        let Some(active) = self.windows.focused().map(|window| window.active) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
+        };
+        if let Some(id) = active.filter(|_| !new_tab) {
+            // Navigating in place also returns from a browser page, which is
+            // what opening a row from the history library should do.
+            return self.operation_navigate(id, input);
         }
         let Some((id, mut effects)) = self.open_tab_with_id() else {
             // Reaching the bounded item limit must not repurpose and navigate
@@ -232,8 +249,22 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
-        if navigation::classify(&input).is_none() {
+        let Some(input) = self
+            .search
+            .engine
+            .configured_classify(&input, &self.search.custom_url)
+            .map(|url| url.to_string())
+        else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+        };
+        if let Some(context) = self
+            .search
+            .context
+            .as_ref()
+            .filter(|context| context.session_id.starts_with(&format!("newtab:{id}:")))
+        {
+            let session = context.session_id.clone();
+            self.cancel_scoped_search(&session);
         }
         if let Some(PendingDiscardProbe::Closing {
             recreate,
@@ -440,6 +471,13 @@ impl Shell {
                 OperationReason::StoreAdmissionRejected,
             );
         }
+        if key == "search.custom-url" {
+            self.search.custom_url = value.clone();
+        }
+        if key == "search.engine" {
+            self.search.engine =
+                zephium_core::search::SearchEngine::from_id(&value).unwrap_or_default();
+        }
         // This projection is downstream of truthful store-queue admission.
         // The desktop composition root applies native theme state from this
         // signal, never optimistically from the IPC request itself.
@@ -475,6 +513,7 @@ impl Shell {
                 || operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged),
                 |id| self.operation_activate(id),
             ),
+            "tab.reopen" => self.operation_reopen_closed_tab(),
             "tab.next" => self.operation_cycle_tab(1),
             "tab.previous" => self.operation_cycle_tab(-1),
             "nav.back" => active.map_or_else(
@@ -508,6 +547,22 @@ impl Shell {
                 OperationOutcome::Rejected,
                 OperationReason::UnsupportedCommand,
             ),
+        }
+    }
+
+    /// Restores the newest tab closed in the focused window's space. Nothing
+    /// to restore is a no-op, not a failure.
+    fn operation_reopen_closed_tab(&mut self) -> OperationDisposition {
+        if self.active_browser_page().is_some() {
+            self.browser_after_return = Some(Box::new(Command::Run("tab.reopen".into())));
+            return self.operation_show_browser_page(None);
+        }
+        let Some(profile) = self.windows.focused().map(|window| window.profile) else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
+        };
+        match self.restore_recently_closed_tab(profile) {
+            Some((_, native)) => mutation_result(native),
+            None => operation_result(OperationOutcome::NoOp, OperationReason::MutationApplied),
         }
     }
 

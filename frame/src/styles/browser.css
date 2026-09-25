@@ -9,6 +9,25 @@
   height: 100%;
   padding-inline-start: 8px;
 }
+/* The new tab sits above the sidebar, as a native page does: whatever the
+   column lets go of while it changes shape passes beneath it. The sidebar's
+   own floating panels still rise above it. Browser pages are left alone: a
+   layer here would trap their full-window dialogs beneath those panels. */
+[data-zephium-new-tab] {
+  position: relative;
+  z-index: 1;
+}
+.stage-page {
+  height: 100%;
+  transform-origin: 50% 40%;
+  animation: stage-in var(--motion-page) var(--ease-emphasized) both;
+}
+@keyframes stage-in {
+  from {
+    opacity: 0;
+    scale: 0.985;
+  }
+}
 .settings-shell,
 .library-shell {
   display: flex;
@@ -18,7 +37,6 @@
   overflow: hidden;
   border-radius: var(--content-radius);
   background: var(--color-page);
-  box-shadow: inset 0 0 0 1px var(--color-border);
 }
 .internal-toolbar {
   display: flex;
@@ -30,31 +48,12 @@
   font-size: 12px;
   color: var(--color-muted);
 }
-.toolbar-separator {
-  color: var(--color-faint);
-  margin-inline: 2px;
-}
 .toolbar-current {
   color: var(--color-text);
-}
-.settings-body {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-}
-.settings-navigation {
-  display: flex;
-  flex-direction: column;
-  flex: 0 0 196px;
-  padding: 8px 10px 16px;
-}
-.settings-navigation > .ui-search {
-  margin: 0 2px 12px;
 }
 .settings-navigation-list {
   overflow-y: auto;
   min-height: 0;
-  scrollbar-width: none;
 }
 .settings-nav-group {
   margin-block: 10px 16px;
@@ -75,7 +74,7 @@
   padding: 9px 10px;
   margin-block: 2px;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-row);
   text-align: start;
   background: transparent;
   color: var(--color-muted);
@@ -83,15 +82,19 @@
   line-height: 18px;
   cursor: default;
 }
+/* Positioned so its label stays drawn above a plate travelling beneath it. */
+.settings-nav-item {
+  position: relative;
+}
 .settings-nav-item > svg {
   flex: none;
 }
 .settings-nav-item,
 .settings-back {
   transition:
-    background-color var(--motion-base) var(--ease-smooth),
-    color var(--motion-base) var(--ease-smooth),
-    scale var(--motion-slow) var(--ease-smooth);
+    background-color var(--motion-instant) var(--ease-smooth),
+    color var(--motion-instant) var(--ease-smooth),
+    scale var(--motion-fast) var(--ease-smooth);
 }
 .settings-nav-item,
 .settings-back,
@@ -109,7 +112,7 @@
 /* A section change lands like a native settings pane: the new content rises
    into place while it fades in, on the same curve as the menus. */
 .settings-view {
-  animation: settings-view-in var(--motion-page) var(--ease-smooth) both;
+  animation: settings-view-in var(--motion-page) var(--ease-emphasized) both;
 }
 @keyframes settings-view-in {
   from {
@@ -118,51 +121,45 @@
   }
 }
 .browse-tab {
-  transition: scale var(--motion-slow) var(--ease-smooth);
+  transition: scale var(--motion-fast) var(--ease-smooth);
 }
 .browse-tab:active {
   scale: 0.985;
   transition-duration: var(--motion-fast);
 }
+/* The same row vocabulary the sidebar uses. A ring around the current item
+   makes a selection read as a button that happens to be stuck down; every
+   selected row in the product is a plate of light and nothing else, so the
+   two columns of this window finally agree with each other. */
 .settings-nav-item:hover {
-  background: var(--color-fill);
+  background: var(--row-hover);
   color: var(--color-text);
 }
 .settings-nav-item[aria-current="page"] {
-  background: var(--color-fill-active);
+  background: var(--row-active);
+  box-shadow: var(--row-rim);
   color: var(--color-text);
-  box-shadow: var(--shadow-control);
 }
+/* The shell owns the page ground for both of its columns, so the content
+   column adds nothing but its own edge. */
 .settings-content {
   min-width: 0;
   flex: 1;
   overflow-y: auto;
-  border-radius: 14px 0 0 0;
-  background: var(--color-page);
+  border-radius: var(--radius-control) 0 0 0;
+  background: transparent;
   box-shadow: -1px 0 0 var(--color-border);
   container-type: inline-size;
 }
 
 /* Pages read at the roomier scale; every primitive inside follows. */
-/* Over a native material the internal pages let a little of the glass
-   through; solid hosts keep the opaque page. */
-:root[data-material="vibrancy"] :is(.settings-shell, .library-shell),
-:root[data-material="liquid_glass"] :is(.settings-shell, .library-shell),
-:root[data-material="acrylic"] :is(.settings-shell, .library-shell) {
-  background: color-mix(in srgb, var(--color-page) 86%, transparent);
-}
-:root[data-material="vibrancy"] .settings-content,
-:root[data-material="liquid_glass"] .settings-content,
-:root[data-material="acrylic"] .settings-content {
-  background: transparent;
-}
 .settings-page {
   --text-body: var(--text-page-body);
   --text-label: 12px;
 
-  max-width: 820px;
+  max-width: 850px;
   margin-inline: auto;
-  padding: 38px clamp(22px, 5cqi, 60px) 64px;
+  padding: 52px clamp(22px, 5cqi, 60px) 64px;
 }
 .settings-page-heading {
   margin-block-end: 34px;
@@ -179,7 +176,6 @@
   margin: 8px 0 0;
   font-size: 13px;
   line-height: 1.6;
-  color: var(--color-muted);
 }
 .settings-page .ui-settings-copy p {
   max-width: 440px;
@@ -191,20 +187,10 @@
 .settings-feedback {
   padding: 12px 16px;
   margin-block-end: 20px;
-  border-radius: 12px;
+  border-radius: var(--radius-control);
   background: var(--color-fill);
   color: var(--color-danger);
   font-size: 12px;
-}
-.settings-availability {
-  display: block;
-  font-size: 11px;
-  color: var(--color-faint);
-  line-height: 1.6;
-  margin-block: 12px;
-}
-.settings-mobile-nav {
-  display: none;
 }
 .appearance-previews {
   display: flex;
@@ -215,7 +201,7 @@
   flex: 1;
   min-width: 0;
   padding: 3px;
-  border-radius: 13px;
+  border-radius: var(--radius-control);
   border: 1px solid transparent;
 }
 .appearance-preview[data-selected="true"] {
@@ -227,7 +213,7 @@
   padding: 6px;
   gap: 6px;
   background: #e2e3e8;
-  border-radius: 10px;
+  border-radius: var(--radius-row);
   overflow: hidden;
 }
 .mini-sidebar {
@@ -323,7 +309,7 @@
   border: 0;
   background: var(--color-surface);
   color: var(--color-muted);
-  border-radius: 13px;
+  border-radius: var(--radius-control);
   padding: 18px;
   cursor: default;
 }
@@ -402,21 +388,15 @@
   font-size: 13px;
   line-height: 1.7;
 }
-.about-values {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  justify-content: center;
-}
 .zephium-wordmark {
   display: block;
-  width: 236px;
-  height: 79px;
+  width: 260px;
+  height: 38px;
   flex: none;
   background: var(--color-text);
   opacity: 0.9;
-  mask: url(/zephium-text.svg) center / contain no-repeat;
-  -webkit-mask: url(/zephium-text.svg) center / contain no-repeat;
+  mask: url(/zephium-wordmark.svg) center / contain no-repeat;
+  -webkit-mask: url(/zephium-wordmark.svg) center / contain no-repeat;
 }
 .newtab-page {
   position: relative;
@@ -425,12 +405,12 @@
   align-items: center;
   justify-content: center;
   height: 100%;
-  gap: 26px;
-  padding: 24px 32px 72px;
+  padding: 24px 32px 60px;
 }
 .newtab-search {
   width: 100%;
-  max-width: 530px;
+  max-width: 520px;
+  margin-top: 28px;
 }
 .newtab-customize {
   position: absolute;
@@ -445,9 +425,9 @@
   align-items: center;
   justify-content: center;
   gap: 14px;
-  background: var(--color-page);
+  background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: 14px;
+  border-radius: var(--radius-control);
   margin-block-end: 28px;
 }
 .newtab-preview .zephium-wordmark {
@@ -457,7 +437,7 @@
 .preview-search {
   padding: 10px 20px;
   width: 65%;
-  border-radius: 24px;
+  border-radius: var(--radius-card);
   background: var(--color-fill);
   font-size: 10px;
   color: var(--color-faint);
@@ -470,7 +450,7 @@
 .preview-favorites i {
   width: 22px;
   height: 22px;
-  border-radius: 8px;
+  border-radius: var(--radius-row);
   background: var(--color-fill);
 }
 .essentials-hint {
@@ -482,21 +462,13 @@
   padding: 8px;
   margin: 4px 0 8px;
   border: 1px dashed var(--color-border-strong);
-  border-radius: 12px;
+  border-radius: var(--radius-control);
   color: var(--color-faint);
   font-size: 11px;
 }
 .essentials-hint[data-dropping="true"] {
   background: var(--color-fill);
   border-color: var(--color-accent);
-}
-.profile-avatar {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  background: var(--color-fill);
 }
 .library-content {
   width: 100%;
@@ -517,7 +489,7 @@
   place-items: center;
   height: 64px;
   width: 64px;
-  border-radius: 22px;
+  border-radius: var(--radius-card);
   background: var(--color-fill);
   color: var(--color-muted);
   margin-block-end: 20px;
@@ -532,12 +504,6 @@
   line-height: 1.7;
   color: var(--color-muted);
   max-width: 340px;
-}
-:root[data-theme="dark"] .content-pane {
-  background: color-mix(in srgb, var(--color-canvas) 90%, transparent);
-}
-:root[data-theme="light"] .content-pane {
-  background: color-mix(in srgb, var(--color-canvas) 94%, transparent);
 }
 @container (max-width: 450px) {
   .settings-page .ui-settings-row {
@@ -556,24 +522,12 @@
   }
 }
 @media (max-width: 1000px) {
-  .settings-navigation {
-    flex-basis: 176px;
-    padding-inline: 8px;
-  }
   .settings-nav-item {
     font-size: 11px;
     gap: 7px;
   }
 }
 @media (max-width: 820px) {
-  .settings-navigation {
-    display: none;
-  }
-  .settings-mobile-nav {
-    display: grid;
-    gap: 12px;
-    margin-bottom: 26px;
-  }
   .settings-page {
     padding: 24px 20px 40px;
   }
@@ -607,7 +561,7 @@
   inset-inline: 16px;
   bottom: 60px;
   padding: 12px;
-  border-radius: 12px;
+  border-radius: var(--radius-control);
   background: var(--color-raised);
   color: var(--color-danger);
   font-size: 12px;
@@ -619,6 +573,7 @@
   padding-block-start: 0;
 }
 .sidebar-columns {
+  position: relative;
   display: flex;
   flex: 1;
   min-height: 0;
@@ -635,6 +590,7 @@
   flex: 0 0 56px;
 }
 .settings-sidebar-navigation {
+  position: relative;
   min-height: 0;
   flex: 1;
   display: flex;
@@ -649,7 +605,7 @@
   padding: 8px;
   margin-bottom: 10px;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-row);
   color: var(--color-muted);
   background: transparent;
   font-size: 12px;
@@ -667,7 +623,7 @@
   min-height: 34px;
   padding-inline: 10px;
   background: var(--color-fill);
-  border-radius: 12px;
+  border-radius: var(--radius-row);
   box-shadow: var(--shadow-field);
   margin-bottom: 12px;
   color: var(--color-faint);
@@ -686,16 +642,12 @@
   outline-offset: 2px;
 }
 .settings-sidebar-navigation .settings-nav-item {
-  font-size: 12px;
+  font-size: 13px;
   padding-block: 8px;
 }
 .settings-shell > .settings-content {
   border-radius: inherit;
   box-shadow: none;
-}
-.settings-page {
-  padding-block-start: 52px;
-  max-width: 850px;
 }
 .settings-eyebrow {
   display: block;
@@ -709,7 +661,7 @@
   border-top: 1px solid var(--color-border);
 }
 [data-setting] {
-  border-radius: 12px;
+  border-radius: var(--radius-control);
   scroll-margin-block: 32px;
 }
 [data-setting][data-highlighted="true"] {
@@ -759,7 +711,7 @@
 }
 .collection-empty {
   border: 1px dashed var(--color-border-strong);
-  border-radius: 13px;
+  border-radius: var(--radius-control);
   padding: 24px 16px;
   font-size: 12px;
   text-align: center;
@@ -770,7 +722,7 @@
   padding: 0;
   margin: 0;
   background: var(--color-surface);
-  border-radius: 13px;
+  border-radius: var(--radius-control);
   overflow: hidden;
 }
 .settings-collection li {
@@ -822,7 +774,7 @@
   gap: 16px;
   padding: 18px;
   background: var(--color-surface);
-  border-radius: 13px;
+  border-radius: var(--radius-control);
   margin-bottom: 26px;
 }
 .settings-dialog-overlay {
@@ -830,7 +782,7 @@
   inset: 0;
   z-index: 80;
   background: rgb(0 0 0 / 0.3);
-  animation: interface-fade 160ms var(--ease-out-quiet);
+  animation: interface-fade var(--motion-base) var(--ease-out);
 }
 .settings-dialog {
   position: fixed;
@@ -841,14 +793,14 @@
   width: min(480px, calc(100vw - 48px));
   max-height: calc(100vh - 48px);
   overflow-y: auto;
-  border-radius: 20px;
+  border-radius: var(--radius-card);
   padding: 26px;
   color: var(--color-text);
-  background: var(--color-page);
+  background: var(--color-raised);
   box-shadow: var(--shadow-overlay);
   border: 1px solid var(--color-border-strong);
   outline: none;
-  animation: interface-fade 160ms var(--ease-out-quiet);
+  animation: interface-fade var(--motion-base) var(--ease-out);
 }
 .settings-dialog-title {
   margin: 0;
@@ -925,7 +877,7 @@
   place-items: center;
   background: var(--color-fill);
   border: 1px solid transparent;
-  border-radius: 14px;
+  border-radius: var(--radius-control);
   color: var(--color-muted);
 }
 .profile-icon-choices button[aria-pressed="true"] {
@@ -938,145 +890,9 @@
 }
 .diagnostic-preview {
   background: var(--color-fill);
-  border-radius: 12px;
+  border-radius: var(--radius-control);
   padding: 16px;
   color: var(--color-muted);
-}
-.mode-footer {
-  padding: 8px 8px 10px;
-}
-.mode-footer .ui-choices > div {
-  min-height: 28px;
-}
-.mode-footer .ui-choices label > span {
-  font-size: 11px;
-}
-.mode-rail {
-  display: flex;
-  justify-content: center;
-  padding-block: 8px;
-}
-.tool-panel {
-  min-width: 0;
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  background: var(--color-fill);
-  border-radius: 13px;
-  overflow: hidden;
-  margin-bottom: 1px;
-}
-.tool-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 44px;
-  padding: 6px 8px 6px 14px;
-  flex: none;
-}
-.tool-header h2 {
-  flex: 1;
-  font-size: 13px;
-  margin: 0;
-  font-weight: 550;
-}
-.tool-controls {
-  display: grid;
-  gap: 12px;
-  padding: 0 12px 8px;
-}
-.tool-content {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 12px;
-}
-.tool-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 260px;
-  height: 100%;
-  padding: 24px;
-  text-align: center;
-}
-.tool-empty > span {
-  display: grid;
-  place-items: center;
-  width: 54px;
-  height: 54px;
-  border-radius: 20px;
-  background: var(--color-fill);
-  color: var(--color-muted);
-  margin-bottom: 18px;
-}
-.tool-empty h3 {
-  font-size: 15px;
-  font-weight: 500;
-  letter-spacing: -0.02em;
-  margin: 0 0 9px;
-}
-.tool-empty p {
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--color-muted);
-  margin: 0;
-}
-.tool-draft {
-  display: grid;
-  gap: 16px;
-}
-.tool-composer {
-  position: relative;
-  margin: 8px 12px 0;
-  padding: 12px 12px 34px;
-  background: var(--color-fill);
-  border-radius: 14px;
-  box-shadow: var(--shadow-field);
-}
-.tool-composer textarea {
-  width: 100%;
-  resize: none;
-  border: 0;
-  outline: none;
-  background: transparent;
-  color: var(--color-text);
-  font: inherit;
-  font-size: 12px;
-}
-.tool-composer button {
-  position: absolute;
-  right: 8px;
-  bottom: 8px;
-  height: 26px;
-  width: 26px;
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: 50%;
-  background: var(--color-accent);
-  color: var(--color-on-accent);
-}
-.tool-composer button:disabled {
-  opacity: 0.3;
-}
-.tool-footnote {
-  color: var(--color-faint);
-  font-size: 10px;
-  line-height: 1.5;
-  padding: 12px;
-  text-align: center;
-}
-.newtab-page {
-  gap: 0;
-  padding-bottom: 60px;
-}
-.zephium-wordmark {
-  width: 260px;
-  height: 38px;
-  mask-image: url(/zephium-wordmark.svg);
-  -webkit-mask-image: url(/zephium-wordmark.svg);
 }
 .newtab-greeting {
   font-size: 15px;
@@ -1084,10 +900,6 @@
   color: var(--color-muted);
   margin: 20px 0 0;
   letter-spacing: -0.01em;
-}
-.newtab-search {
-  margin-top: 28px;
-  max-width: 520px;
 }
 .newtab-clock {
   position: absolute;
@@ -1104,12 +916,6 @@
   color: var(--color-muted);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
-}
-:root[data-theme="dark"] .content-pane {
-  background: color-mix(in srgb, var(--color-canvas) 78%, transparent);
-}
-:root[data-theme="light"] .content-pane {
-  background: color-mix(in srgb, var(--color-canvas) 84%, transparent);
 }
 @keyframes interface-fade {
   from {
@@ -1129,53 +935,46 @@
   }
 }
 @media (forced-colors: active) {
-  .settings-dialog,
-  .tool-panel {
+  .settings-dialog {
     border: 1px solid CanvasText;
   }
   .settings-sidebar-search {
     border: 1px solid ButtonText;
   }
 }
-.sidebar-columns[data-phase="exit"] .sidebar-browser-column > :not(.mode-footer),
-.sidebar-columns[data-phase="exit"] .tool-panel {
-  opacity: 0.25;
-  transition: opacity 60ms ease-out;
+/* A change of shape: the column's width travels on the page's curve, while
+   what it holds keeps its final width, so the morph's measured positions
+   stay true and only the space beside the column moves. */
+.browser-sidebar[data-reshaping="true"] {
+  transition: width var(--motion-page) var(--ease-emphasized);
 }
-.sidebar-columns[data-phase="enter"] .sidebar-browser-column,
-.sidebar-columns[data-phase="enter"] .tool-panel {
-  animation: sidebar-enter 140ms var(--ease-out-quiet);
+/* Width only: the column still fills the sidebar's height, or the dock at
+   its foot rides up under the tabs for the length of the change. */
+.browser-sidebar[data-reshaping="true"] > .sidebar-columns {
+  width: var(--sidebar-width);
 }
-@keyframes sidebar-enter {
+/* The header is one shape or the other, never both; the new one fades in. */
+.browser-sidebar[data-header-fresh="true"] > header {
+  animation: interface-fade var(--motion-slow) var(--ease-out) both;
+}
+
+/* The launch cascade: the column's contents settle in from the top, one
+   beat apart, so the window arrives as a list being laid out rather than as
+   a picture of one. Past the first screenful every row shares the last
+   beat — nobody watches row forty arrive. */
+.sidebar-columns:is([data-launch="armed"], [data-launch="running"]) [data-cascade] {
+  animation: cascade-in var(--motion-page) var(--ease-emphasized) both;
+  animation-delay: calc(min(var(--cascade), 14) * 20ms);
+}
+/* Armed: every row waits at the start of its entrance until the window is
+   on screen, so none is ever seen before it arrives. */
+.sidebar-columns[data-launch="armed"] [data-cascade] {
+  animation-play-state: paused;
+}
+@keyframes cascade-in {
   from {
-    opacity: 0.3;
-    transform: translateX(-3px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-.sidebar-columns[data-launch="true"] .browse-tab[data-entrance="true"]:not([data-selected="true"]) {
-  animation: tab-enter 140ms var(--ease-out-quiet) var(--entrance-delay) both;
-}
-@keyframes tab-enter {
-  from {
-    opacity: 0.65;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .sidebar-columns[data-phase] *,
-  .sidebar-columns[data-launch] * {
-    animation: none !important;
-    transition: none !important;
-    opacity: 1 !important;
-    transform: none !important;
+    opacity: 0;
+    translate: 0 8px;
   }
 }
 .folder-row {
@@ -1186,7 +985,7 @@
   gap: 10px;
   background: transparent;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--radius-row);
   color: var(--color-muted);
   font: inherit;
   font-size: 12px;
@@ -1207,115 +1006,75 @@
 }
 .folder-chevron {
   display: flex;
-  transition: transform 160ms var(--ease-out-quiet);
+  transition: transform var(--motion-base) var(--ease-out);
 }
 .folder-chevron[data-expanded="true"] {
   transform: rotate(90deg);
 }
-/* One footer, one identity entry point. */
-.sidebar-footer {
-  position: relative;
-  flex: none;
-  padding: 8px 4px 5px;
+/* The environment switch, heading the column above the field it governs.
+   Flush left like every other band in the column. */
+.sidebar-head {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--sidebar-inset) 6px;
 }
-.sidebar-footer-row {
+
+/* The current tab's plate in flight between two rows (selection-glide.ts).
+   It sits under everything the rows draw; the rows it leaves and reaches
+   stop painting their own plate while it travels. */
+.selection-glide {
+  position: absolute;
+  z-index: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+.selection-glide-fill {
+  position: absolute;
+  inset: 0;
+}
+[data-plate][data-gliding] {
+  background-color: transparent !important;
+  box-shadow: none !important;
+}
+
+/* A row being dragged to a new place in its list: lifted off the column,
+   the one thing in it that casts a shadow, until it is set down. */
+.browse-tab[data-lifted][data-lifted] {
+  z-index: 2;
+  scale: 1.02;
+  background: var(--row-active);
+  box-shadow: var(--shadow-float);
+}
+
+/* The dock's site row. */
+.dock-sites {
+  border-radius: var(--radius-card);
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+/* With nothing kept, the row still holds a tile's worth of space on the
+   tiles' own ground: an empty slot, not a dashed outline of one. A line of
+   grey text alone would read as a bug; a wireframe reads as unfinished. */
+.dock-sites[data-empty="true"] {
   display: flex;
   align-items: center;
-  gap: 7px;
-  min-height: 34px;
+  justify-content: center;
+  min-height: var(--dock-tile);
+  background: var(--color-card);
 }
-.profile-menu-button {
-  display: grid;
-  place-items: center;
-  flex: 0 0 30px;
-  width: 30px;
-  height: 30px;
-  overflow: hidden;
-  padding: 0;
-  border: 1px solid var(--color-border-strong);
-  border-radius: 50%;
-  background: var(--color-fill-active);
-  color: var(--color-text);
-  cursor: default;
-  font-size: 13px;
-  font-weight: 550;
-  line-height: 1;
-  transition: background-color 100ms var(--ease-out-quiet);
+.dock-sites[data-over="true"] {
+  background: var(--color-fill-hover);
+  box-shadow: inset 0 0 0 1px var(--color-border-strong);
 }
-.profile-menu-button:hover {
-  background: var(--color-fill-pressed);
-}
-.profile-menu-button:focus-visible {
-  outline: 2px solid var(--color-ring);
-  outline-offset: 3px;
-}
-.profile-menu-button img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-.sidebar-footer-row .mode-footer {
-  flex: 1;
-  min-width: 0;
-  padding: 0;
-}
-.sidebar-footer-row .ui-choices > div {
-  min-height: 30px;
-}
-.sidebar-footer-compact .sidebar-footer-row {
-  flex-direction: column-reverse;
-  gap: 10px;
-}
-.compact-mode-word {
-  padding: 5px 2px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--color-muted);
-  font-size: 10px;
-  font-weight: 500;
-  cursor: default;
-}
-.compact-mode-word:hover {
-  background: var(--color-fill);
-  color: var(--color-text);
-}
-.sidebar-notification-anchor {
-  position: absolute;
-  inset-inline-end: 5px;
-  bottom: 46px;
-}
-.browser-sidebar > .sidebar-columns .sidebar-browser-column > form {
-  padding-inline: 4px;
-}
-.sidebar-browser-column nav {
-  padding-inline: 4px;
-}
-.sidebar-browser-column > .h-8 {
-  padding-inline: 9px;
-}
-.sidebar-browser-column .browse-tab > button:first-child {
-  padding-inline-start: 8px;
-}
-.essentials-drop-zone {
-  margin-inline: 4px;
-  border-radius: 12px;
-  transition: background-color 100ms ease-out;
-}
-.essentials-drop-zone[data-over="true"] {
-  background: var(--color-fill-active);
-  outline: 1px solid var(--color-accent);
-  outline-offset: -1px;
-}
-.essential-drop-hint {
-  display: grid;
-  place-items: center;
-  min-height: 45px;
-  padding: 8px;
-  border: 1px dashed var(--color-border-strong);
-  border-radius: 12px;
-  color: var(--color-muted);
-  font-size: 11px;
+.dock-sites-hint {
+  padding-inline: 10px;
+  color: var(--color-faint);
+  font-size: 11.5px;
+  line-height: 1.3;
+  text-align: center;
 }
 .sidebar-move-error {
   margin: 5px 8px;
@@ -1332,7 +1091,7 @@
   padding: 22px;
   margin-bottom: 26px;
   border: 1px solid var(--color-border);
-  border-radius: 16px;
+  border-radius: var(--radius-card);
   background: var(--color-surface);
 }
 .settings-callout-icon {
@@ -1341,7 +1100,7 @@
   flex: 0 0 48px;
   width: 48px;
   height: 48px;
-  border-radius: 16px;
+  border-radius: var(--radius-card);
   background: var(--color-fill);
   color: var(--color-text);
 }
@@ -1386,7 +1145,7 @@
   padding: 0;
   margin: 0;
   background: var(--color-surface);
-  border-radius: 14px;
+  border-radius: var(--radius-control);
   overflow: hidden;
 }
 .language-order li {
@@ -1498,7 +1257,7 @@
   text-align: start;
   padding: 22px;
   border: 1px solid var(--color-border);
-  border-radius: 14px;
+  border-radius: var(--radius-control);
   background: var(--color-surface);
   color: var(--color-text);
   cursor: default;
@@ -1511,7 +1270,7 @@
   place-items: center;
   width: 38px;
   height: 38px;
-  border-radius: 13px;
+  border-radius: var(--radius-control);
   background: var(--color-fill);
   color: var(--color-muted);
 }
@@ -1564,8 +1323,8 @@
     grid-template-columns: 1fr;
   }
 }
-:root[data-density="compact"] .browse-tab {
-  height: 30px;
+:root[data-density="compact"] .browser-sidebar {
+  --row-sidebar: 32px;
 }
 :root[data-contrast="true"] :is(.browser-sidebar, .settings-shell) {
   --color-muted: var(--color-text);
@@ -1575,28 +1334,30 @@
   outline: 1px solid var(--color-border-strong);
 }
 :root[data-text="large"]
-  :is(.settings-nav-item, .browse-tab, .ui-input, .ui-button, .settings-page .ui-settings-copy h3) {
+  :is(.settings-nav-item, .ui-input, .ui-button, .settings-page .ui-settings-copy h3) {
   font-size: 14px;
 }
 :root[data-text="small"]
-  :is(.settings-nav-item, .browse-tab, .ui-input, .ui-button, .settings-page .ui-settings-copy h3) {
+  :is(.settings-nav-item, .ui-input, .ui-button, .settings-page .ui-settings-copy h3) {
   font-size: 12px;
+}
+:root[data-text="large"] .browser-sidebar {
+  --sidebar-row-text: 14px;
+}
+:root[data-text="small"] .browser-sidebar {
+  --sidebar-row-text: 12px;
 }
 /* Sidebar labels sit a step below full white so they belong to the material;
    only the current item is fully lit. */
 .settings-sidebar-navigation .settings-nav-item,
 .settings-sidebar-navigation .settings-back,
-.browser-sidebar .folder-row,
-.browser-sidebar .compact-mode-word {
+.browser-sidebar .folder-row {
   color: var(--color-label-secondary);
 }
 .settings-sidebar-navigation .settings-nav-item:hover,
 .settings-sidebar-navigation .settings-nav-item[aria-current="page"],
 .settings-sidebar-navigation .settings-back:hover {
   color: var(--color-text);
-}
-.settings-sidebar-navigation .settings-nav-item {
-  font-size: 13px;
 }
 .settings-sidebar-navigation .settings-nav-group h2 {
   font-size: 11px;
@@ -1614,21 +1375,20 @@
   color: var(--color-label-secondary);
   opacity: 1;
 }
-.browser-menu-button {
-  border: 0;
-  border-radius: 12px;
-  background: transparent;
-  color: var(--color-text);
-}
-.browser-menu-button:hover {
-  background: var(--color-fill-active);
-}
 .sidebar-tool-host {
   display: flex;
   flex: 1;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border-radius: 13px;
+  border-radius: var(--radius-control);
   background: var(--color-fill);
+  animation: tool-host-in var(--motion-page) var(--ease-emphasized) both;
+}
+/* A tool grows out of the rail it was opened from. */
+@keyframes tool-host-in {
+  from {
+    opacity: 0;
+    translate: -8px 0;
+  }
 }

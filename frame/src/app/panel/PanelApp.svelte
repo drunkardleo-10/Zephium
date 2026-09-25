@@ -3,16 +3,17 @@
   import LazyView from "$shared/ui/LazyView";
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import { loadToolSlot } from "$features/tools";
-  import "@fontsource-variable/inter";
   import "$styles/panel.css";
   import { onMount, flushSync } from "svelte";
   import type { PanelState, PanelIntent, ToolKind } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
   import { events } from "$shared/ipc/native-events";
   import { theme } from "$domain/appearance";
+  import { favicons } from "$domain/favicons";
   import { acceptPanelState } from "$features/panel";
   import { tools as toolManifest, toolKinds } from "$features/tools";
-  import { Launcher } from "$features/launcher";
+  import { loadLauncherPanel } from "$features/search";
+  import { loadCapture } from "$features/tasks";
   import * as m from "$shared/i18n/messages";
   const destinations = toolKinds.map((kind) => ({
     kind,
@@ -66,11 +67,14 @@
     const listener = events.panelState.listen((event) => {
       if (!disposed) apply(event.payload);
     });
+
+    // Result rasters arrive just ahead of the results that reference them.
+    const faviconsReady = favicons.init();
     void (async () => {
       try {
         stop = await listener;
         stopMotion = await motionListener;
-        await theme.init();
+        await Promise.all([theme.init(), faviconsReady]);
         if (disposed) return;
         const motion = await commands.settingGet("ui.reduce-motion").catch(() => null);
         if (disposed) return;
@@ -89,11 +93,22 @@
       disposed = true;
       stop?.();
       stopMotion?.();
+      favicons.dispose();
       theme.dispose();
     };
   });
   function tool(kind: ToolKind) {
     void intent({ type: "tool", tool: kind });
+  }
+  /** Long enough to read that it landed, short enough not to wait on. */
+  const CAPTURED_MS = 700;
+  async function capture(text: string): Promise<string | null> {
+    const profile = presentation?.profile_id;
+    if (!profile) return null;
+    const { captureTask } = await loadCapture();
+    const title = await captureTask(profile, text);
+    if (title) setTimeout(() => void intent({ type: "dismiss" }), CAPTURED_MS);
+    return title;
   }
 </script>
 
@@ -106,12 +121,20 @@
   {#if presentation?.visible}
     {#if failed}<div class="panel-error" role="alert">{m.panel_action_failed()}</div>{/if}
     <RenderBoundary title={m.surface_render_failed()} retryLabel={m.surface_retry()}>
-      {#if presentation.route.type === "search"}{#key presentation.session_id}<Launcher
-            context={presentation}
-            {destinations}
-            onTool={tool}
-            onDrag={() => void drag()}
-          />{/key}
+      {#if presentation.route.type === "search"}{#key presentation.session_id}{@const owner =
+            presentation}<LazyView
+            loader={loadLauncherPanel}
+            loadingLabel={m.surface_loading()}
+            failureLabel={m.surface_render_failed()}
+            retryLabel={m.surface_retry()}
+            >{#snippet children(Launcher)}<Launcher
+                context={owner}
+                {destinations}
+                onTool={tool}
+                onCapture={capture}
+                onDrag={() => void drag()}
+              />{/snippet}</LazyView
+          >{/key}
       {:else}{@const tool = presentation.route.tool}{@const owner = presentation}<LazyView
           loader={loadToolSlot}
           loadingLabel={m.surface_loading()}

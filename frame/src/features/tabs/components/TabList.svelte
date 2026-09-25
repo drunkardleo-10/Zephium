@@ -13,6 +13,9 @@
   } from "../lib/sidebar-model";
   import SplitGroupRow from "./SplitGroupRow.svelte";
   import TabRow from "./TabRow.svelte";
+  import { untrack } from "svelte";
+  import { ListMotion } from "$shared/lib/list-motion";
+  import { RowDrag } from "$session/row-drag.svelte";
 
   let {
     entries,
@@ -21,8 +24,14 @@
     essentialTile,
     label,
     splitting,
+    cascadeFrom = 0,
+    columns,
     onSelect,
   }: {
+    /** Lay the tiles out in rows of this many even columns, filling upwards. */
+    columns?: number;
+    /** Where this list's first row falls in the launch cascade. */
+    cascadeFrom?: number;
     entries: SidebarEntry[];
     section: SidebarSectionView;
     variant?: "list" | "essentials";
@@ -32,232 +41,220 @@
     onSelect: (id: string) => void;
   } = $props();
 
-  let down: { x: number; y: number } | null = null;
-  let dragId = "";
-  let dragTitle = "";
-  let dragging = $state(false);
-  let ghost = $state<{ title: string; x: number; y: number } | null>(null);
-  let pendingPointer = { x: 0, y: 0 };
-  let frame = 0;
-  let suppressClick = false;
   let displayUnits = $derived(sidebarDisplayUnits(section, entries, tabs.splitGroup()));
   const folded = new SvelteSet<string>();
   let hiddenUnits = $derived(collapsedSidebarUnits(displayUnits, folded, tabs.activeId()));
+
+  const drag = new RowDrag({
+    list: () => list,
+    // Only open tabs reorder in place; native places anything dropped in
+    // this list among them.
+    reorder: () => (variant === "list" && section === "today" ? { essential: false } : null),
+    drop: ({ id, x, y, over, before }) => {
+      if (over?.closest("[data-essentials-drop]")) {
+        void tabDrag.move(id, true, before);
+        return;
+      }
+      // Dropped among the open tabs from anywhere else: it joins them there.
+      // Dropping onto a row does not pair the two; that is Split View's job,
+      // from the menu or by dropping onto the page.
+      if (over?.closest("[data-tabs-drop]") && section !== "today") {
+        void tabDrag.move(id, false, before);
+        return;
+      }
+      tabs.dropTab(id, x, y);
+    },
+  });
+  const handlePointerDown = (event: PointerEvent, tab: TabView) => drag.down(event, tab.id);
+  const handlePointerMove = (event: PointerEvent) => drag.move(event);
+  const handlePointerUp = (event: PointerEvent) => drag.up(event);
+  const handlePointerCancel = (event: PointerEvent) => drag.cancel(event);
+  let ghostTitle = $derived(
+    drag.ghost ? (tabs.tabs().find((tab) => tab.id === drag.ghost?.id)?.title ?? "") : "",
+  );
+
+  // Motion follows the list's shape, not its content: a title or a loading
+  // state changing moves nothing, so only a change of order or membership
+  // is measured at all.
+  let list = $state<HTMLUListElement>();
+  const motion = new ListMotion({ enter: () => (variant === "essentials" ? "grow" : "rise") });
+  let shape = $derived(
+    `${displayUnits.map((unit) => unit.key).join(" ")}|${[...hiddenUnits].join(" ")}`,
+  );
+  $effect.pre(() => {
+    void shape;
+    untrack(() => {
+      motion.capture(list);
+      // A drop's rows are held where they were drawn until the reordered
+      // list arrives; the capture above has just recorded exactly that, so
+      // the list's own motion lands them from there.
+      drag.landed();
+    });
+  });
+  $effect(() => {
+    void shape;
+    untrack(() => motion.play(list));
+  });
 
   function toggleFolder(key: string) {
     if (folded.has(key)) folded.delete(key);
     else folded.add(key);
   }
 
-  function resetDrag() {
-    if (frame !== 0) {
-      cancelAnimationFrame(frame);
-      frame = 0;
-    }
-    down = null;
-    dragId = "";
-    dragTitle = "";
-    dragging = false;
-    ghost = null;
-    document.body.style.cursor = "";
-    tabDrag.end();
-  }
-
-  function handlePointerDown(event: PointerEvent, tab: TabView) {
-    if (event.button !== 0) return;
-    down = { x: event.clientX, y: event.clientY };
-    dragId = tab.id;
-    dragTitle = tab.title;
-    dragging = false;
-  }
-
-  function handlePointerMove(event: PointerEvent) {
-    if (down === null) return;
-
-    if (!dragging && Math.abs(event.clientX - down.x) + Math.abs(event.clientY - down.y) > 4) {
-      const target = event.currentTarget;
-      if (target instanceof HTMLElement) target.setPointerCapture(event.pointerId);
-      dragging = true;
-      tabDrag.begin(dragId);
-      document.body.style.cursor = "grabbing";
-    }
-    if (!dragging) return;
-
-    pendingPointer = { x: event.clientX, y: event.clientY };
-    if (frame !== 0) return;
-    frame = requestAnimationFrame(() => {
-      frame = 0;
-      ghost = { title: dragTitle, ...pendingPointer };
-      tabDrag.hover(pendingPointer.x, pendingPointer.y);
-      tabs.dragOver(pendingPointer.x, pendingPointer.y);
-    });
-  }
-
-  function handlePointerUp(event: PointerEvent) {
-    const droppedElement = document.elementFromPoint(event.clientX, event.clientY);
-    const essentialZone = droppedElement?.closest("[data-essentials-drop]");
-    const listZone = droppedElement?.closest("[data-tabs-drop]");
-    const before =
-      droppedElement?.closest<HTMLElement>("[data-zephium-tab-id]")?.dataset.zephiumTabId ?? null;
-    const didDrag = dragging;
-    const id = dragId;
-    const target = event.currentTarget;
-
-    if (target instanceof HTMLElement && target.hasPointerCapture(event.pointerId)) {
-      target.releasePointerCapture(event.pointerId);
-    }
-    resetDrag();
-
-    if (!didDrag) return;
-    suppressClick = true;
-    if (essentialZone) {
-      void tabDrag.move(id, true, before === id ? null : before);
-      return;
-    }
-    if (listZone && section === "favorites") {
-      void tabDrag.move(id, false, before === id ? null : before);
-      return;
-    }
-
-    // Dropping onto another row in the sidebar pairs the two tabs, matching
-    // the drop-onto-a-pane gesture over content. The shell splits the active
-    // tab with a target, so the dragged tab is activated first; both are
-    // ordered mutations through the same actor queue.
-    const onto = rowUnderPointer(event.clientX, event.clientY, id);
-    if (onto !== null) {
-      tabs.activate(id);
-      tabs.split(onto);
-      return;
-    }
-
-    tabs.dropTab(id, event.clientX, event.clientY);
-  }
-
-  function rowUnderPointer(x: number, y: number, dragged: string): string | null {
-    const element = document.elementFromPoint(x, y);
-    const row = element?.closest("[data-zephium-tab-id]");
-    if (!(row instanceof HTMLElement)) return null;
-    const id = row.dataset.zephiumTabId;
-    return id !== undefined && id !== dragged ? id : null;
-  }
-
-  function handlePointerCancel(event: PointerEvent) {
-    const target = event.currentTarget;
-    if (target instanceof HTMLElement && target.hasPointerCapture(event.pointerId)) {
-      target.releasePointerCapture(event.pointerId);
-    }
-    resetDrag();
-  }
-
   function handleContextMenu(event: MouseEvent, tab: TabView) {
     // A DOM menu cannot reach past the chrome WebView, so the tab menu is a
     // real native popup owned by Rust.
     event.preventDefault();
-    resetDrag();
+    drag.abandon();
     tabs.openTabMenu(tab.id, event.clientX, event.clientY);
   }
 
   function select(id: string) {
-    if (suppressClick) {
-      suppressClick = false;
-      return;
-    }
+    if (drag.swallowClick()) return;
     onSelect(id);
   }
 </script>
 
-{#if entries.length > 0}
-  <nav class="px-1.5 py-0.5" aria-label={label}>
-    <ul
-      class:grid={variant === "essentials"}
-      class:grid-cols-[repeat(auto-fill,minmax(46px,1fr))]={variant === "essentials"}
-      class:gap-1.5={variant === "essentials"}
-      class:flex={variant === "list"}
-      class:flex-col={variant === "list"}
-      class:gap-px={variant === "list"}
-      role="list"
-    >
-      {#each displayUnits as unit, index (unit.key)}
-        {#if unit.kind === "folder"}
-          <FolderRow
-            expanded={!folded.has(unit.key) ||
-              displayUnits.some(
-                (child, index) =>
-                  index > displayUnits.indexOf(unit) &&
-                  child.depth > unit.depth &&
-                  !hiddenUnits.has(child.key),
-              )}
-            ontoggle={() => toggleFolder(unit.key)}
-            name={unit.node.kind.name}
-            depth={unit.depth}
-            class={[
-              variant === "essentials" ? "col-span-full" : "",
-              hiddenUnits.has(unit.key) ? "hidden" : "",
-            ].join(" ")}
-          />
-        {:else if unit.kind === "split"}
-          <SplitGroupRow
-            tabs={unit.tabs.map((entry) => entry.tab)}
-            activeId={tabs.activeId()}
-            {splitting}
-            closable={section === "today"}
-            class={[
-              variant === "essentials" ? "col-span-full" : "",
-              hiddenUnits.has(unit.key) ? "hidden" : "",
-            ].join(" ")}
-            onSelect={select}
-            onClose={tabs.close}
-            onContextMenu={handleContextMenu}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerCancel}
-          />
-        {:else if variant === "essentials" && unit.depth === 0 && essentialTile}
-          {@render essentialTile({
-            tab: unit.tab,
-            active: unit.tab.id === tabs.activeId(),
-            splitCandidate: splitting && unit.tab.id !== tabs.activeId(),
-            onSelect: select,
-            onContextMenu: handleContextMenu,
-            onPointerDown: handlePointerDown,
-            onPointerMove: handlePointerMove,
-            onPointerUp: handlePointerUp,
-            onPointerCancel: handlePointerCancel,
-          })}
-        {:else}
-          <TabRow
-            entranceIndex={index}
-            tab={unit.tab}
-            active={unit.tab.id === tabs.activeId()}
-            depth={unit.depth}
-            closable={section === "today"}
-            class={[
-              variant === "essentials" ? "col-span-full" : "",
-              hiddenUnits.has(unit.key) ? "hidden" : "",
-            ].join(" ")}
-            splitCandidate={splitting && unit.tab.id !== tabs.activeId()}
-            onSelect={select}
-            onClose={tabs.close}
-            onContextMenu={handleContextMenu}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerCancel}
-          />
-        {/if}
-      {/each}
-    </ul>
-  </nav>
-{/if}
+<!--
+  Mounted even when empty, and hidden instead: the first site kept, or the
+  first tab opened, is an arrival the list has to be present to see.
+-->
+<nav
+  class={["tab-list", variant === "essentials" && "tab-list-flush"]}
+  aria-label={label}
+  hidden={entries.length === 0}
+>
+  <ul
+    bind:this={list}
+    class:flex={variant === "list"}
+    class:dock-row={variant === "essentials" && columns === undefined}
+    class:dock-stack={variant === "essentials" && columns !== undefined}
+    style:--dock-columns={columns}
+    class:flex-col={variant === "list"}
+    class:tab-list-rows={variant === "list"}
+    role="list"
+  >
+    {#each displayUnits as unit, index (unit.key)}
+      {#if unit.kind === "folder"}
+        <FolderRow
+          motionKey={unit.key}
+          expanded={!folded.has(unit.key) ||
+            displayUnits.some(
+              (child, index) =>
+                index > displayUnits.indexOf(unit) &&
+                child.depth > unit.depth &&
+                !hiddenUnits.has(child.key),
+            )}
+          ontoggle={() => toggleFolder(unit.key)}
+          name={unit.node.kind.name}
+          depth={unit.depth}
+          class={[
+            variant === "essentials" ? "col-span-full" : "",
+            hiddenUnits.has(unit.key) ? "hidden" : "",
+          ].join(" ")}
+        />
+      {:else if unit.kind === "split"}
+        <SplitGroupRow
+          motionKey={unit.key}
+          tabs={unit.tabs.map((entry) => entry.tab)}
+          activeId={tabs.activeId()}
+          {splitting}
+          closable={section === "today"}
+          class={[
+            variant === "essentials" ? "col-span-full" : "",
+            hiddenUnits.has(unit.key) ? "hidden" : "",
+          ].join(" ")}
+          onSelect={select}
+          onClose={tabs.close}
+          onContextMenu={handleContextMenu}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+        />
+      {:else if variant === "essentials" && unit.depth === 0 && essentialTile}
+        {@render essentialTile({
+          tab: unit.tab,
+          active: unit.tab.id === tabs.activeId(),
+          splitCandidate: splitting && unit.tab.id !== tabs.activeId(),
+          onSelect: select,
+          onContextMenu: handleContextMenu,
+          onPointerDown: handlePointerDown,
+          onPointerMove: handlePointerMove,
+          onPointerUp: handlePointerUp,
+          onPointerCancel: handlePointerCancel,
+        })}
+      {:else}
+        <TabRow
+          cascade={cascadeFrom + index}
+          tab={unit.tab}
+          active={unit.tab.id === tabs.activeId()}
+          depth={unit.depth}
+          closable={section === "today"}
+          class={[
+            variant === "essentials" ? "col-span-full" : "",
+            hiddenUnits.has(unit.key) ? "hidden" : "",
+          ].join(" ")}
+          splitCandidate={splitting && unit.tab.id !== tabs.activeId()}
+          onSelect={select}
+          onClose={tabs.close}
+          onContextMenu={handleContextMenu}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+        />
+      {/if}
+    {/each}
+  </ul>
+</nav>
 
-{#if ghost !== null}
+{#if drag.ghost !== null}
   <div
-    class="pointer-events-none fixed z-50 max-w-52 truncate rounded-md bg-raised px-3 py-2 text-[13px] text-text shadow-overlay"
-    style:left={`${ghost.x + 12}px`}
-    style:top={`${ghost.y + 8}px`}
+    class="pointer-events-none fixed z-50 max-w-52 truncate rounded-control bg-raised px-3 py-2 text-[13px] text-text shadow-overlay"
+    style:left={`${drag.ghost.x + 12}px`}
+    style:top={`${drag.ghost.y + 8}px`}
     aria-hidden="true"
   >
-    {ghost.title}
+    {ghostTitle}
   </div>
 {/if}
+
+<style>
+  .tab-list {
+    padding-inline: var(--sidebar-inset);
+    padding-block: 2px;
+  }
+
+  /* The dock owns the band's inset, so its site row adds none of its own. */
+  .tab-list-flush {
+    padding: 0;
+  }
+
+  /* The row beside the shelf: its sites share its width, so one alone
+     fills it. The caller hands it only as many as fit. */
+  .dock-row {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    gap: var(--dock-gap);
+  }
+
+  /* Rows over the shelf's row: even columns, and wrapping upwards, so a row
+     that is not yet full sits on top as a ragged edge rather than leaving a
+     hole in the middle of the stack. */
+  .dock-stack {
+    display: flex;
+    flex-wrap: wrap-reverse;
+    gap: var(--dock-gap);
+  }
+
+  .dock-stack > :global(li) {
+    flex: 0 0 calc((100% - (var(--dock-columns) - 1) * var(--dock-gap)) / var(--dock-columns));
+  }
+
+  /* One pixel between rows read as a stack of stripes rather than a list. */
+  .tab-list-rows {
+    gap: var(--sidebar-row-gap);
+  }
+</style>

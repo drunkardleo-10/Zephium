@@ -1,1 +1,1 @@
-export { default as NewTab } from "./components/NewTab.svelte";
+export const loadNewTab = () => import("./components/NewTab.svelte");

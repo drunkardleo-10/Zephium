@@ -1,190 +1,201 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { commands } from "$shared/ipc/bindings";
-  import { resourceSession, type ResourceSession } from "$domain/resources";
-  import ResourcePanel from "$shared/ui/data/ResourcePanel";
-  import SaveStatus from "$shared/ui/data/SaveStatus";
-  import Button from "$shared/ui/Button";
-  import LazyView from "$shared/ui/LazyView";
-  import NoteCard from "./NoteCard.svelte";
+  import type { NoteSession } from "$domain/notes";
+  import Icon from "$shared/ui/Icon";
+  import { Delete02Icon, Note01Icon, Search01Icon } from "@hugeicons/core-free-icons";
+  import PencilEdit02Icon from "@hugeicons/core-free-icons/PencilEdit02Icon";
   import * as m from "$shared/i18n/messages";
-  let {
-    profile,
-    host = "work",
-    onclose,
-    ondrag,
-    onback,
-  }: {
-    profile: string;
-    host?: string;
-    onclose?: () => void;
-    ondrag?: () => void;
-    onback?: () => void;
-  } = $props();
-  let session = $state.raw<ResourceSession | null>(
-    untrack(() => resourceSession(profile, "note", host)),
-  );
-  const loadEditor = () => import("./NotesEditor.svelte");
-  $effect(() => {
-    const owner = profile;
-    const scope = host;
-    const current = untrack(() => resourceSession(owner, "note", scope));
-    session = current;
-    void current?.start();
-    return () => current?.stopObserving();
+  import NoteList from "./NoteList.svelte";
+  import NoteView from "./NoteView.svelte";
+  import NoteNotice from "./NoteNotice.svelte";
+  import { enter } from "../lib/enter";
+
+  let { session }: { session: NoteSession } = $props();
+
+  let open = $derived(session.note !== null);
+  let direction = $state<"forward" | "back" | null>(null);
+  let was = untrack(() => open);
+  $effect.pre(() => {
+    if (open !== was) direction = open ? "forward" : "back";
+    was = open;
   });
-  let titleInput = $state<HTMLInputElement>();
-  async function create() {
-    const current = session;
-    await current?.create(m.note_untitled());
-    if (current === session && current?.record && current.saveState === "saved") {
-      titleInput?.focus();
-      titleInput?.select();
-    }
-  }
-  async function close() {
-    const current = session;
-    if (current && (await current.flush()) && current === session) onclose?.();
-  }
-  async function exit() {
-    const current = session;
-    if (current && (await current.flush()) && current === session) onback?.();
-  }
-  async function trashFilter() {
-    const current = session;
-    if (current && (await current.flush()) && current === session) {
-      await current.back();
-      if (current !== session) return;
-      current.trash = !current.trash;
-      void current.reload();
-    }
+
+  let scroll = $state<HTMLDivElement>();
+
+  function edit() {
+    scroll?.querySelector<HTMLElement>(".note-document")?.focus();
   }
 </script>
 
-{#if session}<ResourcePanel
-    title={m.tool_notes()}
-    rows={session.items}
-    query={session.query}
-    onquery={(value) => session?.search(value)}
-    loading={session.loading}
-    error={session.error}
-    editing={!!session.draft}
-    oncreate={create}
-    onclose={onclose ? close : undefined}
-    onback={() => {
-      void session?.back();
-    }}
-    {ondrag}
-    onexit={onback ? exit : undefined}
-    hasMore={!!session.next}
-    onmore={() => {
-      void session?.reload(true);
-    }}
-    trash={session.trash}
-    ontrash={trashFilter}
-  >
-    {#snippet status()}{#if session && (session.draft || session.pending)}<SaveStatus
-          state={session.saveState}
-          onretry={() => {
-            void session?.retry();
-          }}
-          ondiscard={() => {
-            void session?.discardDraft();
-          }}
-          onkeep={() => {
-            void session?.keepDraft();
-          }}
-        />{/if}{/snippet}
-    {#snippet row(note)}<NoteCard
-        title={note.title}
-        pinned={note.pinned}
-        selected={session?.record?.id === note.id}
-        onopen={() => {
-          void session?.open(note.id);
-        }}
-      />{/snippet}
-    {#snippet editor()}{#if session?.draft?.content.kind === "note"}{@const current = session}
-        <label class="note-title"
-          ><span>{m.resource_title()}</span><input
-            bind:this={titleInput}
-            value={current.draft!.title}
-            maxlength="256"
-            required
-            disabled={!current.canEdit}
-            oninput={(event) => current.edit({ title: event.currentTarget.value })}
-          /></label
-        >
-        <div class="note-actions">
-          <Button
-            variant="ghost"
-            size="compact"
-            disabled={!current.canEdit}
-            aria-pressed={current.draft!.pinned}
-            onclick={() => current.edit({ pinned: !current.draft!.pinned })}
-            >{m.resource_pin()}</Button
-          >{#if current.record}<Button
-              size="compact"
-              disabled={current.navigating}
-              onclick={() => {
-                void current.setTrashed(!current.record!.trashed);
-              }}>{current.record.trashed ? m.resource_restore() : m.resource_trash()}</Button
-            >{/if}
+<div class="notes" data-view={open ? "note" : "list"} data-note-bounds>
+  {#if session.note}
+    {#key session.note.version}
+      <div class="note-scroll" bind:this={scroll} use:enter={direction}>
+        <NoteView {session} density="panel" autofocus />
+      </div>
+    {/key}
+  {:else}
+    <div class="notes-list" use:enter={direction}>
+      {#if !session.trash}<button
+          type="button"
+          class="new-note"
+          onclick={() => void session.create()}
+          ><Icon icon={PencilEdit02Icon} size={16} /><span>{m.note_new()}</span></button
+        >{/if}
+      {#if session.error && !session.items.length}
+        <div class="notes-empty">
+          <span class="empty-icon"><Icon icon={Note01Icon} size={22} /></span>
+          <h3>{m.note_unavailable()}</h3>
+          <p>{m.note_unavailable_body()}</p>
+          <button type="button" class="empty-action" onclick={() => void session.reload()}
+            >{m.note_try_again()}</button
+          >
         </div>
-        {#key `${profile}:${current.editorKey}`}<LazyView
-            loader={loadEditor}
-            loadingLabel={m.surface_loading()}
-            failureLabel={m.surface_render_failed()}
-            retryLabel={m.surface_retry()}
-            >{#snippet children(Editor)}<Editor
-                value={current.draft!.content.kind === "note"
-                  ? current.draft!.content.document
-                  : { version: 1, document: { type: "doc", content: [{ type: "paragraph" }] } }}
-                disabled={!current.canEdit}
-                onchange={(document) => current.edit({ content: { kind: "note", document } })}
-                onopen={(id) => {
-                  void current.open(id);
-                }}
-                onlink={(href) => void commands.tabsOpenUrl(href)}
-                findNotes={(query) => current.findNotes(query)}
-                resolveNotes={(ids) => current.resolveNotes(ids)}
-                referencesRevision={current.referencesRevision}
-              />{/snippet}</LazyView
-          >{/key}
-      {/if}{/snippet}
-  </ResourcePanel>{:else}<p role="alert">{m.resource_draft_capacity()}</p>{/if}
+      {:else if session.loaded && !session.items.length}
+        <div class="notes-empty">
+          {#if session.query.trim()}
+            <span class="empty-icon"><Icon icon={Search01Icon} size={22} /></span>
+            <h3>{m.note_empty_search()}</h3>
+            <p>{m.note_empty_search_body()}</p>
+          {:else if session.trash}
+            <span class="empty-icon"><Icon icon={Delete02Icon} size={22} /></span>
+            <h3>{m.note_trash_empty()}</h3>
+            <p>{m.note_trash_hint()}</p>
+          {:else}
+            <span class="empty-icon"><Icon icon={Note01Icon} size={22} /></span>
+            <h3>{m.note_empty_title()}</h3>
+            <p>{m.note_empty_body()}</p>
+          {/if}
+        </div>
+      {:else}
+        <NoteList {session} density="panel" onopen={(id) => void session.open(id)} onedit={edit} />
+      {/if}
+    </div>
+  {/if}
+  <NoteNotice {session} />
+</div>
 
 <style>
-  .note-title {
-    display: grid;
-    gap: 8px;
+  /* Sized by the host, never by a long title or preview inside it: without
+     containment the rows' unshrunk text widens the whole panel. */
+  .notes {
+    container-type: inline-size;
+    position: relative;
+    display: flex;
+    flex: 1 1 0;
+    flex-direction: column;
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
   }
 
-  .note-title span {
-    font-size: var(--text-caption);
+  .notes-list {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .note-scroll {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    padding: 6px 20px 0 22px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .new-note {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: none;
+    height: 36px;
+    margin: 0 8px 4px;
+    padding-inline: 10px;
+    border: 0;
+    border-radius: var(--radius-row);
+    background: transparent;
+    color: var(--color-muted);
+    font: inherit;
+    font-size: 14px;
+    text-align: start;
+    cursor: default;
+    outline: none;
+    transition:
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out);
+  }
+
+  .new-note:hover {
+    background: var(--row-hover);
+    color: var(--color-text);
+  }
+
+  .new-note:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: -2px;
+  }
+
+  .notes-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 56px 28px;
+    text-align: center;
+    animation: empty-in var(--motion-slow) var(--ease-out);
+  }
+
+  @keyframes empty-in {
+    from {
+      opacity: 0;
+    }
+  }
+
+  .empty-icon {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    margin-block-end: 8px;
+    border-radius: var(--radius-control);
+    background: var(--color-fill);
     color: var(--color-muted);
   }
 
-  input {
-    width: 100%;
-    box-sizing: border-box;
-    font: inherit;
-    font-size: var(--text-title);
-    font-weight: 600;
+  .notes-empty h3 {
+    margin: 0;
     color: var(--color-text);
-    background: transparent;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .notes-empty p {
+    max-width: 260px;
+    text-wrap: balance;
+    margin: 0;
+    color: var(--color-muted);
+    font-size: var(--text-body);
+    line-height: 19px;
+  }
+
+  .empty-action {
+    height: 28px;
+    margin-block-start: 10px;
+    padding-inline: 12px;
     border: 0;
-    padding: 8px 0;
-    outline: none;
+    border-radius: var(--radius-inset);
+    background: var(--color-control);
+    color: var(--color-text);
+    font: inherit;
+    font-size: var(--text-body);
+    cursor: default;
   }
 
-  input:focus-visible {
-    box-shadow: 0 2px var(--color-ring);
-  }
-
-  .note-actions {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-block: 12px;
+  .empty-action:hover {
+    background: var(--color-control-hover);
   }
 </style>

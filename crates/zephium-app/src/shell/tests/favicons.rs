@@ -64,13 +64,17 @@ fn favicon_pipeline_accepts_only_fixed_renderer_rasters_for_current_origin() {
         &[(String::from("https://example.com"), rgba)]
     );
     let tab = last(&screen).tabs.into_iter().next().unwrap();
-    assert!(tab
-        .favicon
-        .as_deref()
-        .is_some_and(|value| value.starts_with(zephium_core::icon::RGBA32_PREFIX)));
+    assert_eq!(
+        tab.icon.as_ref().map(|icon| icon.origin.as_str()),
+        Some("https://example.com")
+    );
     let profile = shell.windows.focused().unwrap().profile;
     assert!(shell
-        .favicon_key_for_url(profile, "https://example.com")
+        .icon_ref_for_url(
+            zephium_ipc::IconSurface::Chrome,
+            profile,
+            "https://example.com"
+        )
         .is_some());
 }
 
@@ -100,9 +104,14 @@ fn stale_favicon_store_reply_cannot_cross_a_navigation_generation() {
         profile,
         origin: "https://first.example".into(),
         rgba: Some(rgba.clone()),
+        stale: false,
     }));
     assert!(shell
-        .favicon_key_for_url(profile, "https://first.example/")
+        .icon_ref_for_url(
+            zephium_ipc::IconSurface::Chrome,
+            profile,
+            "https://first.example/"
+        )
         .is_none());
     assert_eq!(
         shell
@@ -119,9 +128,14 @@ fn stale_favicon_store_reply_cannot_cross_a_navigation_generation() {
         profile,
         origin: "https://second.example".into(),
         rgba: Some(rgba),
+        stale: false,
     }));
     assert!(shell
-        .favicon_key_for_url(profile, "https://second.example/")
+        .icon_ref_for_url(
+            zephium_ipc::IconSurface::Chrome,
+            profile,
+            "https://second.example/"
+        )
         .is_some());
 }
 
@@ -178,10 +192,7 @@ fn bootstrap_hydrates_restored_tab_icons_without_native_callbacks() {
 
     let state = last(&restored_screen);
     assert_eq!(state.tabs.len(), 2);
-    assert!(state.tabs.iter().all(|tab| tab
-        .favicon
-        .as_deref()
-        .is_some_and(|value| value.starts_with(zephium_core::icon::RGBA32_PREFIX))));
+    assert!(state.tabs.iter().all(|tab| tab.icon.is_some()));
     assert!(engine
         .calls()
         .iter()
@@ -276,8 +287,7 @@ fn slow_load_gets_one_fresh_bounded_favicon_pass_after_completion() {
         .tabs
         .iter()
         .find(|tab| tab.id == id.to_string())
-        .and_then(|tab| tab.favicon.as_deref())
-        .is_some_and(|value| value.starts_with(zephium_core::icon::RGBA32_PREFIX)));
+        .is_some_and(|tab| tab.icon.is_some()));
 }
 
 #[test]
@@ -385,6 +395,111 @@ fn private_favicon_is_visible_but_never_written_to_persistent_storage() {
         .tabs
         .iter()
         .find(|tab| tab.id == id.to_string())
-        .and_then(|tab| tab.favicon.as_deref())
-        .is_some_and(|value| value.starts_with(zephium_core::icon::RGBA32_PREFIX)));
+        .is_some_and(|tab| tab.icon.is_some()));
+}
+
+#[test]
+fn a_favourite_tab_restores_its_icon_like_any_other() {
+    let store = Arc::new(FakeStore::default());
+    let (mut first, _engine, screen) = setup_with(store.clone());
+    first.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut first, id, "kept.example");
+    first.handle(Command::SetTabEssential {
+        id,
+        essential: true,
+        before: None,
+    });
+    store.icons.lock().unwrap().push((
+        "https://kept.example".to_owned(),
+        vec![19; zephium_core::icon::RGBA32_BYTES],
+    ));
+    drop(first);
+
+    let (mut restored, _engine, restored_screen) = setup_with(store);
+    restored.handle(Command::Bootstrap);
+
+    let state = last(&restored_screen);
+    let kept = state
+        .tabs
+        .iter()
+        .find(|tab| tab.url.as_deref() == Some("https://kept.example/"))
+        .expect("the favourite survives the restart");
+    assert_eq!(
+        kept.icon.as_ref().map(|icon| icon.origin.as_str()),
+        Some("https://kept.example")
+    );
+}
+
+#[test]
+fn a_stored_icon_is_drawn_whatever_its_age_while_a_newer_one_is_fetched() {
+    let store = Arc::new(FakeStore::default());
+    store.icons.lock().unwrap().push((
+        "https://ancient.example".to_owned(),
+        vec![23; zephium_core::icon::RGBA32_BYTES],
+    ));
+    store
+        .icon_ages
+        .lock()
+        .unwrap()
+        .insert("https://ancient.example".to_owned(), 400 * 24 * 3600);
+
+    let (mut shell, engine, screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "ancient.example");
+
+    let profile = shell.windows.focused().unwrap().profile;
+    assert!(shell
+        .icon_ref_for_url(
+            zephium_ipc::IconSurface::Chrome,
+            profile,
+            "https://ancient.example/"
+        )
+        .is_some());
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("discover {id}")));
+}
+
+#[test]
+fn identical_pixels_are_sent_once_and_a_reattached_surface_gets_them_again() {
+    let (mut shell, _engine, screen, icons) = setup_with_icon_log(Arc::new(FakeStore::default()));
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "once.example");
+    let rgba = vec![55; zephium_core::icon::RGBA32_BYTES];
+
+    shell.handle(Command::Engine(EngineEvent::FaviconPixels {
+        id,
+        page_url: "https://once.example/".into(),
+        rgba: rgba.clone(),
+    }));
+    let delivered: usize = icons.lock().unwrap().iter().map(|v| v.entries.len()).sum();
+    assert_eq!(delivered, 1);
+
+    // The renderer rediscovering the same pixels must not resend them.
+    shell.handle(Command::Engine(EngineEvent::FaviconPixels {
+        id,
+        page_url: "https://once.example/".into(),
+        rgba,
+    }));
+    let delivered: usize = icons.lock().unwrap().iter().map(|v| v.entries.len()).sum();
+    assert_eq!(delivered, 1);
+
+    // A chrome reload leaves the webview with an empty raster cache.
+    shell.handle(Command::Bootstrap);
+    let entries: Vec<_> = icons
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|view| view.entries.iter().map(|entry| entry.origin.clone()))
+        .collect();
+    assert_eq!(entries, ["https://once.example", "https://once.example"]);
+    assert!(icons
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|view| view.surface == zephium_ipc::IconSurface::Chrome));
 }

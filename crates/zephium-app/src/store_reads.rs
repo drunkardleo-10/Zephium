@@ -16,9 +16,16 @@ use zephium_core::{icon, navigation};
 use crate::{CallbackHandle, Command, SharedStore};
 
 const MAX_PENDING_FAVICON_READS: usize = 64;
+const MAX_PENDING_HISTORY_CALLS: usize = 8;
 const MAX_SEARCH_QUERY_BYTES: usize = 4 * 1024;
 const MAX_CONSECUTIVE_EXTENSION_HISTORY_READS: usize = 4;
 pub(crate) const FAVICON_CACHE_MAX_AGE_SECONDS: i64 = 7 * 24 * 3600;
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
 
 #[derive(Clone, Debug)]
 pub enum StoreReadResult {
@@ -39,6 +46,8 @@ pub enum StoreReadResult {
         profile: ProfileId,
         origin: String,
         rgba: Option<Vec<u8>>,
+        /// The stored copy is older than the refresh window, or absent.
+        stale: bool,
     },
     FaviconBatch {
         generation: u64,
@@ -46,6 +55,13 @@ pub enum StoreReadResult {
         space: SpaceId,
         origins: Vec<String>,
         rasters: Vec<(String, Vec<u8>)>,
+    },
+    HistorySurface {
+        token: u64,
+        profile: ProfileId,
+        visits: Vec<zephium_core::ports::store::HistoryVisit>,
+        next: Option<i64>,
+        removed: Option<u32>,
     },
 }
 
@@ -72,6 +88,11 @@ enum Request {
         space: SpaceId,
         origins: Vec<String>,
     },
+    HistorySurface {
+        token: u64,
+        profile: ProfileId,
+        call: zephium_ipc::HistoryCall,
+    },
 }
 
 struct State {
@@ -80,6 +101,7 @@ struct State {
     in_flight: bool,
     consecutive_extension_history_reads: usize,
     history: Option<Request>,
+    history_calls: VecDeque<Request>,
     extension_history: HashMap<
         (
             zephium_core::extensions::ExtensionRuntimeInstance,
@@ -104,6 +126,7 @@ impl Default for State {
             in_flight: false,
             consecutive_extension_history_reads: 0,
             history: None,
+            history_calls: VecDeque::new(),
             extension_history: HashMap::new(),
             extension_history_order: VecDeque::new(),
             favicon_batch: None,
@@ -154,6 +177,37 @@ impl StoreReadQueue {
             generation,
             profile,
             query,
+        });
+        self.inner.ready.notify_one();
+        true
+    }
+
+    /// Queues one history-surface request. Unlike launcher input these are not
+    /// latest-value: each carries a completion the caller is waiting on.
+    pub(crate) fn request_history_call(
+        &self,
+        token: u64,
+        profile: ProfileId,
+        call: zephium_ipc::HistoryCall,
+    ) -> bool {
+        if !call.validate() {
+            return false;
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.stopped
+            || !state.accepting
+            || state.history_calls.len() >= MAX_PENDING_HISTORY_CALLS
+        {
+            return false;
+        }
+        state.history_calls.push_back(Request::HistorySurface {
+            token,
+            profile,
+            call,
         });
         self.inner.ready.notify_one();
         true
@@ -345,6 +399,7 @@ impl StoreReadQueue {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.accepting = false;
         state.history = None;
+        state.history_calls.clear();
         state.consecutive_extension_history_reads = 0;
         state.extension_history.clear();
         state.extension_history_order.clear();
@@ -390,6 +445,7 @@ impl StoreReadQueue {
         state.stopped = true;
         state.accepting = false;
         state.history = None;
+        state.history_calls.clear();
         state.consecutive_extension_history_reads = 0;
         state.extension_history.clear();
         state.extension_history_order.clear();
@@ -413,6 +469,7 @@ fn pop_browser_read(state: &mut State) -> Option<Request> {
     state
         .history
         .take()
+        .or_else(|| state.history_calls.pop_front())
         .or_else(|| state.favicon_batch.take())
         .or_else(|| {
             while let Some(id) = state.favicon_order.pop_front() {
@@ -455,7 +512,33 @@ impl Drop for StoreReaderStopGuard {
     }
 }
 
+/// The worker loop with its delivery injected, so a test can drive the real
+/// queue and the real request handling without an actor behind it.
+#[cfg(test)]
+pub(crate) fn run_for_test(
+    store: SharedStore,
+    queue: StoreReadQueue,
+    sink: std::sync::mpsc::Sender<StoreReadResult>,
+) {
+    run_with(store, queue, move |result| sink.send(result).is_ok());
+}
+
+/// Candidates handed to ranking. Larger than what is shown, so recorded
+/// searches and already-open tabs can be filtered out without leaving the
+/// history section short.
+const HISTORY_READ_LIMIT: u32 = 10;
+
 pub(crate) fn run(store: SharedStore, queue: StoreReadQueue, callback: CallbackHandle) {
+    run_with(store, queue, move |result| {
+        callback.dispatch(Command::StoreRead(result))
+    });
+}
+
+fn run_with(
+    store: SharedStore,
+    queue: StoreReadQueue,
+    mut deliver: impl FnMut(StoreReadResult) -> bool,
+) {
     while let Some(mut lease) = queue.recv() {
         let Some(request) = lease.take() else {
             continue;
@@ -469,9 +552,9 @@ pub(crate) fn run(store: SharedStore, queue: StoreReadQueue, callback: CallbackH
                 generation,
                 profile,
                 hits: store
-                    .search_history(profile, &query, 6)
+                    .search_history(profile, &query, HISTORY_READ_LIMIT)
                     .into_iter()
-                    .take(6)
+                    .take(HISTORY_READ_LIMIT as usize)
                     .filter(|hit| navigation::is_allowed_str(&hit.url))
                     .map(|mut hit| {
                         hit.title = sanitize_page_title(&hit.title);
@@ -498,21 +581,72 @@ pub(crate) fn run(store: SharedStore, queue: StoreReadQueue, callback: CallbackH
                     })
                     .collect(),
             },
+            Request::HistorySurface {
+                token,
+                profile,
+                call,
+            } => match call {
+                zephium_ipc::HistoryCall::Page {
+                    query,
+                    range,
+                    before,
+                    limit,
+                } => {
+                    let before = before
+                        .as_deref()
+                        .and_then(|cursor| cursor.parse::<i64>().ok());
+                    let since = range.window_seconds().map(|window| now_secs() - window);
+                    let visits =
+                        store.history_page(profile, &query, since, before, u32::from(limit));
+                    // A full page implies there may be more; a short one is the end.
+                    let next = (visits.len() == usize::from(limit))
+                        .then(|| visits.last().map(|visit| visit.id))
+                        .flatten();
+                    StoreReadResult::HistorySurface {
+                        token,
+                        profile,
+                        visits,
+                        next,
+                        removed: None,
+                    }
+                }
+                zephium_ipc::HistoryCall::Forget { urls } => StoreReadResult::HistorySurface {
+                    token,
+                    profile,
+                    visits: Vec::new(),
+                    next: None,
+                    removed: Some(store.forget_history_urls(profile, &urls)),
+                },
+                zephium_ipc::HistoryCall::Clear { range } => {
+                    let since = range.window_seconds().map(|window| now_secs() - window);
+                    StoreReadResult::HistorySurface {
+                        token,
+                        profile,
+                        visits: Vec::new(),
+                        next: None,
+                        removed: Some(store.clear_history(profile, since)),
+                    }
+                }
+            },
             Request::Favicon {
                 generation,
                 id,
                 profile,
                 origin,
             } => {
-                let rgba = store
-                    .fresh_favicon_raster(profile, &origin, FAVICON_CACHE_MAX_AGE_SECONDS)
-                    .filter(|bytes| icon::validated_rgba32(bytes).is_some());
+                let stored = store
+                    .favicon_raster_with_age(profile, &origin)
+                    .filter(|(bytes, _)| icon::validated_rgba32(bytes).is_some());
+                let stale = stored
+                    .as_ref()
+                    .is_none_or(|(_, age)| *age > FAVICON_CACHE_MAX_AGE_SECONDS);
                 StoreReadResult::Favicon {
                     generation,
                     id,
                     profile,
                     origin,
-                    rgba,
+                    rgba: stored.map(|(bytes, _)| bytes),
+                    stale,
                 }
             }
             Request::FaviconBatch {
@@ -541,7 +675,7 @@ pub(crate) fn run(store: SharedStore, queue: StoreReadQueue, callback: CallbackH
                 }
             }
         };
-        let _ = callback.dispatch(Command::StoreRead(result));
+        let _ = deliver(result);
     }
 }
 

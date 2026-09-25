@@ -109,4 +109,4 @@ pub mod work_runtime;
 mod work_search;
 #[cfg(feature = "work-runtime")]
 mod work_synthesis;
-pub use api::ResourceCompletion;
+pub use api::{HistoryCompletion, NoteCompletion, NotesAttachment, ResourceCompletion};

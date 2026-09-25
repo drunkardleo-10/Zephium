@@ -43,8 +43,17 @@ export const architecture = {
           {
             from: { element: { type: "features", captured: { module: "tools" } } },
             allow: {
-              to: { element: { type: "features", captured: { module: ["notes", "tasks"] } } },
+              to: {
+                element: {
+                  type: "features",
+                  captured: { module: ["notes", "tasks", "history", "downloads"] },
+                },
+              },
             },
+          },
+          {
+            from: { element: { type: "features", captured: { module: "library" } } },
+            allow: { to: { element: { type: "features", captured: { module: "downloads" } } } },
           },
           {
             from: { file: { categories: "entry" } },

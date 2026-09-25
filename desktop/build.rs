@@ -64,7 +64,8 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
     let extension_lab = env::var_os("CARGO_FEATURE_LOCAL_EXTENSION_LAB").is_some();
     let resource_ui_qa = env::var_os("CARGO_FEATURE_RESOURCE_UI_QA").is_some();
     let work_integration_qa = env::var_os("CARGO_FEATURE_WORK_INTEGRATION_QA").is_some();
-    let isolated_ui_qa = resource_ui_qa || work_integration_qa;
+    let file_workflows_qa = env::var_os("CARGO_FEATURE_FILE_WORKFLOWS_QA").is_some();
+    let isolated_ui_qa = resource_ui_qa || work_integration_qa || file_workflows_qa;
     let rendering_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_RENDERING_PROBE").is_some();
     let navigation_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_NAVIGATION_PROBE").is_some();
     if env::var_os("CARGO_FEATURE_MACOS_WORK_RETAINED_PRODUCT_PROBE").is_some()
@@ -91,35 +92,49 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
                 .ok_or("navigation qualification requires its isolated configuration override")?,
         )?;
     }
+    if [resource_ui_qa, work_integration_qa, file_workflows_qa]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count()
+        > 1
+    {
+        return Err("resource, Work and file workflow QA identities are mutually exclusive".into());
+    }
     if isolated_ui_qa {
-        if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+        let target = env::var("CARGO_CFG_TARGET_OS")?;
+        let supported_target = target == "macos" || (file_workflows_qa && target == "windows");
+        if !supported_target
             || env::var("PROFILE").as_deref() != Ok("debug")
             || extensions_staging
             || extension_lab
             || rendering_probe
             || navigation_probe
-            || (resource_ui_qa && work_integration_qa)
         {
-            return Err("resource UI QA requires an isolated macOS debug build".into());
+            return Err("product UI QA requires an isolated supported-platform debug build".into());
         }
-        let config = config_override
-            .as_ref()
-            .ok_or("resource UI QA requires an explicit isolated configuration")?;
-        let (identifier, title) = if work_integration_qa {
+        let (qa_id, qa_name) = if file_workflows_qa {
+            (
+                "app.zephium.files-integration-qa",
+                "Zephium Files Integration QA",
+            )
+        } else if work_integration_qa {
             ("app.zephium.work-integration", "Zephium Work Integration")
         } else {
             ("app.zephium.resources-qa", "Zephium Resources QA")
         };
-        if config.get("identifier").and_then(Value::as_str) != Some(identifier)
-            || config.get("productName").and_then(Value::as_str) != Some(title)
+        let config = config_override
+            .as_ref()
+            .ok_or("product UI QA requires an explicit isolated configuration")?;
+        if config.get("identifier").and_then(Value::as_str) != Some(qa_id)
+            || config.get("productName").and_then(Value::as_str) != Some(qa_name)
             || config
                 .pointer("/app/windows/0/title")
                 .and_then(Value::as_str)
-                != Some(title)
+                != Some(qa_name)
             || config.pointer("/build/devUrl") != Some(&Value::Null)
         {
             return Err(
-                "resource UI QA requires its exact isolated identity and bundled frontend".into(),
+                "product UI QA requires its exact isolated identity and bundled frontend".into(),
             );
         }
     }

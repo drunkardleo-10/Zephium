@@ -348,6 +348,8 @@
 #[cfg(any(target_os = "windows", target_os = "android"))]
 mod custom_protocol_workaround;
 mod error;
+#[cfg(target_os = "macos")]
+mod file_upload;
 #[cfg(any(target_os = "android", test))]
 mod inject_initialization_scripts;
 mod native_admission;
@@ -355,6 +357,8 @@ mod native_bounds;
 #[cfg(any(target_os = "windows", test))]
 mod native_cleanup;
 mod permissions;
+#[cfg(target_os = "macos")]
+pub use file_upload::{FileUploadRequest, FileUploadResponder};
 mod proxy;
 #[cfg(any(target_os = "macos", target_os = "android", target_os = "ios"))]
 mod util;
@@ -406,7 +410,8 @@ pub use self::webview2::{
 };
 #[cfg(target_os = "windows")]
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-  ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Environment,
+  ICoreWebView2, ICoreWebView2ContextMenuRequestedEventArgs, ICoreWebView2Controller,
+  ICoreWebView2DownloadStartingEventArgs, ICoreWebView2Environment,
 };
 
 use std::{borrow::Cow, collections::HashMap, path::PathBuf, rc::Rc};
@@ -505,6 +510,13 @@ pub enum NewWindowResponse {
     #[cfg(target_os = "macos")]
     webview: Retained<objc2_web_kit::WKWebView>,
   },
+  /// A host-owned Windows child requiring post-attachment policy registration.
+  /// The callback must close the child when attachment or policy setup fails.
+  #[cfg(windows)]
+  CreateGuarded {
+    webview: ICoreWebView2,
+    attached: Box<dyn FnOnce(bool)>,
+  },
   /// Deny the window from being opened.
   Deny,
 }
@@ -585,6 +597,10 @@ pub struct NewWindowOpener {
 #[non_exhaustive]
 #[derive(Debug)]
 pub struct NewWindowFeatures {
+  /// Native admission evidence. This is never supplied by page IPC.
+  pub user_initiated: bool,
+  /// Requested UI disposition; it is not an authorization signal.
+  pub foreground: bool,
   /// Specifies the size of the content area
   /// as defined by the user's operating system where the new window will be generated.
   pub size: Option<dpi::LogicalSize<f64>>,
@@ -784,6 +800,8 @@ struct WebViewAttributes<'a> {
   /// Policy for page-driven native close requests. The secure default keeps
   /// lifecycle ownership with the embedder.
   pub page_close_policy: PageClosePolicy,
+  #[cfg(any(target_os = "macos", target_os = "windows"))]
+  pub page_close_handler: Option<Box<dyn Fn()>>,
 
   /// Enables clipboard access for the page rendered on **Linux** and **Windows**.
   ///
@@ -992,6 +1010,8 @@ impl Default for WebViewAttributes<'_> {
       download_policy: DownloadPolicy::UseHandlers,
       new_window_req_handler: None,
       page_close_policy: PageClosePolicy::Ignore,
+      #[cfg(any(target_os = "macos", target_os = "windows"))]
+      page_close_handler: None,
       clipboard: false,
       #[cfg(debug_assertions)]
       devtools: true,
@@ -1622,6 +1642,14 @@ impl<'a> WebViewBuilder<'a> {
     self
   }
 
+  /// Route native page-close requests to the host without destroying its
+  /// controller behind the logical tab lifecycle.
+  #[cfg(any(target_os = "macos", target_os = "windows"))]
+  pub fn with_page_close_handler(mut self, handler: impl Fn() + 'static) -> Self {
+    self.attrs.page_close_handler = Some(Box::new(handler));
+    self
+  }
+
   /// Sets whether clicking an inactive window also clicks through to the webview. Default is `false`.
   ///
   /// ## Platform-specific
@@ -1843,6 +1871,10 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
   permission_request_handler:
     Option<Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>>,
   #[cfg(target_os = "macos")]
+  file_upload_handler: Option<Box<file_upload::FileUploadHandler>>,
+  #[cfg(target_os = "macos")]
+  native_download_handler: Option<Box<dyn Fn(&objc2_web_kit::WKDownload)>>,
+  #[cfg(target_os = "macos")]
   context_menu_handler: Option<
     Box<
       dyn Fn(
@@ -1870,6 +1902,10 @@ impl Default for PlatformSpecificWebViewAttributes {
       webview_configuration: None,
       #[cfg(target_os = "macos")]
       permission_request_handler: None,
+      #[cfg(target_os = "macos")]
+      file_upload_handler: None,
+      #[cfg(target_os = "macos")]
+      native_download_handler: None,
       #[cfg(target_os = "macos")]
       context_menu_handler: None,
     }
@@ -1945,6 +1981,21 @@ pub trait WebViewBuilderExtMacos {
     self,
     handler: impl Fn(PermissionRequest) -> PermissionRequestDisposition + 'static,
   ) -> Self;
+  /// Transfers native download delegation to the embedder. The callback must
+  /// retain its delegate/operation and cancel on any admission failure.
+  /// Requires `DownloadPolicy::UseHandlers`; a deny policy always wins.
+  fn with_native_download_handler(
+    self,
+    handler: impl Fn(&objc2_web_kit::WKDownload) + 'static,
+  ) -> Self;
+  /// Installs a main-thread native file upload broker. Without it uploads are
+  /// denied before inspecting request metadata. The responder cancels on drop;
+  /// the embedder must cancel retained responders on navigation and teardown.
+  /// WebKit owns user activation and the original input/frame association.
+  fn with_file_upload_handler(
+    self,
+    handler: impl Fn(&objc2_web_kit::WKWebView, FileUploadRequest, FileUploadResponder) + 'static,
+  ) -> Self;
   /// Merges browser-owned items into the native page context menu without
   /// serializing page metadata through Rust. The callback receives WebKit's
   /// already-created default menu and may replace or suppress it.
@@ -1977,6 +2028,22 @@ impl WebViewBuilderExtMacos for WebViewBuilder<'_> {
   ) -> Self {
     self.attrs.permission_handler = None;
     self.platform_specific.permission_request_handler = Some(Box::new(handler));
+    self
+  }
+
+  fn with_native_download_handler(
+    mut self,
+    handler: impl Fn(&objc2_web_kit::WKDownload) + 'static,
+  ) -> Self {
+    self.platform_specific.native_download_handler = Some(Box::new(handler));
+    self
+  }
+
+  fn with_file_upload_handler(
+    mut self,
+    handler: impl Fn(&objc2_web_kit::WKWebView, FileUploadRequest, FileUploadResponder) + 'static,
+  ) -> Self {
+    self.platform_specific.file_upload_handler = Some(Box::new(handler));
     self
   }
 
@@ -2075,6 +2142,12 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
   environment: Option<ICoreWebView2Environment>,
   environment_created_handler: Option<std::sync::Arc<dyn Fn(&ICoreWebView2Environment) + 'static>>,
   profile_name: Option<String>,
+  native_context_menu_handler: Option<
+    Rc<dyn Fn(&ICoreWebView2Controller, &ICoreWebView2ContextMenuRequestedEventArgs) -> bool>,
+  >,
+  native_download_handler: Option<
+    std::sync::Arc<dyn Fn(&ICoreWebView2Controller, &ICoreWebView2DownloadStartingEventArgs)>,
+  >,
 }
 
 #[cfg(windows)]
@@ -2093,12 +2166,29 @@ impl Default for PlatformSpecificWebViewAttributes {
       environment: None,
       environment_created_handler: None,
       profile_name: None,
+      native_context_menu_handler: None,
+      native_download_handler: None,
     }
   }
 }
 
 #[cfg(windows)]
 pub trait WebViewBuilderExtWindows {
+  /// Opt in to a host-filtered native context menu. The event is handled by
+  /// default; only a true return permits displaying the filtered native items.
+  fn with_native_context_menu_handler(
+    self,
+    handler: impl Fn(&ICoreWebView2Controller, &ICoreWebView2ContextMenuRequestedEventArgs) -> bool
+      + 'static,
+  ) -> Self;
+  /// Hands the original native download event to the host. Cancellation is
+  /// set before invocation; the host must retain a deferral to resolve later.
+  /// Explicit download denial always takes precedence over this opt-in hook.
+  fn with_native_download_handler(
+    self,
+    handler: impl Fn(&ICoreWebView2Controller, &ICoreWebView2DownloadStartingEventArgs) + 'static,
+  ) -> Self;
+
   /// Pass additional args to WebView2 upon creating the webview.
   ///
   /// ## Warning
@@ -2242,6 +2332,23 @@ pub trait WebViewBuilderExtWindows {
 
 #[cfg(windows)]
 impl WebViewBuilderExtWindows for WebViewBuilder<'_> {
+  fn with_native_context_menu_handler(
+    mut self,
+    handler: impl Fn(&ICoreWebView2Controller, &ICoreWebView2ContextMenuRequestedEventArgs) -> bool
+      + 'static,
+  ) -> Self {
+    self.platform_specific.native_context_menu_handler = Some(Rc::new(handler));
+    self.platform_specific.default_context_menus = true;
+    self
+  }
+  fn with_native_download_handler(
+    mut self,
+    handler: impl Fn(&ICoreWebView2Controller, &ICoreWebView2DownloadStartingEventArgs) + 'static,
+  ) -> Self {
+    self.platform_specific.native_download_handler = Some(std::sync::Arc::new(handler));
+    self
+  }
+
   fn with_additional_browser_args<S: Into<String>>(mut self, additional_args: S) -> Self {
     self.platform_specific.additional_browser_args = Some(additional_args.into());
     self
@@ -3049,7 +3156,10 @@ pub enum NavigationEventPhase {
   Committed,
   /// The committed navigation completed successfully.
   Finished,
-  /// The navigation terminated with an error or cancellation.
+  /// Native policy or user cancellation ended navigation without a document.
+  /// This is not a successful commit or a successful download.
+  Cancelled,
+  /// The navigation terminated with an error.
   Failed,
 }
 

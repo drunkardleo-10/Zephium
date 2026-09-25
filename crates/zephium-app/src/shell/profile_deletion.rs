@@ -762,6 +762,11 @@ impl Shell {
             state.retry_exponent = 0;
             (attempt, state.extension_native_namespace)
         };
+        // Close the profile's notes before its folder is erased; the notes
+        // thread handles this long before native erasure reports back.
+        if let Some(notes) = &self.notes {
+            notes.release(profile, Box::new(|| {}));
+        }
         let inbox = self.profile_deletion.inbox.clone();
         let wake = self.self_queue.as_ref().map(|queue| CallbackHandle {
             queue: Arc::downgrade(&queue.inner),

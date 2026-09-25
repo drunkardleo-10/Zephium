@@ -7,7 +7,7 @@ use tauri::{LogicalSize, Manager, PhysicalPosition, WebviewWindow};
 use zephium_core::ports::store::Store;
 use zephium_ipc::{
     OperationDisposition, OperationOutcome, PanelIntent, PanelOwner, PanelRoute, PanelState,
-    SearchContext,
+    SearchContext, ToolKind,
 };
 pub const PANEL_LABEL: &str = "panel";
 pub const PANEL_SIZE: (f64, f64) = geometry::DEFAULT;
@@ -112,6 +112,15 @@ impl Overlay {
     pub fn window_app(&self) -> &tauri::AppHandle {
         self.window.app_handle()
     }
+    pub fn private(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .model
+            .owner
+            .as_ref()
+            .is_none_or(|owner| owner.private)
+    }
     pub fn snapshot(&self) -> PanelState {
         let mut snapshot = self
             .state
@@ -121,6 +130,14 @@ impl Overlay {
             .snapshot();
         snapshot.position_restorable = position_supported();
         snapshot
+    }
+    /// Whether the panel is on screen with `tool` open.
+    pub fn showing(&self, tool: ToolKind) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let model = &state.model;
+        model.presented
+            && !model.suppressed
+            && matches!(&model.route, PanelRoute::Tool { tool: open } if *open == tool)
     }
     pub fn always_floating(&self) -> bool {
         self.state
@@ -195,6 +212,7 @@ impl Overlay {
     }
     fn cancel_search(&self, session_id: String) {
         if let Some(shell) = self.window.app_handle().try_state::<zephium_app::Handle>() {
+            crate::search_providers::cancel(&session_id);
             shell.dispatch(zephium_app::Command::CancelSearch { session_id });
         }
     }
@@ -586,6 +604,7 @@ impl Overlay {
 }
 pub fn update_context(app: &tauri::AppHandle, context: &PanelOwner) {
     let owner = Some(Owner {
+        private: context.private,
         window: context.window_id.clone(),
         profile: context.profile_id.clone(),
         name: context.profile_name.clone(),

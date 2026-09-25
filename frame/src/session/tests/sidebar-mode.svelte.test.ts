@@ -1,16 +1,28 @@
 import { describe, expect, it, vi } from "vitest";
 
+const native = vi.hoisted(() => ({ width: vi.fn(async () => undefined) }));
+
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
-    sidebarSetWidth: vi.fn(async () => undefined),
+    sidebarSetWidth: native.width,
     settingSet: vi.fn(async () => ({ operation_id: null, accepted: true })),
     settingGet: vi.fn(async () => null),
   });
 });
 
-const { COMPACT_WIDTH, MAX_EXPANDED_WIDTH, MIN_EXPANDED_WIDTH, SNAP_THRESHOLD, resolveDragWidth } =
-  await import("../sidebar-mode.svelte");
+const {
+  COMPACT_WIDTH,
+  MAX_EXPANDED_WIDTH,
+  MIN_EXPANDED_WIDTH,
+  SNAP_THRESHOLD,
+  applyDragWidth,
+  resolveDragWidth,
+  adoptMode,
+  setPanelExtent,
+  sidebarMode,
+  toggleMode,
+} = await import("../sidebar-mode.svelte");
 
 describe("resolveDragWidth", () => {
   it("snaps to the rail below the threshold", () => {
@@ -40,5 +52,78 @@ describe("resolveDragWidth", () => {
     for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
       expect(resolveDragWidth(value).mode).toBe("compact");
     }
+  });
+});
+
+describe("which width changes the page travels with", () => {
+  const last = () => native.width.mock.calls.at(-1) as unknown as [number, boolean];
+
+  it("slides for a deliberate change of shape and follows a drag directly", () => {
+    toggleMode();
+    expect(last()).toEqual([COMPACT_WIDTH, true]);
+    toggleMode();
+    expect(last()[1]).toBe(true);
+
+    applyDragWidth(300);
+    expect(last()).toEqual([300, false]);
+    applyDragWidth(310);
+    expect(last()).toEqual([310, false]);
+
+    // Crossing the snap point is a change of shape, however it was reached.
+    applyDragWidth(SNAP_THRESHOLD - 1);
+    expect(last()).toEqual([COMPACT_WIDTH, true]);
+    applyDragWidth(SNAP_THRESHOLD + 40);
+    expect(last()[1]).toBe(true);
+  });
+
+  it("slides when a tool opens beside the rail and when it closes", () => {
+    setPanelExtent(336);
+    expect(last()[1]).toBe(true);
+    setPanelExtent(0);
+    expect(last()[1]).toBe(true);
+  });
+});
+
+describe("the stored preference catching up with a toggle", () => {
+  it("never bounces the column back to the shape it just left", () => {
+    adoptMode("default");
+    vi.useFakeTimers();
+    native.width.mockClear();
+    toggleMode();
+    expect(sidebarMode()).toBe("compact");
+    expect(native.width.mock.calls).toEqual([[COMPACT_WIDTH, true]]);
+
+    // The store still holds the old value, then reports the new one: neither
+    // is a change of shape, so neither moves anything.
+    adoptMode("default");
+    adoptMode("compact");
+    expect(sidebarMode()).toBe("compact");
+    expect(native.width.mock.calls).toHaveLength(1);
+    vi.useRealTimers();
+  });
+
+  it("ignores the report of a save already overtaken by the next toggle", () => {
+    vi.useFakeTimers();
+    toggleMode();
+    toggleMode();
+    const shape = sidebarMode();
+    const sent = native.width.mock.calls.length;
+    adoptMode(shape === "compact" ? "default" : "compact");
+    adoptMode(shape);
+    expect(sidebarMode()).toBe(shape);
+    expect(native.width.mock.calls).toHaveLength(sent);
+    vi.useRealTimers();
+  });
+
+  it("still follows a change made elsewhere, and a save whose report never came", () => {
+    vi.useFakeTimers();
+    toggleMode();
+    const shape = sidebarMode();
+    vi.advanceTimersByTime(2000);
+    const other = shape === "compact" ? "default" : "compact";
+    adoptMode(other);
+    expect(sidebarMode()).toBe(other);
+    expect((native.width.mock.calls.at(-1) as unknown as [number, boolean])[1]).toBe(false);
+    vi.useRealTimers();
   });
 });

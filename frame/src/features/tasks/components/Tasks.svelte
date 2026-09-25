@@ -1,291 +1,289 @@
 <script lang="ts">
-  import { untrack } from "svelte";
-  import { resourceSession, type ResourceSession } from "$domain/resources";
-  import ResourcePanel from "$shared/ui/data/ResourcePanel";
-  import SaveStatus from "$shared/ui/data/SaveStatus";
+  import { tick, untrack } from "svelte";
+  import { commands } from "$shared/ipc/bindings";
+  import type { TaskContext, TaskSession } from "$domain/resources";
+  import EmptyState from "$shared/ui/EmptyState";
+  import Icon from "$shared/ui/Icon";
   import Button from "$shared/ui/Button";
-  import TaskCard from "./TaskCard.svelte";
+  import { CheckListIcon, Delete02Icon } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
+  import type { TaskScope } from "../lib/task-sections";
+  import { today, watchToday } from "../lib/today.svelte";
+  import TaskComposer from "./TaskComposer.svelte";
+  import TaskList from "./TaskList.svelte";
+  import TaskNotice from "./TaskNotice.svelte";
+  import TaskFailure from "./TaskFailure.svelte";
+  import LazyView from "$shared/ui/LazyView";
+  const loadDetail = () => import("./TaskDetail.svelte");
+
   let {
-    profile,
-    host = "work",
-    onclose,
-    ondrag,
-    onback,
+    session,
+    scope = "today",
+    density = "panel",
+    query = "",
+    listId = null,
+    page = null,
+    compact = false,
+    composing = false,
+    inlineDetail = true,
+    notices = true,
+    onselected,
+    oncomposed,
   }: {
-    profile: string;
-    host?: string;
-    onclose?: () => void;
-    ondrag?: () => void;
-    onback?: () => void;
+    session: TaskSession;
+    scope?: TaskScope;
+    density?: "panel" | "rail" | "page";
+    query?: string;
+    listId?: string | null;
+    /** The page in front of the reader, which a new task can link to. */
+    page?: TaskContext | null;
+    /** Bare property marks in the composer, for the narrow sidebar column. */
+    compact?: boolean;
+    composing?: boolean;
+    inlineDetail?: boolean;
+    /** False where the host draws the undo notice itself. */
+    notices?: boolean;
+    onselected?: (id: string | null) => void;
+    oncomposed?: () => void;
   } = $props();
-  let session = $state.raw<ResourceSession | null>(
-    untrack(() => resourceSession(profile, "task", host)),
-  );
+  let composer = $state<ReturnType<typeof TaskComposer>>();
+  let root = $state<HTMLElement>();
+  let spoken = $state("");
+  let opened = $state(false);
+  let selected = $derived(session.rows.find((row) => row.id === session.selectedId) ?? null);
+  let searching = $derived(query.trim().length > 0);
+
+  $effect(() => watchToday());
   $effect(() => {
-    const owner = profile;
-    const scope = host;
-    const current = untrack(() => resourceSession(owner, "task", scope));
-    session = current;
-    void current?.start();
-    return () => current?.stopObserving();
+    const view = scope;
+    const day = today();
+    const list = listId;
+    untrack(() => session.setView(view, day, list));
   });
-  let titleInput = $state<HTMLInputElement>();
-  async function create() {
-    const current = session;
-    await current?.create(m.task_untitled());
-    if (current === session && current?.record && current.saveState === "saved") {
-      titleInput?.focus();
-      titleInput?.select();
+  $effect(() => {
+    if (!composing) return;
+    untrack(() => {
+      opened = false;
+      void tick().then(() => composer?.focus());
+      oncomposed?.();
+    });
+  });
+
+  const open = (url: string) => void commands.browserOpenUrl(url, false);
+  function select(id: string | null, activate = true) {
+    session.selectedId = id;
+    if (activate) opened = id !== null;
+    if (id) void session.load(id);
+    onselected?.(id);
+  }
+  async function closeDetail() {
+    const id = session.selectedId;
+    opened = false;
+    await tick();
+    root
+      ?.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(id ?? "")}"] .task-title`)
+      ?.focus();
+  }
+  function announce(message: string) {
+    spoken = "";
+    queueMicrotask(() => (spoken = message));
+  }
+  function keydown(event: KeyboardEvent) {
+    const target = event.target as HTMLElement;
+    if (event.defaultPrevented || target.closest("input,textarea,select,[contenteditable=true]"))
+      return;
+    if (event.key === "Escape" && opened && inlineDetail) {
+      event.preventDefault();
+      void closeDetail();
+      return;
     }
-  }
-  async function close() {
-    const current = session;
-    if (current && (await current.flush()) && current === session) onclose?.();
-  }
-  async function exit() {
-    const current = session;
-    if (current && (await current.flush()) && current === session) onback?.();
-  }
-  async function trashFilter() {
-    const current = session;
-    if (current && (await current.flush()) && current === session) {
-      await current.back();
-      if (current !== session) return;
-      current.trash = !current.trash;
-      void current.reload();
-    }
+    if (
+      !(event.metaKey || event.ctrlKey) ||
+      event.shiftKey ||
+      event.key.toLowerCase() !== "z" ||
+      !session.undoable
+    )
+      return;
+    event.preventDefault();
+    void session.undo();
   }
 </script>
 
-{#if session}<ResourcePanel
-    title={m.tool_tasks()}
-    rows={session.items}
-    query={session.query}
-    onquery={(value) => session?.search(value)}
-    loading={session.loading}
-    error={session.error}
-    editing={!!session.draft}
-    oncreate={create}
-    onclose={onclose ? close : undefined}
-    onback={() => {
-      void session?.back();
-    }}
-    {ondrag}
-    onexit={onback ? exit : undefined}
-    hasMore={!!session.next}
-    onmore={() => {
-      void session?.reload(true);
-    }}
-    trash={session.trash}
-    ontrash={trashFilter}
-  >
-    {#snippet status()}{#if session && (session.draft || session.pending)}<SaveStatus
-          state={session.saveState}
-          onretry={() => {
-            void session?.retry();
-          }}
-          ondiscard={() => {
-            void session?.discardDraft();
-          }}
-          onkeep={() => {
-            void session?.keepDraft();
-          }}
-        />{/if}{/snippet}
-    {#snippet filters()}<div class="task-filters">
-        {#each ["all", "open", "completed"] as filter (filter)}<Button
-            variant="ghost"
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_no_noninteractive_tabindex -->
+<div
+  bind:this={root}
+  class="tasks"
+  data-density={density}
+  data-tasks-root
+  data-tauri-drag-region="false"
+  role="group"
+  aria-label={m.tool_tasks()}
+  tabindex={-1}
+  onkeydown={keydown}
+>
+  <TaskFailure {session} />
+  <div class="task-list-view" class:concealed={inlineDetail && opened && selected !== null}>
+    {#if !session.trash && scope !== "completed"}<TaskComposer
+        bind:this={composer}
+        bind:value={session.captureDraft}
+        bind:context={session.captureContext}
+        {page}
+        {compact}
+        {density}
+        lists={session.lists}
+        initialList={listId}
+        defaultDate={scope === "today" ? today() : null}
+        today={today()}
+        oncreate={(input) => session.create(input)}
+        onexit={() => root?.querySelector<HTMLElement>(".task-title")?.focus()}
+      />{/if}
+    {#if session.loading && session.rows.length === 0}<p class="task-loading" role="status">
+        {m.task_loading()}
+      </p>{:else if session.rows.length === 0 && !session.failure}
+      <EmptyState
+        title={session.trash
+          ? m.task_trash_empty()
+          : searching
+            ? m.task_empty_search()
+            : scope === "inbox"
+              ? m.task_empty_inbox()
+              : listId
+                ? m.task_empty_list()
+                : scope === "all"
+                  ? m.task_empty_all()
+                  : scope === "completed"
+                    ? m.task_empty_completed()
+                    : scope === "upcoming"
+                      ? m.task_empty_upcoming()
+                      : m.task_empty_title()}
+        description={session.trash
+          ? m.task_trash_empty_help()
+          : searching
+            ? m.task_empty_search_help()
+            : scope === "inbox"
+              ? m.task_inbox_help()
+              : listId
+                ? m.task_list_help()
+                : m.task_empty_help()}
+      >
+        {#snippet icon()}<Icon
+            icon={session.trash ? Delete02Icon : CheckListIcon}
+            size={24}
+          />{/snippet}
+      </EmptyState>
+    {:else}
+      <TaskList
+        rows={session.rows}
+        {scope}
+        {density}
+        {query}
+        {announce}
+        {listId}
+        lists={session.lists}
+        selectedId={session.selectedId}
+        onselected={select}
+        trashed={session.trash}
+        ontoggle={(id, status) => session.setStatus(id, status)}
+        onschedule={(id, day, time) => void session.schedule(id, day, time)}
+        onrename={(id, title) => session.rename(id, title)}
+        onpin={(id, pinned) => void session.setPinned(id, pinned)}
+        ondelete={(id) => session.setTrashed(id, true)}
+        onrestore={(id) => session.setTrashed(id, false)}
+        onopenpage={open}
+        onposition={(id, key) => void session.setPosition(id, key)}
+      />
+      {#if session.next}<div class="task-more">
+          <Button
             size="compact"
-            aria-pressed={session?.filter === filter}
-            onclick={() => {
-              if (session) {
-                session.filter = filter as "all" | "open" | "completed";
-                void session.reload();
-              }
-            }}
-            >{filter === "all"
-              ? m.tool_all()
-              : filter === "open"
-                ? m.task_open()
-                : m.tool_completed()}</Button
-          >{/each}
-      </div>{/snippet}
-    {#snippet row(task)}<TaskCard
-        title={task.title}
-        completed={task.completed ?? false}
-        dueDate={task.due_date}
-        pinned={task.pinned}
-        selected={session?.record?.id === task.id}
-        disabled={session?.navigating ||
-          session?.saveState === "saving" ||
-          session?.saveState === "unknown" ||
-          session?.trash}
-        onopen={() => {
-          void session?.open(task.id);
-        }}
-        ontoggle={(value) => {
-          void session?.setTaskCompleted(task, value);
-        }}
-      />{/snippet}
-    {#snippet editor()}{#if session?.draft?.content.kind === "task"}{@const current =
-          session}{@const task = session.draft.content}
-        <div class="task-editor">
-          <label class="task-title"
-            ><span>{m.resource_title()}</span><input
-              bind:this={titleInput}
-              value={current.draft!.title}
-              maxlength="256"
-              required
-              disabled={!current.canEdit}
-              oninput={(event) => current.edit({ title: event.currentTarget.value })}
-            /></label
+            variant="ghost"
+            disabled={session.loading}
+            onclick={() => void session.reload(true)}>{m.task_more_tasks()}</Button
           >
-          <button
-            type="button"
-            class="completion"
-            role="checkbox"
-            aria-checked={current.record?.draft.content.kind === "task" &&
-              current.record.draft.content.completed}
-            disabled={current.navigating ||
-              current.record?.trashed ||
-              current.saveState === "unknown" ||
-              current.saveState === "conflict" ||
-              task.completed !==
-                (current.record?.draft.content.kind === "task" &&
-                  current.record.draft.content.completed)}
-            onclick={() => {
-              current.edit({ content: { ...task, completed: !task.completed } });
-              void current.flush();
-            }}
-            ><span aria-hidden="true"
-              >{current.record?.draft.content.kind === "task" &&
-              current.record.draft.content.completed
-                ? "✓"
-                : "○"}</span
-            >{m.task_complete()}</button
-          >
-          <label
-            >{m.task_description()}<textarea
-              value={task.description}
-              rows="4"
-              maxlength="4096"
-              disabled={!current.canEdit}
-              oninput={(event) =>
-                current.edit({ content: { ...task, description: event.currentTarget.value } })}
-            ></textarea></label
-          >
-          <label
-            >{m.task_due()}<input
-              type="date"
-              value={task.due_date ?? ""}
-              disabled={!current.canEdit}
-              onchange={(event) =>
-                current.edit({ content: { ...task, due_date: event.currentTarget.value || null } })}
-            /></label
-          >
-          <div class="task-actions">
-            <Button
-              size="compact"
-              disabled={!current.canEdit}
-              aria-pressed={current.draft!.pinned}
-              onclick={() => current.edit({ pinned: !current.draft!.pinned })}
-              >{m.resource_pin()}</Button
-            >{#if current.record}<Button
-                size="compact"
-                disabled={current.navigating}
-                onclick={() => {
-                  void current.setTrashed(!current.record!.trashed);
-                }}>{current.record.trashed ? m.resource_restore() : m.resource_trash()}</Button
-              >{/if}
-          </div>
-        </div>
-      {/if}{/snippet}
-  </ResourcePanel>{:else}<p role="alert">{m.resource_draft_capacity()}</p>{/if}
+        </div>{/if}
+    {/if}
+  </div>
+  {#if inlineDetail && opened && selected}<LazyView
+      loader={loadDetail}
+      loadingLabel={m.task_loading()}
+      failureLabel={m.task_read_failed()}
+      retryLabel={m.surface_retry()}
+      >{#snippet children(TaskDetail)}<TaskDetail
+          task={selected}
+          today={today()}
+          lists={session.lists}
+          compact
+          trashed={session.trash}
+          onclose={() => void closeDetail()}
+          ontoggle={(id, status) => void session.setStatus(id, status)}
+          onschedule={(id, day, time) => void session.schedule(id, day, time)}
+          ondeadline={(id, day) => void session.setDeadline(id, day)}
+          onduration={(id, minutes) => void session.setDuration(id, minutes)}
+          onorganize={(id, list, inbox) => void session.organize(id, list, inbox)}
+          onpriority={(id, priority) => void session.prioritize(id, priority)}
+          onsteps={(id, steps) => session.updateSteps(id, steps)}
+          onsteprename={(id, step, title) => session.renameStep(id, step, title)}
+          onrename={(id, title) => session.rename(id, title)}
+          ondescribe={(id, text) => session.describe(id, text)}
+          onpin={(id, pinned) => void session.setPinned(id, pinned)}
+          onremove={(id) => {
+            opened = false;
+            void session.setTrashed(id, !session.trash);
+          }}
+          onopenpage={open}
+        />{/snippet}</LazyView
+    >{/if}
+  {#if notices}<TaskNotice
+      notice={session.notice}
+      onundo={() => void session.undo()}
+      ondismiss={() => session.dismissNotice()}
+    />{/if}
+  <p class="task-live" role="status" aria-live="polite">{spoken}</p>
+</div>
 
 <style>
-  .completion {
+  .tasks,
+  .task-list-view {
     display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px;
-    text-align: start;
-    font: inherit;
-    background: var(--color-fill);
-    color: var(--color-text);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    cursor: pointer;
-  }
-
-  .completion:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: 2px;
-  }
-
-  .completion:disabled {
-    opacity: 0.5;
-  }
-
-  .task-editor {
-    display: grid;
-    gap: 20px;
-  }
-
-  label {
-    display: grid;
-    gap: 8px;
-    color: var(--color-muted);
-    font-size: var(--text-caption);
-  }
-
-  input,
-  textarea {
-    box-sizing: border-box;
-    width: 100%;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
     min-width: 0;
-    padding: 12px;
-    font: inherit;
-    font-size: 14px;
-    line-height: 1.6;
-    color: var(--color-text);
-    background: var(--color-field);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-field);
-  }
-
-  textarea {
-    resize: vertical;
-  }
-
-  input:focus-visible,
-  textarea:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: 2px;
-  }
-
-  .task-title input {
-    padding: 8px 0;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-    font-size: var(--text-title);
-    font-weight: 600;
-    line-height: 1.3;
-  }
-
-  .task-title input:focus-visible {
     outline: none;
-    box-shadow: 0 2px var(--color-ring);
   }
 
-  .task-actions,
-  .task-filters {
+  .tasks {
+    position: relative;
+    padding-inline: 8px;
+  }
+
+  .tasks[data-density="page"] {
+    padding-inline: 0;
+  }
+
+  .concealed {
+    display: none;
+  }
+
+  .task-loading {
+    padding: 16px;
+    color: var(--color-muted);
+    font-size: var(--text-body);
+  }
+
+  .task-more {
     display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
+    justify-content: center;
+    padding-block: 12px;
   }
 
-  .task-filters {
-    margin-block-start: 12px;
+  .task-live {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 </style>

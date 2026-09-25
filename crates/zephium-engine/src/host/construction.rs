@@ -1,7 +1,6 @@
 #[cfg(target_os = "windows")]
 use super::dispatch::with_profile_exit;
 use super::dispatch::{with_renderer_exit, with_source_observation, with_title_observation};
-use super::navigation::bounded_title;
 #[cfg(target_os = "macos")]
 use super::permits::queue_extension_background_wake;
 use super::permits::{
@@ -41,23 +40,26 @@ use objc2::rc::Retained;
 #[cfg(target_os = "windows")]
 use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2, ICoreWebView2Environment};
 
-#[derive(Clone, Copy)]
-enum NativeViewPurpose {
+pub(super) enum NativeViewPurpose {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    NativeTab(wry::NewWindowOpener),
     Tab,
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     WarmSpare,
 }
 
 impl NativeViewPurpose {
-    const fn resource_class(self) -> NativeResourceClass {
+    const fn resource_class(&self) -> NativeResourceClass {
         match self {
             Self::Tab => NativeResourceClass::Tab,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            Self::NativeTab(_) => NativeResourceClass::Tab,
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             Self::WarmSpare => NativeResourceClass::WarmSpare,
         }
     }
 
-    const fn reports_failure(self) -> bool {
+    const fn reports_failure(&self) -> bool {
         matches!(self, Self::Tab)
     }
 }
@@ -301,7 +303,7 @@ impl EngineHost {
         }
     }
 
-    fn build_view(
+    pub(super) fn build_view(
         &mut self,
         id: Rc<Cell<ItemId>>,
         partition: Partition,
@@ -368,8 +370,7 @@ impl EngineHost {
             return None;
         }
         let mut native_resource = Some(native_resource);
-        let mut built =
-            self.build_view_inner(id, partition, url, bounds, report_failure, event_permit);
+        let mut built = self.build_view_inner(id, partition, url, bounds, event_permit, purpose);
         #[cfg(target_os = "windows")]
         {
             let construction_debts = wry::pending_webview2_cleanup_debts();
@@ -511,9 +512,25 @@ impl EngineHost {
         partition: Partition,
         url: &str,
         bounds: Rect,
-        report_failure: bool,
         event_permit: EventPermit,
+        purpose: NativeViewPurpose,
     ) -> Option<ObservedView> {
+        let report_failure = purpose.reports_failure();
+        let popup_opener = match purpose {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            NativeViewPurpose::NativeTab(opener) => Some(opener),
+            _ => None::<wry::NewWindowOpener>,
+        };
+        let native_popup = popup_opener.is_some();
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let initial_download = Rc::new(Cell::new(native_popup));
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let initial_download_deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(30);
+        #[cfg(target_os = "macos")]
+        let initial_download_window = popup_opener
+            .as_ref()
+            .and_then(|opener| opener.webview.window());
         if self.erasure_tombstones.contains(&partition.profile()) {
             if report_failure {
                 event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
@@ -579,6 +596,16 @@ impl EngineHost {
         let extension_document_permits_pending =
             self.extension_document_authority.pending_presence();
         let presentation_permit = Arc::new(AtomicBool::new(false));
+        #[cfg(target_os = "macos")]
+        let file_uploads = super::file_uploads::FileUploadBroker::new(
+            event_permit.clone(),
+            navigation.clone(),
+            presentation_permit.clone(),
+        );
+        #[cfg(target_os = "macos")]
+        let load_file_uploads = Rc::downgrade(&file_uploads);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let download_surface_intent = Arc::new(AtomicBool::new(false));
         let guard_presentation_permit = presentation_permit.clone();
         let load_presentation_permit = presentation_permit.clone();
         let crash_permit = event_permit.clone();
@@ -856,6 +883,26 @@ impl EngineHost {
         // keep the real privileged New Tab surface until its exact URL
         // projection is verified; the transparent presentation-gated stage
         // then reveals only the attributed document.
+        #[cfg(target_os = "macos")]
+        let builder = if let Some(opener) = popup_opener.as_ref() {
+            use wry::WebViewBuilderExtMacos;
+            let config = opener.target_configuration.clone();
+            let mtm = objc2_foundation::MainThreadMarker::new()?;
+            unsafe {
+                config.setUserContentController(&objc2_web_kit::WKUserContentController::new(mtm));
+            }
+            builder.with_webview_configuration(config)
+        } else {
+            builder
+        };
+        #[cfg(target_os = "windows")]
+        let builder = if let Some(opener) = popup_opener.as_ref() {
+            use wry::WebViewBuilderExtWindows;
+            builder.with_environment(opener.environment.clone())
+        } else {
+            builder
+        };
+
         let mut builder = builder
             .with_bounds(to_wry(bounds))
             // Construction itself may enter a native message loop. On
@@ -907,7 +954,7 @@ impl EngineHost {
             .with_navigation_presentation_guard(move || {
                 guard_presentation_permit.store(false, Ordering::Release);
             })
-            .with_document_title_changed_handler(move |title| {
+            .with_document_title_changed_handler(move |_title| {
                 // Title callbacks carry no navigation identifier. Do not let
                 // an inactive spare, transitional document, or callback
                 // queued by the prior document publish directly into chrome.
@@ -916,25 +963,83 @@ impl EngineHost {
                         let id = title_id.get();
                         let queued_permit = title_permit.clone();
                         let queued_navigation = title_navigation.clone();
-                        let title = bounded_title(&title);
                         with_title_observation(id, move |host| {
                             host.emit_title_observation(
                                 id,
                                 &queued_permit,
                                 &queued_navigation,
                                 epoch,
-                                title,
                             );
                         });
                     }
                 }
             });
 
-        // Intentionally do not install a new-window callback. Wry's native
-        // no-callback path denies synchronously before reading the URI/window
-        // metadata or acquiring a deferral. An always-Deny callback would be
-        // observably equivalent but would retain attacker-controlled COM
-        // state and enqueue one UI closure for every popup request.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            if native_popup {
+                let closing_item = id.clone();
+                let closing_permit = event_permit.clone();
+                let closing_sink = self.sink.clone();
+                builder = builder.with_page_close_handler(move || {
+                    closing_permit.emit(
+                        &closing_sink,
+                        EngineEvent::NativeTabCloseRequested {
+                            id: closing_item.get(),
+                        },
+                    )
+                });
+            }
+            let source = id.clone();
+            let permit = event_permit.clone();
+            let tracker = navigation.clone();
+            let burst = Cell::new((std::time::Instant::now(), 0u8));
+            let last_blocked = Cell::new(None::<std::time::Instant>);
+            let popup_sink = self.sink.clone();
+            builder = builder.with_new_window_req_handler(move |url, features| {
+                // Bound script-triggered bursts without delaying ordinary rapid
+                // modifier-clicks. Physical controllers have a separate cap.
+                let now = std::time::Instant::now();
+                let report_blocked = || {
+                    if last_blocked.get().is_none_or(|old| {
+                        now.duration_since(old) >= std::time::Duration::from_secs(1)
+                    }) {
+                        last_blocked.set(Some(now));
+                        permit.emit(
+                            &popup_sink,
+                            EngineEvent::PageOpenBlocked { id: source.get() },
+                        );
+                    }
+                };
+                let (started, count) = burst.get();
+                let (started, count) =
+                    if now.duration_since(started) >= std::time::Duration::from_secs(1) {
+                        (now, 0)
+                    } else {
+                        (started, count)
+                    };
+                if !features.user_initiated || count >= 8 {
+                    report_blocked();
+                    return wry::NewWindowResponse::Deny;
+                }
+                burst.set((started, count + 1));
+                let Some(activity) = tracker.activity_snapshot() else {
+                    report_blocked();
+                    return wry::NewWindowResponse::Deny;
+                };
+                let response = super::dispatch::try_open_native_tab(
+                    source.get(),
+                    &permit,
+                    activity,
+                    &url,
+                    features,
+                );
+                if matches!(response, wry::NewWindowResponse::Deny) {
+                    report_blocked();
+                }
+                response
+            });
+        }
 
         // `scripts_for` prepends the protected host-owned registrations. Keep
         // that exact ordering so their captured intrinsics and observers are
@@ -979,6 +1084,58 @@ impl EngineHost {
                     }
                     *observed = Some(environment.clone());
                 });
+            {
+                let menu_permit = event_permit.clone();
+                let menu_navigation = navigation.clone();
+                let menu_presentation = presentation_permit.clone();
+                builder = builder.with_native_context_menu_handler(move |controller, args| {
+                    super::page_open::filter_windows_context_menu(
+                        &menu_permit,
+                        &menu_navigation,
+                        &menu_presentation,
+                        controller,
+                        args,
+                    )
+                });
+            }
+            if let Some(downloads) = &self.downloads {
+                let downloads = Rc::downgrade(downloads);
+                let download_permit = event_permit.clone();
+                let download_intent = download_surface_intent.clone();
+                let download_navigation = navigation.clone();
+                let initial_download = initial_download.clone();
+                let download_item = id.clone();
+                let download_sink = self.sink.clone();
+                builder = builder
+                    .with_download_policy(DownloadPolicy::UseHandlers)
+                    .with_native_download_handler(move |controller, event| {
+                        if let Some(manager) = downloads.upgrade() {
+                            let initial = initial_download.replace(false)
+                                && std::time::Instant::now() <= initial_download_deadline;
+                            let started = initial.then(|| {
+                                let item = download_item.get();
+                                let permit = download_permit.clone();
+                                let sink = download_sink.clone();
+                                Box::new(move || {
+                                    permit.emit(
+                                        &sink,
+                                        EngineEvent::LinkedDownloadStarted { id: item },
+                                    )
+                                }) as Box<dyn FnOnce()>
+                            });
+                            manager.admit(
+                                partition,
+                                download_permit.clone(),
+                                download_intent.clone(),
+                                download_navigation.clone(),
+                                (controller, event),
+                                started.map(|on_started| super::downloads::InitialDownload {
+                                    on_started: Some(on_started),
+                                }),
+                            );
+                        }
+                    });
+            }
             if let Some(environment) = cached_environment {
                 builder = builder.with_environment(environment);
             }
@@ -1004,6 +1161,12 @@ impl EngineHost {
         {
             use wry::{WebViewBuilderExtDarwin, WebViewBuilderExtMacos};
             let permit = crash_permit.clone();
+            let upload_broker = Rc::downgrade(&file_uploads);
+            let crash_upload_broker = Rc::downgrade(&file_uploads);
+            let drop_permit = event_permit.clone();
+            let drop_navigation = navigation.clone();
+            let drop_presentation = presentation_permit.clone();
+            let drop_epoch = std::cell::Cell::new(None);
             let page_permission_item = id.clone();
             let page_permission_permit = event_permit.clone();
             let page_permission_navigation = navigation.clone();
@@ -1016,6 +1179,35 @@ impl EngineHost {
                 // the popup broker. Keep it disabled until chrome can label
                 // the origin and verify the initiating gesture.
                 .with_allow_link_preview(false)
+                .with_drag_drop_handler(move |event| {
+                    let permitted = drop_permit.active_token().is_some()
+                        && drop_presentation.load(Ordering::Acquire);
+                    match event {
+                        wry::DragDropEvent::Enter { .. } => {
+                            let epoch = drop_navigation
+                                .current_committed()
+                                .filter(|epoch| permitted && drop_navigation.is_current(*epoch));
+                            drop_epoch.set(epoch);
+                            epoch.is_none()
+                        }
+                        wry::DragDropEvent::Drop { .. } => !drop_epoch
+                            .take()
+                            .is_some_and(|epoch| permitted && drop_navigation.is_current(epoch)),
+                        wry::DragDropEvent::Over { .. } => !drop_epoch
+                            .get()
+                            .is_some_and(|epoch| permitted && drop_navigation.is_current(epoch)),
+                        wry::DragDropEvent::Leave => {
+                            drop_epoch.set(None);
+                            false
+                        }
+                        _ => true,
+                    }
+                })
+                .with_file_upload_handler(move |view, request, responder| {
+                    if let Some(broker) = upload_broker.upgrade() {
+                        broker.present(view, request, responder);
+                    }
+                })
                 .with_permission_request_handler(move |request| {
                     super::page_permissions::admit_native_request(
                         profile,
@@ -1027,12 +1219,60 @@ impl EngineHost {
                     )
                 })
                 .with_on_web_content_process_terminate_handler(move || {
+                    if let Some(broker) = crash_upload_broker.upgrade() {
+                        broker.cancel();
+                    }
                     let id = crash_id.get();
                     let queued_permit = permit.clone();
                     with_renderer_exit(id, move |host| {
                         host.on_renderer_process_exit(id, &queued_permit)
                     });
                 });
+            if let Some(downloads) = &self.downloads {
+                let downloads = Rc::downgrade(downloads);
+                let download_permit = event_permit.clone();
+                let download_intent = download_surface_intent.clone();
+                let download_navigation = navigation.clone();
+                let initial_download = initial_download.clone();
+                let download_item = id.clone();
+                let download_sink = self.sink.clone();
+                builder = builder
+                    .with_download_policy(DownloadPolicy::UseHandlers)
+                    .with_native_download_handler(move |native| {
+                        if let Some(downloads) = downloads.upgrade() {
+                            let initial = initial_download.replace(false)
+                                && std::time::Instant::now() <= initial_download_deadline;
+                            let started = initial.then(|| {
+                                let item = download_item.get();
+                                let permit = download_permit.clone();
+                                let sink = download_sink.clone();
+                                Box::new(move || {
+                                    permit.emit(
+                                        &sink,
+                                        EngineEvent::LinkedDownloadStarted { id: item },
+                                    )
+                                }) as Box<dyn FnOnce()>
+                            });
+                            downloads.admit(
+                                partition,
+                                download_permit.clone(),
+                                download_intent.clone(),
+                                download_navigation.clone(),
+                                native,
+                                started.and_then(|on_started| {
+                                    initial_download_window.clone().map(|window| {
+                                        super::downloads::InitialDownload {
+                                            window,
+                                            on_started: Some(on_started),
+                                        }
+                                    })
+                                }),
+                            );
+                        } else {
+                            unsafe { native.cancel(None) };
+                        }
+                    });
+            }
             if prepared_extension_controller.is_some() {
                 builder = builder.with_context_menu_handler(move |_event, default_menu| {
                     super::dispatch::try_macos_extension_context_menu(
@@ -1070,6 +1310,10 @@ impl EngineHost {
         };
 
         builder = builder.with_navigation_event_handler(move |event| {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            if event.phase == wry::NavigationEventPhase::Committed && event.url != "about:blank" {
+                initial_download.set(false);
+            }
             let id = load_id.get();
             if event.phase == wry::NavigationEventPhase::Committed {
                 // Wry already revoked this permit before its native hide. Do
@@ -1082,6 +1326,10 @@ impl EngineHost {
             };
             match transition {
                 NavigationTransition::Started(epoch) => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(broker) = load_file_uploads.upgrade() {
+                        broker.cancel();
+                    }
                     #[cfg(target_os = "macos")]
                     queue_extension_background_wake(
                         id,
@@ -1150,7 +1398,14 @@ impl EngineHost {
                     if let Some(request) = request {
                         load_permit.emit(&on_load, EngineEvent::NavigationFailed { id, request });
                     }
-                    queue_navigation_failure(id, &load_permit, &load_navigation, failed, restored);
+                    queue_navigation_failure(
+                        id,
+                        &load_permit,
+                        &load_navigation,
+                        failed,
+                        restored,
+                        event.phase == wry::NavigationEventPhase::Cancelled,
+                    );
                 }
             }
         });
@@ -1382,6 +1637,19 @@ impl EngineHost {
         };
         #[cfg(target_os = "windows")]
         {
+            use wry::WebViewExtWindows;
+            // configure() deliberately denies menus for generic/agent views.
+            // Only this human-view constructor installed both the bounded
+            // ContextMenuRequested filter and the SaveAsUIShowing denial hook.
+            if unsafe { view.webview().Settings() }
+                .and_then(|settings| unsafe { settings.SetAreDefaultContextMenusEnabled(true) })
+                .is_err()
+            {
+                if report_failure {
+                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                }
+                return None;
+            }
             debug_assert!(!self.construction_unproven.contains(&partition.profile()));
         }
         #[cfg(target_os = "macos")]
@@ -1565,7 +1833,11 @@ impl EngineHost {
             }
             return None;
         };
-        if let Err(error) = view.load_url(url) {
+        if let Err(error) = if native_popup {
+            Ok(())
+        } else {
+            view.load_url(url)
+        } {
             navigation.fail_synchronous(epoch);
             eprintln!("engine: initial navigation failed: {error}");
             if report_failure {
@@ -1579,6 +1851,10 @@ impl EngineHost {
             return None;
         }
         Some(ObservedView {
+            #[cfg(target_os = "macos")]
+            file_uploads,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            download_surface_intent,
             event_permit,
             navigation,
             presentation_permit,
@@ -1586,7 +1862,7 @@ impl EngineHost {
             presentable: false,
             presentation_announced: None,
             title_ready: None,
-            nonpresentable_bootstrap: (!report_failure).then_some(epoch),
+            nonpresentable_bootstrap: (!report_failure && !native_popup).then_some(epoch),
             #[cfg(target_os = "windows")]
             _crash_observer: crash_observer,
             #[cfg(target_os = "windows")]

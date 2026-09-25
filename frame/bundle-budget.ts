@@ -6,7 +6,8 @@ export function checkBundleBudget(
   limits: Record<string, BundleLimit>,
 ): string | null {
   const limit = Object.hasOwn(limits, name) ? limits[name] : undefined;
-  if (!limit) return `Unbudgeted entry ${name}; measure and review its startup cost`;
+  if (!limit)
+    return `Unbudgeted entry ${name}; measured ${actual.staticJsBytes} JS bytes and ${actual.staticCssBytes} CSS bytes; review its startup cost`;
   for (const [kind, size, maximum] of [
     ["JS", actual.staticJsBytes, limit.js],
     ["CSS", actual.staticCssBytes, limit.css],

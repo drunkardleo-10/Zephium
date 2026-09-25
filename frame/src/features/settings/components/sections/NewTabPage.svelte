@@ -1,7 +1,7 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import { preferences } from "$domain/preferences";
-  import Checkbox from "$shared/ui/Checkbox";
+  import Switch from "$shared/ui/Switch";
   import PreviewNotice from "../PreviewNotice.svelte";
   import PreviewToggle from "../PreviewToggle.svelte";
   import PreviewSelect from "../PreviewSelect.svelte";
@@ -28,7 +28,7 @@
     settingId="ntp.logo"
     title={m.settings_wordmark()}
     description={m.settings_wordmark_desc()}
-    ><Checkbox
+    ><Switch
       label={m.settings_wordmark()}
       labelHidden
       checked={preferences.value("ui.newtab-logo") === "true"}
@@ -40,7 +40,7 @@
     settingId="ntp.essentials"
     title={m.settings_favorites()}
     description={m.settings_favorites_desc()}
-    ><Checkbox
+    ><Switch
       label={m.settings_favorites()}
       labelHidden
       checked={preferences.value("ui.newtab-shortcuts") === "true"}

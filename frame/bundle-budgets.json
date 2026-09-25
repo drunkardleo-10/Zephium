@@ -1,142 +1,206 @@
 {
   "browser": {
-    "js": 297000,
-    "css": 81564,
+    "js": 875256,
+    "css": 270090,
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "panel": {
-    "js": 139000,
-    "css": 26345,
+    "js": 400500,
+    "css": 79035,
     "description": "Measured 138101 JS bytes: folder, link and file strings enter the shared message catalog."
   },
   "lazy:features/settings/components/sections/AboutPage.svelte": {
-    "js": 432000,
-    "css": 90838,
+    "js": 1276581,
+    "css": 300363,
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/settings/components/sections/AccountPage.svelte": {
-    "js": 351000,
-    "css": 84110,
+    "js": 1036152,
+    "css": 277728,
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/tools/components/previews/ChatView.svelte": {
-    "js": 101000,
-    "css": 6463
+    "js": 295563,
+    "css": 19800
   },
   "lazy:features/settings/components/sections/DeveloperPage.svelte": {
-    "js": 307000,
-    "css": 84802,
+    "js": 900507,
+    "css": 279804,
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/settings/components/sections/DocumentationPage.svelte": {
-    "js": 143000,
-    "css": 3491
+    "js": 419283,
+    "css": 10473
   },
   "lazy:features/settings/components/sections/DownloadsPage.svelte": {
-    "js": 424000,
-    "css": 90293,
+    "js": 1251285,
+    "css": 298728,
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/tools/components/previews/DownloadsView.svelte": {
-    "js": 100000,
-    "css": 6463
+    "js": 292458,
+    "css": 19800
   },
   "lazy:features/settings/components/sections/FocusPage.svelte": {
-    "js": 427000,
-    "css": 90293,
+    "js": 1262430,
+    "css": 303480,
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/settings/components/sections/GeneralPage.svelte": {
-    "js": 439000,
-    "css": 92134,
+    "js": 1298475,
+    "css": 309003,
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/tools/components/previews/HistoryView.svelte": {
-    "js": 100000,
-    "css": 6463
+    "js": 301071,
+    "css": 22500
   },
   "lazy:features/settings/components/sections/KeyboardPage.svelte": {
-    "js": 428000,
-    "css": 90293,
+    "js": 1267323,
+    "css": 303480,
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/settings/components/sections/LanguagesPage.svelte": {
-    "js": 434000,
-    "css": 90838,
+    "js": 1283448,
+    "css": 305115,
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/tools/components/previews/NotesView.svelte": {
-    "js": 97876,
-    "css": 12558
+    "js": 280500,
+    "css": 16000
   },
   "lazy:features/settings/components/sections/PasswordsPage.svelte": {
-    "js": 361000,
-    "css": 86098,
+    "js": 1064301,
+    "css": 288444,
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/settings/components/sections/PerformancePage.svelte": {
-    "js": 427000,
-    "css": 90293,
+    "js": 1263141,
+    "css": 303480,
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/settings/components/sections/PrivacyPage.svelte": {
-    "js": 437000,
-    "css": 92134,
+    "js": 1295037,
+    "css": 309003,
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/settings/components/sections/ProfilesPage.svelte": {
-    "js": 423000,
-    "css": 90943,
+    "js": 1253325,
+    "css": 300678,
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/settings/components/sections/SearchPage.svelte": {
-    "js": 427000,
-    "css": 90293,
+    "js": 1254108,
+    "css": 299136,
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/settings/components/Settings.svelte": {
-    "js": 431000,
-    "css": 93000,
+    "js": 1270500,
+    "css": 310227,
     "description": "Media cards and the media tool add to the shared Work graph and message catalog."
   },
   "lazy:features/settings/components/sections/TabsPage.svelte": {
-    "js": 413000,
-    "css": 91684,
+    "js": 1218300,
+    "css": 302901,
     "description": "Note link marks and the typed document view add to the shared graph."
   },
   "lazy:features/tools/components/previews/TasksView.svelte": {
-    "js": 97236,
-    "css": 11250
+    "js": 290000,
+    "css": 18000
   },
   "lazy:features/tools/components/previews/TimeView.svelte": {
-    "js": 100000,
-    "css": 6463
+    "js": 292728,
+    "css": 19800
   },
   "lazy:features/tools/components/ToolSlot.svelte": {
-    "js": 97000,
-    "css": 353
+    "js": 283200,
+    "css": 4500
   },
   "lazy:features/notes/components/Notes.svelte": {
-    "js": 135000,
-    "css": 12000
+    "js": 270000,
+    "css": 18500
+  },
+  "lazy:features/tasks/components/Tasks.svelte": {
+    "js": 317000,
+    "css": 31000
+  },
+  "lazy:app/browser/WorkWorkspace.svelte": {
+    "js": 975000,
+    "css": 270567,
+    "description": "Measured 328183 JS bytes with the agent run operation, step labels, and the agent line on the canvas card in the shared graph. Media record revisions for context selection add 0.1 KB (330153 measured)."
+  },
+  "lazy:features/work/components/WorkCanvas.svelte": {
+    "js": 1410000,
+    "css": 311655,
+    "description": "Cards add 14.3 KB JS and 8.2 KB CSS (568279 and 127517 measured on b1628da5): the Findings, File and Command cards, one card frame, and the card mode of every result renderer. Derived cluster nodes, latent relation edges and the path draw-in add 3.0 KB JS and 0.9 KB CSS (571252 and 128409 measured together). The camera following the agent adds 1.6 KB JS (572888 measured). Selection, the marquee, the arrange bar and area fit, rename and remove add 17.7 KB JS and 3.6 KB CSS (590564 and 132017 measured). The link card's Play here button adds 0.2 KB JS and 0.3 KB CSS (591458 and 132341 measured). Cards sized to what they say, plan steps as cards with their glyphs, whole subject facts, compare checks and best-value dots, and request-to-request thread handles add 11.8 KB JS and 2.0 KB CSS (603288 and 134373 measured)."
+  },
+  "lazy:features/newtab/components/NewTab.svelte": {
+    "js": 891081,
+    "css": 274842
+  },
+  "lazy:domain/resources/index.ts": {
+    "js": 237000,
+    "css": 4200
+  },
+  "lazy:features/search/components/LauncherPanel.svelte": {
+    "js": 376593,
+    "css": 18000
+  },
+  "lazy:features/search/components/NewTabSearch.svelte": {
+    "js": 375492,
+    "css": 18000
+  },
+  "lazy:features/history/components/HistoryPage.svelte": {
+    "js": 695235,
+    "css": 43077
+  },
+  "lazy:features/history/components/HistoryPanel.svelte": {
+    "js": 353283,
+    "css": 12600
+  },
+  "lazy:features/library/components/LibraryPage.svelte": {
+    "js": 318567,
+    "css": 9000
+  },
+  "lazy:features/tasks/components/TasksPage.svelte": {
+    "js": 371000,
+    "css": 41500
+  },
+  "lazy:features/tasks/components/TaskDetail.svelte": {
+    "js": 332000,
+    "css": 39500
+  },
+  "lazy:features/tasks/components/TaskBoard.svelte": {
+    "js": 327000,
+    "css": 36500
+  },
+  "lazy:features/tasks/lib/capture.ts": {
+    "js": 175000,
+    "css": 4200
+  },
+  "lazy:features/downloads/components/DownloadsList.svelte": {
+    "js": 155000,
+    "css": 7000
+  },
+  "lazy:features/notes/components/editor/NoteEditor.svelte": {
+    "js": 539000,
+    "css": 16500
+  },
+  "lazy:features/notes/components/NotesPage.svelte": {
+    "js": 290000,
+    "css": 24500
+  },
+  "lazy:domain/notes/index.ts": {
+    "js": 149500,
+    "css": 4000
+  },
+  "lazy:features/notes/index.ts": {
+    "js": 137500,
+    "css": 4000
   },
   "lazy:features/notes/components/NotesEditor.svelte": {
     "js": 440000,
     "css": 10000
-  },
-  "lazy:features/tasks/components/Tasks.svelte": {
-    "js": 105000,
-    "css": 12000
-  },
-  "lazy:app/browser/WorkWorkspace.svelte": {
-    "js": 330400,
-    "css": 88000,
-    "description": "Measured 328183 JS bytes with the agent run operation, step labels, and the agent line on the canvas card in the shared graph. Media record revisions for context selection add 0.1 KB (330153 measured)."
-  },
-  "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 604800,
-    "css": 134900,
-    "description": "Cards add 14.3 KB JS and 8.2 KB CSS (568279 and 127517 measured on b1628da5): the Findings, File and Command cards, one card frame, and the card mode of every result renderer. Derived cluster nodes, latent relation edges and the path draw-in add 3.0 KB JS and 0.9 KB CSS (571252 and 128409 measured together). The camera following the agent adds 1.6 KB JS (572888 measured). Selection, the marquee, the arrange bar and area fit, rename and remove add 17.7 KB JS and 3.6 KB CSS (590564 and 132017 measured). The link card's Play here button adds 0.2 KB JS and 0.3 KB CSS (591458 and 132341 measured). Cards sized to what they say, plan steps as cards with their glyphs, whole subject facts, compare checks and best-value dots, and request-to-request thread handles add 11.8 KB JS and 2.0 KB CSS (603288 and 134373 measured)."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
     "js": 70000,
@@ -177,11 +241,6 @@
     "js": 160400,
     "css": 25000,
     "description": "Measured 147677 JS and 22233 CSS bytes: the lift renders the result itself, the quiet per-cell correction and the one Accept the review state needs; the card mode of the result renderers, source glyphs on chips, and bars for numeric compare rows add 6.6 KB. Reading mode, the lift header and the collapsed sources rail add 9.3 KB JS and 2.5 KB CSS (158031 and 24772 measured). Compare check rows and best-value dots add 1.4 KB JS (159821 measured)."
-  },
-  "lazy:features/notes/components/NoteEditorHost.svelte": {
-    "js": 96000,
-    "css": 7000,
-    "description": "Single-note editor host for the Work lift; shares the Notes editor graph."
   },
   "lazy:features/work/components/WorkSubjectInspector.svelte": {
     "js": 119300,

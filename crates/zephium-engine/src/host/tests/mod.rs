@@ -110,10 +110,19 @@ fn protected_document_start_scripts_flow_through_the_ordered_builder_path() {
 }
 
 #[test]
-fn raw_popups_use_wrys_synchronous_deny_without_metadata_path() {
+fn raw_popups_use_owned_native_adoption_with_explicit_gesture_and_scope_checks() {
     let raw_policy = raw_view_construction_policy();
-    assert!(!raw_policy.contains("with_new_window_req_handler"));
-    assert!(raw_policy.contains("Intentionally do not install a new-window callback"));
+    assert!(raw_policy.contains("with_new_window_req_handler"));
+    assert!(raw_policy.contains("!features.user_initiated"));
+    let boundary = include_str!("../page_open.rs");
+    assert!(boundary.contains("presentation_permit.load(Ordering::Acquire)"));
+    assert!(boundary.contains("same_generation(permit)"));
+    assert!(boundary.contains("matches_activity(activity)"));
+    assert!(boundary
+        .split_whitespace()
+        .collect::<String>()
+        .contains("native_open_authority.reserve"));
+    assert!(boundary.contains("NativeViewPurpose::NativeTab(features.opener)"));
 }
 
 #[test]
@@ -916,6 +925,7 @@ fn title_callbacks_are_quarantined_until_exact_finished_document_attribution() {
         .expect("bounded title observation gate");
     assert!(observed.contains("view.presentable"));
     assert!(observed.contains("view.title_ready != Some(epoch)"));
+    assert!(observed.contains(".document_title()"));
 }
 
 #[test]

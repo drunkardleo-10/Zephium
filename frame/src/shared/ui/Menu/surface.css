@@ -1,0 +1,167 @@
+/* The floating material and the row that lives on it. Split out of the menu's
+   own stylesheet because the chrome's dropdowns load on every launch while a
+   portalled menu does not: the eager graph should carry the surface and the
+   item, not the viewport, the separator and the shortcut. */
+.ui-menu {
+  z-index: 50;
+  box-sizing: border-box;
+  padding: var(--menu-pad);
+
+  /* Concentric with its rows: 10px row + 6px padding. Anything else leaves a
+     crescent of panel in each corner. */
+  border-radius: var(--radius-menu);
+  background: var(--color-menu);
+
+  /* The one blur in the chrome, and the one surface that is translucent at
+     every tier. A menu is the only thing here that genuinely floats over
+     something else, so it is the only thing that should show a trace of it —
+     the desktop under glass, our own page under none. No saturation boost: the
+     platform's own materials use one to keep colour alive behind frosted
+     white, but this panel is graphite by design, and all a boost does here is
+     pull whatever hue the wallpaper happens to have up into it. */
+  backdrop-filter: blur(24px);
+  box-shadow: var(--shadow-menu);
+  outline: none;
+  overflow: hidden;
+}
+
+/* A panel rather than a list: its contents own their own spacing. */
+.ui-popover {
+  padding: 10px;
+}
+
+/* The non-portalled variant: anchored under its own trigger, and animated by
+   state rather than by the mount, since it is never unmounted. Same numbers as
+   the portalled mount below — a menu should not open differently depending on
+   which machinery happens to be behind it. */
+.ui-disclosure-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  z-index: 40;
+  min-width: 100%;
+  max-width: calc(var(--sidebar-width, 320px) - 8px);
+  transform-origin: top left;
+  opacity: 0;
+  scale: 0.96;
+  translate: 0 -4px;
+  visibility: hidden;
+  transition:
+    opacity var(--motion-instant) var(--ease-exit),
+    scale var(--motion-instant) var(--ease-exit),
+    translate var(--motion-instant) var(--ease-exit),
+    visibility 0s linear var(--motion-instant);
+}
+
+.ui-disclosure-panel[data-align="start"] {
+  inset-inline-start: 0;
+}
+
+.ui-disclosure-panel[data-align="end"] {
+  inset-inline-end: 0;
+  transform-origin: top right;
+}
+
+.ui-disclosure-panel[data-open="true"] {
+  opacity: 1;
+  scale: 1;
+  translate: 0 0;
+  visibility: visible;
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    scale var(--motion-base) var(--ease-out),
+    translate var(--motion-base) var(--ease-out),
+    visibility 0s;
+}
+
+.ui-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  min-height: var(--menu-row);
+  padding: 6px var(--menu-item-inset);
+
+  /* Concentric with the panel by construction: the row's corner plus the
+     padding around it is exactly the panel's corner, which is the only way a
+     highlighted row's curve can sit parallel to the one outside it. */
+  border-radius: calc(var(--radius-menu) - var(--menu-pad));
+  color: var(--color-text);
+  font-size: var(--text-body);
+  font-weight: 450;
+  line-height: 18px;
+  outline: none;
+  cursor: default;
+  /* stylelint-disable-next-line property-no-vendor-prefix */
+  -webkit-user-select: none;
+  user-select: none;
+  transition: background-color var(--motion-instant) var(--ease-smooth);
+}
+
+/* A choice menu renders the mark column on every row whether or not the row
+   carries a glyph, so the labels hold still as the choice moves down the
+   list — the single thing that separates a menu that feels built from one
+   that feels generated. */
+.ui-menu-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: var(--menu-gutter);
+  height: var(--menu-gutter);
+  margin-inline-start: auto;
+  color: var(--color-text);
+}
+
+/* Fill only. A row inside a panel is already bounded by the panel; ringing it
+   as well draws a second edge a few pixels inside the first, and the highlight
+   stops reading as the row lighting up and starts reading as a chip sitting on
+   top of it. The sidebar's rows keep their rim because nothing else bounds
+   them — here the menu does. */
+.ui-menu-item[data-highlighted] {
+  background: var(--row-active);
+}
+
+.ui-menu-item[data-highlighted]:active {
+  background: var(--row-pressed);
+}
+
+.ui-menu-item[data-disabled] {
+  opacity: 0.45;
+}
+
+.ui-menu-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  color: var(--color-muted);
+  transition: color var(--motion-instant) var(--ease-smooth);
+}
+
+/* Destructive rows carry their colour into the highlight instead of losing it
+   to the neutral plate, which is the only place in the product where a state
+   fill is allowed a hue. */
+.ui-menu-item[data-danger="true"],
+.ui-menu-item[data-danger="true"] .ui-menu-icon {
+  color: var(--color-danger);
+}
+
+.ui-menu-item[data-highlighted]:not([data-danger="true"]) .ui-menu-icon {
+  color: var(--color-text);
+}
+
+.ui-menu-item[data-danger="true"][data-highlighted] {
+  background: color-mix(in srgb, var(--color-danger) 16%, transparent);
+}
+
+@media (forced-colors: active) {
+  .ui-menu {
+    border: 1px solid ButtonText;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .ui-menu-item[data-highlighted] {
+    background: Highlight;
+    color: HighlightText;
+  }
+}

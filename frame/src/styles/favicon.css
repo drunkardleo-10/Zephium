@@ -1,0 +1,116 @@
+/* A site's mark, wherever it is drawn: the sidebar, the dock, a task, a
+   launcher result. Shared by both windows' entry stylesheets rather than
+   carried by the component, so every surface draws it the same way and no
+   lazily loaded view pays for it again. */
+
+.favicon {
+  position: relative;
+  display: grid;
+  flex: none;
+}
+
+.favicon > * {
+  grid-area: 1 / 1;
+}
+
+/* Site icons are arbitrary third-party artwork. Resting rows dim and
+   desaturate them so the column reads as one surface. */
+.favicon-plate {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  opacity: var(--favicon-rest-opacity);
+  filter: saturate(var(--favicon-rest-saturation));
+  transition:
+    opacity var(--motion-base) var(--ease-out),
+    filter var(--motion-fast) var(--ease-out),
+    scale var(--motion-base) var(--ease-out);
+}
+
+.favicon-plate > canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 3px;
+}
+
+.favicon-plate-lit {
+  opacity: 1;
+  filter: none;
+}
+
+/* A near-neutral mark the colour of the surface behind it reads as an empty
+   square. Give it the opposite ground, the way a sticker carries its own.
+   Only neutral icons qualify: a coloured mark stays legible however dark it
+   is, and a plate behind it would misrepresent the brand. */
+.favicon-plate[data-tone="dark"] {
+  padding: var(--favicon-inset);
+  background: var(--favicon-plate);
+}
+
+:root[data-theme="light"] .favicon-plate[data-tone="dark"] {
+  padding: 0;
+  background: none;
+}
+
+:root[data-theme="light"] .favicon-plate[data-tone="light"] {
+  padding: var(--favicon-inset);
+  background: var(--favicon-plate);
+}
+
+.favicon-fallback {
+  display: grid;
+  place-items: center;
+  color: var(--color-faint);
+}
+
+.favicon-blank {
+  margin: 22%;
+  border-radius: var(--radius-capsule);
+  background: var(--color-fill-strong);
+}
+
+/*
+  Loading keeps the site's mark in view, stepped back, with a single arc
+  travelling around it. The arc waits a moment before it appears, so a page
+  that loads at once never flashes a spinner, and it turns by transform
+  alone, which the compositor runs without the page or the chrome laying
+  anything out.
+*/
+.favicon[data-loading="true"] > * {
+  opacity: 0.5;
+  scale: 0.82;
+}
+
+.favicon::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: var(--radius-capsule);
+  background: conic-gradient(from 0deg, transparent 20%, var(--color-text));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 1.5px), black calc(100% - 1px));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.favicon[data-loading="true"]::after {
+  opacity: 0.85;
+  transition-delay: 150ms;
+  animation: favicon-orbit 0.9s linear infinite;
+}
+
+@keyframes favicon-orbit {
+  to {
+    rotate: 1turn;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .favicon[data-loading="true"]::after {
+    animation: none;
+    background: var(--color-faint);
+  }
+}

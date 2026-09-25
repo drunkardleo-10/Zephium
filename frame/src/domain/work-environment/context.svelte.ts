@@ -4,7 +4,7 @@ import type {
   WorkEnvironmentSnapshot,
   WorkRuntimeProjection,
   WorkPlanRevision,
-  ResourceSummary,
+  NoteSummary,
   WorkPageV1,
   MediaAssetV1_Deserialize as MediaAssetV1,
 } from "$shared/ipc/bindings";
@@ -24,7 +24,7 @@ export class WorkEnvironmentContext {
    * Work session happens to be on.
    */
   readonly pages = new SvelteMap<string, WorkPageV1[]>();
-  notes = $state.raw<ResourceSummary[]>([]);
+  notes = $state.raw<NoteSummary[]>([]);
   /** Admitted media assets for resource elements that are not notes. */
   readonly media = new SvelteMap<string, MediaAssetV1>();
   /** Each media record's revision: the identity Rust checks when one is context. */
@@ -57,6 +57,13 @@ export class WorkEnvironmentContext {
       }),
       events.resourceChanged.listen(({ payload }) => {
         if (payload.profile === this.profile && this.noteIds.includes(payload.id))
+          void this.readNotes();
+      }),
+      events.notesChanged.listen(({ payload }) => {
+        if (
+          payload.profile === this.profile &&
+          (payload.reset || payload.notes.some((note) => this.noteIds.includes(note.id)))
+        )
           void this.readNotes();
       }),
     ]);
@@ -214,25 +221,20 @@ export class WorkEnvironmentContext {
   private async fetchNotes() {
     const read = ++this.noteRead;
     const ids = [...this.noteIds];
-    const rows: ResourceSummary[] = [];
-    for (let offset = 0; offset < ids.length; offset += 64) {
+    const rows: NoteSummary[] = [];
+    const others: string[] = [];
+    // Notes are Markdown files; a reference that is not one may be media.
+    for (const id of ids.slice(0, 64)) {
       const response = await observe(
-        Promise.resolve().then(() =>
-          commands.resourceCall(this.profile, {
-            kind: "resolve_notes",
-            ids: ids.slice(offset, offset + 64),
-          }),
-        ),
+        Promise.resolve().then(() => commands.noteCall(this.profile, { kind: "get", id })),
         9000,
         this.lifetime.signal,
       );
       if (!this.active || read !== this.noteRead) return;
-      if (
-        response.state === "received" &&
-        response.value.profile === this.profile &&
-        response.value.response.kind === "page"
-      )
-        rows.push(...response.value.response.items.filter((item) => ids.includes(item.id)));
+      if (response.state !== "received" || response.value.profile !== this.profile) continue;
+      const reply = response.value.response;
+      if (reply.kind === "record" && !reply.record.summary.trashed) rows.push(reply.record.summary);
+      else if (reply.kind === "error" && reply.error === "not_found") others.push(id);
     }
     if (!this.active || read !== this.noteRead) return;
     this.notes = rows;
@@ -241,8 +243,7 @@ export class WorkEnvironmentContext {
         this.media.delete(id);
         this.mediaRevisions.delete(id);
       }
-    const others = ids.filter((id) => !rows.some((row) => row.id === id)).slice(0, 32);
-    for (const id of others) {
+    for (const id of others.slice(0, 32)) {
       if (this.media.has(id)) continue;
       const response = await observe(
         Promise.resolve().then(() => commands.resourceCall(this.profile, { kind: "get", id })),

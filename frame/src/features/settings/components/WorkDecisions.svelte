@@ -2,7 +2,7 @@
   import * as m from "$shared/i18n/messages";
   import type { WorkDecisionChoiceV1 } from "$shared/ipc/bindings";
   import { WorkDecisionSession } from "$domain/work-decision";
-  import ChoiceGroup from "$shared/ui/ChoiceGroup";
+  import SegmentedControl from "$shared/ui/SegmentedControl";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import {
@@ -34,9 +34,8 @@
     description={m.settings_decisions_desc()}
   >
     <div class="decisions">
-      <ChoiceGroup
+      <SegmentedControl
         label={m.settings_decisions()}
-        segmented
         {options}
         value={choice}
         disabled={!preference || session?.busy}

@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use zephium_agentic::{AgentAuditCompletion, AgentAuditDelivery};
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
+use zephium_core::downloads::{DownloadStoreCall, DownloadStoreReply};
 use zephium_core::extensions::{
     ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantAuthority, ExtensionGrantDigest,
     ExtensionGrantManifestBindings, ExtensionGrantPatch, ExtensionGrantRevision,
@@ -46,7 +47,7 @@ use zephium_core::ports::store::{
     ExtensionNativeNamespaceLoadOutcome, ExtensionNativeOwnershipActivationOutcome,
     ExtensionNativeOwnershipJournalLoadOutcome, ExtensionNativeOwnershipJournalMutationOutcome,
     ExtensionProfilePolicyLoadOutcome, ExtensionProfilePolicyMutationOutcome, HistoryHit,
-    PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
+    HistoryVisit, PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
     ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome, ProfileDeletionLoad,
     SessionLoad, Store, StoreShutdownOutcome, UserscriptCatalogLoadOutcome,
     UserscriptCatalogMutationOutcome, MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
@@ -633,6 +634,8 @@ enum Cmd {
         zephium_core::resources::ResourceDone,
         ResourcePermit,
     ),
+    LegacyNotes(ProfileId, zephium_core::ports::store::LegacyNotesDone),
+    RetireLegacyNotes(ProfileId, Vec<String>, Box<dyn FnOnce(bool) + Send>),
     #[cfg(feature = "work-execution")]
     AgentWork(
         zephium_agentic::AgentWorkJournalRequest,
@@ -767,11 +770,30 @@ enum Cmd {
         ExtensionNativeOwnershipMutationPermit,
         ExtensionNativeOwnershipJournalMutationDone,
     ),
+    DownloadRecoveryProfiles(Box<dyn FnOnce(DownloadStoreReply) + Send>),
+    DownloadCall(
+        ProfileId,
+        DownloadStoreCall,
+        Box<dyn FnOnce(DownloadStoreReply) + Send>,
+    ),
     GetSetting(String, Sender<Option<String>>),
     SearchHistory(ProfileId, String, u32, Sender<Vec<HistoryHit>>),
+    RecordSearch(ProfileId, String, String),
     RecentHistory(ProfileId, u32, Sender<Vec<HistoryHit>>),
+    // Two adjacent Option<i64> bounds mean different things; name them.
+    HistoryPage {
+        profile: ProfileId,
+        query: String,
+        since: Option<i64>,
+        before: Option<i64>,
+        limit: u32,
+        reply: Sender<Vec<HistoryVisit>>,
+    },
+    ForgetHistoryUrls(ProfileId, Vec<String>, Sender<u32>),
+    ClearHistory(ProfileId, Option<i64>, Sender<u32>),
+    AmendVisitTitle(ProfileId, String, String),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
-    FreshFaviconRaster(ProfileId, String, i64, Sender<Option<Vec<u8>>>),
+    FaviconRasterWithAge(ProfileId, String, Sender<Option<(Vec<u8>, i64)>>),
     SaveFavicon(ProfileId, String, Option<String>, Vec<u8>),
     FaviconBytes(ProfileId, String, Sender<Option<(Option<String>, Vec<u8>)>>),
     FaviconRasters(ProfileId, Vec<String>, Sender<Vec<(String, Vec<u8>)>>),
@@ -2398,7 +2420,14 @@ impl SqliteStore {
         }
 
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || lifecycle.exited.get_mut().unwrap_or_else(|poisoned| poisoned.into_inner()).recv_timeout(remaining).is_err() {
+        if remaining.is_zero()
+            || lifecycle
+                .exited
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .recv_timeout(remaining)
+                .is_err()
+        {
             return StoreShutdownOutcome::Unclean;
         }
         let Some(join) = lifecycle.join.take() else {
@@ -2503,6 +2532,31 @@ impl Store for SqliteStore {
                     error: ResourceError::Unavailable,
                 });
             }
+        }
+    }
+
+    fn legacy_notes(&self, profile: ProfileId, done: zephium_core::ports::store::LegacyNotesDone) {
+        if let Err(
+            mpsc::TrySendError::Full(Cmd::LegacyNotes(_, done))
+            | mpsc::TrySendError::Disconnected(Cmd::LegacyNotes(_, done)),
+        ) = self.tx.try_send(Cmd::LegacyNotes(profile, done))
+        {
+            done(None);
+        }
+    }
+
+    fn retire_legacy_notes(
+        &self,
+        profile: ProfileId,
+        ids: Vec<String>,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) {
+        if let Err(
+            mpsc::TrySendError::Full(Cmd::RetireLegacyNotes(_, _, done))
+            | mpsc::TrySendError::Disconnected(Cmd::RetireLegacyNotes(_, _, done)),
+        ) = self.tx.try_send(Cmd::RetireLegacyNotes(profile, ids, done))
+        {
+            done(false);
         }
     }
 
@@ -2935,23 +2989,13 @@ impl Store for SqliteStore {
         rx.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
     }
 
-    fn fresh_favicon_raster(
-        &self,
-        profile: ProfileId,
-        origin: &str,
-        max_age_seconds: i64,
-    ) -> Option<Vec<u8>> {
-        if !hub::valid_favicon_origin(origin) || max_age_seconds < 0 {
+    fn favicon_raster_with_age(&self, profile: ProfileId, origin: &str) -> Option<(Vec<u8>, i64)> {
+        if !hub::valid_favicon_origin(origin) {
             return None;
         }
         let (tx, rx) = mpsc::channel();
         self.tx
-            .try_send(Cmd::FreshFaviconRaster(
-                profile,
-                origin.into(),
-                max_age_seconds,
-                tx,
-            ))
+            .try_send(Cmd::FaviconRasterWithAge(profile, origin.into(), tx))
             .ok()?;
         rx.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
     }
@@ -2979,6 +3023,18 @@ impl Store for SqliteStore {
         rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
     }
 
+    fn record_search(&self, profile: ProfileId, query: String, url: String) -> bool {
+        if query.trim().is_empty()
+            || query.len() > 512
+            || !zephium_core::navigation::is_allowed_str(&url)
+        {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::RecordSearch(profile, query, url))
+            .is_ok()
+    }
+
     fn search_history(&self, profile: ProfileId, query: &str, limit: u32) -> Vec<HistoryHit> {
         if query.len() > MAX_HISTORY_QUERY_BYTES || limit == 0 {
             return Vec::new();
@@ -2997,6 +3053,93 @@ impl Store for SqliteStore {
             return Vec::new();
         }
         rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
+    }
+
+    fn download_recovery_profiles(&self, done: Box<dyn FnOnce(DownloadStoreReply) + Send>) -> bool {
+        self.tx
+            .try_send(Cmd::DownloadRecoveryProfiles(done))
+            .is_ok()
+    }
+
+    fn download_call(
+        &self,
+        profile: ProfileId,
+        call: DownloadStoreCall,
+        done: Box<dyn FnOnce(DownloadStoreReply) + Send>,
+    ) -> bool {
+        if let DownloadStoreCall::Save(record) = &call {
+            if !record.validate() {
+                return false;
+            }
+        }
+        self.tx
+            .try_send(Cmd::DownloadCall(profile, call, done))
+            .is_ok()
+    }
+
+    fn history_page(
+        &self,
+        profile: ProfileId,
+        query: &str,
+        since: Option<i64>,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Vec<HistoryVisit> {
+        if limit == 0 || query.len() > MAX_HISTORY_QUERY_BYTES {
+            return Vec::new();
+        }
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::HistoryPage {
+                profile,
+                query: query.to_owned(),
+                since,
+                before,
+                limit: limit.min(hub::MAX_HISTORY_PAGE),
+                reply: tx,
+            })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
+    }
+
+    fn forget_history_urls(&self, profile: ProfileId, urls: &[String]) -> u32 {
+        if urls.is_empty() || urls.len() > hub::MAX_HISTORY_FORGET_URLS {
+            return 0;
+        }
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::ForgetHistoryUrls(profile, urls.to_vec(), tx))
+            .is_err()
+        {
+            return 0;
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
+    }
+
+    fn clear_history(&self, profile: ProfileId, since: Option<i64>) -> u32 {
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::ClearHistory(profile, since, tx))
+            .is_err()
+        {
+            return 0;
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
+    }
+
+    fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool {
+        if !zephium_core::navigation::is_allowed_str(&url) || title.len() > hub::MAX_TITLE_BYTES {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::AmendVisitTitle(profile, url, title))
+            .is_ok()
     }
 
     fn recent_history(&self, profile: ProfileId, limit: u32) -> Vec<HistoryHit> {
@@ -3635,8 +3778,48 @@ fn actor(
                 drop(admission);
                 done(response);
             }
+            Some(Cmd::LegacyNotes(profile, done)) => {
+                let known = hub.knows(profile) || flush(&mut hub, &mut pending);
+                done(known.then(|| hub.legacy_notes(profile)).flatten());
+            }
+            Some(Cmd::RetireLegacyNotes(profile, ids, done)) => {
+                done(hub.knows(profile) && hub.retire_legacy_notes(profile, &ids));
+            }
+            Some(Cmd::DownloadRecoveryProfiles(done)) => {
+                done(hub.download_recovery_profiles());
+            }
+            Some(Cmd::DownloadCall(profile, call, done)) => {
+                done(hub.download_call(profile, call));
+            }
+            Some(Cmd::RecordSearch(profile, query, url)) => {
+                hub.record_search(profile, &query, &url);
+            }
             Some(Cmd::SearchHistory(profile, query, limit, reply)) => {
-                let _ = reply.send(hub.search_history(profile, &query, limit));
+                let mut hits = hub.search_queries(profile, &query);
+                hits.extend(hub.search_history(profile, &query, limit));
+                let mut seen = std::collections::HashSet::new();
+                hits.retain(|hit| seen.insert(hit.url.clone()));
+                hits.truncate(limit as usize);
+                let _ = reply.send(hits);
+            }
+            Some(Cmd::HistoryPage {
+                profile,
+                query,
+                since,
+                before,
+                limit,
+                reply,
+            }) => {
+                let _ = reply.send(hub.history_page(profile, &query, since, before, limit));
+            }
+            Some(Cmd::ForgetHistoryUrls(profile, urls, reply)) => {
+                let _ = reply.send(hub.forget_history_urls(profile, &urls));
+            }
+            Some(Cmd::ClearHistory(profile, since, reply)) => {
+                let _ = reply.send(hub.clear_history(profile, since));
+            }
+            Some(Cmd::AmendVisitTitle(profile, url, title)) => {
+                hub.amend_visit_title(profile, &url, &title);
             }
             Some(Cmd::RecentHistory(profile, limit, reply)) => {
                 let _ = reply.send(hub.recent_history(profile, limit));
@@ -3644,8 +3827,8 @@ fn actor(
             Some(Cmd::FaviconAge(profile, origin, reply)) => {
                 let _ = reply.send(hub.favicon_age(profile, &origin));
             }
-            Some(Cmd::FreshFaviconRaster(profile, origin, max_age_seconds, reply)) => {
-                let _ = reply.send(hub.fresh_favicon_raster(profile, &origin, max_age_seconds));
+            Some(Cmd::FaviconRasterWithAge(profile, origin, reply)) => {
+                let _ = reply.send(hub.favicon_raster_with_age(profile, &origin));
             }
             Some(Cmd::SaveFavicon(profile, origin, content_type, bytes)) => {
                 hub.save_favicon(profile, &origin, content_type.as_deref(), &bytes);

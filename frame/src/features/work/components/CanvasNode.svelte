@@ -194,7 +194,7 @@
     padding: 2px 8px;
     border-radius: var(--radius-capsule);
     background: var(--color-success);
-    color: var(--color-on-primary);
+    color: var(--color-on-lit);
     font-size: 10.5px;
     font-weight: 600;
     letter-spacing: 0.02em;

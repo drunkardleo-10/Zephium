@@ -368,6 +368,17 @@ impl Hub {
             .collect())
     }
 
+    /// Tombstoned profiles still own download staging until native erasure is
+    /// proven. Only the internal cleanup path can access their download records.
+    pub(super) fn download_cleanup_deletions(&self) -> rusqlite::Result<Vec<ProfileId>> {
+        Ok(self
+            .profile_deletion_journal_entries()?
+            .into_iter()
+            .filter(|entry| !entry.native_erasure_verified && entry.local_unlink_process.is_none())
+            .map(|entry| entry.profile)
+            .collect())
+    }
+
     /// Refreshes process-local registry truth from the durable transaction
     /// before interpreting the deletion journal. This is required after a
     /// commit error: SQLite/OS failures can leave the caller unable to infer
@@ -590,6 +601,10 @@ fn purge_profile_file(dir: &Path, profile: ProfileId) -> rusqlite::Result<()> {
     // This provides fail-closed logical deletion and overwrites SQLite cells
     // where the filesystem honors those writes. It is not a promise of
     // physical secure erasure on copy-on-write filesystems or SSD media.
+    // Notes go first: if erasing them fails, the database and its journal
+    // authorization remain and the whole cleanup is retried.
+    remove_notes_directory(dir, profile)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let path = dir.join(format!("profile-{profile}.sqlite"));
     if regular_file_exists(&path)? {
         let scrub = scrub_profile_database(&path);
@@ -623,6 +638,35 @@ fn purge_profile_file(dir: &Path, profile: ProfileId) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// The profile's notes folder and index, `notes/<profile>`. The directory is
+/// first renamed aside so a partial removal can never be mistaken for a live
+/// folder, then removed without following any link inside it.
+fn remove_notes_directory(dir: &Path, profile: ProfileId) -> std::io::Result<()> {
+    let notes = dir.join("notes");
+    let live = notes.join(profile.to_string());
+    let erasing = notes.join(format!(".erasing-{profile}"));
+    match std::fs::symlink_metadata(&live) {
+        Ok(meta) if meta.file_type().is_dir() => {
+            if std::fs::symlink_metadata(&erasing).is_ok() {
+                std::fs::remove_dir_all(&erasing)?;
+            }
+            std::fs::rename(&live, &erasing)?;
+        }
+        Ok(_) => std::fs::remove_file(&live)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    match std::fs::symlink_metadata(&erasing) {
+        Ok(meta) if meta.file_type().is_dir() => std::fs::remove_dir_all(&erasing)?,
+        Ok(_) => std::fs::remove_file(&erasing)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    #[cfg(unix)]
+    sync_directory(&notes)?;
+    Ok(())
+}
+
 /// Logically removes every current profile-owned data and authority domain
 /// before the journal-authorized unlink. Keep this list in dependency order:
 /// future PROFILE migrations that add durable user data must extend this
@@ -650,11 +694,17 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM extension_install_catalog;
          DELETE FROM page_permission_grants;
          DELETE FROM page_permission_catalog;
+         DELETE FROM task_list_receipts;
+         DELETE FROM task_lists;
          DELETE FROM user_resource_receipts;
          DELETE FROM user_resources;
          DELETE FROM user_resource_usage;
          DELETE FROM userscripts;
          DELETE FROM userscript_catalog;
+         DELETE FROM download_cleanup;
+         DELETE FROM download_preferences;
+         DELETE FROM downloads;
+         DELETE FROM search_queries;
          DELETE FROM history;
          DELETE FROM history_usage;
          DELETE FROM favicons;
@@ -791,7 +841,9 @@ mod tests {
              VALUES (1, 'space', 'item', 'private-layout');
              INSERT INTO favicons(origin, content_type, icon, fetched_at)
              VALUES ('https://history.example', 'image/png', X'01020304', 1);
-             INSERT INTO settings(key, value) VALUES ('private-setting', 'private-value');",
+             INSERT INTO settings(key, value) VALUES ('private-setting', 'private-value');
+             INSERT INTO downloads(id,session,revision,terminal,payload) VALUES ('00000000000000000000000001','00000000000000000000000002',1,1,'{\"private\":\"download-history\"}');
+             INSERT INTO download_preferences(id,payload) VALUES (1,'{\"directory\":\"/private/downloads\"}');",
         )
         .unwrap();
         conn.execute(
@@ -891,14 +943,24 @@ mod tests {
             pinned: false,
             related: vec![],
             content: zephium_core::resources::ResourceContent::Task {
+                details: Default::default(),
                 description: PROFILE_SCRUB_MARKER.into(),
                 completed: false,
                 due_date: None,
+                due_time: None,
+                status: zephium_core::resources::TaskStatus::Open,
+                assignee: zephium_core::resources::TaskActor::User,
+                origin: zephium_core::resources::TaskActor::User,
+                context: None,
+                sort_key: None,
+                work: None,
             },
         })
         .unwrap();
         conn.execute("INSERT INTO user_resources(id,kind,revision,title,pinned,trashed,created_at,updated_at,body,search_text,completed) VALUES('00000000000000000000000001','task',1,?1,0,0,1,1,?2,?1,0)",params![PROFILE_SCRUB_MARKER,body]).unwrap();
         conn.execute("INSERT INTO user_resource_receipts(request_id,digest,resource_id,revision,retained) VALUES(?1,?2,'00000000000000000000000001',1,1)",params![PROFILE_SCRUB_MARKER,vec![1_u8;32]]).unwrap();
+        conn.execute("INSERT INTO task_lists(id,title,revision,deleted) VALUES('00000000000000000000000002',?1,1,0)",[PROFILE_SCRUB_MARKER]).unwrap();
+        conn.execute("INSERT INTO task_list_receipts(request_id,digest,list_id,retained) VALUES(?1,?2,'00000000000000000000000002',1)",params![PROFILE_SCRUB_MARKER,vec![2_u8;32]]).unwrap();
         drop(conn);
 
         scrub_profile_database(&path).unwrap();
@@ -917,6 +979,9 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         let expected_tables = [
+            "download_cleanup",
+            "download_preferences",
+            "downloads",
             "extension_grant_api_permissions",
             "extension_grant_host_permissions",
             "extension_grants",
@@ -936,9 +1001,17 @@ mod tests {
             "items",
             "page_permission_catalog",
             "page_permission_grants",
+            "resource_titles_fts",
+            "resource_titles_fts_config",
+            "resource_titles_fts_data",
+            "resource_titles_fts_docsize",
+            "resource_titles_fts_idx",
+            "search_queries",
             "settings",
             "spaces",
             "sqlite_sequence",
+            "task_list_receipts",
+            "task_lists",
             "user_resource_receipts",
             "user_resource_usage",
             "user_resources",
@@ -965,6 +1038,12 @@ mod tests {
         );
 
         for table in [
+            "download_cleanup",
+            "download_preferences",
+            "downloads",
+            "search_queries",
+            "task_list_receipts",
+            "task_lists",
             "user_resource_receipts",
             "user_resources",
             "user_resource_usage",

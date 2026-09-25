@@ -104,7 +104,7 @@
     max-height: 560px;
     overflow: auto;
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-card);
     padding: 16px;
     background: var(--color-field);
     color: var(--color-text);

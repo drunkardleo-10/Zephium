@@ -1,21 +1,19 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import { resourceSession } from "$domain/resources";
-  import { commands } from "$shared/ipc/bindings";
+  import { commands, type ResourceSummary } from "$shared/ipc/bindings";
+  import { events } from "$shared/ipc/native-events";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
   import { File01Icon, Image01Icon, Pdf01Icon, Upload01Icon } from "../lib/icons";
   import * as m from "$shared/i18n/messages";
   let {
     profile,
-    host,
     kind = "document",
     attachedIds = [],
     pending = false,
     onattach,
   }: {
     profile: string;
-    host: string;
     /** Which half of the library this palette shows. */
     kind?: "document" | "image";
     attachedIds?: readonly string[];
@@ -23,14 +21,38 @@
     onattach: (ids: string[]) => void;
   } = $props();
   const IMAGES = /\.(png|jpe?g|gif|webp|avif|heic|heif|svg|bmp|tiff?)$/iu;
-  const session = untrack(() => resourceSession(profile, "media", host));
+  // The newest page of the library; media is minted only by Rust.
+  let library = $state.raw<ResourceSummary[]>([]);
+  let reads = 0;
+  async function reload() {
+    const read = ++reads;
+    const owner = untrack(() => profile);
+    try {
+      const reply = await commands.resourceCall(owner, {
+        kind: "list",
+        query: {
+          kind: "media",
+          completed: null,
+          search: "",
+          trashed: false,
+          after: null,
+          limit: 100,
+        },
+      });
+      if (read === reads && reply.profile === owner && reply.response.kind === "page")
+        library = reply.response.items;
+    } catch {
+      // The list stays as it was; an import still attaches directly.
+    }
+  }
   onMount(() => {
-    void session?.start();
-    return () => session?.stopObserving();
+    void reload();
+    const stop = events.resourceChanged.listen(({ payload }) => {
+      if (payload.profile === profile && payload.kind === "media") void reload();
+    });
+    return () => void stop.then((unlisten) => unlisten());
   });
-  const items = $derived(
-    (session?.items ?? []).filter((item) => IMAGES.test(item.title) === (kind === "image")),
-  );
+  const items = $derived(library.filter((item) => IMAGES.test(item.title) === (kind === "image")));
   let selected = $state<string[]>([]);
   let importing = $state(false);
   let failure = $state<string | null>(null);
@@ -52,7 +74,7 @@
       }
       const outcome = result.data;
       if (outcome.kind === "imported") {
-        await session?.reload();
+        await reload();
         onattach([outcome.record.id]);
       } else if (outcome.kind === "refused") {
         failure =

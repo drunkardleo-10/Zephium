@@ -10,14 +10,18 @@
   import { tabs } from "$domain/tabs";
   import type { TabView } from "$shared/ipc/bindings";
   import FavIcon from "$shared/ui/FavIcon";
+  import { favicons } from "$domain/favicons";
+  import type { Snippet } from "svelte";
   import SearchField from "$shared/ui/SearchField";
 
   let {
+    search,
     clockFormat = "System",
     showGreeting = true,
     personalize = false,
     showClock = true,
   }: {
+    search?: Snippet;
     clockFormat?: string;
     showGreeting?: boolean;
     personalize?: boolean;
@@ -99,13 +103,13 @@
       <time datetime={now.toISOString()}>{clock}</time><span>{date}</span>
     </div>{/if}
   <div class="newtab-search">
-    <SearchField
-      size="page"
-      label={m.search_web()}
-      placeholder={m.search_web()}
-      bind:ref={input}
-      onsubmit={go}
-    />
+    {#if search}{@render search()}{:else}<SearchField
+        size="page"
+        label={m.search_web()}
+        placeholder={m.search_web()}
+        bind:ref={input}
+        onsubmit={go}
+      />{/if}
   </div>
 
   {#if preferences.value("ui.newtab-shortcuts") === "true" && essentials.length > 0}
@@ -116,10 +120,16 @@
             type="button"
             title={tab.title || m.untitled_tab()}
             aria-label={tab.title || m.untitled_tab()}
-            class="press flex h-11 w-11 cursor-default items-center justify-center rounded-lg bg-fill outline-none hover:bg-fill-hover"
+            class="press flex h-11 w-11 cursor-default items-center justify-center rounded-control-large bg-fill outline-none hover:bg-fill-hover"
             onclick={() => tabs.activate(tab.id)}
           >
-            <FavIcon favicon={tab.favicon} size={20} lit fallback={Globe02Icon} />
+            <FavIcon
+              image={favicons.image(tab.icon)}
+              tone={favicons.tone(tab.icon)}
+              size={20}
+              lit
+              fallback={Globe02Icon}
+            />
           </button>
         </li>
       {/each}

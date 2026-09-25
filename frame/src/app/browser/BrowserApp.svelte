@@ -1,8 +1,7 @@
 <script lang="ts">
   import { installCloseService } from "$shared/lib/close";
-  import "@fontsource-variable/inter";
   import "$styles/global.css";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { ExtensionPermissionPrompt } from "$features/extensions";
   import { PagePermissionPrompt } from "$features/permissions";
   import * as sidebar from "$session/sidebar-mode.svelte";
@@ -11,6 +10,7 @@
   import { IS_MAC } from "$shared/platform";
   import { blocker } from "$domain/blocker";
   import { extensions } from "$domain/extensions";
+  import { favicons } from "$domain/favicons";
   import { layout } from "$domain/layout";
   import { operations } from "$domain/operations";
   import { pagePermissions } from "$domain/permissions";
@@ -24,9 +24,13 @@
   import { preferences } from "$domain/preferences";
   import Shell from "./Shell.svelte";
 
+  // Follows the stored preference and nothing else. Adopting reads the
+  // sidebar's own shape; tracked, that read made every toggle re-adopt the
+  // not-yet-saved old value, bouncing the column back and forth and cutting
+  // the page's slide short.
   $effect(() => {
     const mode = preferences.value("sidebar.mode");
-    if (mode === "default" || mode === "compact") sidebar.adoptMode(mode);
+    if (mode === "default" || mode === "compact") untrack(() => sidebar.adoptMode(mode));
   });
 
   $effect(() => {
@@ -113,6 +117,10 @@
     const runtimeReady = runtime.init();
     const extensionsReady = extensions.init();
     const pagePermissionsReady = pagePermissions.init();
+
+    // Rasters are emitted immediately before the projection that references
+    // them, so this listener must exist before tabs asks native to bootstrap.
+    const faviconsReady = favicons.init();
     const tabsReady = tabs.init();
     const sidebarReady = sidebar.init();
     const uiEventsReady = ui.init();
@@ -131,6 +139,7 @@
           runtimeReady,
           extensionsReady,
           pagePermissionsReady,
+          faviconsReady,
           tabsReady,
           uiEventsReady,
           sidebarReady,
@@ -164,6 +173,7 @@
       runtime.dispose();
       extensions.dispose();
       pagePermissions.dispose();
+      favicons.dispose();
       tabs.dispose();
       ui.dispose();
       if (!IS_MAC) layout.dispose();

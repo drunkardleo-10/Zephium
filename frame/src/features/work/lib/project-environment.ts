@@ -2,7 +2,7 @@ import type {
   WorkFileEvidenceV1,
   WorkEnvironmentSnapshot,
   TabView,
-  ResourceSummary,
+  NoteSummary,
   WorkHumanPageV1,
   WorkPageV1,
   WorkRuntimeProjection,
@@ -101,7 +101,7 @@ export function environmentPictures(
 export function environmentItems(
   snapshot: WorkEnvironmentSnapshot,
   tabs: readonly TabView[],
-  notes: readonly ResourceSummary[],
+  notes: readonly NoteSummary[],
   objectives: ReadonlyMap<string, WorkRuntimeProjection> = new Map(),
   media: ReadonlyMap<string, MediaAssetV1> = new Map(),
 ): CanvasItem[] {
@@ -134,7 +134,7 @@ export function environmentItems(
 function elementItems(
   snapshot: WorkEnvironmentSnapshot,
   tabs: readonly TabView[],
-  notes: readonly ResourceSummary[],
+  notes: readonly NoteSummary[],
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
   media: ReadonlyMap<string, MediaAssetV1>,
 ): CanvasItem[] {
@@ -162,7 +162,7 @@ function elementItems(
         title: tab?.title || m.work_env_unavailable_tab(),
         detail: origin,
         status: tab ? area : m.work_env_tab_unavailable(),
-        favicon: tab?.favicon ?? null,
+        icon: tab?.icon ?? null,
         unavailable: !tab,
       };
     }
@@ -193,7 +193,7 @@ function elementItems(
         area: element.area,
         kind: m.work_env_notes(),
         title: note?.title || m.work_env_saved_resource(),
-        detail: note?.updated_at ?? "",
+        detail: note?.modified_at ?? "",
         status: area,
         unavailable: !note,
       };

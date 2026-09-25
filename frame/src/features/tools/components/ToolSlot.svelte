@@ -88,7 +88,7 @@
 
   .tool-load-state button {
     border: 0;
-    border-radius: 7px;
+    border-radius: var(--radius-inset);
     background: var(--color-fill);
     color: var(--color-text);
     padding: 7px 12px;

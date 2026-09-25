@@ -18,9 +18,45 @@ pub struct TabView {
     pub title: String,
     pub url: Option<String>,
     pub loading: bool,
+    #[serde(default)]
+    pub popup_blocked: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
-    pub favicon: Option<String>,
+    pub icon: Option<IconRef>,
+}
+
+/// Names a cached site icon without carrying its pixels. Chrome keeps rasters
+/// by origin and repaints only when `revision` changes, so a projection costs
+/// a short string per tab instead of a five-kilobyte raster.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct IconRef {
+    pub origin: String,
+    pub revision: String,
+}
+
+/// One site icon: canonical base64 of exactly 32x32 RGBA bytes. Chrome never
+/// decodes a page-controlled image format.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct FaviconEntry {
+    pub origin: String,
+    pub revision: String,
+    pub rgba: String,
+}
+
+/// Which privileged webview a raster is destined for. Each keeps its own
+/// cache, so delivery is tracked per surface rather than broadcast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum IconSurface {
+    Chrome,
+    Panel,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct FaviconsView {
+    pub surface: IconSurface,
+    pub profile_id: String,
+    pub entries: Vec<FaviconEntry>,
 }
 
 /// Non-authorizing identity for one live extension runtime. Privileged chrome
@@ -510,6 +546,7 @@ pub struct ItemsState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(tag = "type")]
 pub enum SearchAction {
+    OpenNote { id: String },
     ActivateTab { id: String },
     OpenUrl { url: String },
     RunCommand { id: String },
@@ -571,15 +608,131 @@ pub struct SearchResult {
     pub kind: String,
     pub title: String,
     pub detail: String,
-    pub favicon: Option<String>,
+    pub icon: Option<IconRef>,
     pub action: SearchAction,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct SearchResults {
+    pub pending: bool,
     pub context: Option<SearchContext>,
     pub query: String,
+    /// Host the field may complete the typed text to. Native decides what is
+    /// confident enough to offer; the field still refuses to apply one that
+    /// does not extend exactly what the user has typed.
+    pub completion: Option<String>,
     pub results: Vec<SearchResult>,
+}
+
+/// One request from a history surface. Reads and deletions share one bounded
+/// entry point, as resource calls do.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HistoryCall {
+    /// `before` is the id of the last visit already seen. Row ids and unix
+    /// seconds cross as decimal strings; JavaScript never parses a Rust i64.
+    Page {
+        query: String,
+        /// How far back the list reaches. The same scope Clear operates on,
+        /// so clearing removes exactly what the reader is looking at.
+        range: HistoryRange,
+        before: Option<String>,
+        limit: u16,
+    },
+    Forget {
+        urls: Vec<String>,
+    },
+    Clear {
+        range: HistoryRange,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryRange {
+    Hour,
+    Day,
+    Week,
+    Everything,
+}
+
+impl HistoryRange {
+    /// Seconds of history the range covers, or None for all of it.
+    pub fn window_seconds(self) -> Option<i64> {
+        match self {
+            Self::Hour => Some(3600),
+            Self::Day => Some(24 * 3600),
+            Self::Week => Some(7 * 24 * 3600),
+            Self::Everything => None,
+        }
+    }
+}
+
+pub const MAX_HISTORY_PAGE_LIMIT: u16 = 200;
+pub const MAX_HISTORY_QUERY_BYTES: usize = 512;
+pub const MAX_HISTORY_FORGET_URLS: usize = 100;
+
+impl HistoryCall {
+    pub fn validate(&self) -> bool {
+        match self {
+            Self::Page {
+                query,
+                before,
+                limit,
+                ..
+            } => {
+                query.len() <= MAX_HISTORY_QUERY_BYTES
+                    && *limit > 0
+                    && *limit <= MAX_HISTORY_PAGE_LIMIT
+                    && before
+                        .as_ref()
+                        .is_none_or(|cursor| cursor.parse::<i64>().is_ok_and(|id| id > 0))
+            }
+            Self::Forget { urls } => {
+                !urls.is_empty()
+                    && urls.len() <= MAX_HISTORY_FORGET_URLS
+                    && urls
+                        .iter()
+                        .all(|url| zephium_core::navigation::is_allowed_str(url))
+            }
+            Self::Clear { .. } => true,
+        }
+    }
+}
+
+/// One recorded visit. Visits are not deduplicated by address: a history list
+/// shows every time a page was opened.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct HistoryVisitView {
+    pub id: String,
+    pub url: String,
+    pub title: String,
+    pub visited_at: String,
+    pub icon: Option<IconRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HistoryResponse {
+    Page {
+        visits: Vec<HistoryVisitView>,
+        /// Cursor for the following page, absent once the list is exhausted.
+        next: Option<String>,
+    },
+    Removed {
+        count: u32,
+    },
+    Error {
+        error: HistoryError,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryError {
+    Invalid,
+    Unavailable,
+    Capacity,
 }
 
 /// Split divider hit-strip in window logical coordinates; the chrome renders
@@ -1042,6 +1195,7 @@ impl BlockerStatusView {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct PanelOwner {
+    pub private: bool,
     pub window_id: String,
     pub profile_id: String,
     pub profile_name: String,
@@ -1056,6 +1210,7 @@ pub enum Projection {
     PanelOwner(PanelOwner),
     Items(ItemsState),
     Tab(TabView),
+    Favicons(FaviconsView),
     ExtensionActions(ExtensionActionsView),
     ExtensionActionFailed(ExtensionActionFailedView),
     ExtensionActionShortcut(ExtensionActionShortcutView),
@@ -1066,6 +1221,7 @@ pub enum Projection {
     PagePermissionPrompt(PagePermissionPromptView),
     UiCommand(String),
     Search(SearchResults),
+    OpenNote { profile: String, id: String },
     Layout(LayoutState),
     RuntimeStatus(RuntimeStatus),
     BlockerStatus(BlockerStatusView),

@@ -45,11 +45,6 @@ export const commands = {
 	workSetDecisionPreference: (expectedProfile: string, choice: WorkDecisionChoiceV1) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_set_decision_preference", { expectedProfile, choice }),
 	tabsBootstrap: () => __TAURI_INVOKE<void>("tabs_bootstrap"),
 	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
-	/**
-	 *  Explicit trusted user navigation. A citation alone never calls this command
-	 *  or allocates a Work browser resource.
-	 */
-	tabsOpenUrl: (url: string) => __TAURI_INVOKE<OperationAdmission>("tabs_open_url", { url }),
 	tabsActivate: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_activate", { id }),
 	tabsClose: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_close", { id }),
 	tabsSetEssential: (id: string, essential: boolean, before: string | null) => __TAURI_INVOKE<OperationAdmission>("tabs_set_essential", { id, essential, before }),
@@ -155,11 +150,34 @@ export const commands = {
 	tabMenuPopup: (id: string, x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, canSplit }),
 	profileMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("profile_menu_popup", { x, y }),
 	sidebarMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y }),
+	toolsMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("tools_menu_popup", { x, y }),
+	/**
+	 *  New Tab has its own main-only entry. The actor revalidates the bound blank
+	 *  tab and focused profile/space before searching or executing any result.
+	 */
+	newtabSearchContext: (tabId: string) => __TAURI_INVOKE<{
+	window_id: string,
+	session_id: string,
+	request_id: string,
+	profile_id: string,
+	space_id: string,
+} | null>("newtab_search_context", { tabId }),
+	newtabSearch: (query: string, context: SearchContext) => __TAURI_INVOKE<boolean>("newtab_search", { query, context }),
+	newtabRun: (action: SearchAction, context: SearchContext) => __TAURI_INVOKE<OperationAdmission>("newtab_run", { action, context }),
+	newtabCancel: (context: SearchContext) => __TAURI_INVOKE<boolean>("newtab_cancel", { context }),
 	launcherSearch: (query: string, requestId: string) => __TAURI_INVOKE<boolean>("launcher_search", { query, requestId }),
 	launcherRun: (action: SearchAction, context: SearchContext) => __TAURI_INVOKE<OperationAdmission>("launcher_run", { action, context }),
-	sidebarSetWidth: (width: number | null) => __TAURI_INVOKE<void>("sidebar_set_width", { width }),
+	sidebarSetWidth: (width: number | null, animate: boolean) => __TAURI_INVOKE<void>("sidebar_set_width", { width, animate }),
 	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
 	resourceCall: (expectedProfile: string, call: ResourceCall_Deserialize) => __TAURI_INVOKE<ResourceReply_Serialize>("resource_call", { expectedProfile, call }),
+	noteCall: (expectedProfile: string, call: NoteCall) => __TAURI_INVOKE<NoteReply>("note_call", { expectedProfile, call }),
+	historyCall: (expectedProfile: string, call: HistoryCall) => __TAURI_INVOKE<HistoryResponse>("history_call", { expectedProfile, call }),
+	downloadCall: (expectedProfile: string, call: DownloadCall) => __TAURI_INVOKE<DownloadResponse>("download_call", { expectedProfile, call }),
+	/**
+	 *  Opens an address in the focused window. The launcher panel and the history
+	 *  surfaces have no tab id to navigate, and must not be given one.
+	 */
+	browserOpenUrl: (url: string, newTab: boolean) => __TAURI_INVOKE<OperationAdmission>("browser_open_url", { url, newTab }),
 	resourceCloseReady: (token: string, success: boolean) => __TAURI_INVOKE<boolean>("resource_close_ready", { token, success }),
 	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("tab_drop", { id, x, y }),
 	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),
@@ -171,6 +189,7 @@ export const commands = {
 export const events = {
 	blockerStatusChanged: makeEvent<BlockerStatusChanged>("blocker-status-changed"),
 	browserCredentialCapabilityChanged: makeEvent<BrowserCredentialCapabilityChanged>("browser-credential-capability-changed"),
+	downloadsChanged: makeEvent<DownloadsChanged>("downloads-changed"),
 	extensionActionFailed: makeEvent<ExtensionActionFailed>("extension-action-failed"),
 	extensionActionShortcut: makeEvent<ExtensionActionShortcut>("extension-action-shortcut"),
 	extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
@@ -178,8 +197,11 @@ export const events = {
 	extensionManagementAvailabilityChanged: makeEvent<ExtensionManagementAvailabilityChanged>("extension-management-availability-changed"),
 	extensionManagementChanged: makeEvent<ExtensionManagementChanged>("extension-management-changed"),
 	extensionRuntimeGrantPromptChanged: makeEvent<ExtensionRuntimeGrantPromptChanged>("extension-runtime-grant-prompt-changed"),
+	faviconsChanged: makeEvent<FaviconsChanged>("favicons-changed"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
+	noteOpenRequested: makeEvent<NoteOpenRequested>("note-open-requested"),
+	notesChanged: makeEvent<NotesChanged>("notes-changed"),
 	operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
 	pagePermissionPromptChanged: makeEvent<PagePermissionPromptChanged>("page-permission-prompt-changed"),
 	resourceChanged: makeEvent<ResourceChanged>("resource-changed"),
@@ -345,6 +367,15 @@ export type BrowserCredentialCapabilityView = {
 export type BrowserPasskeyAuthorizationView = "authorized" | "denied" | "not_determined" | "entitlement_required" | "unknown" | "unavailable" | "unsupported";
 
 /**
+ *  A note that changed, and the revision it now has on disk, or `None` when
+ *  it no longer exists.
+ */
+export type ChangedNote = {
+	id: string,
+	revision: string | null,
+};
+
+/**
  *  Split divider hit-strip in window logical coordinates; the chrome renders
  *  these as drag targets on platforms without native stage dividers.
  */
@@ -424,6 +455,45 @@ export type DocumentNode_Serialize = {
 	text?: string | null,
 	attrs?: DocumentAttrs | null,
 	marks?: DocumentMark_Serialize[],
+};
+
+export type DownloadCall = { kind: "updates" } | { kind: "retry_cleanup" } | { kind: "list"; before: string | null; limit: number } | { kind: "cancel"; id: string } | { kind: "open"; id: string } | { kind: "reveal"; id: string } | { kind: "forget"; id: string } | { kind: "preferences" } | { kind: "choose_directory" } | { kind: "set_ask_destination"; enabled: boolean };
+
+export type DownloadCleanup = {
+	running: boolean,
+	error: DownloadError | null,
+};
+
+export type DownloadError = "invalid" | "unavailable" | "unsupported" | "capacity" | "storage" | "destination" | "network" | "disk_full" | "protection" | "missing_file" | "changed_file" | "cancelled";
+
+export type DownloadPreferences = {
+	ask_destination: boolean,
+	/**  Set only by the native directory picker, never accepted from page IPC. */
+	directory: string | null,
+	/**  Read-only native directory identity; only the OS picker can mint it. */
+	directory_identity?: string | null,
+};
+
+export type DownloadResponse = { kind: "updates"; entries: DownloadView[]; removed: string[]; cleanup: DownloadCleanup } | { kind: "page"; entries: DownloadView[]; next: string | null; supported: boolean; cleanup: DownloadCleanup } | { kind: "preferences"; preferences: DownloadPreferences; supported: boolean; site_downloads_require_confirmation: boolean } | { kind: "accepted" } | { kind: "applied" } | { kind: "error"; error: DownloadError };
+
+export type DownloadState = "pending" | "receiving" | "cancelling" | "finalizing" | "completed" | "cancelled" | "interrupted" | "failed";
+
+export type DownloadView = {
+	id: string,
+	revision: string,
+	created_at: string,
+	filename: string,
+	source: string,
+	/**  For origin-less generated data, the displayed origin is page context. */
+	source_is_context?: boolean,
+	state: DownloadState,
+	received: string,
+	total: string | null,
+	error: DownloadError | null,
+};
+
+export type DownloadsChanged = {
+	profile: string,
 };
 
 export type ExtensionActionFailed = ExtensionActionFailedView;
@@ -741,6 +811,76 @@ export type ExtensionUpdateConsentView = {
 	limitations: ExtensionManagementLimitationView[],
 };
 
+/**
+ *  One site icon: canonical base64 of exactly 32x32 RGBA bytes. Chrome never
+ *  decodes a page-controlled image format.
+ */
+export type FaviconEntry = {
+	origin: string,
+	revision: string,
+	rgba: string,
+};
+
+export type FaviconsChanged = FaviconsView;
+
+export type FaviconsView = {
+	surface: IconSurface,
+	profile_id: string,
+	entries: FaviconEntry[],
+};
+
+/**
+ *  One request from a history surface. Reads and deletions share one bounded
+ *  entry point, as resource calls do.
+ */
+export type HistoryCall = 
+/**
+ *  `before` is the id of the last visit already seen. Row ids and unix
+ *  seconds cross as decimal strings; JavaScript never parses a Rust i64.
+ */
+{ kind: "page"; query: string; 
+/**
+ *  How far back the list reaches. The same scope Clear operates on,
+ *  so clearing removes exactly what the reader is looking at.
+ */
+range: HistoryRange; before: string | null; limit: number } | { kind: "forget"; urls: string[] } | { kind: "clear"; range: HistoryRange };
+
+export type HistoryError = "invalid" | "unavailable" | "capacity";
+
+export type HistoryRange = "hour" | "day" | "week" | "everything";
+
+export type HistoryResponse = { kind: "page"; visits: HistoryVisitView[]; 
+/**  Cursor for the following page, absent once the list is exhausted. */
+next: string | null } | { kind: "removed"; count: number } | { kind: "error"; error: HistoryError };
+
+/**
+ *  One recorded visit. Visits are not deduplicated by address: a history list
+ *  shows every time a page was opened.
+ */
+export type HistoryVisitView = {
+	id: string,
+	url: string,
+	title: string,
+	visited_at: string,
+	icon: IconRef | null,
+};
+
+/**
+ *  Names a cached site icon without carrying its pixels. Chrome keeps rasters
+ *  by origin and repaints only when `revision` changes, so a projection costs
+ *  a short string per tab instead of a five-kilobyte raster.
+ */
+export type IconRef = {
+	origin: string,
+	revision: string,
+};
+
+/**
+ *  Which privileged webview a raster is destined for. Each keeps its own
+ *  cache, so delivery is tracked per surface rather than broadcast.
+ */
+export type IconSurface = "chrome" | "panel";
+
 export type ItemId = string;
 
 export type ItemsChanged = ItemsState;
@@ -822,6 +962,27 @@ export type MediaOrigin =
 /**  Fetched by Rust from a public HTTPS URL without cookies. */
 { kind: "fetched"; url: string; observed_at: string };
 
+export type NoteCall = { kind: "list"; query: NoteQuery } | { kind: "get"; id: string } | { kind: "create"; request_id: string; markdown: string } | 
+/**
+ *  Replaces the file only if it still holds `base_revision`. Replaying the
+ *  same write after an unknown outcome succeeds without a second change.
+ */
+{ kind: "write"; request_id: string; id: string; base_revision: string; markdown: string } | { kind: "set_pinned"; id: string; pinned: boolean } | { kind: "trash"; id: string } | { kind: "restore"; id: string } | 
+/**  Permanent. Only a note already in the trash can be deleted. */
+{ kind: "delete"; id: string } | { kind: "resolve"; targets: string[] } | { kind: "backlinks"; id: string } | 
+/**  Shows the note, or the folder when `id` is absent, in the system file manager. */
+{ kind: "reveal"; id: string | null };
+
+/**
+ *  Notes that changed on disk, by this browser or anything else. `reset`
+ *  means the listing itself may have changed beyond the named notes.
+ */
+export type NoteChanges = {
+	profile: string,
+	notes: ChangedNote[],
+	reset: boolean,
+};
+
 export type NoteDocument = NoteDocument_Serialize | NoteDocument_Deserialize;
 
 export type NoteDocument_Deserialize = {
@@ -833,6 +994,66 @@ export type NoteDocument_Serialize = {
 	version: number,
 	document: DocumentNode_Serialize,
 };
+
+export type NoteError = "invalid" | "not_found" | "capacity" | "too_large" | "read_only" | "unavailable" | "outcome_unknown";
+
+export type NoteOpenRequested = {
+	profile: string,
+	id: string,
+};
+
+export type NoteQuery = {
+	search: string,
+	trashed: boolean,
+	after: string | null,
+	limit: number,
+};
+
+export type NoteRecord = {
+	summary: NoteSummary,
+	markdown: string,
+};
+
+export type NoteReply = {
+	profile: string | null,
+	response: NoteResponse,
+};
+
+export type NoteResponse = { kind: "done" } | { kind: "page"; items: NoteSummary[]; next: string | null } | { kind: "record"; record: NoteRecord } | { kind: "applied"; request_id: string; summary: NoteSummary } | 
+/**  The file changed since `base_revision`; nothing was written. */
+{ kind: "conflict"; current: NoteRecord } | { kind: "targets"; items: NoteTarget[] } | { kind: "error"; error: NoteError };
+
+export type NoteSummary = {
+	id: string,
+	/**
+	 *  Content hash of the bytes on disk. Stable across restarts and index
+	 *  rebuilds, so a writer can prove which version it edited.
+	 */
+	revision: string,
+	title: string,
+	/**  Plain text after the title, collapsed to one line. */
+	preview: string,
+	pinned: boolean,
+	trashed: boolean,
+	/**
+	 *  False when the file is too large or not UTF-8. It is listed and
+	 *  readable elsewhere but never rewritten from a partial view.
+	 */
+	editable: boolean,
+	/**  Milliseconds since the Unix epoch, as decimal strings. */
+	created_at: string,
+	modified_at: string,
+	/**  Folder-relative path with `/` separators, for display only. */
+	path: string,
+};
+
+/**  What a `[[target]]` in a note currently points at. */
+export type NoteTarget = {
+	target: string,
+	note: NoteSummary | null,
+};
+
+export type NotesChanged = NoteChanges;
 
 /**
  *  Immediate result returned by a privileged IPC command. `accepted` with an
@@ -956,12 +1177,25 @@ export type ProfileView = {
 
 export type ResourceCall = ResourceCall_Serialize | ResourceCall_Deserialize;
 
-export type ResourceCall_Deserialize = ({ kind: "resolve_notes"; ids: string[] }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; ids?: never; query?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; ids?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; ids?: never; query?: never; request_id?: never } | ({ kind: "mutate"; command: ResourceCommand_Deserialize }) & { id?: never; ids?: never; query?: never; request_id?: never };
+export type ResourceCall_Deserialize = ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; query?: never; today?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; request_id?: never; today?: never } | ({ kind: "list_tasks"; query: TaskQuery }) & { command?: never; id?: never; request_id?: never; today?: never } | 
+/**
+ *  Navigation counts and lists without a page of rows, for refreshing
+ *  totals after a write whose record the caller already holds.
+ */
+({ kind: "task_overview"; today: string }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; query?: never; request_id?: never; today?: never } | ({ kind: "mutate"; command: ResourceCommand_Deserialize }) & { id?: never; query?: never; request_id?: never; today?: never };
 
-export type ResourceCall_Serialize = ({ kind: "resolve_notes"; ids: string[] }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; ids?: never; query?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; ids?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; ids?: never; query?: never; request_id?: never } | ({ kind: "mutate"; command: ResourceCommand_Serialize }) & { id?: never; ids?: never; query?: never; request_id?: never };
+export type ResourceCall_Serialize = ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; query?: never; today?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; request_id?: never; today?: never } | ({ kind: "list_tasks"; query: TaskQuery }) & { command?: never; id?: never; request_id?: never; today?: never } | 
+/**
+ *  Navigation counts and lists without a page of rows, for refreshing
+ *  totals after a write whose record the caller already holds.
+ */
+({ kind: "task_overview"; today: string }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; query?: never; request_id?: never; today?: never } | ({ kind: "mutate"; command: ResourceCommand_Serialize }) & { id?: never; query?: never; request_id?: never; today?: never };
+
+export type ResourceChangeKind = "task" | "task_list" | "object" | "media";
 
 export type ResourceChanged = {
 	profile: string,
+	kind: ResourceChangeKind,
 	id: string,
 	revision: string,
 };
@@ -982,31 +1216,87 @@ export type ResourceCommand_Serialize = {
 
 export type ResourceContent = ResourceContent_Serialize | ResourceContent_Deserialize;
 
-export type ResourceContent_Deserialize = ({ kind: "note"; document: NoteDocument_Deserialize }) & { asset?: never; completed?: never; description?: never; due_date?: never; object?: never } | ({ kind: "task"; description: string; completed: boolean; due_date: string | null }) & { asset?: never; document?: never; object?: never } | 
+export type ResourceContent_Deserialize = ({ kind: "note"; document: NoteDocument_Deserialize }) & { asset?: never; assignee?: never; completed?: never; context?: never; description?: never; details?: never; due_date?: never; due_time?: never; object?: never; origin?: never; sort_key?: never; status?: never; work?: never } | 
+/**
+ *  Fields added after the first release carry `#[serde(default)]` so bodies
+ *  written before they existed still load. A later track adding its own
+ *  binding here follows the same rule.
+ */
+({ kind: "task"; details?: TaskDetails; description: string; 
+/**
+ *  The persisted projection of `status` that the listing column and
+ *  query filter are built from. `validate` keeps the two in step.
+ */
+completed: boolean; due_date: string | null; 
+/**
+ *  `HH:MM`, and only alongside a day: a time with no date is not a
+ *  moment, and nothing could sort or show it.
+ */
+due_time?: string | null; status?: TaskStatus; assignee?: TaskActor; origin?: TaskActor; context?: TaskContext | null; 
+/**
+ *  Manual position within a section, honoured by the list's ordering.
+ *  Opaque here: only the ordering of two keys matters, never their
+ *  contents. No gesture writes one yet.
+ */
+sort_key?: string | null; 
+/**
+ *  Reserved for the Work runtime track, which owns Work identity and
+ *  the rules binding a task to one. This crate assigns it no meaning
+ *  beyond being a same-profile ULID and enforces no reference.
+ */
+work?: string | null }) & { asset?: never; document?: never; object?: never } | 
 /**
  *  A user-owned semantic object: a table, checklist, comparison, chart,
  *  document, or findings, editable like a note.
  */
-({ kind: "object"; object: WorkObjectV1_Deserialize }) & { asset?: never; completed?: never; description?: never; document?: never; due_date?: never } | 
+({ kind: "object"; object: WorkObjectV1_Deserialize }) & { asset?: never; assignee?: never; completed?: never; context?: never; description?: never; details?: never; document?: never; due_date?: never; due_time?: never; origin?: never; sort_key?: never; status?: never; work?: never } | 
 /**
  *  An imported or admitted file. Bytes live in the profile's
  *  content-addressed media store; this row is its provenance and shape.
  *  Only Rust mints it, after bounded sniffing and decoding.
  */
-({ kind: "media"; asset: MediaAssetV1_Deserialize }) & { completed?: never; description?: never; document?: never; due_date?: never; object?: never };
+({ kind: "media"; asset: MediaAssetV1_Deserialize }) & { assignee?: never; completed?: never; context?: never; description?: never; details?: never; document?: never; due_date?: never; due_time?: never; object?: never; origin?: never; sort_key?: never; status?: never; work?: never };
 
-export type ResourceContent_Serialize = ({ kind: "note"; document: NoteDocument_Serialize }) & { asset?: never; completed?: never; description?: never; due_date?: never; object?: never } | ({ kind: "task"; description: string; completed: boolean; due_date: string | null }) & { asset?: never; document?: never; object?: never } | 
+export type ResourceContent_Serialize = ({ kind: "note"; document: NoteDocument_Serialize }) & { asset?: never; assignee?: never; completed?: never; context?: never; description?: never; details?: never; due_date?: never; due_time?: never; object?: never; origin?: never; sort_key?: never; status?: never; work?: never } | 
+/**
+ *  Fields added after the first release carry `#[serde(default)]` so bodies
+ *  written before they existed still load. A later track adding its own
+ *  binding here follows the same rule.
+ */
+({ kind: "task"; details: TaskDetails; description: string; 
+/**
+ *  The persisted projection of `status` that the listing column and
+ *  query filter are built from. `validate` keeps the two in step.
+ */
+completed: boolean; due_date: string | null; 
+/**
+ *  `HH:MM`, and only alongside a day: a time with no date is not a
+ *  moment, and nothing could sort or show it.
+ */
+due_time?: string | null; status: TaskStatus; assignee: TaskActor; origin: TaskActor; context?: TaskContext | null; 
+/**
+ *  Manual position within a section, honoured by the list's ordering.
+ *  Opaque here: only the ordering of two keys matters, never their
+ *  contents. No gesture writes one yet.
+ */
+sort_key?: string | null; 
+/**
+ *  Reserved for the Work runtime track, which owns Work identity and
+ *  the rules binding a task to one. This crate assigns it no meaning
+ *  beyond being a same-profile ULID and enforces no reference.
+ */
+work?: string | null }) & { asset?: never; document?: never; object?: never } | 
 /**
  *  A user-owned semantic object: a table, checklist, comparison, chart,
  *  document, or findings, editable like a note.
  */
-({ kind: "object"; object: WorkObjectV1_Serialize }) & { asset?: never; completed?: never; description?: never; document?: never; due_date?: never } | 
+({ kind: "object"; object: WorkObjectV1_Serialize }) & { asset?: never; assignee?: never; completed?: never; context?: never; description?: never; details?: never; document?: never; due_date?: never; due_time?: never; origin?: never; sort_key?: never; status?: never; work?: never } | 
 /**
  *  An imported or admitted file. Bytes live in the profile's
  *  content-addressed media store; this row is its provenance and shape.
  *  Only Rust mints it, after bounded sniffing and decoding.
  */
-({ kind: "media"; asset: MediaAssetV1_Serialize }) & { completed?: never; description?: never; document?: never; due_date?: never; object?: never };
+({ kind: "media"; asset: MediaAssetV1_Serialize }) & { assignee?: never; completed?: never; context?: never; description?: never; details?: never; document?: never; due_date?: never; due_time?: never; object?: never; origin?: never; sort_key?: never; status?: never; work?: never };
 
 export type ResourceDraft = ResourceDraft_Serialize | ResourceDraft_Deserialize;
 
@@ -1032,19 +1322,29 @@ export type ResourceId = string;
 
 export type ResourceIntent = ResourceIntent_Serialize | ResourceIntent_Deserialize;
 
-export type ResourceIntent_Deserialize = ({ kind: "create"; draft: ResourceDraft_Deserialize }) & { artifact?: never; basis?: never; execution?: never; expected_revision?: never; id?: never; objective?: never; title?: never } | 
+export type ResourceIntent_Deserialize = ({ kind: "create_task_list"; title: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; expected_revision?: never; id?: never; objective?: never; set?: never } | ({ kind: "rename_task_list"; id: string; expected_revision: string; title: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never } | ({ kind: "delete_task_list"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | ({ kind: "create"; draft: ResourceDraft_Deserialize }) & { artifact?: never; basis?: never; execution?: never; expect?: never; expected_revision?: never; id?: never; objective?: never; set?: never; title?: never } | 
 /**
  *  Copy an artifact (original or the user's revision) into an Object
  *  resource. Rust resolves data, evidence, review, and provenance.
  */
-({ kind: "preserve_artifact"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; basis: WorkObjectBasis; title?: string | null }) & { draft?: never; expected_revision?: never; id?: never } | ({ kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Deserialize }) & { artifact?: never; basis?: never; execution?: never; objective?: never; title?: never } | ({ kind: "trash"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; objective?: never; title?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; objective?: never; title?: never };
+({ kind: "preserve_artifact"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; basis: WorkObjectBasis; title?: string | null }) & { draft?: never; expect?: never; expected_revision?: never; id?: never; set?: never } | ({ kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Deserialize }) & { artifact?: never; basis?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | ({ kind: "trash"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | 
+/**
+ *  Writes individual task properties onto the current revision, whatever
+ *  it is, after checking the `expect` preconditions against it.
+ */
+({ kind: "update_task"; id: string; set: TaskField[]; expect?: TaskField[] }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expected_revision?: never; objective?: never; title?: never };
 
-export type ResourceIntent_Serialize = ({ kind: "create"; draft: ResourceDraft_Serialize }) & { artifact?: never; basis?: never; execution?: never; expected_revision?: never; id?: never; objective?: never; title?: never } | 
+export type ResourceIntent_Serialize = ({ kind: "create_task_list"; title: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; expected_revision?: never; id?: never; objective?: never; set?: never } | ({ kind: "rename_task_list"; id: string; expected_revision: string; title: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never } | ({ kind: "delete_task_list"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | ({ kind: "create"; draft: ResourceDraft_Serialize }) & { artifact?: never; basis?: never; execution?: never; expect?: never; expected_revision?: never; id?: never; objective?: never; set?: never; title?: never } | 
 /**
  *  Copy an artifact (original or the user's revision) into an Object
  *  resource. Rust resolves data, evidence, review, and provenance.
  */
-({ kind: "preserve_artifact"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; basis: WorkObjectBasis; title?: string | null }) & { draft?: never; expected_revision?: never; id?: never } | ({ kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Serialize }) & { artifact?: never; basis?: never; execution?: never; objective?: never; title?: never } | ({ kind: "trash"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; objective?: never; title?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; objective?: never; title?: never };
+({ kind: "preserve_artifact"; objective: WorkId; execution: WorkExecutionId; artifact: WorkArtifactId; basis: WorkObjectBasis; title?: string | null }) & { draft?: never; expect?: never; expected_revision?: never; id?: never; set?: never } | ({ kind: "replace"; id: string; expected_revision: string; draft: ResourceDraft_Serialize }) & { artifact?: never; basis?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | ({ kind: "trash"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | ({ kind: "restore"; id: string; expected_revision: string }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expect?: never; objective?: never; set?: never; title?: never } | 
+/**
+ *  Writes individual task properties onto the current revision, whatever
+ *  it is, after checking the `expect` preconditions against it.
+ */
+({ kind: "update_task"; id: string; set: TaskField[]; expect: TaskField[] }) & { artifact?: never; basis?: never; draft?: never; execution?: never; expected_revision?: never; objective?: never; title?: never };
 
 export type ResourceKind = "note" | "task" | "object" | "media";
 
@@ -1093,10 +1393,14 @@ export type ResourceReply_Serialize = {
 
 export type ResourceResponse = ResourceResponse_Serialize | ResourceResponse_Deserialize;
 
-export type ResourceResponse_Deserialize = ({ kind: "acknowledged" }) & { applied_revision?: never; error?: never; items?: never; next?: never; record?: never; request_id?: never } | ({ kind: "record"; record: ResourceRecord_Deserialize }) & { applied_revision?: never; error?: never; items?: never; next?: never; request_id?: never } | ({ kind: "page"; items: ResourceSummary[]; next: string | null }) & { applied_revision?: never; error?: never; record?: never; request_id?: never } | ({ kind: "applied"; request_id: string; applied_revision: string; record: ResourceRecord_Deserialize }) & { error?: never; items?: never; next?: never } | ({ kind: "error"; error: ResourceError }) & { applied_revision?: never; items?: never; next?: never; record?: never; request_id?: never };
+export type ResourceResponse_Deserialize = ({ kind: "acknowledged" }) & { applied_revision?: never; counts?: never; error?: never; items?: never; list?: never; lists?: never; metadata?: never; next?: never; record?: never; request_id?: never } | ({ kind: "record"; record: ResourceRecord_Deserialize }) & { applied_revision?: never; counts?: never; error?: never; items?: never; list?: never; lists?: never; metadata?: never; next?: never; request_id?: never } | ({ kind: "page"; items: ResourceSummary[]; next: string | null }) & { applied_revision?: never; counts?: never; error?: never; list?: never; lists?: never; metadata?: never; record?: never; request_id?: never } | ({ kind: "task_list_applied"; request_id: string; list: TaskList }) & { applied_revision?: never; counts?: never; error?: never; items?: never; lists?: never; metadata?: never; next?: never; record?: never } | ({ kind: "task_page"; lists: TaskList[]; metadata: TaskMetadata[]; items: ResourceSummary[]; next: string | null; counts: TaskCounts }) & { applied_revision?: never; error?: never; list?: never; record?: never; request_id?: never } | ({ kind: "task_overview"; lists: TaskList[]; counts: TaskCounts }) & { applied_revision?: never; error?: never; items?: never; list?: never; metadata?: never; next?: never; record?: never; request_id?: never } | ({ kind: "applied"; request_id: string; applied_revision: string; record: ResourceRecord_Deserialize }) & { counts?: never; error?: never; items?: never; list?: never; lists?: never; metadata?: never; next?: never } | ({ kind: "error"; error: ResourceError }) & { applied_revision?: never; counts?: never; items?: never; list?: never; lists?: never; metadata?: never; next?: never; record?: never; request_id?: never };
 
-export type ResourceResponse_Serialize = ({ kind: "acknowledged" }) & { applied_revision?: never; error?: never; items?: never; next?: never; record?: never; request_id?: never } | ({ kind: "record"; record: ResourceRecord_Serialize }) & { applied_revision?: never; error?: never; items?: never; next?: never; request_id?: never } | ({ kind: "page"; items: ResourceSummary[]; next: string | null }) & { applied_revision?: never; error?: never; record?: never; request_id?: never } | ({ kind: "applied"; request_id: string; applied_revision: string; record: ResourceRecord_Serialize }) & { error?: never; items?: never; next?: never } | ({ kind: "error"; error: ResourceError }) & { applied_revision?: never; items?: never; next?: never; record?: never; request_id?: never };
+export type ResourceResponse_Serialize = ({ kind: "acknowledged" }) & { applied_revision?: never; counts?: never; error?: never; items?: never; list?: never; lists?: never; metadata?: never; next?: never; record?: never; request_id?: never } | ({ kind: "record"; record: ResourceRecord_Serialize }) & { applied_revision?: never; counts?: never; error?: never; items?: never; list?: never; lists?: never; metadata?: never; next?: never; request_id?: never } | ({ kind: "page"; items: ResourceSummary[]; next: string | null }) & { applied_revision?: never; counts?: never; error?: never; list?: never; lists?: never; metadata?: never; record?: never; request_id?: never } | ({ kind: "task_list_applied"; request_id: string; list: TaskList }) & { applied_revision?: never; counts?: never; error?: never; items?: never; lists?: never; metadata?: never; next?: never; record?: never } | ({ kind: "task_page"; lists: TaskList[]; metadata: TaskMetadata[]; items: ResourceSummary[]; next: string | null; counts: TaskCounts }) & { applied_revision?: never; error?: never; list?: never; record?: never; request_id?: never } | ({ kind: "task_overview"; lists: TaskList[]; counts: TaskCounts }) & { applied_revision?: never; error?: never; items?: never; list?: never; metadata?: never; next?: never; record?: never; request_id?: never } | ({ kind: "applied"; request_id: string; applied_revision: string; record: ResourceRecord_Serialize }) & { counts?: never; error?: never; items?: never; list?: never; lists?: never; metadata?: never; next?: never } | ({ kind: "error"; error: ResourceError }) & { applied_revision?: never; counts?: never; items?: never; list?: never; lists?: never; metadata?: never; next?: never; record?: never; request_id?: never };
 
+/**
+ *  Everything a list row draws, so a populated list costs one query rather than
+ *  one query and a fetch per row. Task-only fields are `None` for a note.
+ */
 export type ResourceSummary = {
 	id: string,
 	revision: string,
@@ -1105,6 +1409,13 @@ export type ResourceSummary = {
 	updated_at: string,
 	completed: boolean | null,
 	due_date: string | null,
+	due_time: string | null,
+	status: TaskStatus | null,
+	assignee: TaskActor | null,
+	origin: TaskActor | null,
+	context: TaskContext | null,
+	sort_key: string | null,
+	work: string | null,
 };
 
 /**  Sanitized advisory delivered only to privileged main chrome. */
@@ -1149,7 +1460,7 @@ export type RuntimeStatus = {
 
 export type RuntimeStatusChanged = RuntimeStatus;
 
-export type SearchAction = { type: "ActivateTab"; id: string } | { type: "OpenUrl"; url: string } | { type: "RunCommand"; id: string };
+export type SearchAction = { type: "OpenNote"; id: string } | { type: "ActivateTab"; id: string } | { type: "OpenUrl"; url: string } | { type: "RunCommand"; id: string };
 
 export type SearchChanged = SearchResults;
 
@@ -1165,13 +1476,20 @@ export type SearchResult = {
 	kind: string,
 	title: string,
 	detail: string,
-	favicon: string | null,
+	icon: IconRef | null,
 	action: SearchAction,
 };
 
 export type SearchResults = {
+	pending: boolean,
 	context: SearchContext | null,
 	query: string,
+	/**
+	 *  Host the field may complete the typed text to. Native decides what is
+	 *  confident enough to offer; the field still refuses to apply one that
+	 *  does not extend exactly what the user has typed.
+	 */
+	completion: string | null,
 	results: SearchResult[],
 };
 
@@ -1231,10 +1549,112 @@ export type TabView = {
 	title: string,
 	url: string | null,
 	loading: boolean,
+	popup_blocked?: boolean,
 	can_go_back: boolean,
 	can_go_forward: boolean,
-	favicon: string | null,
+	icon: IconRef | null,
 };
+
+/**
+ *  Who holds the next move on a task. People and agents share one list; this
+ *  records which of them is expected to act, not which of them is permitted to.
+ */
+export type TaskActor = "user" | "agent";
+
+/**
+ *  The page a task came from, so it can reopen its own context. The URL passes
+ *  the same commit gate as any navigation; a stored task can never become a
+ *  route to a scheme the browser would refuse to open.
+ */
+export type TaskContext = {
+	url: string,
+	title: string,
+};
+
+export type TaskCounts = {
+	inbox: number,
+	today: number,
+	overdue: number,
+	upcoming: number,
+	all: number,
+	completed: number,
+	trash: number,
+};
+
+export type TaskDetails = {
+	list?: string | null,
+	inbox?: boolean,
+	priority?: TaskPriority,
+	steps?: TaskStep[],
+	/**  Native completion time; callers cannot forge or preserve it across reopening. */
+	completed_at?: string | null,
+	/**
+	 *  The day the outcome is owed, independent of the day it is planned for:
+	 *  `due_date` says when to work on it, `deadline` when it must be finished.
+	 */
+	deadline?: string | null,
+	/**  Estimated effort in minutes. */
+	duration?: number | null,
+};
+
+/**
+ *  One task property, as a value to write or as a precondition to hold.
+ * 
+ *  Fields are written independently so two actors editing different properties
+ *  of one task never conflict; a caller that must not overwrite a concurrent
+ *  change to the same property states its expected value in `expect`.
+ */
+export type TaskField = { field: "title"; value: string } | { field: "description"; value: string } | { field: "status"; value: TaskStatus } | { field: "schedule"; date: string | null; time: string | null } | { field: "deadline"; date: string | null } | { field: "duration"; minutes: number | null } | { field: "organization"; list: string | null; inbox: boolean } | { field: "priority"; value: TaskPriority } | { field: "steps"; value: TaskStep[] } | { field: "pinned"; value: boolean } | { field: "position"; sort_key: string | null };
+
+export type TaskList = {
+	id: string,
+	title: string,
+	revision: string,
+	count: number,
+	deleted: boolean,
+};
+
+export type TaskMetadata = {
+	id: string,
+	list: string | null,
+	inbox: boolean,
+	priority: TaskPriority,
+	steps: number,
+	steps_done: number,
+	completed_at: string | null,
+	deadline: string | null,
+	duration: number | null,
+};
+
+export type TaskPriority = "none" | "low" | "medium" | "high";
+
+export type TaskQuery = {
+	list?: string | null,
+	view: TaskView,
+	today: string,
+	search: string,
+	after: string | null,
+	limit: number,
+};
+
+/**
+ *  A task's own lifecycle. `Blocked` is where a delegated task lands when it
+ *  cannot proceed without a person, so a stalled delegation stays visible
+ *  instead of sitting in `Active` forever.
+ */
+export type TaskStatus = "open" | "active" | "blocked" | "done";
+
+export type TaskStep = {
+	id: string,
+	title: string,
+	completed: boolean,
+};
+
+/**
+ *  Task views are filtered and ordered before pagination, independently of the
+ *  generic resource browser. `today` is the caller's local calendar date.
+ */
+export type TaskView = "inbox" | "today" | "upcoming" | "all" | "completed" | "trash";
 
 export type ToolKind = "notes" | "tasks" | "ai" | "history" | "downloads" | "time";
 

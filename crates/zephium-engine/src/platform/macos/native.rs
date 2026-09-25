@@ -291,6 +291,10 @@ pub fn configure(
     view.setAutoresizingMask(Mask::ViewWidthSizable | Mask::ViewHeightSizable);
     if let Some(layer) = view.layer() {
         layer.setCornerRadius(radius);
+        // The window's own corners are continuous, so a circular page corner
+        // beside them reads as a different shape at the one place they meet.
+        // SAFETY: an immutable framework constant.
+        layer.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
         layer.setMasksToBounds(true);
         // a hairline keeps the edge readable when page and backdrop are both
         // dark; without it the rounded corners visually vanish

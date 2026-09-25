@@ -6651,7 +6651,7 @@ fn best_effort_actor_calls_remain_bounded_at_a_full_queue() {
         None
     );
     assert_eq!(
-        store.fresh_favicon_raster(ProfileId::from(1), "https://example.com", 7 * 24 * 3600),
+        store.favicon_raster_with_age(ProfileId::from(1), "https://example.com"),
         None
     );
     assert!(start.elapsed() < Duration::from_secs(1));
@@ -6763,11 +6763,9 @@ fn favicons_roundtrip_with_age() {
     let (ct, stored) = hub.favicon_bytes(profile, origin).unwrap();
     assert_eq!(ct.as_deref(), Some(zephium_core::icon::RGBA32_MIME));
     assert_eq!(stored, bytes);
-    assert_eq!(
-        hub.fresh_favicon_raster(profile, origin, 7 * 24 * 3600),
-        Some(bytes.clone())
-    );
-    assert_eq!(hub.fresh_favicon_raster(profile, origin, -1), None);
+    let (raster, age) = hub.favicon_raster_with_age(profile, origin).unwrap();
+    assert_eq!(raster, bytes);
+    assert!(age < 5);
 
     hub.save_favicon(profile, "https://example.com/path", None, &rgba());
     hub.save_favicon(profile, "https://invalid.example", None, &[1, 2, 3]);
@@ -6776,7 +6774,7 @@ fn favicons_roundtrip_with_age() {
 
     assert_eq!(hub.favicon_bytes(ProfileId::from(99), origin), None);
     assert_eq!(
-        hub.fresh_favicon_raster(ProfileId::from(99), origin, 3600),
+        hub.favicon_raster_with_age(ProfileId::from(99), origin),
         None
     );
 }
@@ -7923,6 +7921,14 @@ fn removed_profile_database_waits_for_native_proof_then_purges_sidecars() {
     hub.record_visit(profile, "https://example.com/", "Example");
     hub.save_favicon(profile, "https://example.com", None, &rgba());
     assert!(path.exists());
+    let notes = dir.path().join("notes").join(profile.to_string());
+    std::fs::create_dir_all(notes.join("Notes")).unwrap();
+    std::fs::write(notes.join("Notes/Plans.md"), "# Plans").unwrap();
+    std::fs::write(notes.join("index.sqlite"), "index").unwrap();
+    let outside = dir.path().join("outside.md");
+    std::fs::write(&outside, "kept").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, notes.join("Notes/Link.md")).unwrap();
 
     assert_eq!(
         hub.authorize_profile_deletion(profile, &SessionState::default())
@@ -7930,6 +7936,7 @@ fn removed_profile_database_waits_for_native_proof_then_purges_sidecars() {
         ProfileDeletionAuthorizeOutcome::Authorized
     );
     assert!(path.exists());
+    assert!(notes.exists());
     assert_eq!(
         hub.pending_profile_deletions().unwrap(),
         vec![zephium_core::ports::store::PendingProfileDeletion {
@@ -7942,6 +7949,12 @@ fn removed_profile_database_waits_for_native_proof_then_purges_sidecars() {
     assert!(!path.exists());
     assert!(!std::path::PathBuf::from(format!("{}-wal", path.display())).exists());
     assert!(!std::path::PathBuf::from(format!("{}-shm", path.display())).exists());
+    assert!(!notes.exists());
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("notes")).unwrap().count(),
+        0
+    );
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "kept");
     assert!(hub.pending_profile_deletions().unwrap().is_empty());
 }
 
@@ -8565,17 +8578,33 @@ fn agent_audit_actor_commits_and_reconciles_the_exact_in_flight_delivery() {
 
 #[test]
 fn agent_audit_admission_shares_live_readers_but_respects_terminal_exclusion() {
-    use zephium_agentic::{AgentAuditDeliveryId, AgentAuditDeliveryOutcome, AgentAuditDispatch, AgentAuditPort, AgentAuditSinkFailure};
+    use zephium_agentic::{
+        AgentAuditDeliveryId, AgentAuditDeliveryOutcome, AgentAuditDispatch, AgentAuditPort,
+        AgentAuditSinkFailure,
+    };
     let (tx, rx) = mpsc::sync_channel(MAX_PENDING_AGENT_AUDIT_DELIVERIES);
     let store = test_store_with_sender(tx);
     let mut ledger = agent_audit_ledger();
-    let first = ledger.begin_delivery(AgentAuditDeliveryId::new(1).unwrap(), 16).unwrap();
+    let first = ledger
+        .begin_delivery(AgentAuditDeliveryId::new(1).unwrap(), 16)
+        .unwrap();
     let proof = first.proof();
     let reader = store.lifecycle.read().unwrap();
-    assert_eq!(store.append(first, Box::new(|_| {})), AgentAuditDispatch::Accepted(proof));
+    assert_eq!(
+        store.append(first, Box::new(|_| {})),
+        AgentAuditDispatch::Accepted(proof)
+    );
     drop(reader);
     let writer = store.lifecycle.write().unwrap();
-    assert_eq!(store.append(ledger.current_delivery().unwrap().unwrap(), Box::new(|_| panic!("refusal cannot transfer callback"))), AgentAuditDispatch::Refused(proof.settle(AgentAuditDeliveryOutcome::Refused(AgentAuditSinkFailure::Unavailable))));
+    assert_eq!(
+        store.append(
+            ledger.current_delivery().unwrap().unwrap(),
+            Box::new(|_| panic!("refusal cannot transfer callback"))
+        ),
+        AgentAuditDispatch::Refused(proof.settle(AgentAuditDeliveryOutcome::Refused(
+            AgentAuditSinkFailure::Unavailable
+        )))
+    );
     drop(writer);
     drop(rx);
 }
@@ -8726,4 +8755,323 @@ fn work_document_mailbox_is_lazy_bounded_and_releases_refused_owners() {
         ),
         Err(WorkError::Shutdown)
     );
+}
+
+#[test]
+fn history_search_ranks_by_frecency_and_never_starves_on_one_busy_address() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    // One address visited far more often than the scan cap used to allow.
+    // Capping candidates before the group-by let this address consume every
+    // slot, hiding every other match for the same term.
+    for _ in 0..600 {
+        hub.record_visit(profile, "https://example.com/busy", "Example Busy");
+    }
+    hub.record_visit(profile, "https://example.com/quiet", "Example Quiet");
+    hub.record_visit(profile, "https://example.org/other", "Example Other");
+
+    let hits = hub.search_history(profile, "example", 10);
+    let urls: Vec<&str> = hits.iter().map(|hit| hit.url.as_str()).collect();
+    assert!(
+        urls.contains(&"https://example.com/quiet") && urls.contains(&"https://example.org/other"),
+        "a busy address must not hide the rest: {urls:?}"
+    );
+    // Frecency, not recency: the daily destination outranks the page opened
+    // once, even though that page was visited more recently.
+    assert_eq!(hits[0].url, "https://example.com/busy");
+}
+
+#[test]
+fn history_pages_every_visit_newest_first_without_gaps_or_repeats() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    for index in 0..25 {
+        hub.record_visit(profile, &format!("https://example.com/{index}"), "Example");
+    }
+
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = hub.history_page(profile, "", None, cursor, 10);
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|visit| visit.id);
+        seen.extend(page);
+    }
+
+    assert_eq!(seen.len(), 25);
+    // Visits recorded in the same second still page exactly, because the cursor
+    // is the row id rather than the timestamp.
+    assert!(seen.windows(2).all(|pair| pair[0].id > pair[1].id));
+    assert_eq!(seen[0].url, "https://example.com/24");
+}
+
+#[test]
+fn downloads_are_profile_scoped_and_recover_interrupted_native_ownership() {
+    use zephium_core::downloads::*;
+    use zephium_core::ids::DownloadId;
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    let id = DownloadId::generate();
+    let session = DownloadId::generate();
+    let mut record = DownloadRecord {
+        id,
+        session,
+        revision: 1,
+        created_at: 1,
+        filename: "fixture.txt".into(),
+        source: "https://example.com".into(),
+        source_is_context: false,
+        state: DownloadState::Pending,
+        received: 0,
+        total: None,
+        error: None,
+        destination: None,
+        staging: None,
+        staging_identity: None,
+        identity: None,
+        writer: None,
+        writer_released: false,
+    };
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Save(Box::new(record.clone()))),
+        DownloadStoreReply::Saved
+    ));
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Save(Box::new(record.clone()))),
+        DownloadStoreReply::Saved
+    ));
+    record.filename = "changed.txt".into();
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Save(Box::new(record.clone()))),
+        DownloadStoreReply::Error(DownloadError::Invalid)
+    ));
+    assert!(matches!(
+        hub.download_call(ProfileId::from(999), DownloadStoreCall::Get(id)),
+        DownloadStoreReply::Error(DownloadError::Storage)
+    ));
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Forget(id)),
+        DownloadStoreReply::Error(DownloadError::Invalid)
+    ));
+    let DownloadStoreReply::Page(page) = hub.download_call(
+        profile,
+        DownloadStoreCall::List {
+            before: None,
+            limit: 10,
+            session: DownloadId::generate(),
+            active: Vec::new(),
+        },
+    ) else {
+        panic!("download page")
+    };
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].state, DownloadState::Interrupted);
+    record.revision = 2;
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Save(Box::new(record))),
+        DownloadStoreReply::Error(DownloadError::Invalid)
+    ));
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::Forget(id)),
+        DownloadStoreReply::Saved
+    ));
+}
+
+#[test]
+fn download_preferences_are_validated_and_persist_only_in_registered_profiles() {
+    use zephium_core::downloads::*;
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    let value = DownloadPreferences {
+        ask_destination: false,
+        directory: Some("/tmp/download-fixtures".into()),
+        directory_identity: Some("0000000000000001:0000000000000002".into()),
+    };
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::SetPreferences(
+            DownloadPreferenceChange::AskDestination(false)
+        )), DownloadStoreReply::Preferences(saved) if !saved.ask_destination
+    ));
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::SetPreferences(
+            DownloadPreferenceChange::Directory {
+                path: value.directory.clone().unwrap(), identity: value.directory_identity.clone().unwrap(),
+            }
+        )), DownloadStoreReply::Preferences(saved) if saved == value
+    ));
+    assert!(
+        matches!(hub.download_call(profile, DownloadStoreCall::Preferences), DownloadStoreReply::Preferences(saved) if saved == value)
+    );
+    assert!(matches!(
+        hub.download_call(
+            ProfileId::from(999),
+            DownloadStoreCall::SetPreferences(DownloadPreferenceChange::AskDestination(true))
+        ),
+        DownloadStoreReply::Error(DownloadError::Storage)
+    ));
+    assert!(matches!(
+        hub.download_call(
+            profile,
+            DownloadStoreCall::SetPreferences(DownloadPreferenceChange::Directory {
+                path: "relative".into(),
+                identity: "0000000000000001:0000000000000002".into()
+            })
+        ),
+        DownloadStoreReply::Error(DownloadError::Invalid)
+    ));
+}
+
+#[test]
+fn history_page_narrows_by_query_and_keeps_repeat_visits() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    hub.record_visit(profile, "https://example.com/docs", "Documentation");
+    hub.record_visit(profile, "https://example.com/docs", "Documentation");
+    hub.record_visit(profile, "https://other.example/news", "Headlines");
+
+    let page = hub.history_page(profile, "documentation", None, None, 10);
+    assert_eq!(
+        page.len(),
+        2,
+        "a history list shows each visit, not each page"
+    );
+    assert!(page
+        .iter()
+        .all(|visit| visit.url == "https://example.com/docs"));
+    assert!(hub
+        .history_page(profile, "documentation", None, None, 0)
+        .is_empty());
+}
+
+#[test]
+fn forgetting_an_address_removes_it_from_search_and_the_byte_ledger() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    hub.record_visit(profile, "https://forget.example/page", "Forgettable");
+    hub.record_visit(profile, "https://forget.example/page", "Forgettable");
+    hub.record_visit(profile, "https://keep.example/page", "Keepsake");
+    let before = hub.history_bytes(profile);
+
+    assert_eq!(
+        hub.forget_history_urls(profile, &["https://forget.example/page".to_owned()]),
+        2
+    );
+
+    assert!(hub.search_history(profile, "forgettable", 10).is_empty());
+    assert_eq!(hub.search_history(profile, "keepsake", 10).len(), 1);
+    assert!(hub.history_bytes(profile) < before);
+}
+
+#[test]
+fn clearing_a_range_leaves_older_visits_and_drops_recorded_searches() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    hub.record_visit(profile, "https://old.example/page", "Ancient");
+    hub.backdate_history(profile, 7 * 24 * 3600);
+    hub.record_visit(profile, "https://new.example/page", "Recent");
+    hub.record_search(
+        profile,
+        "recent query",
+        "https://duckduckgo.com/?q=recent+query",
+    );
+
+    let cleared = hub.clear_history(
+        profile,
+        Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                - 3600,
+        ),
+    );
+
+    assert_eq!(cleared, 1);
+    assert_eq!(hub.search_history(profile, "ancient", 10).len(), 1);
+    assert!(hub.search_history(profile, "recent", 10).is_empty());
+    assert!(hub.search_queries(profile, "recent").is_empty());
+}
+
+#[test]
+fn a_title_published_after_the_url_commits_replaces_the_placeholder() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    // The shell records a visit the moment a URL commits, which is before the
+    // document has a title of its own.
+    hub.record_visit(profile, "https://example.com/article", "example.com");
+
+    hub.amend_visit_title(profile, "https://example.com/article", "The Real Headline");
+
+    let page = hub.history_page(profile, "", None, None, 10);
+    assert_eq!(page[0].title, "The Real Headline");
+    assert_eq!(hub.search_history(profile, "headline", 10).len(), 1);
+
+    hub.backdate_history(profile, 300);
+    hub.amend_visit_title(profile, "https://example.com/article", "Too Late");
+    assert_eq!(
+        hub.history_page(profile, "", None, None, 10)[0].title,
+        "The Real Headline"
+    );
+}
+
+#[test]
+fn a_scoped_history_page_reaches_back_only_as_far_as_its_range() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    hub.record_visit(profile, "https://old.example/page", "Ancient");
+    hub.backdate_history(profile, 3 * 24 * 3600);
+    hub.record_visit(profile, "https://new.example/page", "Recent");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let everything = hub.history_page(profile, "", None, None, 10);
+    let last_hour = hub.history_page(profile, "", Some(now - 3600), None, 10);
+
+    assert_eq!(everything.len(), 2);
+    assert_eq!(last_hour.len(), 1, "a scoped page must not reach past it");
+    assert_eq!(last_hour[0].url, "https://new.example/page");
+
+    // The scope applies to a narrowed list too, not just the unfiltered one.
+    assert!(hub
+        .history_page(profile, "ancient", Some(now - 3600), None, 10)
+        .is_empty());
+    assert_eq!(
+        hub.history_page(profile, "ancient", None, None, 10).len(),
+        1
+    );
+}
+
+#[test]
+fn saving_an_icon_clears_rows_that_can_never_be_read_back() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    hub.save_favicon(profile, "https://keep.example", None, &rgba());
+    // A row from before the fixed-raster format: readable queries reject it,
+    // so it is invisible but still occupies a retention slot.
+    hub.seed_malformed_favicon(profile, "https://legacy.example", 5430);
+    assert_eq!(hub.favicon_rows(profile), 2);
+
+    hub.save_favicon(profile, "https://later.example", None, &rgba());
+
+    assert_eq!(hub.favicon_rows(profile), 2, "the unreadable row is gone");
+    assert!(hub
+        .favicon_raster_with_age(profile, "https://keep.example")
+        .is_some());
+    assert!(hub
+        .favicon_raster_with_age(profile, "https://legacy.example")
+        .is_none());
 }

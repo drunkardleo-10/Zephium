@@ -95,7 +95,7 @@ pub(crate) async fn media_import(
     };
     match reply.response {
         ResourceResponse::Applied { record, .. } => {
-            super::emit_resource_changed(&app, &profile.to_string(), &record.id, &record.revision);
+            super::emit_media_changed(&app, &profile.to_string(), &record.id, &record.revision);
             Ok(MediaImportV1::Imported {
                 record: Box::new(record),
             })
@@ -679,7 +679,7 @@ async fn admit_remote(
             Ok(ResourceResponse::Error { error }) => return refused(error),
             _ => return refused(ResourceError::OutcomeUnknown),
         };
-        super::emit_resource_changed(app, &profile.to_string(), &record.id, &record.revision);
+        super::emit_media_changed(app, &profile.to_string(), &record.id, &record.revision);
         let Some(resource) = ResourceId::parse(&record.id) else {
             return refused(ResourceError::Invalid);
         };

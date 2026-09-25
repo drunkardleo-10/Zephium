@@ -3,6 +3,7 @@
   import type { TabView } from "$shared/ipc/bindings";
   import type { WorkPaneHole } from "$domain/layout";
   import FavIcon from "$shared/ui/FavIcon";
+  import { favicons } from "$domain/favicons";
   import Icon from "$shared/ui/Icon";
   import IconButton from "$shared/ui/IconButton";
   import Button from "$shared/ui/Button";
@@ -302,7 +303,13 @@
     onpointercancel={end}
   >
     <span class="identity" title={tab?.title ?? ""}>
-      <FavIcon favicon={tab?.favicon ?? null} loading={tab?.loading ?? false} size={16} lit />
+      <FavIcon
+        image={favicons.image(tab?.icon ?? null)}
+        tone={favicons.tone(tab?.icon ?? null)}
+        loading={tab?.loading ?? false}
+        size={16}
+        lit
+      />
     </span>
     <span class="nav">
       <IconButton

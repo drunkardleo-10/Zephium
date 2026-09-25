@@ -613,6 +613,31 @@ impl EngineHost {
         extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
         completion: Arc<crate::erasure::Completion>,
     ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(downloads) = self
+            .downloads
+            .as_ref()
+            .filter(|downloads| !downloads.is_retired(profile))
+        {
+            downloads.quiesce(
+                Some(profile),
+                Box::new(move |clean| {
+                    if !clean {
+                        completion
+                            .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
+                        return;
+                    }
+                    let rejected = completion.clone();
+                    if !super::dispatch::try_with_profile_erasure(move |host| {
+                        host.erase_profile_data(profile, extension_native_namespace, completion)
+                    }) {
+                        rejected
+                            .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
+                    }
+                }),
+            );
+            return;
+        }
         if !admit_profile_erasure(
             &mut self.erasure_tombstones,
             &mut self.erasure_attempts,
@@ -986,6 +1011,9 @@ impl EngineHost {
             return;
         }
 
+        if let Some(downloads) = &self.downloads {
+            downloads.runtime_exited(profile);
+        }
         // BrowserProcessExited means the whole process group and UDF resources
         // for this exact PID are released. It can subsume a coalesced
         // ProcessFailed callback, so retire any still-associated controllers.

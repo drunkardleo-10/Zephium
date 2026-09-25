@@ -61,6 +61,18 @@ paths = ["src/lib.rs", "src/webview2/mod.rs", "src/webkitgtk/mod.rs", "src/wkweb
 name = "commit-time presentation and input guard plus bounded native title snapshot"
 paths = ["src/lib.rs", "src/web_context.rs", "src/webview2/mod.rs", "src/webkitgtk/mod.rs", "src/wkwebview/mod.rs", "src/wkwebview/navigation.rs"]
 
+[[patch_sets]]
+name = "opt-in main-thread native file upload completion"
+paths = ["src/lib.rs", "src/file_upload.rs", "src/wkwebview/mod.rs", "src/wkwebview/class/wry_web_view_ui_delegate.rs"]
+
+[[patch_sets]]
+name = "owned native macOS download handoff and attachment response policy"
+paths = ["src/lib.rs", "src/wkwebview/mod.rs", "src/wkwebview/download.rs", "src/wkwebview/navigation.rs", "src/wkwebview/class/wry_download_delegate.rs", "Cargo.toml"]
+
+[[patch_sets]]
+name = "bounded opt-in native WebKit file-drop fallback"
+paths = ["src/wkwebview/drag_drop.rs"]
+
 [release_gates]
 standalone_fmt = "cargo fmt --manifest-path vendor/wry/Cargo.toml -- --check"
 standalone_check = "cargo check --manifest-path vendor/wry/Cargo.toml --locked --all-targets"
@@ -74,3 +86,7 @@ external_native_boundary_audit = "required before stable"
 procedure = "REBASE.md"
 minimum_reviewers = 2
 update_policy = "complete upstream diff and explicit disposition of every patch set"
+
+[[patch_sets]]
+name = "native new-tab adoption and context-menu download handoff"
+paths = ["src/lib.rs", "src/webview2/mod.rs", "src/webkitgtk/mod.rs", "src/wkwebview/mod.rs", "src/wkwebview/navigation.rs", "src/wkwebview/class/wry_navigation_delegate.rs", "src/wkwebview/class/wry_web_view_ui_delegate.rs"]

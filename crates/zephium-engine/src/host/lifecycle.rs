@@ -101,6 +101,17 @@ impl EngineHost {
         }
         #[cfg(target_os = "windows")]
         if let (Some(profile), Some(view)) = (profile, removed) {
+            let view = if let Some(downloads) = &self.downloads {
+                match downloads.retain_closed_view(view) {
+                    Ok(()) => {
+                        self.close_idle_spare(profile);
+                        return;
+                    }
+                    Err(view) => view,
+                }
+            } else {
+                view
+            };
             let (debt, policy_cleanup_failed) = view.close_explicit();
             if policy_cleanup_failed {
                 self.fail_content_policy_retirement();
@@ -122,6 +133,14 @@ impl EngineHost {
             done(false);
             return;
         }
+        #[cfg(target_os = "macos")]
+        let done = if let Some(downloads) = &self.downloads {
+            let (native_done, download_done) = join_download_shutdown(done);
+            downloads.quiesce(None, download_done);
+            native_done
+        } else {
+            done
+        };
         self.shutdown_completion = Some(done);
         self.shutdown_common();
         self.finish_content_policy_shutdown_if_quiescent();
@@ -213,6 +232,19 @@ impl EngineHost {
             // Physical teardown still completes, but clean shutdown requires
             // the shell to have settled every exact Close before this barrier.
             self.native_resource_accounting_failed = true;
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(downloads) = &self.downloads {
+            for view in downloads.take_retained_views() {
+                let profile = view.cleanup_profile;
+                let (debt, failed) = view.close_explicit();
+                if failed {
+                    self.fail_content_policy_retirement();
+                }
+                if let Some(debt) = debt {
+                    self.retain_windows_cleanup_debt(profile, debt);
+                }
+            }
         }
         let ids: Vec<ItemId> = self.views.keys().copied().collect();
         for id in ids {
@@ -325,3 +357,41 @@ impl EngineHost {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+type ShutdownPart = Box<dyn FnOnce(bool) + Send>;
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) fn join_download_shutdown(
+    done: Box<dyn FnOnce(bool) + Send>,
+) -> (ShutdownPart, ShutdownPart) {
+    struct Join {
+        left: usize,
+        clean: bool,
+        done: Option<Box<dyn FnOnce(bool) + Send>>,
+    }
+    let state = std::sync::Arc::new(std::sync::Mutex::new(Join {
+        left: 2,
+        clean: true,
+        done: Some(done),
+    }));
+    let part = |state: std::sync::Arc<std::sync::Mutex<Join>>| -> Box<dyn FnOnce(bool) + Send> {
+        Box::new(move |clean| {
+            let ready = {
+                let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+                state.clean &= clean;
+                state.left -= 1;
+                if state.left == 0 {
+                    let clean = state.clean;
+                    state.done.take().map(|done| (done, clean))
+                } else {
+                    None
+                }
+            };
+            if let Some((done, clean)) = ready {
+                done(clean);
+            }
+        })
+    };
+    (part(state.clone()), part(state))
+}

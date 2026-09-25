@@ -15,7 +15,7 @@ function tab(id: string, value: number, overrides: Partial<TabView> = {}): TabVi
     loading: false,
     can_go_back: false,
     can_go_forward: false,
-    favicon: null,
+    icon: null,
     ...overrides,
   };
 }

@@ -1,5 +1,6 @@
 <script lang="ts">
   import FavIcon from "$shared/ui/FavIcon";
+  import { favicons } from "$domain/favicons";
   import Icon from "$shared/ui/Icon";
   import CardFrame from "./CardFrame.svelte";
   import SubjectPicture from "./SubjectPicture.svelte";
@@ -31,7 +32,10 @@
   hero={item.image ? thumbnail : undefined}
   dense
 >
-  {#snippet leading()}<FavIcon favicon={item.favicon ?? null} />{/snippet}
+  {#snippet leading()}<FavIcon
+      image={favicons.image(item.icon ?? null)}
+      tone={favicons.tone(item.icon ?? null)}
+    />{/snippet}
   {#snippet footer()}<span class="host" title={item.detail}>{host || item.status}</span
     >{#if playable}<button
         type="button"

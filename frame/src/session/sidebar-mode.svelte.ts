@@ -1,4 +1,3 @@
-import { transition } from "./motion.svelte";
 import { commands } from "$shared/ipc/bindings";
 
 export type SidebarMode = "default" | "compact";
@@ -40,7 +39,7 @@ export function setPanelExtent(extent: number) {
   const next = Math.max(0, Math.min(MAX_EXPANDED_WIDTH - COMPACT_WIDTH - PANEL_GAP, extent));
   if (next === panelExtent) return;
   panelExtent = next;
-  publish();
+  publish(true);
 }
 
 function clampExpanded(value: number) {
@@ -55,8 +54,13 @@ export function resolveDragWidth(value: number): { mode: SidebarMode; expanded: 
   return { mode: "default", expanded: clampExpanded(value) };
 }
 
-function publish() {
-  void commands.sidebarSetWidth(effectiveWidth());
+/**
+ * Tells native the column's width. `travel` marks a deliberate change of
+ * shape — a toggle, a snap, a tool opening — which the page slides with;
+ * a drag in progress or a restored preference moves it without ceremony.
+ */
+function publish(travel = false) {
+  void commands.sidebarSetWidth(effectiveWidth(), travel);
 }
 
 export function applyDragWidth(value: number) {
@@ -66,11 +70,32 @@ export function applyDragWidth(value: number) {
   const modeChanged = next.mode !== mode;
   mode = next.mode;
   expandedWidth = next.expanded;
-  publish();
-  if (modeChanged) void commands.settingSet(MODE_SETTING, mode);
+  // Crossing the snap point is a change of shape, not a drag step.
+  publish(modeChanged);
+  if (modeChanged) save(mode);
 }
 
+// The shape this column last saved, until the store reports it back. Values
+// arriving meanwhile are the store catching up with saves made here, not a
+// change from elsewhere: adopting them would snap the column back to a shape
+// it has already left. A save whose report never comes stops counting.
+let saving: { mode: SidebarMode; timer: ReturnType<typeof setTimeout> } | null = null;
+
+function save(next: SidebarMode) {
+  if (saving) clearTimeout(saving.timer);
+  saving = { mode: next, timer: setTimeout(() => (saving = null), 2000) };
+  void commands.settingSet(MODE_SETTING, next);
+}
+
+/** A stored preference reached this column: from here, or from elsewhere. */
 export function adoptMode(next: SidebarMode) {
+  if (saving) {
+    if (next === saving.mode) {
+      clearTimeout(saving.timer);
+      saving = null;
+    }
+    return;
+  }
   if (next === mode) return;
   mode = next;
   desiredMode = next;
@@ -81,14 +106,13 @@ export function setMode(next: SidebarMode) {
   if (next === mode) return;
   mode = next;
   desiredMode = next;
-  publish();
-  void commands.settingSet(MODE_SETTING, next);
+  publish(true);
+  save(next);
 }
 
 export function toggleMode() {
   desiredMode = desiredMode === "compact" ? "default" : "compact";
-  const next = desiredMode;
-  transition(() => setMode(next));
+  setMode(desiredMode);
 }
 
 /**

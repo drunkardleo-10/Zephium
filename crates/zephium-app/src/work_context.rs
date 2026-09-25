@@ -260,12 +260,49 @@ impl WorkContextAdmission {
         }
     }
 
+    async fn note(
+        &self,
+        profile: ProfileId,
+        element: WorkElementId,
+        id: &str,
+    ) -> Result<Option<WorkContextSource>, WorkError> {
+        use zephium_core::notes::{NoteCall, NoteResponse};
+        let receiver = self
+            .handle
+            .note_call(profile, NoteCall::Get { id: id.to_owned() });
+        let reply = tokio::task::spawn_blocking(move || receiver.recv_timeout(READ_TIMEOUT))
+            .await
+            .map_err(|_| WorkError::Unavailable)?
+            .map_err(|_| WorkError::Unavailable)?;
+        let NoteResponse::Record { record } = reply.response else {
+            return Ok(None);
+        };
+        if reply.profile.as_deref() != Some(&profile.to_string()) {
+            return Err(WorkError::ProfileUnavailable);
+        }
+        if record.summary.trashed {
+            return Err(WorkError::NotFound);
+        }
+        Ok(Some(WorkContextSource {
+            element,
+            kind: WorkContextItemKind::Note,
+            title: record.summary.title,
+            revision: record.summary.revision,
+            visibility: WorkContextVisibility::Private,
+            text: record.markdown,
+        }))
+    }
+
     async fn resource(
         &self,
         profile: ProfileId,
         element: WorkElementId,
         resource: String,
     ) -> Result<WorkContextSource, WorkError> {
+        // Notes are Markdown files; any other resource lives in the store.
+        if let Some(note) = self.note(profile, element, &resource).await? {
+            return Ok(note);
+        }
         let receiver = self
             .handle
             .resource_call(profile, ResourceCall::Get { id: resource });

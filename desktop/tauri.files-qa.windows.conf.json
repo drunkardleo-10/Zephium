@@ -1,0 +1,22 @@
+{
+  "productName": "Zephium Files Integration QA",
+  "identifier": "app.zephium.files-integration-qa",
+  "build": { "devUrl": null, "beforeBuildCommand": null },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "title": "Zephium Files Integration QA",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 680,
+        "minHeight": 480,
+        "decorations": false,
+        "shadow": true,
+        "transparent": true,
+        "url": "browser.html"
+      }
+    ]
+  }
+}

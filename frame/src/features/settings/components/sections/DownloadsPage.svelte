@@ -1,30 +1,59 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import * as m from "$shared/i18n/messages";
-  import * as preview from "../../lib/preview.svelte";
-  import PreviewNotice from "../PreviewNotice.svelte";
+  import { tabs } from "$domain/tabs";
+  import { DownloadSession } from "$domain/downloads";
   import SettingsGroup from "$shared/ui/SettingsGroup";
-  import PreviewSelect from "../PreviewSelect.svelte";
-  import PreviewToggle from "../PreviewToggle.svelte";
-  import PreviewAction from "../PreviewAction.svelte";
-  import Field from "$shared/ui/Field";
-  let folder = $state(preview.get("downloads.path", "Downloads"));
+  import SettingsRow from "$shared/ui/SettingsRow";
+  import Button from "$shared/ui/Button";
+  import Switch from "$shared/ui/Switch";
+  let profile = $derived(tabs.profile()?.id ?? "unbound");
+  let session = $state.raw(untrack(() => new DownloadSession(profile)));
+  $effect(() => {
+    const next = new DownloadSession(profile);
+    session = next;
+    void next.perform({ kind: "preferences" });
+    return () => next.stop();
+  });
 </script>
 
-<PreviewNotice />
-<SettingsGroup title={m.section_downloads()}
-  ><PreviewAction
-    id="downloads.path"
-    actionLabel={m.settings_choose_folder()}
-    value={preview.get("downloads.path", "Downloads")}
-    onopen={() => {
-      folder = preview.get("downloads.path", "Downloads");
-    }}
-    valid={folder.trim().length > 0}
-    onapply={() => preview.set("downloads.path", folder.trim())}
-    ><Field label={m.preview_folder_path()} bind:value={folder} required maxlength={512} />
-    <p class="settings-help">{m.preview_folder_note()}</p></PreviewAction
-  ><PreviewToggle id="downloads.ask" /></SettingsGroup
->
-<SettingsGroup title={m.settings_downloads()}
-  ><PreviewToggle id="downloads.notify" /><PreviewSelect id="downloads.clear" /></SettingsGroup
->
+{#if session.error}<p role="alert">
+    {session.error === "unsupported"
+      ? m.download_error_unsupported()
+      : m.download_error_unavailable()}
+  </p>{/if}
+{#if !session.preferences && !session.error}<p role="status">
+    {m.download_settings_loading()}
+  </p>{/if}
+<SettingsGroup title={m.section_downloads()}>
+  <SettingsRow
+    settingId="downloads.path"
+    title={m.pref_downloads_path()}
+    description={session.preferences?.directory ?? m.download_default_directory()}
+  >
+    <Button
+      disabled={session.busy || !session.preferences || !session.supported}
+      onclick={() => void session.perform({ kind: "choose_directory" })}
+      >{m.settings_choose_folder()}</Button
+    >
+  </SettingsRow>
+  <SettingsRow
+    settingId="downloads.ask"
+    title={m.pref_downloads_ask()}
+    description={session.siteDownloadsRequireConfirmation
+      ? m.download_windows_confirmation_help()
+      : m.pref_downloads_ask_help()}
+  >
+    <Switch
+      label={m.pref_downloads_ask()}
+      labelHidden
+      checked={session.siteDownloadsRequireConfirmation ||
+        (session.preferences?.ask_destination ?? true)}
+      disabled={session.busy ||
+        !session.preferences ||
+        !session.supported ||
+        session.siteDownloadsRequireConfirmation}
+      onchange={(enabled) => void session.perform({ kind: "set_ask_destination", enabled })}
+    />
+  </SettingsRow>
+</SettingsGroup>

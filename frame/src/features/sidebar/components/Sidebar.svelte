@@ -5,24 +5,88 @@
   import { surface as browserPage } from "$domain/surface";
   import * as tools from "$session/tools.svelte";
   import { untrack } from "svelte";
-  import { effectiveWidth, isCompact, toggleMode } from "$session/sidebar-mode.svelte";
+  import {
+    COMPACT_WIDTH,
+    effectiveWidth,
+    isCompact,
+    toggleMode,
+  } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
-  import SidebarFooter from "./SidebarFooter.svelte";
   import SidebarHeader from "./SidebarHeader.svelte";
+  import * as shapeMorph from "../lib/shape-morph";
+  import { duration, reducedMotion } from "$shared/lib/motion";
   import SidebarResizeHandle from "./SidebarResizeHandle.svelte";
 
   let {
     settingsNavigation,
     toolPanel,
     browserBody,
+    dock,
   }: {
     settingsNavigation: Snippet;
     toolPanel: Snippet<[tools.ToolKind]>;
     browserBody: Snippet<[boolean]>;
+    dock: Snippet<[boolean]>;
   } = $props();
   let settings = $derived(browserPage.currentPage() === "settings");
-  let compact = $derived(!settings && (isCompact() || tools.activeTool() !== null));
-  let width = $derived(settings ? 240 : effectiveWidth());
+  let taskPage = $derived(
+    browserPage.currentPage() === "tasks" || browserPage.currentPage() === "notes",
+  );
+  // Settings takes the column for its own navigation. Tasks and Notes are part
+  // of browsing, so the column stays as the tab rail: a tab is one click away
+  // and choosing it returns to that page.
+  let navigating = $derived(settings);
+  let compact = $derived(!navigating && (taskPage || isCompact() || tools.activeTool() !== null));
+
+  // A change of shape is one continuous change: every mark travels from the
+  // old shape into the new one while native slides the page to match. Not
+  // on the first shape, which launch brings in with its own cascade.
+  let columns = $state<HTMLElement>();
+  let shown: boolean | null = null;
+  let morph: ReturnType<typeof shapeMorph.capture> = null;
+  // While the shape changes, the column's width travels with the page
+  // instead of jumping, and its contents hold their final width so only the
+  // space beside them moves. A drag never sets this: it follows the pointer.
+  let reshaping = $state(false);
+  // The header only fades in when it is the other header, not merely beside
+  // a column that changed (a tool opening keeps the same header).
+  let headerCompact = $derived(compact && tools.activeTool() === null);
+  let headerFresh = $state(false);
+  let shownHeader: boolean | null = null;
+  let reshaped: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => () => clearTimeout(reshaped));
+  $effect.pre(() => {
+    const next = compact;
+    const head = headerCompact;
+    untrack(() => {
+      const headChanged = shownHeader !== null && shownHeader !== head;
+      shownHeader = head;
+      if (shown === null || shown === next) return;
+      morph = shapeMorph.capture(columns);
+      if (reducedMotion()) return;
+      reshaping = true;
+      headerFresh = headChanged;
+      clearTimeout(reshaped);
+      reshaped = setTimeout(
+        () => {
+          reshaping = false;
+          headerFresh = false;
+        },
+        duration("page") + 40,
+      );
+    });
+  });
+  $effect(() => {
+    const next = compact;
+    untrack(() => {
+      if (shown !== null && shown !== next) shapeMorph.play(morph);
+      morph = null;
+      shown = next;
+    });
+  });
+  let width = $derived(
+    navigating ? 240 : taskPage && tools.activeTool() === null ? COMPACT_WIDTH : effectiveWidth(),
+  );
 
   // Dispatch runs untracked and behind a sequence guard. Handlers read the
   // state they mutate (the sidebar shape, the tab projection), so a tracked
@@ -51,27 +115,33 @@
   aria-label={m.ui_browser_sidebar()}
   style:width={`${width}px`}
   style:--sidebar-width={`${width}px`}
+  data-reshaping={reshaping}
+  data-header-fresh={headerFresh}
   class="browser-sidebar relative flex shrink-0 flex-col text-text select-none"
 >
-  {#if !settings && tools.activeTool() === null}<SidebarResizeHandle {width} />{/if}
+  {#if !navigating && !taskPage && tools.activeTool() === null}<SidebarResizeHandle {width} />{/if}
   <SidebarHeader
-    compact={compact && tools.activeTool() === null}
+    compact={headerCompact}
+    launcher={!navigating && tools.activeTool() !== null}
     ontoggle={toggleShape}
-    navigation={!settings}
+    navigation={!navigating}
   />
   {#if settings}
     {@render settingsNavigation()}
-    <SidebarFooter showMode={false} />
   {:else}
     <div
+      bind:this={columns}
       class="sidebar-columns"
-      data-phase={motion.transitionPhase()}
-      data-launch={motion.launchActive()}
+      data-glide-host
+      data-launch={motion.launchState()}
     >
-      <div class="sidebar-browser-column" class:sidebar-tool-rail={tools.activeTool() !== null}>
-        {@render browserBody(compact)}
-        <SidebarFooter {compact} />
-      </div>
+      {#key compact}<div
+          class="sidebar-browser-column"
+          class:sidebar-tool-rail={tools.activeTool() !== null}
+        >
+          {@render browserBody(compact)}
+          {@render dock(compact)}
+        </div>{/key}
       {#if tools.activeTool() !== null}<div class="sidebar-tool-host">
           {@render toolPanel(tools.activeTool()!)}
         </div>{/if}

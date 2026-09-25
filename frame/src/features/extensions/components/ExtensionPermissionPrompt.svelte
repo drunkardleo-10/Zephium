@@ -55,11 +55,11 @@
     aria-modal="true"
     aria-labelledby="extension-permission-title"
     aria-describedby="extension-permission-summary extension-permission-access"
-    class="max-h-[min(560px,calc(100vh-32px))] w-[min(390px,calc(100vw-32px))] overflow-y-auto rounded-xl border border-border-strong bg-raised p-4 text-start shadow-[var(--shadow-overlay)]"
+    class="max-h-[min(560px,calc(100vh-32px))] w-[min(390px,calc(100vw-32px))] overflow-y-auto rounded-panel border border-border-strong bg-raised p-4 text-start shadow-[var(--shadow-overlay)]"
   >
     <div class="flex items-start gap-3">
       <span
-        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent"
+        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control-compact bg-accent-soft text-accent"
         aria-hidden="true"
       >
         <Icon icon={Shield01Icon} size={19} />
@@ -74,7 +74,7 @@
       </div>
     </div>
 
-    <div id="extension-permission-access" class="mt-3 rounded-lg bg-fill px-3 py-2.5">
+    <div id="extension-permission-access" class="mt-3 rounded-row bg-fill px-3 py-2.5">
       <p class="text-[10.5px] leading-4 font-medium tracking-wide text-faint uppercase">
         Requested access
       </p>
@@ -95,7 +95,7 @@
     </div>
 
     {#if prompt.private_context}
-      <p class="mt-2.5 rounded-md bg-fill px-2.5 py-2 text-[10.5px] leading-4 text-muted">
+      <p class="mt-2.5 rounded-row bg-fill px-2.5 py-2 text-[10.5px] leading-4 text-muted">
         This access applies only to this extension's Private Browsing context.
       </p>
     {/if}

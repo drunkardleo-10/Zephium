@@ -10,7 +10,7 @@ export function tabFixture(overrides: Partial<TabView> = {}): TabView {
     loading: false,
     can_go_back: false,
     can_go_forward: false,
-    favicon: null,
+    icon: null,
     ...overrides,
   };
 }

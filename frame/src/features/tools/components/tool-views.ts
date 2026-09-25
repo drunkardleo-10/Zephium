@@ -2,9 +2,10 @@ import type { ToolKind } from "$shared/ipc/bindings";
 import * as m from "$shared/i18n/messages";
 import {
   Note01Icon,
-  Task01Icon,
+  CheckListIcon,
   SparklesIcon,
-  Clock01Icon,
+  Activity03Icon,
+  HistoryIcon,
   Download01Icon,
 } from "@hugeicons/core-free-icons";
 export const tools = {
@@ -19,7 +20,7 @@ export const tools = {
     title: m.tool_tasks,
     description: m.tool_tasks_help,
     empty: m.tool_tasks_empty,
-    icon: Task01Icon,
+    icon: CheckListIcon,
     load: () => import("./previews/TasksView.svelte"),
   },
   ai: {
@@ -31,14 +32,14 @@ export const tools = {
   },
   history: {
     title: m.browser_history_title,
-    description: m.browser_history_unavailable,
+    description: m.history_empty_help,
     empty: m.browser_history_empty,
-    icon: Clock01Icon,
+    icon: HistoryIcon,
     load: () => import("./previews/HistoryView.svelte"),
   },
   downloads: {
     title: m.browser_downloads_title,
-    description: m.browser_downloads_unavailable,
+    description: m.browser_downloads_description,
     empty: m.browser_downloads_empty,
     icon: Download01Icon,
     load: () => import("./previews/DownloadsView.svelte"),
@@ -47,7 +48,7 @@ export const tools = {
     title: m.tool_time,
     description: m.tool_time_help,
     empty: m.tool_time_empty,
-    icon: Clock01Icon,
+    icon: Activity03Icon,
     load: () => import("./previews/TimeView.svelte"),
   },
 } satisfies Record<ToolKind, unknown>;

@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { TabView } from "$shared/ipc/bindings";
   import FavIcon from "$shared/ui/FavIcon";
+  import { favicons } from "$domain/favicons";
   import Button from "$shared/ui/Button";
   import * as m from "$shared/i18n/messages";
 
@@ -75,7 +76,7 @@
             disabled={pending || attached}
             onchange={() => toggle(tab.id)}
           />
-          <FavIcon favicon={tab.favicon} />
+          <FavIcon image={favicons.image(tab.icon)} tone={favicons.tone(tab.icon)} />
           <span class="identity">
             <strong>{tab.title || m.work_env_untitled_tab()}</strong>
             <span class="where"

@@ -3,7 +3,8 @@
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { WorkEnvironmentContext, type WorkEnvironmentSession } from "$domain/work-environment";
   import { commandId, workSession, type WorkSession } from "$domain/work";
-  import { resourceSession, type ResourceSession } from "$domain/resources";
+  import { taskSession } from "$domain/resources";
+  import { noteSession } from "$domain/notes";
   import type {
     TabView,
     WorkHumanAccountV1,
@@ -21,7 +22,7 @@
   import { workPane, type WorkPaneRect, type WorkPaneTarget } from "$domain/work-pane";
   import { WorkHumanSession, type WorkHumanFailure } from "$domain/work-human";
   import { preferences } from "$domain/preferences";
-  import { loadNotes, loadNoteEditorHost } from "$features/notes";
+  import { loadNotes, loadNoteHost } from "$features/notes";
   import { loadTasks } from "$features/tasks";
   import { IS_MAC } from "$shared/platform";
   import Button from "$shared/ui/Button";
@@ -136,16 +137,15 @@
     session.tabsIntroduced = true;
   });
   const notesHost = $derived(`environment:${session.space}`);
-  let notes = $state.raw<ResourceSession | null>(
-    untrack(() => resourceSession(session.profile, "note", notesHost)),
-  );
-  let taskList = $state.raw<ResourceSession | null>(
-    untrack(() => resourceSession(session.profile, "task", `environment:${session.space}`)),
-  );
+  const notes = untrack(() => noteSession(session.profile, notesHost));
   onMount(() => {
-    const current = taskList;
-    void current?.start();
-    return () => current?.stopObserving();
+    void notes?.start();
+    return () => notes?.stop();
+  });
+  const taskList = untrack(() => taskSession(session.profile, `environment:${session.space}`));
+  onMount(() => {
+    void taskList.start();
+    return () => taskList.stop();
   });
   let objectiveSession = $state.raw<WorkSession | null>(null);
   let inspected = $state<string | null>(null);
@@ -1324,13 +1324,13 @@
     if (
       !current ||
       !(await current.flush()) ||
-      !current.record ||
+      !current.note?.id ||
       environmentId !== session.snapshot?.id
     )
       return;
     await session.edit({
       kind: "add",
-      reference: { kind: "resource", resource: current.record.id },
+      reference: { kind: "resource", resource: current.note.id },
       area: null,
     });
   }
@@ -1338,8 +1338,9 @@
     const current = notes;
     if (!current) return;
     await current.start();
-    await current.create(m.note_untitled());
-    if (current !== notes || !current.record) return;
+    // A note has no file, and so no identity to attach, until it has text.
+    await current.create(`# ${m.note_untitled()}\n`);
+    if (!current.note?.id) return;
     await attachNote();
     chrome?.close();
     notesOpen = true;
@@ -1540,13 +1541,10 @@
       session.checkpoint(next);
   }
   async function closeNotes() {
-    if (!notes || (await notes.flush())) {
-      notesOpen = false;
-      notes?.stopObserving();
-    }
+    if (!notes || (await notes.flush())) notesOpen = false;
   }
-  const taskItems = $derived(taskList?.items ?? []);
-  const tasksDone = $derived(taskItems.filter((task) => task.completed).length);
+  const taskItems = $derived(taskList.rows);
+  const tasksDone = $derived(taskItems.filter((task) => task.status === "done").length);
   const activeExecution = $derived.by(() => {
     const projection = objectiveSession?.projection;
     return !!projection?.executions.some((execution) => isLive(projection, execution));
@@ -1819,7 +1817,6 @@
     {:else}
       <WorkMediaPicker
         profile={session.profile}
-        host={notesHost}
         kind={mediaKind}
         attachedIds={snapshot?.elements.flatMap((element) =>
           element.reference.kind === "resource" ? [element.reference.resource] : [],
@@ -1854,21 +1851,17 @@
       loadingLabel={m.surface_loading()}
       failureLabel={m.surface_render_failed()}
       retryLabel={m.surface_retry()}
-      >{#snippet children(Notes)}<Notes
-          profile={session.profile}
-          host={notesHost}
-        />{/snippet}</LazyView
+      >{#snippet children(Notes)}{#if notes}<Notes session={notes} />{/if}{/snippet}</LazyView
     >
   </div>
   <div class="menu-footer">
     <Button
       size="compact"
       disabled={busy ||
-        !notes?.record ||
+        !notes?.note?.id ||
         snapshot?.elements.some(
           (element) =>
-            element.reference.kind === "resource" &&
-            element.reference.resource === notes?.record?.id,
+            element.reference.kind === "resource" && element.reference.resource === notes?.note?.id,
         )}
       onclick={() => void attachNote()}>{m.work_env_attach_note()}</Button
     >
@@ -1922,11 +1915,7 @@
       loadingLabel={m.surface_loading()}
       failureLabel={m.surface_render_failed()}
       retryLabel={m.surface_retry()}
-      >{#snippet children(Tasks)}<Tasks
-          profile={session.profile}
-          host={`environment:${session.space}`}
-          onclose={() => (tasksOpen = false)}
-        />{/snippet}</LazyView
+      >{#snippet children(Tasks)}<Tasks session={taskList} density="panel" />{/snippet}</LazyView
     >
   </div>
 {/snippet}
@@ -2264,14 +2253,13 @@
         </div>
       {:else if liftedElement?.reference.kind === "resource"}
         <LazyView
-          loader={loadNoteEditorHost}
+          loader={loadNoteHost}
           loadingLabel={m.surface_loading()}
           failureLabel={m.surface_render_failed()}
           retryLabel={m.surface_retry()}
           >{#snippet children(Host)}<Host
               profile={session.profile}
-              host={notesHost}
-              onlink={openCitation}
+              host={`${notesHost}:lift`}
               id={liftedElement.reference.kind === "resource"
                 ? liftedElement.reference.resource
                 : ""}

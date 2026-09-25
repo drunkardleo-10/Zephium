@@ -447,6 +447,10 @@ New(empty) -navigate-> Active <-> Inactive -idle-> Hibernated -> Closed(restorab
   tab restores by URL.
 - Inactive non-discarded tabs keep their webview hidden (media, sockets,
   scroll survive a switch).
+- Site icons cross as a reference (origin plus content revision), never as a
+  raster. Pixels travel on their own projection, sent once per privileged
+  surface and only for references that surface does not already hold. See
+  `docs/design/history.md`.
 
 ---
 
@@ -3073,6 +3077,16 @@ chrome positioning) carries over as-is.
   commands.
 - **Later, own track:** Tier 2 extensions compat, sync (change-log at the
   reducer chokepoint), SQLCipher/SecretStore.
+
+Website file workflows are implemented for macOS foreground human tabs:
+[file workflow ownership and qualification](file-workflows-progress.md). Native
+selection stays in the engine, with no durable upload manager or frontend file
+path authority. A profile-scoped native WKDownload coordinator owns transfers,
+Store-backed metadata/preferences and bounded progress snapshots. Private transfers
+remain memory-only. Filesystem workers mediate staging, quarantine, exclusive
+publication and file-identity checks. Trusted UI actions carry download IDs;
+paths and native completions stay in Rust. Windows/Linux download adapters remain
+outstanding. Local-document viewing is outside this delivery's scope.
 
 ---
 

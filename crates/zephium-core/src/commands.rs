@@ -37,6 +37,12 @@ pub const REGISTRY: &[CommandSpec] = &[
         group: Group::File,
     },
     CommandSpec {
+        id: "tab.reopen",
+        title: "Reopen Closed Tab",
+        accelerator: Some("CmdOrCtrl+Shift+T"),
+        group: Group::History,
+    },
+    CommandSpec {
         id: "split.choose",
         title: "Split View…",
         accelerator: None,

@@ -2,7 +2,7 @@
   import { onMount, untrack } from "svelte";
   import type { WorkHumanAccountV1 } from "$shared/ipc/bindings";
   import Button from "$shared/ui/Button";
-  import ChoiceGroup from "$shared/ui/ChoiceGroup";
+  import SegmentedControl from "$shared/ui/SegmentedControl";
   import { paneGeometry, remember, type PaneRect } from "../../lib/pane-geometry";
   import { countdownLabel, reasonSentence, type HumanPage } from "../../lib/work-human";
   import * as m from "$shared/i18n/messages";
@@ -194,9 +194,8 @@
       <p class="handing" role="status">{m.work_human_handing_back()}</p>
     {:else}
       {#if signIn}
-        <ChoiceGroup
+        <SegmentedControl
           label={m.work_human_account()}
-          segmented
           options={accounts}
           bind:value={() => account, (next) => (account = next as WorkHumanAccountV1)}
         />

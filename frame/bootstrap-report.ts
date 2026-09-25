@@ -80,6 +80,11 @@ export function bootstrapReport(): Plugin {
             css.add(style);
         };
         walk(root.file);
+        if (root.surface && visited.size + css.size > 24) {
+          this.error(
+            `${name} startup requests exceed the native asset budget: ${visited.size + css.size} (limit 24)`,
+          );
+        }
         if (root.surface) surfaceStyles.set(name, css);
         const forbidden = [...modules].filter(
           (id) =>
@@ -132,6 +137,12 @@ export function bootstrapReport(): Plugin {
       for (const [name, styles] of surfaceStyles) {
         const html = bundle[`${name}.html`];
         if (!html || html.type !== "asset") this.error(`Missing ${name} HTML`);
+        // Tauri nonce-injects inline style tags. That makes unsafe-inline
+        // ineffective and prevents dropdowns from restoring body input styles.
+        if (/<style[\s>]/iu.test(String(html.source)))
+          this.error(
+            `${name} contains inline CSS; startup paint must stay in external stylesheets`,
+          );
         for (const style of styles) {
           if (!String(html.source).includes(style))
             this.error(`${name} stylesheet missing from its HTML preload graph: ${style}`);

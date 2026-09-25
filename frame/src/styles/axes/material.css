@@ -1,0 +1,47 @@
+/*
+ * The material axis: one wash recipe, four native tiers.
+ *
+ * The native effect supplies depth, lensing and motion. It does not supply
+ * identity — bare vibrancy takes whatever colour is behind the window, which
+ * is how a panel over a warm page ends up brown. The wash is the layer that
+ * keeps the interface neutral and the same design across every tier, and the
+ * alphas below are the only thing a tier changes.
+ *
+ * Only what floats is washed: the menu layer and the launcher. The chrome
+ * takes the native material neat and the page is solid, so the window reads
+ * as one sheet you look through onto a surface you look at. The opaque tier
+ * leaves every alpha at the 100% default in tokens.css, because the system
+ * has to stand up with no material at all.
+ */
+
+/* Material activates only after native capability discovery, so an absent
+   attribute keeps the bootstrap document byte-for-byte opaque. */
+:root:not([data-material="none"])[data-material],
+:root:not([data-material="none"])[data-material] body,
+:root:not([data-material="none"])[data-material] #root {
+  background: transparent;
+}
+
+:root[data-material="vibrancy"] {
+  --wash-raised: 56%;
+  --wash-launcher: 56%;
+}
+
+/* Liquid Glass tints and lenses on its own, so it needs less from us than
+   plain vibrancy or the interface reads muddy through both layers. */
+:root[data-material="liquid_glass"] {
+  --wash-raised: 50%;
+  --wash-launcher: 48%;
+}
+
+/* Acrylic on Win11 22H2+ ignores the native tint parameter entirely, so the
+   whole colour layer is ours and the wash carries more here than anywhere. */
+:root[data-material="acrylic"] {
+  --wash-raised: 66%;
+  --wash-launcher: 82%;
+}
+
+:root[data-material="mica"] {
+  --wash-raised: 70%;
+  --wash-launcher: 86%;
+}

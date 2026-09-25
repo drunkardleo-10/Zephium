@@ -4,43 +4,34 @@ const host = vi.hoisted(() => ({
   open: vi.fn(),
   extent: vi.fn(),
   stop: vi.fn(),
-  transition: null as (() => void) | null,
   listener: null as ((event: { payload: string }) => void) | null,
   listen: vi.fn(),
 }));
 vi.mock("$domain/surface", () => ({ surface: { currentPage: () => host.page, open: host.open } }));
 vi.mock("../sidebar-mode.svelte", () => ({ setPanelExtent: host.extent }));
-vi.mock("../motion.svelte", () => ({
-  transition: (callback: () => void) => {
-    host.transition = callback;
-  },
-  cancel: () => {
-    host.transition = null;
-  },
-}));
 vi.mock("$shared/ipc/native-events", () => ({ events: { uiCommand: { listen: host.listen } } }));
 beforeEach(() => {
   vi.resetModules();
   vi.resetAllMocks();
   host.page = null;
-  host.transition = null;
   host.listener = null;
   host.listen.mockImplementation((listener: typeof host.listener) => {
     host.listener = listener;
     return Promise.resolve(host.stop);
   });
 });
-it("does not apply a delayed transition after its owner is disposed", async () => {
+it("opens at once and widens the column in the same step", async () => {
   const tools = await import("../tools.svelte");
   const first = tools.init();
   expect(tools.init()).toBe(first);
   await first;
   tools.open("notes");
-  const transition = host.transition;
-  tools.dispose();
-  transition?.();
+  expect(tools.activeTool()).toBe("notes");
+  expect(host.extent).toHaveBeenCalledWith(336);
+  tools.close();
   expect(tools.activeTool()).toBeNull();
-  expect(host.extent).not.toHaveBeenCalled();
+  expect(host.extent).toHaveBeenLastCalledWith(0);
+  tools.dispose();
   expect(host.stop).toHaveBeenCalledOnce();
 });
 it("explicit close invalidates a queued tool before browser return settles", async () => {
@@ -51,7 +42,6 @@ it("explicit close invalidates a queued tool before browser return settles", asy
   tools.close();
   host.page = null;
   host.listener?.({ payload: "browser.return" });
-  host.transition?.();
   expect(tools.activeTool()).toBeNull();
   tools.dispose();
 });

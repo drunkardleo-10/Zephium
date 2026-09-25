@@ -3,7 +3,7 @@ import type {
   WorkContextSelectionV1,
   WorkEnvironmentSnapshot,
   WorkRuntimeProjection,
-  ResourceSummary,
+  NoteSummary,
 } from "$shared/ipc/bindings";
 
 const MAX_CONTEXT_ITEMS = 16;
@@ -18,7 +18,7 @@ export function contextSelection(
   selected: readonly string[],
   tabs: readonly TabView[],
   known: {
-    notes: readonly ResourceSummary[];
+    notes: readonly NoteSummary[];
     objectives: ReadonlyMap<string, WorkRuntimeProjection>;
     /** Media record revisions: an image or a document is context like a note. */
     media?: ReadonlyMap<string, string>;

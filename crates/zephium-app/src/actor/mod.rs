@@ -1075,6 +1075,32 @@ impl Handle {
         receiver
     }
 
+    /// One profile-checked notes call, settled by the notes service.
+    pub fn note_call(
+        &self,
+        profile: ProfileId,
+        call: zephium_core::notes::NoteCall,
+    ) -> Receiver<zephium_core::notes::NoteReply> {
+        let (sender, receiver) = sync_channel(1);
+        let done = crate::NoteCompletion::new(move |reply| {
+            let _ = sender.send(reply);
+        });
+        let command = Command::NoteCall {
+            expected_profile: profile,
+            call: Arc::new(call),
+            done,
+        };
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self.queue.try_push(command)
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
+
     /// Requests an ordered shutdown without waiting for queue capacity on the
     /// caller (normally the UI thread). Only `RetryableFailure` leaves the
     /// actor and native engine available for another attempt.
@@ -1184,7 +1210,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::UninstallFocusedExtension { .. }
             | Command::RespondToExtensionRuntimeGrantPrompt { .. }
             | Command::RespondToPagePermissionPrompt { .. }
-            | Command::OpenUrl(_)
+            | Command::OpenUrl { .. }
             | Command::SetAppSetting { .. }
             | Command::DeleteProfile(_)
             | Command::RetryContentPolicy { .. }

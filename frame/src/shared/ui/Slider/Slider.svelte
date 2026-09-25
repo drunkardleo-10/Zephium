@@ -171,8 +171,8 @@
     -webkit-user-select: none;
     user-select: none;
     transition:
-      background-color var(--motion-base) var(--ease-smooth),
-      box-shadow var(--motion-base) var(--ease-smooth);
+      background-color var(--motion-instant) var(--ease-smooth),
+      box-shadow var(--motion-instant) var(--ease-smooth);
   }
 
   .field:hover:not([data-editing="true"], [data-disabled="true"]) {
@@ -197,9 +197,9 @@
     box-shadow: var(--shadow-raise);
     pointer-events: none;
     transition:
-      background-color var(--motion-base) var(--ease-smooth),
-      opacity var(--motion-base) var(--ease-smooth),
-      width 220ms var(--ease-out);
+      background-color var(--motion-instant) var(--ease-smooth),
+      opacity var(--motion-fast) var(--ease-smooth),
+      width var(--motion-base) var(--ease-out);
   }
 
   .field[data-dragging="true"] .fill {
@@ -220,7 +220,7 @@
     border-radius: 2px;
     background: var(--color-muted);
     opacity: 0;
-    transition: opacity var(--motion-base) var(--ease-smooth);
+    transition: opacity var(--motion-fast) var(--ease-smooth);
   }
 
   .field:hover .thumb {

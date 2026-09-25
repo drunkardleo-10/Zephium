@@ -199,12 +199,15 @@ Any change that breaks one of these invariants must fail review and release:
    or relying parties. Passkey authorization requires a trusted UI request, is
    process-single-flight, executes on the native main thread, and settles only to the
    fixed main label.
-5. Raw content permissions are denied by the pinned Wry permission callback. Raw and
-   privileged downloads and popups/new windows are denied rather than silently
-   forwarded to the OS or converted into a tab without trustworthy gesture metadata.
-   Linux and macOS additionally cancel file-chooser requests from both raw and
-   privileged WebViews; macOS also denies privileged media capture and device motion
-   natively.
+5. Raw content permissions are denied by the pinned Wry permission callback.
+   Privileged and agent downloads/new windows remain denied. Human macOS and
+   Windows tabs opt into the native download and new-tab brokers described below;
+   Linux retains denial. No new window is forwarded to an unmanaged OS browser.
+   Linux additionally cancels file-chooser requests from both raw and privileged
+   WebViews. macOS raw foreground views opt into a native upload picker bound to
+   the exact view/navigation and labelled with WebKit's initiating-frame origin;
+   privileged and agent views retain file-selection denial. macOS also denies
+   privileged media capture and device motion natively.
 6. Both privileged WebViews are created with incognito mode and their platform-native
    store is checked to be InPrivate/ephemeral/non-persistent. That check and every
    platform hardening hook must succeed before bundled application assets or page script
@@ -298,7 +301,8 @@ to the configured search engine; search expansion is bounded before admission.
 Page-initiated top-level navigation uses the same allowlist. On Windows, raw subframe
 navigation also uses that allowlist, privileged subframes remain on the app origin, and
 WebView2's external-URI event is cancelled for every view. No blocked scheme is
-automatically opened through the OS shell. Popup creation is currently fail-closed.
+automatically opened through the OS shell. Human macOS/Windows new windows require
+native user-activation admission and become host-owned tabs as described below.
 Back, forward, and stop use native WebView operations instead of page-overridable
 JavaScript history/window calls. Native URL/history observers are mandatory on all three
 platforms. They deduplicate bounded state and close the view if an engine source escapes
@@ -340,17 +344,20 @@ The probe can still verify exact deferred Deny, duplicate-settlement rejection, 
 JavaScript `NotAllowedError` under a pre-authorized responsible process. The bundle
 includes camera and microphone usage descriptions, but those strings grant no
 authority. A signed packaged WKWebView/TCC gate on the supported security floor is
-still required before the release capability can change. All downloads are disabled,
-so Zephium does not currently claim destination validation,
-dangerous-file handling, Windows
-Mark-of-the-Web, or macOS quarantine. Linux also cancels privileged file-picker
-requests. Stable WebView2 exposes no supported file-chooser interception event, so a
+still required before the release capability can change. Foreground human macOS tabs
+use the native download broker described below. Foreground human Windows views
+now opt into the WebView2 download adapter described below; privileged, agent and
+Linux downloads remain denied. Windows Attachment Services and Mark-of-the-Web
+are implemented but await native Windows qualification. Linux also cancels privileged file-picker requests. Stable WebView2 exposes no supported file-chooser interception event, so a
 raw Windows file input remains an engine-owned, user-selected native upload surface and
 privileged Windows views have no equivalent native denial hook. This is an explicit
 platform limitation, not a broker Zephium has implemented. Raw Windows views disable
-browser accelerator keys and default context menus, and hide the built-in PDF viewer's
-Save, Save As, and Print controls; installing those settings is mandatory before the
-first load. WebView2 likewise exposes no event that can cancel page-initiated scripted
+browser accelerator keys and initially disable default context menus. Human views
+re-enable native menus only after installing a bounded command allowlist and a
+mandatory SaveAsUIShowing cancellation handler; privileged/agent views retain
+menu denial. Native edit/copy, link opening and download save actions remain;
+print, document Save As, sharing and unknown commands are removed. Built-in PDF
+Save, Save As, and Print controls remain hidden before the first load. WebView2 likewise exposes no event that can cancel page-initiated scripted
 printing. Zephium locks the page and `Window`-prototype print functions and wraps and
 locks both `Document.prototype.execCommand` and the document's own `execCommand` before
 any page-owned script. The wrapper coerces a command exactly once, rejects
@@ -366,6 +373,116 @@ action can bypass the DOM guard through the PDF viewer. Until Zephium can disabl
 broker the built-in viewer with a supported native API, packaged malicious-PDF testing
 and an explicit risk decision are separate Windows stable-release gates. Zephium does
 not claim that the current source tree denies this path.
+
+**Human native new tabs.** On macOS and Windows, native user-initiated links,
+modifier clicks and script-created windows use the original native opener and
+request. macOS disables automatic JavaScript windows in WKPreferences; Windows
+requires NewWindowRequested.IsUserInitiated. Admission additionally checks the
+source generation, navigation activity, presentation, foreground window, profile
+lifetime, resource limits and a bounded burst of eight requests per second.
+Raw page IPC cannot mint this authority. Unsupported URLs and construction or
+adoption failures deny the request. macOS uses WebKit's supplied configuration
+with a fresh per-view script controller; Windows uses the same environment and
+profile and registers request filters after SetNewWindow, before completing its
+deferral. The host never retries a POST/blob/navigation as a plain URL GET.
+
+Rust owns each child through an exactly-once adoption lease. Abandoned adoption
+retires the native controller. Foreground requests select their child only after
+its exact committed-document presentation is admitted, and a newer user tab
+selection cancels that deferred focus. Background requests keep the source
+selected. The first native download chain has a one-shot, 30-second admission
+allowance while its child is hidden; all destination consent and filesystem
+checks still apply. Acceptance or terminal cancellation removes an uncommitted
+transient child, including after a space switch. A child that committed a real
+document is retained. Native script-close notifications only close host-owned
+children; ordinary browser tabs remain host controlled. See
+[native links and download handoff qualification](native-links-implementation.md).
+
+macOS native image/link context-menu downloads use the optional private WebKit
+`_webView:contextMenuDidCreateDownload:` callback to receive the original public
+WKDownload. This is not a public API stability guarantee: supported macOS/WebKit
+versions require native qualification, including the minimum OS. Without this
+callback the browser does not synthesize a replacement network request. Native
+context-menu wording is retained. A host-rejected new-tab request projects a
+bounded popup-blocked status; popups rejected inside WebKit before delegate
+invocation may have no host status event.
+
+**Human file uploads on macOS.** Raw content construction opts into Wry's
+native upload callback. The default remains denial before request metadata is
+read. The engine retains one process-main-thread NSOpenPanel reservation, labels
+it with the canonical HTTP(S) origin supplied by WebKit for the initiating
+frame, and requires a live, presented, visible view in the key window before
+opening it. WebKit owns input user activation and the original input/frame
+association; Zephium does not infer authority from a recent generic click.
+Single/multiple/directory modes come from native parameters. Selected NSURLs
+stay native and are returned only to the original WebKit completion, with at
+most 1024 selected entries and no filesystem paths in frontend IPC or storage.
+A non-cloneable, non-Send responder cancels on drop. A unique request identity
+prevents a late sheet callback from settling a newer request. Navigation start,
+renderer exit, removal from the presented layout and view teardown cancel the
+panel. Settlement rechecks the view permit, committed navigation, navigation
+activity (including failed attempts), visibility and exact window attachment,
+including after native sheet dismissal. There is no persistent filesystem grant.
+The public pinned WKOpenPanelParameters API exposes selection modes but not
+HTML accept filters; this adapter does not invent those filters with page JS.
+Linux upload selection remains disabled; Windows selection retains the engine-owned
+behavior described above. macOS human views opt into native WebKit file drops with
+a 128-item bound, URL bounds, and document/presentation checks at entry and drop.
+Privileged and agent views retain default denial. See
+[file upload implementation and qualification](file-upload-implementation.md).
+
+**Human downloads on macOS.** Raw human views explicitly opt into a WKDownload
+broker; the native network request retains its WebKit profile, cookies, POST body,
+and blob ownership. No URL is replayed through a separate HTTP client. At most
+eight transfers run; an accepted transfer survives source-tab closure. Destination
+panels share the main-thread upload reservation. Pending decisions are bound to
+the initiating view, navigation activity, intended presentation and key window.
+A direct attachment response may arrive before a document commit; that download
+intent does not grant permission to reveal page content.
+
+Rust owns transfer state, bounded profile history and native paths. The trusted
+UI receives typed metadata and issues ID-scoped actions. Private-profile records
+remain in memory. Default behavior asks for a destination; a native directory
+selection records its filesystem identity before automatic saves are permitted.
+Same-volume private staging is journaled before native bytes are admitted.
+Publication applies and checks quarantine, synchronizes the file, and uses an
+exclusive rename with collision suffixes. Open/Reveal verify the recorded file
+identity; interrupted staging cleanup requires the original directory receipt
+and removes only the fixed payload and empty staging directory. Shutdown and
+profile erasure drain native cancellation, filesystem work and Store replies.
+Recovery marks abandoned transfers Interrupted; it does not claim resumability.
+Migration 21 separates cleanup ownership from visible history, so forget/pruning
+cannot discard a pending receipt. Startup enumerates active and deletion-pending
+profiles without a history view. Recovery is paged, profile-scoped, identity-checked
+and retriable. Tombstoned profiles permit only internal cleanup and terminal saves.
+Private receipts stay in memory and drain on orderly closure; abrupt process death
+can leave an incomplete hidden staging directory at the selected destination.
+Quarantine is OS provenance, not malware scanning.
+
+**Human downloads on Windows.** The adapter retains the original WebView2
+DownloadStarting event/deferral and operation. Default cancellation and hidden
+native download UI precede host admission. Cookies, POST bodies and blob/data
+payloads remain native. Pending destination selection requires the exact live
+view/navigation/presentation and foreground parent. Automatic
+saving is not inferred from a recent click or a concurrent browser navigation:
+the event has no initiating-frame activation/navigation identity proof, so every
+Windows download requires native confirmation. HTTP origins
+are displayed without URL secrets; origin-less data downloads label their top
+page origin as context, not an initiating-frame assertion.
+
+Directory handles pin canonical ancestors; a protected staging DACL admits only
+the current user and SYSTEM. File identities retain all 128 Windows file-ID bits.
+Publication invokes Attachment Services with the proposed filename/source origin,
+requires an Internet zone stream, flushes the payload and moves it without a
+replace/cross-volume-copy flag. Protection failure cannot produce Completed.
+Recovery never recursively deletes and refuses an open native writer. Uncertain
+shutdown preserves the writer PID plus creation time and its durable receipt.
+Closing the logical tab revokes page authority, hides/disables scripts and parks
+the retained controller at about:blank until its transfer ends. Native process
+exit proof joins download drain during shutdown/profile retirement. These Windows
+paths have been cross-checked, not yet qualified on a native Windows runtime.
+See [Windows qualification](file-workflows-windows-qa.md) and
+[the current hardening record](file-workflows-hardening.md).
 
 **Profiles and storage.** Persistent profiles use distinct native engine data
 partitions: profile paths/contexts on Windows and Linux and named WKWebsiteDataStore
@@ -1103,7 +1220,7 @@ These inherited properties must not be overstated:
   Raw content requires Settings4, disables password autosave and general autofill, and
   reads both values back before navigation. It also disables browser accelerator keys
   and default context menus and requires Settings7 to hide PDF Save, Save As, and Print.
-  Raw and privileged downloads are denied. Both view classes replace Wry's
+  Privileged downloads remain denied; raw human views use the native download adapter. Both view classes replace Wry's
   broader default browser arguments with only the `msWebOOUI`/`msPdfOOUI` suppressions,
   so Zephium does not deliberately disable SmartScreen.
 - Every view also requires CoreWebView2_18. Raw and privileged subframe navigations are
@@ -1519,8 +1636,8 @@ The following are roadmap items or disabled backends, not current security guara
 - release-enabled page permission prompts or native enforcement of remembered
   per-origin grants (the bounded coordinator is built but the desktop feature gate is
   disabled pending live WKWebView and packaged-build evidence);
-- downloads, safe filenames, destination mediation, quarantine/MOTW, or download
-  scanning;
+- Linux downloads, native Windows release qualification of downloads/protection,
+  guaranteed malware detection, and automatic transfer resumption;
 - extension installation, extension API mediation, or Chrome/Firefox extension
   compatibility;
 - continuously maintained online blocker sources or full EasyList semantics: the usable
@@ -1562,8 +1679,9 @@ risk. The recurring engine-floor, advisory, and fork-review procedure is defined
    local storage, WebSQL where present, HTTP authentication state, and engine caches for
    persistent and incognito profiles. Inject crashes and ambiguous storage outcomes at
    every authorization, native-proof, filesystem, and journal-finalization boundary.
-4. Keep downloads, permission grants, extensions, and product-level content blocking
-   disabled until their brokers are complete and adversarially tested. Blocker enablement
+4. Keep unsupported download adapters, permission grants, extensions, and
+   product-level content blocking disabled until their brokers are complete and
+   adversarially tested. Qualify the macOS file broker on signed release artifacts. Blocker enablement
    additionally requires provisioning and exercising the production trust domain and exact
    licensed list package, plus the packaged cross-platform enforcement, external-review,
    and endurance gates in `docs/adblock.md`.

@@ -1,159 +1,100 @@
-/* The one surface that floats inside a page. Shared by Menu and Select, which
-   both portal their content, so these classes are global by necessity. The
-   blur is the only one in the chrome: a menu sits over our own document, so
-   sampling it is cheap and reads as the native menu material. */
+/* What a portalled menu adds to the shared surface: floating geometry, the
+   mount animation, and the list parts only a full menu has. Shared by Menu
+   and Select, which both portal their content, so these classes are global by
+   necessity. */
+@import "./surface.css";
+
 .ui-menu {
-  z-index: 50;
-  box-sizing: border-box;
-  min-width: max(180px, var(--bits-floating-anchor-width, 0px));
-  max-height: var(--bits-floating-available-height, 360px);
-  padding: 6px;
-  border-radius: var(--radius-menu);
-  background: var(--color-menu);
-  backdrop-filter: blur(8px) saturate(1.15);
-  box-shadow: var(--shadow-popover);
-  outline: none;
-  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+
+  /* Sized to what is in it. A floor tied to the anchor made a three-word menu
+     open as a slab twice the width of the control it belongs to, which is the
+     single thing that stops a menu reading as part of its trigger. */
+  min-width: 168px;
+  max-height: var(--bits-floating-available-height, 420px);
   transform-origin: var(--bits-floating-transform-origin, top);
-  animation: ui-menu-in var(--motion-slow) var(--ease-smooth);
+  animation:
+    ui-menu-fade var(--motion-fast) var(--ease-out),
+    ui-menu-in var(--motion-base) var(--ease-out);
 }
 
 .ui-menu[data-state="closed"] {
-  animation: ui-menu-out var(--motion-fast) var(--ease-out) forwards;
+  animation: ui-menu-out var(--motion-instant) var(--ease-exit) forwards;
+}
+
+@keyframes ui-menu-fade {
+  from {
+    opacity: 0;
+  }
 }
 
 @keyframes ui-menu-in {
   from {
-    opacity: 0;
-    transform: scale(0.96) translateY(-3px);
+    transform: scale(0.96) translateY(-4px);
   }
 }
 
 @keyframes ui-menu-out {
   to {
     opacity: 0;
-    transform: scale(0.99);
+    transform: scale(0.985);
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .ui-menu,
+  .ui-menu[data-state="closed"] {
+    animation: ui-menu-fade var(--motion-instant) linear;
+  }
+}
+
+/* The list scrolls, the panel does not: padding stays put and the rounded
+   corners keep clipping while the rows travel under them. */
 .ui-menu-viewport {
-  max-height: inherit;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  scrollbar-width: none;
-}
-
-.ui-menu-viewport::-webkit-scrollbar {
-  display: none;
-}
-
-.ui-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  box-sizing: border-box;
-  min-height: 34px;
-  padding: 6px 8px 6px 12px;
-  border-radius: var(--radius-control-compact);
-  transition: background-color var(--motion-instant) ease;
-  color: var(--color-text);
-  font-size: var(--text-body);
-  line-height: 20px;
-  outline: none;
-  cursor: default;
-  /* stylelint-disable-next-line property-no-vendor-prefix */
-  -webkit-user-select: none;
-  user-select: none;
-}
-
-.ui-menu-item[data-highlighted] {
-  background: var(--color-control-hover);
-}
-
-.ui-menu-item[data-highlighted]:active {
-  background: var(--color-control-pressed);
-}
-
-.ui-menu-item[data-disabled] {
-  opacity: 0.45;
-}
-
-.ui-menu-item[data-danger="true"] {
-  color: var(--color-danger);
-}
-
-.ui-menu-icon {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 16px;
-  color: var(--color-muted);
-}
-
-.ui-menu-check {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 16px;
-  height: 16px;
-  margin-inline: auto 2px;
-  padding-inline-start: 12px;
-  box-sizing: content-box;
-  color: var(--color-text);
-}
-
-.ui-menu-item[data-highlighted] .ui-menu-icon {
-  color: var(--color-text);
+  overscroll-behavior: contain;
 }
 
 .ui-menu-separator {
+  flex: none;
   height: 1px;
-  margin: 6px -6px;
-  background: var(--color-border);
+
+  /* Full bleed, because a divider that stops short of the edge reads as a
+     misaligned row rather than as a break in the list. */
+  margin: 5px calc(var(--menu-pad) * -1);
+  background: var(--color-menu-separator);
 }
 
 .ui-menu-heading {
-  padding: 8px 12px 4px;
+  padding: 10px var(--menu-item-inset) 5px;
   font-size: var(--text-caption);
-  font-weight: 400;
+  font-weight: 550;
   line-height: 14px;
+  letter-spacing: 0.01em;
   color: var(--color-faint);
 }
 
+/* A shortcut is a caption on the row it belongs to, not a key to press here.
+   Keycaps are for the launcher, where the keys are the interface. */
 .ui-menu-hint {
-  display: inline-flex;
-  gap: 3px;
   margin-inline-start: auto;
-  padding-inline-start: 16px;
-}
-
-.ui-menu-hint > kbd {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  box-sizing: border-box;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 5px;
-  border-radius: var(--radius-xs);
-  background: var(--color-control);
-  box-shadow: inset 0 0 0 1px var(--color-border);
-  color: var(--color-muted);
-  font-family: var(--font-sans);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1;
+  padding-inline-start: 28px;
+  color: var(--color-faint);
+  font-size: var(--text-label);
   font-variant-numeric: tabular-nums;
+  transition: color var(--motion-instant) var(--ease-smooth);
 }
 
-@media (forced-colors: active) {
-  .ui-menu {
-    border: 1px solid ButtonText;
-    box-shadow: none;
-    backdrop-filter: none;
-  }
+.ui-menu-item[data-highlighted] .ui-menu-hint {
+  color: var(--color-muted);
+}
 
-  .ui-menu-item[data-highlighted] {
-    background: Highlight;
-    color: HighlightText;
-  }
+/* A menu long enough to need scrolling keeps its own padding in the scroller:
+   Select brings a viewport of its own, a dropdown has no reason to. */
+.ui-menu-scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }

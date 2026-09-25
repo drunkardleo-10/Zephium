@@ -1,0 +1,97 @@
+# Windows file-workflow candidate qualification
+
+This adapter is implemented, but has not run on a Windows machine yet. A macOS
+cross-check is compilation evidence only. Do not label this candidate Windows
+production-ready until the checks below pass on the supported Windows/WebView2
+floor and a current stable WebView2 runtime.
+
+## Build an isolated candidate
+
+Use the committed integration delivery (also available on the UI branch after
+the local fast-forward), with the repository's Rust/MSVC, Node, pnpm and
+WebView2 prerequisites installed. Install locked frontend/desktop dependencies
+using the normal repository setup, then run in PowerShell:
+
+```powershell
+./scripts/qualification/build_file_workflows_windows.ps1
+```
+
+The script runs native library/desktop tests, Chromium component tests, frontend
+checks/build/CSS gate, then builds a debug executable without an installer. It
+uses `app.zephium.files-integration-qa` and the explicit Windows QA configuration.
+The default output is `target/debug/zephium-desktop.exe`; respect
+`CARGO_TARGET_DIR` if configured. The script does not launch it. The QA feature
+cannot be used in release builds or combined with another QA identity. Neither
+the Windows build script nor its output has been executed on this Mac.
+
+Start the generated-only fixture in a separate terminal:
+
+```powershell
+python scripts/qualification/file_workflows.py --files "$env:TEMP/zephium-files-qa/uploads"
+```
+
+Keep that terminal running. Use the newly printed token URL, never one copied
+from an older test report. Select a new disposable download directory under
+`$env:TEMP/zephium-files-qa/`. Do not select personal upload files.
+
+## Native acceptance matrix
+
+Record the exact Git commit, `git diff --stat`, executable SHA-256, Windows build,
+WebView2 version, filesystem type, test result and any failure for each row.
+
+| Workflow | Required result |
+| --- | --- |
+| First use, empty Downloads, settings, all dropdowns | Usable after click, selection, Escape, focus changes; no CSP violation or pointer lock |
+| Single/multiple/directory uploads and Unicode names | Fixture reports exact bytes; paths remain in native picker/engine |
+| Cross-origin frame upload, accept hints, cancelled picker, navigation/close during picker | Correct frame gets selected files; cancelled/stale selection grants nothing |
+| Drag/drop and cloud-provider file selection | Correct bytes or visible failure; no hang; test each claimed provider separately |
+| Attachment, redirect, cookie-authenticated, POST, blob, large data URL | Exact expected bytes; native session semantics; Completed only after publication |
+| Empty file / unknown Content-Length | Completes with exact zero/actual bytes; no false 100% during transfer |
+| Truncated response and disconnect | Failed/interrupted; no published partial advertised as Completed |
+| Existing name, repeated download, maximum-length Unicode name | Existing file untouched; bounded distinct suffix; correct extension |
+| Save dialog cancel, receiving cancel, cancel at completion | Settles once; no published partial; temporary ownership eventually cleared |
+| Close source tab during slow transfer | Transfer finishes or truthfully fails; closed page cannot regain authority |
+| Quit during native transfer/finalization; reopen | No hang; interrupted receipts recover without opening Downloads |
+| Clear history, then restart / failed cleanup retry | Clearing history never loses cleanup ownership; retry does not delete unrelated files |
+| Delete persistent/private profile during transfer | Native operations drain; profile deletion does not bypass pending cleanup |
+| Private download, close private profile, quit | No private paths/history in SQLite; saved file remains; orderly shutdown removes temporary payloads |
+| Change/remove saved file; Open / Reveal | Exact identity checked; changed/missing files give useful errors |
+| Full/read-only/unplugged target; locked file; junction/reparse substitution | Explicit failure; no overwrite, recursive deletion or write outside selection |
+| Privileged chrome and agent-originated downloads | Still denied |
+| Repeated downloads and idle observation | Eight-transfer admission bound; no accumulating controllers, timers, COM handlers or worker threads |
+
+For a completed fixture file, inspect Windows provenance:
+
+```powershell
+Get-FileHash -Algorithm SHA256 -LiteralPath 'C:\path\zephium-download.txt'
+Get-Content -LiteralPath 'C:\path\zephium-download.txt' -Stream Zone.Identifier
+```
+
+The attachment hash is
+`af816d943b8b840356cccd91cd2540b50d3c07d2f5b05c7fa128b77e55b4d559`.
+The stream must have a single `[ZoneTransfer]` section and Internet/Restricted
+`ZoneId` (3 or 4). The implementation also invokes Windows Attachment Services;
+plain-text fixture success is not proof of malware-detection coverage. Verify
+signed packaged-app execution and enterprise protection policy separately.
+Never weaken security policy or disable Defender to make a check pass.
+
+## Explicit limits
+
+- Every Windows download requires native save confirmation; Settings explains
+  this and disables automatic saving. The event has no originating-frame
+  activation/navigation ID, so neither a recent click nor a concurrent browser
+  navigation is treated as proof for that transfer. The selected download folder
+  is still used as the dialog's starting location.
+- Upload selection is WebView2-owned. The pinned stable API has no equivalent
+  to Zephium's macOS initiating-frame upload broker; do not claim parity for that
+  interception boundary.
+- Automatic resume/replay is not implemented. Interrupted POST/blob downloads
+  must be retried from their website; replaying a saved URL would lose semantics.
+- Protected publication requires a filesystem supporting the enforced identity,
+  ACL and zone-stream guarantees. Unsupported destinations fail closed. FAT/exFAT
+  and particular network/cloud-provider paths are not promised.
+- Private cleanup receipts remain in memory. Abrupt process termination can leave
+  an incomplete hidden staging directory in the selected destination; orderly
+  closure drains it. Private crash cleanup without persisting browsing/path
+  history is still a release-design gap.
+- Linux and local-document navigation remain out of this delivery's scope.

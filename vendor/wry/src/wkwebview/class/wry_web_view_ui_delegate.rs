@@ -149,7 +149,10 @@ impl WryNSWindowDelegate {
 
 pub struct WryWebViewUIDelegateIvars {
   #[cfg(target_os = "macos")]
-  new_window_req_handler: Option<Box<dyn Fn(String, NewWindowFeatures) -> NewWindowResponse>>,
+  page_close_handler: Option<Box<dyn Fn()>>,
+  #[cfg(target_os = "macos")]
+  new_window_req_handler:
+    Option<std::rc::Rc<dyn Fn(String, NewWindowFeatures) -> NewWindowResponse>>,
   #[cfg(target_os = "macos")]
   new_windows: Rc<RefCell<Vec<NewWindow>>>,
   permission_handler: Option<Box<dyn Fn(PermissionKind) -> PermissionResponse + Send + Sync>>,
@@ -158,6 +161,8 @@ pub struct WryWebViewUIDelegateIvars {
     Option<Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>>,
   #[cfg(target_os = "macos")]
   pending_permission_requests: RefCell<BoundedPendingPermissionRequests<PendingPermissionRequest>>,
+  #[cfg(target_os = "macos")]
+  file_upload_handler: Option<Box<crate::file_upload::FileUploadHandler>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -178,6 +183,13 @@ define_class!(
   unsafe impl NSObjectProtocol for WryWebViewUIDelegate {}
 
   unsafe impl WKUIDelegate for WryWebViewUIDelegate {
+    #[cfg(target_os = "macos")]
+    #[unsafe(method(webViewDidClose:))]
+    fn page_requested_close(&self, _webview: &WryWebView) {
+      if let Some(handler) = &self.ivars().page_close_handler {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(handler));
+      }
+    }
     #[cfg(target_os = "macos")]
     #[unsafe(method(webView:runJavaScriptAlertPanelWithMessage:initiatedByFrame:completionHandler:))]
     fn run_javascript_alert(
@@ -219,15 +231,32 @@ define_class!(
     #[unsafe(method(webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:))]
     fn run_file_upload_panel(
       &self,
-      _webview: &WryWebView,
-      _open_panel_params: &WKOpenPanelParameters,
-      _frame: &WKFrameInfo,
+      webview: &WryWebView,
+      parameters: &WKOpenPanelParameters,
+      frame: &WKFrameInfo,
       handler: &block2::Block<dyn Fn(*const NSArray<NSURL>)>,
     ) {
-      // Wry has no origin-labelled, gesture-bound file-selection broker.
-      // Opening NSOpenPanel here lets arbitrary page content own privileged
-      // native UI, so deny until the embedder supplies an explicit broker.
-      handler.call((null_mut(),));
+      let Some(broker) = &self.ivars().file_upload_handler else {
+        handler.call((std::ptr::null(),));
+        return;
+      };
+      let native_origin = unsafe { frame.securityOrigin() };
+      let Some(origin) = Self::permission_origin(&native_origin) else {
+        handler.call((std::ptr::null(),));
+        return;
+      };
+      let request = crate::FileUploadRequest {
+        origin,
+        allows_multiple_selection: unsafe { parameters.allowsMultipleSelection() },
+        allows_directories: unsafe { parameters.allowsDirectories() },
+      };
+      let completion = handler.copy();
+      let responder = crate::FileUploadResponder::new(move |urls| {
+        completion.call((urls.map_or(std::ptr::null(), |urls| urls as *const _),));
+      });
+      // Unwinding drops the responder and denies once. The native block and
+      // selected URLs remain on the owning main thread throughout.
+      let _ = catch_unwind(AssertUnwindSafe(|| broker(webview, request, responder)));
     }
 
     #[unsafe(method(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:))]
@@ -325,30 +354,42 @@ define_class!(
             .and_then(|url| url.absoluteString())
             .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT))?;
 
-          match new_window_req_handler(
-            url,
-            NewWindowFeatures {
-              size: if let (Some(width), Some(height)) =
-                (window_features.width(), window_features.height())
-              {
-                Some(dpi::LogicalSize::new(
-                  width.doubleValue(),
-                  height.doubleValue(),
-                ))
-              } else {
-                None
+          let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            new_window_req_handler(
+              url,
+              NewWindowFeatures {
+                // The per-view WKPreferences gate denies automatic script popups.
+                user_initiated: true,
+                foreground: {
+                  let flags = action.modifierFlags();
+                  let background = flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
+                    || action.buttonNumber() == 2;
+                  !background || flags.contains(objc2_app_kit::NSEventModifierFlags::Shift)
+                },
+                size: if let (Some(width), Some(height)) =
+                  (window_features.width(), window_features.height())
+                {
+                  Some(dpi::LogicalSize::new(
+                    width.doubleValue(),
+                    height.doubleValue(),
+                  ))
+                } else {
+                  None
+                },
+                position: if let (Some(x), Some(y)) = (window_features.x(), window_features.y()) {
+                  Some(dpi::LogicalPosition::new(x.doubleValue(), y.doubleValue()))
+                } else {
+                  None
+                },
+                opener: crate::NewWindowOpener {
+                  webview: webview.into(),
+                  target_configuration: configuration.into(),
+                },
               },
-              position: if let (Some(x), Some(y)) = (window_features.x(), window_features.y()) {
-                Some(dpi::LogicalPosition::new(x.doubleValue(), y.doubleValue()))
-              } else {
-                None
-              },
-              opener: crate::NewWindowOpener {
-                webview: webview.into(),
-                target_configuration: configuration.into(),
-              },
-            },
-          ) {
+            )
+          }))
+          .unwrap_or(NewWindowResponse::Deny);
+          match response {
             NewWindowResponse::Allow => {
               let mtm = MainThreadMarker::new()?;
               let current_window = webview.window()?;
@@ -547,10 +588,16 @@ impl WryWebViewUIDelegate {
 
   pub fn new(
     mtm: MainThreadMarker,
-    new_window_req_handler: Option<Box<dyn Fn(String, NewWindowFeatures) -> NewWindowResponse>>,
+    #[cfg(target_os = "macos")] page_close_handler: Option<Box<dyn Fn()>>,
+    new_window_req_handler: Option<
+      std::rc::Rc<dyn Fn(String, NewWindowFeatures) -> NewWindowResponse>,
+    >,
     permission_handler: Option<Box<dyn Fn(PermissionKind) -> PermissionResponse + Send + Sync>>,
     #[cfg(target_os = "macos")] permission_request_handler: Option<
       Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>,
+    >,
+    #[cfg(target_os = "macos")] file_upload_handler: Option<
+      Box<crate::file_upload::FileUploadHandler>,
     >,
   ) -> Retained<Self> {
     #[cfg(target_os = "ios")]
@@ -560,6 +607,8 @@ impl WryWebViewUIDelegate {
       .alloc::<WryWebViewUIDelegate>()
       .set_ivars(WryWebViewUIDelegateIvars {
         #[cfg(target_os = "macos")]
+        page_close_handler,
+        #[cfg(target_os = "macos")]
         new_window_req_handler,
         #[cfg(target_os = "macos")]
         new_windows: Rc::new(RefCell::new(vec![])),
@@ -568,6 +617,8 @@ impl WryWebViewUIDelegate {
         permission_request_handler,
         #[cfg(target_os = "macos")]
         pending_permission_requests: RefCell::new(BoundedPendingPermissionRequests::new()),
+        #[cfg(target_os = "macos")]
+        file_upload_handler,
       });
     unsafe { msg_send![super(delegate), init] }
   }

@@ -2,6 +2,15 @@
 //! (window -> chrome positioning, engine, shell) and the command surface.
 
 #[cfg(all(
+    feature = "file-workflows-qa",
+    any(
+        not(debug_assertions),
+        not(any(target_os = "macos", target_os = "windows"))
+    )
+))]
+compile_error!("file workflows QA requires a macOS or Windows debug build");
+
+#[cfg(all(
     any(feature = "resource-ui-qa", feature = "work-integration-qa"),
     any(not(debug_assertions), not(target_os = "macos"))
 ))]
@@ -70,6 +79,7 @@ mod linux_shortcut_portal;
 mod linux_x11_shortcut;
 mod material;
 mod media;
+mod notes;
 mod overlay;
 #[cfg(target_os = "macos")]
 mod panel;
@@ -77,6 +87,7 @@ mod platform;
 #[cfg(target_os = "windows")]
 mod privileged_runtime_windows;
 mod resource_close;
+mod search_providers;
 #[cfg(feature = "work-development-traces")]
 mod startup_styles;
 #[cfg(feature = "work-product")]
@@ -172,6 +183,7 @@ const APPEARANCE_DARK: u8 = 2;
 
 const EVENT_ITEMS: &str = "zephium:items";
 const EVENT_TAB: &str = "zephium:tab";
+const EVENT_FAVICONS: &str = "zephium:favicons";
 const EVENT_EXTENSION_ACTIONS: &str = "zephium:extension-actions";
 const EVENT_EXTENSION_ACTION_FAILED: &str = "zephium:extension-action-failed";
 const EVENT_EXTENSION_ACTION_SHORTCUT: &str = "zephium:extension-action-shortcut";
@@ -1362,8 +1374,29 @@ struct WorkDecisionPreferenceChanged(zephium_ipc::work::WorkDecisionPreferenceCh
 struct WorkEnvironmentChanged(zephium_ipc::work::WorkEnvironmentChangedV1);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct NoteOpenRequested {
+    profile: String,
+    id: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+enum ResourceChangeKind {
+    Task,
+    TaskList,
+    Object,
+    Media,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct DownloadsChanged {
+    profile: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ResourceChanged {
     profile: String,
+    kind: ResourceChangeKind,
     id: String,
     revision: String,
 }
@@ -1373,6 +1406,9 @@ struct ItemsChanged(zephium_ipc::ItemsState);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct TabChanged(zephium_ipc::TabView);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct FaviconsChanged(zephium_ipc::FaviconsView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ExtensionActionsChanged(zephium_ipc::ExtensionActionsView);
@@ -1614,7 +1650,6 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_decision::work_set_decision_preference,
             tabs_bootstrap,
             tabs_open,
-            tabs_open_url,
             tabs_activate,
             tabs_close,
             tabs_set_essential,
@@ -1664,11 +1699,20 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tab_menu_popup,
             profile_menu_popup,
             sidebar_menu_popup,
+            tools_menu_popup,
+            newtab_search_context,
+            newtab_search,
+            newtab_run,
+            newtab_cancel,
             launcher_search,
             launcher_run,
             sidebar_set_width,
             tab_drag_over,
             resource_call,
+            notes::note_call,
+            history_call,
+            download_call,
+            browser_open_url,
             resource_close_ready,
             tab_drop,
             divider_grab,
@@ -1681,7 +1725,11 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             WorkHumanChanged,
             WorkDecisionPreferenceChanged,
             ItemsChanged,
+            FaviconsChanged,
             ResourceChanged,
+            notes::NotesChanged,
+            DownloadsChanged,
+            NoteOpenRequested,
             TabChanged,
             ExtensionActionsChanged,
             ExtensionActionFailed,
@@ -1860,14 +1908,10 @@ fn try_emit_to_privileged<T: Serialize>(
     true
 }
 
-pub(crate) fn emit_resource_changed(
-    app: &tauri::AppHandle,
-    profile: &str,
-    id: &str,
-    revision: &str,
-) {
+pub(crate) fn emit_media_changed(app: &tauri::AppHandle, profile: &str, id: &str, revision: &str) {
     let event = ResourceChanged {
         profile: profile.to_owned(),
+        kind: ResourceChangeKind::Media,
         id: id.to_owned(),
         revision: revision.to_owned(),
     };
@@ -2233,6 +2277,7 @@ fn search_action_in_bounds(action: &zephium_ipc::SearchAction) -> bool {
     use zephium_ipc::SearchAction;
 
     match action {
+        SearchAction::OpenNote { id } => zephium_core::resources::valid_id(id),
         SearchAction::ActivateTab { id } => bounded(id, MAX_ITEM_ID_BYTES),
         SearchAction::OpenUrl { url } => bounded(url, MAX_NAVIGATION_INPUT_BYTES),
         // The launcher may only run registry commands. Context-menu actions
@@ -2410,21 +2455,6 @@ fn tabs_open(caller: WebviewWindow, shell: State<'_, Handle>) -> zephium_ipc::Op
         return rejected_operation();
     }
     dispatch_operation(caller.app_handle(), &shell, Command::Open)
-}
-
-/// Explicit trusted user navigation. A citation alone never calls this command
-/// or allocates a Work browser resource.
-#[tauri::command]
-#[specta::specta]
-fn tabs_open_url(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-    url: String,
-) -> zephium_ipc::OperationAdmission {
-    if !authorize(&caller, CallerPolicy::Main, "tabs_open_url") || !trusted_web_url(&url) {
-        return rejected_operation();
-    }
-    dispatch_operation(caller.app_handle(), &shell, Command::OpenUrl(url))
 }
 
 #[tauri::command]
@@ -3436,6 +3466,14 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             _ => rejected_operation(),
         };
     }
+    // Capture belongs to the frame, which decides where the new note opens.
+    if id == "note.new" {
+        return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
     if matches!(
         id,
         "tool.notes"
@@ -3475,6 +3513,8 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             "settings" => Some(zephium_app::BrowserPage::Settings),
             "history" => Some(zephium_app::BrowserPage::History),
             "downloads" => Some(zephium_app::BrowserPage::Downloads),
+            "tasks" => Some(zephium_app::BrowserPage::Tasks),
+            "notes" => Some(zephium_app::BrowserPage::Notes),
             "return" => None,
             _ => return rejected_operation(),
         };
@@ -3589,6 +3629,121 @@ fn run_command(
     execute_command(&app, &id)
 }
 
+/// New Tab has its own main-only entry. The actor revalidates the bound blank
+/// tab and focused profile/space before searching or executing any result.
+#[tauri::command]
+#[specta::specta]
+fn newtab_search_context(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    tab_id: String,
+) -> Option<zephium_ipc::SearchContext> {
+    if !authorize(&caller, CallerPolicy::Main, "newtab_search_context")
+        || ItemId::parse(&tab_id).is_none()
+    {
+        return None;
+    }
+    let state = app.try_state::<overlay::Overlay>()?.snapshot();
+    static NEXT_SEARCH_SESSION: AtomicU64 = AtomicU64::new(1);
+    let session = NEXT_SEARCH_SESSION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .ok()?;
+    Some(zephium_ipc::SearchContext {
+        window_id: state.window_id?,
+        profile_id: state.profile_id?,
+        space_id: state.space_id?,
+        session_id: format!("newtab:{tab_id}:{session}"),
+        request_id: String::new(),
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+fn newtab_search(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    shell: State<'_, Handle>,
+    query: String,
+    context: zephium_ipc::SearchContext,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "newtab_search")
+        || !bounded(&query, MAX_LAUNCHER_QUERY_BYTES)
+        || !newtab_context_valid(&context)
+    {
+        return false;
+    }
+    let accepted = shell.dispatch(Command::SearchScoped {
+        query: query.clone(),
+        context: Box::new(context.clone()),
+    });
+    if accepted {
+        search_providers::schedule(caller, app, shell.inner().clone(), query, context);
+    }
+    accepted
+}
+
+fn newtab_context_valid(context: &zephium_ipc::SearchContext) -> bool {
+    context
+        .session_id
+        .strip_prefix("newtab:")
+        .and_then(|value| value.split_once(':'))
+        .filter(|(_, nonce)| {
+            !nonce.is_empty()
+                && nonce.len() <= 20
+                && nonce.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .and_then(|(id, _)| ItemId::parse(id))
+        .is_some()
+        && bounded(&context.request_id, 64)
+        && !context.request_id.is_empty()
+        && bounded(&context.window_id, 64)
+        && bounded(&context.profile_id, 64)
+        && bounded(&context.space_id, 64)
+}
+
+#[tauri::command]
+#[specta::specta]
+fn newtab_cancel(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    context: zephium_ipc::SearchContext,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "newtab_cancel") || !newtab_context_valid(&context) {
+        return false;
+    }
+    search_providers::cancel(&context.session_id);
+    shell.dispatch(Command::CancelSearch {
+        session_id: context.session_id,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+fn newtab_run(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    shell: State<'_, Handle>,
+    action: zephium_ipc::SearchAction,
+    context: zephium_ipc::SearchContext,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "newtab_run")
+        || !newtab_context_valid(&context)
+        || !search_action_in_bounds(&action)
+    {
+        return rejected_operation();
+    }
+    dispatch_operation(
+        &app,
+        &shell,
+        Command::RunSearchAction {
+            context: Box::new(context),
+            action,
+        },
+    )
+}
+
 #[tauri::command]
 #[specta::specta]
 fn launcher_search(
@@ -3609,10 +3764,14 @@ fn launcher_search(
     else {
         return false;
     };
-    shell.dispatch(Command::SearchScoped {
-        query,
-        context: Box::new(context),
-    })
+    let accepted = shell.dispatch(Command::SearchScoped {
+        query: query.clone(),
+        context: Box::new(context.clone()),
+    });
+    if accepted {
+        search_providers::schedule(caller, app, shell.inner().clone(), query, context);
+    }
+    accepted
 }
 
 #[tauri::command]
@@ -3818,13 +3977,28 @@ async fn resource_call(
         call: Arc::new(call),
         done: zephium_app::ResourceCompletion::new(move |reply| {
             let _permit = permit;
-            if let (Some(profile), ResourceResponse::Applied { record, .. }) =
-                (&reply.profile, &reply.response)
-            {
+            let changed = match &reply.response {
+                ResourceResponse::Applied { record, .. } => {
+                    use zephium_core::resources::ResourceKind;
+                    match record.draft.kind() {
+                        ResourceKind::Task => Some(ResourceChangeKind::Task),
+                        ResourceKind::Object => Some(ResourceChangeKind::Object),
+                        ResourceKind::Media => Some(ResourceChangeKind::Media),
+                        ResourceKind::Note => None,
+                    }
+                    .map(|kind| (kind, &record.id, &record.revision))
+                }
+                ResourceResponse::TaskListApplied { list, .. } => {
+                    Some((ResourceChangeKind::TaskList, &list.id, &list.revision))
+                }
+                _ => None,
+            };
+            if let (Some(profile), Some((kind, id, revision))) = (&reply.profile, changed) {
                 let event = ResourceChanged {
                     profile: profile.clone(),
-                    id: record.id.clone(),
-                    revision: record.revision.clone(),
+                    kind,
+                    id: id.clone(),
+                    revision: revision.clone(),
                 };
                 for label in [MAIN_LABEL, overlay::PANEL_LABEL] {
                     emit_to_privileged(&app, label, "zephium:resource-changed", &event);
@@ -3838,6 +4012,124 @@ async fn resource_call(
     match tokio::time::timeout(std::time::Duration::from_secs(8), receive).await {
         Ok(Ok(reply)) => reply,
         _ => failed(ResourceError::OutcomeUnknown),
+    }
+}
+
+/// Opens an address in the focused window. The launcher panel and the history
+/// surfaces have no tab id to navigate, and must not be given one.
+#[tauri::command]
+#[specta::specta]
+fn browser_open_url(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    url: String,
+    new_tab: bool,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Both, "browser_open_url")
+        || !bounded(&url, MAX_NAVIGATION_INPUT_BYTES)
+        || !zephium_core::navigation::is_allowed_str(&url)
+    {
+        return rejected_operation();
+    }
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::OpenUrl {
+            input: url,
+            new_tab,
+        },
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn download_call(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    call: zephium_core::downloads::DownloadCall,
+) -> zephium_core::downloads::DownloadResponse {
+    use zephium_core::downloads::{DownloadCompletion, DownloadError, DownloadResponse};
+    let failed = |error| DownloadResponse::Error { error };
+    if !authorize(&caller, CallerPolicy::Both, "download_call") || shutdown_started(&app) {
+        return failed(DownloadError::Unavailable);
+    }
+    if !call.validate() {
+        return failed(DownloadError::Invalid);
+    }
+    let Some(profile) =
+        ProfileId::parse(&expected_profile).filter(|id| id.to_string() == expected_profile)
+    else {
+        return failed(DownloadError::Invalid);
+    };
+    static ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+    let Ok(permit) = ADMISSION.try_acquire() else {
+        return failed(DownloadError::Capacity);
+    };
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let interactive = matches!(call, zephium_core::downloads::DownloadCall::ChooseDirectory);
+    let shell = app.state::<Handle>().inner().clone();
+    if !shell.dispatch(Command::DownloadCall {
+        expected_profile: profile,
+        call: Box::new(call),
+        done: DownloadCompletion::new(move |response| {
+            let _permit = permit;
+            let _ = send.send(response);
+        }),
+    }) {
+        return failed(DownloadError::Unavailable);
+    }
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(if interactive { 24 * 60 * 60 } else { 15 }),
+        receive,
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        _ => failed(DownloadError::Unavailable),
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn history_call(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    call: zephium_ipc::HistoryCall,
+) -> zephium_ipc::HistoryResponse {
+    use zephium_ipc::{HistoryError, HistoryResponse};
+    let failed = |error| HistoryResponse::Error { error };
+    if !authorize(&caller, CallerPolicy::Both, "history_call") || shutdown_started(&app) {
+        return failed(HistoryError::Unavailable);
+    }
+    if !call.validate() {
+        return failed(HistoryError::Invalid);
+    }
+    let Some(expected_profile) =
+        ProfileId::parse(&expected_profile).filter(|id| id.to_string() == expected_profile)
+    else {
+        return failed(HistoryError::Invalid);
+    };
+    let shell = app.state::<Handle>().inner().clone();
+    static HISTORY_ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+    let Ok(permit) = HISTORY_ADMISSION.try_acquire() else {
+        return failed(HistoryError::Capacity);
+    };
+    let (send, receive) = tokio::sync::oneshot::channel();
+    if !shell.dispatch(Command::HistoryCall {
+        expected_profile,
+        call: Box::new(call),
+        done: zephium_app::HistoryCompletion::new(move |response| {
+            let _permit = permit;
+            let _ = send.send(response);
+        }),
+    }) {
+        return failed(HistoryError::Unavailable);
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(8), receive).await {
+        Ok(Ok(response)) => response,
+        _ => failed(HistoryError::Unavailable),
     }
 }
 
@@ -3866,6 +4158,11 @@ fn setting_set(
         return rejected_operation();
     }
     if shutdown_started(&app) {
+        return rejected_operation();
+    }
+    #[cfg(feature = "file-workflows-qa")]
+    if key == "__files_qa_diagnostic" && value.len() <= 4096 {
+        eprintln!("files-qa: {value}");
         return rejected_operation();
     }
     if SETTING_KEYS.contains(&key.as_str()) && setting_value_allowed(&key, &value) {
@@ -4001,6 +4298,36 @@ fn profile_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f
 
 #[tauri::command]
 #[specta::specta]
+fn tools_menu_popup(caller: WebviewWindow, app: tauri::AppHandle, x: f64, y: f64) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "tools_menu_popup") {
+        return false;
+    }
+    let Ok(inner_size) = caller.inner_size() else {
+        return false;
+    };
+    let Ok(scale_factor) = caller.scale_factor() else {
+        return false;
+    };
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return false;
+    }
+    let Some(anchor) = menu_popup_anchor(
+        x,
+        y,
+        f64::from(inner_size.width) / scale_factor,
+        f64::from(inner_size.height) / scale_factor,
+    ) else {
+        return false;
+    };
+    let keymap = load_keymap();
+    let Ok(menu) = build_tools_menu(&app, &keymap) else {
+        return false;
+    };
+    caller.popup_menu_at(&menu, anchor).is_ok()
+}
+
+#[tauri::command]
+#[specta::specta]
 fn panel_hide(caller: WebviewWindow, app: tauri::AppHandle) {
     if !authorize(&caller, CallerPolicy::Panel, "panel_hide") {
         return;
@@ -4042,13 +4369,13 @@ fn panel_drag(caller: WebviewWindow) -> bool {
 
 #[tauri::command]
 #[specta::specta]
-fn sidebar_set_width(caller: WebviewWindow, shell: State<'_, Handle>, width: f64) {
+fn sidebar_set_width(caller: WebviewWindow, shell: State<'_, Handle>, width: f64, animate: bool) {
     if !authorize(&caller, CallerPolicy::Main, "sidebar_set_width")
         || !sidebar_width_in_bounds(width)
     {
         return;
     }
-    shell.dispatch(Command::SetSidebarWidth(width));
+    shell.dispatch(Command::SetSidebarWidth(width, animate));
 }
 
 #[tauri::command]
@@ -4211,6 +4538,12 @@ fn build_menu(
         .build()?;
     let file = SubmenuBuilder::new(handle, "File")
         .item(&item("tab.new")?)
+        .item(
+            &MenuItemBuilder::with_id("note.new", "New Note")
+                .accelerator("CmdOrCtrl+Alt+N")
+                .build(handle)?,
+        )
+        .separator()
         .item(&item("tab.close")?)
         .build()?;
     // Standard Edit selectors keep Cmd+C/V/X working inside every webview.
@@ -4243,6 +4576,13 @@ fn build_menu(
     let history = SubmenuBuilder::new(handle, "History")
         .item(&item("nav.back")?)
         .item(&item("nav.forward")?)
+        .separator()
+        .item(&item("tab.reopen")?)
+        .item(
+            &MenuItemBuilder::with_id("browser.history", "Show All History")
+                .accelerator("CmdOrCtrl+Y")
+                .build(handle)?,
+        )
         .build()?;
     let window = SubmenuBuilder::new(handle, "Window")
         .minimize()
@@ -4383,6 +4723,37 @@ fn build_tab_menu(
 }
 
 /// Identity and browser destinations use a native menu at every sidebar width.
+fn build_tools_menu(
+    handle: &tauri::AppHandle,
+    _overrides: &std::collections::HashMap<String, String>,
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
+    let notes = MenuItemBuilder::with_id("tool.notes", "Notes").build(handle)?;
+    let tasks = MenuItemBuilder::with_id("tool.tasks", "Tasks").build(handle)?;
+    let activity = MenuItemBuilder::with_id("tool.time", "Activity").build(handle)?;
+    let ai = MenuItemBuilder::with_id("tool.ai", "Ask").build(handle)?;
+    let first = PredefinedMenuItem::separator(handle)?;
+    let history = MenuItemBuilder::with_id("tool.history", "History").build(handle)?;
+    let downloads = MenuItemBuilder::with_id("tool.downloads", "Downloads").build(handle)?;
+    let second = PredefinedMenuItem::separator(handle)?;
+    // The panel is the quick way in; the full destination is its own entry, the
+    // same shape as Show All History.
+    let all_tasks = MenuItemBuilder::with_id("browser.tasks", "Show All Tasks")
+        .accelerator("CmdOrCtrl+Shift+T")
+        .build(handle)?;
+    let all_notes = MenuItemBuilder::with_id("browser.notes", "Show All Notes").build(handle)?;
+    let settings = MenuItemBuilder::with_id("browser.settings", "Settings…")
+        .accelerator("CmdOrCtrl+,")
+        .build(handle)?;
+    Menu::with_items(
+        handle,
+        &[
+            &notes, &tasks, &activity, &ai, &first, &history, &downloads, &second, &all_notes,
+            &all_tasks, &settings,
+        ],
+    )
+}
+
 fn build_profile_menu(
     handle: &tauri::AppHandle,
     _overrides: &std::collections::HashMap<String, String>,
@@ -4734,6 +5105,17 @@ pub fn run() {
                 .additional_browser_args(PRIVILEGED_WEBVIEW2_BROWSER_ARGS);
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             let main_builder = main_builder.on_download(|_, _| false);
+            #[cfg(feature = "file-workflows-qa")]
+            let main_builder = main_builder.initialization_script(r#"
+              (() => {
+                const report = value => {
+                  try { window.__TAURI_INTERNALS__.invoke('setting_set', {key:'__files_qa_diagnostic',value:String(value).slice(0,4096)}).catch(()=>{}); } catch {}
+                };
+                window.addEventListener('error', event => report(`error: ${event.message || event.target?.src || event.target?.href || 'resource'} ${event.filename || ''}:${event.lineno || ''}`), true);
+                window.addEventListener('unhandledrejection', event => report(`rejection: ${event.reason?.stack || event.reason?.message || event.reason}`));
+                window.addEventListener('DOMContentLoaded', () => report('document ready'));
+              })();
+            "#);
             let ui_startup_gate = UiStartupGate::new(app_url.clone());
             app.manage(ui_startup_gate.clone());
             let page_gate = ui_startup_gate.clone();
@@ -4894,6 +5276,13 @@ pub fn run() {
                     request_unrecoverable_native_failure(&terminal_failure_app, reason);
                 },
             )?);
+            let downloads_app = handle.clone();
+            if !engine.initialize_downloads(store.clone(), move |profile| {
+                let event = DownloadsChanged { profile: profile.to_string() };
+                for label in [MAIN_LABEL, overlay::PANEL_LABEL] {
+                    emit_to_privileged(&downloads_app, label, "zephium:downloads-changed", &event);
+                }
+            }) { return Err(std::io::Error::other("download service initialization was not admitted").into()); }
             let startup_engine = app.try_state::<StartupEngine>().ok_or_else(|| {
                 std::io::Error::other("startup engine cleanup owner is unavailable")
             })?;
@@ -4985,6 +5374,15 @@ pub fn run() {
                 Projection::Tab(tab) => {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_TAB, &tab)
                 }
+                Projection::Favicons(favicons) => emit_to_privileged(
+                    &emit_handle,
+                    match favicons.surface {
+                        zephium_ipc::IconSurface::Chrome => MAIN_LABEL,
+                        zephium_ipc::IconSurface::Panel => overlay::PANEL_LABEL,
+                    },
+                    EVENT_FAVICONS,
+                    &favicons,
+                ),
                 Projection::ExtensionActions(actions) => emit_to_privileged(
                     &emit_handle,
                     MAIN_LABEL,
@@ -5034,6 +5432,7 @@ pub fn run() {
                     &prompt,
                 ),
                 Projection::UiCommand(id) => {
+                    if id.starts_with("preference.search.") { search_providers::cancel_all(); }
                     if let Some(value)=id.strip_prefix("preference.tools.presentation=") {
                         if let Some(panel)=emit_handle.try_state::<overlay::Overlay>() {panel.preference(value=="floating");}
                     }
@@ -5044,8 +5443,9 @@ pub fn run() {
                     }
                     emit_ui_command(&emit_handle, &id);
                 }
+                Projection::OpenNote { profile, id } => emit_to_privileged(&emit_handle, MAIN_LABEL, "zephium:note-open-requested", &NoteOpenRequested { profile, id }),
                 Projection::Search(results) => {
-                    emit_to_privileged(&emit_handle, overlay::PANEL_LABEL, EVENT_SEARCH, &results)
+                    emit_to_privileged(&emit_handle, if results.context.as_ref().is_some_and(|context| context.session_id.starts_with("newtab:")) { MAIN_LABEL } else { overlay::PANEL_LABEL }, EVENT_SEARCH, &results)
                 }
                 Projection::Layout(layout) => {
                     if let Some(menu) = emit_handle.try_state::<WorkPaneMenu>() {
@@ -5228,6 +5628,7 @@ pub fn run() {
                 );
                 return Err(error.into());
             }
+            notes::install(app.handle(), &data_dir, store.clone(), &shell);
             #[cfg(feature = "macos-work")]
             if !work::install(app.handle(), engine.clone(), store.clone()) {
                 let error = std::io::Error::other("Work composition owner is already installed");
@@ -6134,14 +6535,15 @@ mod tests {
     #[test]
     fn svelte_sidebar_routes_add_and_split_selection_through_trusted_native_state() {
         let sidebar = crate::frame_sources::SRC_APP_SHELL_SVELTE;
-        let footer = crate::frame_sources::SRC_FEATURES_SIDEBAR_FOOTER_SIDEBARFOOTER_SVELTE;
+        let shelf = crate::frame_sources::SRC_FEATURES_DOCK_TOOLSHELF_SVELTE;
 
-        // The avatar is the single native menu entry point at either width.
-        // Its actions still return through the trusted command dispatcher.
-        assert!(footer.contains(r#"aria-haspopup="menu""#));
-        assert!(footer.contains("profileMenuPopup"));
-        assert!(!footer.contains("tabs.split("));
-        assert!(!footer.contains("addMenuPopup"));
+        // The tool shelf opens its own tool menu and keeps the native menu on
+        // its secondary click. Neither route mutates tabs from the frame.
+        assert!(shelf.contains("<Disclosure"));
+        assert!(shelf.contains("oncontextmenu={nativeMenu}"));
+        assert!(shelf.contains("toolsMenuPopup"));
+        assert!(!shelf.contains("tabs.split("));
+        assert!(!shelf.contains("addMenuPopup"));
         let native_menu = include_str!("lib.rs")
             .split("fn build_profile_menu(")
             .nth(1)
@@ -6157,9 +6559,26 @@ mod tests {
     }
 
     #[test]
+    fn privileged_html_does_not_add_style_nonces_that_disable_runtime_style_restoration() {
+        for html in [
+            crate::frame_sources::INDEX_HTML,
+            crate::frame_sources::PANEL_HTML,
+        ] {
+            assert!(!html.to_ascii_lowercase().contains("<style"),
+                "Tauri adds nonces to inline style blocks; this disables the configured unsafe-inline and can strand dropdown pointer locks");
+        }
+        for css in [
+            include_str!("../../frame/src/styles/global.css"),
+            include_str!("../../frame/src/styles/panel.css"),
+        ] {
+            assert!(css.starts_with("@import \"./axes/bootstrap.css\";"));
+        }
+    }
+
+    #[test]
     fn bootstrap_paint_matches_the_canvas_token() {
         let tokens = crate::frame_sources::SRC_STYLES_TOKENS_CSS;
-        let bootstrap = crate::frame_sources::INDEX_HTML;
+        let bootstrap = crate::frame_sources::SRC_BOOTSTRAP_CSS;
 
         let canvas = |block: &str| -> String {
             let rest = &tokens[tokens.find(block).expect("theme block")..];
@@ -6180,9 +6599,13 @@ mod tests {
     }
 
     #[test]
-    fn runtime_advisory_listener_precedes_bootstrap_and_stays_in_the_sidebar() {
+    fn runtime_advisory_listener_precedes_bootstrap() {
+        // The advisories have no chrome surface at present: the notification
+        // dialog left with the sidebar footer and their next home is not
+        // decided. The projection ordering it depended on is still a native
+        // contract, because runtime status shares the actor-ordered bootstrap
+        // that supplies tabs.
         let app = crate::frame_sources::SRC_APP_APP_SVELTE;
-        let footer = crate::frame_sources::SRC_FEATURES_SIDEBAR_FOOTER_SIDEBARFOOTER_SVELTE;
         let runtime_listener = app
             .find("const runtimeReady = runtime.init()")
             .expect("runtime projection listener");
@@ -6191,15 +6614,6 @@ mod tests {
             .expect("tab bootstrap");
 
         assert!(runtime_listener < tab_bootstrap);
-        assert!(footer.contains("runtimeNotifications(runtime.status())"));
-        assert!(footer.contains(r#"haspopup="dialog""#));
-        assert!(footer.contains(r#"id="runtime-notifications""#));
-        assert!(footer.contains(r#"aria-modal="true""#));
-        assert!(footer.contains(r#"event.key === "Tab""#));
-        assert!(footer.contains("closeNotifications(true)"));
-        assert!(footer.contains("profileMenuPopup"));
-        assert!(!footer.contains("http://"));
-        assert!(!footer.contains("https://"));
     }
 
     #[test]

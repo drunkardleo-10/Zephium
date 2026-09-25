@@ -1,1 +1,1 @@
-export { default as LibraryPage } from "./components/LibraryPage.svelte";
+export const loadLibraryPage = () => import("./components/LibraryPage.svelte");

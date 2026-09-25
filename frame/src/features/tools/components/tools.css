@@ -26,15 +26,6 @@
   letter-spacing: -0.015em;
 }
 
-.tool-owner {
-  font-size: 11px;
-  color: var(--color-label-secondary);
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .shared-tool-controls {
   display: grid;
   gap: 12px;
@@ -46,7 +37,7 @@
   align-items: center;
   gap: 8px;
   background: var(--color-fill);
-  border-radius: 8px;
+  border-radius: var(--radius-row);
   padding: 9px 10px;
   color: var(--color-label-secondary);
 }
@@ -69,6 +60,14 @@
   padding: 16px;
 }
 
+/* The view owns the scroller. Give it the height instead of a second one. */
+.shared-tool-content-hosted {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
 .shared-tool-empty {
   min-height: 200px;
   height: 100%;
@@ -86,7 +85,7 @@
   place-items: center;
   width: 56px;
   height: 56px;
-  border-radius: 16px;
+  border-radius: var(--radius-card);
   background: var(--color-fill);
   margin-bottom: 20px;
   color: var(--color-label-secondary);
@@ -130,7 +129,7 @@
   padding: 14px 14px 38px;
   background: var(--color-fill);
   border: 1px solid var(--color-border);
-  border-radius: 12px;
+  border-radius: var(--radius-control);
 }
 
 .shared-tool-composer textarea {
@@ -182,4 +181,11 @@
 
 .shared-tool[data-host="floating"] .shared-tool-controls {
   padding-top: 16px;
+}
+
+.shared-tool-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  color: var(--color-muted);
 }

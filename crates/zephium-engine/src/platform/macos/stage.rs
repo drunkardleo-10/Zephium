@@ -5,10 +5,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use dispatch2::{DispatchQueue, MainThreadBound};
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly, Message};
 use objc2_app_kit::{NSColor, NSEvent, NSView};
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+use objc2_foundation::{ns_string, MainThreadMarker, NSNumber, NSPoint, NSRect, NSSize, NSValue};
+use objc2_quartz_core::{
+    kCAFillModeForwards, CABasicAnimation, CAMediaTiming, CAMediaTimingFunction, CATransaction,
+};
 
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
@@ -63,6 +66,11 @@ pub struct StageIvars {
     indicator: RefCell<Option<Retained<NSView>>>,
     on_ratio: RefCell<Option<RatioCallback>>,
     on_stage_failure: RefCell<Option<StageFailureCallback>>,
+    /// A slide that keeps the wider, older frame until it arrives, and the
+    /// frame it then takes. The generation retires a completion whose slide
+    /// a newer layout has already settled.
+    held_frame: Cell<Option<NSRect>>,
+    motion_generation: Cell<u64>,
 }
 
 define_class!(
@@ -214,6 +222,119 @@ impl ContentStage {
         this
     }
 
+    /// Whether a slide to `frame` can be carried out on the layer: the stage
+    /// is on screen and only its horizontal extent changes.
+    pub fn can_slide_to(&self, frame: NSRect) -> bool {
+        let current = self.motion_target();
+        !self.isHidden()
+            && current.size.width > 0.0
+            && current.origin.y == frame.origin.y
+            && current.size.height == frame.size.height
+            && current.origin.x != frame.origin.x
+    }
+
+    /// The frame the stage is at, or is travelling to.
+    pub fn motion_target(&self) -> NSRect {
+        self.ivars()
+            .held_frame
+            .get()
+            .unwrap_or_else(|| self.frame())
+    }
+
+    /// Moves the stage to `frame` as one journey. The stage keeps whichever
+    /// of the two frames is wider for the whole of it — the new one at once
+    /// when the content grows, the old one until arrival when it shrinks —
+    /// so its pages are laid out at most once and no edge ever opens a gap.
+    /// Only the layer's translation animates, which the compositor carries
+    /// without asking any page to draw again.
+    pub fn slide_to(&self, frame: NSRect) {
+        self.settle_motion();
+        let current = self.frame();
+        let Some(layer) = self.layer() else {
+            self.setFrame(frame);
+            return;
+        };
+        let generation = self.ivars().motion_generation.get().wrapping_add(1);
+        self.ivars().motion_generation.set(generation);
+        let (from, to) = if frame.size.width >= current.size.width {
+            self.setFrame(frame);
+            (current.origin.x - frame.origin.x, 0.0)
+        } else {
+            self.ivars().held_frame.set(Some(frame));
+            (0.0, frame.origin.x - current.origin.x)
+        };
+        let animation = translation(from, to, SLIDE_SECONDS);
+        let stage = Weak::from_retained(&self.retain());
+        let arrived = block2::RcBlock::new(move || {
+            if let Some(stage) = stage.load() {
+                if stage.ivars().motion_generation.get() == generation {
+                    stage.settle_motion();
+                }
+            }
+        });
+        CATransaction::begin();
+        // SAFETY: the block holds the stage weakly and runs on the main thread.
+        unsafe { CATransaction::setCompletionBlock(Some(&arrived)) };
+        layer.addAnimation_forKey(&animation, Some(ns_string!("zephium.slide")));
+        CATransaction::commit();
+    }
+
+    /// Brings the stage back into view after a browser page covered it: it
+    /// settles in from a breath smaller and fully transparent, the way a
+    /// browser page arrives in chrome.
+    pub fn arrive(&self) {
+        let Some(layer) = self.layer() else {
+            return;
+        };
+        let bounds = self.bounds();
+        let centre = (bounds.size.width / 2.0, bounds.size.height / 2.0);
+        let fade = CABasicAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
+        let scale = CABasicAnimation::animationWithKeyPath(Some(ns_string!("transform.scale")));
+        // Scaling about the layer's origin corner, shifted by exactly the
+        // amount that makes it a scale about the centre.
+        let shift =
+            CABasicAnimation::animationWithKeyPath(Some(ns_string!("transform.translation")));
+        // SAFETY: NSNumber and NSValue are the value types these key paths take.
+        unsafe {
+            fade.setFromValue(Some(&NSNumber::new_f64(0.0)));
+            fade.setToValue(Some(&NSNumber::new_f64(1.0)));
+            scale.setFromValue(Some(&NSNumber::new_f64(ARRIVE_SCALE)));
+            scale.setToValue(Some(&NSNumber::new_f64(1.0)));
+            shift.setFromValue(Some(&NSValue::valueWithSize(NSSize::new(
+                centre.0 * (1.0 - ARRIVE_SCALE),
+                centre.1 * (1.0 - ARRIVE_SCALE),
+            ))));
+            shift.setToValue(Some(&NSValue::valueWithSize(NSSize::new(0.0, 0.0))));
+        }
+        fade.setDuration(ARRIVE_SECONDS * 0.7);
+        fade.setTimingFunction(Some(&ease_out()));
+        for animation in [&scale, &shift] {
+            animation.setDuration(ARRIVE_SECONDS);
+            animation.setTimingFunction(Some(&emphasized()));
+        }
+        layer.addAnimation_forKey(&fade, Some(ns_string!("zephium.arrive.fade")));
+        layer.addAnimation_forKey(&scale, Some(ns_string!("zephium.arrive.scale")));
+        layer.addAnimation_forKey(&shift, Some(ns_string!("zephium.arrive.shift")));
+    }
+
+    /// Ends any journey at once: the held frame is taken and the layer's
+    /// motion removed in the same transaction, so nothing is seen to jump.
+    pub fn settle_motion(&self) {
+        self.ivars()
+            .motion_generation
+            .set(self.ivars().motion_generation.get().wrapping_add(1));
+        let held = self.ivars().held_frame.take();
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        if let Some(frame) = held {
+            self.setFrame(frame);
+        }
+        if let Some(layer) = self.layer() {
+            layer.removeAnimationForKey(ns_string!("zephium.slide"));
+        }
+        CATransaction::commit();
+    }
+
     /// Reserve authority for one host layout before performing any AppKit
     /// calls. A nested layout increments this epoch and permanently prevents
     /// the older stack frame from revealing the stage container afterward.
@@ -355,6 +476,12 @@ impl ContentStage {
     /// A view can be constructed after that layout task ran, so creation uses
     /// this retained model to attach the late native child without waiting for
     /// another resize or user interaction.
+    pub fn allows_download_decision(&self, id: ItemId) -> bool {
+        !self.ivars().stage_retry_terminal.get()
+            && self.ivars().desired_container_visible.get()
+            && self.contains_item(id)
+    }
+
     pub fn contains_item(&self, id: ItemId) -> bool {
         self.ivars()
             .tree
@@ -1012,6 +1139,38 @@ fn same_rect(left: NSRect, right: NSRect) -> bool {
         && left.origin.y == right.origin.y
         && left.size.width == right.size.width
         && left.size.height == right.size.height
+}
+
+/// The chrome's --motion-page and --ease-emphasized, so the page and the
+/// sidebar beside it travel as one surface.
+const SLIDE_SECONDS: f64 = 0.4;
+const ARRIVE_SECONDS: f64 = 0.4;
+const ARRIVE_SCALE: f64 = 0.985;
+
+fn emphasized() -> Retained<CAMediaTimingFunction> {
+    CAMediaTimingFunction::functionWithControlPoints(0.16, 1.0, 0.3, 1.0)
+}
+
+fn ease_out() -> Retained<CAMediaTimingFunction> {
+    CAMediaTimingFunction::functionWithControlPoints(0.22, 1.0, 0.36, 1.0)
+}
+
+/// A horizontal move added to the layer's resting position, held at its end
+/// until the stage settles.
+fn translation(from: f64, to: f64, seconds: f64) -> Retained<CABasicAnimation> {
+    let animation =
+        CABasicAnimation::animationWithKeyPath(Some(ns_string!("transform.translation.x")));
+    // SAFETY: NSNumber is the value type a scalar key path takes.
+    unsafe {
+        animation.setFromValue(Some(&NSNumber::new_f64(from)));
+        animation.setToValue(Some(&NSNumber::new_f64(to)));
+        animation.setFillMode(kCAFillModeForwards);
+    }
+    animation.setAdditive(true);
+    animation.setRemovedOnCompletion(false);
+    animation.setDuration(seconds);
+    animation.setTimingFunction(Some(&emphasized()));
+    animation
 }
 
 #[cfg(test)]

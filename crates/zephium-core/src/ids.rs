@@ -69,6 +69,7 @@ macro_rules! ulid_id {
     };
 }
 
+ulid_id!(DownloadId);
 ulid_id!(ItemId);
 ulid_id!(SpaceId);
 ulid_id!(ProfileId);

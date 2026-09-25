@@ -61,6 +61,19 @@ mod macos {
     }
     thread_local! { static OBSERVERS: RefCell<HashMap<String, Observer>> = RefCell::new(HashMap::new()); }
 
+    /// Keyed to the canvas rung of the tonal ladder, at roughly a tenth. Held
+    /// deliberately light: the tint only has to stop the glass taking a colour
+    /// cast from the wallpaper, and past that it trades the lensing that makes
+    /// the material worth having for flat grey. Resolved per appearance
+    /// because a tint that works on a dark ground inverts on a light one.
+    fn glass_tint(window: &WebviewWindow) -> window_vibrancy::Color {
+        if matches!(window.theme(), Ok(tauri::Theme::Light)) {
+            (241, 241, 243, 24)
+        } else {
+            (26, 26, 29, 24)
+        }
+    }
+
     pub fn current(label: &str) -> Material {
         INSTALLED
             .lock()
@@ -84,6 +97,11 @@ mod macos {
         // Clear before reapplying: the upstream glass API inserts a new view.
         let _ = clear_liquid_glass(window);
         let _ = clear_vibrancy(window);
+        // The window's own tint belongs here rather than in CSS. A wash drawn
+        // by the web layer only covers the rectangle the web layer occupies,
+        // which stops short of the window's padding and reads as a plate laid
+        // on the glass; setting it on the effect view tints the whole window.
+        let tint = glass_tint(window);
         let material = select_material(
             workspace.accessibilityDisplayShouldReduceTransparency(),
             || {
@@ -91,7 +109,8 @@ mod macos {
                     window,
                     LiquidGlassOptions::new(NSGlassEffectViewStyle::Regular)
                         .radius(radius)
-                        .opaque(false),
+                        .opaque(false)
+                        .tint_color(tint),
                 )
                 .is_ok()
             },

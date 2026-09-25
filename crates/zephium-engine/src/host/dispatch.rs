@@ -370,12 +370,19 @@ const NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY: usize =
         - NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY;
 static PENDING_OVERFLOW_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(4);
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "startup injects distinct native ownership and terminal-failure capabilities"
+)]
 pub(crate) fn install(
     #[cfg(any(target_os = "macos", target_os = "windows"))] parent: RawWindowHandle,
     data_root: PathBuf,
     initial_user_content_generation: UserContentGeneration,
     initial_user_content: UserContent,
     extension_runtime_gate: super::extension_runtime::ExtensionRuntimeFactoryGate,
+    #[cfg(any(target_os = "macos", target_os = "windows"))] native_open_authority: Arc<
+        crate::NativeOpenAuthority,
+    >,
     sink: crate::EngineEventIngressSink,
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
 ) -> Result<(), String> {
@@ -490,6 +497,10 @@ pub(crate) fn install(
             extension_browser_surfaces: HashMap::new(),
             #[cfg(target_os = "macos")]
             page_permissions: super::page_permissions::PagePermissionBroker::default(),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            downloads: None,
+            #[cfg(any(target_os="macos",target_os="windows"))]
+            native_open_authority,
             native_resource_accounting_failed: false,
             navigation_snapshots: HashMap::new(),
             partitions: HashMap::new(),
@@ -602,6 +613,42 @@ where
     F: FnOnce(&mut EngineHost) + 'static,
 {
     with_priority(HostTaskPriority::Normal, None, f)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) fn try_open_native_tab(
+    source: zephium_core::ids::ItemId,
+    permit: &super::permits::EventPermit,
+    activity: crate::navigation_epoch::NavigationActivity,
+    url: &str,
+    features: wry::NewWindowFeatures,
+) -> wry::NewWindowResponse {
+    if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
+        return wry::NewWindowResponse::Deny;
+    }
+    HOST.with(|host| {
+        let Ok(mut slot) = host.try_borrow_mut() else {
+            return wry::NewWindowResponse::Deny;
+        };
+        let Some(host) = slot.as_mut() else {
+            return wry::NewWindowResponse::Deny;
+        };
+        host.open_native_tab(source, permit, activity, url, features)
+    })
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn finish_windows_native_tab(child: zephium_core::ids::ItemId, attached: bool) -> bool {
+    HOST.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return false;
+        };
+        let Some(host) = slot.as_mut() else {
+            return false;
+        };
+        host.finish_windows_native_tab(child, attached);
+        true
+    })
 }
 
 /// Local AppKit monitors must decide synchronously whether to consume an
@@ -1907,6 +1954,16 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
         };
         #[cfg(target_os = "windows")]
         {
+            let (done, download_exit) = if let Some(downloads) = &host.downloads {
+                let (native_done, download_done) = super::lifecycle::join_download_shutdown(done);
+                let notice = downloads.runtime_exit_notifier();
+                downloads.quiesce(None, download_done);
+                (native_done, Some(notice))
+            } else {
+                (done, None)
+            };
+            let download_exit = Arc::new(std::sync::Mutex::new(download_exit));
+            let spawn_failure_exit = download_exit.clone();
             let (browser_processes, process_provenance_valid) = host.shutdown();
             let private_runtime_cleanup = host.private_runtime.cleanup_ticket();
             let worker_completion = Arc::new(std::sync::Mutex::new(Some(done)));
@@ -1917,7 +1974,10 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
             let spawned = std::thread::Builder::new()
                 .name("zephium-webview2-shutdown".into())
                 .spawn(move || {
-                    let finish = |clean| {
+                    let finish = |clean: bool| {
+                        if !clean {
+                            if let Some(notice)=download_exit.lock().unwrap_or_else(|error|error.into_inner()).take(){notice(false);}
+                        }
                         if let Some(done) = worker_completion
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1938,6 +1998,7 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                         finish(false);
                         return;
                     }
+                    if let Some(notice)=download_exit.lock().unwrap_or_else(|error|error.into_inner()).take(){notice(true);}
                     let cleaned = match private_runtime_cleanup.cleanup_after_proven_exit() {
                         Ok(()) => true,
                         Err(error) => {
@@ -1952,6 +2013,13 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                 });
             if let Err(error) = spawned {
                 eprintln!("shutdown: could not start WebView2 cleanup worker: {error}");
+                if let Some(notice) = spawn_failure_exit
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                {
+                    notice(false);
+                }
                 if let Some(done) = spawn_failure
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())

@@ -1,5 +1,9 @@
 use super::*;
 use sha2::{Digest, Sha256};
+#[path = "resources/task_lists.rs"]
+mod task_lists;
+#[path = "resources/task_query.rs"]
+mod task_query;
 use zephium_core::ids::{ProfileId, ResourceId};
 use zephium_core::resources::*;
 use zephium_core::work::{
@@ -63,12 +67,126 @@ pub(super) fn existing_fetched_media(
         .flatten()?;
     get(conn, &id).ok().flatten()
 }
+/// The listing projection, in one place so every caller reads the same columns
+/// in the same order as `summary_row`.
+const SUMMARY_COLUMNS: &str =
+    "id,revision,title,pinned,updated_at,completed,due_date,status,assignee,origin,context_url,context_title,sort_key,work,due_time";
+fn task_status(value: Option<String>) -> Option<TaskStatus> {
+    match value.as_deref() {
+        Some("open") => Some(TaskStatus::Open),
+        Some("active") => Some(TaskStatus::Active),
+        Some("blocked") => Some(TaskStatus::Blocked),
+        Some("done") => Some(TaskStatus::Done),
+        _ => None,
+    }
+}
+fn task_actor(value: Option<String>) -> Option<TaskActor> {
+    match value.as_deref() {
+        Some("user") => Some(TaskActor::User),
+        Some("agent") => Some(TaskActor::Agent),
+        _ => None,
+    }
+}
+fn summary_row(row: &rusqlite::Row) -> rusqlite::Result<ResourceSummary> {
+    Ok(ResourceSummary {
+        id: row.get(0)?,
+        revision: row.get::<_, i64>(1)?.to_string(),
+        title: row.get(2)?,
+        pinned: row.get(3)?,
+        updated_at: row.get::<_, i64>(4)?.to_string(),
+        completed: row.get(5)?,
+        due_date: row.get(6)?,
+        status: task_status(row.get(7)?),
+        assignee: task_actor(row.get(8)?),
+        origin: task_actor(row.get(9)?),
+        context: match (row.get::<_, Option<String>>(10)?, row.get(11)?) {
+            (Some(url), Some(title)) => Some(TaskContext { url, title }),
+            _ => None,
+        },
+        sort_key: row.get(12)?,
+        work: row.get(13)?,
+        due_time: row.get(14)?,
+    })
+}
+/// The columns a task projects out of its body. A note contributes none.
+struct TaskProjection<'a> {
+    completed: Option<bool>,
+    due_date: Option<&'a str>,
+    due_time: Option<&'a str>,
+    status: Option<&'static str>,
+    assignee: Option<&'static str>,
+    origin: Option<&'static str>,
+    context_url: Option<&'a str>,
+    context_title: Option<&'a str>,
+    sort_key: Option<&'a str>,
+    work: Option<&'a str>,
+}
+fn actor_name(actor: TaskActor) -> &'static str {
+    match actor {
+        TaskActor::User => "user",
+        TaskActor::Agent => "agent",
+    }
+}
+fn project(draft: &ResourceDraft) -> TaskProjection<'_> {
+    match &draft.content {
+        ResourceContent::Task {
+            completed,
+            due_date,
+            due_time,
+            status,
+            assignee,
+            origin,
+            context,
+            sort_key,
+            work,
+            ..
+        } => TaskProjection {
+            completed: Some(*completed),
+            due_date: due_date.as_deref(),
+            due_time: due_time.as_deref(),
+            status: Some(match status {
+                TaskStatus::Open => "open",
+                TaskStatus::Active => "active",
+                TaskStatus::Blocked => "blocked",
+                TaskStatus::Done => "done",
+            }),
+            assignee: Some(actor_name(*assignee)),
+            origin: Some(actor_name(*origin)),
+            context_url: context.as_ref().map(|c| c.url.as_str()),
+            context_title: context.as_ref().map(|c| c.title.as_str()),
+            sort_key: sort_key.as_deref(),
+            work: work.as_deref(),
+        },
+        ResourceContent::Note { .. }
+        | ResourceContent::Object { .. }
+        | ResourceContent::Media { .. } => TaskProjection {
+            completed: None,
+            due_date: None,
+            due_time: None,
+            status: None,
+            assignee: None,
+            origin: None,
+            context_url: None,
+            context_title: None,
+            sort_key: None,
+            work: None,
+        },
+    }
+}
 fn search_text(draft: &ResourceDraft) -> String {
     let mut text = draft.title.clone();
     match &draft.content {
-        ResourceContent::Task { description, .. } => {
+        ResourceContent::Task {
+            description,
+            details,
+            ..
+        } => {
             text.push('\n');
             text.push_str(description);
+            for step in &details.steps {
+                text.push('\n');
+                text.push_str(&step.title);
+            }
         }
         ResourceContent::Note { document } => {
             let mut pending = vec![&document.document];
@@ -100,30 +218,34 @@ impl Hub {
             return error(ResourceError::Unavailable);
         };
         match call {
-            ResourceCall::ResolveNotes { ids } => {
-                let mut items = Vec::new();
-                for id in ids {
-                    let row=conn.query_row("SELECT id,revision,title,pinned,updated_at,completed,due_date FROM user_resources WHERE id=?1 AND kind='note' AND trashed=0",[id],|row|Ok(ResourceSummary {id:row.get(0)?,revision:row.get::<_,i64>(1)?.to_string(),title:row.get(2)?,pinned:row.get(3)?,updated_at:row.get::<_,i64>(4)?.to_string(),completed:row.get(5)?,due_date:row.get(6)?})).optional();
-                    match row {
-                        Ok(Some(item)) => items.push(item),
-                        Ok(None) => {}
-                        Err(_) => return error(ResourceError::Unavailable),
-                    }
+            ResourceCall::Acknowledge { request_id } => {
+                if conn
+                    .execute(
+                        "DELETE FROM task_list_receipts WHERE request_id=?1 AND retained=0",
+                        [&request_id],
+                    )
+                    .is_err()
+                {
+                    return error(ResourceError::Unavailable);
                 }
-                ResourceResponse::Page { items, next: None }
+                match conn.execute(
+                    "DELETE FROM user_resource_receipts WHERE request_id=?1 AND retained=0",
+                    [request_id],
+                ) {
+                    Ok(_) => ResourceResponse::Acknowledged,
+                    Err(_) => error(ResourceError::Unavailable),
+                }
             }
-            ResourceCall::Acknowledge { request_id } => match conn.execute(
-                "DELETE FROM user_resource_receipts WHERE request_id=?1 AND retained=0",
-                [request_id],
-            ) {
-                Ok(_) => ResourceResponse::Acknowledged,
-                Err(_) => error(ResourceError::Unavailable),
-            },
             ResourceCall::Get { id } => match get(conn, &id) {
                 Ok(Some(record)) => ResourceResponse::Record { record },
                 Ok(None) => error(ResourceError::NotFound),
                 Err(_) => error(ResourceError::Unavailable),
             },
+            ResourceCall::ListTasks { query } => {
+                task_query::list(conn, query).unwrap_or_else(|_| error(ResourceError::Unavailable))
+            }
+            ResourceCall::TaskOverview { today } => task_query::overview(conn, &today)
+                .unwrap_or_else(|_| error(ResourceError::Unavailable)),
             ResourceCall::List { query } => {
                 list(conn, query).unwrap_or_else(|_| error(ResourceError::Unavailable))
             }
@@ -132,6 +254,51 @@ impl Hub {
         }
     }
 }
+/// Notes are Markdown files now. These read out and then delete the rows
+/// written before that, once each has a file.
+impl Hub {
+    pub fn legacy_notes(&mut self, profile: ProfileId) -> Option<Vec<ResourceRecord>> {
+        let conn = self.profile_conn(profile).ok()?;
+        let ids = conn
+            .prepare("SELECT id FROM user_resources WHERE kind='note' ORDER BY id")
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .ok()?;
+        let mut records = Vec::with_capacity(ids.len());
+        for id in ids {
+            // A row that no longer validates cannot be converted; it stays.
+            if let Ok(Some(record)) = get(conn, &id) {
+                records.push(record);
+            }
+        }
+        Some(records)
+    }
+
+    pub fn retire_legacy_notes(&mut self, profile: ProfileId, ids: &[String]) -> bool {
+        let Ok(conn) = self.profile_conn(profile) else {
+            return false;
+        };
+        let retire = |conn: &mut Connection| -> rusqlite::Result<()> {
+            let tx = conn.transaction()?;
+            for id in ids {
+                tx.execute(
+                    "DELETE FROM user_resource_receipts WHERE resource_id=?1",
+                    [id],
+                )?;
+                tx.execute(
+                    "DELETE FROM user_resources WHERE id=?1 AND kind='note'",
+                    [id],
+                )?;
+            }
+            tx.commit()
+        };
+        retire(conn).is_ok()
+    }
+}
+
 fn list(conn: &Connection, query: ResourceQuery) -> rusqlite::Result<ResourceResponse> {
     let (pin, after) = match query.after.as_deref() {
         None => (2, String::new()),
@@ -142,7 +309,7 @@ fn list(conn: &Connection, query: ResourceQuery) -> rusqlite::Result<ResourceRes
             _ => return Ok(error(ResourceError::Invalid)),
         },
     };
-    let mut statement=conn.prepare("SELECT id,revision,title,pinned,updated_at,completed,due_date FROM user_resources WHERE kind=?1 AND trashed=?2 AND (?7 IS NULL OR completed=?7) AND instr(search_text,?3)>0 AND (pinned<?4 OR (pinned=?4 AND id<?5)) ORDER BY pinned DESC,id DESC LIMIT ?6")?;
+    let mut statement = conn.prepare(&format!("SELECT {SUMMARY_COLUMNS} FROM user_resources WHERE kind=?1 AND trashed=?2 AND (?7 IS NULL OR completed=?7) AND instr(search_text,?3)>0 AND (pinned<?4 OR (pinned=?4 AND id<?5)) ORDER BY pinned DESC,id DESC LIMIT ?6"))?;
     let mut items = statement
         .query_map(
             params![
@@ -154,17 +321,7 @@ fn list(conn: &Connection, query: ResourceQuery) -> rusqlite::Result<ResourceRes
                 u32::from(query.limit) + 1,
                 query.completed
             ],
-            |row| {
-                Ok(ResourceSummary {
-                    id: row.get(0)?,
-                    revision: row.get::<_, i64>(1)?.to_string(),
-                    title: row.get(2)?,
-                    pinned: row.get(3)?,
-                    updated_at: row.get::<_, i64>(4)?.to_string(),
-                    completed: row.get(5)?,
-                    due_date: row.get(6)?,
-                })
-            },
+            summary_row,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let more = items.len() > usize::from(query.limit);
@@ -234,6 +391,23 @@ pub(super) fn mutate(
     profile: ProfileId,
     command: ResourceCommand,
 ) -> rusqlite::Result<ResourceResponse> {
+    if matches!(
+        &command.intent,
+        ResourceIntent::CreateTaskList { .. }
+            | ResourceIntent::RenameTaskList { .. }
+            | ResourceIntent::DeleteTaskList { .. }
+    ) {
+        return task_lists::mutate(conn, command);
+    }
+    // Notes are Markdown files; the rows left here are only read out by the
+    // one-time move and never written again.
+    if let ResourceIntent::Create { draft } | ResourceIntent::Replace { draft, .. } =
+        &command.intent
+    {
+        if draft.kind() == ResourceKind::Note {
+            return Ok(error(ResourceError::Invalid));
+        }
+    }
     let retained_receipt = matches!(&command.intent, ResourceIntent::Create { .. });
     let encoded = serde_json::to_vec(&command).map_err(|_| rusqlite::Error::InvalidQuery)?;
     if encoded.len() > 524288 {
@@ -267,7 +441,7 @@ pub(super) fn mutate(
         return Ok(error(ResourceError::Capacity));
     }
     let now = now_secs();
-    let (id, draft, revision, created, trashed) = match command.intent {
+    let (id, mut draft, revision, created, trashed) = match command.intent {
         ResourceIntent::Create { draft } => {
             let count: i64 =
                 tx.query_row("SELECT count(*) FROM user_resources", [], |r| r.get(0))?;
@@ -313,16 +487,17 @@ pub(super) fn mutate(
                 | ResourceIntent::Restore {
                     id,
                     expected_revision,
-                } => (id, expected_revision),
+                } => (id, Some(expected_revision)),
+                ResourceIntent::UpdateTask { id, .. } => (id, None),
                 _ => unreachable!(),
             };
             let Some(record) = get(&tx, id)? else {
                 return Ok(error(ResourceError::NotFound));
             };
-            if record.revision != *expected {
+            if expected.is_some_and(|expected| record.revision != *expected) {
                 return Ok(error(ResourceError::Conflict));
             }
-            let Some(next) = revision(expected).and_then(|n| n.checked_add(1)) else {
+            let Some(next) = revision(&record.revision).and_then(|n| n.checked_add(1)) else {
                 return Ok(error(ResourceError::Capacity));
             };
             let mut draft = record.draft;
@@ -334,6 +509,17 @@ pub(super) fn mutate(
                         return Ok(error(ResourceError::Conflict));
                     }
                     draft = replacement;
+                    false
+                }
+                ResourceIntent::UpdateTask { set, expect, .. } => {
+                    if record.trashed {
+                        return Ok(error(ResourceError::Conflict));
+                    }
+                    draft = match update_task(&draft, &set, &expect) {
+                        Ok(next) if next.validate() => next,
+                        Ok(_) => return Ok(error(ResourceError::Invalid)),
+                        Err(failure) => return Ok(error(failure)),
+                    };
                     false
                 }
                 ResourceIntent::Trash { .. } => true,
@@ -352,6 +538,32 @@ pub(super) fn mutate(
             )
         }
     };
+    if let ResourceContent::Task {
+        details, status, ..
+    } = &mut draft.content
+    {
+        if let Some(list) = &details.list {
+            if !tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM task_lists WHERE id=?1 AND deleted=0)",
+                [list],
+                |r| r.get::<_, bool>(0),
+            )? {
+                return Ok(error(ResourceError::NotFound));
+            }
+        }
+        details.completed_at = if *status == TaskStatus::Done {
+            match get(&tx, &id)?.map(|record| record.draft.content) {
+                Some(ResourceContent::Task {
+                    status: TaskStatus::Done,
+                    details: previous,
+                    ..
+                }) => previous.completed_at,
+                _ => Some(now.to_string()),
+            }
+        } else {
+            None
+        };
+    }
     for related in &draft.related {
         if related != &id
             && !tx.query_row(
@@ -381,15 +593,17 @@ pub(super) fn mutate(
     if retained + body.len() as i64 > 64 * 1024 * 1024 {
         return Ok(error(ResourceError::Capacity));
     }
-    let (completed, due_date) = match &draft.content {
-        ResourceContent::Task {
-            completed,
-            due_date,
-            ..
-        } => (Some(*completed), due_date.as_deref()),
-        _ => (None, None),
-    };
-    tx.execute("INSERT INTO user_resources(id,kind,revision,title,pinned,trashed,created_at,updated_at,body,search_text,completed,due_date) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,title=excluded.title,pinned=excluded.pinned,trashed=excluded.trashed,updated_at=excluded.updated_at,body=excluded.body,search_text=excluded.search_text,completed=excluded.completed,due_date=excluded.due_date",params![id,kind(draft.kind()),revision,draft.title,draft.pinned,trashed,created,now,body,search_text(&draft),completed,due_date])?;
+    let task = project(&draft);
+    tx.execute("INSERT INTO user_resources(id,kind,revision,title,pinned,trashed,created_at,updated_at,body,search_text,completed,due_date,status,assignee,origin,context_url,context_title,sort_key,work,due_time) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,title=excluded.title,pinned=excluded.pinned,trashed=excluded.trashed,updated_at=excluded.updated_at,body=excluded.body,search_text=excluded.search_text,completed=excluded.completed,due_date=excluded.due_date,status=excluded.status,assignee=excluded.assignee,origin=excluded.origin,context_url=excluded.context_url,context_title=excluded.context_title,sort_key=excluded.sort_key,work=excluded.work,due_time=excluded.due_time",params![id,kind(draft.kind()),revision,draft.title,draft.pinned,trashed,created,now,body,search_text(&draft),task.completed,task.due_date,task.status,task.assignee,task.origin,task.context_url,task.context_title,task.sort_key,task.work,task.due_time])?;
+    if let ResourceContent::Task { details, .. } = &draft.content {
+        let priority = match details.priority {
+            TaskPriority::None => "none",
+            TaskPriority::Low => "low",
+            TaskPriority::Medium => "medium",
+            TaskPriority::High => "high",
+        };
+        tx.execute("UPDATE user_resources SET task_list=?2,task_inbox=?3,task_priority=?4,task_steps=?5,task_steps_done=?6,task_completed_at=?7,task_deadline=?8,task_duration=?9 WHERE id=?1", params![id,details.list,details.inbox,priority,details.steps.len(),details.steps.iter().filter(|step| step.completed).count(),details.completed_at,details.deadline,details.duration])?;
+    }
     tx.execute("INSERT INTO user_resource_receipts(request_id,digest,resource_id,revision,retained) VALUES(?1,?2,?3,?4,?5)",params![command.request_id,digest,id,revision,retained_receipt])?;
     tx.commit()?;
     Ok(ResourceResponse::Applied {

@@ -227,7 +227,10 @@ fn open_url_lands_in_a_new_tab() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let first = active_id(&screen);
-    shell.handle(Command::OpenUrl("github.com".into()));
+    shell.handle(Command::OpenUrl {
+        input: "github.com".into(),
+        new_tab: true,
+    });
     let second = active_id(&screen);
     assert_ne!(first, second);
     assert!(engine
@@ -254,7 +257,10 @@ fn open_url_at_item_limit_never_navigates_the_active_tab() {
     }
     let calls_before = engine.calls().len();
 
-    let completion = shell.handle_operation(Command::OpenUrl("must-not-replace.example".into()));
+    let completion = shell.handle_operation(Command::OpenUrl {
+        input: "must-not-replace.example".into(),
+        new_tab: true,
+    });
 
     assert_eq!(completion.outcome, OperationOutcome::Rejected);
     assert_eq!(completion.reason, OperationReason::ItemLimitReached);
@@ -267,4 +273,183 @@ fn open_url_at_item_limit_never_navigates_the_active_tab() {
         Some("https://kept.example/")
     );
     assert_eq!(engine.calls().len(), calls_before);
+}
+
+#[test]
+fn native_tab_adoption_preserves_background_focus_and_does_not_replay_navigation() {
+    for foreground in [false, true] {
+        let (mut shell, engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let source = active_id(&screen);
+        navigate_and_commit(&mut shell, source, "example.com");
+        let child = ItemId::generate();
+        let (send, receive) = std::sync::mpsc::channel();
+        let before = engine.calls().len();
+        shell.handle(Command::Engine(EngineEvent::NativeTabOpened {
+            id: source,
+            child,
+            foreground,
+            adoption: zephium_core::ports::engine::NativeTabAdoption::new(move |ok| {
+                send.send(ok).unwrap()
+            }),
+        }));
+        assert!(receive.recv().unwrap());
+        assert_eq!(active_id(&screen), source);
+        let tab = shell.items.tab(child).unwrap();
+        assert!(tab.has_view());
+        assert!(
+            tab.url.is_none(),
+            "construction cannot fabricate a committed URL"
+        );
+        assert!(!engine.calls()[before..]
+            .iter()
+            .any(|call| call.starts_with("create ") || call.starts_with("navigate ")));
+        shell.handle(Command::Engine(EngineEvent::LinkedDownloadStarted {
+            id: child,
+        }));
+        assert!(shell.items.get(child).is_none());
+        assert_eq!(active_id(&screen), source);
+    }
+}
+
+#[test]
+fn native_tab_adoption_rejects_an_unknown_source_and_cleans_up_the_lease() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let current = active_id(&screen);
+    let child = ItemId::generate();
+    let (send, receive) = std::sync::mpsc::channel();
+    shell.handle(Command::Engine(EngineEvent::NativeTabOpened {
+        id: ItemId::generate(),
+        child,
+        foreground: true,
+        adoption: zephium_core::ports::engine::NativeTabAdoption::new(move |ok| {
+            send.send(ok).unwrap()
+        }),
+    }));
+    assert!(!receive.recv().unwrap());
+    assert!(shell.items.get(child).is_none());
+    assert_eq!(active_id(&screen), current);
+}
+
+#[test]
+fn download_cleanup_does_not_close_a_native_tab_that_has_committed_a_document() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let source = active_id(&screen);
+    navigate_and_commit(&mut shell, source, "example.com");
+    let child = ItemId::generate();
+    shell.handle(Command::Engine(EngineEvent::NativeTabOpened {
+        id: source,
+        child,
+        foreground: true,
+        adoption: zephium_core::ports::engine::NativeTabAdoption::new(|_| {}),
+    }));
+    commit_url(&mut shell, child, "https://example.com/other");
+    shell.handle(Command::Engine(presentation_pending(
+        child,
+        NavigationPresentationId::from_raw(77),
+        "https://example.com/other",
+    )));
+    shell.handle(Command::Engine(EngineEvent::LinkedDownloadStarted {
+        id: child,
+    }));
+    assert!(shell.items.get(child).is_some());
+    assert_eq!(active_id(&screen), child);
+}
+
+#[test]
+fn native_foreground_selection_waits_for_presentation_and_respects_newer_user_selection() {
+    for (foreground, switch_away) in [(true, false), (false, false), (true, true)] {
+        let (mut shell, _, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let source = active_id(&screen);
+        navigate_and_commit(&mut shell, source, "example.com");
+        let child = ItemId::generate();
+        shell.handle(Command::Engine(EngineEvent::NativeTabOpened {
+            id: source,
+            child,
+            foreground,
+            adoption: zephium_core::ports::engine::NativeTabAdoption::new(|_| {}),
+        }));
+        assert_eq!(active_id(&screen), source);
+        if switch_away {
+            shell.handle(Command::Open);
+            shell.handle(Command::Activate(source));
+        }
+        commit_url(&mut shell, child, "https://example.com/child");
+        assert_eq!(
+            active_id(&screen),
+            source,
+            "URL alone does not select a tab"
+        );
+        shell.handle(Command::Engine(presentation_pending(
+            child,
+            NavigationPresentationId::from_raw(78),
+            "https://example.com/child",
+        )));
+        assert_eq!(
+            active_id(&screen),
+            if foreground && !switch_away {
+                child
+            } else {
+                source
+            }
+        );
+    }
+}
+
+#[test]
+fn native_close_request_only_closes_an_owned_child() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let source = active_id(&screen);
+    shell.handle(Command::Engine(EngineEvent::NativeTabCloseRequested {
+        id: source,
+    }));
+    assert!(shell.items.get(source).is_some());
+    let child = ItemId::generate();
+    shell.handle(Command::Engine(EngineEvent::NativeTabOpened {
+        id: source,
+        child,
+        foreground: true,
+        adoption: zephium_core::ports::engine::NativeTabAdoption::new(|_| {}),
+    }));
+    shell.handle(Command::Engine(EngineEvent::NativeTabCloseRequested {
+        id: child,
+    }));
+    assert!(shell.items.get(child).is_none());
+    assert_eq!(active_id(&screen), source);
+}
+
+#[test]
+fn native_download_cleanup_survives_a_space_switch() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let source = active_id(&screen);
+    let child = ItemId::generate();
+    shell.handle(Command::Engine(EngineEvent::NativeTabOpened {
+        id: source,
+        child,
+        foreground: true,
+        adoption: zephium_core::ports::engine::NativeTabAdoption::new(|_| {}),
+    }));
+    let other = SpaceId::from(9001);
+    let profile = shell.windows.focused().unwrap().profile;
+    assert!(shell.spaces.insert(Space {
+        id: other,
+        profile,
+        name: "Other".into()
+    }));
+    let window = shell.windows.focused_mut().unwrap();
+    window.space = other;
+    window.active = None;
+    shell.handle(Command::Open);
+    let selected = active_id(&screen);
+    shell.handle(Command::Engine(EngineEvent::LinkedDownloadStarted {
+        id: child,
+    }));
+    assert!(shell.items.get(child).is_none());
+    assert!(shell.items.get(source).is_some());
+    assert_eq!(active_id(&screen), selected);
 }
