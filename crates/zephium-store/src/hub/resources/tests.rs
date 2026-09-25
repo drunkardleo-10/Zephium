@@ -231,28 +231,44 @@ fn acknowledged_updates_still_cannot_reapply_an_old_revision() {
 }
 
 #[test]
-fn title_index_excludes_bodies_tasks_and_trash_and_tracks_updates() {
-    let dir = tempfile::tempdir().unwrap();
-    let conn = connection(&dir.path().join("titles.sqlite"));
-    conn.execute("INSERT INTO user_resources(id,kind,revision,title,pinned,trashed,created_at,updated_at,body,search_text) VALUES('00000000000000000000000001','note',1,'Rust handbook',0,0,1,1,'{}','private body text')", []).unwrap();
-    let titles = |query| match search_titles(&conn, query).unwrap() {
-        ResourceResponse::Page { items, .. } => items,
-        other => panic!("unexpected {other:?}"),
+fn legacy_notes_are_read_out_once_and_never_written_again() {
+    let mut hub = Hub::in_memory().unwrap();
+    let profile = ProfileId::from(1);
+    hub.registry.insert(profile);
+    let conn = hub.profile_conn(profile).unwrap();
+    conn.execute("INSERT INTO user_resources(id,kind,revision,title,pinned,trashed,created_at,updated_at,body,search_text) VALUES('01J9ZQ3V6Q4M8Y2K7T5R1N0B3A','note',1,'Plans',1,0,1,1,'{\"title\":\"Plans\",\"pinned\":true,\"content\":{\"kind\":\"note\",\"document\":{\"version\":1,\"document\":{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\"}]}}},\"related\":[]}','plans')", []).unwrap();
+    conn.execute("INSERT INTO user_resource_receipts(request_id,digest,resource_id,revision,retained) VALUES('request-legacy-note-0001',zeroblob(32),'01J9ZQ3V6Q4M8Y2K7T5R1N0B3A',1,1)", []).unwrap();
+    let notes = hub.legacy_notes(profile).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].draft.pinned);
+    let note = notes[0].draft.clone();
+    let replace = ResourceCall::Mutate {
+        command: Box::new(command(
+            "replace",
+            ResourceIntent::Replace {
+                id: notes[0].id.clone(),
+                expected_revision: notes[0].revision.clone(),
+                draft: note.clone(),
+            },
+        )),
     };
-    assert_eq!(titles("rust")[0].title, "Rust handbook");
-    assert!(titles("private").is_empty());
-    conn.execute("UPDATE user_resources SET title='Svelte handbook'", [])
-        .unwrap();
-    assert!(titles("rust").is_empty());
-    assert_eq!(titles("svel").len(), 1);
-    conn.execute("UPDATE user_resources SET trashed=1", [])
-        .unwrap();
-    assert!(titles("svelte").is_empty());
-    conn.execute("UPDATE user_resources SET trashed=0,kind='task'", [])
-        .unwrap();
-    assert!(titles("svelte").is_empty());
-    conn.execute("DELETE FROM user_resources", []).unwrap();
-    assert!(titles("svelte").is_empty());
+    assert!(matches!(
+        hub.resource_call(profile, replace),
+        ResourceResponse::Error {
+            error: ResourceError::Invalid
+        }
+    ));
+    let create = ResourceCall::Mutate {
+        command: Box::new(command("create", ResourceIntent::Create { draft: note })),
+    };
+    assert!(matches!(
+        hub.resource_call(profile, create),
+        ResourceResponse::Error {
+            error: ResourceError::Invalid
+        }
+    ));
+    assert!(hub.retire_legacy_notes(profile, &[notes[0].id.clone()]));
+    assert!(hub.legacy_notes(profile).unwrap().is_empty());
 }
 
 #[test]

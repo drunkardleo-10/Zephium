@@ -621,6 +621,8 @@ enum Cmd {
         zephium_core::resources::ResourceDone,
         ResourcePermit,
     ),
+    LegacyNotes(ProfileId, zephium_core::ports::store::LegacyNotesDone),
+    RetireLegacyNotes(ProfileId, Vec<String>, Box<dyn FnOnce(bool) + Send>),
     #[cfg(feature = "work-execution")]
     AgentWork(
         zephium_agentic::AgentWorkJournalRequest,
@@ -2466,6 +2468,31 @@ impl Store for SqliteStore {
         }
     }
 
+    fn legacy_notes(&self, profile: ProfileId, done: zephium_core::ports::store::LegacyNotesDone) {
+        if let Err(
+            mpsc::TrySendError::Full(Cmd::LegacyNotes(_, done))
+            | mpsc::TrySendError::Disconnected(Cmd::LegacyNotes(_, done)),
+        ) = self.tx.try_send(Cmd::LegacyNotes(profile, done))
+        {
+            done(None);
+        }
+    }
+
+    fn retire_legacy_notes(
+        &self,
+        profile: ProfileId,
+        ids: Vec<String>,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) {
+        if let Err(
+            mpsc::TrySendError::Full(Cmd::RetireLegacyNotes(_, _, done))
+            | mpsc::TrySendError::Disconnected(Cmd::RetireLegacyNotes(_, _, done)),
+        ) = self.tx.try_send(Cmd::RetireLegacyNotes(profile, ids, done))
+        {
+            done(false);
+        }
+    }
+
     fn save_session(&self, session: SessionState) {
         if !admissible_session(&session) {
             return;
@@ -3672,6 +3699,13 @@ fn actor(
                 };
                 drop(admission);
                 done(response);
+            }
+            Some(Cmd::LegacyNotes(profile, done)) => {
+                let known = hub.knows(profile) || flush(&mut hub, &mut pending);
+                done(known.then(|| hub.legacy_notes(profile)).flatten());
+            }
+            Some(Cmd::RetireLegacyNotes(profile, ids, done)) => {
+                done(hub.knows(profile) && hub.retire_legacy_notes(profile, &ids));
             }
             Some(Cmd::DownloadRecoveryProfiles(done)) => {
                 done(hub.download_recovery_profiles());

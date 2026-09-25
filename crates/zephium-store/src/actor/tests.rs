@@ -7920,6 +7920,14 @@ fn removed_profile_database_waits_for_native_proof_then_purges_sidecars() {
     hub.record_visit(profile, "https://example.com/", "Example");
     hub.save_favicon(profile, "https://example.com", None, &rgba());
     assert!(path.exists());
+    let notes = dir.path().join("notes").join(profile.to_string());
+    std::fs::create_dir_all(notes.join("Notes")).unwrap();
+    std::fs::write(notes.join("Notes/Plans.md"), "# Plans").unwrap();
+    std::fs::write(notes.join("index.sqlite"), "index").unwrap();
+    let outside = dir.path().join("outside.md");
+    std::fs::write(&outside, "kept").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, notes.join("Notes/Link.md")).unwrap();
 
     assert_eq!(
         hub.authorize_profile_deletion(profile, &SessionState::default())
@@ -7927,6 +7935,7 @@ fn removed_profile_database_waits_for_native_proof_then_purges_sidecars() {
         ProfileDeletionAuthorizeOutcome::Authorized
     );
     assert!(path.exists());
+    assert!(notes.exists());
     assert_eq!(
         hub.pending_profile_deletions().unwrap(),
         vec![zephium_core::ports::store::PendingProfileDeletion {
@@ -7939,6 +7948,12 @@ fn removed_profile_database_waits_for_native_proof_then_purges_sidecars() {
     assert!(!path.exists());
     assert!(!std::path::PathBuf::from(format!("{}-wal", path.display())).exists());
     assert!(!std::path::PathBuf::from(format!("{}-shm", path.display())).exists());
+    assert!(!notes.exists());
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("notes")).unwrap().count(),
+        0
+    );
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "kept");
     assert!(hub.pending_profile_deletions().unwrap().is_empty());
 }
 

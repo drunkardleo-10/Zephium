@@ -125,6 +125,7 @@ export const commands = {
 	sidebarSetWidth: (width: number | null, animate: boolean) => __TAURI_INVOKE<void>("sidebar_set_width", { width, animate }),
 	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
 	resourceCall: (expectedProfile: string, call: ResourceCall_Deserialize) => __TAURI_INVOKE<ResourceReply_Serialize>("resource_call", { expectedProfile, call }),
+	noteCall: (expectedProfile: string, call: NoteCall) => __TAURI_INVOKE<NoteReply>("note_call", { expectedProfile, call }),
 	historyCall: (expectedProfile: string, call: HistoryCall) => __TAURI_INVOKE<HistoryResponse>("history_call", { expectedProfile, call }),
 	downloadCall: (expectedProfile: string, call: DownloadCall) => __TAURI_INVOKE<DownloadResponse>("download_call", { expectedProfile, call }),
 	/**
@@ -155,6 +156,7 @@ export const events = {
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
 	noteOpenRequested: makeEvent<NoteOpenRequested>("note-open-requested"),
+	notesChanged: makeEvent<NotesChanged>("notes-changed"),
 	operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
 	pagePermissionPromptChanged: makeEvent<PagePermissionPromptChanged>("page-permission-prompt-changed"),
 	resourceChanged: makeEvent<ResourceChanged>("resource-changed"),
@@ -314,6 +316,15 @@ export type BrowserCredentialCapabilityView = {
 };
 
 export type BrowserPasskeyAuthorizationView = "authorized" | "denied" | "not_determined" | "entitlement_required" | "unknown" | "unavailable" | "unsupported";
+
+/**
+ *  A note that changed, and the revision it now has on disk, or `None` when
+ *  it no longer exists.
+ */
+export type ChangedNote = {
+	id: string,
+	revision: string | null,
+};
 
 /**
  *  Split divider hit-strip in window logical coordinates; the chrome renders
@@ -825,6 +836,27 @@ export type LayoutState = {
 
 export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica";
 
+export type NoteCall = { kind: "list"; query: NoteQuery } | { kind: "get"; id: string } | { kind: "create"; request_id: string; markdown: string } | 
+/**
+ *  Replaces the file only if it still holds `base_revision`. Replaying the
+ *  same write after an unknown outcome succeeds without a second change.
+ */
+{ kind: "write"; request_id: string; id: string; base_revision: string; markdown: string } | { kind: "set_pinned"; id: string; pinned: boolean } | { kind: "trash"; id: string } | { kind: "restore"; id: string } | 
+/**  Permanent. Only a note already in the trash can be deleted. */
+{ kind: "delete"; id: string } | { kind: "resolve"; targets: string[] } | { kind: "backlinks"; id: string } | 
+/**  Shows the note, or the folder when `id` is absent, in the system file manager. */
+{ kind: "reveal"; id: string | null };
+
+/**
+ *  Notes that changed on disk, by this browser or anything else. `reset`
+ *  means the listing itself may have changed beyond the named notes.
+ */
+export type NoteChanges = {
+	profile: string,
+	notes: ChangedNote[],
+	reset: boolean,
+};
+
 export type NoteDocument = NoteDocument_Serialize | NoteDocument_Deserialize;
 
 export type NoteDocument_Deserialize = {
@@ -837,10 +869,65 @@ export type NoteDocument_Serialize = {
 	document: DocumentNode_Serialize,
 };
 
+export type NoteError = "invalid" | "not_found" | "capacity" | "too_large" | "read_only" | "unavailable" | "outcome_unknown";
+
 export type NoteOpenRequested = {
 	profile: string,
 	id: string,
 };
+
+export type NoteQuery = {
+	search: string,
+	trashed: boolean,
+	after: string | null,
+	limit: number,
+};
+
+export type NoteRecord = {
+	summary: NoteSummary,
+	markdown: string,
+};
+
+export type NoteReply = {
+	profile: string | null,
+	response: NoteResponse,
+};
+
+export type NoteResponse = { kind: "done" } | { kind: "page"; items: NoteSummary[]; next: string | null } | { kind: "record"; record: NoteRecord } | { kind: "applied"; request_id: string; summary: NoteSummary } | 
+/**  The file changed since `base_revision`; nothing was written. */
+{ kind: "conflict"; current: NoteRecord } | { kind: "targets"; items: NoteTarget[] } | { kind: "error"; error: NoteError };
+
+export type NoteSummary = {
+	id: string,
+	/**
+	 *  Content hash of the bytes on disk. Stable across restarts and index
+	 *  rebuilds, so a writer can prove which version it edited.
+	 */
+	revision: string,
+	title: string,
+	/**  Plain text after the title, collapsed to one line. */
+	preview: string,
+	pinned: boolean,
+	trashed: boolean,
+	/**
+	 *  False when the file is too large or not UTF-8. It is listed and
+	 *  readable elsewhere but never rewritten from a partial view.
+	 */
+	editable: boolean,
+	/**  Milliseconds since the Unix epoch, as decimal strings. */
+	created_at: string,
+	modified_at: string,
+	/**  Folder-relative path with `/` separators, for display only. */
+	path: string,
+};
+
+/**  What a `[[target]]` in a note currently points at. */
+export type NoteTarget = {
+	target: string,
+	note: NoteSummary | null,
+};
+
+export type NotesChanged = NoteChanges;
 
 /**
  *  Immediate result returned by a privileged IPC command. `accepted` with an
@@ -962,21 +1049,21 @@ export type ProfileView = {
 
 export type ResourceCall = ResourceCall_Serialize | ResourceCall_Deserialize;
 
-export type ResourceCall_Deserialize = ({ kind: "search_titles"; query: string }) & { command?: never; id?: never; ids?: never; request_id?: never; today?: never } | ({ kind: "resolve_notes"; ids: string[] }) & { command?: never; id?: never; query?: never; request_id?: never; today?: never } | ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; ids?: never; query?: never; today?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; ids?: never; request_id?: never; today?: never } | ({ kind: "list_tasks"; query: TaskQuery }) & { command?: never; id?: never; ids?: never; request_id?: never; today?: never } | 
+export type ResourceCall_Deserialize = ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; query?: never; today?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; request_id?: never; today?: never } | ({ kind: "list_tasks"; query: TaskQuery }) & { command?: never; id?: never; request_id?: never; today?: never } | 
 /**
  *  Navigation counts and lists without a page of rows, for refreshing
  *  totals after a write whose record the caller already holds.
  */
-({ kind: "task_overview"; today: string }) & { command?: never; id?: never; ids?: never; query?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; ids?: never; query?: never; request_id?: never; today?: never } | ({ kind: "mutate"; command: ResourceCommand_Deserialize }) & { id?: never; ids?: never; query?: never; request_id?: never; today?: never };
+({ kind: "task_overview"; today: string }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; query?: never; request_id?: never; today?: never } | ({ kind: "mutate"; command: ResourceCommand_Deserialize }) & { id?: never; query?: never; request_id?: never; today?: never };
 
-export type ResourceCall_Serialize = ({ kind: "search_titles"; query: string }) & { command?: never; id?: never; ids?: never; request_id?: never; today?: never } | ({ kind: "resolve_notes"; ids: string[] }) & { command?: never; id?: never; query?: never; request_id?: never; today?: never } | ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; ids?: never; query?: never; today?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; ids?: never; request_id?: never; today?: never } | ({ kind: "list_tasks"; query: TaskQuery }) & { command?: never; id?: never; ids?: never; request_id?: never; today?: never } | 
+export type ResourceCall_Serialize = ({ kind: "acknowledge"; request_id: string }) & { command?: never; id?: never; query?: never; today?: never } | ({ kind: "list"; query: ResourceQuery }) & { command?: never; id?: never; request_id?: never; today?: never } | ({ kind: "list_tasks"; query: TaskQuery }) & { command?: never; id?: never; request_id?: never; today?: never } | 
 /**
  *  Navigation counts and lists without a page of rows, for refreshing
  *  totals after a write whose record the caller already holds.
  */
-({ kind: "task_overview"; today: string }) & { command?: never; id?: never; ids?: never; query?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; ids?: never; query?: never; request_id?: never; today?: never } | ({ kind: "mutate"; command: ResourceCommand_Serialize }) & { id?: never; ids?: never; query?: never; request_id?: never; today?: never };
+({ kind: "task_overview"; today: string }) & { command?: never; id?: never; query?: never; request_id?: never } | ({ kind: "get"; id: string }) & { command?: never; query?: never; request_id?: never; today?: never } | ({ kind: "mutate"; command: ResourceCommand_Serialize }) & { id?: never; query?: never; request_id?: never; today?: never };
 
-export type ResourceChangeKind = "note" | "task" | "task_list";
+export type ResourceChangeKind = "task" | "task_list";
 
 export type ResourceChanged = {
 	profile: string,

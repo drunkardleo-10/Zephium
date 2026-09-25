@@ -632,6 +632,8 @@ pub enum StoreShutdownOutcome {
     Unclean,
 }
 
+pub type LegacyNotesDone = Box<dyn FnOnce(Option<Vec<crate::resources::ResourceRecord>>) + Send>;
+
 pub trait Store {
     /// Bounded asynchronous access to durable Notes/Tasks. Caller owns authorization.
     fn resource_call(
@@ -643,6 +645,21 @@ pub trait Store {
         done(crate::resources::ResourceResponse::Error {
             error: crate::resources::ResourceError::Unavailable,
         });
+    }
+    /// Notes kept in the profile database before notes became Markdown
+    /// files, for their one-time move into the notes folder. `None` when they
+    /// cannot be read now.
+    fn legacy_notes(&self, _profile: ProfileId, done: LegacyNotesDone) {
+        done(None);
+    }
+    /// Deletes notes that now live in the notes folder.
+    fn retire_legacy_notes(
+        &self,
+        _profile: ProfileId,
+        _ids: Vec<String>,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) {
+        done(false);
     }
     fn save_session(&self, session: SessionState);
     /// Ordered session-durability barrier for shutdown and other process

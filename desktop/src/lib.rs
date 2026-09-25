@@ -53,6 +53,7 @@ mod linux_shortcut_portal;
 #[cfg(any(target_os = "linux", test))]
 mod linux_x11_shortcut;
 mod material;
+mod notes;
 mod overlay;
 #[cfg(target_os = "macos")]
 mod panel;
@@ -1302,7 +1303,6 @@ struct NoteOpenRequested {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 enum ResourceChangeKind {
-    Note,
     Task,
     TaskList,
 }
@@ -1608,6 +1608,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             sidebar_set_width,
             tab_drag_over,
             resource_call,
+            notes::note_call,
             history_call,
             download_call,
             browser_open_url,
@@ -1621,6 +1622,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ItemsChanged,
             FaviconsChanged,
             ResourceChanged,
+            notes::NotesChanged,
             DownloadsChanged,
             NoteOpenRequested,
             TabChanged,
@@ -3253,6 +3255,14 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             _ => rejected_operation(),
         };
     }
+    // Capture belongs to the frame, which decides where the new note opens.
+    if id == "note.new" {
+        return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
     if matches!(
         id,
         "tool.notes"
@@ -3293,6 +3303,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             "history" => Some(zephium_app::BrowserPage::History),
             "downloads" => Some(zephium_app::BrowserPage::Downloads),
             "tasks" => Some(zephium_app::BrowserPage::Tasks),
+            "notes" => Some(zephium_app::BrowserPage::Notes),
             "return" => None,
             _ => return rejected_operation(),
         };
@@ -3756,14 +3767,11 @@ async fn resource_call(
         done: zephium_app::ResourceCompletion::new(move |reply| {
             let _permit = permit;
             let changed = match &reply.response {
-                ResourceResponse::Applied { record, .. } => Some((
-                    match record.draft.kind() {
-                        zephium_core::resources::ResourceKind::Note => ResourceChangeKind::Note,
-                        zephium_core::resources::ResourceKind::Task => ResourceChangeKind::Task,
-                    },
-                    &record.id,
-                    &record.revision,
-                )),
+                ResourceResponse::Applied { record, .. }
+                    if record.draft.kind() == zephium_core::resources::ResourceKind::Task =>
+                {
+                    Some((ResourceChangeKind::Task, &record.id, &record.revision))
+                }
                 ResourceResponse::TaskListApplied { list, .. } => {
                     Some((ResourceChangeKind::TaskList, &list.id, &list.revision))
                 }
@@ -4295,6 +4303,12 @@ fn build_menu(
         .build()?;
     let file = SubmenuBuilder::new(handle, "File")
         .item(&item("tab.new")?)
+        .item(
+            &MenuItemBuilder::with_id("note.new", "New Note")
+                .accelerator("CmdOrCtrl+Alt+N")
+                .build(handle)?,
+        )
+        .separator()
         .item(&item("tab.close")?)
         .build()?;
     // Standard Edit selectors keep Cmd+C/V/X working inside every webview.
@@ -4463,14 +4477,15 @@ fn build_tools_menu(
     let all_tasks = MenuItemBuilder::with_id("browser.tasks", "Show All Tasks")
         .accelerator("CmdOrCtrl+Shift+T")
         .build(handle)?;
+    let all_notes = MenuItemBuilder::with_id("browser.notes", "Show All Notes").build(handle)?;
     let settings = MenuItemBuilder::with_id("browser.settings", "Settings…")
         .accelerator("CmdOrCtrl+,")
         .build(handle)?;
     Menu::with_items(
         handle,
         &[
-            &notes, &tasks, &activity, &ai, &first, &history, &downloads, &second, &all_tasks,
-            &settings,
+            &notes, &tasks, &activity, &ai, &first, &history, &downloads, &second, &all_notes,
+            &all_tasks, &settings,
         ],
     )
 }
@@ -5280,6 +5295,7 @@ pub fn run() {
                 );
                 return Err(error.into());
             }
+            notes::install(app.handle(), &data_dir, store.clone(), &shell);
             #[cfg(feature = "macos-work")]
             if !work::install(app.handle(), engine.clone(), store.clone()) {
                 let error = std::io::Error::other("Work composition owner is already installed");

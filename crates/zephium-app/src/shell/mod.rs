@@ -250,6 +250,7 @@ pub struct Shell {
     engine: SharedEngine,
     store: SharedStore,
     store_reads: Option<StoreReadQueue>,
+    notes: Option<zephium_core::ports::notes::SharedNotes>,
     chrome: SharedChrome,
     emit: EmitFn,
     #[cfg(test)]
@@ -511,6 +512,7 @@ impl Shell {
             engine,
             store,
             store_reads: store_reads.into(),
+            notes: None,
             chrome,
             emit,
             #[cfg(test)]
@@ -814,6 +816,45 @@ impl Shell {
                 call,
                 done,
             } => self.history_call(expected_profile, *call, done),
+            Command::AttachNotes(attachment) => {
+                self.notes.get_or_insert(attachment.0);
+            }
+            Command::NoteCall {
+                expected_profile,
+                call,
+                done,
+            } => {
+                use zephium_core::notes::{NoteError, NoteReply, NoteResponse};
+                // Private profiles keep nothing on disk, notes included.
+                let profile = self
+                    .windows
+                    .focused()
+                    .map(|window| window.profile)
+                    .filter(|profile| *profile == expected_profile)
+                    .filter(|profile| {
+                        self.profiles.get(*profile).is_some_and(|p| {
+                            p.kind != zephium_core::profiles::ProfileKind::Incognito
+                        })
+                    });
+                match (profile, &self.notes) {
+                    (Some(profile), Some(notes)) => notes.call(
+                        profile,
+                        Arc::unwrap_or_clone(call),
+                        Box::new(move |response| {
+                            done.finish(NoteReply {
+                                profile: Some(profile.to_string()),
+                                response,
+                            })
+                        }),
+                    ),
+                    _ => done.finish(NoteReply {
+                        profile: None,
+                        response: NoteResponse::Error {
+                            error: NoteError::Unavailable,
+                        },
+                    }),
+                }
+            }
             Command::ResourceCall {
                 expected_profile,
                 call,

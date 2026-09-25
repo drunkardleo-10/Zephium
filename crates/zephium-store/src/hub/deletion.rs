@@ -601,6 +601,10 @@ fn purge_profile_file(dir: &Path, profile: ProfileId) -> rusqlite::Result<()> {
     // This provides fail-closed logical deletion and overwrites SQLite cells
     // where the filesystem honors those writes. It is not a promise of
     // physical secure erasure on copy-on-write filesystems or SSD media.
+    // Notes go first: if erasing them fails, the database and its journal
+    // authorization remain and the whole cleanup is retried.
+    remove_notes_directory(dir, profile)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let path = dir.join(format!("profile-{profile}.sqlite"));
     if regular_file_exists(&path)? {
         let scrub = scrub_profile_database(&path);
@@ -631,6 +635,35 @@ fn purge_profile_file(dir: &Path, profile: ProfileId) -> rusqlite::Result<()> {
     #[cfg(unix)]
     sync_directory(dir)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    Ok(())
+}
+
+/// The profile's notes folder and index, `notes/<profile>`. The directory is
+/// first renamed aside so a partial removal can never be mistaken for a live
+/// folder, then removed without following any link inside it.
+fn remove_notes_directory(dir: &Path, profile: ProfileId) -> std::io::Result<()> {
+    let notes = dir.join("notes");
+    let live = notes.join(profile.to_string());
+    let erasing = notes.join(format!(".erasing-{profile}"));
+    match std::fs::symlink_metadata(&live) {
+        Ok(meta) if meta.file_type().is_dir() => {
+            if std::fs::symlink_metadata(&erasing).is_ok() {
+                std::fs::remove_dir_all(&erasing)?;
+            }
+            std::fs::rename(&live, &erasing)?;
+        }
+        Ok(_) => std::fs::remove_file(&live)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    match std::fs::symlink_metadata(&erasing) {
+        Ok(meta) if meta.file_type().is_dir() => std::fs::remove_dir_all(&erasing)?,
+        Ok(_) => std::fs::remove_file(&erasing)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    #[cfg(unix)]
+    sync_directory(&notes)?;
     Ok(())
 }
 

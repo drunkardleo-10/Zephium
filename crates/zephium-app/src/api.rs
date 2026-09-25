@@ -353,6 +353,7 @@ pub enum BrowserPage {
     History,
     Downloads,
     Tasks,
+    Notes,
 }
 
 impl BrowserPage {
@@ -363,6 +364,7 @@ impl BrowserPage {
             Self::History => "browser.history",
             Self::Downloads => "browser.downloads",
             Self::Tasks => "browser.tasks",
+            Self::Notes => "browser.notes",
         }
     }
 }
@@ -383,6 +385,13 @@ pub enum Command {
         expected_profile: ProfileId,
         call: Box<zephium_ipc::HistoryCall>,
         done: HistoryCompletion,
+    },
+    /// Hands the shell its notes service, once, after startup.
+    AttachNotes(NotesAttachment),
+    NoteCall {
+        expected_profile: ProfileId,
+        call: Arc<zephium_core::notes::NoteCall>,
+        done: NoteCompletion,
     },
     #[cfg(feature = "work-execution")]
     AttachWork(crate::work::WorkAttachment),
@@ -765,6 +774,37 @@ impl ResourceCompletion {
 impl fmt::Debug for ResourceCompletion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ResourceCompletion")
+    }
+}
+
+#[derive(Clone)]
+pub struct NotesAttachment(pub zephium_core::ports::notes::SharedNotes);
+impl fmt::Debug for NotesAttachment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NotesAttachment")
+    }
+}
+
+#[derive(Clone)]
+pub struct NoteCompletion(Completion<zephium_core::notes::NoteReply>);
+impl NoteCompletion {
+    pub fn new(done: impl FnOnce(zephium_core::notes::NoteReply) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, reply: zephium_core::notes::NoteReply) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(reply);
+        }
+    }
+}
+impl fmt::Debug for NoteCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NoteCompletion")
     }
 }
 

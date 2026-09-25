@@ -6,8 +6,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{Manager, WebviewWindow};
 use zephium_app::{Command, Handle};
+use zephium_core::notes::{NoteCall, NoteQuery, NoteResponse};
 use zephium_core::ports::store::Store;
-use zephium_core::resources::{ResourceCall, ResourceResponse};
 use zephium_core::search::{remote_query_allowed, scoped_query, SearchEngine, SearchScope};
 use zephium_ipc::{SearchAction, SearchContext, SearchResult};
 
@@ -135,24 +135,35 @@ pub(super) fn schedule(
         let notes = async {
             if notes_possible {
                 tokio::time::sleep(NOTES_DELAY).await;
-                let reply = crate::resource_call(
+                let reply = crate::notes::note_call(
                     caller,
                     app.clone(),
                     context.profile_id.clone(),
-                    ResourceCall::SearchTitles {
-                        query: term.clone(),
+                    NoteCall::List {
+                        query: NoteQuery {
+                            search: term.clone(),
+                            trashed: false,
+                            after: None,
+                            limit: 6,
+                        },
                     },
                 )
                 .await;
                 if reply.profile.as_deref() == Some(&context.profile_id) {
-                    if let ResourceResponse::Page { items, .. } = reply.response {
+                    if let NoteResponse::Page { items, .. } = reply.response {
                         let results = items
                             .into_iter()
                             .take(6)
                             .map(|item| SearchResult {
                                 kind: "note".into(),
                                 title: item.title,
-                                detail: "Note".into(),
+                                // Matches come from the body too; the preview
+                                // shows why a note was found.
+                                detail: if item.preview.is_empty() {
+                                    "Note".into()
+                                } else {
+                                    item.preview
+                                },
                                 icon: None,
                                 action: SearchAction::OpenNote { id: item.id },
                             })

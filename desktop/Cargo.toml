@@ -88,6 +88,7 @@ zephium-extension-authority = { workspace = true, optional = true }
 zephium-extension-distribution = { workspace = true, optional = true }
 zephium-extension-updater = { workspace = true, optional = true }
 zephium-store.workspace = true
+zephium-notes.workspace = true
 zephium-blocker-service.workspace = true
 tauri-plugin-single-instance.workspace = true
 window-vibrancy = "=0.8.0"

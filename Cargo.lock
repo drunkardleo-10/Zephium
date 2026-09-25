@@ -6520,6 +6520,7 @@ dependencies = [
  "zephium-extension-service",
  "zephium-extension-updater",
  "zephium-ipc",
+ "zephium-notes",
  "zephium-store",
  "zephium-work-composition",
 ]

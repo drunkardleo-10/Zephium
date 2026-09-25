@@ -186,29 +186,6 @@ impl Hub {
             return error(ResourceError::Unavailable);
         };
         match call {
-            ResourceCall::SearchTitles { query } => {
-                search_titles(conn, &query).unwrap_or_else(|_| error(ResourceError::Unavailable))
-            }
-            ResourceCall::ResolveNotes { ids } => {
-                let mut items = Vec::new();
-                for id in ids {
-                    let row = conn
-                        .query_row(
-                            &format!(
-                                "SELECT {SUMMARY_COLUMNS} FROM user_resources WHERE id=?1 AND kind='note' AND trashed=0"
-                            ),
-                            [id],
-                            summary_row,
-                        )
-                        .optional();
-                    match row {
-                        Ok(Some(item)) => items.push(item),
-                        Ok(None) => {}
-                        Err(_) => return error(ResourceError::Unavailable),
-                    }
-                }
-                ResourceResponse::Page { items, next: None }
-            }
             ResourceCall::Acknowledge { request_id } => {
                 if conn
                     .execute(
@@ -246,6 +223,51 @@ impl Hub {
         }
     }
 }
+/// Notes are Markdown files now. These read out and then delete the rows
+/// written before that, once each has a file.
+impl Hub {
+    pub fn legacy_notes(&mut self, profile: ProfileId) -> Option<Vec<ResourceRecord>> {
+        let conn = self.profile_conn(profile).ok()?;
+        let ids = conn
+            .prepare("SELECT id FROM user_resources WHERE kind='note' ORDER BY id")
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .ok()?;
+        let mut records = Vec::with_capacity(ids.len());
+        for id in ids {
+            // A row that no longer validates cannot be converted; it stays.
+            if let Ok(Some(record)) = get(conn, &id) {
+                records.push(record);
+            }
+        }
+        Some(records)
+    }
+
+    pub fn retire_legacy_notes(&mut self, profile: ProfileId, ids: &[String]) -> bool {
+        let Ok(conn) = self.profile_conn(profile) else {
+            return false;
+        };
+        let retire = |conn: &mut Connection| -> rusqlite::Result<()> {
+            let tx = conn.transaction()?;
+            for id in ids {
+                tx.execute(
+                    "DELETE FROM user_resource_receipts WHERE resource_id=?1",
+                    [id],
+                )?;
+                tx.execute(
+                    "DELETE FROM user_resources WHERE id=?1 AND kind='note'",
+                    [id],
+                )?;
+            }
+            tx.commit()
+        };
+        retire(conn).is_ok()
+    }
+}
+
 fn list(conn: &Connection, query: ResourceQuery) -> rusqlite::Result<ResourceResponse> {
     let (pin, after) = match query.after.as_deref() {
         None => (2, String::new()),
@@ -290,6 +312,15 @@ fn mutate(conn: &mut Connection, command: ResourceCommand) -> rusqlite::Result<R
             | ResourceIntent::DeleteTaskList { .. }
     ) {
         return task_lists::mutate(conn, command);
+    }
+    // Notes are Markdown files; the rows left here are only read out by the
+    // one-time move and never written again.
+    if let ResourceIntent::Create { draft } | ResourceIntent::Replace { draft, .. } =
+        &command.intent
+    {
+        if draft.kind() == ResourceKind::Note {
+            return Ok(error(ResourceError::Invalid));
+        }
     }
     let retained_receipt = matches!(&command.intent, ResourceIntent::Create { .. });
     let encoded = serde_json::to_vec(&command).map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -483,35 +514,3 @@ fn mutate(conn: &mut Connection, command: ResourceCommand) -> rusqlite::Result<R
 #[cfg(test)]
 #[path = "resources/tests.rs"]
 mod tests;
-
-// The title-only index deliberately excludes document bodies and descriptions.
-fn search_titles(conn: &Connection, query: &str) -> rusqlite::Result<ResourceResponse> {
-    let terms = query
-        .split_whitespace()
-        .take(8)
-        .map(|word| format!("\"{}\"*", word.replace('"', "")))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let mut statement = conn.prepare_cached("SELECT r.id,r.revision,r.title,r.pinned,r.updated_at FROM resource_titles_fts f JOIN user_resources r ON r.rowid=f.rowid WHERE resource_titles_fts MATCH ?1 AND r.kind='note' AND r.trashed=0 ORDER BY rank LIMIT 6")?;
-    let items = statement
-        .query_map([terms], |row| {
-            Ok(ResourceSummary {
-                id: row.get(0)?,
-                revision: row.get::<_, i64>(1)?.to_string(),
-                title: row.get(2)?,
-                pinned: row.get(3)?,
-                updated_at: row.get::<_, i64>(4)?.to_string(),
-                completed: None,
-                due_date: None,
-                due_time: None,
-                status: None,
-                assignee: None,
-                origin: None,
-                context: None,
-                sort_key: None,
-                work: None,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(ResourceResponse::Page { items, next: None })
-}

@@ -7,7 +7,7 @@ use tauri::{LogicalSize, Manager, PhysicalPosition, WebviewWindow};
 use zephium_core::ports::store::Store;
 use zephium_ipc::{
     OperationDisposition, OperationOutcome, PanelIntent, PanelOwner, PanelRoute, PanelState,
-    SearchContext,
+    SearchContext, ToolKind,
 };
 pub const PANEL_LABEL: &str = "panel";
 pub const PANEL_SIZE: (f64, f64) = geometry::DEFAULT;
@@ -130,6 +130,14 @@ impl Overlay {
             .snapshot();
         snapshot.position_restorable = position_supported();
         snapshot
+    }
+    /// Whether the panel is on screen with `tool` open.
+    pub fn showing(&self, tool: ToolKind) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let model = &state.model;
+        model.presented
+            && !model.suppressed
+            && matches!(&model.route, PanelRoute::Tool { tool: open } if *open == tool)
     }
     pub fn always_floating(&self) -> bool {
         self.state

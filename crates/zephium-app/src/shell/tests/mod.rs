@@ -2279,6 +2279,7 @@ mod favicons;
 mod history;
 #[path = "navigation.rs"]
 mod navigation_tests;
+mod notes;
 mod operations;
 mod page_permissions;
 mod persistence;

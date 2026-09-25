@@ -61,4 +61,4 @@ pub use shell::Shell;
 #[doc(hidden)]
 pub use store_reads::StoreReadResult;
 
-pub use api::{HistoryCompletion, ResourceCompletion};
+pub use api::{HistoryCompletion, NoteCompletion, NotesAttachment, ResourceCompletion};

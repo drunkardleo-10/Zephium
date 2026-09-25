@@ -235,14 +235,19 @@ fn same_file_identity(before: &FileIdentity, after: &FileIdentity) -> bool {
 
 pub(super) fn profile_artifacts_exist(dir: &Path, profile: ProfileId) -> rusqlite::Result<bool> {
     let base = dir.join(format!("profile-{profile}.sqlite"));
-    for suffix in ["", "-wal", "-shm"] {
-        let path = if suffix.is_empty() {
-            base.clone()
-        } else {
+    let notes = [
+        dir.join("notes").join(profile.to_string()),
+        dir.join("notes").join(format!(".erasing-{profile}")),
+    ];
+    for path in ["", "-wal", "-shm"]
+        .into_iter()
+        .map(|suffix| {
             let mut path = base.as_os_str().to_owned();
             path.push(suffix);
             PathBuf::from(path)
-        };
+        })
+        .chain(notes)
+    {
         match std::fs::symlink_metadata(&path) {
             Ok(_) => return Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
