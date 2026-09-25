@@ -68,6 +68,10 @@ export default defineConfig({
             },
           },
           include: ["src/**/*.component.test.ts"],
+          // Playwright retires the oldest of 10,000 live requests. Parallel
+          // files flood that window while a slow manual mock is still being
+          // resolved, and its route is collected before it can be fulfilled.
+          fileParallelism: false,
           browser: {
             enabled: true,
             headless: true,
