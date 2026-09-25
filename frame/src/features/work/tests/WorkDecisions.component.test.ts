@@ -9,7 +9,7 @@ import WorkEnvironmentWorkspace from "../components/WorkEnvironmentWorkspace.sve
 const native = vi.hoisted(() => ({ call: vi.fn(), preview: vi.fn() }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ workCall: native.call, workContextPreview: native.preview });
+  return mockBindings({ faviconProbe: async () => true, workCall: native.call, workContextPreview: native.preview });
 });
 
 test("a decision is recorded on the element, shown on the card, and disclosed as context", async () => {

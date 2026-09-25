@@ -24,6 +24,7 @@ const native = vi.hoisted(() => ({
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    faviconProbe: async () => true,
     workCall: native.call,
     workActivity: native.activity,
     workHumanPages: native.humanPages,

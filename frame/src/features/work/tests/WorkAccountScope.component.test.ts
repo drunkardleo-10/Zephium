@@ -9,7 +9,7 @@ import WorkEnvironmentWorkspace from "../components/WorkEnvironmentWorkspace.sve
 const native = vi.hoisted(() => ({ call: vi.fn() }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ workCall: native.call });
+  return mockBindings({ faviconProbe: async () => true, workCall: native.call });
 });
 
 test("a tab card starts a signed-in request that Rust prepares for approval", async () => {
