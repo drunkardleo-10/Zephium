@@ -8,7 +8,7 @@
   import { preparationFailure } from "../lib/preparation-failure";
   import { fileName } from "../lib/work-files";
   import type { CanvasItem } from "../lib/canvas-model";
-  import AgentAvatar from "./cards/AgentAvatar.svelte";
+  import AgentOrb from "./cards/AgentOrb.svelte";
   import Icon from "$shared/ui/Icon";
   import { ArrowDown01Icon, ArrowRight02Icon, ArrowUp02Icon, StopIcon } from "../lib/icons";
   import * as m from "$shared/i18n/messages";
@@ -348,7 +348,7 @@
                       onfocusagent?.(agent.id);
                     }}
                   >
-                    <AgentAvatar seed={agent.agent?.seed ?? 0} size={18} active={live} />
+                    <AgentOrb seed={agent.agent?.seed ?? 0} size={18} />
                     <span class="who">{agent.title}</span>
                     <span class="doing">{agent.status}</span>
                   </button>
@@ -420,7 +420,7 @@
           aria-label={m.work_line_agents()}
           onclick={() => (want = want === "agents" ? null : "agents")}
         >
-          <AgentAvatar seed={agents[0]?.agent?.seed ?? 0} size={22} active={live} />
+          <AgentOrb seed={agents[0]?.agent?.seed ?? 0} size={22} ring={live} />
         </button>
         <div class="state">
           {#if waiting}
@@ -580,7 +580,7 @@
     block-size: 24px;
     padding: 0;
     border: 0;
-    border-radius: 50%;
+    border-radius: var(--radius-capsule);
     background: transparent;
     cursor: default;
     transition: scale var(--motion-base) var(--ease-spring);
@@ -752,7 +752,7 @@
     inline-size: 26px;
     block-size: 26px;
     border: 0;
-    border-radius: 50%;
+    border-radius: var(--radius-capsule);
     background: transparent;
     color: var(--color-muted);
     cursor: default;
@@ -935,7 +935,7 @@
     inline-size: 28px;
     block-size: 28px;
     border: 0;
-    border-radius: 50%;
+    border-radius: var(--radius-capsule);
     background: var(--color-lit);
     color: var(--color-on-lit);
     cursor: default;
