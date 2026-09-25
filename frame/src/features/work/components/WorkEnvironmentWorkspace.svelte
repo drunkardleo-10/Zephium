@@ -65,6 +65,8 @@
   import { homePath } from "../lib/work-files";
   import { youtubeThumbnail } from "../lib/link-media";
   import { resultPlan, stepResult } from "../lib/plan-steps";
+  import { diagramResult } from "../lib/diagram";
+  import { renamedPart } from "../lib/correct";
   import { stepPlan, WorkTasks, workTasksKey, type StepPlan } from "../lib/work-tasks";
   import { documentMarkdown, resultKey, WorkNotes } from "../lib/work-notes";
   import type { LiftAction } from "./LiftHeader.svelte";
@@ -80,6 +82,7 @@
     environmentPictures,
     environmentSources,
     environmentSteps,
+    environmentDiagrams,
     environmentView,
     fileEvidence,
     viewPlacements,
@@ -216,8 +219,9 @@
   function openLift(id: string) {
     const item = items.find((item) => item.id === id);
     if (!item) return;
-    // A step is part of its result: it opens the result whole.
-    const owner = item.type === "step" ? stepResult(id) : null;
+    // A step or a diagram's part is part of its result: it opens the result whole.
+    const owner =
+      item.type === "step" ? stepResult(id) : item.type === "diagram" ? diagramResult(id) : null;
     if (owner) {
       openLift(owner);
       return;
@@ -807,7 +811,15 @@
   const files = $derived(
     snapshot ? environmentFiles(context.objectives, stages) : { items: [], positions: {} },
   );
-  const clusters = $derived(environmentClusters(stages));
+  const diagrams = $derived(
+    snapshot
+      ? environmentDiagrams(snapshot, context.objectives, stages)
+      : { items: [], links: [], positions: {}, clusters: [] },
+  );
+  const clusters = $derived.by(() => {
+    const lanes = environmentClusters(stages);
+    return { ...lanes, clusters: [...diagrams.clusters, ...lanes.clusters] };
+  });
   const items = $derived([
     ...results.items,
     ...requests.items,
@@ -815,6 +827,7 @@
     ...pages.items,
     ...files.items,
     ...steps.items,
+    ...diagrams.items,
     ...agents.items,
   ]);
   const links = $derived([
@@ -825,6 +838,7 @@
     ...sources.links,
     ...pages.links,
     ...steps.links,
+    ...diagrams.links,
     ...agents.links,
   ]);
   const organizing = new SvelteSet<string>();
@@ -1303,6 +1317,7 @@
             ...pages.positions,
             ...files.positions,
             ...steps.positions,
+            ...diagrams.positions,
             ...agents.positions,
             ...plannedGeometry.positions,
             ...planGeometry.positions,
@@ -1715,6 +1730,29 @@
       if (inspected === id) inspected = null;
     }
   }
+  /** The run behind a diagram's part, while the person can still correct what it made. */
+  function partSource(id: string) {
+    const result = diagramResult(id);
+    const reference = snapshot?.elements.find((element) => element.id === result)?.reference;
+    const work = objectiveSession;
+    if (reference?.kind !== "artifact" || !work || work.pending) return null;
+    if (work.projection?.work.id !== reference.objective) return null;
+    const execution = work.projection.executions.find((entry) => entry.id === reference.execution);
+    const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
+    if (!execution || !artifact || !["needs_review", "completed"].includes(execution.status))
+      return null;
+    const user = execution.user_artifacts?.find((entry) => entry.artifact === artifact.id);
+    return { work, execution, artifact, data: user?.edited_data ?? artifact.data };
+  }
+  const canRenamePart = (id: string) => partSource(id)?.data.kind === "diagram";
+  async function renamePart(id: string, name: string) {
+    const source = partSource(id);
+    const next = source ? renamedPart(source.data, id.slice(id.lastIndexOf(":") + 1), name) : null;
+    if (!source || !next) return;
+    source.work.editArtifact(source.execution.id, source.artifact.id, next);
+    if (!(await source.work.saveArtifact(source.artifact.id)))
+      source.work.discardArtifact(source.artifact.id);
+  }
   function onPanelChange(panel: WorkEnvironmentPanel | null) {
     session.tabsIntroduced = true;
     if (panel === "notes") notesOpen = false;
@@ -2121,13 +2159,19 @@
               {remoteView}
               {authoritative}
               expose={(api) => (canvasRef = api)}
+              rename={{ can: canRenamePart, rename: (id, name) => void renamePart(id, name) }}
+              onprobe={(origin: string) =>
+                void commands.faviconProbe(session.profile, [origin]).catch(() => false)}
               fitBottomInset={composerHeight}
               still={!!lifted || !!pane || !!takeover}
               oninspect={(id: string) => (inspected = id)}
               onopen={openLift}
               onopenlink={openCitation}
               onselectionchange={(ids: string[]) => {
-                const owned = ids.filter((id) => authoritative.has(id));
+                // A diagram's part is context as its diagram: the result is the element.
+                const owned = [...new Set(ids.map((id) => diagramResult(id) ?? id))].filter((id) =>
+                  authoritative.has(id),
+                );
                 selectionCount = owned.length;
                 selectedIds = owned;
                 if (!ids.length) inspected = null;

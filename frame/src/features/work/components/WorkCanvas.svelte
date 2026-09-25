@@ -22,6 +22,9 @@
     canvasPictures,
     canvasAreaActions,
     canvasArrival,
+    canvasProbe,
+    canvasRename,
+    canvasSelectGroup,
   } from "../lib/canvas-context";
   import CanvasNode from "./CanvasNode.svelte";
   import AreaNode from "./AreaNode.svelte";
@@ -92,6 +95,8 @@
     onareachange,
     onselectionaction,
     onareaedit,
+    rename,
+    onprobe,
     expose,
   }: {
     items: readonly CanvasItem[];
@@ -126,8 +131,23 @@
       area: string,
       edit: { kind: "rename"; title: string } | { kind: "remove" },
     ) => void;
+    /** A diagram part's name, where its result can still be corrected. */
+    rename?: { can: (id: string) => boolean; rename: (id: string, name: string) => void };
+    /** Asks native for the icon of an origin no tab has shown. */
+    onprobe?: (origin: string) => void;
     expose?: (api: CanvasApi) => void;
   } = $props();
+  setContext(canvasRename, {
+    can: (id: string) => !!rename?.can(id),
+    rename: (id: string, name: string) => rename?.rename(id, name),
+  });
+  /** Each origin is asked for once per canvas. */
+  const probed: Record<string, true> = {};
+  setContext(canvasProbe, (origin: string) => {
+    if (probed[origin]) return;
+    probed[origin] = true;
+    onprobe?.(origin);
+  });
   setContext(canvasEvidence, {
     get open() {
       return onevidence;
@@ -206,8 +226,20 @@
           source: link.source,
           target: link.target,
           type: "work",
-          ...(link.kind === "thread" ? { sourceHandle: "below", targetHandle: "above" } : {}),
-          data: { tone: link.kind === "thread" ? "thread" : rest ? "rest" : "relation" },
+          ...(link.kind === "thread" || link.down
+            ? { sourceHandle: "below", targetHandle: "above" }
+            : {}),
+          data: {
+            tone:
+              link.kind === "thread"
+                ? "thread"
+                : link.kind === "diagram"
+                  ? "diagram"
+                  : rest
+                    ? "rest"
+                    : "relation",
+            ...(link.kind === "diagram" && link.label ? { label: link.label } : {}),
+          },
           deletable: false,
           selectable: false,
           focusable: false,
@@ -515,6 +547,18 @@
     });
   });
   let lastClick = { id: "", at: 0 };
+  /** A group taken whole: its members become the selection, as a marquee would make it. */
+  function selectGroup(id: string) {
+    const members = new Set(scene.clusters.find((cluster) => cluster.id === id)?.members ?? []);
+    if (!members.size) return;
+    nodes = nodes.map((node) =>
+      !!node.selected === members.has(node.id) ? node : { ...node, selected: members.has(node.id) },
+    );
+    selection = [...members];
+    selectedIds = members;
+    onselectionchange?.(selection);
+  }
+  setContext(canvasSelectGroup, selectGroup);
 
   // Selection, marquee, arrange and areas.
   const pendingAreas: Record<string, CanvasPosition & CanvasSize> = {};
@@ -639,6 +683,11 @@
         )
           return;
         const now = performance.now();
+        // A part's double click names it; its lift is one click on Open away.
+        if (byId.get(node.id)?.type === "diagram" && rename?.can(node.id)) {
+          oninspect(node.id);
+          return;
+        }
         if (lastClick.id === node.id && now - lastClick.at < 320) {
           lastClick = { id: "", at: 0 };
           onopen?.(node.id);

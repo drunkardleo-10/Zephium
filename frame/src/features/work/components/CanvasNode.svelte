@@ -30,6 +30,7 @@
   import FolderCard from "./cards/FolderCard.svelte";
   import PageCard from "./cards/PageCard.svelte";
   import StepCard from "./cards/StepCard.svelte";
+  import DiagramNodeCard from "./cards/DiagramNodeCard.svelte";
   import * as m from "$shared/i18n/messages";
   const open = getContext<(id: string) => void>(canvasOpen);
   const action = getContext<(id: string, action?: string) => void>(canvasAction);
@@ -58,6 +59,7 @@
       "file",
       "command",
       "step",
+      "diagram",
     ].includes(type),
   );
   /** A page held for a person opens the takeover, never a copy in Browse. */
@@ -74,7 +76,7 @@
 <NodeResizer
   onResizeStart={() => resize(true)}
   onResizeEnd={() => resize(false)}
-  isVisible={selected}
+  isVisible={selected && type !== "diagram"}
   minWidth={160}
   minHeight={72}
   maxWidth={4096}
@@ -143,6 +145,7 @@
   {:else if type === "file"}<FileCard item={data} {selected} />
   {:else if type === "command"}<CommandCard item={data} {selected} />
   {:else if type === "step"}<StepCard item={data} {selected} />
+  {:else if type === "diagram"}<DiagramNodeCard item={data} {selected} />
   {:else if type === "sources"}<SourcesCard item={data} {selected} />
   {:else if type === "folder"}<FolderCard item={data} {selected} />
   {:else if type === "page"}<PageCard item={data} {selected} onhelp={() => action(id, "help")} />
