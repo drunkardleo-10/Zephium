@@ -25,10 +25,12 @@
     canvasProbe,
     canvasRename,
     canvasSelectGroup,
+    canvasDiagram,
   } from "../lib/canvas-context";
   import CanvasNode from "./CanvasNode.svelte";
   import AreaNode from "./AreaNode.svelte";
   import ClusterNode from "./ClusterNode.svelte";
+  import DiagramBand from "./DiagramBand.svelte";
   import AgentMark from "./AgentMark.svelte";
   import WorkEdge from "./WorkEdge.svelte";
   import { arrivals } from "../lib/arrival";
@@ -58,6 +60,7 @@
     validScene,
     validViewport,
     withClusters,
+    withBands,
     relationLinks,
     restLink,
     type CanvasArea,
@@ -69,6 +72,17 @@
     type CanvasView,
     type WorkNode,
   } from "../lib/canvas-model";
+  import {
+    columnLayout,
+    diagramNodeId,
+    diagramOrigin,
+    layoutOf,
+    partAlong,
+    sceneShape,
+    settledLayout,
+    type DiagramLayout,
+    type DiagramShape,
+  } from "../lib/diagram";
   import * as m from "$shared/i18n/messages";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   let {
@@ -202,7 +216,13 @@
   // One bad card never hides the canvas: the scene is repaired, then guarded.
   const scene = $derived(sanitizeScene(items, links, clusters));
   let valid = $derived(validScene(scene.items, scene.links, scene.clusters));
-  const nodeTypes = { work: CanvasNode, area: AreaNode, cluster: ClusterNode, agent: AgentMark };
+  const nodeTypes = {
+    work: CanvasNode,
+    area: AreaNode,
+    cluster: ClusterNode,
+    agent: AgentMark,
+    band: DiagramBand,
+  };
   const edgeTypes = { work: WorkEdge };
   let selection: string[] = [];
   let selectedIds = $state.raw<ReadonlySet<string>>(new Set());
@@ -218,15 +238,167 @@
   const lit = $derived(relationLinks(scene.links, byId, focused));
   const title = (id: string) =>
     byId.get(id)?.title ?? scene.clusters.find((cluster) => cluster.id === id)?.label ?? "";
-  /** The thread and a flow down a column run upright; a flow beside a column leaves and lands on the right. */
+  /** The thread runs upright. */
   const handles = (link: CanvasLink) =>
-    link.kind === "thread" || link.route === "down"
-      ? { sourceHandle: "below", targetHandle: "above" }
-      : link.route === "up"
-        ? { sourceHandle: "above-out", targetHandle: "below-in" }
-        : link.route
-          ? { targetHandle: "right-in" }
-          : {};
+    link.kind === "thread" ? { sourceHandle: "below", targetHandle: "above" } : {};
+
+  // Diagrams. Each area's parts stand by one layout: the engine's once it has
+  // answered, the columns until then; the canvas finds which by where they stand.
+  type Drawing = {
+    area: string;
+    prefix: string;
+    members: readonly string[];
+    layout: DiagramLayout;
+    origin: CanvasPosition | null;
+  };
+  let drawings = $state.raw<Drawing[]>([]);
+  const shapes = $derived(
+    scene.clusters.flatMap((cluster) =>
+      cluster.tone === "area" && cluster.opens
+        ? [
+            {
+              cluster,
+              shape: sceneShape(
+                cluster.opens,
+                cluster.members,
+                cluster.layers ?? [],
+                scene.links.filter(
+                  (link) => link.kind === "diagram" && cluster.members.includes(link.source),
+                ),
+              ),
+            },
+          ]
+        : [],
+    ),
+  );
+  function drawing(cluster: CanvasCluster, shape: DiagramShape, list: readonly WorkNode[]) {
+    const prefix = diagramNodeId(cluster.opens!, "");
+    const byNode = new Map(list.map((node) => [node.id, node]));
+    const vote = (layout: DiagramLayout) =>
+      diagramOrigin(
+        cluster.members.flatMap((id) => {
+          const node = byNode.get(id);
+          const at = layout.at[id.slice(prefix.length)];
+          return node && at ? [{ position: absolutePosition(node, list), at }] : [];
+        }),
+      );
+    const settled = settledLayout(shape);
+    let layout = settled ?? layoutOf(shape);
+    let found = vote(layout);
+    if (settled && (found?.count ?? 0) < cluster.members.length) {
+      const columns = columnLayout(shape);
+      const other = vote(columns);
+      if ((other?.count ?? 0) > (found?.count ?? 0)) [layout, found] = [columns, other];
+    }
+    return {
+      area: cluster.id,
+      prefix,
+      members: cluster.members,
+      layout,
+      origin: found?.origin ?? null,
+    };
+  }
+  const drawnBy = $derived(
+    new Map(drawings.flatMap((entry) => entry.members.map((id) => [id, entry] as const))),
+  );
+  /** Parts joined by a flow to a part being looked at. */
+  function joined(entry: Drawing, id: string): string[] {
+    const local = id.slice(entry.prefix.length);
+    return Object.values(entry.layout.flows).flatMap((flow) =>
+      flow.from === local
+        ? [entry.prefix + flow.to]
+        : flow.to === local
+          ? [entry.prefix + flow.from]
+          : [],
+    );
+  }
+  /** While a part is looked at, the parts no flow joins it to step back. */
+  const dimmed = $derived.by(() => {
+    const out: string[] = [];
+    for (const entry of drawings) {
+      const here = entry.members.filter((id) => focused.has(id));
+      if (!here.length || here.length === entry.members.length) continue;
+      const near = new Set([...here, ...here.flatMap((id) => joined(entry, id))]);
+      for (const id of entry.members) if (!near.has(id)) out.push(id);
+    }
+    return new Set(out);
+  });
+  setContext(canvasDiagram, (id: string) => dimmed.has(id));
+  /**
+   * A diagram's flow: named first flows at rest and the rest quiet; while one
+   * of its parts is looked at, that part's flows lit and every other quiet.
+   */
+  function flowData(link: CanvasLink) {
+    const entry = drawnBy.get(link.source);
+    const index = Number(link.id.slice(link.id.lastIndexOf(":") + 1));
+    const flow = entry?.layout.flows[index];
+    const looked = !!entry && entry.members.some((id) => focused.has(id));
+    const state = looked
+      ? focused.has(link.source) || focused.has(link.target)
+        ? "lit"
+        : "quiet"
+      : !flow || flow.primary
+        ? "rest"
+        : "quiet";
+    const at = (id: string) => entry?.layout.at[id.slice(entry.prefix.length)];
+    const from = at(link.source);
+    const to = at(link.target);
+    return {
+      state,
+      ...(link.label ? { label: link.label } : {}),
+      ...(flow && from && to
+        ? {
+            flow: {
+              points: flow.points,
+              from,
+              to,
+              ...(flow.plate ? { plate: flow.plate } : {}),
+              settled: entry!.layout.settled,
+            },
+          }
+        : {}),
+    };
+  }
+  /** Arrow keys walk a diagram along its flows, from the part that holds the keyboard. */
+  function diagramKeys(event: KeyboardEvent) {
+    if (event.metaKey || event.ctrlKey || event.altKey || !event.key.startsWith("Arrow")) return;
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || !target.matches(".svelte-flow__node")) return;
+    const id = target.dataset.id ?? "";
+    const entry = drawnBy.get(id);
+    if (!entry) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const spot = (part: string) => {
+      const node = nodes.find((candidate) => candidate.id === part);
+      if (!node) return null;
+      const p = absolutePosition(node, nodes);
+      return { x: p.x + (node.width ?? 0) / 2, y: p.y + (node.height ?? 0) / 2 };
+    };
+    const from = spot(id);
+    if (!from) return;
+    const next = partAlong(
+      from,
+      [...new Set(joined(entry, id))].flatMap((part) => {
+        const at = spot(part);
+        return at ? [{ id: part, at }] : [];
+      }),
+      event.key,
+    );
+    if (next)
+      host
+        ?.querySelector<HTMLElement>(`.svelte-flow__node[data-id="${CSS.escape(next)}"]`)
+        ?.focus();
+  }
+  /** A part holding the keyboard is looked at, as one under the pointer is. */
+  function partFocus(event: FocusEvent, into: boolean) {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || !target.matches(".svelte-flow__node")) return;
+    const id = target.dataset.id ?? "";
+    if (!drawnBy.has(id)) return;
+    if (into) hovered = id;
+    else if (hovered === id) hovered = null;
+  }
   let edges = $derived.by<Edge[]>(() => {
     if (!valid) return [];
     arrival.see(scene.clusters, scene.items);
@@ -249,10 +421,7 @@
                   : rest
                     ? "rest"
                     : "relation",
-            ...(link.kind === "diagram" && link.label
-              ? { label: link.label, ...(link.plate ? { plate: link.plate } : {}) }
-              : {}),
-            ...(typeof link.route === "object" ? { bend: link.route.beside } : {}),
+            ...(link.kind === "diagram" ? flowData(link) : {}),
           },
           deletable: false,
           selectable: false,
@@ -332,8 +501,51 @@
     const groups = scene.clusters;
     const active = focused;
     const current = nodes;
-    const next = withClusters(current, valid ? groups : [], active);
+    const drawn = valid ? shapes.map(({ cluster, shape }) => drawing(cluster, shape, current)) : [];
+    // A diagram's area holds its whole picture, and its layers are bands behind the parts.
+    const framed = groups.map((group) => {
+      const entry = drawn.find((candidate) => candidate.area === group.id);
+      if (!entry?.origin) return group;
+      const { bounds } = entry.layout;
+      const frame = {
+        x: entry.origin.x + bounds.x,
+        y: entry.origin.y + bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+      };
+      return { ...group, frame };
+    });
+    const bands = drawn.flatMap((entry) =>
+      entry.origin
+        ? entry.layout.bands.map((band, index) => ({
+            id: `band:${entry.area}:${index}`,
+            name: band.name,
+            rect: {
+              x: entry.origin!.x + band.x,
+              y: entry.origin!.y + band.y,
+              width: band.width,
+              height: band.height,
+            },
+          }))
+        : [],
+    );
+    const next = withBands(withClusters(current, valid ? framed : [], active), bands);
     if (next !== current) nodes = next;
+    untrack(() => {
+      const same =
+        drawn.length === drawings.length &&
+        drawn.every((entry, index) => {
+          const before = drawings[index]!;
+          return (
+            entry.area === before.area &&
+            entry.layout === before.layout &&
+            entry.members === before.members &&
+            entry.origin?.x === before.origin?.x &&
+            entry.origin?.y === before.origin?.y
+          );
+        });
+      if (!same) drawings = drawn;
+    });
   });
   let publishedPositions = "";
   const positionKey = (list: WorkNode[]) =>
@@ -644,6 +856,9 @@
   bind:clientWidth={canvasWidth}
   bind:clientHeight={canvasHeight}
   aria-label={m.work_canvas_label()}
+  onkeydowncapture={diagramKeys}
+  onfocusin={(event) => partFocus(event, true)}
+  onfocusout={(event) => partFocus(event, false)}
 >
   {#if valid}
     <SvelteFlow
@@ -795,9 +1010,17 @@
     transition: none;
   }
 
-  /* stylelint-disable-next-line selector-class-pattern */
-  .work-canvas :global(.svelte-flow__node.cluster-node) {
+  /* stylelint-disable selector-class-pattern */
+  .work-canvas :global(.svelte-flow__node.cluster-node),
+  .work-canvas :global(.svelte-flow__node.band-node) {
     pointer-events: none;
+  }
+  /* stylelint-enable selector-class-pattern */
+
+  /* A diagram's part slides to where the layout engine settles it; a dragged one follows the pointer. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  .work-canvas :global(.svelte-flow__node.diagram-part:not(.dragging)) {
+    transition: transform var(--motion-base) var(--ease-emphasized);
   }
 
   /* The agent's mark walks to its work on a spring; it never takes the pointer. */

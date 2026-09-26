@@ -3,7 +3,7 @@ import type { IconRef } from "$shared/ipc/bindings";
 import type { ArtifactView, FindingView, SubjectView } from "$shared/ui/data/Artifact";
 import type { Node } from "@xyflow/svelte";
 import type { HumanPage } from "./work-human";
-import type { DiagramPlate, DiagramRoute } from "./diagram";
+import { DIAGRAM, type DiagramPlate, type DiagramRoute } from "./diagram";
 import { defaultSize } from "./card-size";
 import { firstRowAnchor } from "./stage-layout";
 export { defaultSize };
@@ -239,6 +239,8 @@ export type CanvasCluster = {
   layers?: readonly { name: string; members: readonly string[] }[];
   /** The least room the members take from the first one: a diagram's plates. */
   extent?: CanvasSize;
+  /** Where a diagram's whole picture stands (parts, flows, bands); its layers then need no captions. */
+  frame?: CanvasPosition & CanvasSize;
   /** The result this group stands for: its title leads the caption and opens it. */
   opens?: string;
   title?: string;
@@ -259,13 +261,17 @@ export type ClusterData = {
 export type WorkItemNode = Node<CanvasItem, "work">;
 type AgentNode = Node<CanvasItem, "agent">;
 type ClusterNode = Node<ClusterData, "cluster">;
-export type WorkNode = WorkItemNode | Node<AreaData, "area"> | ClusterNode | AgentNode;
+/** A diagram layer's swimlane, behind its parts. */
+export type BandData = { name: string };
+type BandNode = Node<BandData, "band">;
+export type WorkNode = WorkItemNode | Node<AreaData, "area"> | ClusterNode | AgentNode | BandNode;
 const AREA_PREFIX = "area:";
 const areaNodeId = (id: string) => `${AREA_PREFIX}${id}`;
 export const isAreaNode = (node: WorkNode): node is Node<AreaData, "area"> => node.type === "area";
 const isClusterNode = (node: WorkNode): node is ClusterNode => node.type === "cluster";
 export const isItemNode = (node: WorkNode): node is WorkItemNode => node.type === "work";
 export const isAgentNode = (node: WorkNode): node is AgentNode => node.type === "agent";
+const isBandNode = (node: WorkNode): node is BandNode => node.type === "band";
 const DEFAULT_AREA: CanvasSize = { width: 640, height: 420 };
 /** The agent's orb; its caption hangs outside the node. */
 const MARK_SIZE = 24;
@@ -592,6 +598,8 @@ export function reconcileNodes(
       type: "work",
       position,
       ...(parent ? { parentId } : {}),
+      // A diagram's part slides to where the layout engine settles it.
+      ...(item.type === "diagram" ? { class: "diagram-part" } : {}),
       data: item,
       width: restoredSize?.width ?? defaultSize(item).width,
       height: restoredSize?.height ?? defaultSize(item).height,
@@ -601,8 +609,8 @@ export function reconcileNodes(
       ariaLabel: `${item.title}. ${item.status}`,
     };
   });
-  // Clusters are derived from the cards afterwards; they keep their node until then.
-  const clusters = previous.filter(isClusterNode);
+  // Clusters and bands are derived from the cards afterwards; they keep their node until then.
+  const clusters = previous.filter((node) => isClusterNode(node) || isBandNode(node));
   const combined: WorkNode[] = [...areaNodes, ...clusters, ...next];
   return combined.length === previous.length &&
     combined.every((node, index) => node === previous[index])
@@ -665,6 +673,14 @@ export function withClusters(
       maxX = Math.max(maxX, left + cluster.extent.width + inset);
       maxY = Math.max(maxY, top + cluster.extent.height + inset);
     }
+    // A diagram's picture reaches past its parts: its flows, plates and bands.
+    if (cluster.frame && rects.length) {
+      const band = cluster.layers?.length ? DIAGRAM.layer : 0;
+      minX = Math.min(minX, cluster.frame.x - inset);
+      minY = Math.min(minY, cluster.frame.y - inset - (caption - band));
+      maxX = Math.max(maxX, cluster.frame.x + cluster.frame.width + inset);
+      maxY = Math.max(maxY, cluster.frame.y + cluster.frame.height + inset);
+    }
     // An inner group is padded like a card, so a group holding only one reads the same.
     for (const box of inner) {
       minX = Math.min(minX, box.x - inset);
@@ -676,7 +692,7 @@ export function withClusters(
     const width = Math.round(maxX - minX);
     const height = Math.round(maxY - minY);
     boxes.set(cluster.id, { ...position, width, height });
-    const layers = cluster.layers?.flatMap((layer) => {
+    const layers = (cluster.frame ? [] : (cluster.layers ?? [])).flatMap((layer) => {
       const column = layer.members.flatMap((id) => {
         const node = byId.get(id);
         return node && isItemNode(node) ? [absolutePosition(node, nodes)] : [];
@@ -746,6 +762,49 @@ export function withClusters(
   return next.length === nodes.length && next.every((node, index) => node === nodes[index])
     ? nodes
     : next;
+}
+
+/**
+ * A diagram's swimlanes as nodes behind its parts, just after the groups; the
+ * same nodes come back when nothing moved.
+ */
+export function withBands(
+  nodes: WorkNode[],
+  bands: readonly { id: string; name: string; rect: CanvasPosition & CanvasSize }[],
+): WorkNode[] {
+  const before = new Map(nodes.filter(isBandNode).map((node) => [node.id, node]));
+  const next: BandNode[] = bands.map(({ id, name, rect }) => {
+    const node = before.get(id);
+    return node &&
+      node.data.name === name &&
+      node.position.x === rect.x &&
+      node.position.y === rect.y &&
+      node.width === rect.width &&
+      node.height === rect.height
+      ? node
+      : {
+          id,
+          type: "band",
+          position: { x: rect.x, y: rect.y },
+          width: rect.width,
+          height: rect.height,
+          data: { name },
+          class: "band-node",
+          selectable: false,
+          draggable: false,
+          focusable: false,
+          deletable: false,
+          connectable: false,
+          zIndex: -1,
+          ariaLabel: name,
+        };
+  });
+  const rest = nodes.filter((node) => !isBandNode(node));
+  const at = rest.findLastIndex((node) => isClusterNode(node) || isAreaNode(node)) + 1;
+  const combined = [...rest.slice(0, at), ...next, ...rest.slice(at)];
+  return combined.length === nodes.length && combined.every((node, i) => node === nodes[i])
+    ? nodes
+    : combined;
 }
 
 /** Applies a remote view to existing nodes in place; dragging and derived nodes keep local geometry. */

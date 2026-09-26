@@ -21,3 +21,5 @@ export const canvasRename = Symbol("canvas-rename");
 export const canvasProbe = Symbol("canvas-probe");
 /** Selects a group's members at once: a diagram taken whole. */
 export const canvasSelectGroup = Symbol("canvas-select-group");
+/** Which diagram parts step back while another part and its flows are looked at. */
+export const canvasDiagram = Symbol("canvas-diagram");
