@@ -471,6 +471,10 @@ test("prompt submission keeps work on canvas and clarification choices above the
       search_call_id: "search-call",
     },
   });
+  // The zoom capsule and the tasks pill sit in the top row, not over the canvas.
+  const chrome = screen.container.querySelector("[data-zephium-work-chrome]")!;
+  expect(chrome.querySelector("[data-work-zoom-slot] [role='group']")).not.toBeNull();
+  expect(chrome.querySelector(".work-tasks-pill")).not.toBeNull();
   await screen.getByRole("button", { name: "Fit view", exact: true }).click();
   await expect.element(screen.getByText("Reviewed findings", { exact: true })).toBeVisible();
   expect(screen.container.querySelector(".detail")).toBeNull();

@@ -198,10 +198,11 @@ test("a subject opens as a product view with its facts, their sources, and its p
   await expect.element(screen.getByText("Minifigures", { exact: true })).toBeVisible();
   await screen.getByRole("button", { name: "Open page", exact: true }).click();
   expect(onopen).toHaveBeenCalledWith("https://lego.com/tower-bridge");
-  // The page behind the fact is listed once in the rail, and opens in the pane.
-  const sources = screen.getByRole("region", { name: "Sources" });
-  await sources.getByRole("button", { name: "Based on 1 source" }).click();
-  await sources.getByRole("listitem").getByRole("button").first().click();
+  // The page behind the fact is listed once, open, and opens in the pane; the list is the statement.
+  const sources = screen.getByRole("complementary", { name: "Sources" });
+  await expect.element(sources.getByRole("listitem")).toHaveLength(1);
+  expect(screen.container.textContent).not.toContain("Based on");
+  await sources.getByRole("listitem").getByRole("button").click();
   expect(onopen).toHaveBeenLastCalledWith("https://lego.com/tower-bridge");
   await screen.unmount();
 });
@@ -239,7 +240,7 @@ test("the open compare keeps its header and first column in view and marks the b
   const criterion = screen.container.querySelector<HTMLElement>("th.criterion")!;
   expect(getComputedStyle(criterion).position).toBe("sticky");
   const picture = screen.container.querySelector<HTMLElement>(".picture")!;
-  expect(picture.getBoundingClientRect().width).toBe(96);
+  expect(picture.getBoundingClientRect().width).toBe(40);
   // The lower price and the higher rating each carry one quiet dot.
   expect(screen.container.querySelectorAll(".best")).toHaveLength(2);
   const check = screen.container.querySelector<HTMLElement>("td.check .cell")!;

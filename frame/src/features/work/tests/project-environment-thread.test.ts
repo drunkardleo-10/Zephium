@@ -47,8 +47,8 @@ test("every message keeps its own request card, one lane each down the request c
   expect(stages.map((stage) => [stage.card, stage.request, stage.place.x, stage.place.y])).toEqual([
     ["objective-card", "Compare quiet keyboards", 0, 0],
     ["request:objective-card:continuation-1", "Show me the quietest one", 0, first + 96],
-    // A lane with nothing but its request is as tall as the request: 64 px for one line.
-    ["request:objective-card:continuation-2", "And the wireless ones", 0, first + 96 + 64 + 96],
+    // A lane with nothing but its request is as tall as the request: 80 px, its floor.
+    ["request:objective-card:continuation-2", "And the wireless ones", 0, first + 96 + 80 + 96],
   ]);
   // The request card the work began with keeps the first sentence, not the last.
   expect(environmentItems(scene, [], [], objectives)[0]?.title).toBe("Compare quiet keyboards");
