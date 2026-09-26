@@ -8,8 +8,6 @@ export { default as ArrowRight01Icon } from "@hugeicons/core-free-icons/ArrowRig
 export { default as ArrowRight02Icon } from "@hugeicons/core-free-icons/ArrowRight02Icon";
 export { default as ArrowUp02Icon } from "@hugeicons/core-free-icons/ArrowUp02Icon";
 export { default as ArrowUpRight01Icon } from "@hugeicons/core-free-icons/ArrowUpRight01Icon";
-export { default as Attachment01Icon } from "@hugeicons/core-free-icons/Attachment01Icon";
-export { default as BoundingBoxIcon } from "@hugeicons/core-free-icons/BoundingBoxIcon";
 export { default as BrowserIcon } from "@hugeicons/core-free-icons/BrowserIcon";
 export { default as Calendar03Icon } from "@hugeicons/core-free-icons/Calendar03Icon";
 export { default as Cancel01Icon } from "@hugeicons/core-free-icons/Cancel01Icon";
@@ -22,7 +20,6 @@ export { default as CubeIcon } from "@hugeicons/core-free-icons/CubeIcon";
 export { default as Database01Icon } from "@hugeicons/core-free-icons/Database01Icon";
 export { default as Doc01Icon } from "@hugeicons/core-free-icons/Doc01Icon";
 export { default as File01Icon } from "@hugeicons/core-free-icons/File01Icon";
-export { default as FitToScreenIcon } from "@hugeicons/core-free-icons/FitToScreenIcon";
 export { default as FlashIcon } from "@hugeicons/core-free-icons/FlashIcon";
 export { default as Folder01Icon } from "@hugeicons/core-free-icons/Folder01Icon";
 export { default as FolderAddIcon } from "@hugeicons/core-free-icons/FolderAddIcon";
@@ -36,7 +33,6 @@ export { default as LayoutGridIcon } from "@hugeicons/core-free-icons/LayoutGrid
 export { default as LeftToRightListBulletIcon } from "@hugeicons/core-free-icons/LeftToRightListBulletIcon";
 export { default as Link04Icon } from "@hugeicons/core-free-icons/Link04Icon";
 export { default as LockIcon } from "@hugeicons/core-free-icons/LockIcon";
-export { default as MapsIcon } from "@hugeicons/core-free-icons/MapsIcon";
 export { default as Mic01Icon } from "@hugeicons/core-free-icons/Mic01Icon";
 export { default as MinusSignIcon } from "@hugeicons/core-free-icons/MinusSignIcon";
 export { default as Money03Icon } from "@hugeicons/core-free-icons/Money03Icon";
@@ -52,7 +48,8 @@ export { default as Settings02Icon } from "@hugeicons/core-free-icons/Settings02
 export { default as Shield01Icon } from "@hugeicons/core-free-icons/Shield01Icon";
 export { default as SourceCodeIcon } from "@hugeicons/core-free-icons/SourceCodeIcon";
 export { default as SparklesIcon } from "@hugeicons/core-free-icons/SparklesIcon";
-export { default as StickyNote02Icon } from "@hugeicons/core-free-icons/StickyNote02Icon";
+export { default as SquareDashedTopSolidIcon } from "@hugeicons/core-free-icons/SquareDashedTopSolidIcon";
+export { default as StickyNote03Icon } from "@hugeicons/core-free-icons/StickyNote03Icon";
 export { default as StopIcon } from "@hugeicons/core-free-icons/StopIcon";
 export { default as Table01Icon } from "@hugeicons/core-free-icons/Table01Icon";
 export { default as Target01Icon } from "@hugeicons/core-free-icons/Target01Icon";

@@ -1,9 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { useSvelteFlow, useViewport, Panel } from "@xyflow/svelte";
-  import Icon from "$shared/ui/Icon";
   import { duration, reducedMotion } from "$shared/lib/motion";
-  import { MinusSignIcon, PlusSignIcon } from "../lib/icons";
   import type { PointerTool } from "../lib/selection";
   import * as m from "$shared/i18n/messages";
   let {
@@ -17,9 +15,9 @@
   const flow = useSvelteFlow();
   const viewport = useViewport();
   const percent = $derived(Math.round(viewport.current.zoom * 100));
-  /** A mark inside the flow: the capsule itself may be drawn in the chrome's row. */
+  /** A mark inside the flow: the level itself is drawn in the canvas's edge slot. */
   let anchor = $state<HTMLElement>();
-  /** The chrome row's slot for the capsule, when this canvas sits under one. */
+  /** The edge slot the workspace keeps for the level, when there is one. */
   let slot = $state<HTMLElement | null>(null);
   onMount(() => {
     const find = () => {
@@ -31,11 +29,11 @@
     };
     slot = find();
     if (slot) return;
-    // The chrome can arrive a frame after the canvas.
+    // The slot can arrive a frame after the canvas.
     const frame = requestAnimationFrame(() => (slot = find()));
     return () => cancelAnimationFrame(frame);
   });
-  /** Draws the capsule in the chrome's slot. */
+  /** Draws the level in the edge slot. */
   function into(node: HTMLElement, target: HTMLElement) {
     // One element moves, so Svelte's removal of the block still finds it.
     target.append(node);
@@ -76,105 +74,61 @@
 />
 
 <span class="anchor" hidden bind:this={anchor}></span>
-{#snippet capsule(docked: boolean)}
-  <div class="capsule" class:docked role="group" aria-label={m.work_canvas_controls()}>
+{#snippet capsule()}
+  <div class="zoom" role="group" aria-label={m.work_canvas_controls()}>
     <button
       type="button"
-      aria-label={m.work_zoom_out()}
-      title={m.work_zoom_out()}
-      onclick={() => void flow.zoomOut({ duration: travel("fast") })}
-      ><Icon icon={MinusSignIcon} size={12} /></button
-    >
-    <button type="button" class="level" aria-label={m.work_fit()} title={m.work_fit()} onclick={fit}
-      >{percent}%</button
-    >
-    <button
-      type="button"
-      aria-label={m.work_zoom_in()}
-      title={m.work_zoom_in()}
-      onclick={() => void flow.zoomIn({ duration: travel("fast") })}
-      ><Icon icon={PlusSignIcon} size={12} /></button
+      class="level"
+      aria-label={m.work_fit()}
+      title={`${m.work_fit()} (0)`}
+      onclick={fit}>{percent}%</button
     >
   </div>
 {/snippet}
-{#if slot}<div class="docked-host" use:into={slot}>{@render capsule(true)}</div>
-{:else}<Panel position="bottom-left">{@render capsule(false)}</Panel>{/if}
+{#if slot}<div class="docked-host" use:into={slot}>{@render capsule()}</div>
+{:else}<Panel position="bottom-right">{@render capsule()}</Panel>{/if}
 
 <style>
   .docked-host {
     display: flex;
   }
 
-  .capsule {
+  /* A reading more than a control: the level, quiet at the canvas's edge,
+     and a click fits the view to it. */
+  .zoom {
     display: inline-flex;
     align-items: center;
-    box-sizing: border-box;
-    block-size: 32px;
-    padding: 2px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-float);
-    box-shadow: var(--shadow-popover);
   }
 
-  button {
-    display: grid;
-    place-items: center;
-    min-inline-size: 28px;
+  .level {
+    min-inline-size: 48px;
     block-size: 28px;
-    padding: 0;
+    padding: 0 8px;
     border: 0;
     border-radius: var(--radius-capsule);
     background: transparent;
     color: var(--color-muted);
     font: inherit;
+    font-size: var(--text-label);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
     cursor: default;
     transition:
       background-color var(--motion-fast) var(--ease-out),
       color var(--motion-fast) var(--ease-out);
   }
 
-  button:hover {
-    background: var(--color-control-hover);
+  .level:hover {
+    background: var(--color-fill-hover);
     color: var(--color-text);
   }
 
-  button:active {
-    background: var(--color-control-pressed);
+  .level:active {
+    background: var(--color-fill-active);
   }
 
-  button:focus-visible {
+  .level:focus-visible {
     outline: 2px solid var(--color-ring);
     outline-offset: -2px;
-  }
-
-  .level {
-    min-inline-size: 48px;
-    padding-inline: 6px;
-    color: var(--color-text);
-    font-size: var(--text-label);
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-  }
-
-  /* In the chrome row: the tasks pill's shape and fill, no float. */
-  .capsule.docked {
-    block-size: 26px;
-    padding: 0 2px;
-    background: var(--color-fill);
-    box-shadow: none;
-  }
-
-  .docked button {
-    min-inline-size: 22px;
-    block-size: 22px;
-  }
-
-  .docked .level {
-    min-inline-size: 44px;
-    color: var(--color-label-secondary);
-  }
-
-  .docked .level:hover {
-    color: var(--color-text);
   }
 </style>
