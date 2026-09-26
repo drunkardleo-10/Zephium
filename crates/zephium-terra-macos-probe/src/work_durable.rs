@@ -555,6 +555,9 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             )
             .map_err(|_| "durable_shell")?;
             *relay.lock().map_err(|_| "durable_events")? = Some(shell.callback_handle());
+            if mode == Mode::LoopbackAccount {
+                super::work_account::install_presence(engine.clone());
+            }
             let composition = MacosWorkComposition::new(engine, owner_store);
             if !shell.admit_startup() {
                 return Err("durable_startup");

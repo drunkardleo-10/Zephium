@@ -43,14 +43,18 @@ enum Check {
     Write,
     /// The grant does not survive into a second request.
     SecondRequest,
+    /// A request naming a tab's site drafts a grant only once the profile
+    /// holds that site's session, and the drafted grant reads signed in.
+    Intent,
 }
-const ALL: [Check; 6] = [
+const ALL: [Check; 7] = [
     Check::Read,
     Check::Outside,
     Check::Redirect,
     Check::Budget,
     Check::Write,
     Check::SecondRequest,
+    Check::Intent,
 ];
 static CHECKS: OnceLock<Vec<Check>> = OnceLock::new();
 
@@ -63,6 +67,7 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("budget") => vec![Check::Budget],
         Some("write") => vec![Check::Write],
         Some("second-request") => vec![Check::SecondRequest],
+        Some("intent") => vec![Check::Intent],
         _ => return Err(super::ProbeFailure::Authority),
     };
     let _ = CHECKS.set(checks);
@@ -79,6 +84,47 @@ struct Hit {
     post: bool,
     path: String,
     cookie: String,
+}
+
+/// A site the person never signed in to; nothing serves it.
+const FRESH: &str = "https://fresh.probe.test";
+
+/// The app's session check against the real profile store, with each contract
+/// host answered by the loopback host whose cookies stand for it.
+pub(super) fn install_presence(engine: std::sync::Arc<zephium_engine::WebviewEngine>) {
+    zephium_app::work_context::install_session_presence(std::sync::Arc::new(
+        move |profile, hosts: Vec<String>| {
+            let hosts = hosts
+                .into_iter()
+                .map(|host| {
+                    match host.as_str() {
+                        "account.probe.test" => "127.0.0.1",
+                        "other.probe.test" => "localhost",
+                        _ => "fresh.probe.invalid",
+                    }
+                    .to_owned()
+                })
+                .collect();
+            engine.work_sessions_present(profile, hosts)
+        },
+    ));
+}
+
+/// Whether a request naming each site would stop at a drafted grant.
+async fn offered(
+    profile: ProfileId,
+    work: WorkId,
+    request: &str,
+    origins: &[&str],
+) -> Result<Option<WorkAccountGrantV1>, &'static str> {
+    zephium_app::work_account_scope::WorkAccountApproval::offer_for_probe(
+        profile,
+        work,
+        request,
+        origins.iter().map(|origin| (*origin).to_owned()).collect(),
+    )
+    .await
+    .map_err(|_| "intent_offer")
 }
 
 /// Two HTTP/1.1 loopback servers that record method, path and cookie only.
@@ -539,6 +585,23 @@ pub(super) async fn workflow(
     let line = |text: String| {
         let _ = writeln!(std::io::stdout().lock(), "loopback-account: {text}");
     };
+    // Before any session: naming the site offers nothing.
+    let unsigned = if checks.contains(&Check::Intent) {
+        let work = context
+            .create("Summarise my inbox on account.probe.test")
+            .await?;
+        Some(
+            offered(
+                profile,
+                work.0,
+                "Summarise my inbox on account.probe.test",
+                &[ACCOUNT],
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     // The person signs in to both sites in this profile.
     let seed = context
         .request(
@@ -712,6 +775,54 @@ pub(super) async fn workflow(
                 line(format!("check=second_request first_signed_in={} second_refused={refused} new_requests={}", first.dispatched.iter().all(|(_, s)| *s), after - before));
                 last = first.state;
                 refused && after == before
+            }
+            Check::Intent => {
+                let request = "Summarise my inbox on account.probe.test";
+                let work = context.create(request).await?;
+                let drafted = offered(profile, work.0, request, &[FRESH, ACCOUNT]).await?;
+                let fresh_work = context
+                    .create("Summarise my notes on fresh.probe.test")
+                    .await?;
+                let fresh = offered(
+                    profile,
+                    fresh_work.0,
+                    "Summarise my notes on fresh.probe.test",
+                    &[FRESH, ACCOUNT],
+                )
+                .await?;
+                let unnamed_work = context.create("Summarise my notes").await?;
+                let unnamed =
+                    offered(profile, unnamed_work.0, "Summarise my notes", &[ACCOUNT]).await?;
+                let origin = drafted.as_ref().map(|grant| grant.origin.as_str());
+                // Allowing the drafted grant rides it with the request, unapproved by the probe.
+                let run = match drafted.clone() {
+                    Some(grant) => Some(
+                        context
+                            .request(
+                                work,
+                                vec![grant],
+                                false,
+                                vec![vec![read(&format!("{ACCOUNT}/inbox"))]],
+                            )
+                            .await
+                            .map_err(|_| "intent_run")?,
+                    ),
+                    None => None,
+                };
+                let signed_in = run
+                    .as_ref()
+                    .is_some_and(|run| run.dispatched.iter().all(|(_, s)| *s));
+                let content = run.as_ref().is_some_and(|run| says(run, ACCOUNT_FACT));
+                line(format!("check=intent before_session={} after_session_origin={origin:?} fresh_site={} unnamed={} signed_in_read={signed_in} account_content={content}", unsigned.as_ref().map_or("skipped", |o| if o.is_some() { "drafted" } else { "none" }), fresh.is_some(), unnamed.is_some()));
+                if let Some(run) = run {
+                    last = run.state;
+                }
+                matches!(unsigned, Some(None))
+                    && origin == Some(ACCOUNT)
+                    && fresh.is_none()
+                    && unnamed.is_none()
+                    && signed_in
+                    && content
             }
         };
         line(format!("check={check:?} passed={passed}"));
