@@ -24,7 +24,7 @@ export const plateHeight = (label: string) =>
   plateRun(label) > PLATE.max ? PLATE.height + PLATE.line : PLATE.height;
 
 /** A level cubic's control points: it leaves and lands along its handles. */
-export function levelCurve(sx: number, sy: number, tx: number, ty: number) {
+function levelCurve(sx: number, sy: number, tx: number, ty: number) {
   const reach = Math.max(24, Math.abs(tx - sx) / 2);
   return [sx + reach, sy, tx - reach, ty] as const;
 }
