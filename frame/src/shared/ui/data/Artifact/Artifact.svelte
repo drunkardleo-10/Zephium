@@ -5,11 +5,13 @@
   import Table from "./Table.svelte";
   import { tableGrid } from "./table";
   import DocumentView from "./DocumentView.svelte";
+  import AnswerView from "./AnswerView.svelte";
   import Findings from "./Findings.svelte";
   import Sources from "./Sources.svelte";
   import EvidenceChips from "./EvidenceChips.svelte";
   import HostGlyph from "./HostGlyph.svelte";
   import {
+    answerCover,
     artifactRenderable,
     displayLocation,
     type ArtifactView,
@@ -211,6 +213,11 @@
           limit={card ? CODE_CARD_LINES : undefined}
         />{/snippet}</LazyView
     >
+  {:else if content.kind === "answer"}<AnswerView
+      blocks={card ? answerCover(content.blocks) : content.blocks}
+      label={artifact.title}
+      page={!card}
+    />
   {:else if content.kind === "unavailable"}<p role="status">{content.reason}</p>{/if}
   {#if valid && !card && !artifact.knowledge && artifact.evidence.length && content.kind !== "sources" && content.kind !== "matrix" && content.kind !== "findings"}<footer
       aria-label={m.work_sources()}

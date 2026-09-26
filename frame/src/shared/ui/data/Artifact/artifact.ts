@@ -6,7 +6,13 @@ export type DocumentNodeView = {
   type: string;
   content?: DocumentNodeView[];
   text?: string | null;
-  attrs?: { level?: number | null; start?: number | null; resource?: string | null } | null;
+  attrs?: {
+    level?: number | null;
+    start?: number | null;
+    resource?: string | null;
+    /** A fenced code block's language. */
+    language?: string | null;
+  } | null;
   marks?: DocumentMarkView[];
 };
 export type NoteDocumentView = { version: number; document: DocumentNodeView };
@@ -122,6 +128,8 @@ export type ArtifactContent =
       layers: readonly { id: string; name: string }[];
     }
   | { kind: "code"; language: string; text: string; notes: readonly CodeNoteView[] }
+  /** The reply as written, and its top-level blocks as the owner parsed them. */
+  | { kind: "answer"; markdown: string; blocks: readonly DocumentNodeView[] }
   | { kind: "unavailable"; reason: string };
 export type ArtifactView = {
   key: string;
@@ -308,6 +316,8 @@ export function artifactRenderable(view: ArtifactView): boolean {
         )
       );
     }
+    case "answer":
+      return data.markdown.length > 0 && text(data.markdown) && data.blocks.length <= 400;
     case "unavailable":
       return text(data.reason);
     default:
@@ -451,4 +461,14 @@ export function planSteps(content: ArtifactContent): PlanStep[] {
     return content.items.flatMap((item) => (item.text.trim() ? [{ text: bare(item.text) }] : []));
   if (content.kind === "document") return documentDigest(content).steps;
   return [];
+}
+
+/**
+ * What an answer's card shows: its lead and its first section, that is every
+ * block before the second heading. The lift reads the whole answer.
+ */
+export function answerCover(blocks: readonly DocumentNodeView[]): readonly DocumentNodeView[] {
+  let headings = 0;
+  const end = blocks.findIndex((block) => block.type === "heading" && ++headings === 2);
+  return end < 0 ? blocks : blocks.slice(0, end);
 }
