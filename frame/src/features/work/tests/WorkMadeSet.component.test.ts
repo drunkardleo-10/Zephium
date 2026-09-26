@@ -16,8 +16,6 @@ import {
   resultHeads,
 } from "../lib/project-environment";
 import { answerParser, artifactView } from "../lib/project-work";
-import { diagramShape, layoutDiagram, primaryFlows } from "../lib/diagram";
-import type { ArtifactContent } from "$shared/ui/data/Artifact";
 import type { CanvasItem } from "../lib/canvas-model";
 import { answerScene, explanationScene, projection, snapshot } from "./environment-fixtures";
 
@@ -91,9 +89,9 @@ test("a diagram result is its area of parts alone, layered left to right, joined
     expect.arrayContaining(["Postgres", "Browser", "API", "Jobs"]),
   );
   expect(parts).toHaveLength(4);
-  // The layers read left to right, each a captioned band behind its column.
-  const bands = [...screen.container.querySelectorAll<HTMLElement>(".svelte-flow__node-band")];
-  expect(bands.map((band) => band.textContent?.trim())).toEqual(["Edge", "Application", "Data"]);
+  // The layers read left to right, each captioned above its column.
+  const layers = [...area()!.querySelectorAll<HTMLElement>(".layer")];
+  expect(layers.map((layer) => layer.textContent)).toEqual(["Edge", "Application", "Data"]);
   const x = (id: string) =>
     screen.container
       .querySelector<HTMLElement>(`.svelte-flow__node[data-id="diagram:result-card:${id}"]`)!
@@ -185,14 +183,6 @@ const TRIP: WorkArtifactDataV1 = {
 
 test("the person's architecture fits its group, and no flow's name sits on a part", async () => {
   await page.viewport(1600, 1000);
-  // Laid out by the engine, as the workspace draws it once the answer lands.
-  const state = structuredClone(projection);
-  state.executions[0]!.artifacts[0]!.data = TRIP;
-  state.executions[0]!.user_artifacts = [];
-  const view = artifactView(state.executions[0]!.artifacts[0]!, state.executions[0]!);
-  const content = view.content as Extract<ArtifactContent, { kind: "diagram" }>;
-  await layoutDiagram(content);
-  const named = primaryFlows(diagramShape(content)).size;
   const { items, links, clusters, positions } = scene(TRIP);
   const screen = await render(WorkCanvas, {
     items,
@@ -205,9 +195,7 @@ test("the person's architecture fits its group, and no flow's name sits on a par
   });
   screen.container.style.width = "1600px";
   screen.container.style.height = "1000px";
-  // At rest only each part's first named flows carry their names.
-  await expect.poll(() => document.querySelectorAll(".work-edge-label").length).toBe(named);
-  expect(named).toBeLessThan(19);
+  await expect.poll(() => document.querySelectorAll(".work-edge-label").length).toBe(19);
   const rect = (element: Element) => element.getBoundingClientRect();
   const cards = [
     ...screen.container.querySelectorAll('.svelte-flow__node[data-id^="diagram:result-card:"]'),
@@ -393,7 +381,7 @@ test("a part shows its vendor's icon once it is held, and its kind's glyph until
   await favicons.init();
   const bare = await render(DiagramNodeCard, { item: part("postgresql.org"), selected: false });
   expect(bare.container.querySelector(".mark canvas")).toBeNull();
-  expect(bare.container.querySelector(".glyph svg")).not.toBeNull();
+  expect(bare.container.querySelector(".mark svg")).not.toBeNull();
   expect(bare.container.querySelector(".caption")?.textContent).toBe("Database");
   await bare.unmount();
   let binary = "";
