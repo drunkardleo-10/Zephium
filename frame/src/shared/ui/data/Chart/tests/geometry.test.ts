@@ -25,6 +25,8 @@ test("bars stand on a zero baseline with rounded ticks and one hover target per 
   expect(b!.tip.y).toBeLessThan(a!.tip.y);
   expect(a!.origin.y).toBe(b!.origin.y);
   expect(shape.ticks.find((tick) => tick.zero)!.pos).toBe(a!.origin.y);
+  // One series takes the first series colour: the lit rung is white on a dark card.
+  expect(shape.bars.map((bar) => bar.color)).toEqual(["var(--chart-1)", "var(--chart-1)"]);
 });
 
 test("bars lie down when there are many or their names are long, never on a card", () => {
@@ -101,6 +103,7 @@ test("a line keeps its own range, gaps at null, and hovers per x", () => {
   expect(shape.traces[0]!.line.match(/M/gu)).toHaveLength(2);
   expect(shape.hits).toHaveLength(3);
   expect(shape.cursor).toBe(true);
+  expect(shape.traces[0]!.color).toBe("var(--chart-1)");
 });
 
 test("an area fills to zero and a time axis reads in date order", () => {
@@ -138,6 +141,7 @@ test("a donut keeps eight slices and folds the rest into Other", () => {
   const shape = geometry(spec, 300, { other: "Other" });
   expect(shape.slices).toHaveLength(8);
   expect(shape.total).toBe(55);
+  expect(shape.slices[0]!.color).toBe("var(--chart-1)");
   expect(shape.slices.at(-1)!.color).toBe("var(--color-tint-graphite)");
   expect(readout(spec, shape, 0, "Other")!.rows[0]!.name).toBe("18.2%");
 });
@@ -190,6 +194,7 @@ test("a spark has no axes", () => {
   expect(shape.ticks).toHaveLength(0);
   expect(shape.labels).toHaveLength(0);
   expect(shape.traces[0]!.line).toMatch(/^M/u);
+  expect(shape.traces[0]!.color).toBe("var(--chart-1)");
 });
 
 test("compact drops tick and category labels", () => {

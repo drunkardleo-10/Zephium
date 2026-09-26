@@ -21,7 +21,7 @@ type ChartSpec = {
     max?: number;
   };
   basis?: string; // one line under the plot
-  knowledge?: boolean; // caption: "From what the agent knows"
+  knowledge?: boolean; // from what the agent knows; draws nothing, the basis line speaks
   compact?: boolean; // the card: no axis labels, no legend, no values table
 };
 type ChartPoint = {
@@ -61,8 +61,10 @@ that draws a source's mark in the tooltip (Work passes its favicon glyph).
 - Series identity: `--chart-1` … `--chart-8`, in fixed order, never cycled; a
   ninth series takes `--color-tint-graphite`. Both themes are stepped and
   validated for colour-vision separation against their own surface.
-- A single series, a spark and the hovered mark are `--color-lit`: the thing
-  that is on is the brightest thing in the frame. Heat mixes `--color-surface`
+- A single series (bars, lines, areas, a spark) and a donut's first slice are
+  `--chart-1`. `--color-lit` is a light tonal rung in the dark theme, so a
+  series drawn with it reads white on a dark card; the lit rung stays for what
+  is on: the hover and the highlighted range. Heat mixes `--color-surface`
   toward `--color-lit`.
 - Gridlines are hairlines on `--color-border` (zero on `--color-border-strong`);
   there are no axis lines. Ticks are rounded (`axisTicks`, clock steps for

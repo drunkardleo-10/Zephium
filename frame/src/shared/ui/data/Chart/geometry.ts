@@ -291,7 +291,7 @@ function standing(spec: ChartSpec, keys: string[], board: number): Geometry {
           index,
           series: order,
           d: barPath(slot, top, thickness, size, ranged ? "both" : up ? "top" : "bottom"),
-          color: single ? "var(--color-lit)" : seriesColor(order),
+          color: seriesColor(order),
           origin: { x: slot + thickness / 2, y: ranged ? top + size : base },
           tip: { x: slot + thickness / 2, y: up ? top : top + size },
           axis: "y",
@@ -452,7 +452,7 @@ function lying(spec: ChartSpec, keys: string[], board: number): Geometry {
         index,
         series: order,
         d: barPath(left, slot, size, thickness, ranged ? "both" : right ? "right" : "left"),
-        color: count === 1 ? "var(--color-lit)" : seriesColor(order),
+        color: seriesColor(order),
         origin: { x: ranged ? left : base, y: slot + thickness / 2 },
         tip: { x: right ? left + size : left, y: slot },
         axis: "x",
@@ -548,7 +548,7 @@ function traces(spec: ChartSpec, keys: string[], board: number): Geometry {
       : null;
     return {
       series: order,
-      color: spec.series.length === 1 ? "var(--color-lit)" : seriesColor(order),
+      color: seriesColor(order),
       line: path ?? "",
       ...(wash ? { area: wash } : {}),
       dots: points
@@ -763,7 +763,7 @@ function spark(spec: ChartSpec, keys: string[], board: number, height: number): 
                   Math.max(1, Math.abs(y(point.y) - y(0))),
                   "none",
                 ),
-                color: "var(--color-lit)",
+                color: seriesColor(0),
                 origin: { x: band(keys[index]!)! + band.bandwidth() / 2, y: y(0) },
                 tip: { x: band(keys[index]!)! + band.bandwidth() / 2, y: y(point.y) },
                 axis: "y" as const,
@@ -782,7 +782,7 @@ function spark(spec: ChartSpec, keys: string[], board: number, height: number): 
       const points = row.map((point, index) => ({ index, x: x.at(index), y: point?.y ?? null }));
       return {
         series: order,
-        color: cells.length === 1 ? "var(--color-lit)" : seriesColor(order),
+        color: seriesColor(order),
         line:
           line<(typeof points)[number]>()
             .defined((point) => point.y !== null)
@@ -847,7 +847,7 @@ export function readout(
     title: xText(key, spec.x?.kind),
     rows: spec.series.map((series, order) => ({
       name: single ? "" : series.name,
-      color: single ? "var(--color-lit)" : seriesColor(order),
+      color: seriesColor(order),
       text: pointText(points[order], spec.y),
     })),
     evidence: pointEvidence(points),
