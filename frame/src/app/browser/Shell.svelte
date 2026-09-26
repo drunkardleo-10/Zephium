@@ -7,7 +7,6 @@
   import LazyView from "$shared/ui/LazyView";
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import { loadSettings } from "$features/settings";
-  import { loadWorkSidebar } from "$features/work";
   import { EssentialTile } from "$features/essentials";
   import { AddressField } from "$features/address";
   import { Dock } from "$features/dock";
@@ -90,6 +89,8 @@
     });
   });
   let splitting = $state(false);
+  // Work's entry stays out of browser startup: the list loads when Work is chosen.
+  const loadWorkSidebar = () => import("$features/work").then((work) => work.loadWorkSidebar());
   let inWork = $derived(browserPage.currentPage() === "work");
   let workScope = $derived.by(() => {
     const profile = tabs.profile();
