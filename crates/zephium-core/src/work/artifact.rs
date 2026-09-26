@@ -602,7 +602,7 @@ impl WorkArtifactField {
             Self::DocumentBlocks => "document blocks are malformed",
             Self::Subjects => "subjects need unique non-empty names, at most 32, with at most three image candidates and public HTTPS links",
             Self::MatrixCriterion => "comparison_matrix criteria need 1 to 16 unique names; a measurement names a unit and a basis, a rating a rubric and a scale_max of 2 to 10",
-            Self::MatrixShape => "comparison_matrix cells need one row per subject and one cell per criterion",
+            Self::MatrixShape => "comparison_matrix cells hold one row per subject in subjects order, and every subject's row has one cell per criterion, in criteria order; never one row per criterion",
             Self::CellEvidence => "cell evidence must cite listed source keys, at most eight, without repeats",
             Self::CellValue => "comparison_matrix cell value must match its criterion: a measurement or money amount is a plain number with a cited source or general_knowledge, money has a three-letter currency code, a rating stays within scale_max",
             Self::MatrixNotes => "comparison_matrix notes are at most eight short texts",
@@ -1303,6 +1303,32 @@ mod tests {
             descriptor: None,
             homepage: None,
             image_candidates: vec![],
+        }
+    }
+    #[test]
+    fn a_matrix_by_criterion_is_refused_with_the_shape_rule() {
+        let text = |value: &str| WorkCell {
+            value: WorkCellValue::Text { text: value.into() },
+            evidence: vec![],
+            note: None,
+            general_knowledge: true,
+        };
+        let criterion = |name: &str| WorkCriterion {
+            name: name.into(),
+            kind: WorkCriterionKind::Text,
+        };
+        let matrix = |cells| WorkArtifactDataV1::ComparisonMatrix {
+            subjects: vec![subject("Ownership"), subject("Tracing GC")],
+            criteria: vec![criterion("Reclaim"), criterion("Pauses"), criterion("Cost")],
+            cells,
+            notes: vec![],
+        };
+        let by_criterion = matrix(vec![vec![text("a"), text("b")]; 3]);
+        assert_eq!(by_criterion.fault(0), Some(WorkArtifactField::MatrixShape));
+        assert!(matrix(vec![vec![text("a"), text("b"), text("c")]; 2]).fault(0).is_none());
+        let phrase = WorkArtifactField::MatrixShape.phrase();
+        for rule in ["one row per subject in subjects order", "one cell per criterion, in criteria order", "never one row per criterion"] {
+            assert!(phrase.contains(rule), "{rule}");
         }
     }
     #[test]
