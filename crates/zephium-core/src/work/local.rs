@@ -279,7 +279,8 @@ mod tests {
         assert!(titled
             .validate(&WorkStepKindV1::Read {
                 url: "https://example.com".into(),
-                collection: None
+                collection: None,
+                goal: None,
             })
             .is_ok());
         assert!(titled.validate(&WorkStepKindV1::Turn).is_err());

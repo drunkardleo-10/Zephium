@@ -5,6 +5,10 @@ use super::*;
 
 #[derive(Clone)]
 pub enum WorkRequest {
+    /// The profile's standing site answers; `set` changes one first (None clears it).
+    SiteAccess {
+        set: Option<(String, Option<super::sites::WorkSiteAccessV1>)>,
+    },
     /// Host-only context read, bound to an existing resource revision and profile.
     ReadMediaContext {
         resource: String,
@@ -106,10 +110,17 @@ impl WorkRequest {
                 update: runtime::WorkRuntimeUpdate::PageTitle { title, .. },
                 ..
             } => runtime::validate_page_title(title),
+            Self::RuntimeUpdate {
+                update: runtime::WorkRuntimeUpdate::ExtendLimits { limits, .. },
+                ..
+            } => limits.validate(),
             Self::ReadMediaContext { resource, revision } => {
                 validate_text(resource, 128)?;
                 validate_text(revision, 128)
             }
+            Self::SiteAccess { set } => set
+                .as_ref()
+                .map_or(Ok(()), |(site, _)| super::sites::validate_site(site)),
             Self::Environment { call, .. } => call.validate(),
             Self::AuthoringCommand { intent, .. } => intent.validate(),
             Self::RuntimeCommand {
@@ -280,6 +291,7 @@ impl std::fmt::Debug for WorkSummary {
 }
 #[derive(Clone, Debug)]
 pub enum WorkReply {
+    SiteAccess(Vec<super::sites::WorkSiteEntryV1>),
     MediaContext(WorkMediaContext),
     Environment(environment::WorkEnvironmentReply),
     AuthoringCommand(authoring::WorkAuthoringReceipt),

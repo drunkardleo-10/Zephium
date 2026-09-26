@@ -179,10 +179,13 @@ pub struct WorkAgentGrantV1 {
     /// step must resolve inside one of them; the application enforces it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<String>,
-    /// Origins the person let the agent read with their signed-in session
-    /// for this request only. Each approval attests its account.
+    /// Retired origin grants: accepted in stored runs, refused for new ones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accounts: Vec<WorkAccountGrantV1>,
+    /// A private run: every page opens in the run's own empty storage and
+    /// never in the person's sessions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private: bool,
 }
 impl WorkAgentGrantV1 {
     pub fn validate(&self) -> Result<(), WorkError> {
@@ -223,6 +226,8 @@ impl WorkAgentGrantV1 {
 
 pub const MAX_WORK_ACCOUNT_GRANTS: usize = 4;
 pub const MAX_WORK_ACCOUNT_PAGES: u8 = 12;
+/// A page task's goal, as the agent states it for one site.
+pub const MAX_WORK_PAGE_GOAL_BYTES: usize = 600;
 /// One origin read with the profile's signed-in session for one request.
 /// The person's approval attests the account; Zephium never infers it.
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -261,23 +266,6 @@ impl WorkAccountGrantV1 {
 }
 fn valid_account(account: &str) -> bool {
     !account.is_empty() && account.len() <= 64 && account.bytes().all(|b| b.is_ascii_alphanumeric())
-}
-
-/// Why the loop refused a signed-in step; closed words only.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WorkAccountRefusal {
-    /// A change on a signed-in page: only a field update proposal may do that.
-    AccountWrite,
-    /// The origin's page budget for this request is used up.
-    PageBudget,
-}
-impl WorkAccountRefusal {
-    pub fn notice(self, host: &str) -> String {
-        match self {
-            Self::AccountWrite => format!("A change on {host} was refused: signed-in pages are read-only for you. Propose it to the person as a field update instead."),
-            Self::PageBudget => format!("The signed-in page budget for {host} is used up: no more pages on it will open in this request. Work from the pages already read."),
-        }
-    }
 }
 
 /// Closed shape of a page path, for logs that must not carry the path.
@@ -1029,6 +1017,9 @@ pub enum WorkStepKindV1 {
         url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         collection: Option<super::collection::WorkBrowseCollection>,
+        /// A page task: the agent works toward this goal on the url's site.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal: Option<String>,
     },
     Discover {
         query: String,
@@ -1145,7 +1136,7 @@ pub struct WorkStepFact {
     pub measurements: Option<WorkStepMeasurementsV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local: Option<Box<WorkLocalStepV1>>,
-    /// A read opened with the person's signed-in session under a grant.
+    /// A page opened in the person's own session on its site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<Box<WorkPageAccountV1>>,
 }
@@ -1153,8 +1144,18 @@ impl WorkStepKindV1 {
     fn validate(&self) -> Result<(), WorkError> {
         match self {
             Self::Search { query } => super::search::validate_public_search_query(query),
-            Self::Read { url, collection } => {
+            Self::Read {
+                url,
+                collection,
+                goal,
+            } => {
                 validate_public_url(url)?;
+                if let Some(goal) = goal {
+                    validate_text(goal, MAX_WORK_PAGE_GOAL_BYTES)?;
+                    if goal.trim().is_empty() || goal.chars().any(char::is_control) {
+                        return Err(WorkError::Invalid);
+                    }
+                }
                 collection.as_ref().map_or(Ok(()), |shape| shape.validate())
             }
             Self::Discover { query, collection } => {
@@ -1937,15 +1938,7 @@ impl WorkExecutionFact {
         }
         // A signed-in read lies inside a granted origin, within its budget.
         let accounts = self.account_use();
-        if self.accounts != accounts
-            || accounts.iter().any(|use_| use_.pages_used > use_.pages)
-            || self.steps.iter().any(|step| {
-                step.account.as_ref().is_some_and(|account| {
-                    !matches!(&step.kind, WorkStepKindV1::Read { url, .. }
-                        if grant.account_for(url).is_some_and(|grant| grant.host() == account.host))
-                })
-            })
-        {
+        if self.accounts != accounts || accounts.iter().any(|use_| use_.pages_used > use_.pages) {
             return Err(WorkError::Invalid);
         }
         let running = attempt.is_some_and(|a| a.status == WorkAttemptStatus::Running);
@@ -2282,6 +2275,13 @@ pub enum WorkRuntimeUpdate {
         file: Option<Box<WorkFileRecordV1>>,
         note: Option<String>,
         measurements: Option<WorkStepMeasurementsV1>,
+    },
+    /// The person let a running agent keep going past a spent budget: its
+    /// token, cost and operation limits grow; nothing else changes.
+    ExtendLimits {
+        execution: WorkExecutionId,
+        attempt: WorkAttemptId,
+        limits: WorkExecutionLimits,
     },
 }
 

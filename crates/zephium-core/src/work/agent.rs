@@ -81,19 +81,21 @@ pub struct WorkAgentTurnContext {
     /// What the application refused last turn, in closed wording.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<String>,
-    /// Origins the person let the agent read with their signed-in session
-    /// for this request, each with the pages it may still open.
+    /// Sites this run works on with the person's session, or without it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub accounts: Vec<WorkAgentAccountView>,
+    pub sites: Vec<WorkAgentSiteView>,
     /// The person's open tabs, listed with their consent and not yet read.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tabs: Vec<WorkAgentTabView>,
 }
+/// One site as this run uses it: `yours` works in the person's session,
+/// `private` in the run's own empty storage (declined, never, or a private run).
 #[derive(Clone, Serialize)]
-pub struct WorkAgentAccountView {
-    pub origin: String,
-    pub pages_left: u8,
+pub struct WorkAgentSiteView {
+    pub site: String,
+    pub session: &'static str,
 }
+pub const MAX_AGENT_SITES: usize = 16;
 #[derive(Clone, Serialize)]
 pub struct WorkAgentTabView {
     pub key: u16,
@@ -311,7 +313,7 @@ impl WorkAgentTurnDisclosure {
             artifacts,
             budget,
             notices,
-            accounts: Vec::new(),
+            sites: Vec::new(),
             tabs: Vec::new(),
         };
         fit(&mut context)?;
@@ -346,18 +348,22 @@ impl WorkAgentTurnDisclosure {
         fit(&mut self.context)?;
         Ok(self)
     }
-    /// Granted signed-in origins: pages inside them are readable directly.
-    pub fn with_accounts(mut self, accounts: Vec<WorkAgentAccountView>) -> Result<Self, WorkError> {
-        if accounts.len() > MAX_WORK_ACCOUNT_GRANTS
-            || accounts.iter().any(|account| {
-                validate_public_url(&account.origin).map_or(true, |url| {
-                    url.origin().ascii_serialization() != account.origin
-                })
+    /// Sites the run already decided; pages on a site worked as the person
+    /// are readable directly.
+    pub fn with_sites(mut self, sites: Vec<WorkAgentSiteView>) -> Result<Self, WorkError> {
+        if sites.len() > MAX_AGENT_SITES
+            || sites.iter().any(|site| {
+                site.site.is_empty()
+                    || site.site.len() > 253
+                    || !site
+                        .site
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
             })
         {
             return Err(WorkError::Invalid);
         }
-        self.context.accounts = accounts;
+        self.context.sites = sites;
         fit(&mut self.context)?;
         Ok(self)
     }
@@ -471,12 +477,34 @@ impl WorkAgentTurnDisclosure {
                 WorkAgentFetch::Read { url, collection } => {
                     let Some(url) = self.readable(&url) else {
                         notices.push(format!(
-                            "Read of {} was refused: only a source url, a link_destination, a requested page, a listed tab or a page inside a listed account origin can be read. Search for it, or read a listed page.",
+                            "Read of {} was refused: only a source url, a link_destination, a requested page, a listed tab or a page on a site you work on as the person can be read. Search for it, or read a listed page.",
                             clip_text(&url, 160)
                         ));
                         continue;
                     };
-                    WorkStepKindV1::Read { url, collection }
+                    WorkStepKindV1::Read {
+                        url,
+                        collection,
+                        goal: None,
+                    }
+                }
+                WorkAgentFetch::Browse {
+                    start,
+                    goal,
+                    collection,
+                } => {
+                    let Some(url) = browse_start(&start) else {
+                        notices.push(format!(
+                            "Browse of {} was refused: start is an https page or a site such as slack.com.",
+                            clip_text(&start, 160)
+                        ));
+                        continue;
+                    };
+                    WorkStepKindV1::Read {
+                        url,
+                        collection,
+                        goal: Some(goal.trim().to_owned()),
+                    }
                 }
                 WorkAgentFetch::Discover { query, collection } => {
                     WorkStepKindV1::Discover { query, collection }
@@ -647,11 +675,12 @@ impl WorkAgentTurnDisclosure {
     fn readable(&self, url: &str) -> Option<String> {
         let listed = |candidate: &String| candidate == url || same_page(candidate, url);
         let granted = validate_public_url(url).is_ok_and(|parsed| {
-            let origin = parsed.origin().ascii_serialization();
-            self.context
-                .accounts
-                .iter()
-                .any(|account| account.origin == origin)
+            parsed.host_str().is_some_and(|host| {
+                self.context.sites.iter().any(|site| {
+                    site.session == "yours"
+                        && (host == site.site || host.ends_with(&format!(".{}", site.site)))
+                })
+            })
         });
         if granted {
             return Some(url.to_owned());
@@ -663,6 +692,17 @@ impl WorkAgentTurnDisclosure {
             .find(|candidate| listed(candidate))
             .cloned()
     }
+}
+
+/// A browse start: an https page as given, or a bare site's home page.
+fn browse_start(start: &str) -> Option<String> {
+    let start = start.trim();
+    let url = if start.contains("://") {
+        start.to_owned()
+    } else {
+        format!("https://{}/", start.trim_end_matches('/'))
+    };
+    validate_public_url(&url).ok().map(|url| url.to_string())
 }
 
 /// Why a whole turn was refused; the loop tells the model in a notice.
@@ -1274,6 +1314,13 @@ pub enum WorkAgentFetch {
     },
     Discover {
         query: String,
+        #[serde(rename = "records", default, skip_serializing_if = "Option::is_none")]
+        collection: Option<super::collection::WorkBrowseCollection>,
+    },
+    /// A page task on one site: open `start` and work toward `goal`.
+    Browse {
+        start: String,
+        goal: String,
         #[serde(rename = "records", default, skip_serializing_if = "Option::is_none")]
         collection: Option<super::collection::WorkBrowseCollection>,
     },

@@ -16,6 +16,7 @@ pub mod port;
 pub mod proposal;
 pub mod runtime;
 pub mod search;
+pub mod sites;
 pub mod synthesis;
 #[cfg(test)]
 mod tests;

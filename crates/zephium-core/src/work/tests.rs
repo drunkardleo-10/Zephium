@@ -657,6 +657,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         browse_hops: 4,
         folders: vec![],
         accounts: Vec::new(),
+        private: false,
     };
     assert!(WorkAgentGrantV1 {
         max_turns: 0,
@@ -1369,6 +1370,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         browse_hops: 2,
         folders: folders.into_iter().map(String::from).collect(),
         accounts: Vec::new(),
+        private: false,
     };
     assert!(grant(vec!["/Users/me/Documents/project"])
         .validate()
@@ -1953,7 +1955,7 @@ fn charts_of_nothing_second_findings_and_malformed_objects_are_refused_by_cause(
 }
 
 #[test]
-fn origin_grants_admit_exact_https_origins_and_bound_signed_in_reads() {
+fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
     use super::{agent::*, context::*, runtime::*, search::*};
     let account = |origin: &str, pages| WorkAccountGrantV1 {
         origin: origin.into(),
@@ -2003,6 +2005,7 @@ fn origin_grants_admit_exact_https_origins_and_bound_signed_in_reads() {
         browse_hops: 4,
         folders: vec![],
         accounts: vec![mail.clone()],
+        private: false,
     };
     grant.validate().unwrap();
     for accounts in [
@@ -2065,6 +2068,7 @@ fn origin_grants_admit_exact_https_origins_and_bound_signed_in_reads() {
         kind: WorkStepKindV1::Read {
             url: url.into(),
             collection: None,
+            goal: None,
         },
         status: WorkStepStatus::Running,
         usage: None,
@@ -2090,17 +2094,25 @@ fn origin_grants_admit_exact_https_origins_and_bound_signed_in_reads() {
     fact.refresh_accounts();
     assert_eq!(fact.accounts[0].pages_used, 1);
     fact.validate(&plan, revision).unwrap();
-    for step in [
-        // Outside every granted origin.
-        read(3, "https://docs.example.com/", Some("docs.example.com")),
-        // A badge that names another host than the page.
-        read(3, "https://mail.example.com/a", Some("other.example.com")),
-    ] {
-        let mut outside = fact.clone();
-        outside.steps.push(step);
-        outside.refresh_accounts();
-        assert!(outside.validate(&plan, revision).is_err());
-    }
+    // A page worked in the person's session carries its own host's badge.
+    let mut session = fact.clone();
+    session.steps.pop();
+    session.steps.push(read(
+        3,
+        "https://docs.example.com/",
+        Some("docs.example.com"),
+    ));
+    session.refresh_accounts();
+    session.validate(&plan, revision).unwrap();
+    let mut other = fact.clone();
+    other.steps.pop();
+    other.steps.push(read(
+        3,
+        "https://mail.example.com/a",
+        Some("other.example.com"),
+    ));
+    other.refresh_accounts();
+    assert!(other.validate(&plan, revision).is_err());
     let mut over = fact.clone();
     over.steps.push(read(
         3,
@@ -2211,10 +2223,16 @@ fn origin_grants_admit_exact_https_origins_and_bound_signed_in_reads() {
         vec![],
     )
     .unwrap()
-    .with_accounts(vec![WorkAgentAccountView {
-        origin: mail.origin.clone(),
-        pages_left: 2,
-    }])
+    .with_sites(vec![
+        WorkAgentSiteView {
+            site: "example.com".into(),
+            session: "yours",
+        },
+        WorkAgentSiteView {
+            site: "example.org".into(),
+            session: "private",
+        },
+    ])
     .unwrap()
     .with_tabs(&[WorkContextTabV1::from_page("Docs", "https://docs.example.com/guide").unwrap()])
     .unwrap();
@@ -2238,11 +2256,51 @@ fn origin_grants_admit_exact_https_origins_and_bound_signed_in_reads() {
         assert_eq!(admitted.fetch.len(), 1, "{readable}");
     }
     let refused = turn
-        .resolve(read_fetch("https://docs.example.com/other"))
+        .resolve(read_fetch("https://public.example.org/other"))
         .ok()
         .unwrap();
     assert!(refused.fetch.is_empty());
+    let browse = |start: &str| WorkAgentTurnOutput {
+        say: None,
+        artifacts: vec![],
+        fetch: vec![WorkAgentFetch::Browse {
+            start: start.into(),
+            goal: " Read #design since Monday ".into(),
+            collection: None,
+        }],
+        ask: None,
+        finish: false,
+        followups: vec![],
+        malformed: 0,
+    };
+    let started = turn.resolve(browse("slack.com")).ok().unwrap();
+    assert_eq!(
+        started.fetch,
+        [WorkStepKindV1::Read {
+            url: "https://slack.com/".into(),
+            collection: None,
+            goal: Some("Read #design since Monday".into()),
+        }]
+    );
+    let page = turn
+        .resolve(browse("https://app.slack.com/client"))
+        .ok()
+        .unwrap();
+    assert_eq!(page.fetch.len(), 1);
+    for refused in ["http://slack.com/", "ftp://slack.com", "not a site"] {
+        assert!(
+            turn.resolve(browse(refused)).ok().unwrap().fetch.is_empty(),
+            "{refused}"
+        );
+    }
+    let mut long = read(9, "https://slack.com/", None);
+    long.kind = WorkStepKindV1::Read {
+        url: "https://slack.com/".into(),
+        collection: None,
+        goal: Some("x".repeat(MAX_WORK_PAGE_GOAL_BYTES + 1)),
+    };
+    assert!(long.validate().is_err());
     let context = serde_json::to_value(turn.context()).unwrap();
-    assert_eq!(context["accounts"][0]["pages_left"], 2);
+    assert_eq!(context["sites"][0]["session"], "yours");
     assert_eq!(context["tabs"][0]["url"], "https://docs.example.com/guide");
 }
