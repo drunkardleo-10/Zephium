@@ -125,6 +125,7 @@
     launcher={!navigating && tools.activeTool() !== null}
     ontoggle={toggleShape}
     navigation={!navigating}
+    pageControls={browserPage.currentPage() !== "work"}
   />
   {#if settings}
     {@render settingsNavigation()}

@@ -1874,6 +1874,15 @@
     const projection = objectiveSession?.projection;
     return !!projection?.executions.some((execution) => isLive(projection, execution));
   });
+  // The sidebar marks the project whose run is live; a run keeps its project when the canvas moves on.
+  $effect(() => {
+    const live = activeExecution;
+    const here = runningObjective ? snapshot?.id : undefined;
+    untrack(() => {
+      if (!live) session.running = null;
+      else if (here) session.running = here;
+    });
+  });
   const needsDecision = $derived(
     !!objectiveSession?.projection?.work.questions.some((question) => question.state === "active"),
   );

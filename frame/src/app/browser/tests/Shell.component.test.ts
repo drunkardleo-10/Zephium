@@ -4,7 +4,10 @@ import { emitNativeEvent } from "$shared/testing/native-events";
 import { tabFixture, revision } from "$shared/testing/fixtures";
 import { tabs } from "$domain/tabs";
 import { surface } from "$domain/surface";
+import { environmentSession } from "$domain/work-environment";
 import Shell from "../Shell.svelte";
+
+vi.mock("../WorkWorkspace.svelte", async () => await import("./StageStub.svelte"));
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -40,4 +43,47 @@ test("Settings return restores the active browser identity synchronously", async
   expect(screen.container.querySelector<HTMLInputElement>("[data-zephium-address]")?.value).toBe(
     "example.com",
   );
+});
+
+test("Work keeps the sidebar and lists the space's projects where the tabs were", async () => {
+  await surface.init();
+  await tabs.init();
+  const tab = tabFixture();
+  emitNativeEvent("itemsChanged", {
+    projection_revision: revision(20),
+    profile: { id: "profile", name: "Personal", kind: "default" },
+    spaces: [{ id: "space", name: "Home" }],
+    active_space_id: "space",
+    nodes: [],
+    tabs: [tab],
+    active: tab.id,
+    split_group: null,
+  });
+  const work = environmentSession("profile", "space")!;
+  work.works = [
+    { id: "trip", space: "space", title: "YC trip", lifecycle: "active", revision: "1" },
+    { id: "saas", space: "space", title: "SaaS design", lifecycle: "active", revision: "1" },
+  ];
+  work.selected = "trip";
+  work.running = "trip";
+  const screen = await render(Shell);
+  const column = screen.container.querySelector("aside")!;
+  expect(screen.container.querySelector("[data-zephium-address]")).not.toBeNull();
+
+  emitNativeEvent("uiCommand", "browser.work");
+  const projects = screen.getByRole("list", { name: "Projects" });
+  await expect.element(projects).toBeVisible();
+  // The same column, not a new one: only its body changed.
+  expect(screen.container.querySelector("aside")).toBe(column);
+  expect(screen.container.querySelector("[data-zephium-address]")).toBeNull();
+  expect(screen.container.querySelector(`[data-zephium-tab-id="${tab.id}"]`)).toBeNull();
+  await expect
+    .element(projects.getByRole("button", { name: "YC trip, working" }))
+    .toHaveAttribute("aria-current", "page");
+  await expect.element(screen.getByRole("button", { name: "New project" })).toBeVisible();
+  await expect.element(screen.getByRole("radio", { name: "Work" })).toBeChecked();
+
+  emitNativeEvent("uiCommand", "browser.return");
+  await expect.poll(() => screen.container.querySelector("[data-zephium-address]")).not.toBeNull();
+  expect(screen.container.querySelector("aside")).toBe(column);
 });

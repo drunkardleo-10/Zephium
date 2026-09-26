@@ -7,6 +7,7 @@
   import LazyView from "$shared/ui/LazyView";
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import { loadSettings } from "$features/settings";
+  import { loadWorkSidebar } from "$features/work";
   import { EssentialTile } from "$features/essentials";
   import { AddressField } from "$features/address";
   import { Dock } from "$features/dock";
@@ -89,6 +90,22 @@
     });
   });
   let splitting = $state(false);
+  let inWork = $derived(browserPage.currentPage() === "work");
+  let workScope = $derived.by(() => {
+    const profile = tabs.profile();
+    const space = tabs.activeSpaceId();
+    return profile && profile.kind !== "incognito" && space ? { profile: profile.id, space } : null;
+  });
+  // The column's body settles in only when the environment changes, never on launch.
+  let modeSwitched = $state(false);
+  let shownMode: boolean | null = null;
+  $effect(() => {
+    const next = inWork;
+    untrack(() => {
+      if (shownMode !== null && shownMode !== next) modeSwitched = true;
+      shownMode = next;
+    });
+  });
 
   // Kept sites fill the row beside the tool shelf first; the rest stack in
   // rows of even columns above it. The floor is the narrowest a tile may get
@@ -154,6 +171,8 @@
       return;
     }
     tabs.activate(id);
+    // A kept site chosen from Work is a page to look at: Browse shows it.
+    if (inWork) void browserPage.open(null);
   }
 </script>
 
@@ -163,102 +182,120 @@
   data-zephium-active-tab={tabs.activeId() ?? ""}
   data-zephium-surface={browserPage.currentPage() === "settings" ? "settings" : "browse"}
 >
-  {#if browserPage.currentPage() !== "work"}<Sidebar
-      >{#snippet browserBody(compact)}
-        {#if compact}
-          <AddressField {compact} />
-          {#if toolHost.activeTool() !== null}<ModeTabs compact standalone />{/if}
-          <TabRail entries={railTabs} onSelect={selectTab} />
-        {:else}
-          <!--
-          The switch sits above the address field because it governs the
-          whole column, field included; the tray rides the field itself,
-          because everything in it acts on the page the field names.
-        -->
-          <div class="sidebar-head"><ModeTabs /></div>
-          <AddressField {compact}>
-            {#snippet trailing()}
-              <UtilityTray>
-                <div class="utility-panel">
-                  <BlockerShield />
-                  <ExtensionActions />
-                </div>
-              </UtilityTray>
-            {/snippet}
-          </AddressField>
-          {#if tabs.profile()?.id}<DownloadStatus
-              profile={tabs.profile()!.id}
-              onopen={() => toolHost.open("downloads")}
-            />{/if}
-          {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
-              {m.choose_split()}
-            </p>{/if}
-          <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
-        {/if}
-      {/snippet}{#snippet dock(compact)}{#if compact}<Dock compact>
-            {#snippet sites()}<EssentialsRail
-                entries={railEssentials}
+  <Sidebar
+    >{#snippet browserBody(compact)}
+      {#if compact && (inWork || toolHost.activeTool() !== null)}
+        {#if !inWork}<AddressField {compact} />{/if}
+        {#if toolHost.activeTool() !== null}<ModeTabs compact standalone />{/if}
+      {:else if compact}<AddressField {compact} />
+      {:else}<div class="sidebar-head"><ModeTabs /></div>{/if}
+      <!-- One column in both environments: only what it lists changes, and the
+           new list settles in where the old one was. -->
+      {#key inWork}<div class="sidebar-mode-body" data-arriving={modeSwitched}>
+          {#if inWork}
+            {#if workScope}{#key `${workScope.profile}:${workScope.space}`}<LazyView
+                  loader={loadWorkSidebar}
+                  loadingLabel=""
+                  failureLabel={m.surface_render_failed()}
+                  retryLabel={m.surface_retry()}
+                  >{#snippet children(Projects)}<Projects
+                      profile={workScope.profile}
+                      space={workScope.space}
+                      {compact}
+                    />{/snippet}</LazyView
+                >{/key}{/if}
+          {:else if compact}
+            <TabRail entries={railTabs} onSelect={selectTab} />
+          {:else}
+            <!--
+            The switch sits above the address field because it governs the
+            whole column, field included; the tray rides the field itself,
+            because everything in it acts on the page the field names.
+          -->
+            <AddressField {compact}>
+              {#snippet trailing()}
+                <UtilityTray>
+                  <div class="utility-panel">
+                    <BlockerShield />
+                    <ExtensionActions />
+                  </div>
+                </UtilityTray>
+              {/snippet}
+            </AddressField>
+            {#if tabs.profile()?.id}<DownloadStatus
+                profile={tabs.profile()!.id}
+                onopen={() => toolHost.open("downloads")}
+              />{/if}
+            {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
+                {m.choose_split()}
+              </p>{/if}
+            <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
+          {/if}
+        </div>{/key}
+    {/snippet}{#snippet dock(compact)}{#if compact}<Dock compact>
+          {#snippet sites()}<EssentialsRail
+              entries={railEssentials}
+              onSelect={selectTab}
+            />{/snippet}
+        </Dock>{:else}<Dock>
+          {#snippet above()}
+            <div
+              class="dock-sites"
+              data-essentials-drop
+              data-over={tabDrag.overEssentials()}
+              hidden={keptAbove.length === 0}
+            >
+              <TabList
+                entries={keptAbove}
+                section="favorites"
+                variant="essentials"
+                columns={dockColumns}
+                label={m.essentials()}
+                {splitting}
                 onSelect={selectTab}
-              />{/snippet}
-          </Dock>{:else}<Dock>
-            {#snippet above()}
-              <div
-                class="dock-sites"
-                data-essentials-drop
-                data-over={tabDrag.overEssentials()}
-                hidden={keptAbove.length === 0}
+                >{#snippet essentialTile(props)}<EssentialTile {...props} />{/snippet}</TabList
               >
-                <TabList
-                  entries={keptAbove}
-                  section="favorites"
-                  variant="essentials"
-                  columns={dockColumns}
-                  label={m.essentials()}
-                  {splitting}
-                  onSelect={selectTab}
-                  >{#snippet essentialTile(props)}<EssentialTile {...props} />{/snippet}</TabList
-                >
-              </div>
-            {/snippet}
-            {#snippet sites()}
-              <div
-                class="dock-sites"
-                bind:clientWidth={sitesWidth}
-                data-essentials-drop
-                data-over={tabDrag.overEssentials()}
-                data-empty={tree.favorites.length === 0}
+            </div>
+          {/snippet}
+          {#snippet sites()}
+            <div
+              class="dock-sites"
+              bind:clientWidth={sitesWidth}
+              data-essentials-drop
+              data-over={tabDrag.overEssentials()}
+              data-empty={tree.favorites.length === 0}
+            >
+              {#if tree.favorites.length === 0}<span class="dock-sites-hint"
+                  >{m.essential_drop_hint()}</span
+                >{/if}
+              <TabList
+                entries={keptBeside}
+                section="favorites"
+                variant="essentials"
+                label={m.essentials()}
+                {splitting}
+                onSelect={selectTab}
+                >{#snippet essentialTile(props)}<EssentialTile {...props} />{/snippet}</TabList
               >
-                {#if tree.favorites.length === 0}<span class="dock-sites-hint"
-                    >{m.essential_drop_hint()}</span
-                  >{/if}
-                <TabList
-                  entries={keptBeside}
-                  section="favorites"
-                  variant="essentials"
-                  label={m.essentials()}
-                  {splitting}
-                  onSelect={selectTab}
-                  >{#snippet essentialTile(props)}<EssentialTile {...props} />{/snippet}</TabList
-                >
-              </div>
-              {#if tabDrag.moveFailed()}<p class="sidebar-move-error" role="alert">
-                  {m.essential_move_failed()}
-                </p>{/if}
-            {/snippet}
-          </Dock>{/if}{/snippet}{#snippet settingsNavigation()}<SettingsNavigation
-        />{/snippet}{#snippet toolPanel(kind)}<LazyView
-          loader={loadToolSlot}
-          loadingLabel={m.surface_loading()}
-          failureLabel={m.surface_render_failed()}
-          retryLabel={m.surface_retry()}
-          >{#snippet children(View)}<View
-              tool={kind}
-              profile={tabs.profile()?.id ?? "unbound"}
-              host="sidebar"
-              onclose={toolHost.close}
-            />{/snippet}</LazyView
-        >{/snippet}</Sidebar
-    >{/if}
+            </div>
+            {#if tabDrag.moveFailed()}<p class="sidebar-move-error" role="alert">
+                {m.essential_move_failed()}
+              </p>{/if}
+          {/snippet}
+        </Dock>{/if}{/snippet}{#snippet settingsNavigation()}<SettingsNavigation
+      />{/snippet}{#snippet toolPanel(kind)}<LazyView
+        loader={loadToolSlot}
+        loadingLabel={m.surface_loading()}
+        failureLabel={m.surface_render_failed()}
+        retryLabel={m.surface_retry()}
+        >{#snippet children(View)}<View
+            tool={kind}
+            profile={tabs.profile()?.id ?? "unbound"}
+            host="sidebar"
+            onclose={toolHost.close}
+          />{/snippet}</LazyView
+      >{/snippet}</Sidebar
+  >
   {#if browserPage.navigationFailed()}<div class="navigation-error" role="alert">
       {m.browser_nav_failed()}
     </div>{/if}
@@ -295,7 +332,7 @@
     </main>
   {/if}
   {#if browserPage.currentPage() !== null}
-    <main class="internal-stage" class:work-stage={browserPage.currentPage() === "work"}>
+    <main class="internal-stage">
       <!-- Each destination arrives as its own page: the ground settles in
            while its content rises onto it. -->
       {#key browserPage.currentPage()}<div class="stage-page">
@@ -355,7 +392,21 @@
 </div>
 
 <style>
-  .work-stage {
-    padding: 0;
+  .sidebar-mode-body {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .sidebar-mode-body[data-arriving="true"] {
+    animation: mode-body-in var(--motion-slow) var(--ease-emphasized) both;
+  }
+
+  @keyframes mode-body-in {
+    from {
+      opacity: 0;
+      translate: 0 6px;
+    }
   }
 </style>

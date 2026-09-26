@@ -31,6 +31,8 @@ export class WorkEnvironmentSession {
   failure = $state<string | null>(null);
   loading = $state(false);
   tabsIntroduced = false;
+  /** The Work whose run the canvas last saw live; the sidebar marks its row. */
+  running = $state<string | null>(null);
   remoteView = $state.raw<{ sequence: number; view: WorkEnvironmentView } | null>(null);
   private remoteSequence = 0;
   composer = $state("");
@@ -275,6 +277,14 @@ export class WorkEnvironmentSession {
   async create(title: string) {
     if (!(await this.flushView())) return false;
     return this.mutate({ kind: "create", space: this.space, title });
+  }
+  /** Rename or archive a Work from the list: it is opened first, since an edit applies to the open one. */
+  async editWork(
+    id: string,
+    edit: Extract<WorkEnvironmentEdit, { kind: "rename" | "set_lifecycle" }>,
+  ) {
+    if (this.snapshot?.id !== id && !(await this.open(id))) return false;
+    return this.edit(edit);
   }
   async edit(edit: WorkEnvironmentEdit) {
     if (!(await this.flushView()) || !this.snapshot) return false;

@@ -19,11 +19,14 @@
     compact,
     ontoggle,
     navigation = true,
+    pageControls = true,
     launcher = false,
   }: {
     compact: boolean;
     ontoggle: () => void;
     navigation?: boolean;
+    /** Back, forward and reload act on a page; Work shows none. */
+    pageControls?: boolean;
     /** The rail beside a tool panel has no head of its own to carry search. */
     launcher?: boolean;
   } = $props();
@@ -93,7 +96,7 @@
       />
     {/if}<span class="flex-1" aria-hidden="true"></span>
 
-    {#if navigation}<div
+    {#if navigation && pageControls}<div
         class="flex items-center gap-0.5"
         role="group"
         aria-label={m.ui_navigation()}
