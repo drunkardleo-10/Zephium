@@ -150,6 +150,7 @@
     >
       <button
         type="button"
+        class="choice"
         onclick={() => {
           accountChoices = false;
           action(id, "account");
@@ -157,6 +158,7 @@
       >
       <button
         type="button"
+        class="choice"
         onclick={() => {
           accountChoices = false;
           action(id, "account-origin");
@@ -299,7 +301,7 @@
     box-shadow: var(--shadow-popover);
   }
 
-  .choices button {
+  .choice {
     padding: 6px 10px;
     border: 0;
     border-radius: var(--radius-control-compact);
@@ -313,11 +315,11 @@
     transition: background-color var(--motion-instant) ease;
   }
 
-  .choices button:hover {
+  .choice:hover {
     background: var(--color-control-hover);
   }
 
-  .choices button:focus-visible {
+  .choice:focus-visible {
     outline: 2px solid var(--color-ring);
     outline-offset: -2px;
   }
