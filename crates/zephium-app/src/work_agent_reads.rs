@@ -1,4 +1,5 @@
 use super::*;
+use zephium_core::work::collection::*;
 
 const MAX_CONCURRENT_PAGE_READS: usize = 3;
 
@@ -26,6 +27,7 @@ impl Driver {
                 self.notice("Native discovery is not available in this run: provider search covers the web. Use search for facts and read for exact URLs listed in sources.");
                 continue;
             }
+            let kind = job_listing(kind);
             let WorkStepKindV1::Read { url, .. } = &kind else {
                 continue;
             };
@@ -117,13 +119,24 @@ impl Driver {
                     });
                 }
                 self.probe.record_activity(WorkActivityV1::Reading);
+                let board = matches!(kind, WorkStepKindV1::Read { ref url, .. } if job_board(url));
                 let request = WorkAgentBrowseRequest {
-                    construction_attempt: Default::default(),
+                    // A board's listings render late: its page gets the longer
+                    // loading window from the start, inside the read's budget.
+                    construction_attempt: if board {
+                        zephium_agentic::WorkBrowserConstructionAttempt::SlowPageRetry
+                    } else {
+                        Default::default()
+                    },
                     id,
                     step: kind.clone(),
                     limits,
                     hops: self.grant.browse_hops,
-                    objective: self.objective.clone(),
+                    objective: if board {
+                        format!("{}\n\n{JOB_BOARD_READING}", self.objective)
+                    } else {
+                        self.objective.clone()
+                    },
                     output: self.output.clone(),
                     account,
                 };
@@ -208,6 +221,65 @@ impl Driver {
             offset += count;
         }
         Ok(None)
+    }
+}
+
+/// Job boards whose listings a script renders after the page loads. Closed.
+const JOB_BOARDS: &[&str] = &[
+    "ashbyhq.com",
+    "greenhouse.io",
+    "lever.co",
+    "myworkdayjobs.com",
+    "myworkdaysite.com",
+    "dropbox.jobs",
+];
+const JOB_BOARD_READING: &str = "This page is a job board whose listings appear after it loads: wait until its list of open positions is shown, scrolling once if it is not, before extracting, then return one record per listed position with its title as the name, its location and its link.";
+const JOB_LISTINGS: u8 = 32;
+
+fn job_board(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .filter(|url| url.scheme() == "https")
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| {
+            JOB_BOARDS.iter().any(|board| {
+                host == *board
+                    || host
+                        .strip_suffix(board)
+                        .is_some_and(|rest| rest.ends_with('.'))
+            })
+        })
+}
+
+/// A board read the model left without records extracts each listing as
+/// one: title, location and link. A collection the model chose stands.
+fn job_listing(kind: WorkStepKindV1) -> WorkStepKindV1 {
+    match kind {
+        WorkStepKindV1::Read {
+            url,
+            collection: None,
+        } if job_board(&url) => WorkStepKindV1::Read {
+            url,
+            collection: Some(WorkBrowseCollection {
+                title: "Open positions".into(),
+                columns: vec![
+                    WorkBrowseColumn {
+                        name: "location".into(),
+                        value: WorkBrowseValue::Text,
+                        required: false,
+                        extraction: WorkBrowseExtraction::Verbatim,
+                    },
+                    WorkBrowseColumn {
+                        name: "url".into(),
+                        value: WorkBrowseValue::Url,
+                        required: false,
+                        extraction: WorkBrowseExtraction::Verbatim,
+                    },
+                ],
+                max_items: JOB_LISTINGS,
+            }),
+        },
+        kind => kind,
     }
 }
 
@@ -357,6 +429,64 @@ pub(super) fn combined_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_job_boards_read_their_listings_as_records() {
+        // The three boards of the person's run, and the other closed hosts.
+        for url in [
+            "https://jobs.ashbyhq.com/dropbox",
+            "https://boards.greenhouse.io/dropbox",
+            "https://job-boards.greenhouse.io/figma/jobs/123",
+            "https://jobs.lever.co/acme",
+            "https://acme.wd5.myworkdayjobs.com/en-US/careers",
+            "https://www.dropbox.jobs/en/jobs",
+            "https://dropbox.jobs/",
+        ] {
+            assert!(job_board(url), "{url}");
+            let WorkStepKindV1::Read {
+                collection: Some(collection),
+                ..
+            } = job_listing(WorkStepKindV1::Read {
+                url: url.into(),
+                collection: None,
+            })
+            else {
+                panic!("a board read carries its listings");
+            };
+            collection.validate().unwrap();
+            let columns: Vec<_> = collection.columns.iter().map(|c| c.name.as_str()).collect();
+            assert_eq!(columns, ["location", "url"]);
+            assert_eq!(collection.max_items, JOB_LISTINGS);
+        }
+        for url in [
+            "https://greenhouse.io.evil.test/jobs",
+            "https://notlever.co/jobs",
+            "http://jobs.lever.co/acme",
+            "https://www.lego.com/en-us/themes/star-wars",
+        ] {
+            assert!(!job_board(url), "{url}");
+            let kind = WorkStepKindV1::Read {
+                url: url.into(),
+                collection: None,
+            };
+            assert_eq!(job_listing(kind.clone()), kind);
+        }
+        // A collection the model chose is its own.
+        let chosen = WorkStepKindV1::Read {
+            url: "https://jobs.lever.co/acme".into(),
+            collection: Some(WorkBrowseCollection {
+                title: "Roles".into(),
+                columns: vec![WorkBrowseColumn {
+                    name: "team".into(),
+                    value: WorkBrowseValue::Text,
+                    required: false,
+                    extraction: WorkBrowseExtraction::Generate,
+                }],
+                max_items: 5,
+            }),
+        };
+        assert_eq!(job_listing(chosen.clone()), chosen);
+    }
 
     #[test]
     fn work_read_budget_shares_preserve_the_original_reservation() {
