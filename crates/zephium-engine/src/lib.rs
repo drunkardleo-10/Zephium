@@ -1817,6 +1817,22 @@ impl WebviewEngine {
         ));
     }
 
+    /// For each host, whether the profile's own website data holds cookies
+    /// for its site: closed facts, never a cookie or an account. The receiver
+    /// yields all false, or disconnects, when the answer is not available.
+    #[cfg(target_os = "macos")]
+    pub fn work_sessions_present(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+        hosts: Vec<String>,
+    ) -> std::sync::mpsc::Receiver<Vec<bool>> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            host::try_with(move |engine| engine.work_sessions_present(profile, hosts, reply));
+        });
+        answer
+    }
+
     fn run(&self, f: impl FnOnce() + Send + 'static) -> bool {
         (self.dispatch)(Box::new(f))
     }

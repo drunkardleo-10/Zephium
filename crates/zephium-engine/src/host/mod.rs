@@ -40,6 +40,8 @@ mod stages;
 pub(crate) mod work_frames;
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
 mod work_resource;
+#[cfg(target_os = "macos")]
+mod work_session_presence;
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
 pub(crate) use work_resource::notify_work_resource;
 
