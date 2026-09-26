@@ -196,10 +196,6 @@
     text-overflow: ellipsis;
   }
 
-  .segmented[data-icon-only="true"] .segment {
-    padding-inline: 0;
-  }
-
   .segmented[data-icon-only="true"] .text {
     position: absolute;
     width: 1px;
@@ -225,6 +221,10 @@
   .segment:hover:not(:disabled),
   .segment[aria-checked="true"] {
     color: var(--color-text);
+  }
+
+  .segmented[data-icon-only="true"] .segment {
+    padding-inline: 0;
   }
 
   @media (prefers-reduced-motion: reduce) {
