@@ -15,6 +15,8 @@ pub const MAX_DIAGRAM_LAYERS: usize = 8;
 pub const MAX_CODE_TEXT_BYTES: usize = 16 * 1024;
 pub const MAX_CODE_LINES: usize = 400;
 pub const MAX_CODE_NOTES: usize = 24;
+pub const MAX_ANSWER_BYTES: usize = 16 * 1024;
+pub const MAX_ANSWER_LINES: usize = 400;
 pub const CODE_LANGUAGES: [&str; 24] = [
     "rust",
     "typescript",
@@ -328,6 +330,9 @@ pub enum WorkArtifactDataV1 {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         notes: Vec<WorkCodeNote>,
     },
+    /// The reply a careful expert would write, in a closed Markdown subset
+    /// (see `answer_faults`); the other objects of its set stand beside it.
+    Answer { markdown: String },
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -590,6 +595,14 @@ pub enum WorkArtifactField {
     CodeNotes,
     CodeNoteRange,
     CodeNoteText,
+    AnswerText,
+    AnswerHeading,
+    AnswerLink,
+    AnswerImage,
+    AnswerHtml,
+    AnswerTable,
+    AnswerFence,
+    AnswerNesting,
 }
 impl WorkArtifactField {
     pub fn phrase(self) -> &'static str {
@@ -636,6 +649,14 @@ impl WorkArtifactField {
             Self::CodeNotes => "code has at most 24 notes",
             Self::CodeNoteRange => "code note lines need 1 <= from <= to <= the number of lines in the text",
             Self::CodeNoteText => "code note text must be one line of at most 160 characters",
+            Self::AnswerText => "answer markdown must be non-empty, at most 16 KB and 400 lines",
+            Self::AnswerHeading => "answer headings are ## or ### only, never # or deeper than ###",
+            Self::AnswerLink => "answer holds no links or bare URLs; name a source in words and cite it in the evidence array",
+            Self::AnswerImage => "answer holds no images",
+            Self::AnswerHtml => "answer holds no HTML tags; write a type such as Vec<T> as inline code",
+            Self::AnswerTable => "answer holds no tables; publish a table as its own table object and refer to it by title",
+            Self::AnswerFence => "answer code fences open with ``` and a language from the code language list, and close",
+            Self::AnswerNesting => "answer lists nest one level at most",
         }
     }
 }
@@ -1062,6 +1083,18 @@ impl WorkArtifactDataV1 {
                     short_text(&mut budget, &note.text, 160)?;
                 }
             }
+            Self::Answer { markdown } => {
+                *at = F::AnswerText;
+                validate_text(markdown, MAX_ANSWER_BYTES)?;
+                if markdown.lines().count() > MAX_ANSWER_LINES {
+                    return Err(WorkError::Invalid);
+                }
+                budget.text(markdown)?;
+                if let Some(field) = answer_faults(markdown).first() {
+                    *at = *field;
+                    return Err(WorkError::Invalid);
+                }
+            }
         }
         Ok(())
     }
@@ -1077,6 +1110,9 @@ impl WorkArtifactDataV1 {
                 ..
             } => return !super::document::document_links(document).is_empty(),
             Self::BrowserResourcePreview { .. } => return true,
+            Self::Answer { markdown } => {
+                return answer_faults(markdown).contains(&WorkArtifactField::AnswerLink)
+            }
             _ => &[],
         };
         subjects
@@ -1174,9 +1210,188 @@ impl WorkArtifactDataV1 {
                 push(text);
                 notes.iter().for_each(|n| push(&n.text));
             }
+            Self::Answer { markdown } => push(markdown),
         }
         out
     }
+}
+
+/// What an answer's Markdown holds outside its closed subset, each field once,
+/// in line order. A line scanner, not a parser: code fences and code spans are
+/// passed over, and everything else is read only for what the subset refuses.
+pub fn answer_faults(markdown: &str) -> Vec<WorkArtifactField> {
+    use WorkArtifactField as F;
+    let mut faults = Vec::new();
+    let mut fault = |field| {
+        if !faults.contains(&field) {
+            faults.push(field);
+        }
+    };
+    let mut fence: Option<(u8, usize)> = None;
+    // Marker indents of the open list, outermost first.
+    let mut levels: Vec<usize> = Vec::new();
+    let mut prose = false;
+    for line in markdown.lines() {
+        let trimmed = line.trim_start_matches([' ', '\t']);
+        let indent = line.len() - trimmed.len();
+        let body = trimmed.trim_end().as_bytes();
+        if let Some((mark, length)) = fence {
+            if indent <= 3 && run(body, mark) >= length && run(body, mark) == body.len() {
+                fence = None;
+            }
+            continue;
+        }
+        let Some(&first) = body.first() else {
+            prose = false;
+            continue;
+        };
+        if matches!(first, b'`' | b'~') && run(body, first) >= 3 {
+            let length = run(body, first);
+            let info = std::str::from_utf8(&body[length..]).unwrap_or_default().trim();
+            if !CODE_LANGUAGES.contains(&info) {
+                fault(F::AnswerFence);
+            }
+            fence = Some((first, length));
+            prose = false;
+            continue;
+        }
+        let mut content = body;
+        while let Some(rest) = content.strip_prefix(b">") {
+            content = rest.trim_ascii_start();
+        }
+        let quoted = content.len() != body.len();
+        let heading = content.first() == Some(&b'#') && {
+            let level = run(content, b'#');
+            let heading = content.get(level).is_none_or(|b| matches!(b, b' ' | b'\t'));
+            if heading && !(2..=3).contains(&level) {
+                fault(F::AnswerHeading);
+            }
+            heading
+        };
+        if prose && content.len() >= 2 && content.iter().all(|b| *b == b'=') {
+            fault(F::AnswerHeading);
+        }
+        if table_row(content) {
+            fault(F::AnswerTable);
+        }
+        let item = list_item(content);
+        if item && !quoted {
+            while levels.last().is_some_and(|level| *level > indent) {
+                levels.pop();
+            }
+            if levels.last().is_none_or(|level| *level < indent) {
+                levels.push(indent);
+            }
+            if levels.len() > 2 {
+                fault(F::AnswerNesting);
+            }
+        } else if indent == 0 && !quoted {
+            levels.clear();
+        }
+        inline_faults(content, &mut fault);
+        prose = !heading && !item;
+    }
+    if fence.is_some() {
+        fault(F::AnswerFence);
+    }
+    faults
+}
+fn run(bytes: &[u8], mark: u8) -> usize {
+    bytes.iter().take_while(|b| **b == mark).count()
+}
+fn table_row(content: &[u8]) -> bool {
+    (content.first() == Some(&b'|') && content[1..].contains(&b'|'))
+        || (content.contains(&b'|')
+            && content.contains(&b'-')
+            && content
+                .iter()
+                .all(|b| matches!(b, b'|' | b':' | b'-' | b' ' | b'\t')))
+}
+fn list_item(content: &[u8]) -> bool {
+    let spaced = |at: usize| content.get(at).is_none_or(|b| matches!(b, b' ' | b'\t'));
+    match content.first() {
+        Some(b'-' | b'*' | b'+') => spaced(1),
+        Some(b) if b.is_ascii_digit() => {
+            let digits = content.iter().take_while(|b| b.is_ascii_digit()).count();
+            digits <= 9 && matches!(content.get(digits), Some(b'.' | b')')) && spaced(digits + 1)
+        }
+        _ => false,
+    }
+}
+/// Links, images, bare URLs and HTML tags outside code spans on one line.
+fn inline_faults(content: &[u8], fault: &mut impl FnMut(WorkArtifactField)) {
+    use WorkArtifactField as F;
+    let starts = |at: usize, prefix: &[u8]| {
+        content
+            .get(at..at + prefix.len())
+            .is_some_and(|part| part.eq_ignore_ascii_case(prefix))
+    };
+    // `[text](url)` or a `[label]: url` definition.
+    let link = |at: usize| {
+        content[at..]
+            .iter()
+            .position(|b| *b == b']')
+            .is_some_and(|end| match content.get(at + end + 1) {
+                Some(b'(') => true,
+                Some(b':') => at == 0,
+                _ => false,
+            })
+    };
+    let mut previous = b' ';
+    let mut at = 0;
+    while at < content.len() {
+        let byte = content[at];
+        match byte {
+            b'\\' => {
+                at += 2;
+                previous = b'\\';
+                continue;
+            }
+            b'`' => {
+                let length = run(&content[at..], b'`');
+                at += length;
+                let mut next = at;
+                while next < content.len() {
+                    let close = run(&content[next..], b'`');
+                    if close == length {
+                        at = next + close;
+                        break;
+                    }
+                    next += close.max(1);
+                }
+                previous = b'`';
+                continue;
+            }
+            b'!' if content.get(at + 1) == Some(&b'[') && link(at + 1) => fault(F::AnswerImage),
+            b'[' if previous != b'!' && link(at) => fault(F::AnswerLink),
+            b'h' | b'H'
+                if !previous.is_ascii_alphanumeric()
+                    && (starts(at, b"http://") || starts(at, b"https://")) =>
+            {
+                fault(F::AnswerLink)
+            }
+            b'<' if !previous.is_ascii_alphanumeric() && html_tag(&content[at + 1..]) => {
+                fault(F::AnswerHtml)
+            }
+            _ => {}
+        }
+        previous = byte;
+        at += 1;
+    }
+}
+/// `<name ...>`, `</name>` or `<!...`, with a closing `>` on the line.
+fn html_tag(rest: &[u8]) -> bool {
+    let name = rest.strip_prefix(b"/").unwrap_or(rest);
+    if rest.first() == Some(&b'!') {
+        return true;
+    }
+    let letters = name
+        .iter()
+        .take_while(|b| b.is_ascii_alphanumeric() || **b == b'-')
+        .count();
+    name.first().is_some_and(u8::is_ascii_alphabetic)
+        && matches!(name.get(letters), Some(b' ' | b'\t' | b'>' | b'/'))
+        && name[letters..].contains(&b'>')
 }
 
 impl std::fmt::Debug for WorkArtifactDataV1 {
@@ -1676,6 +1891,68 @@ mod tests {
         )
         .is_err());
         assert!(base.plain_text().contains("Node 2"));
+    }
+    #[test]
+    fn an_answer_is_markdown_in_a_closed_subset() {
+        use WorkArtifactField as F;
+        let answer = |markdown: &str| WorkArtifactDataV1::Answer {
+            markdown: markdown.into(),
+        };
+        let whole = "Ownership frees memory when its owner leaves scope.\n\n\
+            ## How a move works\n\n\
+            Assigning a `String` moves it; the old name is **no longer usable**.\n\n\
+            1. One owner per value\n   - nested once\n2. Borrows end first\n\n\
+            ### In code\n\n\
+            ```rust\nlet t = s; // <T> and [a](b) and https://x are code here\n```\n\n\
+            > A borrow never outlives its owner.\n\n\
+            See `Vec<T>` and `Option<&str>`; a < b, and Vec<u8> reads as prose.";
+        assert_eq!(answer(whole).validate(0), Ok(()));
+        let wire = serde_json::to_value(answer("x")).unwrap();
+        assert_eq!(wire, serde_json::json!({"kind":"answer","markdown":"x"}));
+        assert!(answer(whole).plain_text().contains("How a move works"));
+        let lines = |count: usize| "line\n".repeat(count);
+        assert_eq!(answer(&lines(MAX_ANSWER_LINES)).validate(0), Ok(()));
+        let (long, wide) = (lines(MAX_ANSWER_LINES + 1), "x".repeat(MAX_ANSWER_BYTES + 1));
+        let cases = [
+            ("", F::AnswerText),
+            (" \n", F::AnswerText),
+            (long.as_str(), F::AnswerText),
+            (wide.as_str(), F::AnswerText),
+            ("# Ownership", F::AnswerHeading),
+            ("#### Deep", F::AnswerHeading),
+            ("> # Quoted title", F::AnswerHeading),
+            ("Ownership\n===", F::AnswerHeading),
+            ("See [the book](https://doc.rust-lang.org/book/).", F::AnswerLink),
+            ("See https://doc.rust-lang.org/book/.", F::AnswerLink),
+            ("See <https://doc.rust-lang.org/>.", F::AnswerLink),
+            ("[book]: https://doc.rust-lang.org/book/", F::AnswerLink),
+            ("![diagram](https://x.test/a.png)", F::AnswerImage),
+            ("Text <b>bold</b>", F::AnswerHtml),
+            ("<details>", F::AnswerHtml),
+            ("<!-- note -->", F::AnswerHtml),
+            ("| Layer | Why |\n| --- | --- |\n| Web | Fast |", F::AnswerTable),
+            ("Layer | Why\n--- | ---", F::AnswerTable),
+            ("```\nplain\n```", F::AnswerFence),
+            ("```rs\nfn main() {}\n```", F::AnswerFence),
+            ("```rust\nfn main() {}", F::AnswerFence),
+            ("- one\n  - two\n    - three", F::AnswerNesting),
+        ];
+        for (index, (markdown, field)) in cases.into_iter().enumerate() {
+            assert_eq!(answer(markdown).fault(0), Some(field), "case {index}");
+        }
+        for fine in [
+            "- one\n  - two\n- three",
+            "##No space is text, and #hashtags are prose",
+            "Setext two\n---",
+            "a | b is a pipe in prose",
+            "~~~python\nprint('<b>')\n~~~",
+            "Escaped \\[not](a link) and \\<b>",
+        ] {
+            assert_eq!(answer(fine).validate(0), Ok(()), "{fine}");
+        }
+        assert!(answer("Read https://x.test/").claims_observed_links());
+        assert!(!answer("`https://x.test/` in code").claims_observed_links());
+        assert!(F::AnswerTable.phrase().contains("its own table object"));
     }
     #[test]
     fn findings_and_source_entries_address_the_artifact_evidence() {

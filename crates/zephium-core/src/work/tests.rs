@@ -1472,22 +1472,64 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
         followups: vec![],
         malformed: 0,
     };
-    let cited = disclosure.resolve(turn(findings(None), false)).unwrap();
-    assert!(cited.artifacts.is_empty());
+    // Findings are cited research only: without a source they are refused,
+    // knowledge or not, and the notice sends the prose to the answer.
+    for known in [false, true] {
+        let refused = disclosure.resolve(turn(findings(None), known)).unwrap();
+        assert!(refused.artifacts.is_empty());
+        assert_eq!(refused.refusals, [WorkAgentArtifactRefusal::FindingsUncited]);
+    }
+    let notice = WorkAgentArtifactRefusal::FindingsUncited.notice();
+    assert!(notice.contains("findings are cited facts") && notice.contains("the answer carries the prose"));
+    let answer = |markdown: &str| WorkArtifactDataV1::Answer {
+        markdown: markdown.into(),
+    };
+    let lead = "Row-level security isolates tenants in one `Postgres` database.";
+    let cited = disclosure.resolve(turn(answer(lead), false)).unwrap();
     assert_eq!(cited.refusals, [WorkAgentArtifactRefusal::Uncited]);
-    let known = disclosure.resolve(turn(findings(None), true)).unwrap();
+    let known = disclosure.resolve(turn(answer(lead), true)).unwrap();
     let [artifact] = known.artifacts.as_slice() else {
         panic!("knowledge object refused: {:?}", known.refusals);
     };
     assert!(artifact.general_knowledge && artifact.evidence.is_empty());
-    let WorkArtifactDataV1::Findings { items, .. } = &artifact.data else {
-        panic!("kind changed");
-    };
-    assert!(items[0].general_knowledge);
     let linked = disclosure
-        .resolve(turn(findings(Some("https://www.postgresql.org/")), true))
+        .resolve(turn(answer("Read https://www.postgresql.org/docs/ first."), true))
         .unwrap();
     assert!(linked.artifacts.is_empty());
+    assert_eq!(linked.refusals, [WorkAgentArtifactRefusal::KnowledgeLink]);
+    // A URL inside code is code, and a fence written in capitals or CRLF stands.
+    let fenced = disclosure
+        .resolve(turn(
+            answer("Fetch it:\r\n\r\n```Bash\r\ncurl https://example.com\r\n```\r\n"),
+            true,
+        ))
+        .unwrap();
+    let WorkArtifactDataV1::Answer { markdown } = &fenced.artifacts[0].data else {
+        panic!("answer refused: {:?}", fenced.refusals);
+    };
+    assert_eq!(markdown, "Fetch it:\n\n```bash\ncurl https://example.com\n```\n");
+    let matrix = WorkArtifactDataV1::ComparisonMatrix {
+        subjects: vec![WorkSubject {
+            name: "Postgres".into(),
+            descriptor: None,
+            homepage: Some("https://www.postgresql.org/".into()),
+            image_candidates: vec![],
+        }],
+        criteria: vec![WorkCriterion {
+            name: "Isolation".into(),
+            kind: WorkCriterionKind::Text,
+        }],
+        cells: vec![vec![WorkCell {
+            value: WorkCellValue::Text {
+                text: "Row-level security".into(),
+            },
+            evidence: vec![],
+            note: None,
+            general_knowledge: true,
+        }]],
+        notes: vec![],
+    };
+    let linked = disclosure.resolve(turn(matrix, true)).unwrap();
     assert_eq!(linked.refusals, [WorkAgentArtifactRefusal::KnowledgeLink]);
     let diagram = WorkArtifactDataV1::Diagram {
         nodes: vec![
@@ -1632,7 +1674,7 @@ fn charts_of_nothing_second_findings_and_malformed_objects_are_refused_by_cause(
     }
     assert!(WorkAgentArtifactRefusal::EmptyChart
         .notice()
-        .contains("say so in one finding"));
+        .contains("say so in the answer"));
     let drawn = disclosure
         .resolve(turn(vec![chart(&["0", "120000", "80000"])]))
         .unwrap();
@@ -1723,16 +1765,65 @@ fn charts_of_nothing_second_findings_and_malformed_objects_are_refused_by_cause(
             general_knowledge: false,
         }],
     };
-    let repeated = disclosure
-        .resolve(turn(vec![
-            findings(
-                &["SQLite", "DuckDB"],
-                "SQLite FTS5 has a built-in full-text index",
-            ),
-            findings(&["duckdb "], "Run a controlled benchmark before choosing"),
-            findings(&[], "No measured winner"),
-            findings(&["RocksDB"], "RocksDB is a key-value store"),
-        ]))
+    let text = "SQLite FTS5 ships a full-text index.";
+    let preview = WorkEvidencePreviewV1 {
+        version: 1,
+        link: WorkEvidenceLink {
+            extraction_id: 40.into(),
+            source_id: 1,
+        },
+        origin: "https://sqlite.org/".into(),
+        role: "paragraph".into(),
+        text: text.into(),
+        truncated: false,
+        source_bytes: text.len().to_string(),
+        link_destination: None,
+        source: WorkEvidenceSourceV1::NativeExtraction,
+    };
+    let sourced = WorkAgentTurnDisclosure::try_new(
+        "Compare SQLite, DuckDB and RocksDB",
+        vec![],
+        vec![],
+        &[],
+        std::slice::from_ref(&preview),
+        &[],
+        WorkAgentBudget {
+            turns_left: 6,
+            steps_left: 20,
+            browse_available: true,
+        },
+        WorkExecutionLimits {
+            model_tokens: 1000,
+            cost_micro_usd: 1000,
+            operations: 2,
+            timeout_seconds: 60,
+            max_workers: 2,
+        },
+        vec![],
+    )
+    .unwrap();
+    let cite = |data: WorkArtifactDataV1| WorkAgentArtifactOutput {
+        title: "Findings".into(),
+        data,
+        evidence: vec![0],
+        general_knowledge: false,
+    };
+    let repeated = sourced
+        .resolve(WorkAgentTurnOutput {
+            artifacts: [
+                findings(
+                    &["SQLite", "DuckDB"],
+                    "SQLite FTS5 has a built-in full-text index",
+                ),
+                findings(&["duckdb "], "Run a controlled benchmark before choosing"),
+                findings(&[], "No measured winner"),
+                findings(&["RocksDB"], "RocksDB is a key-value store"),
+            ]
+            .into_iter()
+            .map(cite)
+            .collect(),
+            ..turn(vec![])
+        })
         .unwrap();
     assert_eq!(repeated.artifacts.len(), 2);
     assert_eq!(

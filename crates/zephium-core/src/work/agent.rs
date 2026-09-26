@@ -858,6 +858,8 @@ pub enum WorkAgentArtifactRefusal {
     EmptyChart,
     /// A second findings object in one turn about the same subjects.
     DuplicateFindings,
+    /// Findings that cite no source: findings are cited research facts only.
+    FindingsUncited,
 }
 impl WorkAgentArtifactRefusal {
     pub fn notice(self) -> String {
@@ -873,7 +875,8 @@ impl WorkAgentArtifactRefusal {
             Self::KnowledgeLink => "is marked general_knowledge but names a homepage, image or link, which only a cited source can supply",
             Self::UnknownEvidenceKey => "cites an evidence key that is not in the sources list",
             Self::UnlistedLink => "links to a URL that is not a listed source",
-            Self::EmptyChart => "is a chart whose points are all zero or unknown, which shows nothing: when the sources give no comparable numbers, say so in one finding, or chart typical published figures marked general_knowledge with a basis that says they are typical figures, not measurements",
+            Self::EmptyChart => "is a chart whose points are all zero or unknown, which shows nothing: when the sources give no comparable numbers, say so in the answer, or chart typical published figures marked general_knowledge with a basis that says they are typical figures, not measurements",
+            Self::FindingsUncited => "is findings that cite no source: findings are cited facts from sources read for this request, and the answer carries the prose, so write what you know in the answer instead",
             Self::DuplicateFindings => "is a second findings object this turn about the same subjects: put a turn's claims in one findings object, add only claims not already on the canvas, and publish nothing when nothing is new",
             Self::Malformed(None) => "has invalid content: measurement cells hold a plain number only (the criterion carries the unit), cell and finding evidence must cite listed source keys, subject indexes must exist, diagram node ids must be unique and every edge and layer must name an existing one, code notes must point at lines of the text, and text must fit its limits",
         }
@@ -897,6 +900,10 @@ impl WorkAgentTurnDisclosure {
             return Err(Refusal::EmptyChart);
         }
         let knowledge = artifact.general_knowledge;
+        let findings = matches!(artifact.data, WorkArtifactDataV1::Findings { .. });
+        if findings && artifact.evidence.is_empty() {
+            return Err(Refusal::FindingsUncited);
+        }
         if artifact.evidence.is_empty() && !knowledge {
             return Err(Refusal::Uncited);
         }
@@ -923,6 +930,13 @@ impl WorkAgentTurnDisclosure {
             Ok((artifact.evidence.len() - 1) as u16)
         })?;
         if artifact.evidence.is_empty() {
+            if findings {
+                return Err(if dropped > 0 {
+                    Refusal::UnknownEvidenceKey
+                } else {
+                    Refusal::FindingsUncited
+                });
+            }
             if !knowledge {
                 return Err(if dropped > 0 {
                     Refusal::UnknownEvidenceKey
@@ -941,6 +955,7 @@ impl WorkAgentTurnDisclosure {
         normalize_measurements(&mut artifact.data);
         normalize_vendors(&mut artifact.data);
         normalize_code(&mut artifact.data);
+        normalize_answer(&mut artifact.data);
         if let Some(field) = artifact.data.fault(artifact.evidence.len()) {
             return Err(malformed(field));
         }
@@ -1085,6 +1100,27 @@ fn normalize_code(data: &mut WorkArtifactDataV1) {
         *text = text.replace("\r\n", "\n").replace('\r', "\n");
     }
 }
+/// Line endings a model sends as CRLF, and a fence language in capitals.
+fn normalize_answer(data: &mut WorkArtifactDataV1) {
+    let WorkArtifactDataV1::Answer { markdown } = data else {
+        return;
+    };
+    if markdown.contains('\r') {
+        *markdown = markdown.replace("\r\n", "\n").replace('\r', "\n");
+    }
+    if markdown.contains("```") {
+        *markdown = markdown
+            .split('\n')
+            .map(|line| match line.trim_start().strip_prefix("```") {
+                Some(info) if !info.starts_with('`') && !info.trim().is_empty() => {
+                    line.to_ascii_lowercase()
+                }
+                _ => line.to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+}
 /// Removes claim-level citations of unknown keys and returns how many went.
 /// A finding or source entry left citing nothing but unknown keys goes too.
 fn drop_unknown_citations(data: &mut WorkArtifactDataV1, known: impl Fn(u16) -> bool) -> usize {
@@ -1118,7 +1154,8 @@ fn drop_unknown_citations(data: &mut WorkArtifactDataV1, known: impl Fn(u16) -> 
         | WorkArtifactDataV1::Checklist { .. }
         | WorkArtifactDataV1::BrowserResourcePreview { .. }
         | WorkArtifactDataV1::Diagram { .. }
-        | WorkArtifactDataV1::Code { .. } => {}
+        | WorkArtifactDataV1::Code { .. }
+        | WorkArtifactDataV1::Answer { .. } => {}
     }
     dropped
 }
@@ -1160,7 +1197,8 @@ fn remap_citations(
         | WorkArtifactDataV1::Checklist { .. }
         | WorkArtifactDataV1::BrowserResourcePreview { .. }
         | WorkArtifactDataV1::Diagram { .. }
-        | WorkArtifactDataV1::Code { .. } => {}
+        | WorkArtifactDataV1::Code { .. }
+        | WorkArtifactDataV1::Answer { .. } => {}
     }
     Ok(())
 }
@@ -1184,6 +1222,7 @@ pub fn artifact_kind(data: &WorkArtifactDataV1) -> &'static str {
         WorkArtifactDataV1::BrowserResourcePreview { .. } => "browser_resource_preview",
         WorkArtifactDataV1::Diagram { .. } => "diagram",
         WorkArtifactDataV1::Code { .. } => "code",
+        WorkArtifactDataV1::Answer { .. } => "answer",
     }
 }
 
