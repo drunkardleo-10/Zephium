@@ -38,11 +38,12 @@ const CONCURRENT_RUNS: usize = 3;
 enum FailureReason {
     /// The execution did not end needing review with artifacts.
     Outcome,
-    /// The collection or detail comparison lacked its required shape.
+    /// The collection or detail comparison lacked its required shape, or
+    /// its one answer beside cited findings.
     Collection,
-    /// The travel or Airbnb criteria were unmet.
+    /// The travel or Airbnb criteria, or the one answer, were unmet.
     Travel,
-    /// The making set, its knowledge marks, reads or time were unmet.
+    /// The making set, its one answer, knowledge marks, reads or time were unmet.
     Design,
     /// A chart of nothing, repeated findings, or too many reads.
     Chart,

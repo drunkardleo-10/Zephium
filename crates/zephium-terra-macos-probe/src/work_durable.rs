@@ -816,6 +816,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             && !artifact.evidence.is_empty()
     });
     let collection_accepted = collection_accepted
+        && (!matches!(mode, Mode::AgentCollection | Mode::AgentDetails)
+            || research_accepted(&state.executions[0]))
         && (mode != Mode::AgentDetails || {
             let mut pages = std::collections::BTreeSet::new();
             for step in &state.executions[0].steps {
@@ -851,7 +853,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         .filter(|page| matches!(page, AirbnbPage::Listing(_)))
         .count();
     let travel_accepted = match mode {
-        Mode::AgentTrip => !airbnb_reads.is_empty(),
+        Mode::AgentTrip => !airbnb_reads.is_empty() && research_accepted(&state.executions[0]),
         Mode::AgentListing => airbnb_listing_reads == 1,
         Mode::AgentAirbnb => {
             airbnb_listing_reads >= 3
@@ -870,6 +872,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
                         .collect();
                     subjects.len() == 3 && pages.len() == 3 && !artifact.evidence.is_empty()
                 })
+                && research_accepted(&state.executions[0])
         }
         _ => true,
     };
@@ -1705,25 +1708,38 @@ fn engine_chart_accepted(execution: &WorkExecutionFact) -> bool {
             _ => Vec::new(),
         })
         .collect();
-    let unavailable_finding = claims.iter().any(|(_, claim)| {
-        let claim = claim.to_lowercase();
-        [
-            "no comparable",
-            "not comparable",
-            "unavailable",
-            "lack",
-            "no published",
-            "do not give",
-            "don't give",
-            "no measured",
-            "not report",
-        ]
+    let answer = AnswerFacts::of(execution);
+    let answer_text: Vec<String> = execution
+        .artifacts
         .iter()
-        .any(|phrase| claim.contains(phrase))
-            && ["number", "benchmark", "figure", "metric", "measure", "data"]
-                .iter()
-                .any(|noun| claim.contains(noun))
-    });
+        .filter_map(|artifact| match &artifact.data {
+            Data::Answer { markdown } => Some(collapse(markdown)),
+            _ => None,
+        })
+        .collect();
+    let unavailable_finding = claims
+        .iter()
+        .map(|(_, claim)| claim)
+        .chain(&answer_text)
+        .any(|claim| {
+            let claim = claim.to_lowercase();
+            [
+                "no comparable",
+                "not comparable",
+                "unavailable",
+                "lack",
+                "no published",
+                "do not give",
+                "don't give",
+                "no measured",
+                "not report",
+            ]
+            .iter()
+            .any(|phrase| claim.contains(phrase))
+                && ["number", "benchmark", "figure", "metric", "measure", "data"]
+                    .iter()
+                    .any(|noun| claim.contains(noun))
+        });
     let duplicate_claims = claims
         .iter()
         .enumerate()
@@ -1746,22 +1762,23 @@ fn engine_chart_accepted(execution: &WorkExecutionFact) -> bool {
         .collect();
     kinds.sort_unstable();
     let accepted = findings_max <= 1
+        && answer.accepted()
         && empty_charts == 0
         && (knowledge_chart || unavailable_finding)
         && reads <= 8
         && duplicate_claims == 0;
     let _ = writeln!(
         std::io::stdout().lock(),
-        "chart_qualification findings_max_per_turn={findings_max} empty_charts={empty_charts} knowledge_chart={knowledge_chart} unavailable_finding={unavailable_finding} duplicate_claims={duplicate_claims} reads={reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
+        "chart_qualification {answer} findings_max_per_turn={findings_max} empty_charts={empty_charts} knowledge_chart={knowledge_chart} unavailable_finding={unavailable_finding} duplicate_claims={duplicate_claims} reads={reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
         kinds.join(","),
     );
     accepted
 }
 
-/// A making request answered from knowledge as a set: a diagram of at least
-/// six nodes, five edges and one vendor host, a table, findings and a
-/// checklist, each marked knowledge; at most two reads, none failed, and the
-/// loop under its deadline.
+/// A making request answered from knowledge: exactly one answer beside a
+/// diagram of at least six nodes, five edges and one vendor host and a table,
+/// each marked knowledge; at most two reads, none failed, and the loop under
+/// its deadline. Findings and a checklist are counted, not required.
 fn architecture_accepted(execution: &WorkExecutionFact) -> bool {
     use zephium_core::work::artifact::WorkArtifactDataV1 as Data;
     let known = |test: &dyn Fn(&Data) -> bool| {
@@ -1777,6 +1794,8 @@ fn architecture_accepted(execution: &WorkExecutionFact) -> bool {
     let table = known(&|data| matches!(data, Data::Table { .. }));
     let findings = known(&|data| matches!(data, Data::Findings { .. }));
     let checklist = known(&|data| matches!(data, Data::Checklist { .. }));
+    let answer = AnswerFacts::of(execution);
+    let answer_known = known(&|data| matches!(data, Data::Answer { .. }));
     let reads: Vec<_> = execution
         .steps
         .iter()
@@ -1800,17 +1819,99 @@ fn architecture_accepted(execution: &WorkExecutionFact) -> bool {
     kinds.sort_unstable();
     let accepted = diagram
         && table
-        && findings
-        && checklist
+        && answer.accepted()
+        && answer_known
         && reads.len() <= 2
         && failed_reads == 0
         && u128::from(elapsed_ms) < ARCHITECTURE_DEADLINE.as_millis();
     let _ = writeln!(
         std::io::stdout().lock(),
-        "design_qualification diagram={diagram} table={table} findings={findings} checklist={checklist} knowledge={marked}/{} reads={} failed_reads={failed_reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
+        "design_qualification {answer} diagram={diagram} table={table} findings={findings} checklist={checklist} knowledge={marked}/{} reads={} failed_reads={failed_reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
         execution.artifacts.len(),
         reads.len(),
         kinds.join(","),
+    );
+    accepted
+}
+
+/// The one answer a finished request publishes, measured without its text:
+/// how many there are, and the largest one's size and shape.
+struct AnswerFacts {
+    count: usize,
+    first: bool,
+    bytes: usize,
+    words: usize,
+    lines: usize,
+    sections: usize,
+    fences: usize,
+}
+impl AnswerFacts {
+    fn of(execution: &WorkExecutionFact) -> Self {
+        use zephium_core::work::artifact::WorkArtifactDataV1 as Data;
+        let answers: Vec<_> = execution
+            .artifacts
+            .iter()
+            .filter_map(|artifact| match &artifact.data {
+                Data::Answer { markdown } => Some((&artifact.id, markdown.as_str())),
+                _ => None,
+            })
+            .collect();
+        let largest = answers
+            .iter()
+            .map(|(_, markdown)| *markdown)
+            .max_by_key(|markdown| markdown.len())
+            .unwrap_or_default();
+        let first = answers.iter().any(|(id, _)| {
+            execution.steps.iter().any(|step| {
+                matches!(step.kind, WorkStepKindV1::Publish) && step.artifacts.first() == Some(*id)
+            })
+        });
+        let fence = |line: &&str| line.trim_start().starts_with("```");
+        Self {
+            count: answers.len(),
+            first,
+            bytes: largest.len(),
+            words: largest.split_whitespace().count(),
+            lines: largest.lines().count(),
+            sections: largest
+                .lines()
+                .filter(|line| line.starts_with("## ") || line.starts_with("### "))
+                .count(),
+            fences: largest.lines().filter(fence).count() / 2,
+        }
+    }
+    /// Exactly one answer, within the size limit.
+    fn accepted(&self) -> bool {
+        use zephium_core::work::artifact::{MAX_ANSWER_BYTES, MAX_ANSWER_LINES};
+        self.count == 1 && self.bytes <= MAX_ANSWER_BYTES && self.lines <= MAX_ANSWER_LINES
+    }
+}
+impl std::fmt::Display for AnswerFacts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "answers={} answer_first={} answer_bytes={} answer_words={} answer_lines={} answer_sections={} answer_fences={}",
+            self.count, self.first, self.bytes, self.words, self.lines, self.sections, self.fences
+        )
+    }
+}
+
+/// Research publishes an answer beside findings that each cite a source.
+fn research_accepted(execution: &WorkExecutionFact) -> bool {
+    use zephium_core::work::artifact::WorkArtifactDataV1 as Data;
+    let answer = AnswerFacts::of(execution);
+    let findings: Vec<_> = execution
+        .artifacts
+        .iter()
+        .filter(|artifact| matches!(artifact.data, Data::Findings { .. }))
+        .collect();
+    let cited = findings.iter().all(|artifact| !artifact.evidence.is_empty());
+    let accepted = answer.accepted() && cited;
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "research_qualification {answer} findings={} findings_cited={cited} kinds={} accepted={accepted}",
+        findings.len(),
+        sorted_kinds(execution),
     );
     accepted
 }
@@ -1837,9 +1938,9 @@ fn sorted_kinds(execution: &WorkExecutionFact) -> String {
     kinds.join(",")
 }
 
-/// How something works, as a set: a knowledge-marked diagram of at least six
-/// nodes, findings of at least five items, a brief, at most one read, and the
-/// loop under its deadline.
+/// How something works: exactly one answer beside a knowledge-marked diagram
+/// of at least six nodes, the example in a named language, at most one read,
+/// and the loop under its deadline. Findings and a brief are counted only.
 fn mechanism_accepted(execution: &WorkExecutionFact) -> bool {
     use zephium_core::work::artifact::WorkArtifactDataV1 as Data;
     let data = || execution.artifacts.iter();
@@ -1862,16 +1963,16 @@ fn mechanism_accepted(execution: &WorkExecutionFact) -> bool {
                 if named == language && notes.len() >= 3 && text.lines().count() <= 30)
         })
     });
+    let answer = AnswerFacts::of(execution);
     let (reads, elapsed_ms) = reads_and_elapsed(execution);
     let accepted = diagram
-        && findings >= 5
-        && brief
+        && answer.accepted()
         && example
         && reads <= 1
         && u128::from(elapsed_ms) < EXPLANATION_DEADLINE.as_millis();
     let _ = writeln!(
         std::io::stdout().lock(),
-        "mechanism_qualification diagram={diagram} findings_items={findings} brief={brief} terms={terms} language={} example={example} reads={reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
+        "mechanism_qualification {answer} diagram={diagram} findings_items={findings} brief={brief} terms={terms} language={} example={example} reads={reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
         language.unwrap_or("none"),
         sorted_kinds(execution),
     );
@@ -1910,9 +2011,10 @@ fn named_language(objective: &str) -> Option<&'static str> {
         })
 }
 
-/// Two ideas compared from knowledge: exactly one knowledge-marked matrix of
-/// two subjects and at least four criteria with every cell filled, no reads,
-/// no object refused as malformed, and the loop under its deadline.
+/// Two ideas compared from knowledge: exactly one answer beside exactly one
+/// knowledge-marked matrix of two subjects and at least four criteria with
+/// every cell filled, no reads, no object refused as malformed, and the loop
+/// under its deadline.
 fn concept_comparison_accepted(execution: &WorkExecutionFact) -> bool {
     use zephium_core::work::artifact::{WorkArtifactDataV1 as Data, WorkCellValue};
     let matrices: Vec<_> = execution
@@ -1940,8 +2042,10 @@ fn concept_comparison_accepted(execution: &WorkExecutionFact) -> bool {
         },
     );
     let malformed = MALFORMED_REFUSALS.load(std::sync::atomic::Ordering::Relaxed);
+    let answer = AnswerFacts::of(execution);
     let (reads, elapsed_ms) = reads_and_elapsed(execution);
     let accepted = matrices.len() == 1
+        && answer.accepted()
         && knowledge
         && subjects == 2
         && criteria >= 4
@@ -1951,7 +2055,7 @@ fn concept_comparison_accepted(execution: &WorkExecutionFact) -> bool {
         && u128::from(elapsed_ms) < EXPLANATION_DEADLINE.as_millis();
     let _ = writeln!(
         std::io::stdout().lock(),
-        "concept_comparison_qualification matrices={} knowledge={knowledge} subjects={subjects} criteria={criteria} filled={filled} malformed={malformed} reads={reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
+        "concept_comparison_qualification {answer} matrices={} knowledge={knowledge} subjects={subjects} criteria={criteria} filled={filled} malformed={malformed} reads={reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
         matrices.len(),
         sorted_kinds(execution),
     );
@@ -1959,8 +2063,8 @@ fn concept_comparison_accepted(execution: &WorkExecutionFact) -> bool {
 }
 
 /// A pasted function reviewed: a code excerpt with at least two notes, one of
-/// them on the off-by-one line, findings that name the bug, no reads, and the
-/// loop under its deadline.
+/// them on the off-by-one line, exactly one answer, the bug named in the
+/// answer or a finding, no reads, and the loop under its deadline.
 fn code_review_accepted(execution: &WorkExecutionFact) -> bool {
     use zephium_core::work::artifact::WorkArtifactDataV1 as Data;
     let (mut notes, mut bug_noted) = (0, false);
@@ -1982,20 +2086,24 @@ fn code_review_accepted(execution: &WorkExecutionFact) -> bool {
                 .any(|note| note.from <= line && line <= note.to)
         });
     }
-    let named = execution.artifacts.iter().any(|artifact| {
-        matches!(&artifact.data, Data::Findings { items, .. } if items.iter().any(|item| {
+    let named = execution.artifacts.iter().any(|artifact| match &artifact.data {
+        Data::Findings { items, .. } => items.iter().any(|item| {
             names_off_by_one(&item.claim, item.detail.as_deref().unwrap_or_default())
-        }))
+        }),
+        Data::Answer { markdown } => names_off_by_one(markdown, ""),
+        _ => false,
     });
+    let answer = AnswerFacts::of(execution);
     let (reads, elapsed_ms) = reads_and_elapsed(execution);
     let accepted = notes >= 2
+        && answer.accepted()
         && bug_noted
         && named
         && reads == 0
         && u128::from(elapsed_ms) < EXPLANATION_DEADLINE.as_millis();
     let _ = writeln!(
         std::io::stdout().lock(),
-        "code_review_qualification notes={notes} bug_noted={bug_noted} bug_named={named} reads={reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
+        "code_review_qualification {answer} notes={notes} bug_noted={bug_noted} bug_named={named} reads={reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
         sorted_kinds(execution),
     );
     accepted
