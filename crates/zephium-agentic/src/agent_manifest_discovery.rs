@@ -72,6 +72,7 @@ enum DiscoveryProfile {
     Restrictive,
     Production,
     PublicWeb,
+    SiteSession,
 }
 
 /// Read-only navigation scope. Destinations are selected from the current
@@ -151,6 +152,37 @@ impl AgentNavigationDiscovery {
         scope.document_policy = crate::WorkBrowserDocumentPolicy::PublicQueryFinalization;
         Ok(scope)
     }
+    /// Work in the person's session on one site: every destination on the
+    /// departure's registrable domain, reached through observed links.
+    pub fn try_new_site_session(
+        departure: crate::ContextNavigationTarget,
+        max_hops: usize,
+    ) -> Result<Self, AgentManifestContractError> {
+        if !crate::WorkBrowserDocumentPolicy::SiteSession.admits_request(&departure) {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        let origin = SemanticOrigin::parse(departure.as_url().as_str())
+            .map_err(|_| AgentManifestContractError::NavigationRoute)?;
+        let mut scope = Self::try_new_production(
+            departure,
+            vec![AgentNavigationOriginRule::try_new(
+                origin,
+                "/".into(),
+                true,
+                false,
+            )?],
+            max_hops,
+            2,
+        )?;
+        scope.profile = DiscoveryProfile::SiteSession;
+        scope.document_policy = crate::WorkBrowserDocumentPolicy::SiteSession;
+        Ok(scope)
+    }
+    /// Whether this scope works in one site's session.
+    pub const fn is_site_session(&self) -> bool {
+        matches!(self.profile, DiscoveryProfile::SiteSession)
+    }
+
     /// Enables safe same-document query updates for a single-page public task.
     /// No additional load, path, origin, hop or authenticated scope is granted.
     pub fn with_same_document_query_updates(mut self) -> Result<Self, AgentManifestContractError> {
@@ -287,7 +319,9 @@ impl AgentNavigationDiscovery {
     pub const fn is_production(&self) -> bool {
         matches!(
             self.profile,
-            DiscoveryProfile::Production | DiscoveryProfile::PublicWeb
+            DiscoveryProfile::Production
+                | DiscoveryProfile::PublicWeb
+                | DiscoveryProfile::SiteSession
         )
     }
     /// Canonical production rules; restrictive profiles contain one equivalent rule.
@@ -304,12 +338,22 @@ impl AgentNavigationDiscovery {
             return crate::ContextNavigationTarget::parse(origin.as_url().as_str())
                 .is_ok_and(|target| public_destination(&target));
         }
+        if self.is_site_session() {
+            return crate::ContextNavigationTarget::parse(origin.as_url().as_str())
+                .is_ok_and(|target| crate::same_work_site(&self.departure, &target));
+        }
         self.rules.iter().any(|rule| rule.origin() == origin)
     }
     /// Scope-only check; policy also requires a current public link and exact history budgets.
     pub fn admits(&self, target: &crate::ContextNavigationTarget) -> bool {
         if self.is_public_web() {
             return public_destination(target) && safe_path(target.as_url().path());
+        }
+        if self.is_site_session() {
+            return crate::WorkBrowserDocumentPolicy::SiteSession.admits_request(target)
+                && crate::same_work_site(&self.departure, target)
+                && target.as_url().as_str().len() <= crate::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
+                && safe_path(target.as_url().path());
         }
         target.as_url().as_str().len() <= crate::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
             && self.rules.iter().any(|rule| rule.admits(target))
@@ -365,6 +409,73 @@ mod public_tests {
                 assert!(!scope.admits(&target), "{url}");
             }
         }
+    }
+    #[test]
+    fn site_session_scope_spans_one_site_and_admits_session_authority() {
+        let scope = AgentNavigationDiscovery::try_new_site_session(
+            crate::ContextNavigationTarget::parse("https://app.slack.com/client").unwrap(),
+            16,
+        )
+        .unwrap();
+        assert!(scope.is_site_session() && scope.is_production() && !scope.is_public_web());
+        assert_eq!(
+            scope.document_policy(),
+            crate::WorkBrowserDocumentPolicy::SiteSession
+        );
+        for url in [
+            "https://app.slack.com/client/T1/C2",
+            "https://files.slack.com/files/x",
+            "https://slack.com/help?q=1",
+        ] {
+            let target = crate::ContextNavigationTarget::parse(url).unwrap();
+            assert!(scope.admits(&target), "{url}");
+            assert!(scope.admits_origin(&SemanticOrigin::parse(url).unwrap()));
+        }
+        for url in [
+            "https://slack.com.evil.com/",
+            "http://app.slack.com/client",
+            "https://accounts.google.com/",
+            "https://app.slack.com/?access_token=secret",
+        ] {
+            let target = crate::ContextNavigationTarget::parse(url).unwrap();
+            assert!(!scope.admits(&target), "{url}");
+        }
+        assert!(AgentNavigationDiscovery::try_new_site_session(
+            crate::ContextNavigationTarget::parse("http://example.com/").unwrap(),
+            4,
+        )
+        .is_err());
+        let authority = || {
+            AgentPlanNodeAuthority::try_new(
+                vec![1.into()],
+                vec![AgentAccountScope::Authenticated(
+                    crate::AgentAccountId::generate(),
+                )],
+                vec![SemanticOrigin::parse("https://app.slack.com").unwrap()],
+                SemanticSensitivity::Sensitive,
+                AgentEffectScope::try_new(&[
+                    SemanticEffectClass::Read,
+                    SemanticEffectClass::LocalWrite,
+                ])
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        assert!(authority().with_navigation_discovery(scope).is_ok());
+        let public = AgentNavigationDiscovery::try_new_production(
+            crate::ContextNavigationTarget::parse("https://app.slack.com/client").unwrap(),
+            vec![AgentNavigationOriginRule::try_new(
+                SemanticOrigin::parse("https://app.slack.com").unwrap(),
+                "/".into(),
+                true,
+                false,
+            )
+            .unwrap()],
+            4,
+            1,
+        )
+        .unwrap();
+        assert!(authority().with_navigation_discovery(public).is_err());
     }
     #[test]
     fn public_discovery_cannot_attach_to_authenticated_or_effectful_authority() {

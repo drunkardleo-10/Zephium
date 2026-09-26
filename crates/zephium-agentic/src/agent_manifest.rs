@@ -717,7 +717,7 @@ impl AgentPlanNodeAuthority {
                 .origins()
                 .any(|origin| self.origins.binary_search(origin).is_err())
             || self.accounts.len() != 1
-            || self.max_sensitivity != SemanticSensitivity::Public
+            || (self.max_sensitivity != SemanticSensitivity::Public && !discovery.is_site_session())
             || (self.effects != AgentEffectScope::try_new(&[SemanticEffectClass::Read])?
                 && self.effects
                     != AgentEffectScope::try_new(&[
@@ -1207,6 +1207,9 @@ fn manifest_guard(
                 if discovery.is_public_web() {
                     hasher.update(b"ZEPHIUM-PUBLIC-WEB-ISOLATED-1\0");
                 }
+                if discovery.is_site_session() {
+                    hasher.update(b"ZEPHIUM-SITE-SESSION-1\0");
+                }
                 hasher.update(node.id().bytes());
                 hasher.update((discovery.max_hops() as u64).to_be_bytes());
                 hasher.update([match discovery.document_policy() {
@@ -1215,6 +1218,7 @@ fn manifest_guard(
                     crate::WorkBrowserDocumentPolicy::DocumentQueryFinalization => 2,
                     crate::WorkBrowserDocumentPolicy::PublicQueryFinalization => 3,
                     crate::WorkBrowserDocumentPolicy::PublicSameDocumentQuery => 4,
+                    crate::WorkBrowserDocumentPolicy::SiteSession => 5,
                 }]);
                 for value in [
                     discovery.departure().as_url().as_str(),

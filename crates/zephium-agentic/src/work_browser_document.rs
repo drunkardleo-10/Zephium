@@ -24,6 +24,11 @@ pub enum WorkBrowserDocumentPolicy {
     /// fragment and credential-bearing location. The admitted URL remains the
     /// resource's stable citation address; query state grants no new destination.
     PublicSameDocumentQuery,
+    /// Work in the person's session on one site: redirects, committed loads
+    /// and same-document location changes may move anywhere on the requested
+    /// site (registrable domain, same scheme and port). Page-initiated loads
+    /// are cancelled, never followed; cross-site locations are refused.
+    SiteSession,
 }
 
 impl WorkBrowserDocumentPolicy {
@@ -35,6 +40,11 @@ impl WorkBrowserDocumentPolicy {
             Self::PublicQueryFinalization | Self::PublicSameDocumentQuery
         ) {
             return url.scheme() == "https"
+                && url.fragment().is_none()
+                && crate::semantic_wire::model_safe_public_url(requested);
+        }
+        if self == Self::SiteSession {
+            return site_scheme(requested)
                 && url.fragment().is_none()
                 && crate::semantic_wire::model_safe_public_url(requested);
         }
@@ -59,6 +69,9 @@ impl WorkBrowserDocumentPolicy {
         if requested == effective {
             return true;
         }
+        if self == Self::SiteSession {
+            return same_site(requested, effective);
+        }
         if matches!(
             self,
             Self::PublicQueryFinalization | Self::PublicSameDocumentQuery
@@ -82,6 +95,29 @@ impl WorkBrowserDocumentPolicy {
                 .map(|(base, _)| base)
                 == Some(requested.as_url().as_str())
     }
+}
+
+/// HTTPS, or plain HTTP on a loopback host (local qualification sites only).
+fn site_scheme(target: &ContextNavigationTarget) -> bool {
+    let url = target.as_url();
+    url.username().is_empty()
+        && url.password().is_none()
+        && match url.scheme() {
+            "https" => true,
+            "http" => {
+                matches!(
+                    url.host(),
+                    Some(url::Host::Ipv4(ip)) if ip.is_loopback()
+                ) || url.host_str() == Some("localhost")
+            }
+            _ => false,
+        }
+}
+
+/// Both locations are on one site: same scheme and port, same registrable
+/// domain (private suffixes keep hosted tenants apart; IPs stay exact).
+pub fn same_site(source: &ContextNavigationTarget, target: &ContextNavigationTarget) -> bool {
+    site_scheme(source) && site_scheme(target) && crate::same_work_human_site(source, target)
 }
 
 #[cfg(test)]
@@ -156,5 +192,47 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn site_session_moves_within_the_registrable_domain_only() {
+        let policy = WorkBrowserDocumentPolicy::SiteSession;
+        let start = ContextNavigationTarget::parse("https://app.slack.com/client").unwrap();
+        assert!(policy.admits_request(&start));
+        for moved in [
+            "https://app.slack.com/client/T1/C2",
+            "https://files.slack.com/files/x?y=1",
+            "https://slack.com/signin#done",
+        ] {
+            let moved = ContextNavigationTarget::parse(moved).unwrap();
+            assert!(policy.admits_final_document(&start, &moved), "{moved:?}");
+        }
+        for foreign in [
+            "https://slack.com.evil.test/",
+            "https://accounts.google.com/",
+            "http://app.slack.com/client",
+            "https://app.slack.com:8443/client",
+        ] {
+            let foreign = ContextNavigationTarget::parse(foreign).unwrap();
+            assert!(
+                !policy.admits_final_document(&start, &foreign),
+                "{foreign:?}"
+            );
+        }
+        let tenant = ContextNavigationTarget::parse("https://one.github.io/a").unwrap();
+        let other = ContextNavigationTarget::parse("https://two.github.io/a").unwrap();
+        assert!(!policy.admits_final_document(&tenant, &other));
+        let loopback = ContextNavigationTarget::parse("http://127.0.0.1:4100/inbox").unwrap();
+        assert!(policy.admits_request(&loopback));
+        assert!(policy.admits_final_document(
+            &loopback,
+            &ContextNavigationTarget::parse("http://127.0.0.1:4100/next").unwrap()
+        ));
+        assert!(!policy.admits_final_document(
+            &loopback,
+            &ContextNavigationTarget::parse("http://127.0.0.1:4101/next").unwrap()
+        ));
+        assert!(!policy
+            .admits_request(&ContextNavigationTarget::parse("http://example.test/").unwrap()));
     }
 }

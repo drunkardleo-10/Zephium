@@ -2538,7 +2538,8 @@ fn validate_context_scope_with_history(
             || candidate.profile() != profile
             || candidate.account != account.account()
             || (!node.navigation_discovery().is_some_and(|scope| {
-                scope.is_public_web() && scope.admits_origin(&candidate.origin)
+                (scope.is_public_web() || scope.is_site_session())
+                    && scope.admits_origin(&candidate.origin)
             }) && (manifest
                 .scope()
                 .origins()
