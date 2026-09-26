@@ -656,6 +656,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         max_steps: 24,
         browse_hops: 4,
         folders: vec![],
+        accounts: Vec::new(),
     };
     assert!(WorkAgentGrantV1 {
         max_turns: 0,
@@ -682,6 +683,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         user_artifacts: vec![],
         intervention: None,
         steps: vec![],
+        accounts: vec![],
     };
     fact.validate(&plan, revision).unwrap();
     let mut reviewed = fact.clone();
@@ -705,6 +707,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         note: None,
         measurements: None,
         local: None,
+        account: None,
     };
     let usage = WorkUsage {
         model_tokens: 1200,
@@ -1240,6 +1243,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         note: None,
         measurements: None,
         local: None,
+        account: None,
     };
     let steer = |status| {
         step(
@@ -1317,6 +1321,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         note: None,
         measurements: None,
         local: None,
+        account: None,
     };
     let proposal = |decision| WorkStepKindV1::WriteFile {
         path: "/Users/me/Documents/project/notes.txt".into(),
@@ -1363,6 +1368,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         max_steps: 12,
         browse_hops: 2,
         folders: folders.into_iter().map(String::from).collect(),
+        accounts: Vec::new(),
     };
     assert!(grant(vec!["/Users/me/Documents/project"])
         .validate()
@@ -1739,4 +1745,286 @@ fn charts_of_nothing_second_findings_and_malformed_objects_are_refused_by_cause(
     assert!(repeated.refusals[0]
         .notice()
         .starts_with("is a second findings object this turn"));
+}
+
+#[test]
+fn origin_grants_admit_exact_https_origins_and_bound_signed_in_reads() {
+    use super::{agent::*, context::*, runtime::*, search::*};
+    let account = |origin: &str, pages| WorkAccountGrantV1 {
+        origin: origin.into(),
+        account: "01J8ACCOUNT".into(),
+        tab: None,
+        pages,
+    };
+    assert!(account("https://mail.example.com", 12).validate().is_ok());
+    for invalid in [
+        account("http://mail.example.com", 3),
+        account("https://mail.example.com/inbox", 3),
+        account("https://mail.example.com", 0),
+        account("https://mail.example.com", 13),
+        WorkAccountGrantV1 {
+            account: "not-alnum".into(),
+            ..account("https://mail.example.com", 3)
+        },
+    ] {
+        assert_eq!(invalid.validate(), Err(WorkError::Invalid));
+    }
+    let mail = account("https://mail.example.com", 2);
+    assert!(mail.admits("https://mail.example.com/u/0/inbox?x=1"));
+    assert!(!mail.admits("https://docs.example.com/"));
+    assert!(!mail.admits("http://mail.example.com/"));
+    assert!(!mail.admits("https://mail.example.com:8443/"));
+    assert_eq!(mail.host(), "mail.example.com");
+
+    let plan = WorkPlanRevision {
+        context: None,
+        author: WorkAuthor::User,
+        revision: WorkRevision::new(2).unwrap(),
+        basis_revision: WorkRevision::INITIAL,
+        draft: draft(),
+    };
+    let limits = WorkExecutionLimits {
+        model_tokens: 600_000,
+        cost_micro_usd: 1_000_000,
+        operations: 64,
+        timeout_seconds: 1200,
+        max_workers: 2,
+    };
+    let grant = WorkAgentGrantV1 {
+        provider: WorkSearchProvider::OpenAi,
+        model: PUBLIC_SEARCH_MODEL.into(),
+        max_turns: 8,
+        max_steps: 24,
+        browse_hops: 4,
+        folders: vec![],
+        accounts: vec![mail.clone()],
+    };
+    grant.validate().unwrap();
+    for accounts in [
+        vec![mail.clone(), mail.clone()],
+        vec![account("https://a.example.com", 1); MAX_WORK_ACCOUNT_GRANTS + 1],
+    ] {
+        assert!(WorkAgentGrantV1 {
+            accounts,
+            ..grant.clone()
+        }
+        .validate()
+        .is_err());
+    }
+    let legacy = serde_json::to_value(WorkAgentGrantV1 {
+        accounts: vec![],
+        ..grant.clone()
+    })
+    .unwrap();
+    assert!(legacy.get("accounts").is_none());
+
+    let spec = WorkExecutionSpec::agent(&plan, limits, grant).unwrap();
+    let revision = WorkRevision::new(9).unwrap();
+    let mut fact = WorkExecutionFact {
+        authorization: WorkExecutionAuthorization::UserDirectedAgent,
+        id: WorkExecutionId::from(7),
+        approved_revision: WorkRevision::new(3).unwrap(),
+        spec,
+        status: WorkExecutionStatus::Running,
+        attempts: vec![WorkAttemptFact {
+            id: 500.into(),
+            node: plan.draft.nodes[0].id,
+            status: WorkAttemptStatus::Running,
+            usage: None,
+        }],
+        artifacts: vec![],
+        provider_evidence: vec![],
+        file_evidence: vec![],
+        command_evidence: vec![],
+        folder_approvals: vec![],
+        user_artifacts: vec![],
+        intervention: None,
+        steps: vec![],
+        accounts: vec![],
+    };
+    // The request's accounts are derived: an unrefreshed fact is refused.
+    assert!(fact.validate(&plan, revision).is_err());
+    fact.refresh_accounts();
+    assert_eq!(
+        fact.accounts,
+        [WorkAccountUseV1 {
+            host: "mail.example.com".into(),
+            pages_used: 0,
+            pages: 2,
+        }]
+    );
+    fact.validate(&plan, revision).unwrap();
+    let read = |id: u128, url: &str, host: Option<&str>| WorkStepFact {
+        id: id.into(),
+        turn: 1,
+        kind: WorkStepKindV1::Read {
+            url: url.into(),
+            collection: None,
+        },
+        status: WorkStepStatus::Running,
+        usage: None,
+        artifacts: vec![],
+        evidence: None,
+        note: None,
+        measurements: None,
+        local: None,
+        account: host.map(|host| {
+            Box::new(WorkPageAccountV1 {
+                host: host.into(),
+                badge: true,
+            })
+        }),
+    };
+    fact.steps.push(read(
+        1,
+        "https://mail.example.com/inbox",
+        Some("mail.example.com"),
+    ));
+    fact.steps
+        .push(read(2, "https://public.example.org/", None));
+    fact.refresh_accounts();
+    assert_eq!(fact.accounts[0].pages_used, 1);
+    fact.validate(&plan, revision).unwrap();
+    for step in [
+        // Outside every granted origin.
+        read(3, "https://docs.example.com/", Some("docs.example.com")),
+        // A badge that names another host than the page.
+        read(3, "https://mail.example.com/a", Some("other.example.com")),
+    ] {
+        let mut outside = fact.clone();
+        outside.steps.push(step);
+        outside.refresh_accounts();
+        assert!(outside.validate(&plan, revision).is_err());
+    }
+    let mut over = fact.clone();
+    over.steps.push(read(
+        3,
+        "https://mail.example.com/b",
+        Some("mail.example.com"),
+    ));
+    over.steps.push(read(
+        4,
+        "https://mail.example.com/c",
+        Some("mail.example.com"),
+    ));
+    over.refresh_accounts();
+    assert_eq!(over.accounts[0].pages_used, 3);
+    assert!(over.validate(&plan, revision).is_err());
+    let mut unbadged = read(5, "https://mail.example.com/d", Some("mail.example.com"));
+    unbadged.account.as_mut().unwrap().badge = false;
+    assert!(unbadged.validate().is_err());
+    let mut search = read(5, "https://mail.example.com/d", Some("mail.example.com"));
+    search.kind = WorkStepKindV1::Search {
+        query: "signed in".into(),
+    };
+    assert!(search.validate().is_err());
+
+    for (url, class) in [
+        ("https://mail.example.com/", WorkPathClass::Root),
+        ("https://mail.example.com/u/0/inbox", WorkPathClass::Page),
+        (
+            "https://mail.example.com/search?q=report",
+            WorkPathClass::Query,
+        ),
+        (
+            "https://mail.example.com/account/delete",
+            WorkPathClass::Action,
+        ),
+        ("https://mail.example.com/sign-out", WorkPathClass::Action),
+        (
+            "https://mail.example.com/settings?action=unsubscribe",
+            WorkPathClass::Action,
+        ),
+        (
+            "https://mail.example.com/confirmation-notes",
+            WorkPathClass::Page,
+        ),
+    ] {
+        assert_eq!(path_class(url), class, "{url}");
+    }
+
+    // Tabs: host and path only, readable by the agent, and private context.
+    let tab =
+        WorkContextTabV1::from_page("Inbox (3)", "https://mail.example.com/u/0/?tab=rm#inbox")
+            .unwrap();
+    assert_eq!(
+        (tab.host.as_str(), tab.path.as_str()),
+        ("mail.example.com", "/u/0/")
+    );
+    assert!(WorkContextTabV1::from_page("Local", "http://intranet.example/").is_none());
+    assert!(WorkContextSelectionV1 {
+        environment: 1.into(),
+        items: vec![],
+        tabs: true,
+    }
+    .validate()
+    .is_ok());
+    let disclosure = WorkContextDisclosureV1 {
+        version: 1,
+        environment: 1.into(),
+        environment_revision: WorkRevision::INITIAL,
+        purpose: WorkContextPurpose::Agent,
+        items: vec![],
+        total_bytes: 0,
+        tabs: vec![tab.clone(); MAX_CONTEXT_TABS],
+    };
+    disclosure.validate().unwrap();
+    assert!(disclosure.requires_review());
+    assert!(WorkContextDisclosureV1 {
+        tabs: vec![tab.clone(); MAX_CONTEXT_TABS + 1],
+        ..disclosure.clone()
+    }
+    .validate()
+    .is_err());
+
+    let turn = WorkAgentTurnDisclosure::try_new(
+        "Summarize my inbox",
+        vec![],
+        vec![],
+        &[],
+        &[],
+        &[],
+        WorkAgentBudget {
+            turns_left: 3,
+            steps_left: 8,
+            browse_available: true,
+        },
+        limits,
+        vec![],
+    )
+    .unwrap()
+    .with_accounts(vec![WorkAgentAccountView {
+        origin: mail.origin.clone(),
+        pages_left: 2,
+    }])
+    .unwrap()
+    .with_tabs(&[WorkContextTabV1::from_page("Docs", "https://docs.example.com/guide").unwrap()])
+    .unwrap();
+    let read_fetch = |url: &str| WorkAgentTurnOutput {
+        say: None,
+        artifacts: vec![],
+        fetch: vec![WorkAgentFetch::Read {
+            url: url.into(),
+            collection: None,
+        }],
+        ask: None,
+        finish: false,
+        followups: vec![],
+        malformed: 0,
+    };
+    for readable in [
+        "https://mail.example.com/u/0/inbox",
+        "https://docs.example.com/guide",
+    ] {
+        let admitted = turn.resolve(read_fetch(readable)).ok().unwrap();
+        assert_eq!(admitted.fetch.len(), 1, "{readable}");
+    }
+    let refused = turn
+        .resolve(read_fetch("https://docs.example.com/other"))
+        .ok()
+        .unwrap();
+    assert!(refused.fetch.is_empty());
+    let context = serde_json::to_value(turn.context()).unwrap();
+    assert_eq!(context["accounts"][0]["pages_left"], 2);
+    assert_eq!(context["tabs"][0]["url"], "https://docs.example.com/guide");
 }

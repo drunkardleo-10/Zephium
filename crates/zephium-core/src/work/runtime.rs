@@ -157,9 +157,10 @@ pub enum WorkCapability {
         scope: WorkAccountScope,
         update: WorkFieldUpdateV1,
     },
-    /// Routine public work under one grant: the agent chooses searches, reads,
-    /// discoveries and published objects turn by turn. Read-only, anonymous,
-    /// public; accounts and effects need their own approval.
+    /// Routine work under one grant: the agent chooses searches, reads,
+    /// discoveries and published objects turn by turn. Read-only; reads are
+    /// anonymous except inside origins the person approved in `accounts`, and
+    /// effects need their own approval.
     Agent {
         grant: WorkAgentGrantV1,
     },
@@ -178,9 +179,22 @@ pub struct WorkAgentGrantV1 {
     /// step must resolve inside one of them; the application enforces it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<String>,
+    /// Origins the person let the agent read with their signed-in session
+    /// for this request only. Each approval attests its account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<WorkAccountGrantV1>,
 }
 impl WorkAgentGrantV1 {
     pub fn validate(&self) -> Result<(), WorkError> {
+        let mut origins = BTreeSet::new();
+        if self.accounts.len() > MAX_WORK_ACCOUNT_GRANTS
+            || self
+                .accounts
+                .iter()
+                .any(|grant| grant.validate().is_err() || !origins.insert(&grant.origin))
+        {
+            return Err(WorkError::Invalid);
+        }
         if self.folders.len() > MAX_WORK_FOLDERS
             || self
                 .folders
@@ -201,6 +215,147 @@ impl WorkAgentGrantV1 {
         }
         Ok(())
     }
+    /// The approved origin a page URL lies inside, if any.
+    pub fn account_for(&self, url: &str) -> Option<&WorkAccountGrantV1> {
+        self.accounts.iter().find(|grant| grant.admits(url))
+    }
+}
+
+pub const MAX_WORK_ACCOUNT_GRANTS: usize = 4;
+pub const MAX_WORK_ACCOUNT_PAGES: u8 = 12;
+/// One origin read with the profile's signed-in session for one request.
+/// The person's approval attests the account; Zephium never infers it.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAccountGrantV1 {
+    /// Exact HTTPS origin.
+    pub origin: String,
+    /// Opaque identity minted by Rust when the approval was drafted.
+    pub account: String,
+    /// The attached tab the person approved it from, when there was one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab: Option<ItemId>,
+    /// Signed-in pages the request may open on this origin.
+    pub pages: u8,
+}
+impl WorkAccountGrantV1 {
+    pub fn validate(&self) -> Result<(), WorkError> {
+        let url = validate_public_url(&self.origin)?;
+        if url.origin().ascii_serialization() != self.origin
+            || !valid_account(&self.account)
+            || self.pages == 0
+            || self.pages > MAX_WORK_ACCOUNT_PAGES
+        {
+            return Err(WorkError::Invalid);
+        }
+        Ok(())
+    }
+    /// Whether `url` is an HTTPS page on exactly this origin.
+    pub fn admits(&self, url: &str) -> bool {
+        validate_public_url(url).is_ok_and(|url| url.origin().ascii_serialization() == self.origin)
+    }
+    pub fn host(&self) -> &str {
+        self.origin.strip_prefix("https://").unwrap_or(&self.origin)
+    }
+}
+fn valid_account(account: &str) -> bool {
+    !account.is_empty() && account.len() <= 64 && account.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// Why the loop refused a signed-in step; closed words only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkAccountRefusal {
+    /// A change on a signed-in page: only a field update proposal may do that.
+    AccountWrite,
+    /// The origin's page budget for this request is used up.
+    PageBudget,
+}
+impl WorkAccountRefusal {
+    pub fn notice(self, host: &str) -> String {
+        match self {
+            Self::AccountWrite => format!("A change on {host} was refused: signed-in pages are read-only for you. Propose it to the person as a field update instead."),
+            Self::PageBudget => format!("The signed-in page budget for {host} is used up: no more pages on it will open in this request. Work from the pages already read."),
+        }
+    }
+}
+
+/// Closed shape of a page path, for logs that must not carry the path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkPathClass {
+    Root,
+    Page,
+    Query,
+    /// Names a state change (sign out, delete, send, pay and the like).
+    Action,
+}
+const ACTION_WORDS: [&str; 19] = [
+    "logout",
+    "log-out",
+    "signout",
+    "sign-out",
+    "delete",
+    "remove",
+    "destroy",
+    "unsubscribe",
+    "send",
+    "submit",
+    "pay",
+    "checkout",
+    "purchase",
+    "transfer",
+    "approve",
+    "confirm",
+    "revoke",
+    "disconnect",
+    "deactivate",
+];
+pub fn path_class(url: &str) -> WorkPathClass {
+    let Ok(url) = url::Url::parse(url) else {
+        return WorkPathClass::Action;
+    };
+    let action = |word: &str| {
+        let word = word.to_ascii_lowercase();
+        ACTION_WORDS.iter().any(|action| {
+            word == *action
+                || word
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|part| part == *action)
+        })
+    };
+    if url
+        .path_segments()
+        .is_some_and(|mut parts| parts.any(action))
+        || url
+            .query_pairs()
+            .any(|(key, value)| action(&key) || action(&value))
+    {
+        WorkPathClass::Action
+    } else if url.query().is_some() {
+        WorkPathClass::Query
+    } else if url.path() == "/" {
+        WorkPathClass::Root
+    } else {
+        WorkPathClass::Page
+    }
+}
+
+/// A page item read under a grant: the canvas draws the account badge.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkPageAccountV1 {
+    pub host: String,
+    pub badge: bool,
+}
+/// One granted origin as the request uses it: "Using your session on host".
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAccountUseV1 {
+    pub host: String,
+    pub pages_used: u8,
+    pub pages: u8,
 }
 
 /// A page the user chose from an attached tab. Execution opens it in a
@@ -230,11 +385,7 @@ pub struct WorkFieldUpdateV1 {
 impl WorkAccountScope {
     pub fn validate(&self) -> Result<(), WorkError> {
         let url = validate_public_url(&self.url)?;
-        if url.origin().ascii_serialization() != self.origin
-            || self.account.is_empty()
-            || self.account.len() > 64
-            || !self.account.bytes().all(|b| b.is_ascii_alphanumeric())
-        {
+        if url.origin().ascii_serialization() != self.origin || !valid_account(&self.account) {
             return Err(WorkError::Invalid);
         }
         Ok(())
@@ -859,6 +1010,10 @@ pub struct WorkExecutionFact {
     /// Admitted agent operations in order, committed as each one settles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<WorkStepFact>,
+    /// Granted signed-in origins and their page budgets, derived from the
+    /// grant and the steps; see `refresh_accounts`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<WorkAccountUseV1>,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -990,6 +1145,9 @@ pub struct WorkStepFact {
     pub measurements: Option<WorkStepMeasurementsV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local: Option<Box<WorkLocalStepV1>>,
+    /// A read opened with the person's signed-in session under a grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<Box<WorkPageAccountV1>>,
 }
 impl WorkStepKindV1 {
     fn validate(&self) -> Result<(), WorkError> {
@@ -1159,6 +1317,15 @@ impl WorkStepFact {
         }
         if let Some(note) = &self.note {
             validate_text(note, MAX_WORK_STEP_NOTE_BYTES)?;
+        }
+        if let Some(account) = &self.account {
+            let WorkStepKindV1::Read { url, .. } = &self.kind else {
+                return Err(WorkError::Invalid);
+            };
+            if !account.badge || validate_public_url(url)?.host_str() != Some(account.host.as_str())
+            {
+                return Err(WorkError::Invalid);
+            }
         }
         if self.turn == 0 || self.artifacts.len() > MAX_WORK_ARTIFACTS {
             return Err(WorkError::Invalid);
@@ -1465,6 +1632,7 @@ impl WorkExecutionFact {
         }
         if self.authorization == WorkExecutionAuthorization::UserDirectedAgent
             || !self.steps.is_empty()
+            || !self.accounts.is_empty()
         {
             return Err(WorkError::Invalid);
         }
@@ -1688,6 +1856,34 @@ impl WorkExecutionFact {
             );
         }
     }
+    /// Each granted origin with the signed-in pages its steps opened.
+    pub fn account_use(&self) -> Vec<WorkAccountUseV1> {
+        let Some(grant) = self.agent_grant() else {
+            return Vec::new();
+        };
+        grant
+            .accounts
+            .iter()
+            .map(|account| WorkAccountUseV1 {
+                host: account.host().to_owned(),
+                pages_used: u8::try_from(
+                    self.steps
+                        .iter()
+                        .filter(|step| {
+                            step.account.is_some()
+                                && matches!(&step.kind, WorkStepKindV1::Read { url, .. } if account.admits(url))
+                        })
+                        .count(),
+                )
+                .unwrap_or(u8::MAX),
+                pages: account.pages,
+            })
+            .collect()
+    }
+    /// Recomputes `accounts`; the Store calls it whenever steps change.
+    pub fn refresh_accounts(&mut self) {
+        self.accounts = self.account_use();
+    }
     pub fn is_agent(&self) -> bool {
         matches!(self.spec.nodes.as_slice(), [node] if matches!(node.capability, WorkCapability::Agent { .. }))
     }
@@ -1736,6 +1932,19 @@ impl WorkExecutionFact {
         } else if !self.steps.is_empty()
             || !self.artifacts.is_empty()
             || !self.provider_evidence.is_empty()
+        {
+            return Err(WorkError::Invalid);
+        }
+        // A signed-in read lies inside a granted origin, within its budget.
+        let accounts = self.account_use();
+        if self.accounts != accounts
+            || accounts.iter().any(|use_| use_.pages_used > use_.pages)
+            || self.steps.iter().any(|step| {
+                step.account.as_ref().is_some_and(|account| {
+                    !matches!(&step.kind, WorkStepKindV1::Read { url, .. }
+                        if grant.account_for(url).is_some_and(|grant| grant.host() == account.host))
+                })
+            })
         {
             return Err(WorkError::Invalid);
         }

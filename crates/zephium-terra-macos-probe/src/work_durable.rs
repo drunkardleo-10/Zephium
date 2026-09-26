@@ -2006,6 +2006,7 @@ async fn agent_workflow(
             .iter()
             .map(|folder| folder.to_string_lossy().into_owned())
             .collect(),
+        accounts: Vec::new(),
     };
     let search = OpenAiPublicSearch::try_new(
         transport.clone(),

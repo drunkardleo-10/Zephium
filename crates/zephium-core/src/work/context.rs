@@ -17,6 +17,10 @@ pub const MAX_CONTEXT_REVISION_BYTES: usize = 128;
 pub struct WorkContextSelectionV1 {
     pub environment: WorkEnvironmentId,
     pub items: Vec<WorkContextSelectionItem>,
+    /// The person's consent, for this request, to list their open tabs of
+    /// the current window as context: title, host and path, never content.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tabs: bool,
 }
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -27,7 +31,7 @@ pub struct WorkContextSelectionItem {
 }
 impl WorkContextSelectionV1 {
     pub fn validate(&self) -> Result<(), WorkError> {
-        if self.items.is_empty() || self.items.len() > MAX_CONTEXT_ITEMS {
+        if (self.items.is_empty() && !self.tabs) || self.items.len() > MAX_CONTEXT_ITEMS {
             return Err(WorkError::Invalid);
         }
         let mut seen = std::collections::HashSet::new();
@@ -127,11 +131,82 @@ pub struct WorkContextDisclosureV1 {
     pub purpose: WorkContextPurpose,
     pub items: Vec<WorkContextItemV1>,
     pub total_bytes: u32,
+    /// Open tabs the person consented to list; the canvas shows them as page
+    /// cards without a read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tabs: Vec<WorkContextTabV1>,
+}
+pub const MAX_CONTEXT_TABS: usize = 60;
+pub const MAX_CONTEXT_TAB_TITLE_BYTES: usize = 256;
+pub const MAX_CONTEXT_TAB_PATH_BYTES: usize = 512;
+/// One open tab: never its page content or query.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkContextTabV1 {
+    pub title: String,
+    pub host: String,
+    pub path: String,
+}
+impl WorkContextTabV1 {
+    /// An HTTPS tab as title, host and path; query and fragment stay behind.
+    pub fn from_page(title: &str, url: &str) -> Option<Self> {
+        let url = url::Url::parse(url).ok()?;
+        let host = url.host_str()?.to_owned();
+        if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+            return None;
+        }
+        let path = url.path();
+        let (path, _) = truncate(path, MAX_CONTEXT_TAB_PATH_BYTES);
+        let title: String = title.chars().filter(|c| !c.is_control()).collect();
+        let (title, _) = truncate(&title, MAX_CONTEXT_TAB_TITLE_BYTES);
+        let tab = Self {
+            title: if title.is_empty() {
+                host.clone()
+            } else {
+                title
+            },
+            host,
+            path,
+        };
+        tab.validate().ok().map(|()| tab)
+    }
+    pub fn validate(&self) -> Result<(), WorkError> {
+        if self.title.trim().is_empty()
+            || self.title.len() > MAX_CONTEXT_TAB_TITLE_BYTES
+            || self.title.chars().any(char::is_control)
+            || self.host.is_empty()
+            || self.host.len() > 253
+            || !self
+                .host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'))
+            || !self.path.starts_with('/')
+            || self.path.len() > MAX_CONTEXT_TAB_PATH_BYTES
+            || self
+                .path
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '?' | '#'))
+        {
+            return Err(WorkError::Invalid);
+        }
+        Ok(())
+    }
+    pub fn url(&self) -> String {
+        format!("https://{}{}", self.host, self.path)
+    }
 }
 impl WorkContextDisclosureV1 {
     pub fn validate(&self) -> Result<(), WorkError> {
-        if self.version != 1 || self.items.is_empty() || self.items.len() > MAX_CONTEXT_ITEMS {
+        if self.version != 1
+            || (self.items.is_empty() && self.tabs.is_empty())
+            || self.items.len() > MAX_CONTEXT_ITEMS
+            || self.tabs.len() > MAX_CONTEXT_TABS
+        {
             return Err(WorkError::Invalid);
+        }
+        for tab in &self.tabs {
+            tab.validate()?;
         }
         let mut seen = std::collections::HashSet::new();
         let mut total = 0u64;
@@ -153,9 +228,11 @@ impl WorkContextDisclosureV1 {
         Ok(())
     }
     pub fn requires_review(&self) -> bool {
-        self.items
-            .iter()
-            .any(|item| item.visibility == WorkContextVisibility::Private)
+        !self.tabs.is_empty()
+            || self
+                .items
+                .iter()
+                .any(|item| item.visibility == WorkContextVisibility::Private)
     }
 }
 
@@ -199,7 +276,31 @@ impl WorkAdmittedContext {
         sources: Vec<WorkContextSource>,
         implicit: Vec<WorkContextSource>,
     ) -> Result<Self, WorkError> {
+        Self::admit_with_tabs(
+            environment,
+            environment_revision,
+            purpose,
+            selection,
+            sources,
+            implicit,
+            Vec::new(),
+        )
+    }
+    /// As `admit`, with the open tabs listed under the selection's consent.
+    pub fn admit_with_tabs(
+        environment: WorkEnvironmentId,
+        environment_revision: WorkRevision,
+        purpose: WorkContextPurpose,
+        selection: &WorkContextSelectionV1,
+        sources: Vec<WorkContextSource>,
+        implicit: Vec<WorkContextSource>,
+        mut tabs: Vec<WorkContextTabV1>,
+    ) -> Result<Self, WorkError> {
         selection.validate()?;
+        if !selection.tabs && !tabs.is_empty() {
+            return Err(WorkError::Invalid);
+        }
+        tabs.truncate(MAX_CONTEXT_TABS);
         if sources.len() != selection.items.len() {
             return Err(WorkError::NotFound);
         }
@@ -254,6 +355,7 @@ impl WorkAdmittedContext {
             purpose,
             items,
             total_bytes: total as u32,
+            tabs,
         };
         disclosure.validate()?;
         if purpose == WorkContextPurpose::PublicRead && disclosure.requires_review() {
@@ -412,6 +514,7 @@ mod tests {
                     revision: (*revision).into(),
                 })
                 .collect(),
+            tabs: false,
         }
     }
 
@@ -516,6 +619,7 @@ mod implicit_tests {
                 element,
                 revision: "art-1".into(),
             }],
+            tabs: false,
         };
         let source = |kind, revision: &str, text: &str| WorkContextSource {
             element,

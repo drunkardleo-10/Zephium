@@ -81,6 +81,24 @@ pub struct WorkAgentTurnContext {
     /// What the application refused last turn, in closed wording.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notices: Vec<String>,
+    /// Origins the person let the agent read with their signed-in session
+    /// for this request, each with the pages it may still open.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<WorkAgentAccountView>,
+    /// The person's open tabs, listed with their consent and not yet read.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tabs: Vec<WorkAgentTabView>,
+}
+#[derive(Clone, Serialize)]
+pub struct WorkAgentAccountView {
+    pub origin: String,
+    pub pages_left: u8,
+}
+#[derive(Clone, Serialize)]
+pub struct WorkAgentTabView {
+    pub key: u16,
+    pub title: String,
+    pub url: String,
 }
 
 /// Disclosure data, never an execution token.
@@ -282,6 +300,8 @@ impl WorkAgentTurnDisclosure {
             artifacts,
             budget,
             notices,
+            accounts: Vec::new(),
+            tabs: Vec::new(),
         };
         fit(&mut context)?;
         Ok(Self {
@@ -311,6 +331,41 @@ impl WorkAgentTurnDisclosure {
             }
         }
         self.context.thread = thread;
+        fit(&mut self.context)?;
+        Ok(self)
+    }
+    /// Granted signed-in origins: pages inside them are readable directly.
+    pub fn with_accounts(mut self, accounts: Vec<WorkAgentAccountView>) -> Result<Self, WorkError> {
+        if accounts.len() > MAX_WORK_ACCOUNT_GRANTS
+            || accounts.iter().any(|account| {
+                validate_public_url(&account.origin).map_or(true, |url| {
+                    url.origin().ascii_serialization() != account.origin
+                })
+            })
+        {
+            return Err(WorkError::Invalid);
+        }
+        self.context.accounts = accounts;
+        fit(&mut self.context)?;
+        Ok(self)
+    }
+    /// The person's open tabs as local keys; each tab's page is readable.
+    pub fn with_tabs(mut self, tabs: &[context::WorkContextTabV1]) -> Result<Self, WorkError> {
+        if tabs.len() > context::MAX_CONTEXT_TABS {
+            return Err(WorkError::Capacity);
+        }
+        self.context.tabs = tabs
+            .iter()
+            .enumerate()
+            .map(|(key, tab)| {
+                tab.validate()?;
+                Ok(WorkAgentTabView {
+                    key: key as u16,
+                    title: clip_text(&tab.title, 120),
+                    url: tab.url(),
+                })
+            })
+            .collect::<Result<_, WorkError>>()?;
         fit(&mut self.context)?;
         Ok(self)
     }
@@ -395,7 +450,7 @@ impl WorkAgentTurnDisclosure {
                 WorkAgentFetch::Read { url, collection } => {
                     let Some(url) = self.readable(&url) else {
                         notices.push(format!(
-                            "Read of {} was refused: only a source url, a link_destination or a requested page can be read. Search for it, or read a listed page.",
+                            "Read of {} was refused: only a source url, a link_destination, a requested page, a listed tab or a page inside a listed account origin can be read. Search for it, or read a listed page.",
                             clip_text(&url, 160)
                         ));
                         continue;
@@ -474,6 +529,7 @@ impl WorkAgentTurnDisclosure {
                 note: None,
                 measurements: None,
                 local: None,
+                account: None,
             };
             if probe.validate().is_err() {
                 notices.push(
@@ -512,6 +568,7 @@ impl WorkAgentTurnDisclosure {
                 note: None,
                 measurements: None,
                 local: None,
+                account: None,
             };
             if probe.validate().is_err() {
                 notices.push("The question was dropped: it needs a prompt.".into());
@@ -568,9 +625,20 @@ impl WorkAgentTurnDisclosure {
     /// does not make a listed page unknown.
     fn readable(&self, url: &str) -> Option<String> {
         let listed = |candidate: &String| candidate == url || same_page(candidate, url);
+        let granted = validate_public_url(url).is_ok_and(|parsed| {
+            let origin = parsed.origin().ascii_serialization();
+            self.context
+                .accounts
+                .iter()
+                .any(|account| account.origin == origin)
+        });
+        if granted {
+            return Some(url.to_owned());
+        }
         self.urls
             .iter()
             .chain(self.context.requested_pages.iter())
+            .chain(self.context.tabs.iter().map(|tab| &tab.url))
             .find(|candidate| listed(candidate))
             .cloned()
     }

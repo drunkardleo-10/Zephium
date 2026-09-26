@@ -784,6 +784,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         max_steps: 24,
         browse_hops: 4,
         folders: vec![],
+        accounts: Vec::new(),
     };
     let limits = WorkExecutionLimits {
         model_tokens: 600_000,
@@ -854,6 +855,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         note: None,
         measurements: None,
         local: None,
+        account: None,
     };
     // Steps need a live attempt.
     assert!(update(

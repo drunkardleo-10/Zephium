@@ -530,6 +530,7 @@ pub(super) fn command(
                 note: None,
                 measurements: None,
                 local: None,
+                account: None,
             });
             row.fact.validate(
                 &read_plan(tx, id, row.fact.spec.plan_revision)?,
@@ -622,7 +623,7 @@ pub(super) fn command(
                 .tick_ms
                 .checked_add(i64::from(spec.limits.timeout_seconds) * 1000)
                 .ok_or(WorkError::Capacity)?;
-            let fact = WorkExecutionFact {
+            let mut fact = WorkExecutionFact {
                 authorization: if direct {
                     WorkExecutionAuthorization::UserDirectedPublicRead
                 } else if agent {
@@ -643,7 +644,9 @@ pub(super) fn command(
                 command_evidence: vec![],
                 folder_approvals: vec![],
                 steps: vec![],
+                accounts: vec![],
             };
+            fact.refresh_accounts();
             fact.validate(plan, expected.next()?)?;
             tx.execute("INSERT INTO work_executions(work_id, execution_id, plan_revision, owner_session, approved_unix_ms, expires_unix_ms, body, approved_tick_ms, expires_tick_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", params![id.to_string(), id_execution.to_string(), fact.spec.plan_revision.get() as i64, session.session.to_string(), now, expires, body(&fact)?, session.tick_ms, expires_tick]).map_err(db)?;
             id_execution
@@ -1025,6 +1028,7 @@ pub(super) fn update(
                 file,
             )?;
             row.fact.steps.push(step);
+            row.fact.refresh_accounts();
         }
         WorkRuntimeUpdate::CommandProgress {
             attempt,

@@ -782,6 +782,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                         max_steps: 24,
                         browse_hops: 1,
                         folders: vec![],
+                        accounts: Vec::new(),
                     },
                     limits: WorkExecutionLimits {
                         model_tokens: 100_000,
@@ -908,6 +909,7 @@ async fn a_run_that_runs_out_of_time_says_so() {
                         max_steps: 24,
                         browse_hops: 1,
                         folders: vec![],
+                        accounts: Vec::new(),
                     },
                     limits: WorkExecutionLimits {
                         model_tokens: 100_000,

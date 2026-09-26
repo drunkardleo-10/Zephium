@@ -267,6 +267,7 @@ impl WorkExecutionService {
                     revision: item.revision.clone(),
                 })
                 .collect(),
+            tabs: false,
         };
         let admitted = crate::work_context::WorkContextAdmission::new(self.handle.clone())
             .admit(profile, context::WorkContextPurpose::Planning, &selection)

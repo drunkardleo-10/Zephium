@@ -95,6 +95,7 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                                 max_steps: 24,
                                 browse_hops: 1,
                                 folders: vec![],
+                                accounts: Vec::new(),
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 100_000,
@@ -423,6 +424,7 @@ async fn work_parallel_searches_share_and_recalculate_the_remaining_grant() {
                                 max_steps: 24,
                                 browse_hops: 1,
                                 folders: vec![],
+                                accounts: Vec::new(),
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 100_000,
@@ -640,6 +642,7 @@ async fn work_search_ranking_preserves_sources_and_accounts_for_refused_or_unkno
                                 max_steps: 24,
                                 browse_hops: 1,
                                 folders: vec![],
+                                accounts: Vec::new(),
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 100_000,

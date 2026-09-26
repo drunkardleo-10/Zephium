@@ -181,6 +181,7 @@ async fn context_admission_binds_digests_and_refuses_stale_or_private_public_rea
                 revision: "https://docs.example/guide".into(),
             },
         ],
+        tabs: false,
     };
 
     let admission = WorkContextAdmission::new(handle.clone());
@@ -280,6 +281,7 @@ async fn context_admission_binds_digests_and_refuses_stale_or_private_public_rea
     let public_only = WorkContextSelectionV1 {
         environment: snapshot.id,
         items: vec![],
+        tabs: false,
     };
     assert!(public_only.validate().is_err());
 
@@ -289,6 +291,7 @@ async fn context_admission_binds_digests_and_refuses_stale_or_private_public_rea
             element: WorkElementId::generate(),
             revision: "x".into(),
         }],
+        tabs: false,
     };
     let not_found = drive(
         &mut shell,
@@ -366,6 +369,7 @@ async fn work_media_context_keeps_revision_privacy_and_existing_budget() {
             element: snapshot.elements[0].id,
             revision: record.revision.clone(),
         }],
+        tabs: false,
     };
     let admission = WorkContextAdmission::new(handle);
     let admitted = drive(

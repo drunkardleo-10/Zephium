@@ -434,6 +434,7 @@ impl Driver {
             note: None,
             measurements: None,
             local: None,
+            account: None,
         }
     }
     async fn begin(
@@ -2278,6 +2279,7 @@ mod tests {
             note: None,
             measurements: None,
             local: None,
+            account: None,
         };
         assert!(reuses_completed_read(&request, &step));
         let mut renamed = request.clone();
