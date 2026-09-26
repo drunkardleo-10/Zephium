@@ -9,6 +9,7 @@
   import Button from "$shared/ui/Button";
   import LiftHeader, { type LiftAction } from "./LiftHeader.svelte";
   import SourcesRail from "./SourcesRail.svelte";
+  import LazyView from "$shared/ui/LazyView";
   import {
     CheckListIcon,
     Doc01Icon,
@@ -23,6 +24,8 @@
   import { correctedMatrix } from "../lib/correct";
   import { untrack } from "svelte";
   import * as m from "$shared/i18n/messages";
+  /** The diagram's picture and lists load only when a diagram is lifted. */
+  const loadDiagram = () => import("./DiagramLift.svelte");
   let {
     session,
     reference,
@@ -254,6 +257,13 @@
               {paragraph}
             </p>{/each}{/if}
       </div>
+    {:else if view.content.kind === "diagram"}{@const content = view.content}<LazyView
+        loader={loadDiagram}
+        loadingLabel={m.surface_loading()}
+        failureLabel={m.work_artifact_unavailable()}
+        retryLabel={m.surface_retry()}
+        >{#snippet children(DiagramLift)}<DiagramLift {content} />{/snippet}</LazyView
+      >
     {:else}<Artifact artifact={view} embedded onevidence={pick} onlink={onopen} />{/if}
     {#if copied === "failed"}<p role="alert">{m.work_code_copy_failed()}</p>{/if}
     {#if evidence}<Evidence {evidence} {onopen} />{/if}

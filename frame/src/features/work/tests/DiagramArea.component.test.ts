@@ -6,6 +6,7 @@ import { favicons } from "$domain/favicons";
 import type { WorkArtifactDataV1 } from "$shared/ipc/bindings";
 import type { ArtifactContent } from "$shared/ui/data/Artifact";
 import WorkCanvas from "../components/WorkCanvas.svelte";
+import DiagramLift from "../components/DiagramLift.svelte";
 import { environmentStages, environmentRequests } from "../lib/project-environment-thread";
 import { environmentClusters, environmentDiagrams, resultHeads } from "../lib/project-environment";
 import { artifactView } from "../lib/project-work";
@@ -192,5 +193,52 @@ test("hovering a part lights its flows and names, quiets the rest, and dims the 
   expect(["diagram:result-card:api", "diagram:result-card:cdn"]).toContain(reached);
   press(reached.slice("diagram:result-card:".length), "ArrowLeft");
   await expect.poll(focusedId).toBe("diagram:result-card:web");
+  await screen.unmount();
+});
+
+test("the lift shows the picture larger, lists parts and flows, and a picked row lights its part or flow", async () => {
+  const content = {
+    kind: "diagram",
+    nodes: FIVE.kind === "diagram" ? FIVE.nodes : [],
+    edges: FIVE.kind === "diagram" ? FIVE.edges : [],
+    layers: FIVE.kind === "diagram" ? (FIVE.layers ?? []) : [],
+  } as Extract<ArtifactContent, { kind: "diagram" }>;
+  await layoutDiagram(content);
+  const screen = await render(DiagramLift, { content });
+  const root = screen.container;
+  const scaled = root.querySelector<HTMLElement>(".scaled")!;
+  expect(scaled.style.transform).toBe("scale(1.25)");
+  expect(root.querySelectorAll(".band")).toHaveLength(2);
+  expect(root.querySelectorAll(".flows .flow")).toHaveLength(6);
+  const rows = [...root.querySelectorAll<HTMLButtonElement>(".lists button")];
+  expect(rows.map((row) => row.textContent?.replace(/\s+/gu, " ").trim())).toEqual([
+    "Browser Client",
+    "CDN Edge",
+    "API Service",
+    "Jobs Worker",
+    "Store Database",
+    "Browser → API: HTTPS",
+    "API → Jobs: enqueues",
+    "Jobs → Browser: push",
+    "API → Store: SQL",
+    "Store → API: rows",
+    "Browser → CDN",
+  ]);
+  const flows = () => [...root.querySelectorAll(".flows .flow")].map((flow) => flow.classList);
+  // A flow's row lights that flow alone and dims every part it does not join.
+  await page.elementLocator(rows[8]!).click();
+  await expect.poll(() => flows()[3]!.contains("lit")).toBe(true);
+  expect(flows().filter((flow) => flow.contains("lit"))).toHaveLength(1);
+  expect(root.querySelectorAll(".part.dimmed")).toHaveLength(3);
+  expect([...root.querySelectorAll(".plate")].map((plate) => plate.textContent)).toEqual(["SQL"]);
+  // A part's row lights all its flows.
+  await page.elementLocator(rows[3]!).click();
+  await expect
+    .poll(() => flows().flatMap((flow, index) => (flow.contains("lit") ? [index] : [])))
+    .toEqual([1, 2]);
+  expect(rows[3]!.getAttribute("aria-pressed")).toBe("true");
+  // Picking it again returns the picture to rest.
+  await page.elementLocator(rows[3]!).click();
+  await expect.poll(() => root.querySelectorAll(".part.dimmed").length).toBe(0);
   await screen.unmount();
 });
