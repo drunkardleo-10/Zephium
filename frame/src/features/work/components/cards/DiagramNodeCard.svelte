@@ -99,7 +99,9 @@
           onblur={commit}
         />{:else}<strong class="name" title={item.title} ondblclick={edit}>{item.title}</strong
         >{/if}
-      <span class="caption">{item.diagram?.note || item.kind}</span>
+      <span class="caption" title={item.diagram?.note || undefined}
+        >{item.diagram?.note || item.kind}</span
+      >
     </span>
   </div>
 </CardFrame>
@@ -137,7 +139,7 @@
     min-inline-size: 0;
   }
 
-  /* The name on up to two lines; what the part does on one. */
+  /* The name on one line, two when it wraps; what the part does on up to two more. */
   .name {
     display: -webkit-box;
     -webkit-box-orient: vertical;
@@ -152,9 +154,12 @@
   }
 
   .caption {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
     color: var(--color-muted);
     font-size: var(--text-caption);
     line-height: 13px;

@@ -11,6 +11,7 @@ import {
   type StageContents,
   type StageMember,
 } from "../lib/stage-layout";
+import { DIAGRAM } from "../lib/diagram";
 
 const request = { x: 0, y: 0, ...SIZES.request };
 const cards = (prefix: string, count: number, size: { width: number; height: number }) =>
@@ -286,7 +287,7 @@ test("a bare checklist is its steps alone, standing where its cover would", () =
 });
 
 test("a bare diagram's area stands in its place and holds its whole extent, plates included", () => {
-  const part = { width: 200, height: 64 };
+  const part = DIAGRAM.node;
   const layout = stageLayout(request, {
     results: {
       members: [
