@@ -102,6 +102,7 @@ mod work_operations;
 mod work_product;
 #[cfg(feature = "work-product")]
 mod work_provider;
+mod work_sites;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -1650,6 +1651,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_product::human::work_human_release,
             work_decision::work_decision_preference,
             work_decision::work_set_decision_preference,
+            work_sites::work_sites,
+            work_sites::work_set_site,
             tabs_bootstrap,
             tabs_open,
             tabs_activate,

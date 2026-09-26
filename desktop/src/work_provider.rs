@@ -179,15 +179,8 @@ impl WorkProviders {
                         return Err(WorkError::Invalid);
                     }
                     grant.validate()?;
-                    // A request naming a signed-in tab's site waits for the
-                    // person's answer to the drafted grant instead of starting.
-                    if let Some(response) =
-                        zephium_app::work_account_scope::WorkAccountApproval::new(shell.clone())
-                            .signed_in_draft(profile, &command, context.as_ref(), &signed_in)
-                            .await?
-                    {
-                        return Ok(WorkOperationStateV1::Settled { response });
-                    }
+                    // Retired: sessions are decided per site inside the run.
+                    let _ = signed_in;
                     let binding_request = shell.work_profile_binding();
                     let binding =
                         tokio::time::timeout(std::time::Duration::from_secs(8), async move {
@@ -379,12 +372,8 @@ impl WorkProviders {
                     .await?;
                 Ok(WorkOperationStateV1::Settled { response })
             }
-            WorkOperationV1::PrepareAccount { request } => {
-                let response = zephium_app::work_account_scope::WorkAccountApproval::new(shell)
-                    .prepare(profile, request)
-                    .await?;
-                Ok(WorkOperationStateV1::Settled { response })
-            }
+            // Retired with origin grants; the frame drops its entry in Stage 3.
+            WorkOperationV1::PrepareAccount { .. } => Err(WorkError::Invalid),
             WorkOperationV1::Start { request } => {
                 #[cfg(not(target_os = "macos"))]
                 {
