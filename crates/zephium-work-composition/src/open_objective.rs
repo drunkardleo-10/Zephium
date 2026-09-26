@@ -85,15 +85,34 @@ impl PublicReadWorkInvocation {
         }
     }
 
-    /// A signed-in page may only be scrolled; nothing on it is clicked.
+    /// A page in the person's session is read: scrolled, tabs and details
+    /// revealed, never changed.
     #[cfg(feature = "durable-runtime")]
-    pub(crate) fn with_signed_in_reading(self) -> PublicLocalActionWorkInvocation {
+    pub(crate) fn with_session_reading(self) -> PublicLocalActionWorkInvocation {
         PublicLocalActionWorkInvocation {
             read: self,
             actions: LocalActions {
-                policy: Box::new(read_interactions::SignedInReadingPolicy),
+                policy: Box::new(read_interactions::SessionReadingPolicy),
                 max_actions: 8,
                 read_only: true,
+            },
+        }
+    }
+
+    /// A page task on one site: navigating, searching and drafting proceed;
+    /// a committing step is held back and recorded in `held`.
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) fn with_site_work(
+        self,
+        held: Arc<std::sync::atomic::AtomicBool>,
+        max_actions: u64,
+    ) -> PublicLocalActionWorkInvocation {
+        PublicLocalActionWorkInvocation {
+            read: self,
+            actions: LocalActions {
+                policy: Box::new(site_work::SiteWorkPolicy { held }),
+                max_actions,
+                read_only: false,
             },
         }
     }
@@ -345,12 +364,20 @@ fn assemble_with_actions(
             AgentAccountScope::Authenticated(*account)
         }
     };
+    // The person's own session discloses their pages to the model: its
+    // content is personal, never public.
+    let sensitivity =
+        if objective.navigation.is_site_session() && account != AgentAccountScope::Anonymous {
+            SemanticSensitivity::Sensitive
+        } else {
+            SemanticSensitivity::Public
+        };
     let node = AgentPlanNodeId::generate();
     let authority = AgentPlanNodeAuthority::try_new(
         vec![identity.profile()],
         vec![account],
         origins.clone(),
-        SemanticSensitivity::Public,
+        sensitivity,
         effects,
     )
     .map_err(fail)?
@@ -365,7 +392,7 @@ fn assemble_with_actions(
             vec![identity.profile()],
             vec![account],
             origins,
-            SemanticSensitivity::Public,
+            sensitivity,
             effects,
             Vec::new(),
         )
@@ -449,3 +476,5 @@ mod tests;
 
 #[cfg(feature = "durable-runtime")]
 mod read_interactions;
+#[cfg(feature = "durable-runtime")]
+pub(crate) mod site_work;

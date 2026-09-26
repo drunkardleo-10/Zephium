@@ -531,20 +531,27 @@ impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
     }
 }
 
-/// A signed-in page is read-only for the agent: it may scroll the document,
-/// never click, dismiss or consent, since page handlers may persist state.
-pub(super) struct SignedInReadingPolicy;
+/// A page in the person's session is read: it may be scrolled and its tabs
+/// and details revealed; nothing is dismissed, consented to or changed.
+pub(super) struct SessionReadingPolicy;
 
-impl AgentWorkLocalActionPolicy for SignedInReadingPolicy {
+impl AgentWorkLocalActionPolicy for SessionReadingPolicy {
     fn decision_action_recipe(
         &self,
         operation: &DecisionOperation,
         observation: &SemanticObservation,
     ) -> Result<Option<SemanticActionProposal>, AgentWorkFailure> {
         match operation {
-            DecisionOperation::Scroll(_) => {
-                ReadingInteractionPolicy.decision_action_recipe(operation, observation)
-            }
+            DecisionOperation::Scroll(_) | DecisionOperation::Click(_) => ReadingInteractionPolicy
+                .decision_action_recipe(operation, observation)
+                .map(|recipe| {
+                    recipe.filter(|recipe| {
+                        !matches!(
+                            recipe.verification(),
+                            SemanticVerification::PageDialogClosed
+                        )
+                    })
+                }),
             _ => Ok(None),
         }
     }
@@ -553,19 +560,28 @@ impl AgentWorkLocalActionPolicy for SignedInReadingPolicy {
         Some(SemanticEffectClass::Read)
     }
 
+    fn detail_disclosure(&self, observation: &SemanticObservation) -> Option<DecisionOperation> {
+        ReadingInteractionPolicy.detail_disclosure(observation)
+    }
+
     fn model_action_operations(
         &self,
         node: &SemanticNode,
         observation: &SemanticObservation,
     ) -> Result<SemanticOperations, AgentWorkFailure> {
-        let scroll = interaction(node, observation, SemanticOperationClass::Scroll)
-            == Some(Interaction::Scroll);
-        SemanticOperations::try_new(if scroll {
-            &[SemanticOperationClass::Scroll]
-        } else {
-            &[]
+        let operations = [
+            SemanticOperationClass::Click,
+            SemanticOperationClass::Scroll,
+        ]
+        .into_iter()
+        .filter(|operation| {
+            matches!(
+                interaction(node, observation, *operation),
+                Some(Interaction::Scroll | Interaction::Tab | Interaction::Disclosure)
+            )
         })
-        .map_err(|_| AgentWorkFailure::Contract)
+        .collect::<Vec<_>>();
+        SemanticOperations::try_new(&operations).map_err(|_| AgentWorkFailure::Contract)
     }
 
     fn assess(
@@ -573,7 +589,7 @@ impl AgentWorkLocalActionPolicy for SignedInReadingPolicy {
         action: &SemanticPreparedAction,
         observation: &SemanticObservation,
     ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
-        if action.kind() != SemanticActionKind::Scroll {
+        if action.verification() == SemanticVerification::PageDialogClosed {
             return Err(AgentWorkFailure::ActionDenied);
         }
         ReadingInteractionPolicy.assess(action, observation)

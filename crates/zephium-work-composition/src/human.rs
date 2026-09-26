@@ -1,10 +1,10 @@
-use crate::{MacosWorkComposition, PublicReadWorkAccount};
+use crate::MacosWorkComposition;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
     time::Instant,
 };
-use zephium_agentic::{AgentAccountId, AgentBrowserHumanReason, WorkBrowserHumanRegion};
+use zephium_agentic::{AgentBrowserHumanReason, WorkBrowserHumanRegion};
 use zephium_app::{RetainedHumanPhase, RetainedWorkHandle};
 use zephium_core::{
     ids::ProfileId,
@@ -80,27 +80,6 @@ impl HumanRegistration<'_> {
         if changed {
             notify_change(notify, self.key);
         }
-    }
-    pub(crate) fn account(&self, generation: u32) -> Result<PublicReadWorkAccount, WorkError> {
-        let mut pages = self.pages.0.lock().map_err(|_| WorkError::Unavailable)?;
-        let page = pages
-            .entries
-            .get_mut(&self.key)
-            .ok_or(WorkError::Unavailable)?;
-        let (current, account) = page.account.take().ok_or(WorkError::Invalid)?;
-        if current != generation || page.released {
-            return Err(WorkError::Invalid);
-        }
-        Ok(match account {
-            WorkHumanAccountV1::Anonymous => PublicReadWorkAccount::Anonymous,
-            WorkHumanAccountV1::SignedInPublicOnly => {
-                let account = AgentAccountId::generate();
-                PublicReadWorkAccount::Identified {
-                    account,
-                    source: Box::new(crate::account_scope::UserAttestedAccount { account }),
-                }
-            }
-        })
     }
 }
 impl Drop for HumanRegistration<'_> {

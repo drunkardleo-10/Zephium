@@ -365,7 +365,10 @@ fn public_interactions_preserve_anonymous_read_only_scope() {
 }
 
 #[cfg(feature = "durable-runtime")]
-fn reading_observation(nodes: serde_json::Value, completeness: &str) -> SemanticObservation {
+pub(super) fn reading_observation(
+    nodes: serde_json::Value,
+    completeness: &str,
+) -> SemanticObservation {
     let context = join(identity());
     let frame = SemanticFrameJoin::try_new(
         context,
@@ -689,7 +692,7 @@ fn human_account_attestation_keeps_isolated_storage_and_single_page_scope() {
         definition,
         settings(PublicReadWorkAccount::Identified {
             account,
-            source: Box::new(crate::account_scope::UserAttestedAccount { account }),
+            source: Box::new(crate::account_scope::SessionAccount { account }),
         }),
     )
     .unwrap();
@@ -843,10 +846,9 @@ fn a_recorded_specifications_disclosure_in_view_is_toggled_by_recipe() {
 
 #[cfg(feature = "durable-runtime")]
 #[test]
-fn a_signed_in_page_is_only_ever_scrolled() {
+fn a_page_in_the_persons_session_is_read_never_dismissed_or_consented() {
     use serde_json::json;
-    let public = read_interactions::ReadingInteractionPolicy;
-    let policy = read_interactions::SignedInReadingPolicy;
+    let policy = read_interactions::SessionReadingPolicy;
     let observation = reading_observation(
         json!([
             {"k":1,"r":"document","fc":true,"o":16,"b":{"x":0,"y":0,"w":800,"h":600}},
@@ -859,39 +861,14 @@ fn a_signed_in_page_is_only_ever_scrolled() {
     );
     let snapshot = &observation.frames()[0];
     let [document, disclosure, tab] = [0, 1, 2].map(|index| &snapshot.nodes()[index]);
-    let scroll = policy
-        .decision_action_recipe(
-            &DecisionOperation::Scroll(document.reference()),
-            &observation,
-        )
-        .unwrap()
-        .unwrap();
-    let batch = SemanticActionBatch::bind(
-        SemanticActionBatchId::new(1).unwrap(),
-        &observation,
-        &[snapshot.frame().clone()],
-        vec![scroll],
-    )
-    .unwrap();
-    assert!(policy
-        .assess(&batch.actions()[0].prepare(snapshot).unwrap(), &observation)
-        .is_ok());
-    for node in [disclosure, tab] {
-        // The public reading policy may click these; a signed-in page may not.
-        assert!(public
-            .model_action_operations(node, &observation)
-            .unwrap()
-            .contains(SemanticOperationClass::Click));
-        assert!(!policy
-            .model_action_operations(node, &observation)
-            .unwrap()
-            .contains(SemanticOperationClass::Click));
-        assert!(policy
-            .decision_action_recipe(&DecisionOperation::Click(node.reference()), &observation)
-            .unwrap()
-            .is_none());
-        let recipe = public
-            .decision_action_recipe(&DecisionOperation::Click(node.reference()), &observation)
+    for (node, operation) in [
+        (document, DecisionOperation::Scroll(document.reference())),
+        (disclosure, DecisionOperation::Click(disclosure.reference())),
+        (tab, DecisionOperation::Click(tab.reference())),
+    ] {
+        let _ = node;
+        let recipe = policy
+            .decision_action_recipe(&operation, &observation)
             .unwrap()
             .unwrap();
         let batch = SemanticActionBatch::bind(
@@ -901,13 +878,13 @@ fn a_signed_in_page_is_only_ever_scrolled() {
             vec![recipe],
         )
         .unwrap();
-        let action = batch.actions()[0].prepare(snapshot).unwrap();
-        assert!(public.assess(&action, &observation).is_ok());
-        assert!(matches!(
-            policy.assess(&action, &observation),
-            Err(AgentWorkFailure::ActionDenied)
-        ));
+        assert!(policy
+            .assess(&batch.actions()[0].prepare(snapshot).unwrap(), &observation)
+            .is_ok());
     }
+    assert!(policy
+        .model_action_operations(tab, &observation)
+        .unwrap()
+        .contains(SemanticOperationClass::Click));
     assert!(policy.consent_dismissal(&observation).is_none());
-    assert!(policy.detail_disclosure(&observation).is_none());
 }
