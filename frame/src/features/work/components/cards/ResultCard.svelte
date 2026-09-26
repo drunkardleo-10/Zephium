@@ -3,11 +3,8 @@
   import CardFrame from "./CardFrame.svelte";
   import TableCard from "./TableCard.svelte";
   import CodeCard from "./CodeCard.svelte";
-  import Icon from "$shared/ui/Icon";
-  import { SparklesIcon } from "../../lib/icons";
   import { TABLE_CARD, tableGrid } from "$shared/ui/data/Artifact/table";
   import Artifact, { documentDigest } from "$shared/ui/data/Artifact";
-  import { cardKnowledge } from "$shared/ui/data/Artifact/artifact";
   import { CODE_CARD_LINES, codeLines } from "$shared/ui/data/Code";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import { canvasEvidence, canvasOpen, canvasOpenLink } from "../../lib/canvas-context";
@@ -65,8 +62,6 @@
   /** Lines past the fourteen a code card shows. */
   const lines = $derived(code ? codeLines(code.text).length - CODE_CARD_LINES : 0);
   const notes = $derived(code?.notes.length ?? 0);
-  // One caption per card: the card's own, never the chart's as well.
-  const knowledge = $derived(!!item.artifact && cardKnowledge(item.artifact));
   // A press that moved was a drag; a control inside the cover keeps its own click.
   let pressed: { x: number; y: number } | null = null;
   function openCover(event: MouseEvent) {
@@ -84,9 +79,7 @@
   {kind}
   title={item.title}
   {selected}
-  footer={item.actionLabel || knowledge || hidden > 0 || lines > 0 || notes > 0
-    ? action
-    : undefined}
+  footer={item.actionLabel || hidden > 0 || lines > 0 || notes > 0 ? action : undefined}
 >
   {#if item.artifact}
     <div
@@ -117,9 +110,6 @@
   {:else}<p class="summary">{item.detail || item.status}</p>{/if}
 </CardFrame>
 {#snippet action()}<span class="notes">
-    {#if knowledge}<span class="knowledge"
-        ><Icon icon={SparklesIcon} size={11} />{m.work_knowledge_caption()}</span
-      >{/if}
     {#if hidden > 0}<span class="rows"
         >{hidden === 1
           ? m.work_table_more_row_one()
@@ -174,13 +164,6 @@
     align-items: center;
     gap: 8px;
     min-inline-size: 0;
-  }
-
-  .knowledge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    color: var(--color-muted);
   }
 
   .rows {

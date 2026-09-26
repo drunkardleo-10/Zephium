@@ -36,7 +36,7 @@ export type ChartSpec = {
   y?: ChartY;
   /** One line, drawn under the plot when present. */
   basis?: string;
-  /** Drawn as a caption: the numbers come from what the agent knows, not a source. */
+  /** The numbers come from what the agent knows, not a source; nothing draws it. */
   knowledge?: boolean;
   /** The card size: no axis labels, no legend, values on hover only. */
   compact?: boolean;

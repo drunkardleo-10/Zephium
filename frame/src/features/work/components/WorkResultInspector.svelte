@@ -209,14 +209,7 @@
 
 {#if view}
   <section class="result">
-    <LiftHeader
-      {kind}
-      title={view.title}
-      {meta}
-      {icon}
-      primary={primary ?? copy}
-      knowledge={!!view.knowledge}
-    >
+    <LiftHeader {kind} title={view.title} {meta} {icon} primary={primary ?? copy}>
       {#snippet actions()}{#if secondary}<Button
             size="compact"
             disabled={secondary.disabled}

@@ -90,6 +90,7 @@ test("hover shows the point, its value and its sources, and hands a source back"
       x: { label: "Sample" },
       y: { label: "Time" },
       basis: "Basis: Same rig",
+      knowledge: true,
       series: [
         {
           name: "Baseline",
@@ -103,6 +104,8 @@ test("hover shows the point, its value and its sources, and hands a source back"
     onevidence,
   });
   await expect.element(screen.getByText("Basis: Same rig", { exact: true })).toBeVisible();
+  // Known numbers keep their basis line and draw no disclaimer.
+  expect(screen.container.textContent).not.toContain("agent knows");
   expect(screen.container.querySelector(".tip")).toBeNull();
   const hit = screen.container.querySelector<SVGRectElement>("rect.hit")!;
   hit.dispatchEvent(new PointerEvent("pointerenter"));

@@ -299,41 +299,26 @@ const chart = (general_knowledge: boolean): WorkArtifactDataV1 => ({
   general_knowledge,
 });
 
-test("a chart card is compact, and says it is from what the agent knows only when it is", async () => {
+test("a chart card is compact and reads like an answer: no disclaimer, known or cited", async () => {
   await page.viewport(1200, 800);
-  const known = await render(ResultCard, {
-    id: "result",
-    item: result(chart(true)),
-    selected: false,
-    onaction: () => {},
-  });
-  await expect.poll(() => known.container.querySelector(".chart.compact svg")).not.toBeNull();
-  expect(known.container.querySelector(".chart details")).toBeNull();
-  expect(known.container.querySelector(".chart .legend")).toBeNull();
-  await expect.element(known.getByText("From what the agent knows")).toBeVisible();
-  expect(known.container.textContent?.match(/From what the agent knows/gu)).toHaveLength(1);
-  await known.unmount();
-  const cited = await render(ResultCard, {
-    id: "result",
-    item: result(chart(false)),
-    selected: false,
-    onaction: () => {},
-  });
-  await expect.poll(() => cited.container.querySelector(".chart.compact svg")).not.toBeNull();
-  expect(cited.container.textContent).not.toContain("From what the agent knows");
-  await cited.unmount();
-  // Marked on the chart and not on the result: still one caption, the card's own.
-  for (const whole of [true, false]) {
-    const both = await render(ResultCard, {
+  for (const [known, whole] of [
+    [true, true],
+    [true, false],
+    [false, undefined],
+  ] as const) {
+    const card = await render(ResultCard, {
       id: "result",
-      item: result(chart(true), whole),
+      item: result(chart(known), whole),
       selected: false,
       onaction: () => {},
     });
-    await expect.poll(() => both.container.querySelector(".chart.compact svg")).not.toBeNull();
-    expect(both.container.textContent?.match(/From what the agent knows/gu)).toHaveLength(1);
-    expect(both.container.querySelector(".chart .caption")).toBeNull();
-    await both.unmount();
+    await expect.poll(() => card.container.querySelector(".chart.compact svg")).not.toBeNull();
+    expect(card.container.querySelector(".chart details")).toBeNull();
+    expect(card.container.querySelector(".chart .legend")).toBeNull();
+    expect(card.container.querySelector(".chart .caption")).toBeNull();
+    expect(card.container.textContent).not.toContain("From what the agent knows");
+    expect(card.container.querySelector(".footer, footer")).toBeNull();
+    await card.unmount();
   }
 });
 

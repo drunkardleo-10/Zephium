@@ -101,8 +101,8 @@ test("a checklist draws no cover: its steps stand in its place, their caption ca
     label: "11 steps",
     title: "Implementation roadmap",
     opens: "plan-card",
-    knowledge: true,
   });
+  expect(clusters[0]).not.toHaveProperty("knowledge");
   expect(clusters[1]).toMatchObject({
     id: "group:objective-card:made",
     members: [],

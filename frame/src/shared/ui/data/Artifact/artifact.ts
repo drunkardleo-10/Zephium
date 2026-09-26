@@ -129,13 +129,9 @@ export type ArtifactView = {
   content: ArtifactContent;
   reviewLabel: string;
   evidence: readonly EvidenceReference[];
-  /** Drawn from what the agent knows, not from a source: a caption stands for the chips. */
+  /** Drawn from what the agent knows, not from a source: it cites no chips. */
   knowledge?: boolean;
 };
-
-/** A card carries one knowledge caption: the whole result's, or its chart's. */
-export const cardKnowledge = (view: ArtifactView) =>
-  !!view.knowledge || (view.content.kind === "chart" && !!view.content.generalKnowledge);
 
 // Renderer ceilings, not runtime admission rules. Oversized inputs remain unavailable
 // rather than silently presenting a truncated result as the complete artifact.

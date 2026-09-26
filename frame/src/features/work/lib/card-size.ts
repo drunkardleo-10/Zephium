@@ -1,8 +1,4 @@
-import {
-  cardKnowledge,
-  documentDigest,
-  type ArtifactView,
-} from "$shared/ui/data/Artifact/artifact";
+import { documentDigest, type ArtifactView } from "$shared/ui/data/Artifact/artifact";
 import { TABLE_CARD, tableGrid } from "$shared/ui/data/Artifact/table";
 import { CODE_CARD_LINES, codeLines } from "$shared/ui/data/Code";
 import { DIAGRAM } from "./diagram";
@@ -52,8 +48,7 @@ export function resultSize(
   view: ArtifactView | undefined,
   action = false,
 ): CanvasSize {
-  const known = !!view && cardKnowledge(view);
-  const end = action || known ? FRAME.footer : FRAME.end + 4;
+  const end = action ? FRAME.footer : FRAME.end + 4;
   switch (view?.content.kind) {
     case "table":
     case "comparison": {
@@ -74,10 +69,7 @@ export function resultSize(
       return {
         width,
         height: clamp(
-          KIND +
-            header(title, width - 24, false) +
-            body +
-            (more || action || known ? FRAME.footer : end),
+          KIND + header(title, width - 24, false) + body + (more || action ? FRAME.footer : end),
           120,
           440,
         ),
@@ -97,7 +89,7 @@ export function resultSize(
           KIND +
             header(title, 420 - 24, false) +
             Math.min(lines, CODE_CARD_LINES) * CODE_LINE +
-            (more || action || known ? FRAME.footer : end),
+            (more || action ? FRAME.footer : end),
         ),
       };
     }

@@ -1009,7 +1009,6 @@ export function environmentDiagrams(
             : m.work_card_diagram_parts({ count: content.nodes.length }),
         title: clipText(artifact.title, TITLE_TEXT),
         opens: element.id,
-        ...(view.knowledge ? { knowledge: true } : {}),
         more: 0,
         members: content.nodes.map((node) => id(node.id)),
         inset: LANE.inset,
@@ -1032,19 +1031,19 @@ export function environmentDiagrams(
 }
 const diagramArea = (card: string, result: string) => `group:${card}:diagram:${result}`;
 
-/** Each bare result's title and whether it is drawn from what the agent knows. */
+/** Each bare result's title. */
 export function resultHeads(
   snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
   stages: readonly WorkStage[],
-): Map<string, { title: string; knowledge: boolean }> {
+): Map<string, { title: string }> {
   const bare = new Set(
     stages.flatMap(
       (stage) =>
         stage.contents.results?.members.flatMap((member) => (member.bare ? [member.id] : [])) ?? [],
     ),
   );
-  const heads = new Map<string, { title: string; knowledge: boolean }>();
+  const heads = new Map<string, { title: string }>();
   for (const element of snapshot.elements) {
     const reference = element.reference;
     if (reference.kind !== "artifact" || !bare.has(element.id)) continue;
@@ -1054,7 +1053,7 @@ export function resultHeads(
     const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
     if (!execution || !artifact) continue;
     const view = artifactView(artifact, execution);
-    heads.set(element.id, { title: clipText(view.title, TITLE_TEXT), knowledge: !!view.knowledge });
+    heads.set(element.id, { title: clipText(view.title, TITLE_TEXT) });
   }
   return heads;
 }
@@ -1102,8 +1101,8 @@ const stepsCaption = (count: number) =>
  */
 export function environmentClusters(
   stages: readonly WorkStage[],
-  /** A bare result's title and knowledge: its steps caption carries them. */
-  heads: ReadonlyMap<string, { title: string; knowledge: boolean }> = new Map(),
+  /** A bare result's title: its steps caption carries it. */
+  heads: ReadonlyMap<string, { title: string }> = new Map(),
 ): {
   clusters: CanvasCluster[];
   links: CanvasLink[];
@@ -1135,13 +1134,7 @@ export function environmentClusters(
           members: entry.members,
           inset: LANE.inset,
           live: stage.live,
-          ...(head
-            ? {
-                title: head.title,
-                opens: entry.result,
-                ...(head.knowledge ? { knowledge: true } : {}),
-              }
-            : {}),
+          ...(head ? { title: head.title, opens: entry.result } : {}),
         });
       }
       clusters.push({

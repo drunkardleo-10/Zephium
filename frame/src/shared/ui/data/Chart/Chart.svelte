@@ -202,7 +202,6 @@
       </div>
     {:else}<p role="status" class="caption">{m.chart_unavailable()}</p>{/if}
     {#if spec.basis?.trim()}<p class="caption">{spec.basis}</p>{/if}
-    {#if spec.knowledge}<p class="caption">{m.chart_knowledge()}</p>{/if}
     {#if !compact}
       <details>
         <summary>{exact ? m.chart_exact_values() : m.chart_values()}</summary>

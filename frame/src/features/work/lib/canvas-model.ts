@@ -242,8 +242,6 @@ export type CanvasCluster = {
   /** The result this group stands for: its title leads the caption and opens it. */
   opens?: string;
   title?: string;
-  /** The result is drawn from what the agent knows. */
-  knowledge?: boolean;
 };
 export type ClusterData = {
   label: string;
@@ -255,7 +253,6 @@ export type ClusterData = {
   layers?: { name: string; x: number; y: number }[];
   opens?: string;
   title?: string;
-  knowledge?: boolean;
   /** Where the group's lines attach, from its top; its centre when absent. */
   anchor?: number;
 };
@@ -703,7 +700,6 @@ export function withClusters(
       ...(layers?.length ? { layers } : {}),
       ...(cluster.opens ? { opens: cluster.opens } : {}),
       ...(cluster.title ? { title: cluster.title } : {}),
-      ...(cluster.knowledge ? { knowledge: true } : {}),
       ...(anchor === undefined ? {} : { anchor }),
     };
     const node = byId.get(cluster.id);
@@ -720,7 +716,6 @@ export function withClusters(
         node.data.inset === data.inset &&
         node.data.title === data.title &&
         node.data.opens === data.opens &&
-        node.data.knowledge === data.knowledge &&
         node.data.anchor === data.anchor &&
         JSON.stringify(node.data.layers) === JSON.stringify(data.layers)
         ? node

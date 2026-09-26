@@ -147,7 +147,7 @@
       retryLabel={m.surface_retry()}
       >{#snippet children(WorkChart)}<WorkChart
           title={artifact.title}
-          chart={artifact.knowledge || card ? { ...content, generalKnowledge: false } : content}
+          chart={content}
           compact={compact || card}
           {onevidence}
         >

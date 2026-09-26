@@ -14,8 +14,6 @@
   import Icon from "$shared/ui/Icon";
   import Button from "$shared/ui/Button";
   import HostGlyph from "./cards/HostGlyph.svelte";
-  import { SparklesIcon } from "../lib/icons";
-  import * as m from "$shared/i18n/messages";
   let {
     kind,
     title,
@@ -25,7 +23,6 @@
     icon,
     leading,
     whole = false,
-    knowledge = false,
     primary,
     actions,
   }: {
@@ -40,8 +37,6 @@
     leading?: Snippet;
     /** A request reads whole; every other title clamps to two lines. */
     whole?: boolean;
-    /** Drawn from what the agent knows: one caption stands for the sources. */
-    knowledge?: boolean;
     primary?: LiftAction;
     actions?: Snippet;
   } = $props();
@@ -57,9 +52,6 @@
     {#if host || meta}<p class="meta">
         {#if host}<span class="host"><HostGlyph {host} {url} size={14} />{host}</span>{/if}
         {#if meta}<span class="text">{meta}</span>{/if}
-      </p>{/if}
-    {#if knowledge}<p class="meta knowledge">
-        <Icon icon={SparklesIcon} size={12} />{m.work_knowledge_caption()}
       </p>{/if}
   </div>
   {#if primary || actions}<div class="actions">
@@ -116,10 +108,6 @@
     gap: 8px;
     min-inline-size: 0;
     color: var(--color-muted);
-  }
-
-  .knowledge {
-    gap: 4px;
   }
 
   .host {

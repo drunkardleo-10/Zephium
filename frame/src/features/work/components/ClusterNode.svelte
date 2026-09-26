@@ -7,8 +7,6 @@
     type Node,
   } from "@xyflow/svelte";
   import { getContext, onMount } from "svelte";
-  import Icon from "$shared/ui/Icon";
-  import { SparklesIcon } from "../lib/icons";
   import { canvasArrival, canvasOpen, canvasSelectGroup } from "../lib/canvas-context";
   import { arrive } from "../lib/arrival";
   import { stepsGroupResult, workTasksKey, type WorkTasks } from "../lib/work-tasks";
@@ -63,9 +61,7 @@
         class="title nodrag nopan"
         title={data.title}
         onclick={() => data.opens && open?.(data.opens)}>{data.title}</button
-      >{#if data.knowledge}<span class="knowledge"
-          ><Icon icon={SparklesIcon} size={11} />{m.work_knowledge_caption()}</span
-        >{/if}{/if}{#if data.tone === "area"}<button
+      >{/if}{#if data.tone === "area"}<button
         type="button"
         class="count take nodrag nopan"
         title={m.work_diagram_select()}
@@ -156,13 +152,6 @@
 
   .title:hover {
     color: var(--color-accent);
-  }
-
-  .knowledge {
-    display: inline-flex;
-    flex: none;
-    align-items: center;
-    gap: 4px;
   }
 
   .count {
