@@ -185,10 +185,10 @@ function found(contents: StageContents): GroupShape | null {
 export const stepColumns = (count: number) => (count <= 4 ? 2 : count <= 9 ? 3 : 4);
 
 /**
- * Made as a set: the cover, each diagram with its area, and any result with
- * steps stand on rows of their own, the steps or the area to the result's
- * right, or in its place when the result is bare; tables, charts, findings
- * and comparisons follow two across.
+ * Made as a set, in the order it is given: the cover, each diagram with its
+ * area, and any result with steps stand on rows of their own, the steps or
+ * the area to the result's right, or in its place when the result is bare;
+ * the tables, charts, code and findings between them run two across.
  */
 function made(contents: StageContents): GroupShape | null {
   const results = shown(contents, "results").visible;
@@ -200,7 +200,6 @@ function made(contents: StageContents): GroupShape | null {
     plan.some((step) => step.of === result.id) ||
     parts.some((part) => part.of === result.id);
   const rows = results.filter(alone);
-  const rest = results.filter((result) => !alone(result));
   const column = Math.max(
     0,
     ...rows.filter((result) => !result.bare).map((result) => result.size.width),
@@ -209,7 +208,19 @@ function made(contents: StageContents): GroupShape | null {
   const steps: NonNullable<GroupShape["steps"]> = [];
   const diagrams: NonNullable<GroupShape["diagrams"]> = [];
   let y = LANE.pad + LANE.caption;
-  for (const result of rows) {
+  let run: StageMember[] = [];
+  const flush = () => {
+    const placed = cells(run, 2, { x: LANE.pad, y });
+    placed.forEach((rect, index) => cards.push({ id: run[index]!.id, rect }));
+    if (placed.length) y = Math.max(...placed.map((rect) => rect.y + rect.height)) + LANE.gap;
+    run = [];
+  };
+  for (const result of results) {
+    if (!alone(result)) {
+      run.push(result);
+      continue;
+    }
+    flush();
     let bottom = y;
     if (!result.bare) {
       const rect = { x: LANE.pad, y, ...result.size };
@@ -259,9 +270,7 @@ function made(contents: StageContents): GroupShape | null {
     }
     y = bottom + LANE.gap;
   }
-  cells(rest, 2, { x: LANE.pad, y }).forEach((rect, index) =>
-    cards.push({ id: rest[index]!.id, rect }),
-  );
+  flush();
   const boxes = [
     ...cards.map((card) => card.rect),
     ...steps.map((entry) => entry.box),

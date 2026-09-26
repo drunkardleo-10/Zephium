@@ -254,3 +254,57 @@ export function explanationScene() {
   scene.relations = [];
   return { scene, objectives };
 }
+
+/** A reply as the agent writes it: a lead, two sections, a list, inline code and a fence. */
+const ANSWER_MARKDOWN = [
+  "Rust frees each value when its one owner leaves scope, so memory is safe without a garbage collector.",
+  "",
+  "## Ownership and moves",
+  "",
+  "Every value has exactly one owner. Assigning a `String` to another name **moves** it:",
+  "",
+  "- the old name can no longer be used",
+  "- the new owner frees the buffer when it goes",
+  "",
+  "```rust",
+  'let s = String::from("hi");',
+  "let t = s; // s moved",
+  "```",
+  "",
+  "## Borrowing",
+  "",
+  "A reference borrows without taking ownership; the example below shows both.",
+].join("\n");
+
+/** A making answer as a set: the answer, the diagram, the example and a table of terms. */
+export function answerScene() {
+  const explained = explanationScene();
+  const run = explained.objectives.get("objective")!.executions[0]!;
+  const byId = new Map(run.artifacts.map((artifact) => [artifact.id, artifact]));
+  // The answer arrives among the others; the set still reads it first.
+  run.artifacts = [
+    byId.get("diagram")!,
+    byId.get("code")!,
+    {
+      ...byId.get("brief")!,
+      id: "answer",
+      title: "How Rust ownership works",
+      data: { kind: "answer", markdown: ANSWER_MARKDOWN },
+    },
+    byId.get("table")!,
+  ];
+  explained.scene.elements = [
+    explained.scene.elements[0]!,
+    ...run.artifacts.map((artifact) => ({
+      id: `${artifact.id}-card`,
+      area: null,
+      reference: {
+        kind: "artifact" as const,
+        objective: "objective",
+        execution: "execution",
+        artifact: artifact.id,
+      },
+    })),
+  ];
+  return explained;
+}

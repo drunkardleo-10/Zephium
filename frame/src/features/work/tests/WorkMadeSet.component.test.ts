@@ -16,8 +16,10 @@ import {
   resultHeads,
 } from "../lib/project-environment";
 import { artifactView } from "../lib/project-work";
+import { diagramShape, layoutDiagram, primaryFlows } from "../lib/diagram";
+import type { ArtifactContent } from "$shared/ui/data/Artifact";
 import type { CanvasItem } from "../lib/canvas-model";
-import { explanationScene, projection, snapshot } from "./environment-fixtures";
+import { answerScene, explanationScene, projection, snapshot } from "./environment-fixtures";
 
 afterEach(() => favicons.dispose());
 
@@ -89,9 +91,9 @@ test("a diagram result is its area of parts alone, layered left to right, joined
     expect.arrayContaining(["Postgres", "Browser", "API", "Jobs"]),
   );
   expect(parts).toHaveLength(4);
-  // The layers read left to right, each captioned above its column.
-  const layers = [...area()!.querySelectorAll<HTMLElement>(".layer")];
-  expect(layers.map((layer) => layer.textContent)).toEqual(["Edge", "Application", "Data"]);
+  // The layers read left to right, each a captioned band behind its column.
+  const bands = [...screen.container.querySelectorAll<HTMLElement>(".svelte-flow__node-band")];
+  expect(bands.map((band) => band.textContent?.trim())).toEqual(["Edge", "Application", "Data"]);
   const x = (id: string) =>
     screen.container
       .querySelector<HTMLElement>(`.svelte-flow__node[data-id="diagram:result-card:${id}"]`)!
@@ -183,6 +185,14 @@ const TRIP: WorkArtifactDataV1 = {
 
 test("the person's architecture fits its group, and no flow's name sits on a part", async () => {
   await page.viewport(1600, 1000);
+  // Laid out by the engine, as the workspace draws it once the answer lands.
+  const state = structuredClone(projection);
+  state.executions[0]!.artifacts[0]!.data = TRIP;
+  state.executions[0]!.user_artifacts = [];
+  const view = artifactView(state.executions[0]!.artifacts[0]!, state.executions[0]!);
+  const content = view.content as Extract<ArtifactContent, { kind: "diagram" }>;
+  await layoutDiagram(content);
+  const named = primaryFlows(diagramShape(content)).size;
   const { items, links, clusters, positions } = scene(TRIP);
   const screen = await render(WorkCanvas, {
     items,
@@ -195,7 +205,9 @@ test("the person's architecture fits its group, and no flow's name sits on a par
   });
   screen.container.style.width = "1600px";
   screen.container.style.height = "1000px";
-  await expect.poll(() => document.querySelectorAll(".work-edge-label").length).toBe(19);
+  // At rest only each part's first named flows carry their names.
+  await expect.poll(() => document.querySelectorAll(".work-edge-label").length).toBe(named);
+  expect(named).toBeLessThan(19);
   const rect = (element: Element) => element.getBoundingClientRect();
   const cards = [
     ...screen.container.querySelectorAll('.svelte-flow__node[data-id^="diagram:result-card:"]'),
@@ -292,6 +304,80 @@ test("an explanation reads diagram, then code and findings two across, then the 
   await screen.unmount();
 });
 
+test("an answer leads Made full width, the diagram's area follows, then code and table two across", async () => {
+  await page.viewport(1600, 1000);
+  const { scene: answered, objectives } = answerScene();
+  const stages = environmentStages(answered, objectives);
+  const layout = stages[0]!.layout;
+  const diagrams = environmentDiagrams(answered, objectives, stages);
+  const lanes = environmentClusters(stages, resultHeads(answered, objectives, stages));
+  const requests = environmentRequests(stages);
+  const positions = { ...requests.positions, ...layout.positions, ...diagrams.positions };
+  const items = [
+    ...environmentItems(answered, [], [], objectives).filter((item) => positions[item.id]),
+    ...diagrams.items,
+  ];
+  const at = (id: string) => layout.positions[`${id}-card`]!;
+  const answer = items.find((item) => item.id === "answer-card")!;
+  const made = layout.groups.find((group) => group.kind === "made")!;
+  const area = made.diagrams![0]!.box;
+  // The answer is the cover: first, top-left, on a row of its own.
+  expect(at("answer").x).toBe(Math.min(at("answer").x, at("code").x, area.x));
+  expect(at("answer").y).toBeLessThan(area.y);
+  expect(answer.artifact?.content.kind).toBe("answer");
+  expect(area.y).toBeGreaterThan(at("answer").y);
+  expect(at("code").y).toBeGreaterThan(area.y + area.height);
+  expect(at("table").y).toBe(at("code").y);
+  expect(at("table").x).toBeGreaterThan(at("code").x);
+  const screen = await render(WorkCanvas, {
+    items,
+    links: [...lanes.links, ...diagrams.links],
+    clusters: [...diagrams.clusters, ...lanes.clusters],
+    authoritative: new Set(answered.elements.map((element) => element.id)),
+    initialView: { positions, viewport: { x: 0, y: 20, zoom: 0.55 } },
+    oninspect: () => {},
+  });
+  screen.container.style.width = "1600px";
+  screen.container.style.height = "1000px";
+  const node = (id: string) =>
+    screen.container.querySelector(`.svelte-flow__node[data-id="${id}"]`)?.getBoundingClientRect();
+  await expect.poll(() => node("answer-card")).toBeDefined();
+  const card = screen.container.querySelector<HTMLElement>('[data-id="answer-card"] .card')!;
+  // A quiet mark, the question, the lead and the first section; the second waits in the lift.
+  expect(card.querySelector(".kind")?.textContent).toBe("Answer");
+  expect(card.querySelector(".title")?.textContent).toBe("How Rust ownership works");
+  expect(card.textContent).toContain("Rust frees each value when its one owner leaves scope");
+  expect(card.querySelector("h3")?.textContent).toBe("Ownership and moves");
+  expect(card.textContent).not.toContain("Borrowing");
+  expect(card.querySelector(".answer code")?.textContent).toBe("String");
+  expect(card.querySelectorAll(".answer li")).toHaveLength(2);
+  expect(card.querySelector(".answer-body.more")).not.toBeNull();
+  expect(card.querySelector("footer .link")?.textContent).toBe("Read the answer");
+  expect(answer.artifact && card.getBoundingClientRect().height).toBeLessThanOrEqual(
+    (360 + 1) * 0.55,
+  );
+  const boxes = [
+    ["answer", node("answer-card")!],
+    ["area", node("group:objective-card:diagram:diagram-card")!],
+    ...["code", "table"].map((id) => [id, node(`${id}-card`)!] as const),
+  ] as const;
+  const group = node("group:objective-card:made")!;
+  for (const [name, box] of boxes) {
+    expect(box.left, name).toBeGreaterThanOrEqual(group.left);
+    expect(box.right, name).toBeLessThanOrEqual(group.right + 0.5);
+    for (const [other, next] of boxes)
+      if (other !== name)
+        expect(
+          box.left < next.right - 0.5 &&
+            next.left < box.right - 0.5 &&
+            box.top < next.bottom - 0.5 &&
+            next.top < box.bottom - 0.5,
+          `${name} over ${other}`,
+        ).toBe(false);
+  }
+  await screen.unmount();
+});
+
 const part = (vendor?: string): CanvasItem => ({
   id: "diagram:result-card:db",
   type: "diagram",
@@ -306,7 +392,7 @@ test("a part shows its vendor's icon once it is held, and its kind's glyph until
   await favicons.init();
   const bare = await render(DiagramNodeCard, { item: part("postgresql.org"), selected: false });
   expect(bare.container.querySelector(".mark canvas")).toBeNull();
-  expect(bare.container.querySelector(".mark svg")).not.toBeNull();
+  expect(bare.container.querySelector(".glyph svg")).not.toBeNull();
   expect(bare.container.querySelector(".caption")?.textContent).toBe("Database");
   await bare.unmount();
   let binary = "";

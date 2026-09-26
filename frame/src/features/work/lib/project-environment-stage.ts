@@ -419,11 +419,19 @@ export function laneFacts(
 }
 
 /**
- * Made reads as a set: documents first (the first is the cover), then the
- * rest. An explanation leads with its diagram instead: then the code and the
- * findings, the tables and charts, and its brief last.
+ * Made reads as a set. An answer leads as the cover, full width; the
+ * diagram's area follows, then code, tables and charts two across, and the
+ * checklist last. A set without an answer: documents first (the first is the
+ * cover), then the rest; an explanation leads with its diagram instead, then
+ * the code and the findings, the tables and charts, and its brief last.
  */
-function rank(kind: WorkArtifactV1["data"]["kind"] | undefined, drawn: boolean): number {
+function rank(
+  kind: WorkArtifactV1["data"]["kind"] | undefined,
+  drawn: boolean,
+  answered: boolean,
+): number {
+  if (answered)
+    return kind === "answer" ? 0 : kind === "diagram" ? 1 : kind === "checklist" ? 3 : 2;
   if (!drawn) return kind === "document" ? 0 : 2;
   return kind === "diagram"
     ? 0
@@ -535,6 +543,7 @@ export function stageContents(
   }
   const unshown = [...named].filter((key) => !hubs.has(key)).length;
   const drawn = results.some((result) => result.kind === "diagram");
+  const answered = results.some((result) => result.kind === "answer");
   return {
     sources: { members: sources },
     pages: { members: pages },
@@ -544,13 +553,13 @@ export function stageContents(
     results: {
       members: [0, 1, 2, 3].flatMap((order) =>
         results
-          .filter((result) => rank(result.kind, drawn) === order)
+          .filter((result) => rank(result.kind, drawn, answered) === order)
           .map((result, index) => ({
             id: result.id,
             size: result.size,
             ...(result.bare ? { bare: true } : {}),
             ...(result.extent ? { extent: result.extent } : {}),
-            ...(order === 0 && !index && !drawn ? { cover: true } : {}),
+            ...(order === 0 && !index && (answered || !drawn) ? { cover: true } : {}),
           })),
       ),
     },
