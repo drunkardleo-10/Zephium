@@ -53,6 +53,11 @@ pub trait AgentWorkLocalActionPolicy: Send {
         observation: &SemanticObservation,
     ) -> Result<SemanticOperations, AgentWorkFailure>;
 
+    /// A page-state wall the person must pass first, such as a sign-in form.
+    fn human_wall(&self, _: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
+        None
+    }
+
     /// Narrows the model effect vocabulary when the assignment has one effect.
     fn model_action_effect(&self) -> Option<SemanticEffectClass> {
         None
@@ -172,6 +177,12 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
     fn navigation_discovery(&self) -> Option<&AgentNavigationDiscovery> {
         Some(&self.discovery)
     }
+    fn human_wall(&self, observation: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
+        self.local_actions
+            .as_ref()
+            .and_then(|policy| policy.human_wall(observation))
+    }
+
     fn allows_baseline_read(&self) -> bool {
         true
     }
@@ -274,6 +285,16 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
             .frames()
             .first()
             .ok_or(AgentWorkFailure::Contract)?;
+        // In a site session a proposal declared past local drafting is the
+        // page agent's to reconsider, not a broken contract.
+        if self.discovery.is_site_session()
+            && !matches!(
+                action.effect(),
+                SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
+            )
+        {
+            return Err(AgentWorkFailure::ActionDenied);
+        }
         if self.complete
             || self.current != Some((request.context(), request.id()))
             || action.source_observation() != request.id()

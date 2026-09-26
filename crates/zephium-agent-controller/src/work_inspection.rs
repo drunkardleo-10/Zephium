@@ -25,7 +25,7 @@ impl AgentWorkController {
             SemanticObservation,
             SemanticCaptureInstant,
             AgentWorkTaskProgress,
-            AgentBrowserProviderTurn,
+            Option<AgentBrowserProviderTurn>,
         ),
         AgentWorkFailure,
     > {
@@ -104,6 +104,10 @@ impl AgentWorkController {
         );
         let current = Self::fit_model_observation(current)?;
         let progress = state.task_progress(&current)?;
+        // A wall the fuller view shows stops the page for the person.
+        if state.human_request && Self::raise_human_wall(state, &current)? {
+            return Ok((current, captured_at, progress, None));
+        }
         state.refresh_account(worker, browser)?;
         let action_authority = state
             .session
@@ -127,7 +131,7 @@ impl AgentWorkController {
             ),
         )
         .await?;
-        Ok((current, captured_at, progress, next))
+        Ok((current, captured_at, progress, Some(next)))
     }
 }
 

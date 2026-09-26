@@ -297,6 +297,12 @@ pub trait AgentWorkTask: Send {
     fn detail_disclosure(&self, _: &SemanticObservation) -> Option<DecisionOperation> {
         None
     }
+    /// A trusted page-state reading that the person must act first (a sign-in
+    /// wall). Checked on the first observation, each snapshot and each verified action;
+    /// the page agent can raise a wall itself but never clear one.
+    fn human_wall(&self, _: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
+        None
+    }
     /// Supplies independently sourced current account facts for this exact
     /// context. Called at startup and before each provider/effect admission,
     /// including nonterminal inspection and extraction mapping. It must be
@@ -2193,6 +2199,9 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
         mut observation: SemanticObservation,
     ) -> Result<(SemanticObservation, bool), AgentWorkFailure> {
+        if state.human_request && Self::raise_human_wall(state, &observation)? {
+            return Ok((observation, true));
+        }
         if !state.human_request
             || !Self::classify_human_challenge(state, worker, browser, &observation, false).await?
         {
@@ -2237,6 +2246,31 @@ impl AgentWorkController {
                 .map(|browser| browser.binding().lease().resource().identity()),
         });
         Ok((observation, true))
+    }
+
+    /// Stops for the person when the task reads a wall on this page.
+    fn raise_human_wall(
+        state: &mut WorkState,
+        observation: &SemanticObservation,
+    ) -> Result<bool, AgentWorkFailure> {
+        let Some(reason) = state.task.human_wall(observation) else {
+            return Ok(false);
+        };
+        state
+            .journal_mut()?
+            .emit(AgentWorkEventKind::ModelRequestedHuman(reason))?;
+        state.model_human_request = Some(AgentWorkHumanRequest {
+            context: observation.request().context(),
+            observation: observation.request().id(),
+            generation: observation.request().generation(),
+            reason,
+            retained_resource: state
+                .native
+                .retained
+                .as_ref()
+                .map(|browser| browser.binding().lease().resource().identity()),
+        });
+        Ok(true)
     }
 
     async fn observe(
@@ -2761,7 +2795,11 @@ impl AgentWorkController {
                 observation = next.0;
                 captured_at = next.1;
                 progress = next.2;
-                turn = next.3;
+                let Some(next_turn) = next.3 else {
+                    state.observation = Some(observation);
+                    return Ok(());
+                };
+                turn = next_turn;
                 frames = observation
                     .frames()
                     .iter()
@@ -2810,6 +2848,9 @@ impl AgentWorkController {
                 observation = next.0;
                 captured_at = next.1;
                 turn = next.2;
+                // The task reads the waited-for page like any fresh one, so a
+                // later extraction binds to it.
+                progress = state.task_progress(&observation)?;
                 frames.clear();
                 frames.extend(
                     observation
@@ -3081,7 +3122,9 @@ impl AgentWorkController {
                 &observation,
             )?;
             progress = state.task_progress(&observation)?;
-            if progress == AgentWorkTaskProgress::Complete {
+            if progress == AgentWorkTaskProgress::Complete
+                || (state.human_request && Self::raise_human_wall(state, &observation)?)
+            {
                 state.observation = Some(observation);
                 return Ok(());
             }
