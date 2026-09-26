@@ -47,6 +47,7 @@ type ChartSpec = {
   knowledge?: boolean; // from what the agent knows; draws nothing, the basis line speaks
   compact?: boolean; // the card: see the card rules
   horizontal?: boolean; // bars lie down whatever their names: the owner knows they collide
+  values?: false; // the owner shows the exact values itself: no values table
 };
 type ChartPoint = {
   x: string | number; // a category, a number, or an ISO date for a time axis
@@ -166,7 +167,9 @@ workChartSpec({
 **Work's board.** A chart block draws the full chart, not the card, at its
 block's width. Before it draws, it measures its category names against the
 room each bar has; names that would run into each other set `horizontal`, so
-the bars lie down and every name reads whole. When the chart carries a total
+the bars lie down and every name reads whole. A chart and the table of its own
+rows are one block: the table is the chart's exact values (`values: false`
+drops the kit's own values table), opened in place under the plot. When the chart carries a total
 (a point named Total) or its values are ranges, the block says it above the
 plot as one headline figure ("$50–$33,000, Monthly cost"). A chart that draws
 the same rows as a table sits beside that table.
