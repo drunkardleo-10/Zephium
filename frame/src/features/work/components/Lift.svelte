@@ -26,13 +26,17 @@
     children: Snippet;
   } = $props();
   provideSiteMarks(siteMark);
-  const width = $derived(Math.max(280, Math.min(preferred.width, bounds.width - 64)));
-  const height = $derived(Math.max(200, Math.min(preferred.height, bounds.height - 64)));
+  /** Never closer than 48 px to the canvas's edges, whatever the kind asks for. */
+  const MARGIN = 48;
+  const width = $derived(Math.max(280, Math.min(preferred.width, bounds.width - MARGIN * 2)));
+  const height = $derived(Math.max(200, Math.min(preferred.height, bounds.height - MARGIN * 2)));
   const left = $derived(bounds.left + (bounds.width - width) / 2);
   const top = $derived(bounds.top + (bounds.height - height) / 2);
   let panel = $state<HTMLElement>();
   let face = $state<HTMLElement>();
   let backdrop = $state<HTMLElement>();
+  /** The header keeps a hairline under it once the well has scrolled. */
+  let scrolled = $state(false);
   /** Hidden until the morph's first frame has been taken from the card. */
   let shown = $state(false);
   let closing = false;
@@ -280,7 +284,13 @@
     <button type="button" class="close" aria-label={m.work_env_lift_close()} onclick={close}>
       <Icon icon={Cancel01Icon} size={14} />
     </button>
-    <div class="content">{@render children()}</div>
+    <div
+      class="content"
+      data-lift-scrolled={scrolled || undefined}
+      onscroll={(event) => (scrolled = event.currentTarget.scrollTop > 0)}
+    >
+      {@render children()}
+    </div>
   </div>
 </div>
 
@@ -329,11 +339,12 @@
     min-inline-size: 0;
   }
 
+  /* Level with the header's mark, above the header as it sticks. */
   .close {
     position: absolute;
-    inset-block-start: 12px;
-    inset-inline-end: 12px;
-    z-index: 2;
+    inset-block-start: 24px;
+    inset-inline-end: 24px;
+    z-index: 4;
     display: grid;
     place-items: center;
     inline-size: 28px;
@@ -358,11 +369,15 @@
     outline-offset: 2px;
   }
 
+  /* One scroll well for every kind; the header sticks at its top. */
   .content {
+    --lift-pad: 24px;
+
     flex: 1;
     min-block-size: 0;
-    padding: 20px 24px;
+    padding: var(--lift-pad);
     overflow: auto;
+    overscroll-behavior: contain;
   }
 
   /* The morph: one frame travels from the card's rect to the lift's; the card's

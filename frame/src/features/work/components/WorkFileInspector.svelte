@@ -2,6 +2,8 @@
   import type { WorkFileEvidenceV1 } from "$shared/ipc/bindings";
   import type { WorkSession } from "$domain/work";
   import Button from "$shared/ui/Button";
+  import LiftHeader from "./LiftHeader.svelte";
+  import { File01Icon } from "../lib/icons";
   import { fileName, homePath } from "../lib/work-files";
   import * as m from "$shared/i18n/messages";
   let {
@@ -87,23 +89,20 @@
 </script>
 
 <section class="file">
-  <header>
-    <span class="where">
-      <span class="path">{homePath(path)}</span>
-      <span class="facts"
-        >{shown
-          ? (labels[shown.kind]?.() ?? shown.name)
-          : fileName(path)}{#if shown?.truncated}<span class="dot" aria-hidden="true"
-          ></span>{m.work_env_file_truncated()}{/if}</span
-      >
-    </span>
-    <span class="actions">
-      {#if onreveal && path}<Button size="compact" onclick={() => onreveal?.(path)}
-          >{m.work_env_reveal()}</Button
-        >{/if}
-      {#if onback}<Button size="compact" onclick={onback}>{m.work_env_back()}</Button>{/if}
-    </span>
-  </header>
+  <LiftHeader
+    kind={shown ? (labels[shown.kind]?.() ?? m.work_env_file()) : m.work_env_file()}
+    title={fileName(path) || homePath(path)}
+    meta={[homePath(path), shown?.truncated ? m.work_env_file_truncated() : ""]
+      .filter(Boolean)
+      .join(" · ")}
+    icon={File01Icon}
+  >
+    {#snippet actions()}{#if onreveal && path}<Button
+          size="compact"
+          onclick={() => onreveal?.(path)}>{m.work_env_reveal()}</Button
+        >{/if}{#if onback}<Button size="compact" onclick={onback}>{m.work_env_back()}</Button
+        >{/if}{/snippet}
+  </LiftHeader>
   {#if change?.kind === "run_command" && step && session}
     {#key loadAttempt}
       {#await import("./local/CommandInspector.svelte") then module}
@@ -171,49 +170,10 @@
     min-block-size: 0;
   }
 
-  header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
-    flex: none;
-    padding-inline-end: 28px;
-  }
-
-  .where {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-inline-size: 0;
-  }
-
-  .actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex: none;
-  }
-
-  .path {
-    font-family: var(--font-mono);
-    font-size: var(--text-label);
-    font-weight: 600;
-    overflow-wrap: anywhere;
-  }
-
   .facts {
-    display: flex;
-    align-items: center;
-    gap: 6px;
+    margin: 0;
     color: var(--color-faint);
     font-size: var(--text-caption);
-  }
-
-  .dot {
-    inline-size: 3px;
-    block-size: 3px;
-    border-radius: 50%;
-    background: currentcolor;
   }
 
   .passages {

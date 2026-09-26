@@ -23,6 +23,7 @@
     icon,
     leading,
     whole = false,
+    onhost,
     primary,
     actions,
   }: {
@@ -33,6 +34,8 @@
     /** Where it lives: drawn with the site's mark. */
     host?: string;
     url?: string;
+    /** The host reads as a quiet link to the thing's own page. */
+    onhost?: () => void;
     icon?: IconSvgElement;
     leading?: Snippet;
     /** A request reads whole; every other title clamps to two lines. */
@@ -50,7 +53,12 @@
     <p class="kind">{kind}</p>
     <h2 class:whole>{title}</h2>
     {#if host || meta}<p class="meta">
-        {#if host}<span class="host"><HostGlyph {host} {url} size={14} />{host}</span>{/if}
+        {#if host && onhost}<button
+            type="button"
+            class="host link"
+            title={url || host}
+            onclick={onhost}>{host}</button
+          >{:else if host}<span class="host"><HostGlyph {host} {url} size={14} />{host}</span>{/if}
         {#if meta}<span class="text">{meta}</span>{/if}
       </p>{/if}
   </div>
@@ -67,11 +75,23 @@
 </header>
 
 <style>
+  /* Every lift's head: mark, kind, title, where it lives, actions; it stays
+     at the top of the well while the body scrolls under it. */
   .lift-header {
+    position: sticky;
+    inset-block-start: calc(-1 * var(--lift-pad));
+    z-index: 3;
     display: flex;
     align-items: flex-start;
     gap: 12px;
-    padding-inline-end: 40px;
+    margin: calc(-1 * var(--lift-pad)) calc(-1 * var(--lift-pad)) 0;
+    padding: var(--lift-pad) calc(var(--lift-pad) + 40px) 12px var(--lift-pad);
+    background: var(--color-surface);
+    transition: box-shadow var(--motion-fast) var(--ease-out);
+  }
+
+  :global([data-lift-scrolled]) .lift-header {
+    box-shadow: 0 1px 0 var(--color-border);
   }
 
   .glyph {
@@ -118,6 +138,32 @@
     max-inline-size: 60%;
     overflow: hidden;
     white-space: nowrap;
+  }
+
+  .link {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--color-muted);
+    font: inherit;
+    text-decoration: underline;
+    text-decoration-color: transparent;
+    text-underline-offset: 2px;
+    cursor: default;
+    transition:
+      color var(--motion-fast) var(--ease-out),
+      text-decoration-color var(--motion-fast) var(--ease-out);
+  }
+
+  .link:hover {
+    color: var(--color-text);
+    text-decoration-color: currentcolor;
+  }
+
+  .link:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-inset);
   }
 
   .text {
