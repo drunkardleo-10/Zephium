@@ -6,6 +6,7 @@
   import AnswerView from "$shared/ui/data/Artifact/AnswerView.svelte";
   import Evidence, { type EvidenceView } from "$shared/ui/data/Evidence";
   import Compare from "./compare/Compare.svelte";
+  import FindingsLift from "./FindingsLift.svelte";
   import Button from "$shared/ui/Button";
   import LiftHeader, { type LiftAction } from "./LiftHeader.svelte";
   import SourcesRail from "./SourcesRail.svelte";
@@ -257,6 +258,13 @@
               {paragraph}
             </p>{/each}{/if}
       </div>
+    {:else if view.content.kind === "findings"}<FindingsLift
+        content={view.content}
+        onevidence={pick}
+      />
+    {:else if view.content.kind === "code"}<div class="reading code">
+        <Artifact artifact={view} embedded onevidence={pick} onlink={onopen} />
+      </div>
     {:else if view.content.kind === "diagram"}{@const content = view.content}<LazyView
         loader={loadDiagram}
         loadingLabel={m.surface_loading()}
@@ -300,5 +308,40 @@
   .reading p {
     margin-block: 0 12px;
     white-space: pre-wrap;
+  }
+
+  /* A document reads as the answer's page does: one measure, one scale. */
+  .reading:not(.code) :global(p),
+  .reading:not(.code) :global(ul),
+  .reading:not(.code) :global(ol),
+  .reading:not(.code) :global(blockquote),
+  .reading:not(.code) :global(pre) {
+    margin-block-end: 12px;
+    line-height: 1.6;
+  }
+
+  .reading:not(.code) :global(h3) {
+    margin-block: 24px 8px;
+    font-size: var(--text-page-title);
+  }
+
+  .reading:not(.code) :global(h4) {
+    margin-block: 16px 6px;
+    font-size: var(--text-body);
+  }
+
+  .reading:not(.code) > :global(:first-child > :first-child) {
+    margin-block-start: 0;
+  }
+
+  /* Code keeps its rail and its own size; it only shares the measure. */
+  .reading.code {
+    font-size: inherit;
+    line-height: inherit;
+    overflow-wrap: normal;
+  }
+
+  .reading.code:has(:global(.rail)) {
+    max-inline-size: calc(640px + 16px + 240px);
   }
 </style>
