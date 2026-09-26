@@ -215,6 +215,32 @@ lists the open tabs of the focused window as title, host and path (at most 60,
 never content or query). The agent sees them as `tabs`; reading one is
 anonymous unless its origin is granted.
 
+## Artifact kinds
+
+An agent turn places closed semantic objects (`WorkArtifactDataV1`): `answer`,
+`document`, `table`, `comparison_matrix`, `findings`, `chart`, `checklist`,
+`evidence_collection`, `diagram`, `code` and `browser_resource_preview`. Each
+is validated in Rust, and a refused object reaches the model as a closed
+notice naming the first field that failed, never its value.
+
+Every finished request publishes exactly one `answer`: `{ kind: "answer",
+markdown }`, the reply a careful expert would write in a chat, at most 16 KB
+and 400 lines. Its Markdown is a closed subset: level 2 and 3 headings,
+paragraphs, bullet and numbered lists nested at most one level, bold, inline
+code, fenced code naming a language from the `code` kind's list, and block
+quotes. A line scanner in core, not a Markdown parser, refuses raw links and
+bare URLs (`AnswerLink`), images (`AnswerImage`), HTML (`AnswerHtml`), level 1
+or deeper headings (`AnswerHeading`), tables (`AnswerTable`, since a table is
+its own object), unnamed or unclosed fences (`AnswerFence`), deeper lists
+(`AnswerNesting`) and empty or oversized text (`AnswerText`); code fences and
+code spans are passed over. A knowledge answer that names a URL is refused as
+`KnowledgeLink`, as any knowledge object that claims an observed source. The
+answer never repeats a table, diagram or code its set holds; it refers to
+them by title. `document` is only text the person asked for as a note, brief
+or letter. `findings` are cited research facts only: a findings object with an
+empty evidence array is refused as `FindingsUncited`, whose notice sends the
+prose to the answer.
+
 ## Evidence and remaining product seams
 
 The excluded public Luna qualifiers compose this actor with the actual
