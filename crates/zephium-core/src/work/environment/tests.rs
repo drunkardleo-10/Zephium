@@ -288,14 +288,24 @@ fn view_fault_names_the_bound_a_refused_view_broke() {
         ..Default::default()
     };
     assert_eq!(view.fault(), None);
-    let cases: [(fn(&mut WorkEnvironmentView), WorkViewFault); 8] = [
+    type Case = (fn(&mut WorkEnvironmentView), WorkViewFault);
+    let cases: [Case; 8] = [
         (|v| v.y = -1_000_001, WorkViewFault::Coordinate),
         (|v| v.placements[0].x = 1_000_001, WorkViewFault::Coordinate),
         (|v| v.areas[0].y = 1_000_001, WorkViewFault::Coordinate),
         (|v| v.zoom_milli = 4001, WorkViewFault::Zoom),
-        (|v| v.placements[0].height = 79, WorkViewFault::PlacementSize),
-        (|v| v.placements[0].width = 4097, WorkViewFault::PlacementSize),
-        (|v| v.placements[0].revision = 1, WorkViewFault::PlacementRevision),
+        (
+            |v| v.placements[0].height = 79,
+            WorkViewFault::PlacementSize,
+        ),
+        (
+            |v| v.placements[0].width = 4097,
+            WorkViewFault::PlacementSize,
+        ),
+        (
+            |v| v.placements[0].revision = 1,
+            WorkViewFault::PlacementRevision,
+        ),
         (|v| v.areas[0].height = 159, WorkViewFault::AreaSize),
     ];
     for (mutate, fault) in cases {

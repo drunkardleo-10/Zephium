@@ -1477,10 +1477,16 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
     for known in [false, true] {
         let refused = disclosure.resolve(turn(findings(None), known)).unwrap();
         assert!(refused.artifacts.is_empty());
-        assert_eq!(refused.refusals, [WorkAgentArtifactRefusal::FindingsUncited]);
+        assert_eq!(
+            refused.refusals,
+            [WorkAgentArtifactRefusal::FindingsUncited]
+        );
     }
     let notice = WorkAgentArtifactRefusal::FindingsUncited.notice();
-    assert!(notice.contains("findings are cited facts") && notice.contains("the answer carries the prose"));
+    assert!(
+        notice.contains("findings are cited facts")
+            && notice.contains("the answer carries the prose")
+    );
     let answer = |markdown: &str| WorkArtifactDataV1::Answer {
         markdown: markdown.into(),
     };
@@ -1533,7 +1539,7 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
         kind: WorkStepKindV1::Publish,
         status: WorkStepStatus::Succeeded,
         usage: None,
-        artifacts: vec![placed.id.clone()],
+        artifacts: vec![placed.id],
         evidence: None,
         note: None,
         measurements: None,
@@ -1562,7 +1568,9 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
         vec![],
     )
     .unwrap();
-    let again = later.resolve(turn(answer("A revised reply."), true)).unwrap();
+    let again = later
+        .resolve(turn(answer("A revised reply."), true))
+        .unwrap();
     assert_eq!(again.refusals, [WorkAgentArtifactRefusal::AnswerRepeated]);
     // An answer of an earlier request on the canvas does not count.
     let inherited = WorkAgentTurnDisclosure::try_new(
@@ -1593,7 +1601,10 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
         .refusals
         .is_empty());
     let linked = disclosure
-        .resolve(turn(answer("Read https://www.postgresql.org/docs/ first."), true))
+        .resolve(turn(
+            answer("Read https://www.postgresql.org/docs/ first."),
+            true,
+        ))
         .unwrap();
     assert!(linked.artifacts.is_empty());
     assert_eq!(linked.refusals, [WorkAgentArtifactRefusal::KnowledgeLink]);
@@ -1607,7 +1618,10 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
     let WorkArtifactDataV1::Answer { markdown } = &fenced.artifacts[0].data else {
         panic!("answer refused: {:?}", fenced.refusals);
     };
-    assert_eq!(markdown, "Fetch it:\n\n```bash\ncurl https://example.com\n```\n");
+    assert_eq!(
+        markdown,
+        "Fetch it:\n\n```bash\ncurl https://example.com\n```\n"
+    );
     let matrix = WorkArtifactDataV1::ComparisonMatrix {
         subjects: vec![WorkSubject {
             name: "Postgres".into(),

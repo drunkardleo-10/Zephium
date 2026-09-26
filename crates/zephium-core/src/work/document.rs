@@ -332,7 +332,11 @@ mod tests {
                 level: Some(4),
                 ..block(
                     WorkBlockKind::Heading,
-                    vec![span("file", WorkSpanStyle::Plain, Some("file:///etc/hosts"))],
+                    vec![span(
+                        "file",
+                        WorkSpanStyle::Plain,
+                        Some("file:///etc/hosts"),
+                    )],
                 )
             },
             WorkDocumentBlock {

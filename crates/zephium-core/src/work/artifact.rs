@@ -332,7 +332,9 @@ pub enum WorkArtifactDataV1 {
     },
     /// The reply a careful expert would write, in a closed Markdown subset
     /// (see `answer_faults`); the other objects of its set stand beside it.
-    Answer { markdown: String },
+    Answer {
+        markdown: String,
+    },
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -1247,7 +1249,9 @@ pub fn answer_faults(markdown: &str) -> Vec<WorkArtifactField> {
         };
         if matches!(first, b'`' | b'~') && run(body, first) >= 3 {
             let length = run(body, first);
-            let info = std::str::from_utf8(&body[length..]).unwrap_or_default().trim();
+            let info = std::str::from_utf8(&body[length..])
+                .unwrap_or_default()
+                .trim();
             if !CODE_LANGUAGES.contains(&info) {
                 fault(F::AnswerFence);
             }
@@ -1540,9 +1544,15 @@ mod tests {
         };
         let by_criterion = matrix(vec![vec![text("a"), text("b")]; 3]);
         assert_eq!(by_criterion.fault(0), Some(WorkArtifactField::MatrixShape));
-        assert!(matrix(vec![vec![text("a"), text("b"), text("c")]; 2]).fault(0).is_none());
+        assert!(matrix(vec![vec![text("a"), text("b"), text("c")]; 2])
+            .fault(0)
+            .is_none());
         let phrase = WorkArtifactField::MatrixShape.phrase();
-        for rule in ["one row per subject in subjects order", "one cell per criterion, in criteria order", "never one row per criterion"] {
+        for rule in [
+            "one row per subject in subjects order",
+            "one cell per criterion, in criteria order",
+            "never one row per criterion",
+        ] {
             assert!(phrase.contains(rule), "{rule}");
         }
     }
@@ -1912,7 +1922,10 @@ mod tests {
         assert!(answer(whole).plain_text().contains("How a move works"));
         let lines = |count: usize| "line\n".repeat(count);
         assert_eq!(answer(&lines(MAX_ANSWER_LINES)).validate(0), Ok(()));
-        let (long, wide) = (lines(MAX_ANSWER_LINES + 1), "x".repeat(MAX_ANSWER_BYTES + 1));
+        let (long, wide) = (
+            lines(MAX_ANSWER_LINES + 1),
+            "x".repeat(MAX_ANSWER_BYTES + 1),
+        );
         let cases = [
             ("", F::AnswerText),
             (" \n", F::AnswerText),
@@ -1922,7 +1935,10 @@ mod tests {
             ("#### Deep", F::AnswerHeading),
             ("> # Quoted title", F::AnswerHeading),
             ("Ownership\n===", F::AnswerHeading),
-            ("See [the book](https://doc.rust-lang.org/book/).", F::AnswerLink),
+            (
+                "See [the book](https://doc.rust-lang.org/book/).",
+                F::AnswerLink,
+            ),
             ("See https://doc.rust-lang.org/book/.", F::AnswerLink),
             ("See <https://doc.rust-lang.org/>.", F::AnswerLink),
             ("[book]: https://doc.rust-lang.org/book/", F::AnswerLink),
@@ -1930,7 +1946,10 @@ mod tests {
             ("Text <b>bold</b>", F::AnswerHtml),
             ("<details>", F::AnswerHtml),
             ("<!-- note -->", F::AnswerHtml),
-            ("| Layer | Why |\n| --- | --- |\n| Web | Fast |", F::AnswerTable),
+            (
+                "| Layer | Why |\n| --- | --- |\n| Web | Fast |",
+                F::AnswerTable,
+            ),
             ("Layer | Why\n--- | ---", F::AnswerTable),
             ("```\nplain\n```", F::AnswerFence),
             ("```rs\nfn main() {}\n```", F::AnswerFence),
