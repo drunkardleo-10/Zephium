@@ -98,7 +98,7 @@ async fn selected_work(
     let shell = app.state::<zephium_app::Handle>();
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(8),
-        shell.work_projection(profile, work)?,
+        admit("projection", || shell.work_projection(profile, work)).await?,
     )
     .await
     .map_err(|_| WorkError::Unavailable)??;
@@ -332,15 +332,84 @@ pub(crate) async fn work_call(
     }
     super::resource_close::touch(caller.label());
     let shell = app.state::<zephium_app::Handle>();
-    let request = match shell.work_call(profile, call) {
+    let name = call_name(&call);
+    let request = match admit(name, || shell.work_call(profile, call.clone())).await {
         Ok(request) => request,
         Err(error) => return failed(error),
     };
     // An admitted Store operation may commit after observation expires. Its
     // stable command identity remains replayable through the original Store.
-    match tokio::time::timeout(std::time::Duration::from_secs(8), request.response(profile)).await {
-        Ok(response) => response,
-        Err(_) => failed(WorkError::OutcomeUnknown),
+    let response =
+        match tokio::time::timeout(std::time::Duration::from_secs(8), request.response(profile))
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => failed(WorkError::OutcomeUnknown),
+        };
+    if let zephium_ipc::work::WorkReplyV1::Error { error } = &response.reply {
+        if name.starts_with("environment:c") {
+            trace(format_args!(
+                "work: phase=call call={name} error={error:?}"
+            ));
+        }
+    }
+    response
+}
+
+/// The application admits four Work documents at a time. A refusal at that
+/// bound is a queue, not an answer: wait briefly for a permit before refusing.
+async fn admit<T>(
+    name: &str,
+    mut submit: impl FnMut() -> Result<T, WorkError>,
+) -> Result<T, WorkError> {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(4);
+    let mut waited = std::time::Duration::ZERO;
+    let mut delay = std::time::Duration::from_millis(25);
+    loop {
+        match submit() {
+            Err(WorkError::Capacity) if waited < WAIT => {
+                tokio::time::sleep(delay).await;
+                waited += delay;
+                delay = (delay * 2).min(std::time::Duration::from_millis(400));
+            }
+            result => {
+                if let Err(error) = &result {
+                    trace(format_args!(
+                        "work: phase=call call={name} refused={error:?} waited_ms={}",
+                        waited.as_millis()
+                    ));
+                } else if !waited.is_zero() {
+                    trace(format_args!(
+                        "work: phase=call call={name} waited_ms={}",
+                        waited.as_millis()
+                    ));
+                }
+                return result;
+            }
+        }
+    }
+}
+
+fn trace(arguments: std::fmt::Arguments<'_>) {
+    #[cfg(feature = "work-development-traces")]
+    super::work_diagnostics::record(arguments);
+    #[cfg(not(feature = "work-development-traces"))]
+    super::write_diagnostic(arguments);
+}
+
+fn call_name(call: &WorkCallV1) -> &'static str {
+    use zephium_core::work::environment::WorkEnvironmentCall;
+    match call {
+        WorkCallV1::Environment { request, .. } => match request {
+            WorkEnvironmentCall::Checkpoint { .. } => "environment:checkpoint",
+            WorkEnvironmentCall::Command { .. } => "environment:command",
+            WorkEnvironmentCall::Open { .. } => "environment:open",
+            WorkEnvironmentCall::Read { .. } => "environment:read",
+            WorkEnvironmentCall::List { .. } => "environment:list",
+        },
+        WorkCallV1::Query { .. } => "query",
+        WorkCallV1::Author { .. } => "author",
+        WorkCallV1::Execute { .. } => "execute",
     }
 }
 
@@ -354,4 +423,28 @@ pub(crate) fn release_human_presentations(app: &tauri::AppHandle) {
     }
     #[cfg(not(all(feature = "work-product", target_os = "macos")))]
     let _ = app;
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    #[test]
+    fn a_busy_admission_waits_for_a_permit_instead_of_refusing() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        let mut refusals = 2;
+        let admitted = runtime.block_on(admit("query", || {
+            if refusals > 0 {
+                refusals -= 1;
+                Err(WorkError::Capacity)
+            } else {
+                Ok(7)
+            }
+        }));
+        assert_eq!(admitted, Ok(7));
+        let other = runtime.block_on(admit::<u8>("query", || Err(WorkError::Invalid)));
+        assert_eq!(other, Err(WorkError::Invalid));
+    }
 }
