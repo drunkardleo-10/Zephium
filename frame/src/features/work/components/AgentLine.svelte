@@ -3,7 +3,14 @@
   import type { WorkSession } from "$domain/work";
   import type { WorkHumanReasonV1 } from "$shared/ipc/bindings";
   import { currentActivity } from "$domain/work";
-  import { agentLine, endingNote, isLive } from "../lib/agent-steps";
+  import {
+    agentLine,
+    endingNote,
+    isAgentExecution,
+    isLive,
+    runFacts,
+    runFactsLine,
+  } from "../lib/agent-steps";
   import {
     accountRefusal,
     accountRefusalSentence,
@@ -36,6 +43,9 @@
     onopenpage,
     onreview,
     onsteered,
+    onsignin,
+    retry = null,
+    onretry,
   }: {
     session: WorkSession;
     /** The run's agent presences, as the canvas already projects them. */
@@ -63,6 +73,11 @@
     onreview?: (step: string) => void;
     /** The draft was handed to the agent or queued; clear the composer. */
     onsteered?: () => void;
+    /** A read met a sign-in wall: stop there and open the page to sign in. */
+    onsignin?: (card: string) => void;
+    /** The site the person went to sign in to; the same request can go again as them. */
+    retry?: { host: string } | null;
+    onretry?: () => void;
   } = $props();
   const id = $props.id();
   const runtime = $derived(session.projection);
@@ -256,6 +271,14 @@
     }
   });
   const settled = $derived(!live && !question && !proposal);
+  /** Under a finished run's words, what it did, counted from its steps. */
+  const facts = $derived(
+    settled && !waiting && execution && isAgentExecution(execution)
+      ? runFactsLine(runFacts(execution))
+      : "",
+  );
+  const signInWall = $derived(waiting?.reason === "sign_in" && !!onsignin);
+  const tryAgain = $derived(!!retry && !live && !!onretry);
   const followups = $derived(settled ? session.followups.slice(0, 3) : []);
   const writeupOffer = $derived(settled ? writeup : undefined);
   const nextRows = $derived(followups.length > 0 || !!writeupOffer);
@@ -464,7 +487,7 @@
         >
           <AgentOrb seed={agents[0]?.agent?.seed ?? 0} size={22} ring={live} />
         </button>
-        <div class="state">
+        <div class="state" class:two={!!facts}>
           {#if waiting}
             <button
               type="button"
@@ -502,6 +525,7 @@
             {/key}
           {/if}
           {#if live && preview}<span class="draft">{preview}</span>{/if}
+          {#if facts}<span class="facts">{facts}</span>{/if}
         </div>
         <div class="controls">
           {#if live && preview}
@@ -510,6 +534,18 @@
               class="action"
               title={m.work_line_steer_hint()}
               onclick={() => void steer()}>{m.work_line_steer()}</button
+            >
+          {:else if signInWall && waiting}
+            <button
+              type="button"
+              class="action"
+              disabled={blocked}
+              onclick={() => onsignin?.(waiting.card)}
+              >{m.work_line_sign_in({ host: waiting.host })}</button
+            >
+          {:else if tryAgain}
+            <button type="button" class="action" disabled={blocked} onclick={() => onretry?.()}
+              >{m.work_line_try_as_me()}</button
             >
           {:else if proposal}
             <button
@@ -614,7 +650,7 @@
     align-items: center;
     gap: 10px;
     box-sizing: border-box;
-    block-size: 36px;
+    min-block-size: 36px;
     padding: 0 6px 0 7px;
   }
 
@@ -652,6 +688,25 @@
     flex: 1;
     min-inline-size: 0;
     font-size: var(--text-label);
+  }
+
+  /* The finished run's words, then what it did, quieter, beneath them. */
+  .state.two {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    padding-block: 5px;
+  }
+
+  .facts {
+    max-inline-size: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
+    font-variant-numeric: tabular-nums;
+    line-height: 14px;
   }
 
   .words {
