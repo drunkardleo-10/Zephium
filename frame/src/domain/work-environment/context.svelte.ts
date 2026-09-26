@@ -34,6 +34,7 @@ export class WorkEnvironmentContext {
   private noteIds: string[] = [];
   private pending = new SvelteSet<string>();
   private workers = 0;
+  private failures = new SvelteMap<string, number>();
   private inFlight = new SvelteSet<string>();
   private notesTask: Promise<void> | null = null;
   private notesAgain = false;
@@ -179,10 +180,22 @@ export class WorkEnvironmentContext {
           )
             this.plans.set(id, historical.value.reply.plan);
         }
+        this.failures.delete(id);
         return;
       }
     }
-    this.unavailable.set(id, true);
+    // A busy read is asked again before the lane is shown as unavailable.
+    const attempt = (this.failures.get(id) ?? 0) + 1;
+    this.failures.set(id, attempt);
+    if (attempt > 3) {
+      this.unavailable.set(id, true);
+      return;
+    }
+    setTimeout(() => {
+      if (!this.active || !this.wanted.includes(id) || this.objectives.has(id)) return;
+      this.pending.add(id);
+      this.pump();
+    }, 1000 * attempt);
   }
   /** The frames one work recorded, so its page cards are pictures on arrival. */
   private async readPages(id: string, generation: number) {
