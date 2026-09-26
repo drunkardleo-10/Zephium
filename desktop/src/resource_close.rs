@@ -97,7 +97,7 @@ pub(super) fn request(app: tauri::AppHandle, done: impl FnOnce() + Send + 'stati
             for (label, token) in requests {
                 super::emit_to_privileged(&app, label, "zephium:resource-close-cancelled", &token);
             }
-            app.dialog().message("Some Notes or Tasks could not be saved. Return to them to retry or resolve a conflict. Drafts in another profile must be saved from that profile.").title("Unsaved changes").kind(tauri_plugin_dialog::MessageDialogKind::Warning).show(|_|{});
+            app.dialog().message("Some changes in Notes, Tasks or Work could not be saved. Return to them to retry or resolve a conflict. Drafts in another profile must be saved from that profile.").title("Unsaved changes").kind(tauri_plugin_dialog::MessageDialogKind::Warning).show(|_|{});
         }
     });
 }
