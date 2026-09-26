@@ -83,20 +83,11 @@ test("an origin grant asks in plain words and rides with the run once allowed", 
   const review = screen.getByRole("region", {
     name: "Let the agent read app.notion.com as me for this request",
   });
-  await expect.element(review.getByText("app.notion.com", { exact: true })).toBeVisible();
   await expect
-    .element(review.getByText("as the account signed in on this tab", { exact: true }))
+    .element(review.getByText("Read app.notion.com as you for this request?", { exact: true }))
     .toBeVisible();
   await expect
     .element(review.getByText("up to 12 pages, reading only", { exact: true }))
-    .toBeVisible();
-  await expect
-    .element(
-      review.getByText(
-        "The agent cannot change anything here; a change would be shown to you first",
-        { exact: true },
-      ),
-    )
     .toBeVisible();
   // The attested account is never shown: not a name, not the minted id.
   expect(screen.container.textContent).not.toContain(grant.account);
@@ -114,14 +105,18 @@ test("an origin grant asks in plain words and rides with the run once allowed", 
   session.dispose();
 });
 
-test("not now forgets the drafted grant without a run", async () => {
+test("not now forgets the drafted grant and runs without the session", async () => {
   const { session, begin } = await drafted(null);
   const screen = await render(WorkExecutionReview, { session });
   await screen.getByRole("button", { name: "Not now", exact: true }).click();
   await expect
     .element(screen.getByRole("button", { name: "Allow for this request" }))
     .not.toBeInTheDocument();
-  expect(begin).toHaveBeenCalledTimes(1);
+  await expect.poll(() => begin.mock.calls.length).toBe(2);
+  const run = begin.mock.calls[1]![0];
+  if (run.kind !== "run" || run.command.intent.kind !== "begin_agent") throw new Error("run");
+  expect(run.command.intent.grant.accounts).toBeUndefined();
+  expect(session.grantDraft).toBeNull();
   await screen.unmount();
   session.dispose();
 });
