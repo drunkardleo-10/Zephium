@@ -17,6 +17,7 @@
     value = $bindable(""),
     size = "regular",
     full = false,
+    iconOnly = false,
     disabled = false,
     onchange,
   }: {
@@ -26,6 +27,8 @@
     size?: "compact" | "regular";
     /** Fill the inline axis instead of sizing to the widest segment. */
     full?: boolean;
+    /** Glyphs alone; each label stays the segment's accessible name and tooltip. */
+    iconOnly?: boolean;
     disabled?: boolean;
     onchange?: (value: string) => void;
   } = $props();
@@ -78,6 +81,7 @@
   aria-disabled={disabled || undefined}
   data-size={size}
   data-full={full}
+  data-icon-only={iconOnly}
   style:--seg-count={options.length}
   style:--seg-index={Math.max(0, index)}
 >
@@ -91,6 +95,7 @@
       aria-checked={option.value === value}
       tabindex={at === Math.max(0, index) ? 0 : -1}
       disabled={disabled || option.disabled}
+      title={iconOnly ? option.label : undefined}
       onclick={() => pick(option.value)}
       onkeydown={keydown}
     >
@@ -189,6 +194,17 @@
   .text {
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .segmented[data-icon-only="true"] .segment {
+    padding-inline: 0;
+  }
+
+  .segmented[data-icon-only="true"] .text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    clip-path: inset(50%);
   }
 
   /* The side you are not on keeps its glyph a step behind its label, so only

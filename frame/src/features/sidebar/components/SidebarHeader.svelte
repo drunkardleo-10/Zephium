@@ -12,7 +12,7 @@
   import { commands } from "$shared/ipc/bindings";
   import { IS_MAC } from "$shared/platform";
   import IconButton from "$shared/ui/IconButton";
-  import ModePicker from "./ModePicker.svelte";
+  import ModeTabs from "./ModeTabs.svelte";
   import WindowControls from "./WindowControls.svelte";
 
   let {
@@ -54,7 +54,7 @@
     {#if IS_MAC}
       <div style:height="var(--titlebar-height)" aria-hidden="true"></div>
     {/if}
-    <ModePicker />
+    <ModeTabs compact />
     <div class="flex items-center gap-0.5">
       <IconButton
         icon={EllipsisIcon}

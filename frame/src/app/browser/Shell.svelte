@@ -38,7 +38,7 @@
   import { loadTasksPage } from "$features/tasks";
   import { loadNewTabSearch } from "$features/search";
   import { loadNewTab } from "$features/newtab";
-  import { ModePicker, ModeTabs, Sidebar, UtilityTray } from "$features/sidebar";
+  import { ModeTabs, Sidebar, UtilityTray } from "$features/sidebar";
   import { IS_MAC } from "$shared/platform";
   import { tabs } from "$domain/tabs";
   /** New Note, from the menu or its shortcut: a note starts where notes are open. */
@@ -167,7 +167,7 @@
       >{#snippet browserBody(compact)}
         {#if compact}
           <AddressField {compact} />
-          {#if toolHost.activeTool() !== null}<ModePicker standalone />{/if}
+          {#if toolHost.activeTool() !== null}<ModeTabs compact standalone />{/if}
           <TabRail entries={railTabs} onSelect={selectTab} />
         {:else}
           <!--
