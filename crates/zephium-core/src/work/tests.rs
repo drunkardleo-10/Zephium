@@ -2157,6 +2157,19 @@ fn origin_grants_admit_exact_https_origins_and_bound_signed_in_reads() {
         ("mail.example.com", "/u/0/")
     );
     assert!(WorkContextTabV1::from_page("Local", "http://intranet.example/").is_none());
+    // A session is a closed fact beside the tab, absent from the wire when false.
+    assert!(!tab.signed_in);
+    assert!(!serde_json::to_string(&tab).unwrap().contains("signed_in"));
+    let signed = WorkContextTabV1 {
+        signed_in: true,
+        ..tab.clone()
+    };
+    let wire = serde_json::to_string(&signed).unwrap();
+    assert!(wire.contains("\"signed_in\":true"));
+    assert_eq!(
+        serde_json::from_str::<WorkContextTabV1>(&wire).unwrap(),
+        signed
+    );
     assert!(WorkContextSelectionV1 {
         environment: 1.into(),
         items: vec![],

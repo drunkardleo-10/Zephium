@@ -147,6 +147,10 @@ pub struct WorkContextTabV1 {
     pub title: String,
     pub host: String,
     pub path: String,
+    /// The profile holds a first-party cookie for this host: a closed fact,
+    /// never an account or a name. It offers a grant; it never grants one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signed_in: bool,
 }
 impl WorkContextTabV1 {
     /// An HTTPS tab as title, host and path; query and fragment stay behind.
@@ -168,6 +172,7 @@ impl WorkContextTabV1 {
             },
             host,
             path,
+            signed_in: false,
         };
         tab.validate().ok().map(|()| tab)
     }

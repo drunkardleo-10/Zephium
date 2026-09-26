@@ -453,6 +453,7 @@ async fn open_tabs_join_context_only_with_consent_and_without_their_query() {
             title: "Inbox (3)".into(),
             host: "mail.example.com".into(),
             path: "/u/0/".into(),
+            signed_in: false,
         }]
     );
     assert!(admitted.bodies.is_empty());
