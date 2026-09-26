@@ -22,6 +22,56 @@ const _: [(); 32] = [(); MAX_WORK_QUESTIONS];
 const _: [(); 2048] = [(); MAX_WORK_EVENTS];
 const _: [(); 41943040] = [(); MAX_WORK_PROFILE_BYTES];
 
+const SITE_ACCESS_KEY: &str = "work.site_access";
+
+/// The profile's standing site answers, kept sorted in its settings table.
+fn site_access(
+    conn: &mut Connection,
+    set: Option<(String, Option<sites::WorkSiteAccessV1>)>,
+) -> Result<Vec<sites::WorkSiteEntryV1>, WorkError> {
+    let tx = conn.transaction().map_err(|_| WorkError::Unavailable)?;
+    let stored: Option<String> = tx
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [SITE_ACCESS_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| WorkError::Unavailable)?;
+    let mut entries: Vec<sites::WorkSiteEntryV1> = match stored {
+        Some(value) => serde_json::from_str(&value).map_err(|_| WorkError::Invalid)?,
+        None => Vec::new(),
+    };
+    if entries.len() > sites::MAX_WORK_SITE_ACCESS
+        || entries
+            .iter()
+            .any(|entry| sites::validate_site(&entry.site).is_err())
+    {
+        return Err(WorkError::Invalid);
+    }
+    let Some((site, access)) = set else {
+        return Ok(entries);
+    };
+    sites::validate_site(&site)?;
+    entries.retain(|entry| entry.site != site);
+    if let Some(access) = access {
+        if entries.len() >= sites::MAX_WORK_SITE_ACCESS {
+            return Err(WorkError::Capacity);
+        }
+        entries.push(sites::WorkSiteEntryV1 { site, access });
+        entries.sort_by(|a, b| a.site.cmp(&b.site));
+    }
+    let value = serde_json::to_string(&entries).map_err(|_| WorkError::Invalid)?;
+    tx.execute(
+        "INSERT INTO settings(key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = ?2",
+        params![SITE_ACCESS_KEY, value],
+    )
+    .map_err(|_| WorkError::Unavailable)?;
+    tx.commit().map_err(|_| WorkError::Unavailable)?;
+    Ok(entries)
+}
+
 impl Hub {
     pub(crate) fn work_document(
         &mut self,
@@ -34,6 +84,12 @@ impl Hub {
         }
         if self.recovery_required.is_some() {
             return Err(WorkError::Unavailable);
+        }
+        if let WorkRequest::SiteAccess { set } = request {
+            let conn = self
+                .profile_conn(profile)
+                .map_err(|_| WorkError::Unavailable)?;
+            return site_access(conn, set).map(WorkReply::SiteAccess);
         }
         if let WorkRequest::ReadMediaContext { resource, revision } = &request {
             use sha2::{Digest, Sha256};
@@ -245,9 +301,9 @@ fn apply(
         WorkRequest::AuthoringCommand { command, intent } => {
             authoring_store::command(tx, profile, runtime_session, command, intent)?
         }
-        WorkRequest::ReadEvidence { .. } | WorkRequest::ReadMediaContext { .. } => {
-            return Err(WorkError::Invalid)
-        }
+        WorkRequest::ReadEvidence { .. }
+        | WorkRequest::ReadMediaContext { .. }
+        | WorkRequest::SiteAccess { .. } => return Err(WorkError::Invalid),
         WorkRequest::RuntimeAbandon {
             id,
             execution,

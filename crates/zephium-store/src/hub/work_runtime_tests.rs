@@ -785,6 +785,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         browse_hops: 4,
         folders: vec![],
         accounts: Vec::new(),
+        private: false,
     };
     let limits = WorkExecutionLimits {
         model_tokens: 600_000,
@@ -879,6 +880,48 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         },
     )
     .unwrap();
+    // Keep going grows the budget; it never shrinks it or changes its shape.
+    let grown = WorkExecutionLimits {
+        cost_micro_usd: limits.cost_micro_usd * 2,
+        operations: limits.operations * 2,
+        ..limits
+    };
+    for refused in [
+        WorkExecutionLimits {
+            operations: limits.operations - 1,
+            ..grown
+        },
+        WorkExecutionLimits {
+            timeout_seconds: limits.timeout_seconds + 1,
+            ..grown
+        },
+        WorkExecutionLimits {
+            cost_micro_usd: 20_000_000,
+            ..grown
+        },
+    ] {
+        assert!(update(
+            &mut hub,
+            WorkRuntimeUpdate::ExtendLimits {
+                execution,
+                attempt,
+                limits: refused,
+            }
+        )
+        .is_err());
+    }
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::ExtendLimits {
+            execution,
+            attempt,
+            limits: grown,
+        },
+    )
+    .unwrap();
+    let extended = read_runtime(&mut hub, &initial);
+    assert_eq!(extended.executions[0].spec.limits, grown);
+    assert_eq!(extended.executions[0].spec.nodes[0].limits.operations, 128);
     let usage = WorkUsage {
         model_tokens: 1200,
         cost_micro_usd: 300,
@@ -1160,6 +1203,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
                 WorkStepKindV1::Read {
                     url: "https://example.com/page".into(),
                     collection: None,
+                    goal: None,
                 },
                 WorkStepStatus::Running,
             ),
@@ -1276,4 +1320,39 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
     assert_eq!(state.executions[0].status, WorkExecutionStatus::NeedsReview);
     assert_eq!(state.executions[0].steps.len(), 7);
     assert!(matches!(steer(&mut hub, 211), Err(WorkError::Conflict)));
+}
+
+#[test]
+fn site_access_is_a_bounded_sorted_profile_list() {
+    use zephium_core::work::sites::*;
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&session()).unwrap();
+    let initial = create(&mut hub);
+    let mut call = |set| match hub
+        .work_document(initial.profile, WorkRequest::SiteAccess { set })
+        .unwrap()
+    {
+        WorkReply::SiteAccess(entries) => entries,
+        _ => panic!(),
+    };
+    assert!(call(None).is_empty());
+    call(Some(("slack.com".into(), Some(WorkSiteAccessV1::Always))));
+    let listed = call(Some(("chase.com".into(), Some(WorkSiteAccessV1::Never))));
+    assert_eq!(
+        listed.iter().map(|e| e.site.as_str()).collect::<Vec<_>>(),
+        ["chase.com", "slack.com"]
+    );
+    let changed = call(Some(("slack.com".into(), Some(WorkSiteAccessV1::Never))));
+    assert!(changed.iter().all(|e| e.access == WorkSiteAccessV1::Never));
+    let cleared = call(Some(("slack.com".into(), None)));
+    assert_eq!(cleared.len(), 1);
+    assert_eq!(call(None), cleared);
+    assert!(hub
+        .work_document(
+            initial.profile,
+            WorkRequest::SiteAccess {
+                set: Some(("https://slack.com".into(), None))
+            }
+        )
+        .is_err());
 }

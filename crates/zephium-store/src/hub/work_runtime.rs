@@ -614,6 +614,15 @@ pub(super) fn command(
             require_idle(tx, id, current.revision)?;
             let plan = current.plan.as_ref().ok_or(WorkError::Conflict)?;
             spec.validate(plan)?;
+            // Account-scoped reads and field updates are retired; stored ones still load.
+            if spec.nodes.iter().any(|node| {
+                matches!(
+                    node.capability,
+                    WorkCapability::AccountRead { .. } | WorkCapability::AccountUpdate { .. }
+                )
+            }) {
+                return Err(WorkError::Invalid);
+            }
             let id_execution = WorkExecutionId::generate();
             let now = timestamp()?;
             let expires = now
@@ -746,6 +755,7 @@ pub(super) fn update(
         | WorkRuntimeUpdate::SettleStep { execution, .. }
         | WorkRuntimeUpdate::CommandProgress { execution, .. }
         | WorkRuntimeUpdate::PageTitle { execution, .. }
+        | WorkRuntimeUpdate::ExtendLimits { execution, .. }
         | WorkRuntimeUpdate::SettleCommand { execution, .. }
         | WorkRuntimeUpdate::FinishCancellation { execution } => *execution,
         WorkRuntimeUpdate::SettleProviderSearch { .. } => return Err(WorkError::Invalid),
@@ -765,6 +775,33 @@ pub(super) fn update(
         _ => None,
     };
     match update {
+        WorkRuntimeUpdate::ExtendLimits {
+            attempt, limits, ..
+        } => {
+            let prior = row.fact.spec.limits;
+            if !row.fact.is_agent()
+                || !row
+                    .fact
+                    .attempts
+                    .iter()
+                    .any(|a| a.id == attempt && a.status == WorkAttemptStatus::Running)
+                || limits.model_tokens < prior.model_tokens
+                || limits.cost_micro_usd < prior.cost_micro_usd
+                || limits.operations < prior.operations
+                || limits.timeout_seconds != prior.timeout_seconds
+                || limits.max_workers != prior.max_workers
+            {
+                return Err(WorkError::Invalid);
+            }
+            limits.validate()?;
+            row.fact.spec.limits = limits;
+            for node in &mut row.fact.spec.nodes {
+                node.limits = WorkExecutionLimits {
+                    max_workers: node.limits.max_workers,
+                    ..limits
+                };
+            }
+        }
         WorkRuntimeUpdate::PageTitle {
             attempt,
             step,
