@@ -163,11 +163,11 @@ enum Mode {
     /// Two ideas compared from knowledge in one matrix.
     AgentConceptComparison,
     /// Signed-in origin grants against two loopback sites; no public site.
-    LoopbackAccount,
+    LoopbackSite,
 }
 
-pub(super) fn run_loopback_account() -> Result<(), super::ProbeFailure> {
-    run_mode(Mode::LoopbackAccount)
+pub(super) fn run_loopback_site() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::LoopbackSite)
 }
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
@@ -506,7 +506,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     let relay = Arc::new(Mutex::new(None::<zephium_app::CallbackHandle>));
     let events = relay.clone();
     let execution_timeout = Duration::from_secs(match mode {
-        Mode::LoopbackAccount => 840,
+        Mode::LoopbackSite => 840,
         Mode::Agent
         | Mode::AgentRead
         | Mode::AgentGovernment
@@ -555,8 +555,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             )
             .map_err(|_| "durable_shell")?;
             *relay.lock().map_err(|_| "durable_events")? = Some(shell.callback_handle());
-            if mode == Mode::LoopbackAccount {
-                super::work_account::install_presence(engine.clone());
+            if mode == Mode::LoopbackSite {
+                super::work_site::install_presence(engine.clone());
             }
             let composition = MacosWorkComposition::new(engine, owner_store);
             if !shell.admit_startup() {
@@ -655,15 +655,12 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             );
             Error::Runtime
         })?;
-    if mode == Mode::LoopbackAccount {
+    if mode == Mode::LoopbackSite {
         let _ = state;
         return match failure {
             None => Ok(()),
             Some(failure) => {
-                let _ = writeln!(
-                    std::io::stdout().lock(),
-                    "loopback-account: failure={failure}"
-                );
+                let _ = writeln!(std::io::stdout().lock(), "loopback-site: failure={failure}");
                 Err(Error::Verification)
             }
         };
@@ -1088,9 +1085,9 @@ async fn workflow(
             _ => return Err("profile_not_ready"),
         }
     };
-    if mode == Mode::LoopbackAccount {
+    if mode == Mode::LoopbackSite {
         let _ = planning_key;
-        return super::work_account::workflow(handle, composition, profile, binding, browser_keys)
+        return super::work_site::workflow(handle, composition, profile, binding, browser_keys)
             .await;
     }
     if matches!(
@@ -2263,6 +2260,7 @@ async fn agent_workflow(
             .map(|folder| folder.to_string_lossy().into_owned())
             .collect(),
         accounts: Vec::new(),
+        private: false,
     };
     let search = OpenAiPublicSearch::try_new(
         transport.clone(),
