@@ -86,15 +86,20 @@
     renaming = null;
     const title = draft.trim();
     if (!session || !title || title === work.title) return;
-    await session.editWork(work.id, { kind: "rename", title });
+    const shown = current;
+    // An edit applies to the open project, so another one is opened for it and the canvas returns.
+    if ((await session.editWork(work.id, { kind: "rename", title })) && shown && shown !== work.id)
+      await session.open(shown);
   }
 
   async function archive(work: WorkEnvironmentSummary) {
     if (!session) return;
-    const next = active.find((candidate) => candidate.id !== work.id);
+    const shown = current;
+    const next =
+      shown && shown !== work.id ? shown : active.find((candidate) => candidate.id !== work.id)?.id;
     if (!(await session.editWork(work.id, { kind: "set_lifecycle", lifecycle: "archived" })))
       return;
-    if (next) await session.open(next.id);
+    if (next) await session.open(next);
     else await session.create(m.work_env_default_title());
   }
 
