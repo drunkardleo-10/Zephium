@@ -17,6 +17,15 @@ impl WorkProviders {
     ) -> Self {
         #[cfg(not(target_os = "macos"))]
         let _ = (engine, store);
+        // A request may offer a grant for a signed-in attached tab: the engine
+        // answers whether the profile holds cookies for a site, nothing more.
+        #[cfg(target_os = "macos")]
+        {
+            let engine = engine.clone();
+            zephium_app::work_context::install_session_presence(Arc::new(move |profile, hosts| {
+                engine.work_sessions_present(profile, hosts)
+            }));
+        }
         Self {
             activity: super::work_activity::WorkActivity::new(frames),
             #[cfg(target_os = "macos")]
@@ -147,10 +156,14 @@ impl WorkProviders {
                     })
                 }
             }
-            WorkOperationV1::Run { command, context } => {
+            WorkOperationV1::Run {
+                command,
+                context,
+                signed_in,
+            } => {
                 #[cfg(not(target_os = "macos"))]
                 {
-                    let _ = (command, context);
+                    let _ = (command, context, signed_in);
                     Err(WorkError::Unavailable)
                 }
                 #[cfg(target_os = "macos")]
@@ -166,6 +179,15 @@ impl WorkProviders {
                         return Err(WorkError::Invalid);
                     }
                     grant.validate()?;
+                    // A request naming a signed-in tab's site waits for the
+                    // person's answer to the drafted grant instead of starting.
+                    if let Some(response) =
+                        zephium_app::work_account_scope::WorkAccountApproval::new(shell.clone())
+                            .signed_in_draft(profile, &command, context.as_ref(), &signed_in)
+                            .await?
+                    {
+                        return Ok(WorkOperationStateV1::Settled { response });
+                    }
                     let binding_request = shell.work_profile_binding();
                     let binding =
                         tokio::time::timeout(std::time::Duration::from_secs(8), async move {

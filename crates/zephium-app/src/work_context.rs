@@ -9,8 +9,38 @@ use zephium_core::{
 };
 
 const READ_TIMEOUT: Duration = Duration::from_secs(8);
+/// A session check never holds a request up for longer than this.
+const PRESENCE_TIMEOUT: Duration = Duration::from_secs(2);
 #[path = "work_context_media.rs"]
 mod media;
+
+/// Answers, per host, whether the profile's own website data holds cookies
+/// for that host's site. Closed facts only; the composition root installs the
+/// engine's check, and without one every answer is false.
+pub type WorkSessionPresence =
+    dyn Fn(ProfileId, Vec<String>) -> std::sync::mpsc::Receiver<Vec<bool>> + Send + Sync;
+static PRESENCE: std::sync::RwLock<Option<std::sync::Arc<WorkSessionPresence>>> =
+    std::sync::RwLock::new(None);
+pub fn install_session_presence(presence: std::sync::Arc<WorkSessionPresence>) {
+    if let Ok(mut slot) = PRESENCE.write() {
+        *slot = Some(presence);
+    }
+}
+/// One answer per host, in order; false wherever the check is unavailable.
+pub(crate) async fn sessions_present(profile: ProfileId, hosts: Vec<String>) -> Vec<bool> {
+    let count = hosts.len();
+    let presence = PRESENCE.read().ok().and_then(|slot| slot.clone());
+    let (Some(presence), false) = (presence, hosts.is_empty()) else {
+        return vec![false; count];
+    };
+    let receiver = presence(profile, hosts);
+    tokio::task::spawn_blocking(move || receiver.recv_timeout(PRESENCE_TIMEOUT))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .filter(|answers| answers.len() == count)
+        .unwrap_or_else(|| vec![false; count])
+}
 
 pub struct WorkContextAdmission {
     handle: crate::Handle,
@@ -115,11 +145,17 @@ impl WorkContextAdmission {
             .await
             .map_err(|_| WorkError::Unavailable)?
             .map_err(|_| WorkError::Unavailable)?;
-        Ok(tabs
+        let mut tabs: Vec<WorkContextTabV1> = tabs
             .iter()
             .filter_map(|tab| WorkContextTabV1::from_page(&tab.title, tab.url.as_deref()?))
             .take(MAX_CONTEXT_TABS)
-            .collect())
+            .collect();
+        let present =
+            sessions_present(profile, tabs.iter().map(|tab| tab.host.clone()).collect()).await;
+        for (tab, present) in tabs.iter_mut().zip(present) {
+            tab.signed_in = present;
+        }
+        Ok(tabs)
     }
 
     async fn environment(

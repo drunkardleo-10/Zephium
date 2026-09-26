@@ -2343,7 +2343,7 @@ export type WorkContextDisclosureV1_Deserialize = {
 	 *  Open tabs the person consented to list; the canvas shows them as page
 	 *  cards without a read.
 	 */
-	tabs?: WorkContextTabV1[],
+	tabs?: WorkContextTabV1_Deserialize[],
 };
 
 /**
@@ -2361,7 +2361,7 @@ export type WorkContextDisclosureV1_Serialize = {
 	 *  Open tabs the person consented to list; the canvas shows them as page
 	 *  cards without a read.
 	 */
-	tabs?: WorkContextTabV1[],
+	tabs?: WorkContextTabV1_Serialize[],
 };
 
 export type WorkContextItemKind = "note" | "task" | "object" | "tab" | "objective" | "artifact" | "subject" | "finding" | "source" | 
@@ -2463,10 +2463,30 @@ export type WorkContextSelectionV1_Serialize = {
 };
 
 /**  One open tab: never its page content or query. */
-export type WorkContextTabV1 = {
+export type WorkContextTabV1 = WorkContextTabV1_Serialize | WorkContextTabV1_Deserialize;
+
+/**  One open tab: never its page content or query. */
+export type WorkContextTabV1_Deserialize = {
 	title: string,
 	host: string,
 	path: string,
+	/**
+	 *  The profile holds a first-party cookie for this host: a closed fact,
+	 *  never an account or a name. It offers a grant; it never grants one.
+	 */
+	signed_in?: boolean,
+};
+
+/**  One open tab: never its page content or query. */
+export type WorkContextTabV1_Serialize = {
+	title: string,
+	host: string,
+	path: string,
+	/**
+	 *  The profile holds a first-party cookie for this host: a closed fact,
+	 *  never an account or a name. It offers a grant; it never grants one.
+	 */
+	signed_in?: boolean,
 };
 
 /**
@@ -3246,11 +3266,13 @@ export type WorkOperationV1 = WorkOperationV1_Serialize | WorkOperationV1_Deseri
  */
 export type WorkOperationV1_Deserialize = ({ kind: "read_public"; command: WorkCommandV1_Deserialize; 
 /**  Selected public canvas objects to accompany the query. */
-context?: WorkContextSelectionV1_Deserialize | null }) & { request?: never } | 
+context?: WorkContextSelectionV1_Deserialize | null }) & { request?: never; signed_in?: never } | 
 /**  The routine agent loop on the objective; the command carries the grant. */
-({ kind: "run"; command: WorkCommandV1_Deserialize; context?: WorkContextSelectionV1_Deserialize | null }) & { request?: never } | ({ kind: "plan"; request: WorkPlanRequestV1_Deserialize }) & { command?: never; context?: never } | ({ kind: "prepare_plan"; request: WorkPlanRequestV1_Deserialize }) & { command?: never; context?: never } | ({ kind: "prepare"; request: WorkApprovalRequestV1 }) & { command?: never; context?: never } | 
+({ kind: "run"; command: WorkCommandV1_Deserialize; context?: WorkContextSelectionV1_Deserialize | null; 
+/**  How a request without accounts treats the person's sessions. */
+signed_in?: WorkSignedInV1 }) & { request?: never } | ({ kind: "plan"; request: WorkPlanRequestV1_Deserialize }) & { command?: never; context?: never; signed_in?: never } | ({ kind: "prepare_plan"; request: WorkPlanRequestV1_Deserialize }) & { command?: never; context?: never; signed_in?: never } | ({ kind: "prepare"; request: WorkApprovalRequestV1 }) & { command?: never; context?: never; signed_in?: never } | 
 /**  Approval draft for one signed-in page chosen from an attached tab. */
-({ kind: "prepare_account"; request: WorkAccountApprovalRequestV1_Deserialize }) & { command?: never; context?: never } | ({ kind: "start"; request: WorkStartRequestV1 }) & { command?: never; context?: never };
+({ kind: "prepare_account"; request: WorkAccountApprovalRequestV1_Deserialize }) & { command?: never; context?: never; signed_in?: never } | ({ kind: "start"; request: WorkStartRequestV1 }) & { command?: never; context?: never; signed_in?: never };
 
 /**
  *  On-demand operations have an application lifetime independent of a view.
@@ -3258,11 +3280,13 @@ context?: WorkContextSelectionV1_Deserialize | null }) & { request?: never } |
  */
 export type WorkOperationV1_Serialize = ({ kind: "read_public"; command: WorkCommandV1_Serialize; 
 /**  Selected public canvas objects to accompany the query. */
-context?: WorkContextSelectionV1_Serialize | null }) & { request?: never } | 
+context?: WorkContextSelectionV1_Serialize | null }) & { request?: never; signed_in?: never } | 
 /**  The routine agent loop on the objective; the command carries the grant. */
-({ kind: "run"; command: WorkCommandV1_Serialize; context?: WorkContextSelectionV1_Serialize | null }) & { request?: never } | ({ kind: "plan"; request: WorkPlanRequestV1_Serialize }) & { command?: never; context?: never } | ({ kind: "prepare_plan"; request: WorkPlanRequestV1_Serialize }) & { command?: never; context?: never } | ({ kind: "prepare"; request: WorkApprovalRequestV1 }) & { command?: never; context?: never } | 
+({ kind: "run"; command: WorkCommandV1_Serialize; context?: WorkContextSelectionV1_Serialize | null; 
+/**  How a request without accounts treats the person's sessions. */
+signed_in?: WorkSignedInV1 }) & { request?: never } | ({ kind: "plan"; request: WorkPlanRequestV1_Serialize }) & { command?: never; context?: never; signed_in?: never } | ({ kind: "prepare_plan"; request: WorkPlanRequestV1_Serialize }) & { command?: never; context?: never; signed_in?: never } | ({ kind: "prepare"; request: WorkApprovalRequestV1 }) & { command?: never; context?: never; signed_in?: never } | 
 /**  Approval draft for one signed-in page chosen from an attached tab. */
-({ kind: "prepare_account"; request: WorkAccountApprovalRequestV1_Serialize }) & { command?: never; context?: never } | ({ kind: "start"; request: WorkStartRequestV1 }) & { command?: never; context?: never };
+({ kind: "prepare_account"; request: WorkAccountApprovalRequestV1_Serialize }) & { command?: never; context?: never; signed_in?: never } | ({ kind: "start"; request: WorkStartRequestV1 }) & { command?: never; context?: never; signed_in?: never };
 
 /**  Requested output review level, never evidence that a requirement was met. */
 export type WorkOutputReview = "mechanical" | "source_mapped_needs_review" | "user_acceptance";
@@ -3683,6 +3707,23 @@ export type WorkSignalV1 = {
 	attempt: WorkAttemptId,
 	activity: WorkActivityV1,
 };
+
+/**
+ *  A run sent without accounts may stop at a drafted origin grant instead of
+ *  starting: the reply is then `account_grant_draft`, and the person's answer
+ *  sends the request again with the grant or declined. Nothing is granted
+ *  without that answer.
+ */
+export type WorkSignedInV1 = 
+/**
+ *  Draft a grant when the request names the site of an attached tab the
+ *  profile holds a session for.
+ */
+{ kind: "offer" } | 
+/**  The person said not now: this request reads anonymously. */
+{ kind: "declined" } | 
+/**  The person signed in to this origin and asked to read it as themselves. */
+{ kind: "origin"; origin: string };
 
 /**  Bounded full-resynchronization projection. Serialized facts grant nothing. */
 export type WorkSnapshot = WorkSnapshot_Serialize | WorkSnapshot_Deserialize;

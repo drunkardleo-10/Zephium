@@ -108,6 +108,9 @@ pub enum WorkOperationV1 {
         command: WorkCommandV1,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<context::WorkContextSelectionV1>,
+        /// How a request without accounts treats the person's sessions.
+        #[serde(default, skip_serializing_if = "WorkSignedInV1::is_offer")]
+        signed_in: WorkSignedInV1,
     },
     Plan {
         request: WorkPlanRequestV1,
@@ -158,6 +161,27 @@ pub struct WorkAccountApprovalRequestV1 {
     /// Signed-in pages an origin grant may open (1–12; 12 when absent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pages: Option<u8>,
+}
+/// A run sent without accounts may stop at a drafted origin grant instead of
+/// starting: the reply is then `account_grant_draft`, and the person's answer
+/// sends the request again with the grant or declined. Nothing is granted
+/// without that answer.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkSignedInV1 {
+    /// Draft a grant when the request names the site of an attached tab the
+    /// profile holds a session for.
+    #[default]
+    Offer,
+    /// The person said not now: this request reads anonymously.
+    Declined,
+    /// The person signed in to this origin and asked to read it as themselves.
+    Origin { origin: String },
+}
+impl WorkSignedInV1 {
+    pub fn is_offer(&self) -> bool {
+        *self == Self::Offer
+    }
 }
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, Eq, PartialEq, Type)]
 #[serde(rename_all = "snake_case")]

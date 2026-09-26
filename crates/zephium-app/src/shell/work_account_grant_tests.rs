@@ -444,3 +444,239 @@ async fn an_origin_grant_is_drafted_from_an_attached_tab_and_claimed_once() {
         Err(WorkError::ReviewRequired)
     );
 }
+
+#[tokio::test]
+async fn a_request_naming_a_signed_in_tab_drafts_its_grant_and_waits() {
+    use crate::Command;
+    use zephium_core::{
+        ports::engine::EngineEvent,
+        work::{context::*, environment::*},
+    };
+    use zephium_ipc::work::*;
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let space = shell.windows.focused().unwrap().space;
+    let tab = shell.windows.focused().unwrap().active.unwrap();
+    shell.handle(Command::Navigate {
+        id: tab,
+        input: "https://app.slack.com/client/T1".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id: tab,
+        url: "https://app.slack.com/client/T1".into(),
+    }));
+    // The engine's answer stands in: only Slack's site holds a session.
+    let signed_in = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let answer = signed_in.clone();
+    crate::work_context::install_session_presence(Arc::new(move |_, hosts: Vec<String>| {
+        let (reply, receiver) = std::sync::mpsc::channel();
+        let _ = reply.send(
+            hosts
+                .iter()
+                .map(|host| host == "app.slack.com" && answer.load(Ordering::SeqCst))
+                .collect(),
+        );
+        receiver
+    }));
+    let mut works = Vec::new();
+    for objective in [
+        "Summarise the launch channel in Slack",
+        "Summarise the channel",
+    ] {
+        let create = handle
+            .work_document(WorkIntent::Create {
+                objective: objective.into(),
+            })
+            .unwrap();
+        works.push(create.work_id().unwrap());
+        drive(&mut shell, &queue, create).await.unwrap();
+    }
+    let environment = |call| {
+        handle
+            .submit_work_document(
+                WorkRequest::Environment {
+                    call,
+                    space_available: true,
+                    browser_available: true,
+                    note_available: false,
+                },
+                Some(profile),
+            )
+            .unwrap()
+    };
+    let created = drive(
+        &mut shell,
+        &queue,
+        environment(WorkEnvironmentCall::Command {
+            command: WorkCommandId::generate(),
+            intent: WorkEnvironmentIntent::Create {
+                space,
+                title: "Slack".into(),
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    let WorkReply::Environment(WorkEnvironmentReply::Applied { snapshot, .. }) = created.reply
+    else {
+        panic!("environment")
+    };
+    let attached = drive(
+        &mut shell,
+        &queue,
+        environment(WorkEnvironmentCall::Command {
+            command: WorkCommandId::generate(),
+            intent: WorkEnvironmentIntent::Edit {
+                id: snapshot.id,
+                expected: snapshot.revision,
+                edit: WorkEnvironmentEdit::Add {
+                    reference: WorkEnvironmentReference::Browser { tab },
+                    area: None,
+                },
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    let WorkReply::Environment(WorkEnvironmentReply::Applied { snapshot, .. }) = attached.reply
+    else {
+        panic!("attach")
+    };
+    let context = WorkContextSelectionV1 {
+        environment: snapshot.id,
+        items: vec![WorkContextSelectionItem {
+            element: snapshot.elements[0].id,
+            revision: "https://app.slack.com/client/T1".into(),
+        }],
+        tabs: false,
+    };
+    let command = |work: WorkId, accounts: Vec<WorkAccountGrantV1>| {
+        let mut command = begin(work, WorkRevision::INITIAL);
+        if let WorkRuntimeIntent::BeginAgent { grant, .. } = &mut command.intent {
+            grant.accounts = accounts;
+        }
+        command
+    };
+    let approval = crate::work_account_scope::WorkAccountApproval::new(handle.clone());
+    let offered = drive(
+        &mut shell,
+        &queue,
+        approval.signed_in_draft(
+            profile,
+            &command(works[0], vec![]),
+            Some(&context),
+            &WorkSignedInV1::Offer,
+        ),
+    )
+    .await
+    .unwrap()
+    .expect("a drafted grant");
+    let WorkReplyV1::AccountGrantDraft { work, grant } = offered.reply else {
+        panic!("origin grant draft");
+    };
+    assert_eq!(work, works[0]);
+    assert_eq!(grant.origin, "https://app.slack.com");
+    assert_eq!(grant.tab, Some(tab));
+    assert_eq!(grant.pages, MAX_WORK_ACCOUNT_PAGES);
+    // The same grant as `prepare` drafts: claimed once, by this work.
+    crate::work_account_scope::claim_account_grants(profile, work, std::slice::from_ref(&grant))
+        .unwrap();
+    assert_eq!(
+        crate::work_account_scope::claim_account_grants(
+            profile,
+            work,
+            std::slice::from_ref(&grant)
+        ),
+        Err(WorkError::ReviewRequired)
+    );
+    // The consented open tabs are candidates too.
+    let open = WorkContextSelectionV1 {
+        items: vec![],
+        tabs: true,
+        ..context.clone()
+    };
+    let from_open = drive(
+        &mut shell,
+        &queue,
+        approval.signed_in_draft(
+            profile,
+            &command(works[0], vec![]),
+            Some(&open),
+            &WorkSignedInV1::Offer,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(from_open.is_some());
+    // Nothing is drafted for a request that does not name the site, one that
+    // already carries accounts, one the person declined, or one without context.
+    for (work, accounts, choice, context) in [
+        (works[1], vec![], WorkSignedInV1::Offer, Some(&context)),
+        (works[0], vec![grant], WorkSignedInV1::Offer, Some(&context)),
+        (works[0], vec![], WorkSignedInV1::Declined, Some(&context)),
+        (works[0], vec![], WorkSignedInV1::Offer, None),
+    ] {
+        let none = drive(
+            &mut shell,
+            &queue,
+            approval.signed_in_draft(profile, &command(work, accounts), context, &choice),
+        )
+        .await
+        .unwrap();
+        assert!(none.is_none());
+    }
+    // Without a session nothing is offered.
+    signed_in.store(false, Ordering::SeqCst);
+    let absent = drive(
+        &mut shell,
+        &queue,
+        approval.signed_in_draft(
+            profile,
+            &command(works[0], vec![]),
+            Some(&context),
+            &WorkSignedInV1::Offer,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(absent.is_none());
+    // After signing in, the person asks for one origin by name: no tab.
+    let origin = drive(
+        &mut shell,
+        &queue,
+        approval.signed_in_draft(
+            profile,
+            &command(works[1], vec![]),
+            None,
+            &WorkSignedInV1::Origin {
+                origin: "https://jobs.example.com".into(),
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .expect("a drafted grant");
+    let WorkReplyV1::AccountGrantDraft { grant, .. } = origin.reply else {
+        panic!("origin grant draft");
+    };
+    assert_eq!(
+        (grant.origin.as_str(), grant.tab),
+        ("https://jobs.example.com", None)
+    );
+    for origin in ["http://jobs.example.com", "https://jobs.example.com/path"] {
+        let refused = drive(
+            &mut shell,
+            &queue,
+            approval.signed_in_draft(
+                profile,
+                &command(works[1], vec![]),
+                None,
+                &WorkSignedInV1::Origin {
+                    origin: origin.into(),
+                },
+            ),
+        )
+        .await;
+        assert_eq!(refused.unwrap_err(), WorkError::Invalid);
+    }
+}
