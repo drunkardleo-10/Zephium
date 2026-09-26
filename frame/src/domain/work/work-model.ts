@@ -15,8 +15,8 @@ export const AGENT_GRANT: WorkAgentGrantV1 = {
 };
 export const AGENT_LIMITS: WorkExecutionLimits = {
   model_tokens: 1_000_000,
-  cost_micro_usd: 1_500_000,
-  operations: 64,
+  cost_micro_usd: 3_000_000,
+  operations: 256,
   timeout_seconds: 1800,
   max_workers: 4,
 };
