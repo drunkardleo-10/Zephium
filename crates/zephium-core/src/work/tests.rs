@@ -1492,6 +1492,106 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
         panic!("knowledge object refused: {:?}", known.refusals);
     };
     assert!(artifact.general_knowledge && artifact.evidence.is_empty());
+    // One answer per request: a second in the same turn is refused, and so is
+    // any answer once one of this request's publish steps placed one.
+    let two = disclosure
+        .resolve(WorkAgentTurnOutput {
+            artifacts: [lead, "A second reply."]
+                .into_iter()
+                .map(|markdown| WorkAgentArtifactOutput {
+                    title: "Tenancy".into(),
+                    data: answer(markdown),
+                    evidence: vec![],
+                    general_knowledge: true,
+                })
+                .collect(),
+            ..turn(answer(lead), true)
+        })
+        .unwrap();
+    assert_eq!(two.artifacts.len(), 1);
+    assert_eq!(two.refusals, [WorkAgentArtifactRefusal::AnswerRepeated]);
+    assert!(WorkAgentArtifactRefusal::AnswerRepeated
+        .notice()
+        .contains("the first answer stands"));
+    let placed = WorkArtifactV1 {
+        version: 1,
+        id: 7.into(),
+        execution: 1.into(),
+        node: 1.into(),
+        attempt: 1.into(),
+        output: String::new(),
+        title: "Tenancy".into(),
+        data: answer(lead),
+        evidence: vec![],
+        review: WorkOutputReview::UserAcceptance,
+        presentation: WorkArtifactPresentationV1::Automatic,
+        general_knowledge: true,
+    };
+    let publish = WorkStepFact {
+        id: 3.into(),
+        turn: 1,
+        kind: WorkStepKindV1::Publish,
+        status: WorkStepStatus::Succeeded,
+        usage: None,
+        artifacts: vec![placed.id.clone()],
+        evidence: None,
+        note: None,
+        measurements: None,
+        local: None,
+        account: None,
+    };
+    let later = WorkAgentTurnDisclosure::try_new(
+        "Design an AI SaaS architecture",
+        vec![],
+        vec![],
+        std::slice::from_ref(&publish),
+        &[],
+        std::slice::from_ref(&placed),
+        WorkAgentBudget {
+            turns_left: 5,
+            steps_left: 19,
+            browse_available: true,
+        },
+        WorkExecutionLimits {
+            model_tokens: 1000,
+            cost_micro_usd: 1000,
+            operations: 2,
+            timeout_seconds: 60,
+            max_workers: 2,
+        },
+        vec![],
+    )
+    .unwrap();
+    let again = later.resolve(turn(answer("A revised reply."), true)).unwrap();
+    assert_eq!(again.refusals, [WorkAgentArtifactRefusal::AnswerRepeated]);
+    // An answer of an earlier request on the canvas does not count.
+    let inherited = WorkAgentTurnDisclosure::try_new(
+        "Design an AI SaaS architecture",
+        vec![],
+        vec![],
+        &[],
+        &[],
+        std::slice::from_ref(&placed),
+        WorkAgentBudget {
+            turns_left: 5,
+            steps_left: 19,
+            browse_available: true,
+        },
+        WorkExecutionLimits {
+            model_tokens: 1000,
+            cost_micro_usd: 1000,
+            operations: 2,
+            timeout_seconds: 60,
+            max_workers: 2,
+        },
+        vec![],
+    )
+    .unwrap();
+    assert!(inherited
+        .resolve(turn(answer("A new request's reply."), true))
+        .unwrap()
+        .refusals
+        .is_empty());
     let linked = disclosure
         .resolve(turn(answer("Read https://www.postgresql.org/docs/ first."), true))
         .unwrap();

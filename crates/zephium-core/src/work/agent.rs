@@ -107,6 +107,8 @@ pub struct WorkAgentTurnDisclosure {
     links: Vec<WorkEvidenceLink>,
     urls: Vec<String>,
     limits: WorkExecutionLimits,
+    /// One of this request's own publish steps already placed its answer.
+    answered: bool,
 }
 impl WorkAgentTurnDisclosure {
     #[allow(clippy::too_many_arguments)]
@@ -195,6 +197,15 @@ impl WorkAgentTurnDisclosure {
                 truncated: preview.truncated,
             });
         }
+        let answered = steps
+            .iter()
+            .filter(|step| matches!(step.kind, WorkStepKindV1::Publish))
+            .flat_map(|step| &step.artifacts)
+            .any(|id| {
+                artifacts.iter().any(|artifact| {
+                    artifact.id == *id && matches!(artifact.data, WorkArtifactDataV1::Answer { .. })
+                })
+            });
         let steps = steps
             .iter()
             .map(|step| {
@@ -309,6 +320,7 @@ impl WorkAgentTurnDisclosure {
             links,
             urls,
             limits,
+            answered,
         })
     }
     pub fn context(&self) -> &WorkAgentTurnContext {
@@ -406,6 +418,8 @@ impl WorkAgentTurnDisclosure {
         // One findings object per turn: a later one stands only when it is
         // about subjects none of the earlier ones name.
         let mut findings_subjects: Vec<BTreeSet<String>> = Vec::new();
+        // One answer per request: a later one never replaces the first.
+        let mut answered = self.answered;
         for artifact in output
             .artifacts
             .into_iter()
@@ -413,6 +427,13 @@ impl WorkAgentTurnDisclosure {
         {
             match self.resolve_artifact(artifact, &mut unknown) {
                 Ok(artifact) => {
+                    if matches!(artifact.data, WorkArtifactDataV1::Answer { .. }) {
+                        if answered {
+                            refusals.push(WorkAgentArtifactRefusal::AnswerRepeated);
+                            continue;
+                        }
+                        answered = true;
+                    }
                     if let WorkArtifactDataV1::Findings { subjects, .. } = &artifact.data {
                         let names: BTreeSet<String> = subjects
                             .iter()
@@ -860,6 +881,8 @@ pub enum WorkAgentArtifactRefusal {
     DuplicateFindings,
     /// Findings that cite no source: findings are cited research facts only.
     FindingsUncited,
+    /// A second answer for one request.
+    AnswerRepeated,
 }
 impl WorkAgentArtifactRefusal {
     pub fn notice(self) -> String {
@@ -876,6 +899,7 @@ impl WorkAgentArtifactRefusal {
             Self::UnknownEvidenceKey => "cites an evidence key that is not in the sources list",
             Self::UnlistedLink => "links to a URL that is not a listed source",
             Self::EmptyChart => "is a chart whose points are all zero or unknown, which shows nothing: when the sources give no comparable numbers, say so in the answer, or chart typical published figures marked general_knowledge with a basis that says they are typical figures, not measurements",
+            Self::AnswerRepeated => "is a second answer for this request: the first answer stands, so correct only the objects that were refused and publish no answer again",
             Self::FindingsUncited => "is findings that cite no source: findings are cited facts from sources read for this request, and the answer carries the prose, so write what you know in the answer instead",
             Self::DuplicateFindings => "is a second findings object this turn about the same subjects: put a turn's claims in one findings object, add only claims not already on the canvas, and publish nothing when nothing is new",
             Self::Malformed(None) => "has invalid content: measurement cells hold a plain number only (the criterion carries the unit), cell and finding evidence must cite listed source keys, subject indexes must exist, diagram node ids must be unique and every edge and layer must name an existing one, code notes must point at lines of the text, and text must fit its limits",
