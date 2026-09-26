@@ -40,6 +40,8 @@ export type ChartSpec = {
   knowledge?: boolean;
   /** The card size: no axis labels, no legend, values on hover only. */
   compact?: boolean;
+  /** Bars lie down whatever their names: the owner knows their names would collide. */
+  horizontal?: boolean;
 };
 
 /** Categorical slots; a ninth series takes the neutral tone rather than a new hue. */

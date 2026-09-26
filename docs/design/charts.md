@@ -7,13 +7,13 @@ on d3).
 
 ## What is ours, what is the library's
 
-| Ours | LayerChart's |
-| --- | --- |
-| `ChartSpec` and its eight kinds (`chart.ts`) | Scales, stacking and grouping |
-| Value parsing, formats, ticks, extremes (`chart.ts`) | Marks: bars, splines, areas, arcs, rects, text |
-| The spec as LayerChart rows and series, the card rules, the tooltip's words, the CSV (`layer.ts`) | Axes, gridlines, the hover highlight |
-| Work's conversion (`Artifact/work-chart.ts`, `WorkChart.svelte`) | Tooltip placement and hit areas |
-| Tokens, the legend, the basis line, the values table (`Chart.svelte`) | Arrival motion (tweened bars, drawn lines) |
+| Ours                                                                                              | LayerChart's                                   |
+| ------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `ChartSpec` and its eight kinds (`chart.ts`)                                                      | Scales, stacking and grouping                  |
+| Value parsing, formats, ticks, extremes (`chart.ts`)                                              | Marks: bars, splines, areas, arcs, rects, text |
+| The spec as LayerChart rows and series, the card rules, the tooltip's words, the CSV (`layer.ts`) | Axes, gridlines, the hover highlight           |
+| Work's conversion (`Artifact/work-chart.ts`, `WorkChart.svelte`)                                  | Tooltip placement and hit areas                |
+| Tokens, the legend, the basis line, the values table (`Chart.svelte`)                             | Arrival motion (tweened bars, drawn lines)     |
 
 `Chart.svelte` renders through LayerChart's `ChartCore` with its own children:
 one `<svg>` per chart, no canvas, one size observer (LayerChart's, on the plot
@@ -31,7 +31,8 @@ patch when LayerChart is upgraded.
 
 ```ts
 type ChartSpec = {
-  kind: "bars" | "stacked" | "line" | "area" | "range" | "donut" | "heat" | "spark";
+  kind:
+    "bars" | "stacked" | "line" | "area" | "range" | "donut" | "heat" | "spark";
   series: { name: string; points: ChartPoint[] }[];
   x?: { label?: string; kind?: "category" | "time" | "linear" };
   y?: {
@@ -45,13 +46,20 @@ type ChartSpec = {
   basis?: string; // one line under the plot
   knowledge?: boolean; // from what the agent knows; draws nothing, the basis line speaks
   compact?: boolean; // the card: see the card rules
+  horizontal?: boolean; // bars lie down whatever their names: the owner knows they collide
 };
 type ChartPoint = {
   x: string | number; // a category, a number, or an ISO date for a time axis
   y: number | null; // null is a gap; nothing is drawn or invented
   y2?: number; // the top of a range
   display?: string; // the value as its source wrote it; shown verbatim in the table
-  evidence?: { key: string; label: string; origin?: string; url?: string; file?: boolean }[];
+  evidence?: {
+    key: string;
+    label: string;
+    origin?: string;
+    url?: string;
+    file?: boolean;
+  }[];
 };
 ```
 
@@ -67,16 +75,16 @@ that draws a source's mark in the tooltip (Work passes its favicon glyph).
 
 ## The kinds
 
-| Kind | Use it for | LayerChart | Notes |
-| --- | --- | --- | --- |
-| `bars` | Comparing a few things: prices, scores, time per site | `Bars`, grouped by series | Lie down past eight categories or with long names (never on a card). One series writes its values on the bars, up to twelve. |
-| `stacked` | One total per x made of parts | `Bars`, `stackDiverging` | Negatives stack below zero; a 2px gap parts segments; only the outer segment is rounded. |
-| `line` | A trend over ordered x | `Spline`, monotone | Its own y range (zero not forced), points on hover, gaps at null. |
-| `area` | A trend whose volume matters | `Area` + `Spline` | As `line`, filled to zero with a 10% wash. |
-| `range` | A spread per item: "$3,000–8,000" | `Bars` from `y` to `y2` | Both ends rounded. |
-| `donut` | A share of one whole | `Pie` + `Arc` | First series only, largest first, seven slices then "Other"; the total in the middle. |
-| `heat` | Two categorical axes and a magnitude: hour by day | `Rect` on two band scales | x categories across, series names down, one tone from the surface rung to the lit rung. |
-| `spark` | A trend in a row | `Spline`, or `Bars` when `x.kind` is `category` | No axes, no tooltip, no table. Fills its container; pass `height` if it has none. |
+| Kind      | Use it for                                            | LayerChart                                      | Notes                                                                                                                        |
+| --------- | ----------------------------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `bars`    | Comparing a few things: prices, scores, time per site | `Bars`, grouped by series                       | Lie down past eight categories or with long names (never on a card). One series writes its values on the bars, up to twelve. |
+| `stacked` | One total per x made of parts                         | `Bars`, `stackDiverging`                        | Negatives stack below zero; a 2px gap parts segments; only the outer segment is rounded.                                     |
+| `line`    | A trend over ordered x                                | `Spline`, monotone                              | Its own y range (zero not forced), points on hover, gaps at null.                                                            |
+| `area`    | A trend whose volume matters                          | `Area` + `Spline`                               | As `line`, filled to zero with a 10% wash.                                                                                   |
+| `range`   | A spread per item: "$3,000–8,000"                     | `Bars` from `y` to `y2`                         | Both ends rounded.                                                                                                           |
+| `donut`   | A share of one whole                                  | `Pie` + `Arc`                                   | First series only, largest first, seven slices then "Other"; the total in the middle.                                        |
+| `heat`    | Two categorical axes and a magnitude: hour by day     | `Rect` on two band scales                       | x categories across, series names down, one tone from the surface rung to the lit rung.                                      |
+| `spark`   | A trend in a row                                      | `Spline`, or `Bars` when `x.kind` is `category` | No axes, no tooltip, no table. Fills its container; pass `height` if it has none.                                            |
 
 ## The card
 
@@ -146,9 +154,22 @@ original string stays in `display` for the table, under the precision note. The
 card is `compact` and draws no basis.
 
 ```ts
-workChartSpec({ xLabel: "Builder", yLabel: "Quote", series, basis: "Basis: Written quotes" });
+workChartSpec({
+  xLabel: "Builder",
+  yLabel: "Quote",
+  series,
+  basis: "Basis: Written quotes",
+});
 // → { kind: "range", y: { label: "Quote", format: "money", currency: "USD" }, … }
 ```
+
+**Work's board.** A chart block draws the full chart, not the card, at its
+block's width. Before it draws, it measures its category names against the
+room each bar has; names that would run into each other set `horizontal`, so
+the bars lie down and every name reads whole. When the chart carries a total
+(a point named Total) or its values are ranges, the block says it above the
+plot as one headline figure ("$50–$33,000, Monthly cost"). A chart that draws
+the same rows as a table sits beside that table.
 
 **Activity.** Build the spec from measured numbers and render it directly.
 

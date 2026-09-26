@@ -106,6 +106,7 @@ export function categoryKeys(spec: ChartSpec): string[] {
 /** Long names or many of them lie down, so every label stays readable. */
 export function horizontal(spec: ChartSpec, keys: readonly string[]): boolean {
   if (spec.kind !== "bars" && spec.kind !== "range") return false;
+  if (spec.horizontal) return true;
   const long = keys.some((key) => xText(key, spec.x?.kind).length > 14);
   return spec.compact ? long && keys.length <= 6 : long || keys.length > 8;
 }
