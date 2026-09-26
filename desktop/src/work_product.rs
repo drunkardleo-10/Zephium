@@ -98,7 +98,7 @@ async fn selected_work(
     let shell = app.state::<zephium_app::Handle>();
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(8),
-        admit("projection", || shell.work_projection(profile, work)).await?,
+        admit("projection", None, || shell.work_projection(profile, work)).await?,
     )
     .await
     .map_err(|_| WorkError::Unavailable)??;
@@ -333,7 +333,11 @@ pub(crate) async fn work_call(
     super::resource_close::touch(caller.label());
     let shell = app.state::<zephium_app::Handle>();
     let name = call_name(&call);
-    let request = match admit(name, || shell.work_call(profile, call.clone())).await {
+    let request = match admit(name, call_fault(&call), || {
+        shell.work_call(profile, call.clone())
+    })
+    .await
+    {
         Ok(request) => request,
         Err(error) => return failed(error),
     };
@@ -348,9 +352,7 @@ pub(crate) async fn work_call(
         };
     if let zephium_ipc::work::WorkReplyV1::Error { error } = &response.reply {
         if name.starts_with("environment:c") {
-            trace(format_args!(
-                "work: phase=call call={name} error={error:?}"
-            ));
+            trace(format_args!("work: phase=call call={name} error={error:?}"));
         }
     }
     response
@@ -360,6 +362,7 @@ pub(crate) async fn work_call(
 /// bound is a queue, not an answer: wait briefly for a permit before refusing.
 async fn admit<T>(
     name: &str,
+    fault: Option<&'static str>,
     mut submit: impl FnMut() -> Result<T, WorkError>,
 ) -> Result<T, WorkError> {
     const WAIT: std::time::Duration = std::time::Duration::from_secs(4);
@@ -374,10 +377,7 @@ async fn admit<T>(
             }
             result => {
                 if let Err(error) = &result {
-                    trace(format_args!(
-                        "work: phase=call call={name} refused={error:?} waited_ms={}",
-                        waited.as_millis()
-                    ));
+                    trace(format_args!("{}", refusal(name, *error, fault, waited)));
                 } else if !waited.is_zero() {
                     trace(format_args!(
                         "work: phase=call call={name} waited_ms={}",
@@ -387,6 +387,34 @@ async fn admit<T>(
                 return result;
             }
         }
+    }
+}
+
+fn refusal(
+    name: &str,
+    error: WorkError,
+    fault: Option<&'static str>,
+    waited: std::time::Duration,
+) -> String {
+    let fault = match (error, fault) {
+        (WorkError::Invalid, Some(fault)) => format!(" fault={fault}"),
+        _ => String::new(),
+    };
+    format!(
+        "work: phase=call call={name} refused={error:?}{fault} waited_ms={}",
+        waited.as_millis()
+    )
+}
+
+/// The bound a refused checkpoint view broke, named for the log.
+fn call_fault(call: &WorkCallV1) -> Option<&'static str> {
+    use zephium_core::work::environment::WorkEnvironmentCall;
+    match call {
+        WorkCallV1::Environment {
+            request: WorkEnvironmentCall::Checkpoint { view, .. },
+            ..
+        } => view.fault().map(|fault| fault.name()),
+        _ => None,
     }
 }
 
@@ -435,7 +463,7 @@ mod admission_tests {
             .build()
             .expect("runtime");
         let mut refusals = 2;
-        let admitted = runtime.block_on(admit("query", || {
+        let admitted = runtime.block_on(admit("query", None, || {
             if refusals > 0 {
                 refusals -= 1;
                 Err(WorkError::Capacity)
@@ -444,7 +472,42 @@ mod admission_tests {
             }
         }));
         assert_eq!(admitted, Ok(7));
-        let other = runtime.block_on(admit::<u8>("query", || Err(WorkError::Invalid)));
+        let other = runtime.block_on(admit::<u8>("query", None, || Err(WorkError::Invalid)));
         assert_eq!(other, Err(WorkError::Invalid));
+    }
+
+    #[test]
+    fn a_refused_checkpoint_names_the_bound_its_view_broke() {
+        use zephium_core::work::environment::{
+            WorkElementPlacement, WorkEnvironmentCall, WorkEnvironmentView,
+        };
+        let mut view = WorkEnvironmentView::default();
+        view.placements.push(WorkElementPlacement {
+            element: 1.into(),
+            x: 0,
+            y: 0,
+            width: 280,
+            height: 60,
+            revision: 2,
+        });
+        let call = WorkCallV1::Environment {
+            version: 1,
+            request: WorkEnvironmentCall::Checkpoint {
+                id: 1.into(),
+                expected: view.revision,
+                view,
+            },
+        };
+        let fault = call_fault(&call);
+        assert_eq!(fault, Some("placement_size"));
+        let zero = std::time::Duration::ZERO;
+        assert_eq!(
+            refusal("environment:checkpoint", WorkError::Invalid, fault, zero),
+            "work: phase=call call=environment:checkpoint refused=Invalid fault=placement_size waited_ms=0"
+        );
+        assert_eq!(
+            refusal("environment:checkpoint", WorkError::Conflict, fault, zero),
+            "work: phase=call call=environment:checkpoint refused=Conflict waited_ms=0"
+        );
     }
 }
