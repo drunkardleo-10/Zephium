@@ -999,6 +999,24 @@ impl Handle {
         crate::AgentWorkProfileRequest(receiver)
     }
 
+    /// The focused window's open tabs of `profile`, for consented context;
+    /// an unprocessed request disconnects the receiver.
+    pub fn window_tabs(
+        &self,
+        profile: ProfileId,
+    ) -> std::sync::mpsc::Receiver<Vec<crate::TabMetadata>> {
+        let (reply, receiver) = sync_channel(1);
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self.queue.try_push(Command::WindowTabs { profile, reply })
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
+
     /// Tab titles and URLs for context admission; an unprocessed request
     /// disconnects the receiver instead of inventing an empty answer.
     pub fn tab_metadata(

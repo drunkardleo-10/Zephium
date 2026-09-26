@@ -723,6 +723,12 @@ pub enum Command {
         ids: Vec<ItemId>,
         reply: SyncSender<Vec<TabMetadata>>,
     },
+    /// Title and URL of the open tabs in the focused window of `profile`,
+    /// for context the person consented to. Never page content.
+    WindowTabs {
+        profile: ProfileId,
+        reply: SyncSender<Vec<TabMetadata>>,
+    },
     /// Hands the shell the anonymous origin prober, once, after startup.
     AttachFaviconProber(FaviconProberAttachment),
     /// Icons for origins shown outside a tab: cached or stored rasters are

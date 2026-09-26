@@ -85,6 +85,19 @@ impl Shell {
             .collect()
     }
 
+    /// The open tabs of the focused window, when it shows `profile`.
+    pub(super) fn window_tabs(&self, profile: ProfileId) -> Vec<crate::TabMetadata> {
+        let Some(window) = self
+            .windows
+            .focused()
+            .filter(|window| window.profile == profile)
+        else {
+            return Vec::new();
+        };
+        let ids = self.today_tabs(window.space);
+        self.tab_metadata(profile, &ids)
+    }
+
     pub(super) fn today_tabs(&self, space: SpaceId) -> Vec<ItemId> {
         self.items
             .roots(Placement::Space {

@@ -1168,6 +1168,9 @@ impl Shell {
             } => {
                 let _ = reply.send(self.tab_metadata(profile, &ids));
             }
+            Command::WindowTabs { profile, reply } => {
+                let _ = reply.send(self.window_tabs(profile));
+            }
             Command::FaviconPoll { id, attempt } => self.poll_favicon(id, attempt),
             Command::PresentationFallback {
                 id,

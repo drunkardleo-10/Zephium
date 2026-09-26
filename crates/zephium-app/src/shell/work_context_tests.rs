@@ -401,3 +401,75 @@ async fn work_media_context_keeps_revision_privacy_and_existing_budget() {
         Err(WorkError::ReviewRequired)
     ));
 }
+
+#[tokio::test]
+async fn open_tabs_join_context_only_with_consent_and_without_their_query() {
+    let store = std::sync::Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let space = shell.windows.focused().unwrap().space;
+    let tab = shell.windows.focused().unwrap().active.unwrap();
+    shell.handle(Command::Navigate {
+        id: tab,
+        input: "https://mail.example.com/u/0/?search=inbox".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id: tab,
+        url: "https://mail.example.com/u/0/?search=inbox".into(),
+    }));
+    shell.handle(Command::Engine(EngineEvent::TitleChanged {
+        id: tab,
+        title: "Inbox (3)".into(),
+    }));
+    let created = environment(
+        &mut shell,
+        &queue,
+        &handle,
+        profile,
+        WorkEnvironmentCall::Command {
+            command: WorkCommandId::generate(),
+            intent: WorkEnvironmentIntent::Create {
+                space,
+                title: "Research".into(),
+            },
+        },
+    )
+    .await;
+    let admission = WorkContextAdmission::new(handle.clone());
+    let consent = WorkContextSelectionV1 {
+        environment: created.id,
+        items: vec![],
+        tabs: true,
+    };
+    let admitted = drive(
+        &mut shell,
+        &queue,
+        admission.admit(profile, WorkContextPurpose::Agent, &consent),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        admitted.disclosure.tabs,
+        [WorkContextTabV1 {
+            title: "Inbox (3)".into(),
+            host: "mail.example.com".into(),
+            path: "/u/0/".into(),
+        }]
+    );
+    assert!(admitted.bodies.is_empty());
+    assert!(admitted.disclosure.requires_review());
+    // Tabs are the person's browsing: never public-read context.
+    let public = drive(
+        &mut shell,
+        &queue,
+        admission.admit(profile, WorkContextPurpose::PublicRead, &consent),
+    )
+    .await;
+    assert!(matches!(public, Err(WorkError::ReviewRequired)));
+    // Without consent no tab is listed.
+    assert!(WorkContextSelectionV1 {
+        tabs: false,
+        ..consent
+    }
+    .validate()
+    .is_err());
+}

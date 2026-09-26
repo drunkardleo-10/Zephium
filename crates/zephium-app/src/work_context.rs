@@ -92,14 +92,34 @@ impl WorkContextAdmission {
                 });
             }
         }
-        WorkAdmittedContext::admit(
+        let tabs = if selection.tabs {
+            self.window_tabs(profile).await?
+        } else {
+            Vec::new()
+        };
+        WorkAdmittedContext::admit_with_tabs(
             environment.id,
             environment.revision,
             purpose,
             selection,
             sources,
             implicit,
+            tabs,
         )
+    }
+
+    /// The focused window's open HTTPS tabs as title, host and path, capped.
+    async fn window_tabs(&self, profile: ProfileId) -> Result<Vec<WorkContextTabV1>, WorkError> {
+        let receiver = self.handle.window_tabs(profile);
+        let tabs = tokio::task::spawn_blocking(move || receiver.recv_timeout(READ_TIMEOUT))
+            .await
+            .map_err(|_| WorkError::Unavailable)?
+            .map_err(|_| WorkError::Unavailable)?;
+        Ok(tabs
+            .iter()
+            .filter_map(|tab| WorkContextTabV1::from_page(&tab.title, tab.url.as_deref()?))
+            .take(MAX_CONTEXT_TABS)
+            .collect())
     }
 
     async fn environment(
