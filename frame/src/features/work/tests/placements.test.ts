@@ -155,3 +155,38 @@ test("a card follows its lane place when that place moves, and only then", () =>
   );
   expect(followed[0]!.position).toEqual({ x: 400, y: 0 });
 });
+
+test("a saved placement always holds to the checkpoint contract", () => {
+  const stages = environmentStages(snapshot, objectives());
+  const saved = viewPlacements(
+    snapshot,
+    {
+      positions: {
+        "objective-card": { x: 0.4, y: 0 },
+        "result-card": { x: 2_500_000, y: Number.NaN },
+      },
+      sizes: {
+        "objective-card": { width: 300, height: 64 },
+        "result-card": { width: 90.6, height: 9000 },
+      },
+      viewport: { x: 0, y: 0, zoom: 1 },
+    },
+    stages,
+  );
+  for (const place of saved) {
+    for (const value of [place.x, place.y, place.width, place.height])
+      expect(Number.isInteger(value)).toBe(true);
+    expect(Math.abs(place.x)).toBeLessThanOrEqual(1_000_000);
+    expect(Math.abs(place.y)).toBeLessThanOrEqual(1_000_000);
+  }
+  // A one-line request measures 64; the contract's floor is 80.
+  expect(saved.find((place) => place.element === "objective-card")).toMatchObject({
+    width: 300,
+    height: 80,
+  });
+  expect(saved.find((place) => place.element === "result-card")).toMatchObject({
+    width: 120,
+    height: 4096,
+    y: 0,
+  });
+});

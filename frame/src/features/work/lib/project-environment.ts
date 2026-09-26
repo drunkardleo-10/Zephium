@@ -407,6 +407,24 @@ export function environmentView(snapshot: WorkEnvironmentSnapshot): CanvasView {
  * lane card as its offset from its lane place. A lane card the canvas has not
  * placed yet keeps what it had.
  */
+/**
+ * The bounds Rust holds a checkpoint to; one card outside them refuses the
+ * whole save. A one-line request card measures 64 tall, and its size is
+ * derived from its words on read, so rounding it up here changes nothing shown.
+ */
+const PLACEMENT = { coordinate: 1_000_000, width: [120, 4096], height: [80, 4096] } as const;
+const bounded = (value: number, min: number, max: number, fallback: number) =>
+  Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : fallback;
+function contractPlacement(place: WorkElementPlacement): WorkElementPlacement {
+  const { coordinate, width, height } = PLACEMENT;
+  return {
+    ...place,
+    x: bounded(place.x, -coordinate, coordinate, 0),
+    y: bounded(place.y, -coordinate, coordinate, 0),
+    width: bounded(place.width, width[0], width[1], 280),
+    height: bounded(place.height, height[0], height[1], 160),
+  };
+}
 export function viewPlacements(
   snapshot: WorkEnvironmentSnapshot,
   view: CanvasView,
@@ -425,21 +443,22 @@ export function viewPlacements(
       height: view.sizes?.[element.id]?.height ?? previous?.height ?? 160,
     };
     if (!laneElement(snapshot, element))
-      return {
+      return contractPlacement({
         element: element.id,
-        x: Math.round(point?.x ?? previous?.x ?? 0),
-        y: Math.round(point?.y ?? previous?.y ?? 0),
+        x: point?.x ?? previous?.x ?? 0,
+        y: point?.y ?? previous?.y ?? 0,
         ...size,
-      };
+      });
     const base = bases.get(element.id);
-    if (!base || !point) return previous ?? { element: element.id, x: 0, y: 0, ...size };
-    return {
+    if (!base || !point)
+      return contractPlacement(previous ?? { element: element.id, x: 0, y: 0, ...size });
+    return contractPlacement({
       element: element.id,
-      x: Math.round(point.x - base.x),
-      y: Math.round(point.y - base.y),
+      x: point.x - base.x,
+      y: point.y - base.y,
       ...size,
       revision: LANE_PLACEMENT,
-    };
+    });
   });
 }
 const relationLabels: Record<
