@@ -20,6 +20,7 @@
     SparklesIcon,
   } from "../../lib/icons";
   import { canvasProbe, canvasRename } from "../../lib/canvas-context";
+  import { vendorHost } from "../../lib/vendors";
   import type { CanvasItem } from "../../lib/canvas-model";
   import * as m from "$shared/i18n/messages";
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
@@ -42,7 +43,8 @@
     { can: (id: string) => boolean; rename: (id: string, name: string) => void } | undefined
   >(canvasRename);
   const probe = getContext<((origin: string) => void) | undefined>(canvasProbe);
-  const vendor = $derived(item.diagram?.vendor?.trim().toLowerCase() ?? "");
+  // The stated vendor, else a well-known product the part's name or note names.
+  const vendor = $derived(vendorHost(item.diagram?.vendor, item.title, item.diagram?.note) ?? "");
   const origin = $derived(vendor ? `https://${vendor}` : "");
   const mark = $derived(origin ? siteMark(origin) : null);
   const glyph = $derived(GLYPHS[item.diagram?.kind ?? "other"] ?? CircleIcon);

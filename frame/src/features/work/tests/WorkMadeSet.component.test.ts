@@ -254,6 +254,19 @@ test("a part shows its vendor's icon once it is held, and its kind's glyph until
   const held = await render(DiagramNodeCard, { item: part("postgresql.org"), selected: false });
   await expect.poll(() => held.container.querySelector(".mark canvas")).not.toBeNull();
   await held.unmount();
+  // Without a vendor the part's own name finds the product; a plain word keeps the glyph.
+  const named = await render(DiagramNodeCard, { item: part(), selected: false });
+  await expect.poll(() => named.container.querySelector(".mark canvas")).not.toBeNull();
+  await named.unmount();
+  const plain = await render(DiagramNodeCard, {
+    item: { ...part(), title: "Cache", diagram: { kind: "cache", note: "Hot keys, 5 minutes" } },
+    selected: false,
+  });
+  expect(plain.container.querySelector(".mark canvas")).toBeNull();
+  expect(plain.container.querySelector(".caption")?.getAttribute("title")).toBe(
+    "Hot keys, 5 minutes",
+  );
+  await plain.unmount();
 });
 
 const result = (data: WorkArtifactDataV1, general_knowledge?: boolean): CanvasItem => {
