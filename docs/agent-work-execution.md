@@ -210,6 +210,24 @@ diagnostics carry only the grant index, the path class, byte counts and
 outcome classes. The projection marks each such page (`WorkStepFact.account`)
 and the request's use of each origin (`WorkExecutionFact.accounts`).
 
+A request can also state the intent itself. When a run is sent with
+attached or consented tabs and no accounts (`WorkOperationV1::Run` with
+`signed_in: offer`, the default), Rust asks the engine, for each tab whose
+host, site or vendor-table product the request names as a whole word,
+whether the profile's own website data holds cookies for that site. The
+answer is one closed fact per host, "signed-in session present" (also
+`WorkContextTabV1.signed_in` on consented tabs), never a cookie, a name or
+an account; it only decides whether to ask. For the first such tab Rust
+drafts the same origin grant `prepare` mode origin drafts and the run
+replies `account_grant_draft` instead of starting. The person's answer is
+the attestation: Allow sends the request again with that grant, Not now
+sends it with `signed_in: declined` and it reads anonymously. After an
+anonymous read meets a sign-in wall, the person can sign in in the pane and
+send the request with `signed_in: origin`, which drafts a grant for that
+origin to approve the same way. No grant exists without an approval, and
+the limits, the claim-once ledger and the read-only rules above apply
+unchanged.
+
 With the person's consent for one request, `WorkContextSelectionV1.tabs`
 lists the open tabs of the focused window as title, host and path (at most 60,
 never content or query). The agent sees them as `tabs`; reading one is
