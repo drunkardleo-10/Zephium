@@ -4,9 +4,16 @@ import type { ArtifactView, FindingView, SubjectView } from "$shared/ui/data/Art
 import type { Node } from "@xyflow/svelte";
 import type { HumanPage } from "./work-human";
 import { DIAGRAM, type DiagramPlate, type DiagramRoute } from "./diagram";
-import { defaultSize } from "./card-size";
+import { defaultSize as cardSize } from "./card-size";
 import { firstRowAnchor } from "./stage-layout";
-export { defaultSize };
+
+/** The Sources card's line for pages that could not be read. */
+export const UNREAD_FOOTER = 24;
+/** A card's size before it renders; Sources grows by its unread line. */
+export function defaultSize(item: CanvasItem): CanvasSize {
+  const size = cardSize(item);
+  return item.unread?.length ? { ...size, height: size.height + UNREAD_FOOTER } : size;
+}
 
 type CanvasKind =
   | "tab"
@@ -107,6 +114,8 @@ export type CanvasItem = {
     /** A file a step disclosed; the lift shows what the run recorded of it. */
     file?: { record: string; path: string; kind: string };
   }[];
+  /** Pages a run opened and could not read: the Sources card lists them, never as cards. */
+  unread?: readonly { key: string; url: string; host: string; note: string }[];
   /** A page a browser step opened: its newest frame while the agent works there. */
   page?: {
     url: string;
@@ -495,6 +504,7 @@ export function reconcileNodes(
         node.data.elapsed === item.elapsed &&
         JSON.stringify(node.data.counts) === JSON.stringify(item.counts) &&
         JSON.stringify(node.data.sources) === JSON.stringify(item.sources) &&
+        JSON.stringify(node.data.unread) === JSON.stringify(item.unread) &&
         node.data.media?.asset.digest === item.media?.asset.digest &&
         node.data.image?.digest === item.image?.digest &&
         JSON.stringify(node.data.agent) === JSON.stringify(item.agent) &&

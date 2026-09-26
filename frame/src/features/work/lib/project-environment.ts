@@ -24,6 +24,7 @@ import {
   observedTitle,
   pageGroups,
   sourceRows,
+  unreadPages,
 } from "./project-environment-stage";
 import {
   LANE,
@@ -642,7 +643,9 @@ export function environmentSources(
       if (!execution || !isAgentExecution(execution)) continue;
       const running = isLive(projection, execution);
       const rows = sourceRows(execution);
-      if (!rows.length) continue;
+      // A page no read could read is a line here, never a card of its own.
+      const unread = unreadPages(execution);
+      if (!rows.length && !unread.length) continue;
       // A page that would not be read says why, on the row that cites it.
       const read = new Set<string>();
       const refusals = new Map<string, string>();
@@ -657,8 +660,9 @@ export function environmentSources(
         id: card,
         type: "sources",
         kind: m.work_env_sources(),
-        title:
-          rows.length === 1
+        title: !rows.length
+          ? m.work_env_sources()
+          : rows.length === 1
             ? m.work_env_source_one()
             : m.work_env_sources_count({ count: rows.length }),
         detail: "",
@@ -668,6 +672,7 @@ export function environmentSources(
           const refusal = row.url && !read.has(row.url) ? refusals.get(row.url) : undefined;
           return refusal ? { ...row, note: clipText(refusal, ROW_TEXT) } : row;
         }),
+        ...(unread.length ? { unread } : {}),
       });
       const position = stage.layout.positions[card];
       if (position) positions[card] = position;

@@ -10,7 +10,13 @@ import type {
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
 import { FILE_STEPS, isAgentExecution } from "./agent-steps";
-import { clipText, type CanvasItem, type CanvasPosition, type CanvasSize } from "./canvas-model";
+import {
+  clipText,
+  UNREAD_FOOTER,
+  type CanvasItem,
+  type CanvasPosition,
+  type CanvasSize,
+} from "./canvas-model";
 import { findingsSize, resultSize, sourcesSize, stepSize, subjectSize } from "./card-size";
 import { bareResult, resultPlan, stepId } from "./plan-steps";
 import { DIAGRAM, diagramLayout, diagramNodeId } from "./diagram";
@@ -133,14 +139,37 @@ export type PageGroup = {
   /** An open tab the person let the request see; it stands as a page until one is read. */
   tab?: WorkContextTabV1;
 };
+/** Every read of the page settled and none of them read it. */
+const failed = (group: PageGroup) =>
+  group.steps.length > 0 &&
+  group.steps.every((step) => step.status !== "running" && step.status !== "succeeded");
 /**
  * One card per page: every step that opened the same URL folds into it. The
  * open tabs the request was given follow, unread, unless a read took one over.
+ * A page no read could read is not a card: the Sources card lists it, and a
+ * tab the request was shown stays the tab it was.
  */
 export function pageGroups(
   execution: WorkExecutionFact,
   recorded: readonly WorkPageV1[],
 ): PageGroup[] {
+  return openedGroups(execution, recorded).flatMap((group) =>
+    !failed(group) ? [group] : group.tab ? [{ ...group, steps: [], page: undefined }] : [],
+  );
+}
+export type UnreadPage = { key: string; url: string; host: string; note: string };
+/** The pages a run opened and could not read, each with Rust's closed reason. */
+export function unreadPages(execution: WorkExecutionFact): UnreadPage[] {
+  return openedGroups(execution, [])
+    .filter(failed)
+    .map((group) => ({
+      key: group.id,
+      url: clipText(group.url, DETAIL_TEXT),
+      host: host(group.url),
+      note: clipText(group.steps.at(-1)?.note?.trim() || m.work_env_status_failed(), ROW_TEXT),
+    }));
+}
+function openedGroups(execution: WorkExecutionFact, recorded: readonly WorkPageV1[]): PageGroup[] {
   const opened = recorded.filter((page) => page.execution === execution.id);
   const byUrl = new Map<string, PageGroup>();
   for (const step of execution.steps ?? []) {
@@ -465,8 +494,14 @@ export function stageContents(
   for (const execution of runs) {
     if (!isAgentExecution(execution)) continue;
     const rows = sourceRows(execution).length;
-    if (rows)
-      sources.push({ id: `sources:${stage.element}:${execution.id}`, size: sourcesSize(rows) });
+    const unread = unreadPages(execution).length;
+    if (rows || unread) {
+      const size = sourcesSize(rows);
+      sources.push({
+        id: `sources:${stage.element}:${execution.id}`,
+        size: unread ? { ...size, height: size.height + UNREAD_FOOTER } : size,
+      });
+    }
     for (const group of pageGroups(execution, recorded))
       pages.push({ id: group.id, size: SIZES.page });
     for (const card of fileCards(execution)) work.push({ id: card.id, size: SIZES.file });

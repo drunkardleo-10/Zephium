@@ -538,7 +538,7 @@ test("file steps join their run's Sources card as file rows the lift can open", 
   expect(fileEvidence(objectives, "record")?.text).toBe("Plan for the week");
 });
 
-test("a read that gave up says why, on its page card and on the row that cites it", async () => {
+test("a read that gave up is no card: Sources says why, on its row and in its unread line", async () => {
   const { environmentPages, environmentSources } = await import("../lib/project-environment");
   const { environmentStages } = await import("../lib/project-environment-thread");
   const state = structuredClone(projection);
@@ -608,9 +608,26 @@ test("a read that gave up says why, on its page card and on the row that cites i
   const scene = { ...snapshot, elements: snapshot.elements.slice(0, 1) };
   const sources = environmentSources(scene, objectives, environmentStages(scene, objectives));
   expect(sources.items[0]?.sources?.[0]?.note).toBe("The page asked for a human check");
-  const page = environmentPages(scene, objectives, environmentStages(scene, objectives), () => [])
-    .items[0];
-  expect([page?.status, page?.unavailable]).toEqual(["The page asked for a human check", true]);
+  expect(sources.items[0]?.unread).toEqual([
+    {
+      key: "page:execution:read",
+      url: "https://a.example/review",
+      host: "a.example",
+      note: "The page asked for a human check",
+    },
+  ]);
+  // Nothing to act on stands in the workspace, and no frame of it is shown.
+  const pages = environmentPages(scene, objectives, environmentStages(scene, objectives), () => [
+    {
+      execution: "execution",
+      attempt: "attempt",
+      step: "read",
+      url: "https://a.example/review",
+      live: false,
+      frame: { generation: 1, width: 1280, height: 800 },
+    },
+  ]);
+  expect(pages.items).toEqual([]);
 });
 
 test("every stage keeps the pages its own run read", async () => {
@@ -759,4 +776,42 @@ test("a page the run is holding for a person reaches its card, matched by attemp
     () => [{ ...waiting, id: { ...waiting.id, attempt: "earlier" } }],
   ).items[0];
   expect(stale?.page?.human).toBeUndefined();
+});
+
+test("only pages a read reached stand as cards; a shown tab whose read failed stays the tab", async () => {
+  const { pageGroups, unreadPages } = await import("../lib/project-environment-stage");
+  const execution = structuredClone(projection.executions[0]!);
+  execution.spec.context = {
+    version: 1,
+    environment: "environment",
+    environment_revision: "1",
+    purpose: "agent",
+    items: [],
+    total_bytes: 0,
+    tabs: [{ title: "Careers", host: "jobs.ashbyhq.com", path: "/acme" }],
+  };
+  const read = (id: string, url: string, status: "succeeded" | "failed" | "running") => ({
+    id,
+    turn: 1,
+    kind: { kind: "read" as const, url },
+    status,
+    note: status === "failed" ? "The page gave nothing" : null,
+  });
+  execution.steps = [
+    read("a", "https://lego.com/sets", "succeeded"),
+    read("b", "https://boards.greenhouse.io/acme", "failed"),
+    read("c", "https://www.dropbox.jobs/", "running"),
+    read("d", "https://jobs.ashbyhq.com/acme", "failed"),
+    read("e", "https://boards.greenhouse.io/acme", "failed"),
+  ];
+  const groups = pageGroups(execution, []);
+  expect(groups.map((group) => [group.url, group.steps.length, !!group.tab])).toEqual([
+    ["https://lego.com/sets", 1, false],
+    ["https://www.dropbox.jobs/", 1, false],
+    ["https://jobs.ashbyhq.com/acme", 0, true],
+  ]);
+  expect(unreadPages(execution).map((page) => [page.host, page.note])).toEqual([
+    ["boards.greenhouse.io", "The page gave nothing"],
+    ["jobs.ashbyhq.com", "The page gave nothing"],
+  ]);
 });
