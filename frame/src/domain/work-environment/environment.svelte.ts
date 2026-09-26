@@ -61,6 +61,7 @@ export class WorkEnvironmentSession {
   private invalidation: ReturnType<typeof setTimeout> | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private writing: Promise<boolean> | null = null;
+  private checkpointRetries = 0;
   private readonly removeCloseTask: () => void;
   constructor(profile: string, space: string) {
     this.profile = profile;
@@ -251,6 +252,9 @@ export class WorkEnvironmentSession {
       if (!this.viewDraft) {
         this.delivery = "ready";
         this.failure = null;
+      } else if (this.delivery === "rejected") {
+        this.delivery = "ready";
+        this.scheduleView();
       }
       return true;
     }
@@ -338,6 +342,7 @@ export class WorkEnvironmentSession {
         }
         this.delivery = "ready";
         this.failure = null;
+        this.checkpointRetries = 0;
         this.scheduleView();
         return true;
       }
@@ -374,7 +379,26 @@ export class WorkEnvironmentSession {
     this.delivery =
       error === "conflict" ? "conflict" : error === "outcome_unknown" ? "unknown" : "rejected";
     if (this.delivery !== "unknown") this.pending = null;
+    if (pending.kind === "checkpoint" && this.delivery === "rejected") this.releaseDraft(error);
     return false;
+  }
+  /** A refused arrangement save never holds the person: a busy refusal is
+   * retried briefly, then the saved arrangement stands and is re-read. */
+  private releaseDraft(error: string) {
+    const busy = error === "capacity" || error === "unavailable";
+    if (busy && this.checkpointRetries < 2) {
+      this.checkpointRetries += 1;
+      this.delivery = "ready";
+      this.failure = null;
+      clearTimeout(this.timer);
+      this.timer = setTimeout(() => {
+        void this.flushView();
+      }, 1500);
+      return;
+    }
+    this.checkpointRetries = 0;
+    this.viewDraft = null;
+    if (this.active) void this.refresh();
   }
   private scheduleView() {
     clearTimeout(this.timer);
@@ -402,7 +426,7 @@ export class WorkEnvironmentSession {
     const okay = await this.retry();
     if (okay && this.viewDraft && this.viewDraft !== draft && this.delivery === "ready")
       return this.flushView();
-    return okay && !this.viewDraft;
+    return !this.viewDraft && (okay || this.delivery === "rejected");
   }
 }
 const sessions = new SvelteMap<string, WorkEnvironmentSession>();

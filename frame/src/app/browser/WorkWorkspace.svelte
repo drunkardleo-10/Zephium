@@ -51,8 +51,8 @@
             currentTabId={tabs.activeId()}
             aiEnabled={preferences.value("ai.enabled") !== "false"}
             onreturn={() =>
-              void owner.flushView().then((okay) => {
-                if (okay) void surface.open(null);
+              void owner.flushView().then(() => {
+                void surface.open(null);
               })}
             onopen={(id: string) => void browse(id)}
             onnewtab={() => void browse()}

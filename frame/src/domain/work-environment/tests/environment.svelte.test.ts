@@ -303,3 +303,68 @@ test("a checkpoint reply with a newer remote view cannot release a queued semant
   expect(native.call).toHaveBeenCalledTimes(1);
   session.dispose();
 });
+
+test("a refused arrangement save releases the draft and lets the saved arrangement stand", async () => {
+  const { WorkEnvironmentSession } = await import("../environment.svelte");
+  native.call.mockImplementation((_profile: string, call: WorkCallV1) => {
+    if (call.kind !== "environment") throw new Error("Unexpected call");
+    if (call.request.kind === "list") return page();
+    if (call.request.kind === "checkpoint") return response({ kind: "error", error: "invalid" });
+    return response({
+      kind: "environment",
+      reply: { kind: "snapshot", snapshot: snapshot("91", "7") },
+    });
+  });
+  const session = new WorkEnvironmentSession(profile, space);
+  await session.start("Untitled");
+  session.checkpoint({ ...snapshot().view, x: 42 });
+  expect(await session.flushView()).toBe(true);
+  expect(session.viewDraft).toBeNull();
+  expect(session.pending).toBeNull();
+  await vi.waitFor(() => expect(session.delivery).toBe("ready"));
+  expect(native.call.mock.calls.at(-1)?.[1]).toMatchObject({ request: { kind: "read", id } });
+  expect(await session.open(id)).toBe(true);
+  session.dispose();
+});
+
+test("a busy refusal retries the arrangement save before releasing it", async () => {
+  vi.useFakeTimers();
+  try {
+    const { WorkEnvironmentSession } = await import("../environment.svelte");
+    let checkpoints = 0;
+    native.call.mockImplementation((_profile: string, call: WorkCallV1) => {
+      if (call.kind !== "environment") throw new Error("Unexpected call");
+      if (call.request.kind === "list") return page();
+      if (call.request.kind !== "checkpoint")
+        return response({
+          kind: "environment",
+          reply: { kind: "snapshot", snapshot: snapshot("91", "7") },
+        });
+      checkpoints += 1;
+      if (checkpoints < 2) return response({ kind: "error", error: "capacity" });
+      return response({
+        kind: "environment",
+        reply: {
+          kind: "checkpointed",
+          expected: "7",
+          applied_view_revision: "8",
+          replayed: false,
+          snapshot: snapshot("91", "8"),
+        },
+      });
+    });
+    const session = new WorkEnvironmentSession(profile, space);
+    await session.start("Untitled");
+    session.checkpoint({ ...snapshot().view, x: 42 });
+    expect(await session.flushView()).toBe(false);
+    expect(session.viewDraft?.view.x).toBe(42);
+    expect(session.failure).toBeNull();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(checkpoints).toBe(2);
+    expect(session.viewDraft).toBeNull();
+    expect(session.snapshot?.view.revision).toBe("8");
+    session.dispose();
+  } finally {
+    vi.useRealTimers();
+  }
+});
