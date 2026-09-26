@@ -84,6 +84,20 @@ describe("contextSelection", () => {
     ).toBeNull();
   });
 
+  test("consent to open tabs stands alone or rides with a selection", () => {
+    const known = { notes: [], objectives: new Map() };
+    expect(contextSelection(snapshot, [], [], known, true)).toEqual({
+      environment: "env",
+      items: [],
+      tabs: true,
+    });
+    expect(contextSelection(snapshot, ["e-unknown"], [], known, true)).toEqual({
+      environment: "env",
+      items: [],
+      tabs: true,
+    });
+  });
+
   test("formats sizes for the manifest", () => {
     expect(formatBytes(512)).toBe("512 B");
     expect(formatBytes(2048)).toBe("2.0 KB");
