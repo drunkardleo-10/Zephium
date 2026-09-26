@@ -85,6 +85,19 @@ impl PublicReadWorkInvocation {
         }
     }
 
+    /// A signed-in page may only be scrolled; nothing on it is clicked.
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) fn with_signed_in_reading(self) -> PublicLocalActionWorkInvocation {
+        PublicLocalActionWorkInvocation {
+            read: self,
+            actions: LocalActions {
+                policy: Box::new(read_interactions::SignedInReadingPolicy),
+                max_actions: 8,
+                read_only: true,
+            },
+        }
+    }
+
     pub fn new(
         objective: PublicReadWorkObjective,
         settings: PublicReadWorkSettings,

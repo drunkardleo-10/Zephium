@@ -53,6 +53,10 @@ pub struct WorkBrowserAdapterSettings {
     /// Closed stage labels (refused compilation, historical review); no operands.
     #[cfg(feature = "public-qualification")]
     pub stage_diagnostic: Option<fn(&str)>,
+    /// Qualification only: anonymous reads of a loopback fixture, in the same
+    /// isolated storage an anonymous public read gets.
+    #[cfg(feature = "public-qualification")]
+    pub loopback_anonymous: bool,
     pub profile: AgentWorkProfileBinding,
     pub model: AgentBrowserModel,
     pub config: AgentWorkApplicationConfig,
@@ -77,6 +81,8 @@ impl WorkBrowserAdapterSettings {
             model_diagnostic: None,
             #[cfg(feature = "public-qualification")]
             stage_diagnostic: None,
+            #[cfg(feature = "public-qualification")]
+            loopback_anonymous: false,
             profile,
             model,
             config,
@@ -255,6 +261,7 @@ impl MacosWorkComposition {
                 diagnostics,
                 decisions,
                 None,
+                None,
             )
             .await?;
         attempt
@@ -333,6 +340,7 @@ impl MacosWorkComposition {
                 note: None,
                 measurements: None,
                 helped: false,
+                account_write: false,
             });
         }
         let diagnostics = Diagnostics::from(&settings);
@@ -368,11 +376,16 @@ impl MacosWorkComposition {
             decisions,
             deadline: probe.deadline().min(Instant::now() + MAX_STEP_DURATION),
         };
-        let admission = if matches!(request.step, WorkStepKindV1::Read { .. }) {
-            Some(probe.admit_read_page(request.id).await?)
-        } else {
-            None
-        };
+        // Grouped Work pages are isolated by the engine; a signed-in read runs
+        // as its own lifetime, never beside anonymous pages.
+        let admission =
+            if matches!(request.step, WorkStepKindV1::Read { .. }) && request.account.is_none() {
+                Some(probe.admit_read_page(request.id).await?)
+            } else {
+                None
+            };
+        let signed_in = request.account.as_ref().map(|grant| grant.origin.clone());
+        let account_write = std::sync::atomic::AtomicBool::new(false);
         let invocation = compile_step(probe, request, settings, collection.as_ref(), None)?;
         let invocation = match admission {
             Some(page) => invocation.with_page_admission(page),
@@ -383,7 +396,7 @@ impl MacosWorkComposition {
                 shell,
                 probe,
                 invocation,
-                None,
+                signed_in.clone(),
                 limits,
                 &outputs,
                 collection.as_ref(),
@@ -391,6 +404,7 @@ impl MacosWorkComposition {
                 diagnostics,
                 decisions,
                 Some(resume_plan),
+                Some(&account_write),
             )
             .await?;
         if let Some(host) = host.filter(|_| collection.is_none()) {
@@ -412,6 +426,7 @@ impl MacosWorkComposition {
             note: run.note,
             measurements: Some(run.measurements),
             helped: run.helped,
+            account_write: account_write.load(std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -429,6 +444,9 @@ impl MacosWorkComposition {
         diagnostics: Diagnostics,
         decisions: WorkDecisionPreference,
         resume_plan: Option<ResumePlan>,
+        // Set for an agent read: the read is read-only, and a signed-in one
+        // (with an intervention origin) records refused write attempts here.
+        account_write: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<BrowserRun, WorkError> {
         #[cfg(feature = "public-qualification")]
         let diagnostic = diagnostics.diagnostic;
@@ -489,11 +507,17 @@ impl MacosWorkComposition {
         // Anonymous reads have no side effects: an uncertain page settles as a
         // failure charged with what the model actually used.
         let anonymous = intervention_origin.is_none();
+        // A signed-in agent read runs as its own lifetime: an uncertain page
+        // is closed and drained before it settles, and, being scroll-only,
+        // settles as failed rather than unknown.
+        let signed_in = account_write.filter(|_| intervention_origin.is_some());
         let mut settled = WorkUsage::default();
         let mut model_in_flight = false;
         let mut paused = false;
         // A page that never reaches its loop is failed, not waited on.
         let mut running_seen = false;
+        // The page reached its own loop at least once.
+        let mut ran = false;
         let mut not_ready = false;
         let mut last_phase: Option<RetainedWorkPhase> = None;
         // A person was shown the page and continued it.
@@ -529,6 +553,18 @@ impl MacosWorkComposition {
             // Draining also releases the controller's bounded event backpressure.
             while let Some(event) = guard.0.take_event() {
                 measure.observe(event.kind());
+                if let (Some(flag), AgentWorkEventKind::ActionProposalRefused(reason)) =
+                    (signed_in, event.kind())
+                {
+                    if matches!(
+                        reason,
+                        SemanticActionBindingError::AssignmentDenied
+                            | SemanticActionBindingError::TaskEffectMismatch(_)
+                            | SemanticActionBindingError::CredentialBoundary
+                    ) {
+                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
                 match event.kind() {
                     AgentWorkEventKind::ModelActive => model_in_flight = true,
                     AgentWorkEventKind::ModelSettled {
@@ -733,10 +769,20 @@ impl MacosWorkComposition {
                     helped = true;
                     let result = async {
                         let plan = resume_plan.as_ref().ok_or(WorkError::Invalid)?;
-                        let account = registration
+                        let chosen = registration
                             .as_ref()
                             .ok_or(WorkError::Invalid)?
                             .account(resume.generation)?;
+                        // A signed-in read continues as its approved account.
+                        let account = match signed_in_account(&plan.request)? {
+                            Some(account) => PublicReadWorkAccount::Identified {
+                                account,
+                                source: Box::new(crate::account_scope::UserAttestedAccount {
+                                    account,
+                                }),
+                            },
+                            None => chosen,
+                        };
                         let total =
                             add_usage(prior_usage, resume.usage).ok_or(WorkError::Capacity)?;
                         let calls = prior_calls
@@ -830,6 +876,12 @@ impl MacosWorkComposition {
                     | RetainedWorkPhase::Refused
             ) {
                 running_seen = true;
+                ran |= matches!(
+                    snapshot.phase,
+                    RetainedWorkPhase::Running
+                        | RetainedWorkPhase::Closing
+                        | RetainedWorkPhase::Terminal
+                );
             }
             if !running_seen && !requested_close && now >= ready_deadline {
                 trace("close:not_ready");
@@ -1008,6 +1060,17 @@ impl MacosWorkComposition {
                             .and_then(|usage| add_usage(prior_usage, usage))
                     }
                     .filter(|usage| usage.within(limits))
+                    // A signed-in read wrote nothing: like an anonymous one it
+                    // is charged what its model calls settled.
+                    .or_else(|| {
+                        signed_in.and_then(|_| {
+                            add_usage(
+                                prior_usage,
+                                uncertain_usage(settled, model_in_flight, limits),
+                            )
+                            .filter(|usage| usage.within(limits))
+                        })
+                    })
                     .unwrap_or(WorkUsage {
                         model_tokens: limits.model_tokens,
                         cost_micro_usd: limits.cost_micro_usd,
@@ -1015,7 +1078,9 @@ impl MacosWorkComposition {
                         accounting: WorkUsageAccounting::ConservativeReservation,
                     }),
                 );
+                // A signed-in page's title never leaves the page.
                 if disposition == Some(AgentWorkDisposition::Succeeded)
+                    && signed_in.is_none()
                     && resume_plan.as_ref().is_some_and(|plan| {
                         matches!(plan.request.step, WorkStepKindV1::Read { .. })
                     })
@@ -1044,8 +1109,32 @@ impl MacosWorkComposition {
                         Some(AgentWorkDisposition::Failed | AgentWorkDisposition::WaitingForHuman),
                         _,
                     ) => Ok((WorkAttemptStatus::Failed, vec![])),
+                    _ if signed_in.is_some() => Ok((WorkAttemptStatus::Failed, vec![])),
                     _ => Err(WorkError::OutcomeUnknown),
                 };
+                // The engine refuses a load that leaves the approved document
+                // before the page runs; the read ends naming its origin.
+                let left = signed_in.is_some()
+                    && disposition != Some(AgentWorkDisposition::Succeeded)
+                    && match snapshot.failure {
+                        Some(AgentWorkFailure::Browser(
+                            zephium_agent_controller::AgentBrowserProviderError::Navigation(_),
+                        )) => true,
+                        Some(AgentWorkFailure::ContextLost) => !ran,
+                        _ => false,
+                    };
+                if left {
+                    let origin = intervention_origin.as_deref().unwrap_or_default();
+                    let host = origin.split_once("://").map_or(origin, |(_, host)| host);
+                    return Ok(BrowserRun::closed(
+                        result,
+                        usage,
+                        intervention,
+                        Some(format!("The page left {host}")),
+                        measure.settle(started, model_in_flight),
+                        helped,
+                    ));
+                }
                 let note = match disposition {
                     _ if snapshot.construction_timed_out => {
                         construction_note(true, construction_attempt)
@@ -1642,6 +1731,52 @@ fn remaining_read(
     Ok((remaining, (16 - calls) as u8, u64::from(8 - actions)))
 }
 
+/// How an anonymous public read may use the page.
+const PUBLIC_READING: &str = "\nIf needed, scroll the current document to reveal more of the page; restore its ref with snapshot(initial) when absent. Nested scroll regions move only their own contents. Use effect=read, wait=immediate and verification=scroll_position_changed. Inspect fresh content after moving. Repeated initial snapshots do not scroll. If a page dialog is visible, work within that dialog before interacting with the covered page. You may also dismiss an entry dialog, select a content tab, or expand/collapse details or navigation menus using a permitted disclosure button with effect=read. Verify page_dialog_closed for dismissal, selected=true for a tab, or the intended expanded state for a disclosure. Close an expanded navigation menu before reading the underlying page. Inspect the revealed content afterward. A disclosure with a permitted click can be expanded directly even when other page content is omitted. If the needed click is unavailable in a truncated observation, capture its containing dialog or section with snapshot(subtree). Do not use focus as proof of success. For this isolated public session, close notices or reject optional cookies when a permitted dismissal is available; that routine step is authorized and does not require a user decision. Never enable optional tracking or choose Accept All. Transactions, account changes, form submissions and external writes are outside this reading assignment. Never assume an unavailable control succeeded.";
+/// A signed-in page is read-only: the only permitted action is a scroll.
+const SIGNED_IN_READING: &str = "\nIf needed, scroll the current document to reveal more of the page; restore its ref with snapshot(initial) when absent. Use effect=read, wait=immediate and verification=scroll_position_changed. Inspect fresh content after moving. Scrolling is the only action permitted on this signed-in page: never click, dismiss, fill, select, submit, sign in or navigate. A change the person wants on this page is proposed to them separately, never made here. Never assume an unavailable control succeeded.";
+
+/// The approved account a signed-in read uses, checked against its page.
+fn signed_in_account(
+    request: &WorkAgentBrowseRequest,
+) -> Result<Option<AgentAccountId>, WorkError> {
+    let Some(grant) = &request.account else {
+        return Ok(None);
+    };
+    let WorkStepKindV1::Read { url, .. } = &request.step else {
+        return Err(WorkError::Invalid);
+    };
+    let origin = SemanticOrigin::parse(&grant.origin).map_err(|_| WorkError::Invalid)?;
+    if SemanticOrigin::parse(url).ok().as_ref() != Some(&origin)
+        || grant.origin != origin.as_url().origin().ascii_serialization()
+    {
+        return Err(WorkError::Invalid);
+    }
+    AgentAccountId::parse(&grant.account)
+        .map(Some)
+        .ok_or(WorkError::Invalid)
+}
+
+/// Qualification only: an anonymous single-page read of a loopback fixture,
+/// with the isolated storage an anonymous public read gets.
+fn loopback_page(
+    target: ContextNavigationTarget,
+) -> Result<AgentNavigationDiscovery, AgentManifestContractError> {
+    let origin = SemanticOrigin::parse(target.as_url().as_str())
+        .map_err(|_| AgentManifestContractError::NavigationRoute)?;
+    AgentNavigationDiscovery::try_new_production(
+        target,
+        vec![AgentNavigationOriginRule::try_new(
+            origin,
+            "/".into(),
+            true,
+            false,
+        )?],
+        1,
+        1,
+    )
+}
+
 /// A step reads one shown source or starts one anonymous discovery; both are
 /// read-only, anonymous, and bounded by the loop's remaining limits.
 fn compile_step(
@@ -1663,13 +1798,32 @@ fn compile_step(
     )
     .map_err(|_| refused(&settings, "budget", WorkError::Capacity))?;
     let hops = usize::from(request.hops.clamp(1, 8));
+    let signed_in = signed_in_account(&request)?;
+    #[cfg(feature = "public-qualification")]
+    let loopback = settings.loopback_anonymous && signed_in.is_none();
+    #[cfg(not(feature = "public-qualification"))]
+    let loopback = false;
     let (navigation, task) = match &request.step {
         WorkStepKindV1::Read { url, .. } => (
-            AgentNavigationDiscovery::try_new_public_page(
-                ContextNavigationTarget::parse(url).map_err(|_| WorkError::Invalid)?,
-            )
-            .map_err(|_| WorkError::Invalid)?,
-            format!("Read only this page: {url}\nReport the facts on this page that matter for the objective, with exact figures, names and dates. Include relevant observed link destinations as cited evidence so the coordinator can request subsequent pages. Do not follow links: other page visits are separate assignments."),
+            {
+                let target = ContextNavigationTarget::parse(url).map_err(|_| WorkError::Invalid)?;
+                if signed_in.is_some() {
+                    AgentNavigationDiscovery::try_new_account_page(
+                        target,
+                        WorkBrowserDocumentPolicy::Exact,
+                    )
+                } else if loopback {
+                    loopback_page(target)
+                } else {
+                    AgentNavigationDiscovery::try_new_public_page(target)
+                }
+                .map_err(|_| WorkError::Invalid)?
+            },
+            if signed_in.is_some() {
+                format!("Read only this page: {url}\nIt is open with the person's own signed-in session. Report the facts on this page that matter for the objective, with exact figures, names and dates. Do not follow links: other page visits are separate assignments.")
+            } else {
+                format!("Read only this page: {url}\nReport the facts on this page that matter for the objective, with exact figures, names and dates. Include relevant observed link destinations as cited evidence so the coordinator can request subsequent pages. Do not follow links: other page visits are separate assignments.")
+            },
         ),
         WorkStepKindV1::Discover { query, .. } => (
             AgentNavigationDiscovery::try_new_public_web(
@@ -1696,7 +1850,10 @@ fn compile_step(
             resume.document_policy,
         )
         .map_err(|_| WorkError::Invalid)?
-    } else if matches!(request.step, WorkStepKindV1::Read { .. }) {
+    } else if matches!(request.step, WorkStepKindV1::Read { .. })
+        && signed_in.is_none()
+        && !loopback
+    {
         navigation
             .with_same_document_query_updates()
             .map_err(|_| refused(&settings, "navigation", WorkError::Invalid))?
@@ -1707,7 +1864,11 @@ fn compile_step(
     objective.push_str(&request.objective);
     objective.push_str("\n\nContribute evidence for only the browser assignment below. Other assignments are coordinated separately; do not repeat the entire multi-page objective in this step. Preserve all user constraints.\n\nThis step: ");
     objective.push_str(&task);
-    objective.push_str("\nIf needed, scroll the current document to reveal more of the page; restore its ref with snapshot(initial) when absent. Nested scroll regions move only their own contents. Use effect=read, wait=immediate and verification=scroll_position_changed. Inspect fresh content after moving. Repeated initial snapshots do not scroll. If a page dialog is visible, work within that dialog before interacting with the covered page. You may also dismiss an entry dialog, select a content tab, or expand/collapse details or navigation menus using a permitted disclosure button with effect=read. Verify page_dialog_closed for dismissal, selected=true for a tab, or the intended expanded state for a disclosure. Close an expanded navigation menu before reading the underlying page. Inspect the revealed content afterward. A disclosure with a permitted click can be expanded directly even when other page content is omitted. If the needed click is unavailable in a truncated observation, capture its containing dialog or section with snapshot(subtree). Do not use focus as proof of success. For this isolated public session, close notices or reject optional cookies when a permitted dismissal is available; that routine step is authorized and does not require a user decision. Never enable optional tracking or choose Accept All. Transactions, account changes, form submissions and external writes are outside this reading assignment. Never assume an unavailable control succeeded.");
+    objective.push_str(if signed_in.is_some() {
+        SIGNED_IN_READING
+    } else {
+        PUBLIC_READING
+    });
     objective.push_str(match collection {
         Some(_) => "\noutput_0: distinct records matching the requested collection schema. Preserve exact displayed values. Omit unsupported optional fields. Do not turn missing evidence into a negative or zero, mix different items into one record, or treat the visible subset as the complete catalog.",
         None => "\noutput_0: a list of separately cited findings from the visited pages. Give each finding its own supporting sources. Preserve conditions, exceptions and historical qualifications. Cover the requested facts supported by the observed evidence; do not imply complete page coverage when observations are partial.",
@@ -1739,7 +1900,13 @@ fn compile_step(
         None => (
             ContextId::generate(),
             None,
-            PublicReadWorkAccount::Anonymous,
+            match signed_in {
+                Some(account) => PublicReadWorkAccount::Identified {
+                    account,
+                    source: Box::new(crate::account_scope::UserAttestedAccount { account }),
+                },
+                None => PublicReadWorkAccount::Anonymous,
+            },
             16,
             probe.deadline().min(Instant::now() + MAX_STEP_DURATION),
         ),
@@ -1760,17 +1927,22 @@ fn compile_step(
         settings.config,
         settings.credential,
     )
-    .with_persistent_result()
-    .with_read_interactions();
+    .with_persistent_result();
+    let invocation = if signed_in.is_some() {
+        invocation.with_signed_in_reading()
+    } else {
+        invocation.with_read_interactions()
+    };
+    // Provider retention is for public pages only, never a signed-in one.
     #[cfg(feature = "public-qualification")]
-    let invocation = if settings.retain_public_responses {
+    let invocation = if settings.retain_public_responses && signed_in.is_none() {
         invocation.with_inspectable_public_retention()
     } else {
         invocation
     };
     #[cfg(feature = "public-qualification")]
     let diagnostic = settings.stage_diagnostic;
-    let mut request = invocation
+    let request = invocation
         .into_retained_request(settings.profile, context, max_actions)
         .map_err(|failure| {
             #[cfg(feature = "public-qualification")]
@@ -1786,13 +1958,19 @@ fn compile_step(
             let _ = &failure;
             WorkError::Unavailable
         })?;
-    if continuing {
+    let request = request
+        .with_construction_attempt(construction_attempt)
+        .with_work_identity(probe.work());
+    // A signed-in read shares the profile's cookies; every other read keeps
+    // the run's own anonymous storage.
+    if signed_in.is_some() {
+        return Ok(request);
+    }
+    let mut request = request;
+    if continuing || loopback {
         request.input = request.input.with_isolated_website_data();
     }
-    Ok(request
-        .with_construction_attempt(construction_attempt)
-        .with_work_identity(probe.work())
-        .with_anonymous_session(probe.browser_session().clone()))
+    Ok(request.with_anonymous_session(probe.browser_session().clone()))
 }
 
 /// Interrupted records of dead processes accepted per step before giving up.

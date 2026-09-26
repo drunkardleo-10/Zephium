@@ -530,3 +530,52 @@ impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
         ))
     }
 }
+
+/// A signed-in page is read-only for the agent: it may scroll the document,
+/// never click, dismiss or consent, since page handlers may persist state.
+pub(super) struct SignedInReadingPolicy;
+
+impl AgentWorkLocalActionPolicy for SignedInReadingPolicy {
+    fn decision_action_recipe(
+        &self,
+        operation: &DecisionOperation,
+        observation: &SemanticObservation,
+    ) -> Result<Option<SemanticActionProposal>, AgentWorkFailure> {
+        match operation {
+            DecisionOperation::Scroll(_) => {
+                ReadingInteractionPolicy.decision_action_recipe(operation, observation)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn model_action_effect(&self) -> Option<SemanticEffectClass> {
+        Some(SemanticEffectClass::Read)
+    }
+
+    fn model_action_operations(
+        &self,
+        node: &SemanticNode,
+        observation: &SemanticObservation,
+    ) -> Result<SemanticOperations, AgentWorkFailure> {
+        let scroll = interaction(node, observation, SemanticOperationClass::Scroll)
+            == Some(Interaction::Scroll);
+        SemanticOperations::try_new(if scroll {
+            &[SemanticOperationClass::Scroll]
+        } else {
+            &[]
+        })
+        .map_err(|_| AgentWorkFailure::Contract)
+    }
+
+    fn assess(
+        &self,
+        action: &SemanticPreparedAction,
+        observation: &SemanticObservation,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        if action.kind() != SemanticActionKind::Scroll {
+            return Err(AgentWorkFailure::ActionDenied);
+        }
+        ReadingInteractionPolicy.assess(action, observation)
+    }
+}

@@ -19,7 +19,8 @@ use zephium_ipc::work::WorkActivityV1;
 mod reads;
 
 /// A browser read or discovery the loop admitted for one step. The host
-/// compiles it into an anonymous, read-only public browsing task.
+/// compiles it into a read-only browsing task: anonymous and public, or, for
+/// a read inside a granted origin, with the profile's signed-in session.
 #[derive(Clone)]
 pub struct WorkAgentBrowseRequest {
     pub construction_attempt: zephium_agentic::WorkBrowserConstructionAttempt,
@@ -29,6 +30,8 @@ pub struct WorkAgentBrowseRequest {
     pub objective: String,
     pub output: String,
     pub limits: WorkExecutionLimits,
+    /// The approved origin this read lies inside; None reads anonymously.
+    pub account: Option<WorkAccountGrantV1>,
 }
 pub struct WorkBrowserOutcome {
     pub status: WorkStepStatus,
@@ -41,6 +44,8 @@ pub struct WorkBrowserOutcome {
     pub measurements: Option<WorkStepMeasurementsV1>,
     /// A person was shown this page and continued it.
     pub helped: bool,
+    /// The page agent tried to change something on a signed-in page and was refused.
+    pub account_write: bool,
 }
 pub struct WorkAgentProviders<'a> {
     pub turn: &'a dyn WorkAgentTurnProvider,
@@ -130,6 +135,15 @@ pub enum WorkAgentDiagnostic {
         kind: &'static str,
         error: WorkError,
     },
+    /// A read admitted inside a granted origin: its grant and path shape.
+    AccountRead { grant: u8, path: WorkPathClass },
+    /// A signed-in step the loop refused.
+    AccountRefused {
+        grant: u8,
+        reason: WorkAccountRefusal,
+    },
+    /// The person's open tabs listed as context, by count.
+    TabsListed { count: u8 },
 }
 
 pub struct WorkAgentService {
@@ -170,7 +184,11 @@ impl WorkAgentService {
         }
         let work = command.work;
         let command_id = command.command;
-        let (request, bodies, private) = match selection {
+        if let WorkRuntimeIntent::BeginAgent { grant, .. } = &command.intent {
+            grant.validate()?;
+            crate::work_account_scope::claim_account_grants(profile, work, &grant.accounts)?;
+        }
+        let (request, bodies, private, tabs) = match selection {
             Some(selection) => {
                 let admitted = crate::work_context::WorkContextAdmission::new(self.handle.clone())
                     .admit(profile, context::WorkContextPurpose::Agent, &selection)
@@ -183,6 +201,7 @@ impl WorkAgentService {
                     .filter(|(item, _)| item.visibility == context::WorkContextVisibility::Private)
                     .map(|(_, body)| body.text.clone())
                     .collect();
+                let tabs = admitted.disclosure.tabs.clone();
                 let zephium_ipc::work::WorkCommandV1 {
                     work,
                     expected_revision,
@@ -200,9 +219,10 @@ impl WorkAgentService {
                     },
                     admitted.bodies,
                     private,
+                    tabs,
                 )
             }
-            None => (command.into_request()?, Vec::new(), Vec::new()),
+            None => (command.into_request()?, Vec::new(), Vec::new(), Vec::new()),
         };
         request.validate()?;
         let response = tokio::time::timeout(
@@ -240,6 +260,7 @@ impl WorkAgentService {
             return Err(WorkError::Invalid);
         }
         let node = execution.spec.nodes[0].node;
+        let grant_accounts = grant.accounts.len();
         let attempt = WorkRuntimeService::new(self.handle.clone())
             .begin_node(
                 profile,
@@ -278,7 +299,15 @@ impl WorkAgentService {
             published: 0,
             finish_refusals: 0,
             pending_output_repair: false,
+            account_pages: vec![0; grant_accounts],
+            signed_in: Vec::new(),
+            tabs,
         };
+        if !driver.tabs.is_empty() {
+            driver.report(WorkAgentDiagnostic::TabsListed {
+                count: u8::try_from(driver.tabs.len()).unwrap_or(u8::MAX),
+            });
+        }
         let (files, refused) = crate::work_files::WorkFileGrant::admit(&driver.grant.folders);
         for folder in refused {
             driver.notice(&format!(
@@ -349,6 +378,12 @@ struct Driver {
     published: usize,
     finish_refusals: u8,
     pending_output_repair: bool,
+    /// Signed-in pages opened per granted origin, in grant order.
+    account_pages: Vec<u8>,
+    /// Steps read with a signed-in session, and their grant.
+    signed_in: Vec<(WorkStepId, usize)>,
+    /// The person's open tabs, listed with their consent.
+    tabs: Vec<context::WorkContextTabV1>,
 }
 
 enum Fetched {
@@ -506,6 +541,17 @@ impl Driver {
             return Err(error);
         }
         Ok(())
+    }
+    /// Tells the model and the log why a signed-in step did not run.
+    fn refuse_account(&mut self, grant: usize, reason: WorkAccountRefusal) {
+        let Some(host) = self.grant.accounts.get(grant).map(|g| g.host().to_owned()) else {
+            return;
+        };
+        self.notice(&reason.notice(&host));
+        self.report(WorkAgentDiagnostic::AccountRefused {
+            grant: u8::try_from(grant).unwrap_or(u8::MAX),
+            reason,
+        });
     }
     fn report(&self, event: WorkAgentDiagnostic) {
         if let Some(diagnostic) = self.diagnostic {
@@ -718,6 +764,16 @@ impl Driver {
                 browse_available: true,
             };
             let notices = std::mem::take(&mut self.notices);
+            let accounts: Vec<WorkAgentAccountView> = self
+                .grant
+                .accounts
+                .iter()
+                .zip(&self.account_pages)
+                .map(|(grant, used)| WorkAgentAccountView {
+                    origin: grant.origin.clone(),
+                    pages_left: grant.pages.saturating_sub(*used),
+                })
+                .collect();
             let view = TurnView {
                 objective: &self.objective,
                 decisions: &self.decisions,
@@ -727,6 +783,8 @@ impl Driver {
                 budget,
                 remaining: self.remaining(),
                 notices: &notices,
+                accounts: &accounts,
+                tabs: &self.tabs,
             };
             let disclosed = disclose(
                 &view,
@@ -1465,6 +1523,14 @@ impl Driver {
                         if let Some(usage) = outcome.usage {
                             self.charge(usage);
                         }
+                        let signed_in = self
+                            .signed_in
+                            .iter()
+                            .find(|(step, _)| *step == id)
+                            .map(|(_, grant)| *grant);
+                        if let Some(grant) = signed_in.filter(|_| outcome.account_write) {
+                            self.refuse_account(grant, WorkAccountRefusal::AccountWrite);
+                        }
                         let measurements = outcome.measurements;
                         let usage = if outcome.status == WorkStepStatus::OutcomeUnknown {
                             None
@@ -1506,6 +1572,12 @@ impl Driver {
                                 "A page read failed: {}. Use another listed source or finish with what the canvas has; do not reopen that page.",
                                 outcome.note.as_deref().unwrap_or("the page gave nothing")
                             ));
+                        }
+                        // Facts from a signed-in page never ride a search query.
+                        if signed_in.is_some() {
+                            self.private.extend(
+                                artifacts.iter().map(|artifact| artifact.data.plain_text()),
+                            );
                         }
                         let links = browser_preview_links(&artifacts);
                         let published = artifacts.len();
@@ -1790,6 +1862,8 @@ struct TurnView<'a> {
     budget: WorkAgentBudget,
     remaining: WorkExecutionLimits,
     notices: &'a [String],
+    accounts: &'a [WorkAgentAccountView],
+    tabs: &'a [context::WorkContextTabV1],
 }
 
 /// Builds the turn, shedding until it fits: the disclosure itself first drops
@@ -1825,7 +1899,9 @@ fn disclose(
             view.remaining,
             view.notices.to_vec(),
         )
-        .and_then(|disclosure| disclosure.with_thread(thread.clone()));
+        .and_then(|disclosure| disclosure.with_thread(thread.clone()))
+        .and_then(|disclosure| disclosure.with_accounts(view.accounts.to_vec()))
+        .and_then(|disclosure| disclosure.with_tabs(view.tabs));
         match disclosed {
             Err(WorkError::Capacity) => {}
             other => return other,
@@ -2470,6 +2546,8 @@ mod tests {
                 max_workers: 1,
             },
             notices: &[],
+            accounts: &[],
+            tabs: &[],
         };
         let disclosure = disclose(&view, &mut previews, &mut inherited, &kept, &mut thread)
             .expect("a long work still gets its turn");

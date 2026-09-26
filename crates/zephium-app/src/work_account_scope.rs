@@ -1,17 +1,100 @@
-//! Approval drafts for one signed-in page. Rust resolves the chosen tab, mints
-//! the account identity, and returns the exact specification the user
-//! approves. Approval is the user's attestation of the account; Zephium has no
-//! independent account collector and never claims one.
-use std::time::Duration;
+//! Approval drafts for one signed-in page, or for signed-in reads on one
+//! origin during the next request. Rust resolves the chosen tab, mints the
+//! account identity, and returns the exact draft the user approves. Approval
+//! is the user's attestation of the account; Zephium has no independent
+//! account collector and never claims one.
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 use zephium_core::{
     ids::ProfileId,
     work::{environment::*, port::*, proposal::*, runtime::*, *},
 };
 use zephium_ipc::work::{
-    WorkAccountApprovalRequestV1, WorkAccountEffectV1, WorkReplyV1, WorkResponseV1,
+    WorkAccountApprovalRequestV1, WorkAccountEffectV1, WorkAccountModeV1, WorkReplyV1,
+    WorkResponseV1,
 };
 
 const READ_TIMEOUT: Duration = Duration::from_secs(8);
+/// How long a drafted origin grant waits for the request that uses it.
+const DRAFT_PATIENCE: Duration = Duration::from_secs(30 * 60);
+const MAX_DRAFTED: usize = 16;
+
+/// Origin grants Rust drafted for the person's approval. A request claims
+/// each at most once; a later request needs a new approval.
+static DRAFTED: Mutex<Vec<Drafted>> = Mutex::new(Vec::new());
+struct Drafted {
+    profile: ProfileId,
+    work: WorkId,
+    grant: WorkAccountGrantV1,
+    at: Instant,
+}
+pub(crate) fn draft(
+    profile: ProfileId,
+    work: WorkId,
+    grant: WorkAccountGrantV1,
+) -> Result<(), WorkError> {
+    let mut drafted = DRAFTED.lock().map_err(|_| WorkError::Unavailable)?;
+    drafted.retain(|entry| {
+        entry.at.elapsed() < DRAFT_PATIENCE
+            && !(entry.profile == profile
+                && entry.work == work
+                && entry.grant.origin == grant.origin)
+    });
+    if drafted.len() >= MAX_DRAFTED {
+        drafted.remove(0);
+    }
+    drafted.push(Drafted {
+        profile,
+        work,
+        grant,
+        at: Instant::now(),
+    });
+    Ok(())
+}
+/// Consumes the drafts a request's grant names, all or none. An account Rust
+/// did not draft for this work, or one already used, is refused.
+pub fn claim_account_grants(
+    profile: ProfileId,
+    work: WorkId,
+    grants: &[WorkAccountGrantV1],
+) -> Result<(), WorkError> {
+    if grants.is_empty() {
+        return Ok(());
+    }
+    let mut drafted = DRAFTED.lock().map_err(|_| WorkError::Unavailable)?;
+    drafted.retain(|entry| entry.at.elapsed() < DRAFT_PATIENCE);
+    let found: Option<Vec<usize>> = grants
+        .iter()
+        .map(|grant| {
+            drafted.iter().position(|entry| {
+                entry.profile == profile && entry.work == work && entry.grant == *grant
+            })
+        })
+        .collect();
+    let mut found = found.ok_or(WorkError::ReviewRequired)?;
+    found.sort_unstable();
+    found.dedup();
+    if found.len() != grants.len() {
+        return Err(WorkError::ReviewRequired);
+    }
+    for index in found.into_iter().rev() {
+        drafted.remove(index);
+    }
+    Ok(())
+}
+/// The probe's stand-in for the person approving a drafted origin grant.
+#[cfg(feature = "work-execution-probe")]
+#[doc(hidden)]
+pub fn record_approved_grant_for_probe(
+    profile: ProfileId,
+    work: WorkId,
+    grant: WorkAccountGrantV1,
+) -> Result<(), WorkError> {
+    grant.validate()?;
+    draft(profile, work, grant)
+}
 pub const ACCOUNT_LIMITS: WorkExecutionLimits = WorkExecutionLimits {
     model_tokens: 128_000,
     cost_micro_usd: 500_000,
@@ -54,14 +137,39 @@ impl WorkAccountApproval {
             .map_err(|_| WorkError::Invalid)?
             .origin()
             .ascii_serialization();
+        let account = serde_json::to_value(zephium_agentic::AgentAccountId::generate())
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .ok_or(WorkError::Unavailable)?;
+        if request.mode == WorkAccountModeV1::Origin {
+            if request.effect != WorkAccountEffectV1::Read {
+                return Err(WorkError::Invalid);
+            }
+            let grant = WorkAccountGrantV1 {
+                origin,
+                account,
+                tab: Some(tab.id),
+                pages: request.pages.unwrap_or(MAX_WORK_ACCOUNT_PAGES),
+            };
+            grant.validate()?;
+            draft(profile, request.work, grant.clone())?;
+            return Ok(WorkResponseV1 {
+                version: 1,
+                profile: profile.to_string(),
+                reply: WorkReplyV1::AccountGrantDraft {
+                    work: request.work,
+                    grant,
+                },
+            });
+        }
+        if request.pages.is_some() {
+            return Err(WorkError::Invalid);
+        }
         let scope = WorkAccountScope {
             tab: tab.id,
             url,
             origin,
-            account: serde_json::to_value(zephium_agentic::AgentAccountId::generate())
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .ok_or(WorkError::Unavailable)?,
+            account,
         };
         let capability = match request.effect {
             WorkAccountEffectV1::Read => WorkCapability::AccountRead { scope },

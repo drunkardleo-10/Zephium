@@ -20,12 +20,35 @@ impl Driver {
         F: Future<Output = Result<WorkBrowserOutcome, WorkError>>,
     {
         let mut reads = Vec::new();
+        let mut opened = self.account_pages.clone();
         for kind in browses {
             if matches!(kind, WorkStepKindV1::Discover { .. }) {
                 self.notice("Native discovery is not available in this run: provider search covers the web. Use search for facts and read for exact URLs listed in sources.");
-            } else {
-                reads.push(kind);
+                continue;
             }
+            let WorkStepKindV1::Read { url, .. } = &kind else {
+                continue;
+            };
+            let granted = self
+                .grant
+                .accounts
+                .iter()
+                .position(|grant| grant.admits(url));
+            if let Some(index) = granted {
+                let refusal = if path_class(url) == WorkPathClass::Action {
+                    Some(WorkAccountRefusal::AccountWrite)
+                } else if opened[index] >= self.grant.accounts[index].pages {
+                    Some(WorkAccountRefusal::PageBudget)
+                } else {
+                    None
+                };
+                if let Some(reason) = refusal {
+                    self.refuse_account(index, reason);
+                    continue;
+                }
+                opened[index] += 1;
+            }
+            reads.push((kind, granted));
         }
         let cap = usize::from(self.limits.max_workers).clamp(1, MAX_CONCURRENT_PAGE_READS);
         let mut offset = 0;
@@ -39,8 +62,16 @@ impl Driver {
                 self.notice(BUDGET_EXHAUSTED);
                 break;
             };
+            // A signed-in page runs alone: the engine groups only isolated pages.
+            let run = match reads[offset].1 {
+                Some(_) => 1,
+                None => reads[offset..]
+                    .iter()
+                    .take_while(|(_, granted)| granted.is_none())
+                    .count(),
+            };
             let count = cap
-                .min(reads.len() - offset)
+                .min(run)
                 .min(steps)
                 .min(remaining.model_tokens as usize)
                 .min(remaining.cost_micro_usd as usize)
@@ -57,12 +88,19 @@ impl Driver {
             )> = Vec::new();
             let mut terminal = None;
             let mut failure = None;
-            for (kind, limits) in batch.iter().zip(limits) {
+            for ((kind, granted), limits) in batch.iter().zip(limits) {
                 if self.cancelled().await {
                     terminal = Some(WorkAttemptStatus::Cancelled);
                     break;
                 }
-                let step = self.step(kind.clone(), WorkStepStatus::Running);
+                let account = granted.and_then(|index| self.grant.accounts.get(index).cloned());
+                let mut step = self.step(kind.clone(), WorkStepStatus::Running);
+                step.account = account.as_ref().map(|grant| {
+                    Box::new(WorkPageAccountV1 {
+                        host: grant.host().to_owned(),
+                        badge: true,
+                    })
+                });
                 let id = match self.begin(step, vec![], None).await {
                     Ok(id) => id,
                     Err(error) => {
@@ -70,6 +108,14 @@ impl Driver {
                         break;
                     }
                 };
+                if let (Some(index), WorkStepKindV1::Read { url, .. }) = (*granted, kind) {
+                    self.account_pages[index] += 1;
+                    self.signed_in.push((id, index));
+                    self.report(WorkAgentDiagnostic::AccountRead {
+                        grant: u8::try_from(index).unwrap_or(u8::MAX),
+                        path: path_class(url),
+                    });
+                }
                 self.probe.record_activity(WorkActivityV1::Reading);
                 let request = WorkAgentBrowseRequest {
                     construction_attempt: Default::default(),
@@ -79,6 +125,7 @@ impl Driver {
                     hops: self.grant.browse_hops,
                     objective: self.objective.clone(),
                     output: self.output.clone(),
+                    account,
                 };
                 let future = Box::pin(browser(self.probe.clone(), request.clone()));
                 pending.push(PendingRead {
@@ -169,7 +216,8 @@ fn retry_request(
     outcome: &Result<WorkBrowserOutcome, WorkError>,
     limits: WorkExecutionLimits,
 ) -> WorkAgentBrowseRequest {
-    let construction_attempt = if matches!(outcome, Ok(WorkBrowserOutcome { note: Some(note), .. }) if note == read_note::CONSTRUCTION_TIMEOUT)
+    let construction_attempt = if request.account.is_none()
+        && matches!(outcome, Ok(WorkBrowserOutcome { note: Some(note), .. }) if note == read_note::CONSTRUCTION_TIMEOUT)
     {
         zephium_agentic::WorkBrowserConstructionAttempt::SlowPageRetry
     } else {
@@ -372,6 +420,7 @@ mod tests {
                 note: None,
                 measurements: None,
                 helped: false,
+                account_write: false,
             };
             assert!(matches!(
                 checked_outcome(Ok(outcome), limits),

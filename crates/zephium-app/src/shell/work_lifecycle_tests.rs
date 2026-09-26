@@ -217,6 +217,7 @@ async fn page(
                 note: None,
                 measurements: None,
                 helped: false,
+                account_write: false,
             });
         }
         if !hang {
@@ -248,6 +249,7 @@ async fn page(
         note: None,
         measurements: None,
         helped: false,
+        account_write: false,
     })
 }
 
@@ -951,6 +953,7 @@ async fn work_a_human_check_is_read_again_only_after_a_person_continued_it() {
                             note: Some(read_note::HUMAN_CHECK.into()),
                             measurements: None,
                             helped,
+                            account_write: false,
                         })
                     }
                 },

@@ -840,3 +840,74 @@ fn a_recorded_specifications_disclosure_in_view_is_toggled_by_recipe() {
     let action = batch.actions()[0].prepare(snapshot).unwrap();
     assert!(policy.assess(&action, &shown).is_ok());
 }
+
+#[cfg(feature = "durable-runtime")]
+#[test]
+fn a_signed_in_page_is_only_ever_scrolled() {
+    use serde_json::json;
+    let public = read_interactions::ReadingInteractionPolicy;
+    let policy = read_interactions::SignedInReadingPolicy;
+    let observation = reading_observation(
+        json!([
+            {"k":1,"r":"document","fc":true,"o":16,"b":{"x":0,"y":0,"w":800,"h":600}},
+            {"k":2,"p":0,"r":"button","n":"Specifications","ak":6,"o":25,"fc":true,
+             "b":{"x":1,"y":1,"w":100,"h":30}},
+            {"k":3,"p":0,"r":"tab","n":"Details","ak":1,"o":9,"fc":true,
+             "b":{"x":1,"y":40,"w":100,"h":30}}
+        ]),
+        "complete",
+    );
+    let snapshot = &observation.frames()[0];
+    let [document, disclosure, tab] = [0, 1, 2].map(|index| &snapshot.nodes()[index]);
+    let scroll = policy
+        .decision_action_recipe(
+            &DecisionOperation::Scroll(document.reference()),
+            &observation,
+        )
+        .unwrap()
+        .unwrap();
+    let batch = SemanticActionBatch::bind(
+        SemanticActionBatchId::new(1).unwrap(),
+        &observation,
+        &[snapshot.frame().clone()],
+        vec![scroll],
+    )
+    .unwrap();
+    assert!(policy
+        .assess(&batch.actions()[0].prepare(snapshot).unwrap(), &observation)
+        .is_ok());
+    for node in [disclosure, tab] {
+        // The public reading policy may click these; a signed-in page may not.
+        assert!(public
+            .model_action_operations(node, &observation)
+            .unwrap()
+            .contains(SemanticOperationClass::Click));
+        assert!(!policy
+            .model_action_operations(node, &observation)
+            .unwrap()
+            .contains(SemanticOperationClass::Click));
+        assert!(policy
+            .decision_action_recipe(&DecisionOperation::Click(node.reference()), &observation)
+            .unwrap()
+            .is_none());
+        let recipe = public
+            .decision_action_recipe(&DecisionOperation::Click(node.reference()), &observation)
+            .unwrap()
+            .unwrap();
+        let batch = SemanticActionBatch::bind(
+            SemanticActionBatchId::new(1).unwrap(),
+            &observation,
+            &[snapshot.frame().clone()],
+            vec![recipe],
+        )
+        .unwrap();
+        let action = batch.actions()[0].prepare(snapshot).unwrap();
+        assert!(public.assess(&action, &observation).is_ok());
+        assert!(matches!(
+            policy.assess(&action, &observation),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+    }
+    assert!(policy.consent_dismissal(&observation).is_none());
+    assert!(policy.detail_disclosure(&observation).is_none());
+}

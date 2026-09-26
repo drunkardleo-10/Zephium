@@ -2389,6 +2389,7 @@ fn browser_settings(
     WorkBrowserAdapterSettings {
         decisions: zephium_work_composition::durable_runtime::WorkDecisionPreference::Recommended,
         retain_public_responses: true,
+        loopback_anonymous: false,
         stage_diagnostic: Some(|stage| {
             let _ = writeln!(std::io::stdout().lock(), "durable-work: stage={stage}");
         }),
