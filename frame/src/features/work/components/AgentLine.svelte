@@ -1,3 +1,9 @@
+<script lang="ts" module>
+  /** When this document first saw each run live, so the clock survives the line being redrawn. */
+  const seen: Record<string, number> = {};
+  const order: string[] = [];
+</script>
+
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import type { WorkSession } from "$domain/work";
@@ -46,6 +52,7 @@
     onsignin,
     retry = null,
     onretry,
+    docked = false,
   }: {
     session: WorkSession;
     /** The run's agent presences, as the canvas already projects them. */
@@ -78,6 +85,8 @@
     /** The site the person went to sign in to; the same request can go again as them. */
     retry?: { host: string } | null;
     onretry?: () => void;
+    /** Drawn as the bar's own line: the bar is its ground and holds the draft. */
+    docked?: boolean;
   } = $props();
   const id = $props.id();
   const runtime = $derived(session.projection);
@@ -271,6 +280,30 @@
     }
   });
   const settled = $derived(!live && !question && !proposal);
+  /** How long the run has been going, by this window's clock: a second hand only while it runs. */
+  let now = $state(Date.now());
+  const since = $derived.by(() => {
+    const id = execution?.id;
+    if (!live || !id) return null;
+    const known = seen[id];
+    if (known !== undefined) return known;
+    const first = Date.now();
+    order.push(id);
+    if (order.length > 64) delete seen[order.shift()!];
+    seen[id] = first;
+    return first;
+  });
+  $effect(() => {
+    if (since === null) return;
+    now = Date.now();
+    const tick = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(tick);
+  });
+  const elapsed = $derived.by(() => {
+    if (since === null) return "";
+    const seconds = Math.max(0, Math.floor((now - since) / 1000));
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  });
   /** Under a finished run's words, what it did, counted from its steps. */
   const facts = $derived(
     settled && !waiting && execution && isAgentExecution(execution)
@@ -383,7 +416,13 @@
 />
 
 {#if work}
-  <section class="agent-line" class:settled bind:this={host} aria-label={m.work_agent_line()}>
+  <section
+    class="agent-line"
+    class:settled
+    class:docked
+    bind:this={host}
+    aria-label={m.work_agent_line()}
+  >
     <!-- One capsule: it grows upward into its list and folds back into the line. -->
     <div class="capsule" class:open={expanded}>
       <div class="expand" class:shown={expanded} aria-hidden={!expanded} inert={!expanded}>
@@ -524,7 +563,8 @@
               {/if}
             {/key}
           {/if}
-          {#if live && preview}<span class="draft">{preview}</span>{/if}
+          {#if elapsed && !waiting}<span class="elapsed">{elapsed}</span>{/if}
+          {#if live && preview && !docked}<span class="draft">{preview}</span>{/if}
           {#if facts}<span class="facts">{facts}</span>{/if}
         </div>
         <div class="controls">
@@ -619,6 +659,12 @@
     border-radius: var(--radius-panel);
     background: var(--color-float);
     box-shadow: var(--shadow-popover);
+  }
+
+  /* In the bar the capsule is the bar's own row: no second ground, no second shadow. */
+  .docked .capsule {
+    background: transparent;
+    box-shadow: none;
   }
 
   /* Grows on the arrival curve, folds on the exit curve; the rows fade with it. */
@@ -807,6 +853,12 @@
     color: var(--color-muted);
     font-variant-numeric: tabular-nums;
     text-decoration: none;
+  }
+
+  .elapsed {
+    flex: none;
+    color: var(--color-faint);
+    font-variant-numeric: tabular-nums;
   }
 
   .draft {
