@@ -4,7 +4,7 @@
   import HostGlyph from "../cards/HostGlyph.svelte";
   import Icon from "$shared/ui/Icon";
   import { Cancel01Icon, Tick02Icon } from "../../lib/icons";
-  import { cellText, type CompareCell, type CompareModel } from "../../lib/compare";
+  import { cellText, compareCsv, type CompareCell, type CompareModel } from "../../lib/compare";
   import * as m from "$shared/i18n/messages";
   let {
     model,
@@ -27,6 +27,15 @@
     editing = at(cell);
     draft = cellText(cell.value, m.work_yes(), m.work_no());
   }
+  /** The price row is taken into the headers, but it is still a row of the table. */
+  const rowCount = $derived(model.rows.length + (model.priceLabel ? 1 : 0));
+  let copied = $state<"idle" | "copied" | "failed">("idle");
+  function copy() {
+    void navigator.clipboard.writeText(compareCsv(model, m.work_yes(), m.work_no())).then(
+      () => (copied = "copied"),
+      () => (copied = "failed"),
+    );
+  }
   function commit(cell: CompareCell) {
     const text = draft;
     editing = null;
@@ -42,15 +51,21 @@
         <th scope="col" class="corner"><span class="sr-only">{m.work_matrix_criterion()}</span></th>
         {#each model.columns as column (column.key)}
           <th scope="col" class="subject">
-            <span class="picture">
-              <SubjectPicture
-                picture={column.picture}
-                name={column.name}
-                homepage={column.homepage ?? ""}
-                large
-              />
+            <span class="who">
+              <span class="picture">
+                <SubjectPicture
+                  picture={column.picture}
+                  name={column.name}
+                  homepage={column.homepage ?? ""}
+                  markSize={20}
+                />
+              </span>
+              <span class="name"
+                >{#if column.picture && column.homepage}<span class="favicon"
+                    ><HostGlyph url={column.homepage} size={12} initial={false} /></span
+                  >{/if}{column.name}</span
+              >
             </span>
-            <span class="name">{column.name}</span>
             {#if column.price}<span class="price"
                 >{#if column.best}<span
                     class="best"
@@ -119,9 +134,6 @@
                   >{/if}
                 {#if cell.note}<span class="note">{cell.note}</span>{/if}
                 <span class="aside">
-                  {#if cell.generalKnowledge}<span class="general"
-                      >{m.work_general_knowledge()}</span
-                    >{/if}
                   {#each cell.evidence as reference (reference.key)}
                     <button
                       type="button"
@@ -157,6 +169,15 @@
     </ul>
   {/if}
 </div>
+<footer class="compare-footer">
+  <span class="count"
+    >{rowCount === 1 ? m.work_table_count_one() : m.work_table_count({ count: rowCount })}</span
+  >
+  {#if copied === "failed"}<span class="failed" role="alert">{m.work_code_copy_failed()}</span>{/if}
+  <button type="button" class="copy" onclick={copy}
+    >{copied === "copied" ? m.work_code_copied() : m.work_table_copy_csv()}</button
+  >
+</footer>
 
 <style>
   .compare {
@@ -169,8 +190,9 @@
     table-layout: fixed;
     border-collapse: separate;
     border-spacing: 0;
-    inline-size: max(100%, calc(150px + var(--subjects) * 160px));
-    font-size: var(--text-label);
+    inline-size: max(100%, calc(150px + var(--subjects) * 180px));
+    font-size: var(--text-body);
+    line-height: 19px;
   }
 
   th,
@@ -215,20 +237,41 @@
     min-inline-size: 160px;
   }
 
+  /* A 40 px tile, then the name beside it: the column reads as the card does. */
+  .who {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-block-end: 6px;
+  }
+
   .picture {
     display: block;
-    inline-size: 96px;
-    block-size: 96px;
-    margin-block-end: 8px;
-    border-radius: var(--radius-row);
+    flex: none;
+    inline-size: 40px;
+    block-size: 40px;
+    border-radius: var(--radius-inset);
     background: var(--color-fill);
+    box-shadow: inset 0 0 0 1px var(--color-border);
     overflow: hidden;
   }
 
   .name {
-    display: block;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    min-inline-size: 0;
+    overflow: hidden;
+    font-size: var(--text-body);
     font-weight: 600;
     line-height: 17px;
+  }
+
+  .favicon {
+    display: inline-flex;
+    margin-inline-end: 5px;
+    vertical-align: -1px;
   }
 
   .price {
@@ -403,19 +446,48 @@
     outline-offset: 1px;
   }
 
-  .general {
-    padding: 1px 6px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill);
-    color: var(--color-faint);
-    font-size: 10px;
-  }
-
   .notes {
     margin: 12px 0 0;
     padding-inline-start: 18px;
     color: var(--color-muted);
     font-size: var(--text-caption);
+  }
+
+  .compare-footer {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-block-start: 8px;
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+  }
+
+  .count {
+    flex: 1;
+  }
+
+  .failed {
+    color: var(--color-danger);
+  }
+
+  .copy {
+    padding: 2px 10px;
+    border: 0;
+    border-radius: var(--radius-capsule);
+    background: var(--color-control);
+    color: var(--color-text);
+    font: inherit;
+    cursor: default;
+    transition: background-color var(--motion-fast) var(--ease-out);
+  }
+
+  .copy:hover {
+    background: var(--color-control-hover);
+  }
+
+  .copy:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
   }
 
   .sr-only {

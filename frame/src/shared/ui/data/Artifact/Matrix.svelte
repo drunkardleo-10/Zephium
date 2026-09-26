@@ -17,7 +17,7 @@
     notes: readonly string[];
     labels: {
       unknown: string;
-      generalKnowledge: string;
+      generalKnowledge?: string;
       criterion: string;
       subject: string;
       yes: string;
@@ -94,9 +94,7 @@
                   class:yes={cell.value.present}>{cell.value.present ? labels.yes : labels.no}</span
                 >{/if}
               {#if cell?.note && !card}<span class="note">{cell.note}</span>{/if}
-              {#if cell && !card}<span class="basis">
-                  {#if cell.generalKnowledge}<span class="general">{labels.generalKnowledge}</span
-                    >{/if}
+              {#if cell?.evidence.length && !card}<span class="basis">
                   <EvidenceChips references={cell.evidence} compact {onevidence} />
                 </span>{/if}
             </td>
@@ -222,14 +220,6 @@
     align-items: center;
     gap: 4px;
     margin-block-start: 6px;
-  }
-
-  .general {
-    padding: 1px 6px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill);
-    color: var(--color-faint);
-    font-size: 10px;
   }
 
   .card .matrix {

@@ -47,6 +47,8 @@ type CompareRow = {
 };
 export type CompareModel = {
   columns: readonly CompareColumn[];
+  /** The price criterion's name, when its values were taken into the columns. */
+  priceLabel?: string;
   rows: readonly CompareRow[];
   notes: readonly string[];
 };
@@ -262,7 +264,25 @@ export function compareModel(
       },
     ];
   });
-  return { columns, rows, notes: matrix.notes };
+  const priced = price >= 0 && columns.some((column) => column.price);
+  return {
+    columns,
+    ...(priced ? { priceLabel: label(matrix.criteria[price]!.name) } : {}),
+    rows,
+    notes: matrix.notes,
+  };
+}
+
+/** The compare as CSV, subjects across as the lift shows them. */
+export function compareCsv(model: CompareModel, yes: string, no: string): string {
+  const field = (text: string) =>
+    /[",\n\r]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+  const lines = [["", ...model.columns.map((column) => column.name)]];
+  if (model.priceLabel)
+    lines.push([model.priceLabel, ...model.columns.map((column) => column.price ?? "")]);
+  for (const row of model.rows)
+    lines.push([row.label, ...row.cells.map((cell) => cellText(cell.value, yes, no))]);
+  return lines.map((line) => line.map(field).join(",")).join("\r\n");
 }
 
 /** The text a correction starts from: what the cell says now. */

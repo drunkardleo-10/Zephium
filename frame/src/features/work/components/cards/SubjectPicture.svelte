@@ -10,6 +10,7 @@
     name,
     large = false,
     homepage,
+    markSize = 32,
   }: {
     /** The admitted picture, if the run got one; nothing is ever invented. */
     picture?: ComparePicture;
@@ -17,6 +18,8 @@
     large?: boolean;
     /** Where the subject lives: without a picture, its site's icon stands on the tile. */
     homepage?: string;
+    /** The site icon's size on a tile without a picture. */
+    markSize?: number;
   } = $props();
   const source = $derived(picture ? mediaUrl(picture.profile, picture.digest) : null);
   // A picture that will not load leaves a quiet plate: never a broken glyph, never an initial.
@@ -33,7 +36,7 @@
   <img src={source} alt="" decoding="async" draggable="false" onerror={() => (failed = source)} />
 {:else if homepage !== undefined}
   <span class="mark site" aria-hidden="true" title={name}
-    ><HostGlyph url={homepage} size={32} initial={false} /></span
+    ><HostGlyph url={homepage} size={markSize} initial={false} /></span
   >
 {:else}
   <span class="mark" aria-hidden="true" title={name}

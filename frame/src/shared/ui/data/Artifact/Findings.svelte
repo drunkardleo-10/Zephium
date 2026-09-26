@@ -13,7 +13,7 @@
     items: readonly FindingView[];
     labels: {
       confidence: Record<FindingView["confidence"], string>;
-      generalKnowledge: string;
+      generalKnowledge?: string;
     };
     onevidence?: (reference: EvidenceReference) => void;
     /** Card mode: this many claims, no detail and no chips, then "+n". */
@@ -34,8 +34,6 @@
             <span class="confidence">{labels.confidence[finding.confidence]}</span>
             {#if finding.subject !== undefined && subjects[finding.subject]}<span class="subject"
                 >{subjects[finding.subject]!.name}</span
-              >{/if}
-            {#if finding.generalKnowledge}<span class="subject">{labels.generalKnowledge}</span
               >{/if}
             <EvidenceChips references={finding.evidence} compact {onevidence} />
           </div>{:else if finding.subject !== undefined && subjects[finding.subject]}<span
