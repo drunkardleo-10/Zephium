@@ -2,6 +2,7 @@
   import { untrack } from "svelte";
   import CardFrame from "./CardFrame.svelte";
   import HostGlyph from "./HostGlyph.svelte";
+  import AccountBadge from "./AccountBadge.svelte";
   import type { CanvasItem } from "../../lib/canvas-model";
   import { cardCountdown, reasonBadge, reasonSentence } from "../../lib/work-human";
   import * as m from "$shared/i18n/messages";
@@ -24,6 +25,9 @@
     }
   });
   const meta = $derived(item.unavailable || (human && !waiting) ? item.status : path);
+  const account = $derived(item.page?.account ?? null);
+  /** An open tab the request was shown, not a page it read: no frame to show. */
+  const tab = $derived(!!item.page?.tab);
   // A frame that missed once must not pin the placeholder: the store serves it
   // again once the run settles, and every refresh mints a new generation.
   let failedFrame = $state<string | null>(null);
@@ -39,8 +43,13 @@
 
 <CardFrame id={item.id} {selected} unavailable={item.unavailable} plain>
   <div class="page">
-    <div class="frame">
-      {#if frame && !failed}
+    <div class="frame" class:tab>
+      {#if tab}
+        <span class="shown">
+          <span class="caption">{item.status}</span>
+          <span class="title" title={item.title}>{item.title}</span>
+        </span>
+      {:else if frame && !failed}
         <img
           src={frame}
           alt={item.title}
@@ -76,7 +85,14 @@
     </div>
     <div class="about">
       <!-- The arc stands in for the mark while the agent reads this page. -->
-      <HostGlyph {host} {url} loading={!!item.page?.live} initial={false} />
+      <span class="marks"
+        ><HostGlyph
+          {host}
+          {url}
+          loading={!!item.page?.live}
+          initial={false}
+        />{#if account}<AccountBadge host={account} />{/if}</span
+      >
       <span class="titles">
         <strong class="host" title={url}>{host}</strong>
         {#if meta}<span class="meta" title={meta}>{meta}</span>{/if}
@@ -116,6 +132,46 @@
   .placeholder {
     display: grid;
     place-items: center;
+  }
+
+  /* A tab shown to the request: its title where a frame would be. */
+  .frame.tab {
+    place-items: stretch;
+    background: var(--color-surface);
+  }
+
+  .shown {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-inline-size: 0;
+    padding: 12px;
+  }
+
+  .caption {
+    color: var(--color-faint);
+    font-size: var(--text-caption);
+    line-height: 13px;
+  }
+
+  .title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
+    font-size: var(--text-body);
+    font-weight: 500;
+    line-height: 17px;
+    text-wrap: pretty;
+    overflow-wrap: anywhere;
+  }
+
+  .marks {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 4px;
   }
 
   .about {

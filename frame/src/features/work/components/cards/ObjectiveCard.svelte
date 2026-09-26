@@ -1,6 +1,8 @@
 <script lang="ts">
   import CardFrame from "./CardFrame.svelte";
+  import AccountBadge from "./AccountBadge.svelte";
   import type { CanvasItem } from "../../lib/canvas-model";
+  import * as m from "$shared/i18n/messages";
   let { item, selected, onaction }: { item: CanvasItem; selected: boolean; onaction: () => void } =
     $props();
 </script>
@@ -19,6 +21,13 @@
           onaction();
         }}>{item.actionLabel}</button
       >{/if}
+    {#if item.accounts?.length}<ul class="accounts">
+        {#each item.accounts as use (use.host)}<li>
+            <AccountBadge host={use.host} size={14} /><span
+              >{m.work_account_using({ host: use.host, used: use.used, pages: use.pages })}</span
+            >
+          </li>{/each}
+      </ul>{/if}
   </div>
 </CardFrame>
 
@@ -53,6 +62,32 @@
     letter-spacing: -0.005em;
     text-wrap: pretty;
     overflow-wrap: anywhere;
+  }
+
+  /* The signed-in sessions this request used: one quiet line per origin. */
+  .accounts {
+    display: flex;
+    flex-direction: column;
+    align-self: stretch;
+    margin: auto 0 0;
+    padding: 4px 0 0;
+    list-style: none;
+  }
+
+  .accounts li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-inline-size: 0;
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+    line-height: 16px;
+  }
+
+  .accounts span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .link {

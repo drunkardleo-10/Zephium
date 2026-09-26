@@ -50,7 +50,7 @@ export type WorkStage = {
   /** Where the lane's saved cards stand: their lane place plus the person's offset. */
   targets: Record<string, CanvasPosition>;
   /** What the request card says under its words. */
-  facts: Pick<CanvasItem, "elapsed" | "counts">;
+  facts: Pick<CanvasItem, "elapsed" | "counts" | "accounts">;
 };
 const REQUEST_TEXT = 512;
 
@@ -114,7 +114,7 @@ export function environmentStages(
     executions: string[];
     contents: StageContents;
     size: CanvasSize;
-    facts: Pick<CanvasItem, "elapsed" | "counts">;
+    facts: Pick<CanvasItem, "elapsed" | "counts" | "accounts">;
   }[] = [];
   for (const element of snapshot.elements) {
     if (element.reference.kind !== "objective") continue;
@@ -139,7 +139,10 @@ export function environmentStages(
           offsets,
         ),
         // A request is as tall as its words: a size saved by an older placement never clips them.
-        size: requestSize(draft.request, { footer: !!facts.counts }),
+        size: requestSize(draft.request, {
+          footer: !!facts.counts,
+          accounts: facts.accounts?.length ?? 0,
+        }),
         facts,
       });
     }

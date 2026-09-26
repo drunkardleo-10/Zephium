@@ -1,6 +1,7 @@
 import type {
   WorkArtifactV1,
   WorkCommandRecordV1,
+  WorkContextTabV1,
   WorkEnvironmentElement,
   WorkEnvironmentSnapshot,
   WorkExecutionFact,
@@ -117,8 +118,18 @@ export function sourceRows(execution: WorkExecutionFact): SourceRow[] {
 }
 
 type Step = NonNullable<WorkExecutionFact["steps"]>[number];
-export type PageGroup = { id: string; url: string; steps: Step[]; page?: WorkPageV1 };
-/** One card per page: every step that opened the same URL folds into it. */
+export type PageGroup = {
+  id: string;
+  url: string;
+  steps: Step[];
+  page?: WorkPageV1;
+  /** An open tab the person let the request see; it stands as a page until one is read. */
+  tab?: WorkContextTabV1;
+};
+/**
+ * One card per page: every step that opened the same URL folds into it. The
+ * open tabs the request was given follow, unread, unless a read took one over.
+ */
 export function pageGroups(
   execution: WorkExecutionFact,
   recorded: readonly WorkPageV1[],
@@ -135,6 +146,12 @@ export function pageGroups(
     if (page?.frame && (!entry.page?.frame || page.live)) entry.page = page;
     else entry.page ??= page;
     byUrl.set(url, entry);
+  }
+  for (const [index, tab] of (execution.spec.context?.tabs ?? []).entries()) {
+    const url = `https://${tab.host}${tab.path}`;
+    const read = byUrl.get(url);
+    if (read) read.tab ??= tab;
+    else byUrl.set(url, { id: `page:${execution.id}:tab:${index}`, url, steps: [], tab });
   }
   return [...byUrl.values()];
 }
@@ -372,19 +389,25 @@ export function laneOffsets(snapshot: WorkEnvironmentSnapshot): Map<string, Lane
 export function laneFacts(
   executions: readonly WorkExecutionFact[],
   recorded: readonly WorkPageV1[] = [],
-): Pick<CanvasItem, "elapsed" | "counts"> {
+): Pick<CanvasItem, "elapsed" | "counts" | "accounts"> {
   let elapsed = 0;
   let sources = 0;
   let pages = 0;
+  // One line per origin: a later run of the same message speaks for it.
+  const accounts = new Map<string, NonNullable<CanvasItem["accounts"]>[number]>();
   for (const execution of executions) {
     for (const step of execution.steps ?? []) elapsed += step.measurements?.wall_millis ?? 0;
     if (!isAgentExecution(execution)) continue;
     sources += sourceRows(execution).length;
-    pages += pageGroups(execution, recorded).length;
+    // A tab the request was only shown is not a page it read.
+    pages += pageGroups(execution, recorded).filter((group) => group.steps.length).length;
+    for (const use of execution.accounts ?? [])
+      accounts.set(use.host, { host: use.host, used: use.pages_used, pages: use.pages });
   }
   return {
     ...(elapsed ? { elapsed } : {}),
     ...(sources || pages ? { counts: { sources, pages } } : {}),
+    ...(accounts.size ? { accounts: [...accounts.values()] } : {}),
   };
 }
 

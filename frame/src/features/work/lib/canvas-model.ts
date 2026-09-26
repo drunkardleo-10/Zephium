@@ -115,6 +115,10 @@ export type CanvasItem = {
     live: boolean;
     /** Set while the run is holding this page open for a person. */
     human?: HumanPage;
+    /** Read with the person's signed-in session: the host it was granted on. */
+    account?: string;
+    /** An open tab the request was shown, not read: no frame, its title and a caption. */
+    tab?: boolean;
   };
   unavailable?: boolean;
   /** The stage a run is working in right now; it glows while that is true. */
@@ -125,6 +129,8 @@ export type CanvasItem = {
   elapsed?: number;
   /** A request: what its lane read, once it read anything. */
   counts?: { sources: number; pages: number };
+  /** A request: each signed-in origin its runs were granted, and the pages used of it. */
+  accounts?: { host: string; used: number; pages: number }[];
   /** An admitted media asset; the image URL is derived from profile and digest. */
   media?: { profile: string; asset: MediaAssetV1 };
   /** An admitted image related to this element, shown as its picture. */

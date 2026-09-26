@@ -203,15 +203,26 @@ export function stepSize(text: string, detail = ""): CanvasSize {
 /** A caption, the person's words up to eight lines, then the lane's counts once it has any. */
 export function requestSize(
   text: string,
-  { action = false, footer = false }: { action?: boolean; footer?: boolean } = {},
+  {
+    action = false,
+    footer = false,
+    accounts = 0,
+  }: { action?: boolean; footer?: boolean; accounts?: number } = {},
 ): CanvasSize {
   const lines = Math.max(1, textLines(text, 300 - 24, ADVANCE.body, 8));
   return {
     width: 300,
     height: clamp(
-      8 + LINE.caption + 2 + lines * LINE.body + 8 + (footer ? 22 : 0) + (action ? 28 : 0),
+      8 +
+        LINE.caption +
+        2 +
+        lines * LINE.body +
+        8 +
+        (footer ? 22 : 0) +
+        (accounts ? 4 + accounts * LINE.label : 0) +
+        (action ? 28 : 0),
       64,
-      240,
+      240 + accounts * LINE.label,
     ),
   };
 }
@@ -248,7 +259,11 @@ export function defaultSize(item: CanvasItem): CanvasSize {
       return { width: 248, height: 200 };
     case "objective":
     case "request":
-      return requestSize(item.title, { action: !!item.actionLabel, footer: !!item.counts });
+      return requestSize(item.title, {
+        action: !!item.actionLabel,
+        footer: !!item.counts,
+        accounts: item.accounts?.length ?? 0,
+      });
     case "responsibility":
       return { width: 280, height: 150 };
     case "page":

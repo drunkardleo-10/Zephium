@@ -760,23 +760,39 @@ export function environmentPages(
         // The title a read observed names the card; the host stands in until one did.
         const observed = entry.steps.findLast((step) => step.local?.page_title?.trim())?.local
           ?.page_title;
+        // An open tab the request was shown stands as itself until a read takes it over.
+        const shown = !!entry.tab && !entry.steps.length;
+        const account = entry.steps.find((step) => step.account?.badge)?.account?.host;
         items.push({
           id,
           type: "page",
           kind: m.work_env_page(),
-          title: clipText(observed?.trim() || pageHost || m.work_env_page(), TITLE_TEXT),
+          title: clipText(
+            observed?.trim() || entry.tab?.title.trim() || pageHost || m.work_env_page(),
+            TITLE_TEXT,
+          ),
           detail: clipText(url, DETAIL_TEXT),
-          status: held
-            ? (phaseLabel(held.phase) ?? m.work_line_waiting_for_you())
-            : live
-              ? paused
-                ? m.work_line_paused()
-                : m.work_env_page_live()
-              : succeeded
-                ? m.work_env_page_read()
-                : clipText(refused, STATUS_TEXT) || m.work_env_status_failed(),
-          page: { url, host: pageHost, frame, live, ...(held ? { human: humanPage(held) } : {}) },
-          ...(live || succeeded || held ? {} : { unavailable: true }),
+          status: shown
+            ? m.work_env_tab_caption()
+            : held
+              ? (phaseLabel(held.phase) ?? m.work_line_waiting_for_you())
+              : live
+                ? paused
+                  ? m.work_line_paused()
+                  : m.work_env_page_live()
+                : succeeded
+                  ? m.work_env_page_read()
+                  : clipText(refused, STATUS_TEXT) || m.work_env_status_failed(),
+          page: {
+            url,
+            host: pageHost,
+            frame,
+            live,
+            ...(held ? { human: humanPage(held) } : {}),
+            ...(account ? { account } : {}),
+            ...(shown ? { tab: true } : {}),
+          },
+          ...(shown || live || succeeded || held ? {} : { unavailable: true }),
         });
         positions[id] = position;
         // A page is evidence for the subjects its reads established and the findings citing them.
