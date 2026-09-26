@@ -151,6 +151,25 @@ pub struct WorkAccountApprovalRequestV1 {
     /// The attached browser element on the canvas.
     pub element: WorkElementId,
     pub effect: WorkAccountEffectV1,
+    /// `origin` drafts a grant to read pages on the tab's origin for the
+    /// next request, instead of one exact page.
+    #[serde(default, skip_serializing_if = "WorkAccountModeV1::is_page")]
+    pub mode: WorkAccountModeV1,
+    /// Signed-in pages an origin grant may open (1–12; 12 when absent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<u8>,
+}
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkAccountModeV1 {
+    #[default]
+    Page,
+    Origin,
+}
+impl WorkAccountModeV1 {
+    pub fn is_page(&self) -> bool {
+        *self == Self::Page
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -354,6 +373,12 @@ pub enum WorkReplyV1 {
         work: WorkId,
         expected_revision: WorkRevision,
         spec: WorkExecutionSpec,
+    },
+    /// An origin grant for the next request: the person approves it, and
+    /// `Run` carries it in the agent grant's `accounts`.
+    AccountGrantDraft {
+        work: WorkId,
+        grant: WorkAccountGrantV1,
     },
     Projection {
         projection: Box<WorkProjectionV1>,
