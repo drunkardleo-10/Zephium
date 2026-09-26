@@ -1,9 +1,11 @@
 <script lang="ts">
+  import { getContext } from "svelte";
   import CardFrame from "./CardFrame.svelte";
   import HostGlyph from "./HostGlyph.svelte";
   import Icon from "$shared/ui/Icon";
   import { ArrowDown01Icon } from "../../lib/icons";
   import type { CanvasItem } from "../../lib/canvas-model";
+  import { canvasBoard, type BoardActions } from "../../lib/canvas-context";
   import { SOURCE_ROWS } from "../../lib/card-size";
   import * as m from "$shared/i18n/messages";
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
@@ -11,6 +13,8 @@
   const unread = $derived(item.unread ?? []);
   /** The pages that could not be read take the rows' place while they are open. */
   let open = $state(false);
+  const actions = getContext<BoardActions | undefined>(canvasBoard);
+  const frames = $derived(item.frames ?? []);
 </script>
 
 <!-- The count heads the card; each row carries its own site's mark. -->
@@ -23,6 +27,28 @@
   dense
   footer={unread.length ? more : undefined}
 >
+  {#if frames.length}<ul class="frames" aria-label={m.work_board_frames()}>
+      {#each frames as page (page.key)}<li>
+          <button
+            type="button"
+            class="frame nodrag nopan"
+            title={page.url}
+            onclick={(event) => {
+              event.stopPropagation();
+              actions?.page(page.url);
+            }}
+            ><img
+              src={page.frame}
+              alt={page.host}
+              loading="lazy"
+              decoding="async"
+              draggable="false"
+              width="64"
+              height="40"
+            /></button
+          >
+        </li>{/each}
+    </ul>{/if}
   {#if open && unread.length}
     <ul class="rows unread" aria-label={m.work_env_unread_list()}>
       {#each unread as page (page.key)}
@@ -38,7 +64,7 @@
       {#each rows.slice(0, SOURCE_ROWS) as row (row.key)}
         <li>
           <HostGlyph host={row.where} url={row.url} file={!!row.file} size={14} />
-          <span class="where">{row.where}</span>
+          <span class="where">{row.where.replace(/^www\./u, "")}</span>
           <span class="title" class:refused={!!row.note} title={row.note || row.title}
             >{row.note || row.title}</span
           >
@@ -65,6 +91,36 @@
   >{/snippet}
 
 <style>
+  .frames {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+    margin: 0 0 12px;
+    padding: 0;
+    list-style: none;
+  }
+
+  .frame {
+    display: block;
+    inline-size: 100%;
+    aspect-ratio: 16 / 10;
+    overflow: hidden;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-inset);
+    background: var(--color-fill);
+    box-shadow: inset 0 0 0 1px var(--color-border);
+    cursor: default;
+  }
+
+  .frame img {
+    display: block;
+    inline-size: 100%;
+    block-size: 100%;
+    object-fit: cover;
+    object-position: top;
+  }
+
   .rows {
     display: flex;
     flex-direction: column;

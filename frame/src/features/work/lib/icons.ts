@@ -1,5 +1,6 @@
+export { default as AccountSetting01Icon } from "@hugeicons/core-free-icons/AccountSetting01Icon";
 export { default as Add01Icon } from "@hugeicons/core-free-icons/Add01Icon";
-export { default as AirplaneTakeOff01Icon } from "@hugeicons/core-free-icons/AirplaneTakeOff01Icon";
+export { default as Alert02Icon } from "@hugeicons/core-free-icons/Alert02Icon";
 export { default as Archive01Icon } from "@hugeicons/core-free-icons/Archive01Icon";
 export { default as ArrowDown01Icon } from "@hugeicons/core-free-icons/ArrowDown01Icon";
 export { default as ArrowLeft02Icon } from "@hugeicons/core-free-icons/ArrowLeft02Icon";
@@ -9,12 +10,11 @@ export { default as ArrowRight02Icon } from "@hugeicons/core-free-icons/ArrowRig
 export { default as ArrowUp02Icon } from "@hugeicons/core-free-icons/ArrowUp02Icon";
 export { default as ArrowUpRight01Icon } from "@hugeicons/core-free-icons/ArrowUpRight01Icon";
 export { default as BrowserIcon } from "@hugeicons/core-free-icons/BrowserIcon";
-export { default as Calendar03Icon } from "@hugeicons/core-free-icons/Calendar03Icon";
 export { default as Cancel01Icon } from "@hugeicons/core-free-icons/Cancel01Icon";
 export { default as ChartColumnIcon } from "@hugeicons/core-free-icons/ChartColumnIcon";
 export { default as CheckListIcon } from "@hugeicons/core-free-icons/CheckListIcon";
-export { default as CheckmarkCircle02Icon } from "@hugeicons/core-free-icons/CheckmarkCircle02Icon";
 export { default as CircleIcon } from "@hugeicons/core-free-icons/CircleIcon";
+export { default as Clock01Icon } from "@hugeicons/core-free-icons/Clock01Icon";
 export { default as ComputerTerminal01Icon } from "@hugeicons/core-free-icons/ComputerTerminal01Icon";
 export { default as CubeIcon } from "@hugeicons/core-free-icons/CubeIcon";
 export { default as Database01Icon } from "@hugeicons/core-free-icons/Database01Icon";
@@ -25,7 +25,7 @@ export { default as Folder01Icon } from "@hugeicons/core-free-icons/Folder01Icon
 export { default as FolderAddIcon } from "@hugeicons/core-free-icons/FolderAddIcon";
 export { default as GitCompareIcon } from "@hugeicons/core-free-icons/GitCompareIcon";
 export { default as GlobalIcon } from "@hugeicons/core-free-icons/GlobalIcon";
-export { default as Home01Icon } from "@hugeicons/core-free-icons/Home01Icon";
+export { default as HelpCircleIcon } from "@hugeicons/core-free-icons/HelpCircleIcon";
 export { default as Image01Icon } from "@hugeicons/core-free-icons/Image01Icon";
 export { default as Image02Icon } from "@hugeicons/core-free-icons/Image02Icon";
 export { default as LaptopIcon } from "@hugeicons/core-free-icons/LaptopIcon";
@@ -33,12 +33,11 @@ export { default as LayoutGridIcon } from "@hugeicons/core-free-icons/LayoutGrid
 export { default as LeftToRightListBulletIcon } from "@hugeicons/core-free-icons/LeftToRightListBulletIcon";
 export { default as Link04Icon } from "@hugeicons/core-free-icons/Link04Icon";
 export { default as LockIcon } from "@hugeicons/core-free-icons/LockIcon";
+export { default as Message01Icon } from "@hugeicons/core-free-icons/Message01Icon";
 export { default as Mic01Icon } from "@hugeicons/core-free-icons/Mic01Icon";
 export { default as MinusSignIcon } from "@hugeicons/core-free-icons/MinusSignIcon";
-export { default as Money03Icon } from "@hugeicons/core-free-icons/Money03Icon";
 export { default as Note01Icon } from "@hugeicons/core-free-icons/Note01Icon";
 export { default as NoteAddIcon } from "@hugeicons/core-free-icons/NoteAddIcon";
-export { default as PassportIcon } from "@hugeicons/core-free-icons/PassportIcon";
 export { default as Pdf01Icon } from "@hugeicons/core-free-icons/Pdf01Icon";
 export { default as PencilEdit02Icon } from "@hugeicons/core-free-icons/PencilEdit02Icon";
 export { default as PlayIcon } from "@hugeicons/core-free-icons/PlayIcon";
