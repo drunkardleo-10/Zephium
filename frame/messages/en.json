@@ -1724,7 +1724,6 @@
   "work_board_details": "Details",
   "work_board_fewer": "Show less",
   "work_board_frames": "Pages it read",
-  "work_board_more": "{count} more",
   "work_board_pending": "The answer is on its way",
   "work_board_read_all": "Read it all",
   "work_board_trail": "What it did",
@@ -1755,5 +1754,7 @@
   "work_trail_unread_one": "1 page would not open",
   "work_trail_you_answered": "You answered: {answer}",
   "work_trail_you_said": "You said: {text}",
-  "work_board_compare": "Compare side by side"
+  "work_board_compare": "Compare side by side",
+  "work_board_values": "Exact values",
+  "work_board_show_all": "Show all {count}"
 }

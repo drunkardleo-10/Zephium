@@ -110,7 +110,9 @@
     if (rule !== "rows") return [];
     return shape.series.map((series) => ({ name: series.label, color: series.color, share: "" }));
   });
-  const table = $derived(!spark && (!compact || labels.legend === "table"));
+  const table = $derived(
+    !spark && spec.values !== false && (!compact || labels.legend === "table"),
+  );
   const shares = new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 0 });
   const range = $derived(extremes(spec));
   const reading = $derived(

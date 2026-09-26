@@ -12,7 +12,8 @@ export type LayoutBlock = {
 };
 export type BoardLayout = { width: number; height: number; at: Record<string, Rect> };
 
-export const BOARD = { min: 720, max: 1280, gap: 24, row: 24 } as const;
+/** A board is 720–1280 wide; a diagram that leads may widen it to 1600 rather than shrink. */
+export const BOARD = { min: 720, max: 1280, wide: 1600, gap: 24, row: 24 } as const;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -58,9 +59,15 @@ function pack(blocks: readonly LayoutBlock[], width: number, open?: string): Lay
     const supporting = block.emphasis === "supporting";
     const cap = supporting ? 3 : 2;
     const head = row[0];
+    // A primary block left alone in its row takes the supporting blocks that fit beside it.
+    const joins =
+      supporting &&
+      row.length >= 1 &&
+      row.every((entry) => entry.emphasis === "supporting" || entry === head) &&
+      head?.emphasis === "primary";
     const fits =
       !!head &&
-      (head.emphasis === "supporting") === supporting &&
+      ((head.emphasis === "supporting") === supporting || joins) &&
       row.length < cap &&
       row.reduce((sum, entry) => sum + min(entry) + BOARD.gap, 0) + min(block) <= width &&
       // A group starts its own row and keeps it to itself.
@@ -107,14 +114,17 @@ export function boardLayout(
 ): BoardLayout {
   const laid = reading(blocks.filter((block) => !pinned.has(block.id)));
   if (!laid.length) return { width: BOARD.min, height: 0, at: {} };
-  const asked = pack(laid, BOARD.max).reduce((need, row) => {
+  const cap = laid.some((block) => block.emphasis === "hero" && block.kind === "diagram")
+    ? BOARD.wide
+    : BOARD.max;
+  const asked = pack(laid, cap).reduce((need, row) => {
     const ideal = row.reduce(
-      (sum, block, index) => sum + Math.min(block.width.ideal, BOARD.max) + (index ? BOARD.gap : 0),
+      (sum, block, index) => sum + Math.min(block.width.ideal, cap) + (index ? BOARD.gap : 0),
       0,
     );
     return Math.max(need, ideal);
   }, 0);
-  const width = Math.round(clamp(asked, BOARD.min, BOARD.max));
+  const width = Math.round(clamp(asked, BOARD.min, cap));
   const at: Record<string, Rect> = {};
   let y = 0;
   for (const row of pack(laid, width, open)) {

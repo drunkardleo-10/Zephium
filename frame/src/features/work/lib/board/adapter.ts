@@ -205,8 +205,26 @@ export function boardOf(input: BoardInput): Board {
     });
   if (!title) title = blocks.find((block) => block.title)?.title ?? "";
   group(blocks);
+  // A short answer reads on from its lead, above everything it introduces.
+  const more = prose && short(prose) ? prose : undefined;
+  if (more) blocks.splice(blocks.indexOf(more), 1);
   emphasize(blocks);
-  return { id: input.id, title, lead, blocks, sources: Object.fromEntries(sources) };
+  return {
+    id: input.id,
+    title,
+    lead,
+    ...(more ? { more } : {}),
+    blocks,
+    sources: Object.fromEntries(sources),
+  };
+}
+
+/** An answer of a few plain paragraphs, nothing a block would hold. */
+const SHORT = 420;
+function short(prose: ProseBlock): boolean {
+  if (prose.state !== "ready" || !prose.blocks.length) return false;
+  if (!prose.blocks.every((block) => block.type === "paragraph")) return false;
+  return prose.blocks.reduce((sum, block) => sum + plain(block).length, 0) <= SHORT;
 }
 
 function uniqueBy(references: readonly EvidenceReference[]): EvidenceReference[] {
@@ -389,7 +407,10 @@ function headlineOf(chart: Extract<ArtifactView["content"], { kind: "chart" }>) 
   return { label: chart.yLabel || spec.series[0]!.name, value: `${low}–${high}` };
 }
 
-/** A chart sits with the table it draws: shared categories, else shared words in their titles. */
+/**
+ * A chart and the table of its own rows are one block, the table its exact
+ * values; a chart whose table only shares words with it sits beside it.
+ */
 function group(blocks: Block[]) {
   const tables = blocks.filter((block): block is TableBlock => block.kind === "table");
   const taken = new Set<string>();
@@ -405,6 +426,13 @@ function group(blocks: Block[]) {
       free.find((table) => overlap(terms(table.title ?? ""), terms(chart.title ?? "")) > 0);
     if (!match) continue;
     taken.add(match.id);
+    // The same rows twice are one block: the chart, its table as its exact values.
+    if (labels.size > 0 && shared(match).length * 2 >= labels.size) {
+      chart.values = { columns: match.columns, rows: match.rows };
+      chart.title ??= match.title;
+      blocks.splice(blocks.indexOf(match), 1);
+      continue;
+    }
     match.group = chart.group = `pair:${match.id}`;
     // The chart follows its table.
     blocks.splice(blocks.indexOf(chart), 1);

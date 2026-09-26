@@ -252,9 +252,9 @@
     "description": "Measured 202469 JS and 8555 CSS bytes: the diagram lift's picture at 1.25 scale with its parts and flows lists, loaded only when a diagram is lifted; its own chunk is 6.7 KB JS and 4.0 KB CSS, the rest the shared Work graph (favicons, vendor names, the layout)."
   },
   "lazy:features/work/lib/diagram-worker.ts": {
-    "js": 164000,
+    "js": 168500,
     "css": 4200,
-    "description": "Measured 160928 JS and 3963 CSS bytes: the ELK adapter (graph in, layout out) and the worker client, 5.8 KB of its own over the shared runtime. ELK itself is in no budgeted graph: the worker script (1.43 MB) and the in-page fallback script (elk.bundled, 1.61 MB, loaded as a plain script so no page chunk carries ELK's CommonJS wrapper) load only when a diagram is laid out."
+    "description": "Measured 160928 JS and 3963 CSS bytes: the ELK adapter (graph in, layout out) and the worker client, 5.8 KB of its own over the shared runtime. ELK itself is in no budgeted graph: the worker script (1.43 MB) and the in-page fallback script (elk.bundled, 1.61 MB, loaded as a plain script so no page chunk carries ELK's CommonJS wrapper) load only when a diagram is laid out. The tiered layout joins the diagram module this graph shares (167891 measured)."
   },
   "lazy:features/work/components/WorkSubjectInspector.svelte": {
     "js": 212500,

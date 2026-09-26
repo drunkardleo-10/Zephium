@@ -562,6 +562,8 @@ export function environmentAgents(
       const stand = standFor(execution, doing, stage);
       positions[id] = stand;
       item.agent!.stand = stand;
+      // The trail already says what it is doing; the orb only shows where.
+      if (stage.trail.some((line) => line.live)) delete item.agent!.caption;
     }
     items.push(item);
   }
@@ -770,6 +772,16 @@ export function environmentBoards(
         detail: clipText(stage.board.lead, DETAIL_TEXT),
         status: "",
         size: size(stage.column.head),
+        ...(stage.board.more
+          ? {
+              block: {
+                data: stage.board.more,
+                sources: stage.board.sources,
+                open: false,
+                live: stage.live,
+              },
+            }
+          : {}),
       });
     for (const block of stage.board.blocks)
       items.push({

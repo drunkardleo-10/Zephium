@@ -1,5 +1,7 @@
 <script lang="ts">
   import { getContext, onMount, untrack } from "svelte";
+  import { provideSiteMarks } from "$shared/ui/data/Artifact/site-marks";
+  import { siteMark } from "../cards/HostGlyph.svelte";
   import { canvasBoard, type BoardActions } from "../../lib/canvas-context";
   import type { CanvasItem } from "../../lib/canvas-model";
   import { PAD } from "../../lib/board/size";
@@ -23,6 +25,8 @@
     selected = false,
   }: { id: string; item: CanvasItem; selected?: boolean } = $props();
   const actions = getContext<BoardActions | undefined>(canvasBoard);
+  // Source chips draw the sites' real marks.
+  provideSiteMarks(siteMark);
   const block = $derived(item.block!.data);
   const sources = $derived(item.block!.sources);
   const open = $derived(item.block!.open);
@@ -100,7 +104,7 @@
     {:else if block.kind === "gallery"}<Gallery {block} {sources} {actions} {open} width={inner} />
     {:else if block.kind === "diagram"}<Diagram {block} width={inner} {actions} />
     {:else if block.kind === "table"}<Table {block} {actions} {open} />
-    {:else if block.kind === "chart"}<Chart {block} width={inner} />
+    {:else if block.kind === "chart"}<Chart {block} width={inner} {actions} {open} />
     {:else if block.kind === "comparison"}<Comparison {block} {actions} {open} />
     {:else if block.kind === "checklist"}<Checklist {block} />
     {:else if block.kind === "code"}<Code {block} {actions} {open} />

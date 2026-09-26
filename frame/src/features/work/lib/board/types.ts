@@ -105,6 +105,8 @@ export type ChartBlock = Shared & {
   chart: Chart;
   /** The sum or the span the chart carries, said above it. */
   headline?: { label: string; value: string };
+  /** The table that holds the same rows: the chart's exact values, opened in place. */
+  values?: { columns: TableColumn[]; rows: readonly (readonly string[])[] };
 };
 export type TimelineBlock = Shared & { kind: "timeline"; stops: TimelineStop[] };
 export type DiagramBlock = Shared & { kind: "diagram"; diagram: Diagram };
@@ -143,6 +145,8 @@ export type Board = {
   id: string;
   title: string;
   lead: string;
+  /** A short answer's rest, read on from the lead under the title rather than as a block. */
+  more?: ProseBlock;
   blocks: Block[];
   /** Every source a block names, by key. */
   sources: Readonly<Record<string, EvidenceReference>>;

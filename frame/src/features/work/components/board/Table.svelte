@@ -8,7 +8,14 @@
     block,
     actions,
     open = false,
-  }: { block: TableBlock; actions?: BoardActions; open?: boolean } = $props();
+    within = false,
+  }: {
+    block: TableBlock;
+    actions?: BoardActions;
+    open?: boolean;
+    /** Drawn inside another block, which opens and closes it. */
+    within?: boolean;
+  } = $props();
   const grid = $derived({
     columns: block.columns.map((column) => column.label),
     rows: block.rows.map((row) => [...row]),
@@ -105,7 +112,7 @@
     </table>
   </div>
   {#if rest > 0 || open}<footer>
-      {#if rest > 0}<button
+      {#if rest > 0 && !within}<button
           type="button"
           class="more nodrag nopan"
           onclick={() => actions?.toggle(block.id)}

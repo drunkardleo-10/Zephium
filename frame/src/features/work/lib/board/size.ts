@@ -28,6 +28,10 @@ export const GALLERY = 6;
 export const TABLE_ROWS = 8;
 export const CODE_LINES = 16;
 export const CARD = { width: 216, gap: 12 } as const;
+/** A card with a picture is as wide as its picture; one with a mark beside its words, wider and fewer across. */
+export const cardWidth = (block: { entities: readonly { image?: unknown }[] }) =>
+  block.entities.some((entity) => entity.image) ? CARD.width : 300;
+const MARKED_ACROSS = 3;
 const COLUMN: Record<ColumnType, number> = {
   text: 150,
   long: 300,
@@ -44,10 +48,11 @@ export function widthRange(block: Block): { min: number; ideal: number; max: num
     case "entity":
       return { min: 260, ideal: 300, max: 340 };
     case "gallery": {
-      const shown =
-        Math.min(block.entities.length, GALLERY) + (block.entities.length > GALLERY ? 1 : 0);
-      const across = (count: number) => count * CARD.width + (count - 1) * CARD.gap + PAD * 2;
-      return { min: across(2), ideal: across(shown), max: 1280 };
+      const card = cardWidth(block);
+      const shown = Math.min(block.entities.length, card === CARD.width ? GALLERY : MARKED_ACROSS);
+      const across = (count: number) => count * card + (count - 1) * CARD.gap + PAD * 2;
+      // Cards with a mark read one under another when the room is narrow.
+      return { min: across(card === CARD.width ? 2 : 1), ideal: across(shown), max: 1280 };
     }
     case "comparison": {
       const count =
@@ -59,16 +64,18 @@ export function widthRange(block: Block): { min: number; ideal: number; max: num
     }
     case "table": {
       const ideal = block.columns.reduce((sum, column) => sum + COLUMN[column.type], PAD * 2);
-      return { min: Math.min(ideal, 360), ideal, max: Math.max(ideal, 420) };
+      // A table with a long column reads better wide; one of figures stays tight.
+      const long = block.columns.some((column) => column.type === "long");
+      return { min: Math.min(ideal, 360), ideal, max: Math.max(ideal + (long ? 360 : 80), 420) };
     }
     case "chart":
-      return { min: 340, ideal: 480, max: 640 };
+      return block.values ? { min: 420, ideal: 560, max: 720 } : { min: 340, ideal: 480, max: 640 };
     case "timeline":
       return { min: 480, ideal: Math.max(640, block.stops.length * 200), max: 1280 };
     case "diagram": {
       const layout = diagramLayout(block.diagram);
       const ideal = Math.ceil(layout.bounds.width) + PAD * 2;
-      return { min: Math.min(ideal, 720), ideal, max: 1280 };
+      return { min: Math.min(ideal, 720), ideal, max: 1600 };
     }
     case "checklist":
       return { min: 300, ideal: 380, max: 460 };
@@ -108,10 +115,12 @@ export function estimate(block: Block, width: number, open = false): number {
       );
     case "gallery": {
       const shown = open ? block.entities.length : Math.min(block.entities.length, GALLERY);
-      const across = Math.max(1, Math.floor((inner + CARD.gap) / (CARD.width + CARD.gap)));
-      const rows = Math.ceil((shown + (!open && block.entities.length > GALLERY ? 1 : 0)) / across);
-      const card = (block.entities.some((entity) => entity.image) ? 136 : 48) + 150;
-      return frame + rows * card + (rows - 1) * CARD.gap;
+      const across = Math.max(1, Math.floor((inner + CARD.gap) / (cardWidth(block) + CARD.gap)));
+      const rows = Math.ceil(shown / across);
+      const card = block.entities.some((entity) => entity.image) ? 136 + 150 : 120;
+      const footer = block.compare || block.entities.length > GALLERY ? 42 : 0;
+      const compare = open && block.compare ? 60 + block.compare.criteria.length * 44 : 0;
+      return frame + rows * card + (rows - 1) * 20 + footer + compare;
     }
     case "comparison": {
       const rows =
@@ -126,7 +135,12 @@ export function estimate(block: Block, width: number, open = false): number {
       return frame + 36 + rows * 38 + (block.rows.length > TABLE_ROWS ? 40 : 0);
     }
     case "chart":
-      return frame + (block.headline ? 52 : 0) + 260;
+      return (
+        frame +
+        (block.headline ? 52 : 0) +
+        260 +
+        (block.values ? 40 + (open ? 60 + block.values.rows.length * 38 : 0) : 0)
+      );
     case "timeline":
       return frame + (block.stops.length <= 6 && width >= 640 ? 150 : block.stops.length * 56);
     case "diagram":

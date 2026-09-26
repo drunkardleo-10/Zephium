@@ -107,7 +107,7 @@
         const node = byId.get(id);
         return node ? [node.x] : [];
       });
-      return xs.length ? [{ name: layer.name, x: Math.min(...xs), y: Math.max(0, top - 22) }] : [];
+      return xs.length ? [{ name: layer.name, x: Math.min(...xs), y: Math.max(0, top - 24) }] : [];
     });
   });
   const shift = (points: readonly { x: number; y: number }[]) =>
@@ -254,11 +254,11 @@
 
   .tier {
     position: absolute;
-    color: var(--color-faint);
-    font-size: var(--text-caption);
+    color: var(--color-muted);
+    font-size: var(--text-label);
     font-weight: 500;
     letter-spacing: 0.04em;
-    line-height: 14px;
+    line-height: 16px;
     text-transform: uppercase;
     white-space: nowrap;
   }
@@ -309,15 +309,15 @@
   .plate {
     position: absolute;
     box-sizing: border-box;
-    max-inline-size: 160px;
+    max-inline-size: 220px;
     padding: 1px 6px;
     translate: -50% -50%;
     inline-size: max-content;
     border-radius: var(--radius-inset);
     background: var(--color-surface);
-    color: var(--color-muted);
-    font-size: var(--text-caption);
-    line-height: 15px;
+    color: var(--color-label-secondary);
+    font-size: var(--text-label);
+    line-height: 16px;
     text-align: center;
     overflow-wrap: anywhere;
     pointer-events: none;
@@ -410,7 +410,7 @@
   .pop-kind {
     margin: 0;
     color: var(--color-faint);
-    font-size: var(--text-caption);
+    font-size: var(--text-label);
   }
 
   .pop-name {

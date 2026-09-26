@@ -63,11 +63,17 @@ test("a cycle is cut where it closes, and a part with no edges stands with the s
   ]);
 });
 
-test("stated layers are the columns, in their order, with unlayered parts last", () => {
+test("stated layers are the columns, in their order, with unlayered parts last, one column each", () => {
   const diagram: Diagram = {
     kind: "diagram",
-    nodes: [node("db", "data"), node("web", "edge"), node("api", "app"), node("mail")],
-    edges: [edge("web", "api"), edge("api", "db"), edge("api", "mail")],
+    nodes: [
+      node("db", "data"),
+      node("web", "edge"),
+      node("api", "app"),
+      node("jobs", "app"),
+      node("mail"),
+    ],
+    edges: [edge("web", "api"), edge("api", "db"), edge("api", "mail"), edge("jobs", "db")],
     layers: [
       { id: "edge", name: "Edge" },
       { id: "app", name: "Application" },
@@ -77,20 +83,19 @@ test("stated layers are the columns, in their order, with unlayered parts last",
   };
   expect(diagramColumns(diagram)).toEqual([
     { layer: "Edge", nodes: ["web"] },
-    { layer: "Application", nodes: ["api"] },
+    { layer: "Application", nodes: ["api", "jobs"] },
     { layer: "Data", nodes: ["db"] },
     { nodes: ["mail"] },
   ]);
   const layout = diagramLayout(diagram);
-  // Cards 32 px apart where no flow is named, under a 16 px band for the layers' captions.
-  const { width: w, height: h } = DIAGRAM.node;
-  expect(layout.at).toEqual({
-    web: { x: 0, y: 16 },
-    api: { x: w + 32, y: 16 },
-    db: { x: 2 * (w + 32), y: 16 },
-    mail: { x: 3 * (w + 32), y: 16 },
-  });
-  expect([layout.width, layout.height]).toEqual([4 * w + 3 * 32, 16 + h]);
+  const x = (id: string) => layout.at[id]!.x;
+  expect(layout.settled).toBe(true);
+  expect(x("api")).toBe(x("jobs"));
+  expect(x("web") + DIAGRAM.node.width).toBeLessThan(x("api"));
+  expect(x("api") + DIAGRAM.node.width).toBeLessThan(x("db"));
+  expect(x("db") + DIAGRAM.node.width).toBeLessThan(x("mail"));
+  // Under the band that names the tiers.
+  expect(Math.min(...Object.values(layout.at).map((at) => at.y))).toBe(DIAGRAM.layer);
   expect(layout.layers.map((layer) => layer.name)).toEqual(["Edge", "Application", "Data"]);
 });
 
@@ -123,7 +128,7 @@ test("a gap is 32 px plus the widest plate named in it, so every flow's name has
     ],
     layers: [],
   };
-  expect(plateWidth("HTTPS")).toBe(Math.ceil(5 * 6.5 + 12));
+  expect(plateWidth("HTTPS")).toBe(Math.ceil(5 * PLATE.char + PLATE.pad));
   expect(plateWidth("x".repeat(80))).toBe(PLATE.max);
   const layout = diagramLayout(diagram);
   const first = 32 + plateWidth("HTTPS");
@@ -142,50 +147,41 @@ test("a gap is 32 px plus the widest plate named in it, so every flow's name has
 
 const { width: W, height: H } = DIAGRAM.node;
 
-test("a named flow between neighbours in a column widens their row gap and runs down between them", () => {
-  const diagram: Diagram = {
+test("a named flow between neighbours in a tier opens room for its name and runs straight down", () => {
+  const layout = diagramLayout({
     kind: "diagram",
     nodes: [node("api", "app"), node("jobs", "app"), node("mail", "app")],
     edges: [{ from: "api", to: "jobs", label: "queues work" }, edge("jobs", "mail")],
     layers: [{ id: "app", name: "Application" }],
-  };
-  const layout = diagramLayout(diagram);
-  expect(layout.width).toBe(W);
+  });
   const opened = PLATE.height + PLATE.air * 2;
   expect(layout.at.jobs!.y - (layout.at.api!.y + H)).toBe(opened);
-  expect(layout.at.mail!.y - (layout.at.jobs!.y + H)).toBe(DIAGRAM.row);
-  expect(layout.flows[0]!.points).toEqual([
-    { x: W / 2, y: 16 + H },
-    { x: W / 2, y: 16 + H + opened },
+  expect(layout.at.mail!.x).toBe(layout.at.api!.x);
+  const flow = layout.flows[0]!;
+  expect(flow.points).toEqual([
+    { x: W / 2, y: layout.at.api!.y + H },
+    { x: W / 2, y: layout.at.jobs!.y },
   ]);
-  expect(layout.flows[0]!.plate).toEqual({ x: W / 2, y: 16 + H + opened / 2 });
-  // The layer is a band around its column, the picture's whole height.
-  expect(layout.bands).toEqual([
-    { name: "Application", x: 0, y: 0, width: W, height: layout.height },
-  ]);
+  expect(flow.plate).toEqual({ x: W / 2, y: layout.at.api!.y + H + opened / 2 });
 });
 
-test("a flow past a neighbour in one column goes out beside it and back", () => {
-  const diagram: Diagram = {
+test("a flow past a neighbour in one tier goes out beside it and back, its name clear of the parts", () => {
+  const layout = diagramLayout({
     kind: "diagram",
     nodes: [node("a", "app"), node("b", "app"), node("c", "app")],
     edges: [edge("a", "b"), edge("b", "c"), { from: "a", to: "c", label: "audits" }],
     layers: [{ id: "app", name: "Application" }],
-  };
-  const layout = diagramLayout(diagram);
-  const gap = 32 + plateWidth("audits");
-  expect(layout.width).toBe(W + gap);
-  const a = layout.at.a!.y + H / 2;
-  const c = layout.at.c!.y + H / 2;
-  expect(layout.flows[2]!.points).toEqual([
-    { x: W, y: a },
-    { x: W + gap / 2, y: a },
-    { x: W + gap / 2, y: c },
-    { x: W, y: c },
-  ]);
+  });
+  const [start, out, back, end] = layout.flows[2]!.points;
+  expect(start).toEqual({ x: W, y: layout.at.a!.y + H / 2 });
+  expect(out!.x).toBe(back!.x);
+  expect(out!.x).toBeGreaterThan(W);
+  expect(end).toEqual({ x: W, y: layout.at.c!.y + H / 2 });
+  expect(layout.flows[2]!.plate!.x - plateWidth("audits") / 2).toBeGreaterThan(W);
+  expect(layout.width).toBeGreaterThanOrEqual(layout.flows[2]!.plate!.x + plateWidth("audits") / 2);
 });
 
-test("a long flow name takes two lines, and its row gap grows to hold them", () => {
+test("a long flow name takes two lines, and the row it runs down grows to hold them", () => {
   const long = "writes the session record and refreshes the cache";
   expect(plateHeight("HTTPS")).toBe(PLATE.height);
   expect(plateWidth(long)).toBe(PLATE.max);

@@ -42,6 +42,8 @@ export type ChartSpec = {
   compact?: boolean;
   /** Bars lie down whatever their names: the owner knows their names would collide. */
   horizontal?: boolean;
+  /** The owner shows the exact values itself: no values table under the plot. */
+  values?: false;
 };
 
 /** Categorical slots; a ninth series takes the neutral tone rather than a new hue. */

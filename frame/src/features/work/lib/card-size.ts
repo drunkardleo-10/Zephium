@@ -201,7 +201,8 @@ export function resultSize(
 export const SOURCE_ROWS = 6;
 export function sourcesSize(rows: number): CanvasSize {
   const shown = Math.min(SOURCE_ROWS, rows);
-  const body = (rows ? 28 : 0) + shown * LINE.label + Math.max(0, shown - 1) * 6 + 4;
+  // Each row is 20 px, 4 apart, under the count.
+  const body = shown * 20 + Math.max(0, shown - 1) * 4 + 4;
   return { width: 300, height: clamp(header("", 276, true) + body + FRAME.end, 96, 300) };
 }
 

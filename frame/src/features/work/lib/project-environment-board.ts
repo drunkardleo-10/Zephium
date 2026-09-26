@@ -16,6 +16,7 @@ import { boardLayout, type LayoutBlock } from "./board/layout";
 import { LANE, placeLane } from "./board/lane";
 import { estimate, widthRange } from "./board/size";
 import { runTrail, type TrailLine } from "./board/trail";
+import { plain } from "./board/text";
 import type { Block, Picture } from "./board/types";
 import * as m from "$shared/i18n/messages";
 
@@ -87,10 +88,11 @@ function trailSize(lines: readonly TrailLine[]) {
 
 /** The board's title on up to two lines, its lead at the reading size under it. */
 const HEAD = { width: 680 } as const;
-function headHeight(title: string, lead: string, width: number) {
+function headHeight(title: string, lead: string, more: number, width: number) {
   const titleLines = title ? Math.min(2, Math.ceil((title.length * 12.5) / width)) : 0;
   const leadLines = lead ? Math.ceil((lead.length * 8) / width) : 0;
-  return titleLines * 28 + (title && lead ? 8 : 0) + leadLines * 24;
+  const moreLines = more ? Math.ceil((more * 8) / width) + 1 : 0;
+  return titleLines * 28 + (title && lead ? 8 : 0) + leadLines * 24 + moreLines * 25;
 }
 
 /** A block's height as it last measured itself at this width, open or not. */
@@ -198,7 +200,7 @@ export function environmentStages(
         })),
         { ...(open ? { open } : {}), pinned },
       );
-      const headId = board.title || board.lead ? `head:${draft.card}` : undefined;
+      const headId = board.title || board.lead || board.more ? `head:${draft.card}` : undefined;
       const headWidth = Math.min(layout.width, HEAD.width);
       const head = headId
         ? {
@@ -206,7 +208,12 @@ export function environmentStages(
             width: headWidth,
             height:
               measured.get(measureKey(headId, headWidth, false)) ??
-              headHeight(board.title, board.lead, headWidth),
+              headHeight(
+                board.title,
+                board.lead,
+                board.more?.blocks.reduce((sum, node) => sum + plain(node).length, 0) ?? 0,
+                headWidth,
+              ),
           }
         : undefined;
       const pinSizes = new Map(

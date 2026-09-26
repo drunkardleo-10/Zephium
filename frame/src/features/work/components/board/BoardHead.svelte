@@ -1,9 +1,14 @@
 <script lang="ts">
   import { getContext, untrack } from "svelte";
+  import { provideSiteMarks } from "$shared/ui/data/Artifact/site-marks";
+  import { siteMark } from "../cards/HostGlyph.svelte";
   import { canvasBoard, type BoardActions } from "../../lib/canvas-context";
   import type { CanvasItem } from "../../lib/canvas-model";
+  import Prose from "./Prose.svelte";
   let { id, item }: { id: string; item: CanvasItem } = $props();
   const actions = getContext<BoardActions | undefined>(canvasBoard);
+  // Source chips draw the sites' real marks.
+  provideSiteMarks(siteMark);
   let body = $state<HTMLElement>();
   let reported = "";
   $effect(() => {
@@ -36,6 +41,9 @@
 <header class="head" bind:this={body}>
   {#if item.title}<h2>{item.title}</h2>{/if}
   {#if item.detail}<p>{item.detail}</p>{/if}
+  {#if item.block?.data.kind === "prose"}<div class="more">
+      <Prose block={item.block.data} sources={item.block.sources} onevidence={actions?.evidence} />
+    </div>{/if}
 </header>
 
 <style>
@@ -55,6 +63,14 @@
     line-height: 28px;
     letter-spacing: -0.015em;
     text-wrap: balance;
+  }
+
+  .more {
+    pointer-events: auto;
+  }
+
+  .more :global(.prose p) {
+    color: var(--color-label-secondary);
   }
 
   p {

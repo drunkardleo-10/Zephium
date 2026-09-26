@@ -3,6 +3,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import { favicons } from "$domain/favicons";
+import { emitNativeEvent } from "$shared/testing/native-events";
 import BoardCanvas from "./BoardCanvas.svelte";
 import {
   dinnerScene,
@@ -58,6 +59,60 @@ afterEach(() => {
 });
 
 const SHOTS = "../../../../../target/boards";
+
+/** A site's mark as native would deliver it: a 32 px raster, here a lettered tile in the site's colour. */
+function mark(host: string): string {
+  const canvas = new OffscreenCanvas(32, 32);
+  const context = canvas.getContext("2d")!;
+  let hue = 0;
+  for (const char of host) hue = (hue * 31 + char.charCodeAt(0)) % 360;
+  context.fillStyle = `hsl(${hue} 62% 48%)`;
+  context.beginPath();
+  context.roundRect(0, 0, 32, 32, 7);
+  context.fill();
+  context.fillStyle = "#fff";
+  context.font = "600 19px -apple-system, sans-serif";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillText(host.replace(/^www\./u, "")[0]!.toUpperCase(), 16, 17);
+  const bytes = context.getImageData(0, 0, 32, 32).data;
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+const SITES = [
+  "www.ycombinator.com",
+  "esta.cbp.dhs.gov",
+  "www.airbnb.com",
+  "www.lot.com",
+  "www.google.com",
+  "www.kayak.com",
+  "linear.app",
+  "linear.com",
+  "vercel.com",
+  "figma.com",
+  "raycast.com",
+  "supabase.com",
+  "arc.com",
+  "notion.com",
+  "stripe.com",
+  "zunicafe.com",
+  "nopasf.com",
+  "kinkhao.com",
+  "cloudflare.com",
+  "postgresql.org",
+  "redis.io",
+  "aws.amazon.com",
+  "clerk.com",
+];
+async function marks() {
+  await favicons.init();
+  emitNativeEvent("favicons", {
+    surface: "chrome",
+    profile_id: "profile",
+    entries: SITES.map((host) => ({ origin: `https://${host}`, revision: "a", rgba: mark(host) })),
+  });
+}
 
 /** Waits until nothing on the canvas has moved for a while: measured, laid out, arrived. */
 async function settle(container: HTMLElement) {
@@ -116,6 +171,7 @@ async function board(
           layers: artifact.data.layers ?? [],
         } as Parameters<typeof layoutDiagram>[0]);
   await page.viewport(size.width, size.height);
+  await marks();
   for (const theme of ["dark", "light"] as const) {
     document.documentElement.dataset.theme = theme;
     const screen = await render(BoardCanvas, { scene });
@@ -131,7 +187,7 @@ async function board(
 }
 
 test("the SaaS architecture reads as a board: the diagram leads, the prose and tables follow", async () => {
-  await board("saas", saasScene, { width: 1720, height: 2300 });
+  await board("saas", saasScene, { width: 2040, height: 2200 });
 });
 
 test("the YC trip: stays and flights as galleries with pictures, the checklist, the sources", async () => {

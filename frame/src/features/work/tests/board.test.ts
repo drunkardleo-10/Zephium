@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import { boardLayout, BOARD, type LayoutBlock } from "../lib/board/layout";
 import { boardOf } from "../lib/board/adapter";
 import { runTrail } from "../lib/board/trail";
+import { DIAGRAM, diagramLayout } from "../lib/diagram";
 import { environmentStages } from "../lib/project-environment-board";
 import { viewPlacements } from "../lib/project-environment";
 import type { BlockKind, Emphasis } from "../lib/board/types";
@@ -58,7 +59,8 @@ describe("board layout", () => {
       const open = next() < 0.3 ? blocks[Math.floor(next() * count)]!.id : undefined;
       const layout = boardLayout(blocks, open ? { open } : {});
       expect(layout.width).toBeGreaterThanOrEqual(BOARD.min);
-      expect(layout.width).toBeLessThanOrEqual(BOARD.max);
+      const wide = blocks.some((block) => block.emphasis === "hero" && block.kind === "diagram");
+      expect(layout.width).toBeLessThanOrEqual(wide ? BOARD.wide : BOARD.max);
       const rects = Object.values(layout.at);
       expect(rects).toHaveLength(count);
       for (const rect of rects) {
@@ -128,7 +130,7 @@ const board = (scene: ReturnType<typeof saasScene>) => {
 };
 
 describe("the adapter", () => {
-  test("an architecture: the answer's first sentence is the lead, the diagram leads, the cost table and chart pair", () => {
+  test("an architecture: the answer's first sentence is the lead, the diagram leads, the cost chart holds its table", () => {
     const made = board(saasScene());
     expect(made.title).toBe("How to build a B2B SaaS that scales");
     expect(made.lead).toMatch(/^Start as a modular monolith .* file processing\.$/u);
@@ -136,13 +138,11 @@ describe("the adapter", () => {
     expect(kinds).toContainEqual(["diagram", "hero", "Reference architecture"]);
     expect(kinds).toContainEqual(["prose", "primary", "How to build a B2B SaaS that scales"]);
     expect(kinds).toContainEqual(["checklist", "supporting", "Launch checklist"]);
-    const table = made.blocks.find(
-      (block) => block.title === "Monthly cost by stage" && block.kind === "table",
-    )!;
+    // The cost table and the cost chart carry the same rows: one block, the chart, its table as its values.
+    expect(made.blocks.filter((block) => block.title === "Monthly cost by stage")).toHaveLength(1);
     const chart = made.blocks.find((block) => block.kind === "chart")!;
-    expect(chart.group).toBe(table.group);
-    expect(made.blocks.indexOf(chart)).toBe(made.blocks.indexOf(table) + 1);
     if (chart.kind !== "chart") throw new Error("chart");
+    expect(chart.values?.rows).toHaveLength(4);
     expect(chart.headline?.value).toBe("$50–$33,000");
     const stack = made.blocks.find((block) => block.title === "Recommended stack");
     expect(stack?.kind === "table" && stack.columns.map((column) => column.type)).toEqual([
@@ -183,6 +183,9 @@ describe("the adapter", () => {
 
   test("jobs are a gallery of roles; a rust explanation keeps its code; dinner places carry what the page said", () => {
     const jobs = board(jobsScene());
+    // A short answer reads on from the lead, above the roles it introduces.
+    expect(jobs.more?.blocks).toHaveLength(1);
+    expect(jobs.blocks.some((block) => block.kind === "prose")).toBe(false);
     const roles = jobs.blocks.find((block) => block.kind === "gallery");
     expect(roles?.kind === "gallery" && roles.facet).toBe("job");
     expect(roles?.kind === "gallery" && roles.entities).toHaveLength(8);
@@ -274,5 +277,41 @@ describe("the process column", () => {
     // Without a drag nothing is pinned, wherever the canvas says a block stands.
     const kept = viewPlacements(scene.snapshot, view, stages);
     expect(kept.find((place) => place.element === block.id)?.revision).toBeUndefined();
+  });
+});
+
+describe("the architecture diagram", () => {
+  test("thirteen parts stand in five tiers, one column each, at full size within a 1600 board", () => {
+    const made = board(saasScene());
+    const diagram = made.blocks.find((block) => block.kind === "diagram");
+    if (diagram?.kind !== "diagram") throw new Error("diagram");
+    const layout = diagramLayout(diagram.diagram);
+    const xs = new Map<string, Set<number>>();
+    for (const node of diagram.diagram.nodes) {
+      const set = xs.get(node.layer ?? "") ?? new Set<number>();
+      set.add(layout.at[node.id]!.x);
+      xs.set(node.layer ?? "", set);
+    }
+    expect([...xs.values()].map((set) => set.size)).toEqual([1, 1, 1, 1, 1]);
+    expect(layout.bounds.width + 2 * 20).toBeLessThanOrEqual(1600);
+    const { width: W, height: H } = DIAGRAM.node;
+    const parts = Object.values(layout.at);
+    for (const [index, a] of parts.entries())
+      for (const b of parts.slice(index + 1))
+        expect(a.x + W <= b.x || b.x + W <= a.x || a.y + H <= b.y || b.y + H <= a.y).toBe(true);
+    // No line runs through a part it does not start or end at.
+    for (const [key, flow] of Object.entries(layout.flows)) {
+      const points = flow.points;
+      for (const [id, at] of Object.entries(layout.at)) {
+        if (id === flow.from || id === flow.to) continue;
+        points.slice(1).forEach((point, i) => {
+          const from = points[i]!;
+          const [lx, hx] = [Math.min(from.x, point.x), Math.max(from.x, point.x)];
+          const [ly, hy] = [Math.min(from.y, point.y), Math.max(from.y, point.y)];
+          const crosses = lx < at.x + W - 1 && hx > at.x + 1 && ly < at.y + H - 1 && hy > at.y + 1;
+          expect(crosses, `${key} through ${id}`).toBe(false);
+        });
+      }
+    }
   });
 });

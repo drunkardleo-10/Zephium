@@ -2,6 +2,7 @@ import { SvelteMap } from "svelte/reactivity";
 import type { ArtifactContent } from "$shared/ui/data/Artifact/artifact";
 import type { CanvasPosition, CanvasSize } from "./canvas-model";
 import * as m from "$shared/i18n/messages";
+import { tierLayout } from "./diagram-tiers";
 
 type Diagram = Extract<ArtifactContent, { kind: "diagram" }>;
 type Rect = CanvasPosition & CanvasSize;
@@ -11,14 +12,14 @@ export const DIAGRAM = {
   node: { width: 196, height: 64 },
   column: 32,
   row: 12,
-  layer: 16,
+  layer: 20,
 } as const satisfies Record<string, number | CanvasSize>;
 
 /**
  * A flow's plate: caption characters at 6.5 px and 12 px of padding, up to
  * two 15 px lines once the words pass the widest plate.
  */
-export const PLATE = { char: 6.5, pad: 12, line: 15, height: 17, air: 6, max: 220 } as const;
+export const PLATE = { char: 7, pad: 12, line: 16, height: 18, air: 6, max: 220 } as const;
 const plateRun = (label: string) => Math.ceil(label.trim().length * PLATE.char + PLATE.pad);
 export const plateWidth = (label: string) => Math.min(PLATE.max, plateRun(label));
 export const plateHeight = (label: string) =>
@@ -439,6 +440,16 @@ export function diagramLayout(diagram: Diagram): DiagramLayout {
 
 function layoutOf(shape: DiagramShape): DiagramLayout {
   const key = keyOf(shape);
+  // A tiered diagram is laid out here, at once: its tiers are its columns.
+  if (shape.lanes.length) {
+    let tiers = columned.get(key);
+    if (!tiers) {
+      tiers = tierLayout(shape);
+      if (columned.size >= KEPT) columned.delete(columned.keys().next().value!);
+      columned.set(key, tiers);
+    }
+    return tiers;
+  }
   const done = settled.get(key);
   if (done) return done;
   if (typeof window !== "undefined" && !asked.has(key)) void settle(shape, key);
@@ -454,6 +465,7 @@ function layoutOf(shape: DiagramShape): DiagramLayout {
 /** A diagram laid out by the engine, off the main thread where the page allows it. */
 export async function layoutDiagram(diagram: Diagram): Promise<DiagramLayout> {
   const shape = diagramShape(diagram);
+  if (shape.lanes.length) return layoutOf(shape);
   return settled.get(keyOf(shape)) ?? (await settle(shape, keyOf(shape)));
 }
 

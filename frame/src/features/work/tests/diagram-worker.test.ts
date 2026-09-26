@@ -111,20 +111,20 @@ test("ELK's answer reads back as parts from the first corner, flows turned round
   };
   const layout = fromElk(shape, out);
   expect(layout.settled).toBe(true);
-  expect(layout.at).toEqual({ x: { x: 0, y: 16 }, y: { x: 356, y: 16 } });
+  expect(layout.at).toEqual({ x: { x: 0, y: 20 }, y: { x: 356, y: 20 } });
   // The flow from Y back to X runs from Y's west side into X's east side.
   expect(layout.flows[0]).toEqual({
     from: "y",
     to: "x",
     points: [
-      { x: 356, y: 52 },
-      { x: 220, y: 52 },
+      { x: 356, y: 56 },
+      { x: 220, y: 56 },
     ],
-    plate: { x: 288, y: 52 },
+    plate: { x: 288, y: 56 },
     primary: true,
   });
-  expect(layout.bounds).toEqual({ x: -12, y: -24, width: 600, height: 140 });
-  expect([layout.width, layout.height]).toEqual([588, 116]);
+  expect(layout.bounds).toEqual({ x: -12, y: -20, width: 600, height: 140 });
+  expect([layout.width, layout.height]).toEqual([588, 120]);
   expect(layout.bands.map((band) => [band.name, band.x, band.width])).toEqual([
     ["Left", -12, W + 24],
     ["Right", 344, W + 24],

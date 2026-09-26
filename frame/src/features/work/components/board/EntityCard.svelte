@@ -2,7 +2,7 @@
   import Icon from "$shared/ui/Icon";
   import { mediaUrl } from "$domain/resources";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
-  import HostGlyph from "../cards/HostGlyph.svelte";
+  import HostGlyph, { siteMark } from "../cards/HostGlyph.svelte";
   import Chips from "./Chips.svelte";
   import Popover from "./Popover.svelte";
   import { Tick02Icon } from "../../lib/icons";
@@ -34,12 +34,25 @@
       return "";
     }
   });
+  /**
+   * Whose mark stands for it without a picture: the company a role or a repo
+   * names, when the cache holds its icon, else the site it was found on.
+   */
+  const logo = $derived.by(() => {
+    const named = /(?:,| at | · )\s*([\p{L}\p{N}][\p{L}\p{N} .&-]{1,40})$/u.exec(entity.name)?.[1];
+    const guess =
+      named && ["job", "company", "repo", "person"].includes(entity.facet)
+        ? `${named.toLowerCase().replace(/[^a-z0-9]+/gu, "")}.com`
+        : "";
+    const candidates = [guess, host].filter(Boolean);
+    return candidates.find((candidate) => siteMark(candidate)) ?? candidates[0] ?? entity.name;
+  });
   const typed = $derived(entity.facts.filter((fact) => fact.label));
   const said = $derived(entity.facts.filter((fact) => !fact.label));
   let open = $state(false);
 </script>
 
-<div class="entity" class:wide class:chosen={entity.chosen}>
+<div class="entity" class:wide class:chosen={entity.chosen} class:marked={!picture || failed}>
   <button
     type="button"
     class="face nodrag nopan"
@@ -58,9 +71,7 @@
           height={wide ? 200 : 136}
           onerror={() => (failed = true)}
         /></span
-      >{:else}<span class="logo"
-        ><HostGlyph url={entity.homepage ?? ""} {host} size={20} initial={false} /></span
-      >{/if}
+      >{:else}<span class="logo"><HostGlyph host={logo} size={28} /></span>{/if}
     <span class="words">
       <strong class="name">{entity.name}</strong>
       {#if entity.price || entity.time}<span class="money"
@@ -175,14 +186,24 @@
   }
 
   /* Without a picture the site's mark stands for it, as an app's icon would. */
+
+  /* Without a picture the mark stands for it, large on a plate of its own, beside its words. */
+  .marked .face {
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
   .logo {
     display: grid;
+    flex: none;
     place-items: center;
-    inline-size: 36px;
-    block-size: 36px;
-    border-radius: var(--radius-control-compact);
-    background: var(--color-fill);
+    inline-size: 48px;
+    block-size: 48px;
+    border-radius: var(--radius-control);
+    background: color-mix(in srgb, var(--color-text) 6%, var(--color-surface));
     box-shadow: inset 0 0 0 1px var(--color-border);
+    font-size: 18px;
   }
 
   .chosen .picture,
@@ -310,6 +331,11 @@
     transition:
       opacity var(--motion-fast) var(--ease-out),
       background-color var(--motion-fast) var(--ease-out);
+  }
+
+  .marked .choose {
+    inset-block-start: 0;
+    inset-inline-end: 0;
   }
 
   .entity:hover .choose,
