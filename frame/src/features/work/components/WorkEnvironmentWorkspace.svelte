@@ -532,6 +532,8 @@
         width: Math.min(1180, 320 + item.artifact.content.subjects.length * 200),
         height: 640,
       };
+    if (item.artifact?.content.kind === "table" || item.artifact?.content.kind === "comparison")
+      return { width: 960, height: 640 };
     switch (item.type) {
       case "note":
         return { width: 760, height: 620 };
@@ -544,7 +546,8 @@
       case "sources":
         return { width: 560, height: 560 };
       case "subject":
-        return { width: 860, height: 620 };
+        // The picture and its facts at 640, the sources at 320.
+        return { width: 1040, height: 720 };
       default: {
         const base = defaultSize(item);
         return { width: Math.max(720, base.width + 200), height: Math.max(520, base.height + 160) };
@@ -843,7 +846,35 @@
       stages,
       snapshot ? resultHeads(snapshot, context.objectives, stages) : new Map(),
     );
-    return { ...lanes, clusters: [...diagrams.clusters, ...lanes.clusters] };
+    // Results past the canvas's cap: one line under the lane's last group opens its request.
+    const remaining = results.remaining;
+    const lane = remaining
+      ? stages.find(
+          (stage) =>
+            stage.objective === remaining.objective &&
+            stage.executions.includes(remaining.execution),
+        )
+      : undefined;
+    const last = lane?.layout.groups.at(-1);
+    const footer = lane && last ? `group:${lane.card}:${last.kind}` : null;
+    const laneClusters = footer
+      ? lanes.clusters.map((cluster) =>
+          cluster.id === footer
+            ? {
+                ...cluster,
+                footer: {
+                  text: m.work_env_other_results({ count: remaining!.count }),
+                  opens: lane!.element,
+                },
+              }
+            : cluster,
+        )
+      : lanes.clusters;
+    return {
+      ...lanes,
+      clusters: [...diagrams.clusters, ...laneClusters],
+      footed: laneClusters !== lanes.clusters,
+    };
   });
   const items = $derived([
     ...results.items,
@@ -1184,6 +1215,32 @@
       disabled: saving,
       onclick: () => void saveNote(id),
     };
+  }
+  /** A subject written up as a note, once; then its note opens. */
+  function subjectNote(
+    subject: Extract<WorkEnvironmentReference, { kind: "subject" }>,
+    markdown: string,
+  ): LiftAction {
+    const key = `subject:${subject.objective}:${subject.execution}:${subject.artifact}:${subject.index}`;
+    const note = workNotes.note(key);
+    if (note) return { label: m.work_open_note(), onclick: () => openNote(note) };
+    const saving = workNotes.saving(key);
+    return {
+      label: saving ? m.work_saving_note() : m.work_save_note(),
+      disabled: saving,
+      onclick: () => void workNotes.save(key, markdown, notes),
+    };
+  }
+  let liftRef = $state<Lift>();
+  /** Ask about this: the composer takes the subject's name, and the lift steps back. */
+  function askAbout(name: string) {
+    session.composer = m.work_lift_ask_prefix({ name });
+    liftRef?.close();
+    requestAnimationFrame(() => {
+      const field = composerElement?.querySelector<HTMLTextAreaElement>("textarea");
+      field?.focus();
+      field?.setSelectionRange(field.value.length, field.value.length);
+    });
   }
   /** The document the agent line's run just wrote, if it wrote one. */
   const lineDocument = $derived.by(() => {
@@ -2401,19 +2458,18 @@
             >{m.work_env_reload()}</Button
           >{/if}
       </div>{/if}
-    {#if results.remaining}<div class="results-disclosure">
-        <Button
-          size="compact"
-          onclick={() => {
-            const objective = results.remaining?.objective;
-            const request = snapshot?.elements.find(
-              (element) =>
-                element.reference.kind === "objective" && element.reference.objective === objective,
-            );
-            if (request) lift(request.id);
-          }}>{m.work_env_other_results({ count: results.remaining.count })}</Button
-        >
-      </div>{/if}
+    {#if results.remaining && !clusters.footed}<button
+        type="button"
+        class="results-line"
+        onclick={() => {
+          const objective = results.remaining?.objective;
+          const request = snapshot?.elements.find(
+            (element) =>
+              element.reference.kind === "objective" && element.reference.objective === objective,
+          );
+          if (request) lift(request.id);
+        }}>{m.work_env_other_results({ count: results.remaining.count })}</button
+      >{/if}
     {#if notesOpen}<section class="detail" aria-label={m.work_env_notes()}>
         <Button onclick={() => void closeNotes()}>{m.work_env_close()}</Button
         >{@render notesPanel()}
@@ -2421,6 +2477,7 @@
   </div>
   {#if lifted && cardBounds}
     <Lift
+      bind:this={liftRef}
       origin={lifted.origin}
       source={lifted.id || null}
       bounds={cardBounds}
@@ -2580,6 +2637,9 @@
               reference={subject}
               objectives={context.objectives}
               pictures={liftedPictures}
+              pages={recordedPages(subject.objective)}
+              note={(markdown: string) => subjectNote(subject, markdown)}
+              onask={askAbout}
               onopen={openCitation}
               onfile={(record: string) =>
                 (liftFile = fileEvidence(context.objectives, record) ?? null)}
@@ -2715,19 +2775,20 @@
     }}
     {onreturn}
     onpanelchange={onPanelChange}
-  />
-  <TasksCapsule
-    done={tasksDone}
-    total={taskItems.length}
-    active={activeExecution}
-    {needsDecision}
-    open={tasksOpen}
-    panel={tasksPanel}
-    onopenchange={(open) => {
-      tasksOpen = open;
-      if (!open) tasksScope = "today";
-    }}
-  />
+  >
+    {#snippet tasks()}<TasksCapsule
+        done={tasksDone}
+        total={taskItems.length}
+        active={activeExecution}
+        {needsDecision}
+        open={tasksOpen}
+        panel={tasksPanel}
+        onopenchange={(open) => {
+          tasksOpen = open;
+          if (!open) tasksScope = "today";
+        }}
+      />{/snippet}
+  </WorkChrome>
   {#if aiEnabled}
     <div class="composer-dock">
       <Composer
@@ -2810,10 +2871,30 @@
     font-size: var(--text-label);
   }
 
-  .results-disclosure {
+  /* Results past the cap, when their lane has no group to hang the line under. */
+  .results-line {
     position: absolute;
-    inset-block-start: 16px;
+    inset-block-start: 12px;
     inset-inline-end: 16px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--color-muted);
+    font: inherit;
+    font-size: var(--text-caption);
+    cursor: default;
+  }
+
+  .results-line:hover {
+    color: var(--color-text);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .results-line:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-inset);
   }
 
   .lift-body {

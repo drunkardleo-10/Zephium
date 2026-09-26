@@ -20,6 +20,7 @@
     profileLabel,
     panels = {},
     initialTabsOpen = false,
+    tasks,
     onreturn,
     onpanelchange,
   }: {
@@ -28,6 +29,8 @@
     profileLabel: string;
     panels?: Partial<Record<WorkEnvironmentPanel, Snippet>>;
     initialTabsOpen?: boolean;
+    /** The tasks pill, beside the space's name. */
+    tasks?: Snippet;
     onreturn: () => void;
     onpanelchange?: (panel: WorkEnvironmentPanel | null) => void;
   } = $props();
@@ -126,6 +129,7 @@
         {@render panels.switcher?.()}
       </Popover.Content>
     </Popover.Root>
+    {@render tasks?.()}
   </div>
   <nav class="tools" aria-label={m.work_env_toolbar()}>
     {#each tools as entry (entry.key)}{@render tool(
@@ -137,6 +141,8 @@
       )}{/each}
   </nav>
   <div class="profile">
+    <!-- The canvas's zoom capsule is drawn here, at the row's right end. -->
+    <div class="zoom" data-work-zoom-slot></div>
     <Popover.Root open={panel === "profile"} onOpenChange={(open) => change("profile", open)}>
       <Popover.Trigger
         class="work-avatar"
@@ -183,7 +189,7 @@
   .identity {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
     min-inline-size: 0;
     justify-self: start;
   }
@@ -261,7 +267,14 @@
   }
 
   .profile {
+    display: flex;
+    align-items: center;
+    gap: 10px;
     justify-self: end;
+  }
+
+  .zoom {
+    display: flex;
   }
 
   :global(.work-avatar) {

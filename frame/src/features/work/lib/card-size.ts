@@ -263,7 +263,7 @@ export function stepSize(text: string, detail = ""): CanvasSize {
   return { width: STEP_WIDTH, height: clamp(14 + 28 + 8 + body + 14, 96, 240) };
 }
 
-/** A caption, the person's words up to eight lines, then the lane's counts once it has any. */
+/** A quiet mark, the person's words beside it up to eight lines, then the lane's counts once it has any. */
 export function requestSize(
   text: string,
   {
@@ -272,19 +272,18 @@ export function requestSize(
     accounts = 0,
   }: { action?: boolean; footer?: boolean; accounts?: number } = {},
 ): CanvasSize {
-  const lines = Math.max(1, textLines(text, 300 - 24, ADVANCE.body, 8));
+  const lines = Math.max(1, textLines(text, 300 - 24 - 24, ADVANCE.body, 8));
   return {
     width: 300,
+    // Never under 80: a checkpoint refuses a shorter placement.
     height: clamp(
-      8 +
-        LINE.caption +
-        2 +
+      12 +
         lines * LINE.body +
-        8 +
+        12 +
         (footer ? 22 : 0) +
         (accounts ? 4 + accounts * LINE.label : 0) +
         (action ? 28 : 0),
-      64,
+      80,
       240 + accounts * LINE.label,
     ),
   };

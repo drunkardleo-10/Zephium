@@ -13,7 +13,8 @@
     block-size: 100%;
     padding: 8px 12px;
     border-radius: var(--radius-panel);
-    background: color-mix(in srgb, var(--color-surface) 40%, transparent);
+    background: color-mix(in oklab, var(--color-fill) 70%, transparent);
+    box-shadow: inset 0 1px 0 var(--color-border);
   }
 
   .caption {

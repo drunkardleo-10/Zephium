@@ -81,6 +81,11 @@
             : m.work_make_tasks()}</button
       >{/if}</span
   >
+  {#if data.footer}{@const footer = data.footer}<button
+      type="button"
+      class="footer nodrag nopan"
+      onclick={() => open?.(footer.opens)}>{footer.text}</button
+    >{/if}
 </div>
 <Handle
   type="source"
@@ -221,6 +226,36 @@
 
   .make:hover:not(:disabled) {
     background: var(--color-control-hover);
+  }
+
+  /* One quiet line under the lane's last group. */
+  .footer {
+    position: absolute;
+    inset-block-start: calc(100% + 8px);
+    inset-inline-start: var(--inset);
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--color-muted);
+    font: inherit;
+    font-size: var(--text-caption);
+    line-height: 16px;
+    white-space: nowrap;
+    pointer-events: auto;
+    cursor: default;
+    transition: color var(--motion-fast) var(--ease-out);
+  }
+
+  .footer:hover {
+    color: var(--color-text);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .footer:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-inset);
   }
 
   .more {

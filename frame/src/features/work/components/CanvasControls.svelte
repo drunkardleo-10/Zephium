@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { useSvelteFlow, useViewport, Panel } from "@xyflow/svelte";
   import Icon from "$shared/ui/Icon";
   import { duration, reducedMotion } from "$shared/lib/motion";
@@ -16,7 +17,30 @@
   const flow = useSvelteFlow();
   const viewport = useViewport();
   const percent = $derived(Math.round(viewport.current.zoom * 100));
-  let root = $state<HTMLElement>();
+  /** A mark inside the flow: the capsule itself may be drawn in the chrome's row. */
+  let anchor = $state<HTMLElement>();
+  /** The chrome row's slot for the capsule, when this canvas sits under one. */
+  let slot = $state<HTMLElement | null>(null);
+  onMount(() => {
+    const find = () => {
+      for (let at = anchor?.parentElement; at; at = at.parentElement) {
+        const found = at.querySelector<HTMLElement>("[data-work-zoom-slot]");
+        if (found) return found;
+      }
+      return null;
+    };
+    slot = find();
+    if (slot) return;
+    // The chrome can arrive a frame after the canvas.
+    const frame = requestAnimationFrame(() => (slot = find()));
+    return () => cancelAnimationFrame(frame);
+  });
+  /** Draws the capsule in the chrome's slot. */
+  function into(node: HTMLElement, target: HTMLElement) {
+    // One element moves, so Svelte's removal of the block still finds it.
+    target.append(node);
+    return { destroy: () => node.remove() };
+  }
   /** The canvas the pointer last pressed in, so a key reaches it while nothing else has focus. */
   let engaged = false;
   const travel = (name: "fast" | "slow") => (reducedMotion() ? 0 : duration(name));
@@ -33,7 +57,7 @@
   function keys(event: KeyboardEvent) {
     if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.key !== "0" && event.key !== "1") return;
-    const canvas = root?.closest(".svelte-flow");
+    const canvas = anchor?.closest(".svelte-flow");
     const active = document.activeElement;
     const inside = !!active && !!canvas?.contains(active);
     if (!inside && !(engaged && (!active || active === document.body))) return;
@@ -47,18 +71,19 @@
 
 <svelte:window
   onpointerdowncapture={(event) =>
-    (engaged = !!root?.closest(".svelte-flow")?.contains(event.target as Node))}
+    (engaged = !!anchor?.closest(".svelte-flow")?.contains(event.target as Node))}
   onkeydown={keys}
 />
 
-<Panel position="bottom-left">
-  <div class="capsule" role="group" aria-label={m.work_canvas_controls()} bind:this={root}>
+<span class="anchor" hidden bind:this={anchor}></span>
+{#snippet capsule(docked: boolean)}
+  <div class="capsule" class:docked role="group" aria-label={m.work_canvas_controls()}>
     <button
       type="button"
       aria-label={m.work_zoom_out()}
       title={m.work_zoom_out()}
       onclick={() => void flow.zoomOut({ duration: travel("fast") })}
-      ><Icon icon={MinusSignIcon} size={14} /></button
+      ><Icon icon={MinusSignIcon} size={12} /></button
     >
     <button type="button" class="level" aria-label={m.work_fit()} title={m.work_fit()} onclick={fit}
       >{percent}%</button
@@ -68,12 +93,18 @@
       aria-label={m.work_zoom_in()}
       title={m.work_zoom_in()}
       onclick={() => void flow.zoomIn({ duration: travel("fast") })}
-      ><Icon icon={PlusSignIcon} size={14} /></button
+      ><Icon icon={PlusSignIcon} size={12} /></button
     >
   </div>
-</Panel>
+{/snippet}
+{#if slot}<div class="docked-host" use:into={slot}>{@render capsule(true)}</div>
+{:else}<Panel position="bottom-left">{@render capsule(false)}</Panel>{/if}
 
 <style>
+  .docked-host {
+    display: flex;
+  }
+
   .capsule {
     display: inline-flex;
     align-items: center;
@@ -123,5 +154,27 @@
     font-size: var(--text-label);
     font-weight: 500;
     font-variant-numeric: tabular-nums;
+  }
+
+  /* In the chrome row: the tasks pill's shape and fill, no float. */
+  .capsule.docked {
+    block-size: 26px;
+    padding: 0 2px;
+    background: var(--color-fill);
+    box-shadow: none;
+  }
+
+  .docked button {
+    min-inline-size: 22px;
+    block-size: 22px;
+  }
+
+  .docked .level {
+    min-inline-size: 44px;
+    color: var(--color-label-secondary);
+  }
+
+  .docked .level:hover {
+    color: var(--color-text);
   }
 </style>

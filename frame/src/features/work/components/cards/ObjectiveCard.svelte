@@ -1,16 +1,20 @@
 <script lang="ts">
   import CardFrame from "./CardFrame.svelte";
   import AccountBadge from "./AccountBadge.svelte";
+  import Icon from "$shared/ui/Icon";
+  import { UserIcon } from "../../lib/icons";
   import type { CanvasItem } from "../../lib/canvas-model";
   import * as m from "$shared/i18n/messages";
   let { item, selected, onaction }: { item: CanvasItem; selected: boolean; onaction: () => void } =
     $props();
 </script>
 
-<!-- The person's words: what it is, then the sentence whole. -->
+<!-- The person's words, whole, beside a quiet mark that says whose they are. -->
 <CardFrame id={item.id} {selected} plain>
   <div class="request">
-    <p class="caption">{item.kind}</p>
+    <span class="mark" role="img" aria-label={item.kind} title={item.kind}
+      ><Icon icon={UserIcon} size={12} /></span
+    >
     <p class="sentence">{item.title}</p>
     <!-- Only a plan objective carries an action; a request says its words and nothing else. -->
     {#if item.actionLabel}<button
@@ -38,15 +42,24 @@
     align-items: flex-start;
     box-sizing: border-box;
     block-size: 100%;
-    min-block-size: 0;
-    padding: 8px 12px;
+    min-block-size: 80px;
+    padding: 12px 12px 12px 36px;
+    position: relative;
   }
 
-  .caption {
-    margin: 0;
+  /* 16 px, level with the first line; the words keep their own column. */
+  .mark {
+    position: absolute;
+    inset-block-start: 12px;
+    inset-inline-start: 12px;
+    display: grid;
+    place-items: center;
+    inline-size: 16px;
+    block-size: 16px;
+    margin-block-start: 0.5px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill);
     color: var(--color-faint);
-    font-size: var(--text-caption);
-    line-height: 15px;
   }
 
   .sentence {

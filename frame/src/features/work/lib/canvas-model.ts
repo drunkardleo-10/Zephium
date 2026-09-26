@@ -244,7 +244,10 @@ export type CanvasCluster = {
   /** The result this group stands for: its title leads the caption and opens it. */
   opens?: string;
   title?: string;
+  /** A line under the lane's last group: what it holds past its cards, opening where it is. */
+  footer?: ClusterFooter;
 };
+type ClusterFooter = { text: string; opens: string };
 export type ClusterData = {
   label: string;
   more: number;
@@ -257,6 +260,7 @@ export type ClusterData = {
   title?: string;
   /** Where the group's lines attach, from its top; its centre when absent. */
   anchor?: number;
+  footer?: ClusterFooter;
 };
 export type WorkItemNode = Node<CanvasItem, "work">;
 type AgentNode = Node<CanvasItem, "agent">;
@@ -717,6 +721,7 @@ export function withClusters(
       ...(cluster.opens ? { opens: cluster.opens } : {}),
       ...(cluster.title ? { title: cluster.title } : {}),
       ...(anchor === undefined ? {} : { anchor }),
+      ...(cluster.footer ? { footer: cluster.footer } : {}),
     };
     const node = byId.get(cluster.id);
     derived.push(
@@ -733,6 +738,8 @@ export function withClusters(
         node.data.title === data.title &&
         node.data.opens === data.opens &&
         node.data.anchor === data.anchor &&
+        node.data.footer?.text === data.footer?.text &&
+        node.data.footer?.opens === data.footer?.opens &&
         JSON.stringify(node.data.layers) === JSON.stringify(data.layers)
         ? node
         : {

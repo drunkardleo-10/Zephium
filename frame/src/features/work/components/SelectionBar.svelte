@@ -129,13 +129,15 @@
 </div>
 
 <style>
-  /* A floating bar of controls on main's control recipe: fill, and only fill. */
+  /* A floating pill, on the chrome row's recipe: capsule buttons, fill on hover. */
   .selection-bar {
     display: flex;
     align-items: center;
     gap: 2px;
-    padding: 4px;
-    border-radius: var(--radius-control);
+    block-size: 32px;
+    box-sizing: border-box;
+    padding: 3px;
+    border-radius: var(--radius-capsule);
     background: var(--color-float);
     box-shadow: var(--shadow-popover);
     outline: none;
@@ -145,24 +147,27 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    block-size: 28px;
+    block-size: 26px;
     padding: 0 10px;
     border: 0;
-    border-radius: var(--radius-control-compact);
+    border-radius: var(--radius-capsule);
     background: transparent;
     box-shadow: none;
-    color: var(--color-on-control);
+    color: var(--color-label-secondary);
     font: inherit;
     font-size: var(--text-label);
     font-weight: 500;
     white-space: nowrap;
     cursor: default;
-    transition: background-color var(--motion-fast) var(--ease-out);
+    transition:
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out);
   }
 
   .popover button {
     justify-content: flex-start;
     inline-size: 100%;
+    border-radius: var(--radius-control-compact);
   }
 
   .selection-bar button:focus-visible {
@@ -175,13 +180,14 @@
   }
 
   .selection-bar button:hover:not(:disabled) {
-    background: var(--color-control);
-    box-shadow: var(--shadow-control);
+    background: var(--color-fill-hover);
+    color: var(--color-text);
   }
 
   .selection-bar button.open,
   .selection-bar button:active:not(:disabled) {
-    background: var(--color-control-pressed);
+    background: var(--color-fill-active);
+    color: var(--color-text);
   }
 
   .selection-bar button.danger:hover:not(:disabled) {
