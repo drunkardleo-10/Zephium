@@ -115,6 +115,9 @@ export class WorkOperations {
                   state.response.reply.work === work &&
                   state.response.reply.expected_revision ===
                     operationBasis(job.input).expected_revision) ||
+                (job.input.kind === "prepare_account" &&
+                  state.response.reply.kind === "account_grant_draft" &&
+                  state.response.reply.work === work) ||
                 (["start", "read_public", "run"].includes(job.input.kind) &&
                   state.response.reply.kind === "projection" &&
                   state.response.reply.projection.work.id === work &&

@@ -14,6 +14,8 @@ import type {
   WorkPageV1,
   WorkArtifactDataV1,
   WorkContextSelectionV1,
+  WorkAccountApprovalRequestV1,
+  WorkAccountGrantV1,
 } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 import { observe } from "$shared/lib/observe";
@@ -62,6 +64,8 @@ export class WorkSession {
   folders = $state.raw<string[]>([]);
   /** Messages typed while a run was live; each is sent on as the run before it ends. */
   queue = $state.raw<string[]>([]);
+  /** Requests waiting on an origin grant, by work: the context rides with the run once allowed. */
+  private readonly grantRequests = new SvelteMap<string, WorkContextSelectionV1 | null>();
   private activityRefresh: ReturnType<typeof setTimeout> | undefined;
   private readonly artifacts = new SvelteMap<string, ArtifactDraft>();
   private readonly drafts = new SvelteMap<string, TextDraft>();
@@ -437,7 +441,10 @@ export class WorkSession {
     });
   }
   /** The routine loop: sending the objective grants the public envelope. */
-  async run(context: WorkContextSelectionV1 | null = null) {
+  async run(
+    context: WorkContextSelectionV1 | null = null,
+    accounts: readonly WorkAccountGrantV1[] = [],
+  ) {
     if (!this.projection || this.pending || this.operations.busy(this.projection.work.id)) return;
     // What an earlier launch left running is acknowledged first: sending the
     // next request moves on from it, and the work cannot run while it stands.
@@ -455,7 +462,11 @@ export class WorkSession {
         command: commandId(),
         intent: {
           kind: "begin_agent",
-          grant: this.folders.length ? { ...AGENT_GRANT, folders: this.folders } : AGENT_GRANT,
+          grant: {
+            ...AGENT_GRANT,
+            ...(this.folders.length ? { folders: this.folders } : {}),
+            ...(accounts.length ? { accounts: [...accounts] } : {}),
+          },
           limits: AGENT_LIMITS,
         },
       },
@@ -465,12 +476,51 @@ export class WorkSession {
    * The person's next message on the same work: it becomes the live request and
    * starts a fresh run over everything the work already established.
    */
-  async continueWith(text: string): Promise<boolean> {
+  async continueWith(
+    text: string,
+    context: WorkContextSelectionV1 | null = null,
+  ): Promise<boolean> {
     const message = text.trim();
     if (!message || !this.projection?.work) return false;
     if (!(await this.edit({ kind: "set_objective", objective: message }))) return false;
-    await this.run();
+    await this.run(context);
     return true;
+  }
+  /**
+   * Drafts an origin grant for this work's next request. Rust mints the
+   * account identity; the run waits until the person allows it.
+   */
+  async prepareGrant(
+    request: Omit<WorkAccountApprovalRequestV1, "mode" | "effect">,
+    context: WorkContextSelectionV1 | null,
+  ) {
+    this.grantRequests.set(request.work, context);
+    await this.operations.begin({
+      kind: "prepare_account",
+      request: { ...request, effect: { kind: "read" }, mode: "origin" },
+    });
+  }
+  /** The drafted origin grant still waiting on the person, if any. */
+  get grantDraft(): WorkAccountGrantV1 | null {
+    const work = this.projection?.work;
+    if (!work || !this.grantRequests.has(work.id)) return null;
+    const state = this.operations.latest(work.id, "prepare_account")?.state;
+    const reply = state?.kind === "settled" ? state.response.reply : null;
+    return reply?.kind === "account_grant_draft" && reply.work === work.id ? reply.grant : null;
+  }
+  /** Allowing a grant sends its request: the grant rides with this run only. */
+  async allowGrant() {
+    const work = this.projection?.work;
+    const grant = this.grantDraft;
+    if (!work || !grant || this.pending || this.operations.busy(work.id)) return;
+    const context = this.grantRequests.get(work.id) ?? null;
+    this.grantRequests.delete(work.id);
+    await this.run(context, [grant]);
+  }
+  /** Not now: the draft is forgotten and expires unclaimed. */
+  declineGrant() {
+    const work = this.projection?.work;
+    if (work) this.grantRequests.delete(work.id);
   }
   /** Up to three next requests the finished run offers; empty while it works. */
   get followups(): readonly string[] {
