@@ -90,9 +90,11 @@ async function selectTab(screen: Awaited<ReturnType<typeof mountCanvas>>["screen
 test("a tab card starts a signed-in request that Rust prepares for approval", async () => {
   const { screen, environment, snapshot, create, operation, composer } = await mountCanvas();
   await selectTab(screen);
-  await screen.getByRole("button", { name: "Ask signed in", exact: true }).click();
-  await screen.getByRole("button", { name: "Read this page as me", exact: true }).click();
+  await screen.getByRole("button", { name: "Change a field as me", exact: true }).click();
   await expect.element(screen.getByRole("group", { name: "Signed-in page" })).toBeVisible();
+  await expect
+    .element(screen.getByRole("radio", { name: "Change a field and restore it", exact: true }))
+    .toBeChecked();
   await expect
     .element(screen.getByText("https://app.notion.com", { exact: true }).first())
     .toBeVisible();
@@ -132,44 +134,23 @@ test("a tab card starts a signed-in request that Rust prepares for approval", as
   environment.dispose();
 });
 
-test("the tab card's second choice drafts an origin grant for the next request", async () => {
-  const { screen, environment, snapshot, operation, run, composer } = await mountCanvas();
+test("the tab card offers its one page as the person, and a request with it runs as asked", async () => {
+  const { screen, environment, operation, run, composer } = await mountCanvas();
   await selectTab(screen);
-  await screen.getByRole("button", { name: "Ask signed in", exact: true }).click();
   await expect
     .element(screen.getByRole("button", { name: "Read this page as me", exact: true }))
     .toBeVisible();
-  await screen
-    .getByRole("button", {
-      name: "Let the agent read app.notion.com as me for this request",
-      exact: true,
-    })
-    .click();
-  const chip = screen.getByRole("group", { name: "Signed-in page" });
   await expect
-    .element(
-      chip.getByText("Let the agent read app.notion.com as me for this request", { exact: true }),
-    )
+    .element(screen.getByRole("button", { name: "Change a field as me", exact: true }))
     .toBeVisible();
-  // An origin grant only reads: there is no field change to offer.
-  expect(chip.getByRole("radio").elements()).toHaveLength(0);
-  await composer.fill("What changed in the sprint this week?");
+  // Signed-in reading across a site is not a mode to pick: the request's words ask for it.
+  expect(screen.container.textContent).not.toContain("Ask signed in");
+  expect(screen.container.textContent).not.toContain("as me for this request");
+  await composer.fill("What changed in the Notion sprint this week?");
   await screen.getByRole("button", { name: "Send", exact: true }).click();
-  await expect.poll(() => operation.mock.calls.length).toBe(1);
-  expect(operation.mock.calls[0]![0]).toEqual({
-    kind: "prepare_account",
-    request: {
-      version: 1,
-      work: "objective",
-      expected_revision: "4",
-      environment: snapshot.id,
-      element: tabElement,
-      effect: { kind: "read" },
-      mode: "origin",
-    },
-  });
-  // The run waits on the person's word.
-  expect(run).not.toHaveBeenCalled();
+  // Rust decides whether the words name a signed-in tab; the frontend only sends.
+  await expect.poll(() => run.mock.calls.length).toBe(1);
+  expect(operation).not.toHaveBeenCalled();
   expect(environment.accountScope).toBeNull();
   await screen.unmount();
   environment.dispose();

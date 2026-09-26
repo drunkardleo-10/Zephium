@@ -1588,6 +1588,43 @@
           element.reference.objective === objectiveSession?.selected,
       ),
   );
+  /**
+   * A read that met a sign-in wall: the run stops there, the page opens in the
+   * pane for the person to sign in, and the same request can then be sent as
+   * them, once they allow the grant Rust drafts.
+   */
+  let signInRetry = $state.raw<{ work: string; origin: string; host: string } | null>(null);
+  async function signIn(card: string) {
+    const current = objectiveSession;
+    const url = pages.items.find((item) => item.id === card)?.page?.url;
+    const work = current?.projection?.work.id;
+    const execution = current?.projection?.executions.at(-1);
+    if (!current || !url || !work) return;
+    let origin: string;
+    try {
+      origin = new URL(url).origin;
+    } catch {
+      return;
+    }
+    if (execution && current.projection && isLive(current.projection, execution)) {
+      const stopped = await current.execute({
+        kind: "cancel",
+        execution: execution.id,
+        intervention: { kind: "sign_in", origin },
+      });
+      if (!stopped) return;
+    }
+    signInRetry = { work, origin, host: new URL(origin).host };
+    openPane({ kind: "url", url }, card);
+  }
+  async function retrySignedIn() {
+    const current = objectiveSession;
+    const retry = signInRetry;
+    if (!current || !retry || current.projection?.work.id !== retry.work) return;
+    closePane();
+    signInRetry = null;
+    await current.retrySignedIn(retry.origin);
+  }
   /** A field change needs both values, and different ones, before it is sent. */
   function accountInvalid() {
     const account = session.accountScope;
@@ -2274,6 +2311,9 @@
           }}
           onfocusagent={(id) => canvasRef?.center(id)}
           onsteered={() => (session.composer = "")}
+          onsignin={(card: string) => void signIn(card)}
+          retry={signInRetry?.work === objectiveSession?.selected ? signInRetry : null}
+          onretry={() => void retrySignedIn()}
           onopenpage={(tab) => {
             if (!tabs.some((candidate) => candidate.id === tab)) return;
             const origin = snapshot?.elements.find(
@@ -2401,16 +2441,20 @@
                   composerElement?.querySelector<HTMLElement>("textarea")?.focus();
                   return;
                 }
-                if (action === "account" || action === "account-origin") {
+                // One page as the person: read it, or change one field and restore it.
+                if (action === "account" || action === "account-update") {
                   const item = items.find((item) => item.id === id);
                   if (item?.type === "tab" && !item.unavailable && item.detail) {
                     session.accountScope = {
                       element: id,
                       title: item.title,
                       origin: item.detail,
-                      mode: action === "account" ? "page" : "origin",
+                      mode: "page",
                     };
-                    accountEffect = { kind: "read" };
+                    accountEffect =
+                      action === "account"
+                        ? { kind: "read" }
+                        : { kind: "update", update: { field: null, from: "", to: "" } };
                     composerFailure = null;
                     composerElement?.querySelector<HTMLElement>("textarea")?.focus();
                   }

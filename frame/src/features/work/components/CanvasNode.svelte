@@ -62,18 +62,8 @@
       "diagram",
     ].includes(type),
   );
+  /** A tab's one page, read or changed with the person's session: each asks its own approval. */
   const signedIn = $derived(type === "tab" && !data.unavailable && !!data.detail);
-  let accountChoices = $state(false);
-  $effect(() => {
-    if (!selected) accountChoices = false;
-  });
-  const originHost = (origin: string) => {
-    try {
-      return new URL(origin).host;
-    } catch {
-      return origin;
-    }
-  };
   /** A page held for a person opens the takeover, never a copy in Browse. */
   const waiting = $derived(data.page?.human?.phase === "waiting_for_human");
 </script>
@@ -129,10 +119,10 @@
           <option value="">{m.work_env_no_area()}</option>
           {#each areas.list as area (area.id)}<option value={area.id}>{area.title}</option>{/each}
         </select>{/if}{/if}
-    {#if signedIn}<button
-        type="button"
-        aria-expanded={accountChoices}
-        onclick={() => (accountChoices = !accountChoices)}>{m.work_account_ask()}</button
+    {#if signedIn}<button type="button" onclick={() => action(id, "account")}
+        >{m.work_account_read_page()}</button
+      ><button type="button" onclick={() => action(id, "account-update")}
+        >{m.work_account_change_field()}</button
       >{/if}
     {#if !inert && !data.actionLabel}<span class="separator"></span><button
         type="button"
@@ -142,29 +132,6 @@
         <Icon icon={MinusSignIcon} size={14} />{m.work_env_remove()}
       </button>{/if}
   </div>
-  <!-- One page, or the tab's whole site for one request: the person picks, the approval attests. -->
-  {#if signedIn && accountChoices}<div
-      class="choices"
-      role="group"
-      aria-label={m.work_account_ask()}
-    >
-      <button
-        type="button"
-        class="choice"
-        onclick={() => {
-          accountChoices = false;
-          action(id, "account");
-        }}>{m.work_account_read_page()}</button
-      >
-      <button
-        type="button"
-        class="choice"
-        onclick={() => {
-          accountChoices = false;
-          action(id, "account-origin");
-        }}>{m.work_account_read_origin({ host: originHost(data.detail) })}</button
-      >
-    </div>{/if}
 </NodeToolbar>
 <div class="node-root" bind:this={root}>
   {#if data.decision}<span class="decision" title={data.decision}
@@ -285,43 +252,6 @@
 
   .bar button.on {
     color: var(--color-success);
-  }
-
-  .choices {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    inline-size: max-content;
-    max-inline-size: 320px;
-    margin-block-start: 4px;
-    padding: 4px;
-    border-radius: var(--radius-control);
-    background: var(--color-menu);
-    backdrop-filter: blur(12px) saturate(1.2);
-    box-shadow: var(--shadow-popover);
-  }
-
-  .choice {
-    padding: 6px 10px;
-    border: 0;
-    border-radius: var(--radius-control-compact);
-    background: transparent;
-    color: var(--color-text);
-    font: inherit;
-    font-size: var(--text-label);
-    font-weight: 500;
-    text-align: start;
-    cursor: default;
-    transition: background-color var(--motion-instant) ease;
-  }
-
-  .choice:hover {
-    background: var(--color-control-hover);
-  }
-
-  .choice:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: -2px;
   }
 
   .bar .area {

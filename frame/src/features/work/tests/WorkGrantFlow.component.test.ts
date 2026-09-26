@@ -143,8 +143,14 @@ function nativeWork(profile: string, attached: boolean) {
   native.operation.mockImplementation(
     async (_profile: string, operation: string, input: WorkOperationV1) => {
       operations.push(input);
+      // Rust's offer: a run without accounts, naming the attached signed-in tab, drafts.
+      const drafts =
+        input.kind === "run" &&
+        input.command.intent.kind === "begin_agent" &&
+        !input.command.intent.grant.accounts?.length &&
+        !input.signed_in;
       const state =
-        input.kind === "prepare_account"
+        drafts || input.kind === "prepare_account"
           ? {
               kind: "settled",
               response: {
@@ -175,7 +181,7 @@ function nativeWork(profile: string, attached: boolean) {
   return { snapshot, operations };
 }
 
-/** Picks the tab's site on its card, asks, and waits for the drafted grant's question. */
+/** Attaches the tab as context, names its site, and waits for the drafted grant's question. */
 async function ask(profile: string, attached: boolean, earlier = false) {
   await page.viewport(1200, 800);
   const { snapshot, operations } = nativeWork(profile, attached);
@@ -215,17 +221,12 @@ async function ask(profile: string, attached: boolean, earlier = false) {
     );
   await expect.poll(tab).not.toBeNull();
   tab()!.click();
-  await screen.getByRole("button", { name: "Ask signed in", exact: true }).click();
-  await screen
-    .getByRole("button", {
-      name: "Let the agent read app.slack.com as me for this request",
-      exact: true,
-    })
-    .click();
-  await expect.poll(() => environment.accountScope?.mode).toBe("origin");
-  await composer.fill("Summarise the channel");
+  // No mode to pick: the words name the site of a tab the person is signed in to.
+  expect(screen.container.textContent).not.toContain("Ask signed in");
+  await composer.fill("Summarise the launch channel in Slack");
   await screen.getByRole("button", { name: "Send", exact: true }).click();
-  await expect.poll(() => operations.map((input) => input.kind)).toEqual(["prepare_account"]);
+  await expect.poll(() => operations.map((input) => input.kind)).toEqual(["run"]);
+  expect(environment.accountScope).toBeNull();
   const question = screen.getByRole("region", {
     name: "Let the agent read app.slack.com as me for this request",
   });
@@ -243,12 +244,13 @@ async function ask(profile: string, attached: boolean, earlier = false) {
 async function allowed(profile: string, attached: boolean, earlier = false) {
   const { screen, environment, operations } = await ask(profile, attached, earlier);
   await screen.getByRole("button", { name: "Allow for this request", exact: true }).click();
-  await expect
-    .poll(() => operations.map((input) => input.kind))
-    .toEqual(["prepare_account", "run"]);
+  await expect.poll(() => operations.map((input) => input.kind)).toEqual(["run", "run"]);
   const run = operations[1]!;
   if (run.kind !== "run" || run.command.intent.kind !== "begin_agent") throw new Error("run");
   expect(run.command.intent.grant.accounts).toEqual([grant]);
+  expect(run.signed_in).toBeUndefined();
+  // The same request's context rides again with the grant.
+  expect(run.context).toEqual(operations[0]!.kind === "run" ? operations[0]!.context : null);
   await expect.poll(() => screen.container.querySelector(".agent-line")).not.toBeNull();
   await screen.unmount();
   environment.dispose();
@@ -272,12 +274,12 @@ test("not now continues the request without the session", async () => {
   await expect
     .element(screen.getByText("Continuing without your session", { exact: true }))
     .toBeVisible();
-  await expect
-    .poll(() => operations.map((input) => input.kind))
-    .toEqual(["prepare_account", "run"]);
+  await expect.poll(() => operations.map((input) => input.kind)).toEqual(["run", "run"]);
   const run = operations[1]!;
   if (run.kind !== "run" || run.command.intent.kind !== "begin_agent") throw new Error("run");
   expect(run.command.intent.grant.accounts).toBeUndefined();
+  // Declined: Rust drafts nothing again, and the request reads anonymously.
+  expect(run.signed_in).toEqual({ kind: "declined" });
   await screen.unmount();
   environment.dispose();
 });

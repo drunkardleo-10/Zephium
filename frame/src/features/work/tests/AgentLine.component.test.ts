@@ -499,3 +499,102 @@ test("every run that ended early says why in Rust's words, never a generic failu
   await refused.unmount();
   full.dispose();
 });
+
+test("a finished run states what it did beneath its words, counted from its steps", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  const done = agentRun("completed");
+  const read = (id: string, url: string, status: "succeeded" | "failed", note?: string) => ({
+    id,
+    turn: 2,
+    kind: { kind: "read" as const, url },
+    status,
+    ...(note ? { note } : {}),
+  });
+  done.steps = [
+    ...done.steps!,
+    { ...done.steps![1]!, id: "search-2", kind: { kind: "search", query: "keyboard reviews" } },
+    read("read-1", "https://lego.com/sets", "succeeded"),
+    read("read-2", "https://jobs.ashbyhq.com/acme", "failed", "The page gave nothing"),
+    read("read-3", "https://jobs.ashbyhq.com/acme", "failed", "The page gave nothing"),
+    read("read-4", "https://rtings.com/keyboard", "succeeded"),
+    {
+      id: "finish",
+      turn: 3,
+      kind: { kind: "finish", followups: [] },
+      status: "succeeded",
+      note: "Compared three keyboards.",
+    },
+  ];
+  session.projection = { ...structuredClone(projection), executions: [done] };
+  const screen = await render(AgentLine, { session });
+  // The agent's own sentence stays the line; the facts are Rust's, not the model's.
+  await expect
+    .element(screen.getByText("Compared three keyboards.", { exact: true }))
+    .toBeVisible();
+  await expect
+    .element(
+      screen.getByText("searched the web 2 times · opened 3 pages · read 2 · 1 could not be read", {
+        exact: true,
+      }),
+    )
+    .toBeVisible();
+  await screen.unmount();
+  session.dispose();
+});
+
+test("a sign-in wall offers to sign in, then the same request goes again as the person", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  const execution = agentRun("running");
+  execution.steps = [
+    ...execution.steps!,
+    {
+      id: "read-1",
+      turn: 2,
+      kind: { kind: "read", url: "https://jobs.example.com/inbox" },
+      status: "running",
+    },
+  ];
+  session.projection = { ...structuredClone(projection), executions: [execution] };
+  // The takeover: Rust holds the page for a person because it asked to sign in.
+  const waiting = {
+    card: "page:execution:read-1",
+    host: "jobs.example.com",
+    reason: "sign_in" as const,
+    remaining: 150_000,
+  };
+  const onsignin = vi.fn();
+  const onretry = vi.fn();
+  const screen = await render(AgentLine, { session, waiting, onsignin, onretry });
+  await screen.getByRole("button", { name: "Sign in to jobs.example.com", exact: true }).click();
+  expect(onsignin).toHaveBeenCalledExactlyOnceWith("page:execution:read-1");
+  // The run stopped for the sign-in; once the person is back, the line offers the retry.
+  const stopped = { ...execution, status: "cancelled" as const };
+  session.projection = { ...structuredClone(projection), executions: [stopped] };
+  await screen.rerender({
+    session,
+    waiting: null,
+    onsignin,
+    onretry,
+    retry: { host: "jobs.example.com" },
+  });
+  await screen.getByRole("button", { name: "Try again as me", exact: true }).click();
+  expect(onretry).toHaveBeenCalledOnce();
+  // Trying again sends the same request naming the origin: Rust drafts the grant to allow.
+  native.operation.mockResolvedValue({
+    version: 1,
+    profile: "profile",
+    operation: "op",
+    state: { kind: "pending", work: "objective" },
+  });
+  await session.retrySignedIn("https://jobs.example.com");
+  const input = native.operation.mock.lastCall?.[2];
+  expect(input).toMatchObject({
+    kind: "run",
+    signed_in: { kind: "origin", origin: "https://jobs.example.com" },
+  });
+  expect(input.command.intent.grant.accounts).toBeUndefined();
+  await screen.unmount();
+  session.dispose();
+});

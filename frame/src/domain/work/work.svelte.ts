@@ -16,6 +16,7 @@ import type {
   WorkContextSelectionV1,
   WorkAccountApprovalRequestV1,
   WorkAccountGrantV1,
+  WorkSignedInV1,
 } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 import { observe } from "$shared/lib/observe";
@@ -442,10 +443,15 @@ export class WorkSession {
       },
     });
   }
-  /** The routine loop: sending the objective grants the public envelope. */
+  /**
+   * The routine loop: sending the objective grants the public envelope. A
+   * request without accounts may come back as a drafted grant for a signed-in
+   * tab it names; it then waits for the person's answer.
+   */
   async run(
     context: WorkContextSelectionV1 | null = null,
     accounts: readonly WorkAccountGrantV1[] = [],
+    signedIn: WorkSignedInV1 = { kind: "offer" },
   ) {
     if (!this.projection || this.pending || this.operations.busy(this.projection.work.id)) return;
     // What an earlier launch left running is acknowledged first: sending the
@@ -454,9 +460,11 @@ export class WorkSession {
       if (!(await this.execute({ kind: "acknowledge_interruption", execution }))) return;
     const work = this.projection?.work;
     if (!work || this.pending || this.operations.busy(work.id)) return;
+    if (!accounts.length && signedIn.kind !== "declined") this.grantRequests.set(work.id, context);
     await this.operations.begin({
       kind: "run",
       ...(context ? { context } : {}),
+      ...(signedIn.kind === "offer" ? {} : { signed_in: signedIn }),
       command: {
         version: 1,
         work: work.id,
@@ -507,7 +515,7 @@ export class WorkSession {
   get grantDraft(): WorkAccountGrantV1 | null {
     const work = this.projection?.work;
     if (!work || !this.grantRequests.has(work.id)) return null;
-    const state = this.operations.latest(work.id, "prepare_account")?.state;
+    const state = this.operations.latest(work.id, ["prepare_account", "run"])?.state;
     const reply = state?.kind === "settled" ? state.response.reply : null;
     return reply?.kind === "account_grant_draft" && reply.work === work.id ? reply.grant : null;
   }
@@ -528,8 +536,13 @@ export class WorkSession {
     this.grantRequests.delete(work.id);
     const before = this.operations.latest(work.id, "run")?.id;
     this.declined = { work: work.id, last: this.projection?.executions.at(-1)?.id };
-    await this.run(context);
+    await this.run(context, [], { kind: "declined" });
     if (this.operations.latest(work.id, "run")?.id === before) this.declined = null;
+  }
+  /** After signing in to `origin`, the same request again, read as the person once they allow it. */
+  async retrySignedIn(origin: string, context: WorkContextSelectionV1 | null = null) {
+    this.declined = null;
+    await this.run(context, [], { kind: "origin", origin });
   }
   /** The declined request is starting anonymously and its run has not shown yet. */
   get grantDeclined(): boolean {
