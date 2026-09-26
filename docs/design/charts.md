@@ -2,8 +2,30 @@
 
 One kit draws every chart in the product: Work's results and the Activity
 views. It lives in `frame/src/shared/ui/data/Chart`, takes one spec type, and
-draws SVG in Svelte on `d3-scale`, `d3-shape`, `d3-array` and `d3-time`. No
-chart library, no `d3-selection`, no d3 transitions.
+draws SVG with [LayerChart](https://layerchart.com) `2.5.0` (pinned, Svelte 5,
+on d3).
+
+## What is ours, what is the library's
+
+| Ours | LayerChart's |
+| --- | --- |
+| `ChartSpec` and its eight kinds (`chart.ts`) | Scales, stacking and grouping |
+| Value parsing, formats, ticks, extremes (`chart.ts`) | Marks: bars, splines, areas, arcs, rects, text |
+| The spec as LayerChart rows and series, the card rules, the tooltip's words, the CSV (`layer.ts`) | Axes, gridlines, the hover highlight |
+| Work's conversion (`Artifact/work-chart.ts`, `WorkChart.svelte`) | Tooltip placement and hit areas |
+| Tokens, the legend, the basis line, the values table (`Chart.svelte`) | Arrival motion (tweened bars, drawn lines) |
+
+`Chart.svelte` renders through LayerChart's `ChartCore` with its own children:
+one `<svg>` per chart, no canvas, one size observer (LayerChart's, on the plot
+box), nothing running at rest.
+
+LayerChart is patched (`patches/layerchart@2.5.0.patch`). Its lazy imports of
+Voronoi, Arc, Bar, Spline, pan and zoom, and brush import back into the chart
+chunk, which stops the bundler merging common chunks and splits the browser's
+startup into dozens of requests. Arc, Bar and Spline are imported statically as
+SVG; voronoi, pan, zoom and brush are not bundled, so a tooltip `mode` of
+`voronoi`, or `transform` or `brush` on a chart, does nothing. Re-check the
+patch when LayerChart is upgraded.
 
 ## The spec
 
@@ -22,7 +44,7 @@ type ChartSpec = {
   };
   basis?: string; // one line under the plot
   knowledge?: boolean; // from what the agent knows; draws nothing, the basis line speaks
-  compact?: boolean; // the card: no axis labels, no legend, no values table
+  compact?: boolean; // the card: see the card rules
 };
 type ChartPoint = {
   x: string | number; // a category, a number, or an ISO date for a time axis
@@ -45,47 +67,74 @@ that draws a source's mark in the tooltip (Work passes its favicon glyph).
 
 ## The kinds
 
-| Kind | Use it for | Notes |
-| --- | --- | --- |
-| `bars` | Comparing a few things: prices, scores, time per site | Lie down past eight categories or with long names (never on a card). Several series group side by side with a legend. Values sit on the bars when there is room. |
-| `stacked` | One total per x made of parts: a day's time by category | Diverging stacks for negatives; a 2px surface gap parts segments. |
-| `line` | A trend over ordered x | Monotone curve, its own y range (zero not forced), points on hover, gaps at null. |
-| `area` | A trend whose volume matters | As `line`, filled to zero with a 10% wash. |
-| `range` | A spread per item: "$3,000–8,000" | A bar from `y` to `y2`, both ends rounded. |
-| `donut` | A share of one whole | First series only, largest first, seven slices then "Other"; the total in the middle. |
-| `heat` | Two categorical axes and a magnitude: hour by day | x categories across, series names down, one tone from the surface rung to the lit rung. |
-| `spark` | A trend in a row | No axes, no tooltip, no table; a line, or bars when `x.kind` is `category`. Fills its container; pass `height` if it has none. |
+| Kind | Use it for | LayerChart | Notes |
+| --- | --- | --- | --- |
+| `bars` | Comparing a few things: prices, scores, time per site | `Bars`, grouped by series | Lie down past eight categories or with long names (never on a card). One series writes its values on the bars, up to twelve. |
+| `stacked` | One total per x made of parts | `Bars`, `stackDiverging` | Negatives stack below zero; a 2px gap parts segments; only the outer segment is rounded. |
+| `line` | A trend over ordered x | `Spline`, monotone | Its own y range (zero not forced), points on hover, gaps at null. |
+| `area` | A trend whose volume matters | `Area` + `Spline` | As `line`, filled to zero with a 10% wash. |
+| `range` | A spread per item: "$3,000–8,000" | `Bars` from `y` to `y2` | Both ends rounded. |
+| `donut` | A share of one whole | `Pie` + `Arc` | First series only, largest first, seven slices then "Other"; the total in the middle. |
+| `heat` | Two categorical axes and a magnitude: hour by day | `Rect` on two band scales | x categories across, series names down, one tone from the surface rung to the lit rung. |
+| `spark` | A trend in a row | `Spline`, or `Bars` when `x.kind` is `category` | No axes, no tooltip, no table. Fills its container; pass `height` if it has none. |
+
+## The card
+
+`compact` is the Work card (300×160). It is never mute:
+
+- **Bars and ranges** write the category under each bar and the value on top,
+  at `--text-caption`, abbreviated with the spec's format (`1.2K`, `$3.4K`,
+  `45%`, `$3K–$8K`). Past twelve bars there is no room and the values go.
+- **Stacks** write their categories.
+- **Lines and areas** write the first and last x under the plot and the first
+  series' last value at its end.
+- **A donut** states its largest slice's share in the middle, with its label.
+- **Legend**: none for one series; a two-row legend for two to four; past four,
+  the values table instead.
+
+No axis labels and no ticks on the card; gridlines stay.
+
+## The lift
+
+Full size: axes with rounded ticks (`axisTicks`, clock steps for durations) and
+labels, gridlines, the legend when there are two series or more, a tooltip on
+hover with every series at that x and its sources as chips, the extremes
+sentence under the plot ("lowest Mon at 5, highest Wed at 30"), the basis line,
+and the values table with **Copy values (CSV)**, in the sources' own words.
 
 ## Tokens
 
 - Series identity: `--chart-1` … `--chart-8`, in fixed order, never cycled; a
-  ninth series takes `--color-tint-graphite`. Both themes are stepped and
-  validated for colour-vision separation against their own surface.
-- A single series (bars, lines, areas, a spark) and a donut's first slice are
-  `--chart-1`. `--color-lit` is a light tonal rung in the dark theme, so a
-  series drawn with it reads white on a dark card; the lit rung stays for what
-  is on: the hover and the highlighted range. Heat mixes `--color-surface`
-  toward `--color-lit`.
-- Gridlines are hairlines on `--color-border` (zero on `--color-border-strong`);
-  there are no axis lines. Ticks are rounded (`axisTicks`, clock steps for
-  durations) in `--text-caption` and `--color-faint`.
-- The tooltip is a plain popover on `--color-float` with `--shadow-float` and
-  `--radius-control-compact`: the point, its value, and its sources as chips.
-- No gradients, no glow, no blur. A bar's data end is rounded in proportion to
-  its thickness; its baseline is square.
+  ninth series takes `--color-tint-graphite`. A single series is `--chart-1`.
+- Gridlines and axes are hairlines on `--color-border` (zero on
+  `--color-border-strong`); there are no axis lines. Labels are
+  `--text-caption` in `--color-muted`.
+- The tooltip is our content in LayerChart's positioned tooltip: `--color-float`,
+  `--radius-control`, `--shadow-control`; the point, its values and its sources.
+- Heat mixes `--color-surface` toward `--color-lit`. The hover column is
+  `--color-fill`.
+- No gradients, no glow, no blur. A bar's data end is rounded; its baseline is
+  square.
 
 ## Motion
 
-A chart arrives once: bars grow from their baseline and lines draw
-(`pathLength`) over `--motion-slow` on `--ease-emphasized`; washes, slices and
-cells fade in. Hover answers on `--motion-fast`. Under reduced motion (system
-or in-app) nothing animates; the chart is drawn settled.
+A chart arrives once over `--motion-base`: bars grow from their baseline
+(LayerChart's tweened props) and lines draw in; washes, slices and cells fade
+in. Nothing animates at rest. Under reduced motion (system or in-app) nothing
+animates and the tooltip neither springs nor fades.
 
 ## Accessibility
 
 The plot is `role="img"`, named by the title, the axis labels, the kind and the
-extremes ("lowest Mon at 5, highest Wed at 30"). In full size a `<details>`
-values table carries every point, its exact words and its sources.
+extremes. The values table (`<details>`) carries every point, its exact words
+and its sources: always in the lift, and on a card with more than four series.
+
+## Cost
+
+The kit is its own lazy chunk (`WorkChart` today, `Chart` once Activity loads
+it through `loadChart`): about 350 KB minified, 103 KB gzipped, with
+LayerChart. Svelte's transition runtime, which LayerChart's marks use, sits in
+the shared runtime chunk (+2.3 KB in every graph).
 
 ## Callers
 
@@ -94,7 +143,7 @@ chart (exact decimal strings) onto the spec once: `bars` by default, `range`
 when any value parses as a range (`3000-8000`, `$3,000–8,000`), `line` past 24
 points; a currency symbol makes it money; an unparseable value is a gap; the
 original string stays in `display` for the table, under the precision note. The
-card is `compact` and draws no basis and no legend.
+card is `compact` and draws no basis.
 
 ```ts
 workChartSpec({ xLabel: "Builder", yLabel: "Quote", series, basis: "Basis: Written quotes" });
