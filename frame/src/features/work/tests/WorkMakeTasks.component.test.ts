@@ -4,12 +4,9 @@ import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import { TaskSession } from "$domain/resources";
 import WorkCanvas from "../components/WorkCanvas.svelte";
-import {
-  environmentClusters,
-  environmentItems,
-  environmentSteps,
-} from "../lib/project-environment";
-import { environmentStages } from "../lib/project-environment-thread";
+import { environmentBoards, environmentItems } from "../lib/project-environment";
+import { environmentStages } from "../lib/project-environment-board";
+import { artifactView } from "../lib/project-work";
 import { resultPlan } from "../lib/plan-steps";
 import { stepPlan, WorkTasks, workTasksKey } from "../lib/work-tasks";
 import { planScene } from "./environment-fixtures";
@@ -28,17 +25,24 @@ test("a plan's steps become the person's tasks on request, and a task done in Ta
   const server = resourceTestServer(profile);
   native.resource.mockImplementation(server.call);
   const { scene, objectives } = planScene();
+  // The plan as a checklist: its steps are the block's rows.
+  const run = objectives.get("objective")!.executions[0]!;
+  run.artifacts[0]!.data = {
+    kind: "checklist",
+    items: [
+      "Confirm the batch and interview dates",
+      "Check your ESTA eligibility",
+      "Compare Airbnb flats for total cost",
+      "Plan the SFO-to-stay route by BART",
+    ].map((text) => ({ text, completed: false })),
+  };
   const stages = environmentStages(scene, objectives);
-  const steps = environmentSteps(scene, objectives, stages);
-  const { clusters, links } = environmentClusters(stages);
-  const items = [...environmentItems(scene, [], [], objectives), ...steps.items];
-  const result = items.find((item) => item.id === "plan-card")!;
-  const plan = stepPlan(
-    "plan-card",
-    "objective",
-    result.artifact!,
-    resultPlan(result.artifact!.content),
-  );
+  const view = artifactView(run.artifacts[0]!, run);
+  const items = [
+    ...environmentItems(scene, [], [], objectives),
+    ...environmentBoards(stages, null, (id) => (id === "plan-card" ? view : undefined)),
+  ];
+  const plan = stepPlan("plan-card", "objective", view, resultPlan(view.content));
   const session = new TaskSession(profile);
   await session.start();
   const open = vi.fn();
@@ -46,16 +50,11 @@ test("a plan's steps become the person's tasks on request, and a task done in Ta
   const screen = await render(WorkCanvas, {
     props: {
       items,
-      links: [...links, ...steps.links],
-      clusters,
+      links: [],
       authoritative: new Set(["objective-card", "plan-card"]),
       initialView: {
-        positions: {
-          ...stages[0]!.layout.positions,
-          ...steps.positions,
-          "objective-card": { x: 0, y: 0 },
-        },
-        viewport: { x: 16, y: 16, zoom: 0.6 },
+        positions: stages[0]!.targets,
+        viewport: { x: 16, y: 16, zoom: 0.8 },
       },
       oninspect: vi.fn(),
     },
@@ -63,14 +62,14 @@ test("a plan's steps become the person's tasks on request, and a task done in Ta
   });
   screen.container.style.width = "1400px";
   screen.container.style.height = "900px";
-  const cards = () => [...screen.container.querySelectorAll<HTMLElement>(".step")];
+  const cards = () => [...screen.container.querySelectorAll<HTMLElement>(".list li")];
   await expect.poll(() => cards().length).toBe(4);
   // Nothing is made until the person asks.
   expect(server.records.size).toBe(0);
-  expect(screen.container.querySelectorAll(".step .task")).toHaveLength(0);
+  expect(screen.container.querySelectorAll(".list .task")).toHaveLength(0);
 
   await screen.getByRole("button", { name: "Make tasks", exact: true }).click();
-  await expect.poll(() => screen.container.querySelectorAll(".step .task").length).toBe(4);
+  await expect.poll(() => screen.container.querySelectorAll(".list .task").length).toBe(4);
   const made = [...server.records.values()]
     .map((record) => ({ title: record.draft.title, task: record.draft.content }))
     .toSorted((a, b) =>
@@ -129,14 +128,10 @@ test("a step that fails to become a task keeps the ones made and says so once", 
     return server.call(owner, call);
   });
   const { scene, objectives } = planScene();
-  const items = environmentItems(scene, [], [], objectives);
-  const result = items.find((item) => item.id === "plan-card")!;
-  const plan = stepPlan(
-    "plan-card",
-    "objective",
-    result.artifact!,
-    resultPlan(result.artifact!.content),
-  );
+  const run = objectives.get("objective")!.executions[0]!;
+  const view = artifactView(run.artifacts[0]!, run);
+  expect(scene.elements.map((element) => element.id)).toContain("plan-card");
+  const plan = stepPlan("plan-card", "objective", view, resultPlan(view.content));
   const session = new TaskSession("profile");
   await session.start();
   const tasks = new WorkTasks("profile", session, () => new Map([["plan-card", plan]]), vi.fn());

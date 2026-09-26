@@ -28,7 +28,8 @@ test("expands only the exact historical plan with stable dependency identities a
     "objective-card",
   );
   expect(validScene(scene.items, scene.links)).toBe(true);
-  expect(scene.items).toHaveLength(4);
+  // The request and its two steps; the result is its board's.
+  expect(scene.items).toHaveLength(3);
   expect(scene.links).toContainEqual(
     expect.objectContaining({
       source: "plan:objective-card:2:read",
@@ -58,7 +59,7 @@ test("expands only the exact historical plan with stable dependency identities a
   );
   expect(wrong.targets.size).toBe(0);
   const collapsed = environmentPlan(snapshot, base, states, new Map([["objective", plan]]), null);
-  expect(collapsed.items).toHaveLength(2);
+  expect(collapsed.items).toHaveLength(1);
   expect(collapsed.items[0]?.actionLabel).toBe("Show plan");
 });
 

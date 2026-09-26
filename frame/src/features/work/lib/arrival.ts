@@ -34,27 +34,13 @@ export function arrivals() {
   const WINDOW = 500;
   return {
     /** Registers what the scene holds; before the first scene is seen nothing arrives. */
-    see(
-      clusters: readonly { id: string; members: readonly string[]; live?: boolean }[],
-      items: readonly { id: string }[],
-    ) {
+    see(items: readonly { id: string }[]) {
       const now = performance.now();
       for (const [id, entry] of arrived) if (now - entry.at >= WINDOW) arrived.delete(id);
-      const group = new Map<string, { id: string; live?: boolean }>();
-      for (const cluster of clusters) {
-        for (const member of cluster.members) group.set(member, cluster);
-        if (known.has(cluster.id)) continue;
-        known.add(cluster.id);
-        if (seeded && cluster.live) arrived.set(cluster.id, { at: now, motion: "page" });
-      }
       for (const item of items) {
         if (known.has(item.id)) continue;
         known.add(item.id);
-        if (!seeded) continue;
-        const owner = group.get(item.id);
-        if (owner && arrived.get(owner.id)?.at === now)
-          arrived.set(item.id, { at: now, motion: "page" });
-        else if (!owner || owner.live) arrived.set(item.id, { at: now, motion: "base" });
+        if (seeded) arrived.set(item.id, { at: now, motion: "base" });
       }
       if (items.length) seeded = true;
     },

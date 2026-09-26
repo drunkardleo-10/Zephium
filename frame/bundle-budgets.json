@@ -207,9 +207,9 @@
     "description": "LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (149394 measured over 147091 at 714054aa)."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
-    "js": 152000,
-    "css": 10000,
-    "description": "Measured 65242 JS and 2553 CSS bytes: a hand-written SVG plot with no chart library. Merged with main: 89897 JS and 5712 CSS measured. The chart kit (one spec, eight kinds on d3-scale, d3-shape, d3-array and d3-time) is loaded through WorkChart today; this entry is emitted again once Activity loads the kit through loadChart, and is bounded by WorkChart's measured graph."
+    "js": 520000,
+    "css": 16500,
+    "description": "Measured 512177 JS and 16027 CSS bytes: Work's board loads the kit through loadChart, so this entry carries LayerChart and is bounded by WorkChart's measured graph."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
     "js": 761400,
@@ -297,8 +297,8 @@
     "description": "The space's projects in the sidebar when Work is chosen, loaded with the Work environment session the canvas uses: 490124 JS and 96054 CSS measured, almost all of it the shared runtime and the Work session graph a Work window loads anyway."
   },
   "lazy:features/work/index.ts": {
-    "js": 149300,
+    "js": 149500,
     "css": 4000,
-    "description": "Work's entry, loaded when Work is chosen so the sidebar can ask it for the project list: the shared runtime chunk and two loaders (149264 measured)."
+    "description": "Work's entry, loaded when Work is chosen so the sidebar can ask it for the project list: the shared runtime chunk and two loaders (149380 measured; the board adds a few bytes to the shared runtime)."
   }
 }

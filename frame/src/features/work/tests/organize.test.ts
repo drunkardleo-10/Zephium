@@ -128,12 +128,10 @@ test("an agent run leaves its cited pages to the Sources card and places what th
   expect(plan.relations).toEqual([
     { from: plan.adds[1]!.reference, to: plan.adds[0]!.reference, kind: "supports" },
   ]);
-  // Where the lane puts them: Found in slot 2, after Worked with and its Sources card,
-  // the subject over the findings. A card is as tall as what it says.
-  const found = 348 + (24 + 300 + 24) + 48;
-  expect(plan.adds.map((add) => add.placement)).toEqual([
-    { x: found + 24, y: 44, width: 220, height: 96 },
-    { x: found + 24, y: 44 + 96 + 16, width: 300, height: 96 },
+  // The board places them; the saved placement only records the request's corner.
+  expect(plan.adds.map((add) => [add.placement.x, add.placement.y])).toEqual([
+    [100, 300],
+    [100, 300],
   ]);
 });
 
@@ -337,8 +335,6 @@ test("a comparison of two concepts from what the agent knows stands alone in Mad
     expect.objectContaining({ kind: "artifact", artifact: "points" }),
   ]);
   expect(plan.relations).toEqual([]);
-  // Made stands in the first slot, right after the request.
-  expect(Math.min(...plan.adds.map((add) => add.placement.x))).toBe(348 + 24);
 });
 
 test("a full canvas plans no more than it can hold and stops asking", () => {

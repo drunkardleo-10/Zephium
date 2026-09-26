@@ -2,56 +2,12 @@ import "$styles/global.css";
 import { expect, test } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
-import FindingsCard from "../components/cards/FindingsCard.svelte";
 import ResultCard from "../components/cards/ResultCard.svelte";
 import CompareCard from "../components/cards/CompareCard.svelte";
-import FileCard from "../components/cards/FileCard.svelte";
 import SubjectCard from "../components/cards/SubjectCard.svelte";
 import { defaultSize, type CanvasItem } from "../lib/canvas-model";
 
 const base = { kind: "", detail: "", status: "Done" };
-
-test("a findings card lists eight claims with their confidence, then how many more", async () => {
-  await page.viewport(1200, 800);
-  const confidence = [
-    "supported",
-    "contradicted",
-    "inferred",
-    "unverified",
-    "supported",
-    "supported",
-    "supported",
-    "inferred",
-    "supported",
-    "supported",
-  ];
-  const item: CanvasItem = {
-    ...base,
-    id: "findings",
-    type: "findings",
-    title: "Findings",
-    findings: {
-      items: confidence.map((level, index) => ({
-        claim: `Claim ${index + 1}`,
-        confidence: level as "supported",
-        evidence: 1,
-        ...(index === 0 ? { subject: "Tower Bridge" } : {}),
-      })),
-      total: 10,
-    },
-  };
-  const screen = await render(FindingsCard, { item, selected: false });
-  const rows = [...screen.container.querySelectorAll("li")];
-  expect(rows.map((row) => row.className.split(" ")[0])).toEqual(confidence.slice(0, 8));
-  const dot = (row: Element) => getComputedStyle(row.querySelector(".dot")!).backgroundColor;
-  expect(dot(rows[0]!)).not.toBe(dot(rows[1]!));
-  expect(dot(rows[2]!)).toBe(dot(rows[3]!));
-  await expect.element(screen.getByText("Tower Bridge")).toBeVisible();
-  await expect.element(screen.getByText("Claim 8", { exact: true })).toBeVisible();
-  await expect.element(screen.getByText("+2 more")).toBeVisible();
-  expect(screen.container.textContent).not.toContain("Claim 9");
-  await screen.unmount();
-});
 
 test("a document result shows its whole summary and its sections, never its steps or chips", async () => {
   await page.viewport(1200, 800);
@@ -218,28 +174,5 @@ test("a yes/no row reads as a check or a faint cross, centred; unknown stays a d
     );
     expect(cells[2]!.querySelector(".dash")).not.toBeNull();
   }
-  await screen.unmount();
-});
-
-test("a changed file shows its line counts", async () => {
-  await page.viewport(1200, 800);
-  const item: CanvasItem = {
-    ...base,
-    id: "file",
-    type: "file",
-    title: "plan.md",
-    file: {
-      name: "plan.md",
-      folder: "/Users/reader/notes",
-      what: "changed",
-      delta: { plus: 12, minus: 3 },
-    },
-  };
-  const screen = await render(FileCard, { item, selected: false });
-  expect(screen.container.querySelector(".delta")?.textContent?.replace(/\s+/gu, " ")).toBe(
-    "+12 −3",
-  );
-  await expect.element(screen.getByText("Changed")).toBeVisible();
-  await expect.element(screen.getByText("~/notes")).toBeVisible();
   await screen.unmount();
 });

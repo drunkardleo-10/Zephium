@@ -12,7 +12,7 @@ import type {
 import WorkExecutionReview from "../components/WorkExecutionReview.svelte";
 import AgentLine from "../components/AgentLine.svelte";
 import PageCard from "../components/cards/PageCard.svelte";
-import ObjectiveCard from "../components/cards/ObjectiveCard.svelte";
+import Trail from "../components/board/Trail.svelte";
 import type { CanvasItem } from "../lib/canvas-model";
 import { projection } from "./environment-fixtures";
 
@@ -168,29 +168,28 @@ test("an open tab the request was shown stands as a page card without a frame", 
   await screen.unmount();
 });
 
-test("a request whose run used a signed-in session says so under its words", async () => {
+test("a request whose run used a signed-in session says so on its trail", async () => {
   await page.viewport(1200, 800);
-  const screen = await render(ObjectiveCard, {
+  const screen = await render(Trail, {
     item: {
-      id: "request",
-      type: "request",
-      kind: "Request",
+      id: "trail",
+      type: "trail",
+      kind: "What it did",
       title: "What changed in the sprint?",
       detail: "",
       status: "",
-      accounts: [{ host: "app.notion.com", used: 3, pages: 12 }],
+      trail: [
+        {
+          key: "account",
+          icon: "account",
+          text: "As you on app.notion.com",
+          detail: "3 of 12 pages",
+        },
+      ],
     },
-    selected: false,
-    onaction: () => {},
   });
-  await expect
-    .element(
-      screen.getByText("Using your session on app.notion.com · 3 of 12 pages", { exact: true }),
-    )
-    .toBeVisible();
-  await expect
-    .element(screen.getByRole("img", { name: "Read as you on app.notion.com" }))
-    .toBeVisible();
+  await expect.element(screen.getByText("As you on app.notion.com", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("3 of 12 pages", { exact: true })).toBeVisible();
   await screen.unmount();
 });
 

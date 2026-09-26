@@ -1,16 +1,11 @@
 import { expect, test } from "vitest";
 import type { ArtifactContent } from "$shared/ui/data/Artifact";
-import type { WorkArtifactDataV1 } from "$shared/ipc/bindings";
-import { renamedPart } from "../lib/correct";
 import {
   DIAGRAM,
   PLATE,
   arrowHead,
   diagramColumns,
   diagramLayout,
-  diagramNodeId,
-  diagramOrigin,
-  diagramResult,
   diagramShape,
   elbow,
   flowPath,
@@ -19,7 +14,6 @@ import {
   plateHeight,
   plateWidth,
   primaryFlows,
-  sceneShape,
 } from "../lib/diagram";
 
 type Diagram = Extract<ArtifactContent, { kind: "diagram" }>;
@@ -88,14 +82,15 @@ test("stated layers are the columns, in their order, with unlayered parts last",
     { nodes: ["mail"] },
   ]);
   const layout = diagramLayout(diagram);
-  // 220 px cards 32 px apart where no flow is named, under a 16 px band for the layers' captions.
+  // Cards 32 px apart where no flow is named, under a 16 px band for the layers' captions.
+  const { width: w, height: h } = DIAGRAM.node;
   expect(layout.at).toEqual({
     web: { x: 0, y: 16 },
-    api: { x: 252, y: 16 },
-    db: { x: 504, y: 16 },
-    mail: { x: 756, y: 16 },
+    api: { x: w + 32, y: 16 },
+    db: { x: 2 * (w + 32), y: 16 },
+    mail: { x: 3 * (w + 32), y: 16 },
   });
-  expect([layout.width, layout.height]).toEqual([976, 88]);
+  expect([layout.width, layout.height]).toEqual([4 * w + 3 * 32, 16 + h]);
   expect(layout.layers.map((layer) => layer.name)).toEqual(["Edge", "Application", "Data"]);
 });
 
@@ -107,8 +102,13 @@ test("within a column parts stack in the order the edges name them, 12 px apart"
     layers: [],
   };
   const layout = diagramLayout(diagram);
-  expect(layout.at).toEqual({ app: { x: 0, y: 0 }, pg: { x: 252, y: 0 }, s3: { x: 252, y: 84 } });
-  expect(layout.height).toBe(156);
+  const { width: w, height: h } = DIAGRAM.node;
+  expect(layout.at).toEqual({
+    app: { x: 0, y: 0 },
+    pg: { x: w + 32, y: 0 },
+    s3: { x: w + 32, y: h + 12 },
+  });
+  expect(layout.height).toBe(2 * h + 12);
 });
 
 test("a gap is 32 px plus the widest plate named in it, so every flow's name has room", () => {
@@ -128,15 +128,16 @@ test("a gap is 32 px plus the widest plate named in it, so every flow's name has
   const layout = diagramLayout(diagram);
   const first = 32 + plateWidth("HTTPS");
   const second = 32 + plateWidth("authenticated requests");
-  expect(layout.at.api!.x).toBe(220 + first);
-  expect(layout.at.db!.x).toBe(220 + first + 220 + second);
-  expect(layout.width).toBe(3 * 220 + first + second);
+  const { width: w, height: h } = DIAGRAM.node;
+  expect(layout.at.api!.x).toBe(w + first);
+  expect(layout.at.db!.x).toBe(w + first + w + second);
+  expect(layout.width).toBe(3 * w + first + second);
   expect(layout.settled).toBe(false);
   // Each flow is an elbow from its source's right edge to its target's left, its plate on it.
   const flow = layout.flows[1]!;
-  expect(flow.points[0]).toEqual({ x: layout.at.api!.x + 220, y: 36 });
-  expect(flow.points.at(-1)).toEqual({ x: layout.at.db!.x, y: 36 });
-  expect(flow.plate).toEqual({ x: layout.at.api!.x + 220 + second / 2, y: 36 });
+  expect(flow.points[0]).toEqual({ x: layout.at.api!.x + w, y: h / 2 });
+  expect(flow.points.at(-1)).toEqual({ x: layout.at.db!.x, y: h / 2 });
+  expect(flow.plate).toEqual({ x: layout.at.api!.x + w + second / 2, y: h / 2 });
 });
 
 const { width: W, height: H } = DIAGRAM.node;
@@ -217,43 +218,6 @@ test("a flow is primary when it is named and the first out of its source or into
   expect(shape.flows.map((flow) => flow.index)).toEqual([0, 1, 2, 3, 4]);
 });
 
-test("the canvas finds a diagram's shape from its area, layers and links", () => {
-  const diagram: Diagram = {
-    kind: "diagram",
-    nodes: [node("db:main", "data"), node("web", "edge"), node("mail")],
-    edges: [
-      { from: "web", to: "db:main", label: " reads " },
-      edge("web", "mail"),
-      edge("mail", "mail"),
-    ],
-    layers: [
-      { id: "edge", name: "Edge" },
-      { id: "data", name: "Data" },
-    ],
-  };
-  const id = (part: string) => diagramNodeId("element:7", part);
-  const scene = sceneShape(
-    "element:7",
-    diagram.nodes.map((entry) => id(entry.id)),
-    [
-      { name: "Edge", members: [id("web")] },
-      { name: "Data", members: [id("db:main")] },
-    ],
-    diagram.edges.map((entry, index) => ({
-      id: `diagram-edge:element:7:${index}`,
-      source: id(entry.from),
-      target: id(entry.to),
-      ...(entry.label ? { label: entry.label } : {}),
-    })),
-  );
-  expect(scene).toEqual(diagramShape(diagram));
-  expect(scene.parts).toEqual([
-    { id: "db:main", lane: 1 },
-    { id: "web", lane: 0 },
-    { id: "mail", lane: 2 },
-  ]);
-});
-
 test("an elbow crosses the gap between two boxes, or runs down when they share columns", () => {
   const box = (x: number, y: number) => ({ x, y, width: 100, height: 40 });
   expect(elbow(box(0, 0), box(200, 100))).toEqual([
@@ -295,15 +259,7 @@ test("a flow's line turns its corners on 8 px arcs and stops short for its arrow
   expect(arrowHead(line, 5)).toBe("M 40,40 L 36.5,35 L 43.5,35 Z");
 });
 
-test("a picture stands where most of its parts agree, and arrows walk along flows", () => {
-  const at = { a: { x: 0, y: 16 }, b: { x: 300, y: 16 }, c: { x: 300, y: 128 } };
-  expect(
-    diagramOrigin([
-      { position: { x: 100, y: 216 }, at: at.a },
-      { position: { x: 400, y: 216 }, at: at.b },
-      { position: { x: 900, y: 900 }, at: at.c },
-    ]),
-  ).toEqual({ origin: { x: 100, y: 200 }, count: 2 });
+test("arrows walk along flows", () => {
   const joined = [
     { id: "b", at: { x: 300, y: 0 } },
     { id: "c", at: { x: 80, y: 120 } },
@@ -313,29 +269,4 @@ test("a picture stands where most of its parts agree, and arrows walk along flow
   expect(partAlong({ x: 0, y: 0 }, joined, "ArrowDown")).toBe("c");
   expect(partAlong({ x: 0, y: 0 }, joined, "ArrowLeft")).toBe("d");
   expect(partAlong({ x: 0, y: 0 }, joined, "ArrowUp")).toBeNull();
-});
-
-test("a part's card names its result", () => {
-  expect(diagramResult(diagramNodeId("element:7", "api"))).toBe("element:7");
-  expect(diagramResult("step:element:7:0")).toBeNull();
-});
-
-test("a part is renamed in its diagram; an unknown part or the same name is refused", () => {
-  const data: WorkArtifactDataV1 = {
-    kind: "diagram",
-    nodes: [
-      { id: "db", name: "Postgres", kind: "store", vendor: "postgresql.org" },
-      { id: "api", name: "API", kind: "service" },
-    ],
-    edges: [{ from: "api", to: "db" }],
-  };
-  const next = renamedPart(data, "db", "  Primary database ");
-  expect(next?.kind === "diagram" && next.nodes.map((entry) => entry.name)).toEqual([
-    "Primary database",
-    "API",
-  ]);
-  expect(next?.kind === "diagram" && next.nodes[0]!.vendor).toBe("postgresql.org");
-  expect(renamedPart(data, "missing", "Name")).toBeNull();
-  expect(renamedPart(data, "api", "API")).toBeNull();
-  expect(renamedPart(data, "api", "   ")).toBeNull();
 });

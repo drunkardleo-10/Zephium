@@ -7,7 +7,6 @@ import type {
 } from "$shared/ipc/bindings";
 import type { TaskContext, TaskRow, TaskSession } from "$domain/resources";
 import type { ArtifactView, DocumentNodeView, PlanStep } from "$shared/ui/data/Artifact";
-import { stepResult } from "./plan-steps";
 
 /** A result's plan as tasks would carry it: one title per step, in order. */
 export type StepPlan = {
@@ -87,12 +86,6 @@ export function stepPlan(
   };
 }
 
-/** The steps group's result card, read from its group id. */
-export function stepsGroupResult(id: string): string | null {
-  const at = id.lastIndexOf(":steps:");
-  return id.startsWith("group:") && at >= 0 ? id.slice(at + ":steps:".length) || null : null;
-}
-
 /**
  * A plan's steps as the person's tasks. Tasks are made only when asked, one per
  * step, through the resource boundary; what they are now is read from a task
@@ -133,13 +126,6 @@ export class WorkTasks {
       if (row) taken.add(row.id);
       return row;
     });
-  }
-
-  /** The task a step card stands for, once there is one. */
-  task(step: string): TaskRow | undefined {
-    const result = stepResult(step);
-    const index = Number(step.slice(step.lastIndexOf(":") + 1));
-    return result && Number.isInteger(index) ? this.tasks(result)[index] : undefined;
   }
 
   /** Whether a result has steps, is making them, or already made every one. */

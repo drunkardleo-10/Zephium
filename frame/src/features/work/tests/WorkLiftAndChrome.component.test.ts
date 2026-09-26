@@ -7,7 +7,6 @@ import Table from "$shared/ui/data/Artifact/Table.svelte";
 import Matrix from "$shared/ui/data/Artifact/Matrix.svelte";
 import Findings from "$shared/ui/data/Artifact/Findings.svelte";
 import WorkSubjectInspector from "../components/WorkSubjectInspector.svelte";
-import FindingsLift from "../components/FindingsLift.svelte";
 import Compare from "../components/compare/Compare.svelte";
 import ObjectiveCard from "../components/cards/ObjectiveCard.svelte";
 import { compareModel } from "../lib/compare";
@@ -170,7 +169,6 @@ test("findings and cells drawn from what the agent knows carry no chip saying so
     },
   };
   const views = [
-    await render(FindingsLift, { content: { kind: "findings", subjects, items } }),
     await render(Findings, { subjects, items, labels }),
     await render(Matrix, {
       subjects,

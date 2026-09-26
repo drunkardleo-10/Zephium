@@ -8,7 +8,7 @@ type Rect = CanvasPosition & CanvasSize;
 
 /** A part's card, the air between columns and rows, and the band a layer's caption takes. */
 export const DIAGRAM = {
-  node: { width: 220, height: 72 },
+  node: { width: 196, height: 64 },
   column: 32,
   row: 12,
   layer: 16,
@@ -23,16 +23,6 @@ const plateRun = (label: string) => Math.ceil(label.trim().length * PLATE.char +
 export const plateWidth = (label: string) => Math.min(PLATE.max, plateRun(label));
 export const plateHeight = (label: string) =>
   plateRun(label) > PLATE.max ? PLATE.height + PLATE.line : PLATE.height;
-
-/** Retired with curved flows: a flow now carries its own route. */
-export type DiagramRoute = never;
-export type DiagramPlate = never;
-
-/** A part's card: its diagram's result card and the part's own id. */
-export const diagramNodeId = (result: string, node: string) => `diagram:${result}:${node}`;
-/** The result card a part belongs to. */
-export const diagramResult = (id: string) =>
-  id.startsWith("diagram:") ? id.slice(8, id.lastIndexOf(":")) : null;
 
 /**
  * What a layout depends on and nothing else: the parts with their lane (the
@@ -58,36 +48,6 @@ export function diagramShape(diagram: Diagram): DiagramShape {
     used.map((layer) => layer.name),
     diagram.nodes.map((node) => ({ id: node.id, lane: lane(node.layer) })),
     diagram.edges.map((edge, index) => ({ index, ...edge })),
-  );
-}
-
-/**
- * The shape of a diagram as the canvas holds it: its area's members, its
- * layers' members, and its flows' links, so the canvas finds the layout the
- * lane was placed by.
- */
-export function sceneShape(
-  result: string,
-  members: readonly string[],
-  layers: readonly { name: string; members: readonly string[] }[],
-  links: readonly { id: string; source: string; target: string; label?: string }[],
-): DiagramShape {
-  const prefix = diagramNodeId(result, "");
-  const local = (id: string) => (id.startsWith(prefix) ? id.slice(prefix.length) : id);
-  const lane = (id: string) => {
-    if (!layers.length) return -1;
-    const at = layers.findIndex((layer) => layer.members.includes(id));
-    return at < 0 ? layers.length : at;
-  };
-  return shapeOf(
-    layers.map((layer) => layer.name),
-    members.map((id) => ({ id: local(id), lane: lane(id) })),
-    links.map((link) => ({
-      index: Number(link.id.slice(link.id.lastIndexOf(":") + 1)),
-      from: local(link.source),
-      to: local(link.target),
-      ...(link.label === undefined ? {} : { label: link.label }),
-    })),
   );
 }
 
@@ -152,8 +112,6 @@ export type DiagramLayout = {
   layers: { name: string; nodes: string[] }[];
   bands: DiagramBand[];
   flows: Record<number, DiagramFlow>;
-  plates: Record<number, DiagramPlate>;
-  routes: Record<number, DiagramRoute>;
   /** Laid out by the layout engine rather than in columns. */
   settled: boolean;
 };
@@ -231,7 +189,7 @@ function columnsOf(shape: DiagramShape): string[][] {
  * or apart by a plate where a named flow joins neighbours in one column, and
  * each flow an elbow between its parts.
  */
-export function columnLayout(shape: DiagramShape): DiagramLayout {
+function columnLayout(shape: DiagramShape): DiagramLayout {
   const columns = columnsOf(shape);
   const empty = { x: 0, y: 0, width: 0, height: 0 };
   if (!columns.length)
@@ -243,8 +201,6 @@ export function columnLayout(shape: DiagramShape): DiagramLayout {
       layers: [],
       bands: [],
       flows: {},
-      plates: {},
-      routes: {},
       settled: false,
     };
   const band = shape.lanes.length ? DIAGRAM.layer : 0;
@@ -316,8 +272,6 @@ export function columnLayout(shape: DiagramShape): DiagramLayout {
     layers: lanesOf(shape),
     bands: bandsOf(shape, at, { x: 0, y: 0, width: reach, height: bottom }, 0),
     flows: drawn,
-    plates: {},
-    routes: {},
     settled: false,
   };
 }
@@ -438,26 +392,6 @@ export function arrowHead(points: readonly CanvasPosition[], size = 5): string {
   return `M ${end.x},${end.y} L ${base.x - dy * half},${base.y + dx * half} L ${base.x + dy * half},${base.y - dx * half} Z`;
 }
 
-/**
- * Where a diagram's picture stands on the canvas: the corner most of its parts
- * agree on, and how many do, so a part the person dragged away moves nothing else.
- */
-export function diagramOrigin(
-  spots: readonly { position: CanvasPosition; at: CanvasPosition }[],
-): { origin: CanvasPosition; count: number } | null {
-  const votes = new Map<string, { origin: CanvasPosition; count: number }>();
-  let best: { origin: CanvasPosition; count: number } | null = null;
-  for (const { position, at } of spots) {
-    const origin = { x: Math.round(position.x - at.x), y: Math.round(position.y - at.y) };
-    const key = `${origin.x},${origin.y}`;
-    const vote = votes.get(key) ?? { origin, count: 0 };
-    vote.count += 1;
-    votes.set(key, vote);
-    if (!best || vote.count > best.count) best = vote;
-  }
-  return best;
-}
-
 const KEYS: Record<string, CanvasPosition> = {
   ArrowRight: { x: 1, y: 0 },
   ArrowLeft: { x: -1, y: 0 },
@@ -494,9 +428,6 @@ const asked = new Set<string>();
 const KEPT = 48;
 const keyOf = (shape: DiagramShape) => JSON.stringify(shape);
 
-/** The layout the engine settled for a shape, if it has. */
-export const settledLayout = (shape: DiagramShape) => settled.get(keyOf(shape));
-
 /**
  * A diagram's layout now: the engine's once it has answered, otherwise the
  * columns while it is asked (in a browser only), so an area appears at once
@@ -506,7 +437,7 @@ export function diagramLayout(diagram: Diagram): DiagramLayout {
   return layoutOf(diagramShape(diagram));
 }
 
-export function layoutOf(shape: DiagramShape): DiagramLayout {
+function layoutOf(shape: DiagramShape): DiagramLayout {
   const key = keyOf(shape);
   const done = settled.get(key);
   if (done) return done;

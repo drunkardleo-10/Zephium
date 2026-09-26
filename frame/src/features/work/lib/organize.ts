@@ -16,9 +16,6 @@ import {
   subjectKey,
   subjectsOf,
 } from "./subjects";
-import { environmentStages, type WorkStage } from "./project-environment-thread";
-import { artifactSize, subjectCardSize } from "./project-environment-stage";
-import { SIZES, stageLayout, type ClusterKind, type StageContents } from "./stage-layout";
 
 type Placement = CanvasPosition & CanvasSize;
 export type OrganizePlan = {
@@ -121,18 +118,16 @@ export function pendingOrganize(
   return roots(execution).some((artifact) => !placed.has(artifact.id)) ? execution : null;
 }
 
-/** Deterministic first placement around the objective; lane cards then follow their lane. */
+/** Deterministic first placement around the objective; a board then places what it draws. */
 export function organizeExecution(
   projection: WorkRuntimeProjection,
   execution: WorkExecutionFact,
   anchor: CanvasPosition,
   snapshot?: WorkEnvironmentSnapshot,
-  /** The stage the run serves, as the canvas draws it; derived when absent. */
-  stage?: WorkStage,
 ): OrganizePlan {
   const plan =
     snapshot && isAgentExecution(execution)
-      ? organizeAgentRun(projection, execution, snapshot, stage)
+      ? organizeAgentRun(projection, execution, snapshot, anchor)
       : organizeReviewedRun(projection, execution, anchor);
   // A long work fills the canvas; what does not fit stays in its run's result.
   const room = CANVAS_ELEMENTS - (snapshot?.elements.length ?? 0);
@@ -163,7 +158,7 @@ function organizeReviewedRun(
   const subjects = subjectOwner ? cardSubjects(subjectOwner) : [];
   // A reviewed run stands beside its request, not under it.
   let y = anchor.y;
-  const x0 = anchor.x + SIZES.request.width + 48;
+  const x0 = anchor.x + 300 + 48;
   const subjectRefs: WorkEnvironmentReference[] = [];
   if (subjects.length) {
     subjects.forEach((_, index) => {
@@ -177,10 +172,10 @@ function organizeReviewedRun(
       subjectRefs.push(reference);
       adds.push({
         reference,
-        placement: { x: x0 + index * (SIZES.subject.width + GAP), y, ...SIZES.subject },
+        placement: { x: x0 + index * (SUBJECT.width + GAP), y, ...SUBJECT },
       });
     });
-    y += SIZES.subject.height + GAP * 2;
+    y += SUBJECT.height + GAP * 2;
   }
   const columnX = [x0, x0 + 700];
   let leftY = y;
@@ -223,48 +218,35 @@ function organizeReviewedRun(
   return { execution: execution.id, adds, relations, areaTitle };
 }
 
+const SUBJECT = { width: 220, height: 136 } as const;
 function objectSize(artifact: WorkArtifactV1): CanvasSize {
   switch (artifact.data.kind) {
     case "findings":
-      return SIZES.findings;
-    case "document":
-      return SIZES.document;
+      return { width: 300, height: 200 };
     case "comparison_matrix":
-      return SIZES.comparison;
+      return { width: 520, height: 320 };
     default:
-      return SIZES.result;
+      return { width: 420, height: 300 };
   }
 }
 
-/** Agent runs land incrementally: every new root artifact becomes objects that
- * join what is already there, each in the slot its stage's layout gives it.
- * Subjects are hubs, one per name; a findings artifact is one card that
- * supports the subjects it names; a comparison uses its subjects. */
+/**
+ * Agent runs land incrementally: every new root artifact becomes an element,
+ * and each subject one hub per name; the request's board places them all, so
+ * the placement saved here is only a record.
+ */
 function organizeAgentRun(
   projection: WorkRuntimeProjection,
   execution: WorkExecutionFact,
   snapshot: WorkEnvironmentSnapshot,
-  given?: WorkStage,
+  anchor: CanvasPosition,
 ): OrganizePlan {
   const objective = projection.work.id;
-  const stage =
-    given ??
-    environmentStages(snapshot, new Map([[objective, projection]])).find((candidate) =>
-      candidate.executions.includes(execution.id),
-    );
   const fresh = unplacedRoots(snapshot, execution);
   const records = recordArtifacts(execution);
+  const adds: OrganizePlan["adds"] = [];
   const relations: OrganizePlan["relations"] = [];
-  const pending: { reference: WorkEnvironmentReference; size: CanvasSize }[] = [];
-  const contents: StageContents = { ...stage?.contents };
-  const join = (kind: ClusterKind, reference: WorkEnvironmentReference, size: CanvasSize) => {
-    pending.push({ reference, size });
-    const cluster = contents[kind];
-    contents[kind] = {
-      ...cluster,
-      members: [...(cluster?.members ?? []), { id: JSON.stringify(reference), size }],
-    };
-  };
+  const at = (size: CanvasSize) => ({ x: anchor.x, y: anchor.y, ...size });
   let subjectCount = snapshot.elements.filter(
     (element) =>
       element.reference.kind === "subject" && element.reference.execution === execution.id,
@@ -283,7 +265,7 @@ function organizeAgentRun(
         index,
       };
       if (subjectCount < SUBJECTS_PER_RUN) {
-        join("subjects", reference, subjectCardSize(execution, subject));
+        adds.push({ reference, placement: at(SUBJECT) });
         subjectCount += 1;
         subjectByName.set(name, reference);
       }
@@ -298,8 +280,8 @@ function organizeAgentRun(
       execution: execution.id,
       artifact: artifact.id,
     };
+    adds.push({ reference, placement: at(objectSize(artifact)) });
     if (artifact.data.kind === "findings" && !conceptual(artifact)) {
-      join("findings", reference, artifactSize(artifact, execution));
       const named = new Set<number>();
       for (const item of artifact.data.items)
         if (item.subject !== null && item.subject !== undefined) named.add(item.subject);
@@ -307,21 +289,11 @@ function organizeAgentRun(
         const subject = subjects[index];
         if (subject) relations.push({ from: reference, to: subject, kind: "supports" });
       }
-      continue;
     }
-    join("results", reference, artifactSize(artifact, execution));
     if (artifact.data.kind === "comparison_matrix")
       for (const subject of subjects)
         relations.push({ from: subject, to: reference, kind: "uses" });
   }
-  // Where the lane would put them now; once saved, the lane places them itself.
-  const place = stage?.place ?? { x: 0, y: 0, ...SIZES.request };
-  const { positions } = stageLayout(place, contents, stage?.slots);
-  // A card past its cluster's cap only counts on the cluster's label.
-  const adds = pending.flatMap(({ reference, size }) => {
-    const position = positions[JSON.stringify(reference)];
-    return position ? [{ reference, placement: { ...position, ...size } }] : [];
-  });
   return {
     execution: execution.id,
     adds,

@@ -4,7 +4,8 @@ import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import WorkCanvas from "../components/WorkCanvas.svelte";
 import { environmentItems } from "../lib/project-environment";
-import { environmentRequests, environmentStages } from "../lib/project-environment-thread";
+import { environmentRequests } from "../lib/project-environment-thread";
+import { environmentStages } from "../lib/project-environment-board";
 import { projection, snapshot } from "./environment-fixtures";
 import type { CanvasItem, CanvasLink } from "../lib/canvas-model";
 

@@ -12,37 +12,23 @@ import type {
 import { activityLabel, artifactView } from "./project-work";
 import { agentDoing, isAgentExecution, isLive, type AgentDoing } from "./agent-steps";
 import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
-import { firstRequest, threadOf, type WorkStage } from "./project-environment-thread";
+import { firstRequest, type WorkStage } from "./project-environment-thread";
 import {
-  commandCards,
-  displayPath,
-  fileCards,
   host,
-  LANE_PLACEMENT,
-  laneFacts,
-  laneElement,
   observedTitle,
   pageGroups,
   sourceRows,
   unreadPages,
+  type SourceRow,
 } from "./project-environment-stage";
-import {
-  LANE,
-  SIZES,
-  laneShape,
-  markStand,
-  placeLane,
-  type LaneGroup,
-  type MarkStand,
-} from "./stage-layout";
+import { BOARD_PIN, FRAMES, laneElement, stageRuns } from "./project-environment-board";
+import { standBeside } from "./board/lane";
+import type { Rect } from "./board/layout";
 import { fileName } from "./work-files";
 import { heldPage, humanPage, phaseLabel } from "./work-human";
-import { resultPlan, stepIcon, stepId } from "./plan-steps";
-import { DIAGRAM, diagramKindLabel, diagramLayout, diagramNodeId } from "./diagram";
 import { pageFrameUrl } from "$domain/resources";
 import {
   clipText,
-  type CanvasCluster,
   type CanvasItem,
   type CanvasLink,
   type CanvasPosition,
@@ -156,6 +142,8 @@ function elementItems(
   const pictures = subjectPictures(snapshot);
   return snapshot.elements.flatMap((element) => {
     if (pictures.has(element.id)) return [];
+    // What a request's runs placed is drawn by its board, not as a card of its own.
+    if (element.reference.kind !== "objective" && laneElement(snapshot, element)) return [];
     const area = snapshot.areas.find((area) => area.id === element.area)?.title ?? "";
     if (element.reference.kind === "browser") {
       const tabId = element.reference.tab;
@@ -250,47 +238,36 @@ function elementItems(
     const projection = objectives.get(element.reference.objective);
     // A search stage cites many pages; they appear together on one Sources card.
     if (element.reference.kind === "source") return [];
-    if (element.reference.kind === "subject" || element.reference.kind === "finding") {
+    if (element.reference.kind === "finding") return [];
+    if (element.reference.kind === "subject") {
       const reference = element.reference;
       const execution = projection?.executions.find(
         (execution) => execution.id === reference.execution,
       );
       const artifact = execution?.artifacts.find((artifact) => artifact.id === reference.artifact);
       const view = artifact && execution ? artifactView(artifact, execution) : undefined;
-      if (reference.kind === "subject") {
-        const subject =
-          view &&
-          (view.content.kind === "matrix" ||
-            view.content.kind === "findings" ||
-            view.content.kind === "sources")
-            ? view.content.subjects[reference.index]
-            : undefined;
-        const facts = subject && execution ? subjectFacts(execution, subject) : [];
-        return {
-          id: element.id,
-          type: "subject",
-          area: element.area,
-          kind: m.work_env_subject(),
-          title: clipText(subject?.name ?? m.work_artifact_unavailable(), TITLE_TEXT),
-          detail: clipText(subject?.descriptor ?? "", DETAIL_TEXT),
-          status: area,
-          subject,
-          ...(facts.length ? { facts } : {}),
-          unavailable: !subject,
-        };
-      }
-      const finding =
-        view && view.content.kind === "findings" ? view.content.items[reference.index] : undefined;
+      const subject =
+        view &&
+        (view.content.kind === "matrix" ||
+          view.content.kind === "findings" ||
+          view.content.kind === "sources")
+          ? view.content.subjects[reference.index]
+          : undefined;
+      const facts =
+        artifact && execution
+          ? subjectFacts(execution, subjectsOf(artifact)[reference.index]!)
+          : [];
       return {
         id: element.id,
-        type: "finding",
+        type: "subject",
         area: element.area,
-        kind: m.work_env_finding(),
-        title: clipText(finding?.claim ?? m.work_artifact_unavailable(), TITLE_TEXT),
-        detail: clipText(finding?.detail ?? "", DETAIL_TEXT),
+        kind: m.work_env_subject(),
+        title: clipText(subject?.name ?? m.work_artifact_unavailable(), TITLE_TEXT),
+        detail: clipText(subject?.descriptor ?? "", DETAIL_TEXT),
         status: area,
-        finding,
-        unavailable: !finding,
+        ...(subject ? { subject } : {}),
+        ...(subject && facts.length ? { facts } : {}),
+        unavailable: !subject,
       };
     }
     if (element.reference.kind === "artifact") {
@@ -300,32 +277,6 @@ function elementItems(
       );
       const artifact = execution?.artifacts.find((artifact) => artifact.id === reference.artifact);
       const view = artifact && execution ? artifactView(artifact, execution) : undefined;
-      // A findings artifact is one card listing its claims; the lift reads the artifact.
-      if (view?.content.kind === "findings") {
-        const { items, subjects } = view.content;
-        return {
-          id: element.id,
-          type: "findings",
-          area: element.area,
-          kind: m.work_env_findings(),
-          title: clipText(artifact?.title ?? m.work_env_findings(), TITLE_TEXT),
-          detail: "",
-          status: view.reviewLabel,
-          artifact: view,
-          findings: {
-            items: items.map((item) => {
-              const subject = item.subject === undefined ? undefined : subjects[item.subject];
-              return {
-                claim: clipText(item.claim, TITLE_TEXT),
-                confidence: item.confidence,
-                ...(subject ? { subject: clipText(subject.name, ROW_TEXT) } : {}),
-                evidence: item.evidence.length,
-              };
-            }),
-            total: items.length,
-          },
-        };
-      }
       return {
         id: element.id,
         type: "result",
@@ -334,12 +285,11 @@ function elementItems(
         title: clipText(artifact?.title ?? m.work_artifact_unavailable(), TITLE_TEXT),
         detail: "",
         status: view?.reviewLabel ?? m.work_env_open_to_load(),
-        artifact: view,
+        ...(view ? { artifact: view } : {}),
         layout: "artifact",
       };
     }
-    // The person's sentence, carried plainly: state belongs to the agent line.
-    const lane = projection ? threadOf(element.id, projection)[0] : undefined;
+    // The person's sentence, carried plainly: what the run did is its trail's.
     return {
       id: element.id,
       type: "objective",
@@ -348,11 +298,6 @@ function elementItems(
       title: clipText(projection ? firstRequest(projection) : m.work_env_request(), TITLE_TEXT),
       detail: "",
       status: area,
-      ...(projection && lane
-        ? laneFacts(
-            projection.executions.filter((execution) => lane.executions.includes(execution.id)),
-          )
-        : {}),
     };
   });
 }
@@ -368,20 +313,13 @@ export function fileEvidence(
 }
 /**
  * The saved view as the canvas reads it. A lane card's place comes from its
- * lane (see `environmentStages`), so only the person's own elements bring an
- * absolute position; a lane card brings its size once it is saved in lane terms.
+ * lane, so only the person's own elements bring a position and a size.
  */
 export function environmentView(snapshot: WorkEnvironmentSnapshot): CanvasView {
   const lane = new Set(
     snapshot.elements.flatMap((element) => (laneElement(snapshot, element) ? [element.id] : [])),
   );
   const own = snapshot.view.placements.filter((place) => !lane.has(place.element));
-  // A request card sizes to its words, whatever an older placement saved.
-  const requests = new Set(
-    snapshot.elements.flatMap((element) =>
-      element.reference.kind === "objective" ? [element.id] : [],
-    ),
-  );
   return {
     areas: Object.fromEntries(
       (snapshot.view.areas ?? []).map((place) => [
@@ -390,13 +328,7 @@ export function environmentView(snapshot: WorkEnvironmentSnapshot): CanvasView {
       ]),
     ),
     sizes: Object.fromEntries(
-      snapshot.view.placements
-        .filter(
-          (place) =>
-            !requests.has(place.element) &&
-            (!lane.has(place.element) || place.revision === LANE_PLACEMENT),
-        )
-        .map((place) => [place.element, { width: place.width, height: place.height }]),
+      own.map((place) => [place.element, { width: place.width, height: place.height }]),
     ),
     positions: Object.fromEntries(own.map((place) => [place.element, { x: place.x, y: place.y }])),
     viewport: { x: snapshot.view.x, y: snapshot.view.y, zoom: snapshot.view.zoom_milli / 1000 },
@@ -404,14 +336,8 @@ export function environmentView(snapshot: WorkEnvironmentSnapshot): CanvasView {
 }
 
 /**
- * The placements a view saves: the person's own elements where they stand, a
- * lane card as its offset from its lane place. A lane card the canvas has not
- * placed yet keeps what it had.
- */
-/**
  * The bounds Rust holds a checkpoint to; one card outside them refuses the
- * whole save. A one-line request card measures 64 tall, and its size is
- * derived from its words on read, so rounding it up here changes nothing shown.
+ * whole save.
  */
 const PLACEMENT = { coordinate: 1_000_000, width: [120, 4096], height: [80, 4096] } as const;
 const bounded = (value: number, min: number, max: number, fallback: number) =>
@@ -426,16 +352,20 @@ function contractPlacement(place: WorkElementPlacement): WorkElementPlacement {
     height: bounded(place.height, height[0], height[1], 160),
   };
 }
+/**
+ * The placements a view saves: the person's own elements where they stand; a
+ * block the person moved, as its offset from its lane's corner. Every other
+ * lane element keeps what it had: its board places it.
+ */
 export function viewPlacements(
   snapshot: WorkEnvironmentSnapshot,
   view: CanvasView,
   stages: readonly WorkStage[],
+  /** Blocks the person dragged since the canvas opened. */
+  moved: ReadonlySet<string> = new Set(),
 ): WorkElementPlacement[] {
-  const bases = new Map<string, CanvasPosition>();
-  for (const stage of stages) {
-    bases.set(stage.card, stage.place);
-    for (const [id, position] of Object.entries(stage.layout.positions)) bases.set(id, position);
-  }
+  const boards = new Map<string, WorkStage>();
+  for (const stage of stages) for (const block of stage.board.blocks) boards.set(block.id, stage);
   return snapshot.elements.map((element) => {
     const previous = snapshot.view.placements.find((place) => place.element === element.id);
     const point = view.positions[element.id];
@@ -450,22 +380,29 @@ export function viewPlacements(
         y: point?.y ?? previous?.y ?? 0,
         ...size,
       });
-    const base = bases.get(element.id);
-    if (!base || !point)
-      return contractPlacement(previous ?? { element: element.id, x: 0, y: 0, ...size });
+    const stage = boards.get(element.id);
+    const target = stage?.targets[element.id];
+    const pinned =
+      !!stage &&
+      !!point &&
+      (stage.pinned.has(element.id) ||
+        (moved.has(element.id) &&
+          !!target &&
+          Math.hypot(point.x - target.x, point.y - target.y) > 2));
+    if (!pinned) {
+      const kept = previous?.revision === BOARD_PIN ? undefined : previous;
+      return contractPlacement(kept ?? { element: element.id, x: 0, y: 0, ...size });
+    }
     return contractPlacement({
       element: element.id,
-      x: point.x - base.x,
-      y: point.y - base.y,
+      x: point.x - stage.lane.corner.x,
+      y: point.y - stage.lane.corner.y,
       ...size,
-      revision: LANE_PLACEMENT,
+      revision: BOARD_PIN,
     });
   });
 }
-const relationLabels: Record<
-  Exclude<CanvasLink["kind"], "path" | "thread" | "diagram">,
-  () => string
-> = {
+const relationLabels: Record<Exclude<CanvasLink["kind"], "thread">, () => string> = {
   dependency: m.work_env_relation_depends_on,
   reference: m.work_env_relation_uses,
   supports: m.work_env_relation_supports,
@@ -474,14 +411,14 @@ const relationLabels: Record<
   same_as: m.work_env_relation_same_as,
   contradicts: m.work_env_relation_contradicts,
 };
-/** Relations between cards; a request is never an end, the stage's path already reads from it. */
+/** Relations between the person's own cards; a lane already says how its parts belong. */
 export function environmentLinks(snapshot: WorkEnvironmentSnapshot): CanvasLink[] {
   const pictures = subjectPictures(snapshot);
   const ids = new Set(
     snapshot.elements.flatMap((element) =>
       pictures.has(element.id) ||
       element.reference.kind === "source" ||
-      element.reference.kind === "objective"
+      laneElement(snapshot, element)
         ? []
         : [element.id],
     ),
@@ -537,38 +474,52 @@ function agentCaption(
   }
 }
 
-/** Where the mark stands for what the agent does: the page it reads, the result it finished. */
-function standFor(execution: WorkExecutionFact, doing: AgentDoing, stage: WorkStage): MarkStand {
-  if (doing === "reading") {
-    const read = (execution.steps ?? []).find(
-      (step) =>
-        step.status === "running" && (step.kind.kind === "read" || step.kind.kind === "discover"),
-    );
-    const page = pageGroups(execution, []).find((group) =>
-      group.steps.some((step) => step.id === read?.id),
-    )?.id;
-    return page ? { doing, page } : { doing };
+/**
+ * Where the mark stands for what the agent does: by the request while it
+ * thinks, by the trail while it searches or works in files, off the page it
+ * reads, at the board's corner while it writes into it.
+ */
+function standFor(
+  execution: WorkExecutionFact,
+  doing: AgentDoing,
+  stage: WorkStage,
+): CanvasPosition {
+  const rect = (id: string | undefined): Rect | undefined =>
+    id ? stage.lane.rects[id] : undefined;
+  const trail = rect(stage.column.trail);
+  switch (doing) {
+    case "reading": {
+      const read = (execution.steps ?? []).find(
+        (step) =>
+          step.status === "running" && (step.kind.kind === "read" || step.kind.kind === "discover"),
+      );
+      const page = pageGroups(execution, []).find((group) =>
+        group.steps.some((step) => step.id === read?.id),
+      )?.id;
+      const card = rect(stage.column.pages.find((id) => id === page) ?? stage.column.pages[0]);
+      return standBeside(card ?? trail ?? stage.place);
+    }
+    case "searching":
+    case "working":
+      return standBeside(trail ?? stage.place);
+    case "writing":
+    case "done": {
+      const board = stage.lane.board;
+      return { x: board.x - 12, y: board.y - 12 };
+    }
+    default:
+      return standBeside(stage.place);
   }
-  if (doing === "done") {
-    const result = stage.contents.results?.members[0]?.id;
-    return result ? { doing, result } : { doing };
-  }
-  return { doing };
 }
 
-/**
- * Transient agent presence for objectives with live executions; never
- * persisted. The mark stands by what its running steps act on: the request
- * while it thinks, Worked with while it searches, the page it reads, the
- * local row, the group it writes into, and the result once it is done.
- */
+/** Transient agent presence for objectives with live executions; never persisted. */
 export function environmentAgents(
   snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
   activity: (objective: string) => string | undefined,
   /** Every lane of the canvas; the mark stands in the one its run serves. */
   stages: readonly WorkStage[] = [],
-): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
+): { items: CanvasItem[]; positions: Record<string, CanvasPosition> } {
   const items: CanvasItem[] = [];
   const positions: Record<string, CanvasPosition> = {};
   for (const element of snapshot.elements) {
@@ -608,162 +559,123 @@ export function environmentAgents(
     };
     const stage = stages.find((stage) => stage.executions.includes(execution.id));
     if (stage) {
-      const sizes = Object.fromEntries(
-        Object.values(stage.contents).flatMap((group) =>
-          (group?.members ?? []).map((member) => [member.id, member.size] as const),
-        ),
-      );
-      const stand = markStand(stage.layout, standFor(execution, doing, stage), sizes, stage.slots);
+      const stand = standFor(execution, doing, stage);
       positions[id] = stand;
       item.agent!.stand = stand;
     }
     items.push(item);
   }
-  return { items, links: [], positions };
+  return { items, positions };
 }
 
 /**
- * One Sources card per execution: the pages its searches cited and the files
- * its steps opened, counted and listed together. Individual sources are rows,
- * never cards; the lane's group edges already say what came from them.
+ * One Sources card per request, at the foot of its process column: the pages
+ * its searches cited and the files its steps opened, once each; the pages that
+ * would not open; and once the run is done, the frames of the pages it read.
  */
 export function environmentSources(
-  _snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
-  /** The message each run served; its Sources card stands in that lane. */
   stages: readonly WorkStage[],
-): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
+  pages: (objective: string) => readonly WorkPageV1[] = () => [],
+): CanvasItem[] {
   const items: CanvasItem[] = [];
-  const positions: Record<string, CanvasPosition> = {};
   for (const stage of stages) {
-    const projection = objectives.get(stage.objective);
-    if (!projection) continue;
-    for (const id of stage.executions) {
-      const execution = projection.executions.find((entry) => entry.id === id);
-      if (!execution || !isAgentExecution(execution)) continue;
-      const running = isLive(projection, execution);
-      const rows = sourceRows(execution);
-      // A page no read could read is a line here, never a card of its own.
-      const unread = unreadPages(execution);
-      if (!rows.length && !unread.length) continue;
-      // A page that would not be read says why, on the row that cites it.
-      const read = new Set<string>();
-      const refusals = new Map<string, string>();
+    const card = stage.column.sources;
+    if (!card) continue;
+    const runs = stageRuns(stage, objectives).filter(isAgentExecution);
+    const rows: SourceRow[] = [];
+    const seen = new Set<string>();
+    const read = new Set<string>();
+    const refusals = new Map<string, string>();
+    for (const execution of runs) {
+      for (const row of sourceRows(execution))
+        if (!seen.has(row.key)) {
+          seen.add(row.key);
+          rows.push(row);
+        }
       for (const step of execution.steps ?? []) {
         if (step.kind.kind !== "read") continue;
         if (step.status === "succeeded") read.add(step.kind.url);
         else if (step.status === "failed" && step.note?.trim())
           refusals.set(step.kind.url, step.note.trim());
       }
-      const card = `sources:${stage.element}:${execution.id}`;
-      items.push({
-        id: card,
-        type: "sources",
-        kind: m.work_env_sources(),
-        title: !rows.length
-          ? m.work_env_sources()
-          : rows.length === 1
-            ? m.work_env_source_one()
-            : m.work_env_sources_count({ count: rows.length }),
-        detail: "",
-        status: "",
-        ...(running ? { active: true } : {}),
-        sources: rows.slice(0, SOURCE_ROWS).map((row) => {
-          const refusal = row.url && !read.has(row.url) ? refusals.get(row.url) : undefined;
-          return refusal ? { ...row, note: clipText(refusal, ROW_TEXT) } : row;
-        }),
-        ...(unread.length ? { unread } : {}),
-      });
-      const position = stage.layout.positions[card];
-      if (position) positions[card] = position;
     }
+    const unread = runs.flatMap((execution) => unreadPages(execution));
+    const recorded = pages(stage.objective);
+    const frames = stage.live
+      ? []
+      : runs
+          .flatMap((execution) => pageGroups(execution, recorded))
+          .flatMap((group) => {
+            const frame = group.page?.frame
+              ? pageFrameUrl(group.page.attempt, group.page.step, group.page.frame.generation)
+              : null;
+            return frame
+              ? [
+                  {
+                    key: group.id,
+                    url: clipText(group.url, DETAIL_TEXT),
+                    host: host(group.url),
+                    frame,
+                  },
+                ]
+              : [];
+          })
+          .slice(0, FRAMES);
+    items.push({
+      id: card,
+      type: "sources",
+      kind: m.work_env_sources(),
+      title: !rows.length
+        ? m.work_env_sources()
+        : rows.length === 1
+          ? m.work_env_source_one()
+          : m.work_env_sources_count({ count: rows.length }),
+      detail: "",
+      status: "",
+      size: { width: stage.lane.rects[card]!.width, height: stage.lane.rects[card]!.height },
+      ...(stage.live ? { active: true } : {}),
+      sources: rows.slice(0, SOURCE_ROWS).map((row) => {
+        const refusal = row.url && !read.has(row.url) ? refusals.get(row.url) : undefined;
+        return refusal ? { ...row, note: clipText(refusal, ROW_TEXT) } : row;
+      }),
+      ...(unread.length ? { unread } : {}),
+      ...(frames.length ? { frames } : {}),
+    });
   }
-  return { items, links: [], positions };
+  return items;
 }
 
-/** Pages the agent opened, a grid per stage: every run of the stage keeps the
- * last frame it recorded, and a live page still shows the live one. Past the
- * cluster's cap the rest only count on its label. */
+/**
+ * The pages a live run reads, in its process column: the one it is on and the
+ * last it read. A page held for a person says so; the rest say how they went.
+ */
 export function environmentPages(
-  snapshot: WorkEnvironmentSnapshot,
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
-  /** Every message of the thread; a run's pages stand in its stage's cluster. */
   stages: readonly WorkStage[],
   pages: (objective: string) => readonly WorkPageV1[],
   /** The run's current activity, so a page held for a hidden window says so. */
   activity: (objective: string) => string | undefined = () => undefined,
-  /** Unused since the agent ties itself to nothing; kept for the caller's shape. */
-  _present: ReadonlySet<string> = new Set(),
   /** The pages this work is holding open for a person, if any are. */
   human: (objective: string) => readonly WorkHumanPageV1[] = () => [],
-): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
+): CanvasItem[] {
   const items: CanvasItem[] = [];
-  const links: CanvasLink[] = [];
-  const positions: Record<string, CanvasPosition> = {};
   for (const stage of stages) {
+    if (!stage.column.pages.length) continue;
     const projection = objectives.get(stage.objective);
     if (!projection) continue;
     const recorded = pages(projection.work.id);
     const waiting = human(projection.work.id);
     const paused = activity(projection.work.id) === "paused";
-    const runs = stage.executions.flatMap((id) => {
-      const execution = projection.executions.find((entry) => entry.id === id);
-      return execution && isAgentExecution(execution)
-        ? [{ execution, groups: pageGroups(execution, recorded) }]
-        : [];
-    });
-    // The frames this call sees decide the group; the lane may have counted fewer.
-    const seen = runs.flatMap(({ groups }) => groups.map((group) => group.id));
-    const counted = stage.contents.pages?.members.map((member) => member.id) ?? [];
-    const layout =
-      JSON.stringify(seen) === JSON.stringify(counted)
-        ? stage.layout
-        : placeLane(
-            stage.place,
-            laneShape({
-              ...stage.contents,
-              pages: { members: seen.map((id) => ({ id, size: SIZES.page })) },
-            }),
-            stage.slots,
-          );
-    for (const { execution, groups } of runs) {
-      // Only the run that is still going marks its pages live; an earlier
-      // stage keeps its last frames and says nothing about now.
+    for (const execution of stageRuns(stage, objectives)) {
       const running = isLive(projection, execution);
       const opened = recorded.filter((page) => page.execution === execution.id);
-      const hubs = new Map<string, string>();
-      // What each Found card cites, so a page can say it is evidence for it.
-      const cites: { id: string; extractions: Set<string> }[] = [];
-      for (const candidate of snapshot.elements) {
-        const reference = candidate.reference;
-        if (!("execution" in reference) || reference.execution !== execution.id) continue;
-        const artifact = execution.artifacts.find((artifact) => artifact.id === reference.artifact);
-        if (!artifact) continue;
-        if (reference.kind === "subject") {
-          const subject = subjectsOf(artifact)[reference.index];
-          if (subject) hubs.set(subjectKey(subject), candidate.id);
-        } else if (reference.kind === "finding" && artifact.data.kind === "findings") {
-          const evidence = artifact.data.items[reference.index]?.evidence ?? [];
-          cites.push({
-            id: candidate.id,
-            extractions: new Set(
-              evidence.flatMap((index) => artifact.evidence[index]?.extraction_id ?? []),
-            ),
-          });
-        } else if (reference.kind === "artifact" && artifact.data.kind === "findings")
-          cites.push({
-            id: candidate.id,
-            extractions: new Set(artifact.evidence.map((link) => link.extraction_id)),
-          });
-      }
-      for (const entry of groups) {
-        const position = layout.positions[entry.id];
-        if (!position) continue;
+      for (const entry of pageGroups(execution, recorded)) {
+        if (!stage.column.pages.includes(entry.id)) continue;
         const { id, url } = entry;
         const pageHost = host(url);
         const live = running && entry.steps.some((step) => step.status === "running");
         const succeeded = entry.steps.some((step) => step.status === "succeeded");
-        // Rust says why a read gave up or was cut off; the card says it instead of "Failed".
         const refused = !succeeded && !live ? (entry.steps.at(-1)?.note?.trim() ?? "") : "";
         const frame = entry.page?.frame
           ? pageFrameUrl(entry.page.attempt, entry.page.step, entry.page.frame.generation)
@@ -781,12 +693,11 @@ export function environmentPages(
             ),
           ),
         );
-        // The title a read observed names the card; the host stands in until one did.
         const observed = entry.steps.findLast((step) => step.local?.page_title?.trim())?.local
           ?.page_title;
-        // An open tab the request was shown stands as itself until a read takes it over.
         const shown = !!entry.tab && !entry.steps.length;
         const account = entry.steps.find((step) => step.account?.badge)?.account?.host;
+        const rect = stage.lane.rects[id]!;
         items.push({
           id,
           type: "page",
@@ -807,6 +718,7 @@ export function environmentPages(
                 : succeeded
                   ? m.work_env_page_read()
                   : clipText(refused, STATUS_TEXT) || m.work_env_status_failed(),
+          size: { width: rect.width, height: rect.height },
           page: {
             url,
             host: pageHost,
@@ -818,380 +730,64 @@ export function environmentPages(
           },
           ...(shown || live || succeeded || held ? {} : { unavailable: true }),
         });
-        positions[id] = position;
-        // A page is evidence for the subjects its reads established and the findings citing them.
-        const linked = new Set<string>();
-        const tie = (target: string) => {
-          if (linked.has(target)) return;
-          linked.add(target);
-          links.push({
-            id: `page-evidence:${id}:${target}`,
-            source: id,
-            target,
-            kind: "supports",
-            role: "evidence",
-          });
-        };
-        const produced = new Set<string>();
-        for (const step of entry.steps) {
-          if (step.evidence) produced.add(step.evidence);
-          for (const artifactId of step.artifacts ?? []) {
-            produced.add(artifactId);
-            const artifact = execution.artifacts.find((artifact) => artifact.id === artifactId);
-            for (const subject of artifact ? subjectsOf(artifact) : []) {
-              const hub = hubs.get(subjectKey(subject));
-              if (hub) tie(hub);
-            }
-          }
-        }
-        for (const cited of cites)
-          if ([...produced].some((extraction) => cited.extractions.has(extraction))) tie(cited.id);
       }
     }
   }
-  return { items, links, positions };
+  return items;
 }
 
-/** The files and commands each run touched: the stage's Work cluster. */
-export function environmentFiles(
-  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
+/** Each lane's board: its head, its blocks, and its trail in the process column. */
+export function environmentBoards(
   stages: readonly WorkStage[],
-): { items: CanvasItem[]; positions: Record<string, CanvasPosition> } {
+  open: string | null,
+  /** The one result a block stands for, when it stands for one: its note and tasks come from it. */
+  artifactOf: (id: string) => CanvasItem["artifact"] = () => undefined,
+): CanvasItem[] {
   const items: CanvasItem[] = [];
-  const positions: Record<string, CanvasPosition> = {};
   for (const stage of stages) {
-    const projection = objectives.get(stage.objective);
-    if (!projection) continue;
-    const start = items.length;
-    for (const id of stage.executions) {
-      const execution = projection.executions.find((entry) => entry.id === id);
-      if (!execution || !isAgentExecution(execution)) continue;
-      for (const card of fileCards(execution))
-        items.push({
-          id: card.id,
-          type: "file",
-          kind: m.work_env_file(),
-          title: card.file.name,
-          detail: displayPath(card.path),
-          status: "",
-          file: card.file,
-        });
-      for (const card of commandCards(execution))
-        items.push({
-          id: card.id,
-          type: "command",
-          kind: m.work_env_command(),
-          title: card.command.line,
-          detail: "",
-          status: "",
-          command: card.command,
-        });
-    }
-    for (const item of items.slice(start)) {
-      const position = stage.layout.positions[item.id];
-      if (position) positions[item.id] = position;
-    }
-  }
-  return { items, positions };
-}
-
-/**
- * A result's plan, one card per step beside it in Made. A step ties, only
- * while focused, to the subjects it names.
- */
-export function environmentSteps(
-  snapshot: WorkEnvironmentSnapshot,
-  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
-  stages: readonly WorkStage[],
-): { items: CanvasItem[]; links: CanvasLink[]; positions: Record<string, CanvasPosition> } {
-  const items: CanvasItem[] = [];
-  const links: CanvasLink[] = [];
-  const positions: Record<string, CanvasPosition> = {};
-  for (const stage of stages) {
-    const projection = objectives.get(stage.objective);
-    if (!projection) continue;
-    const named = snapshot.elements.flatMap((element) => {
-      const reference = element.reference;
-      if (reference.kind !== "subject" || !stage.executions.includes(reference.execution))
-        return [];
-      const execution = projection.executions.find((entry) => entry.id === reference.execution);
-      const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
-      const name = artifact ? subjectsOf(artifact)[reference.index]?.name.trim() : undefined;
-      return name && name.length >= 3 ? [{ id: element.id, name: name.toLowerCase() }] : [];
-    });
-    for (const element of snapshot.elements) {
-      const reference = element.reference;
-      if (reference.kind !== "artifact" || !stage.executions.includes(reference.execution))
-        continue;
-      const execution = projection.executions.find((entry) => entry.id === reference.execution);
-      const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
-      if (!execution || !artifact) continue;
-      resultPlan(artifactView(artifact, execution).content).forEach((step, index) => {
-        const id = stepId(element.id, index);
-        const text = clipText(step.text, TITLE_TEXT);
-        const detail = clipText(step.detail ?? "", DETAIL_TEXT);
-        const icon = stepIcon(text) === "check" && detail ? stepIcon(detail) : stepIcon(text);
-        items.push({
-          id,
-          type: "step",
-          kind: m.work_env_step(),
-          title: text,
-          detail,
-          status: "",
-          step: { index: index + 1, text, icon },
-        });
-        const position = stage.layout.positions[id];
-        if (position) positions[id] = position;
-        const said = `${text} ${detail}`.toLowerCase();
-        for (const subject of named)
-          if (said.includes(subject.name))
-            links.push({
-              id: `step-subject:${id}:${subject.id}`,
-              source: id,
-              target: subject.id,
-              kind: "uses",
-              role: "named",
-              label: m.work_env_relation_uses(),
-            });
+    const size = (id: string) => {
+      const rect = stage.lane.rects[id]!;
+      return { width: rect.width, height: rect.height };
+    };
+    if (stage.column.trail)
+      items.push({
+        id: stage.column.trail,
+        type: "trail",
+        kind: m.work_board_trail(),
+        title: stage.request,
+        detail: "",
+        status: "",
+        size: size(stage.column.trail),
+        trail: stage.trail,
+        ...(stage.live ? { active: true } : {}),
       });
-    }
-  }
-  return { items, links, positions };
-}
-
-/**
- * A diagram's parts, one small card each in an area beside the diagram's
- * cover, joined at rest by what flows between them. The area is captioned by
- * the diagram's title and each layer by its name.
- */
-export function environmentDiagrams(
-  snapshot: WorkEnvironmentSnapshot,
-  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
-  stages: readonly WorkStage[],
-): {
-  items: CanvasItem[];
-  links: CanvasLink[];
-  positions: Record<string, CanvasPosition>;
-  clusters: CanvasCluster[];
-} {
-  const items: CanvasItem[] = [];
-  const links: CanvasLink[] = [];
-  const positions: Record<string, CanvasPosition> = {};
-  const clusters: CanvasCluster[] = [];
-  for (const stage of stages) {
-    const projection = objectives.get(stage.objective);
-    if (!projection) continue;
-    for (const element of snapshot.elements) {
-      const reference = element.reference;
-      if (reference.kind !== "artifact" || !stage.executions.includes(reference.execution))
-        continue;
-      const execution = projection.executions.find((entry) => entry.id === reference.execution);
-      const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
-      if (!execution || !artifact) continue;
-      const view = artifactView(artifact, execution);
-      if (view.content.kind !== "diagram") continue;
-      const content = view.content;
-      const id = (node: string) => diagramNodeId(element.id, node);
-      for (const node of content.nodes) {
-        const card = id(node.id);
-        items.push({
-          id: card,
-          type: "diagram",
-          kind: diagramKindLabel(node.kind),
-          title: clipText(node.name, TITLE_TEXT),
-          detail: clipText(node.note ?? "", DETAIL_TEXT),
-          status: "",
-          diagram: {
-            kind: node.kind,
-            ...(node.vendor ? { vendor: node.vendor } : {}),
-            ...(node.note ? { note: node.note } : {}),
-            ...(node.layer ? { layer: node.layer } : {}),
-          },
-        });
-        const position = stage.layout.positions[card];
-        if (position) positions[card] = position;
-      }
-      const { layers, plates, routes, width, height } = diagramLayout(content);
-      content.edges.forEach((edge, index) => {
-        const plate = plates[index];
-        links.push({
-          id: `diagram-edge:${element.id}:${index}`,
-          source: id(edge.from),
-          target: id(edge.to),
-          kind: "diagram",
-          ...(routes[index] ? { route: routes[index] } : {}),
-          ...(edge.label ? { label: clipText(edge.label, ROW_TEXT) } : {}),
-          ...(edge.label && plate ? { plate } : {}),
-        });
+    if (stage.column.head)
+      items.push({
+        id: stage.column.head,
+        type: "head",
+        kind: "",
+        title: clipText(stage.board.title, TITLE_TEXT),
+        detail: clipText(stage.board.lead, DETAIL_TEXT),
+        status: "",
+        size: size(stage.column.head),
       });
-      const band = layers.length ? DIAGRAM.layer : 0;
-      clusters.push({
-        id: diagramArea(stage.card, element.id),
-        label:
-          content.nodes.length === 1
-            ? m.work_card_diagram_part_one()
-            : m.work_card_diagram_parts({ count: content.nodes.length }),
-        title: clipText(artifact.title, TITLE_TEXT),
-        opens: element.id,
-        more: 0,
-        members: content.nodes.map((node) => id(node.id)),
-        inset: LANE.inset,
-        live: stage.live,
-        tone: "area",
-        extent: { width, height: height - band },
-        ...(layers.length
-          ? {
-              caption: LANE.caption + DIAGRAM.layer,
-              layers: layers.map((layer) => ({
-                name: layer.name,
-                members: layer.nodes.map(id),
-              })),
-            }
-          : {}),
-      });
-    }
-  }
-  return { items, links, positions, clusters };
-}
-const diagramArea = (card: string, result: string) => `group:${card}:diagram:${result}`;
-
-/** Each bare result's title. */
-export function resultHeads(
-  snapshot: WorkEnvironmentSnapshot,
-  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
-  stages: readonly WorkStage[],
-): Map<string, { title: string }> {
-  const bare = new Set(
-    stages.flatMap(
-      (stage) =>
-        stage.contents.results?.members.flatMap((member) => (member.bare ? [member.id] : [])) ?? [],
-    ),
-  );
-  const heads = new Map<string, { title: string }>();
-  for (const element of snapshot.elements) {
-    const reference = element.reference;
-    if (reference.kind !== "artifact" || !bare.has(element.id)) continue;
-    const execution = objectives
-      .get(reference.objective)
-      ?.executions.find((entry) => entry.id === reference.execution);
-    const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
-    if (!execution || !artifact) continue;
-    const view = artifactView(artifact, execution);
-    heads.set(element.id, { title: clipText(view.title, TITLE_TEXT) });
-  }
-  return heads;
-}
-
-/** A group's caption counts what it holds: "2 pages · 3 local steps", "4 subjects", "6 steps". */
-function caption(group: LaneGroup): string {
-  const { pages = 0, work = 0, subjects = 0, findings = 0, results = 0 } = group.counts;
-  const parts =
-    group.kind === "worked"
-      ? [
-          pages === 1
-            ? m.work_env_cluster_page_one()
-            : pages
-              ? m.work_env_cluster_pages({ count: pages })
-              : "",
-          work === 1
-            ? m.work_env_cluster_work_one()
-            : work
-              ? m.work_env_cluster_work({ count: work })
-              : "",
-        ]
-      : group.kind === "found"
-        ? [
-            subjects === 1
-              ? m.work_env_cluster_subject_one()
-              : subjects
-                ? m.work_env_cluster_subjects({ count: subjects })
-                : "",
-            findings === 1
-              ? m.work_env_findings()
-              : findings
-                ? m.work_env_cluster_findings({ count: findings })
-                : "",
-          ]
-        : [results === 1 ? m.work_env_result() : m.work_env_cluster_results({ count: results })];
-  return parts.filter(Boolean).join(" · ") || m.work_env_sources();
-}
-const stepsCaption = (count: number) =>
-  count === 1 ? m.work_env_cluster_step_one() : m.work_env_cluster_steps({ count });
-
-/**
- * Each lane's groups and the edges that rest between them: request → Worked
- * with → Found → Made, skipping what the lane lacks, and each result into its
- * steps. Edges end at a group's box, never at a card inside it.
- */
-export function environmentClusters(
-  stages: readonly WorkStage[],
-  /** A bare result's title: its steps caption carries it. */
-  heads: ReadonlyMap<string, { title: string }> = new Map(),
-): {
-  clusters: CanvasCluster[];
-  links: CanvasLink[];
-} {
-  const clusters: CanvasCluster[] = [];
-  const links: CanvasLink[] = [];
-  for (const stage of stages) {
-    let from = stage.card;
-    for (const group of stage.layout.groups) {
-      const id = `group:${stage.card}:${group.kind}`;
-      const inner = (group.steps ?? []).map((entry) => ({
-        ...entry,
-        id: `group:${stage.card}:steps:${entry.result}`,
-      }));
-      const areas = group.diagrams ?? [];
-      const steps = new Set([
-        ...inner.flatMap((entry) => entry.members),
-        ...areas.flatMap((entry) => entry.members),
-      ]);
-      const bare = new Set(
-        stage.contents.results?.members.flatMap((member) => (member.bare ? [member.id] : [])),
-      );
-      for (const entry of inner) {
-        const head = bare.has(entry.result) ? heads.get(entry.result) : undefined;
-        clusters.push({
-          id: entry.id,
-          label: stepsCaption(entry.members.length),
-          more: 0,
-          members: entry.members,
-          inset: LANE.inset,
+    for (const block of stage.board.blocks)
+      items.push({
+        id: block.id,
+        type: "block",
+        kind: block.kind,
+        title: clipText(block.title ?? "", TITLE_TEXT),
+        detail: "",
+        status: "",
+        size: size(block.id),
+        ...(artifactOf(block.id) ? { artifact: artifactOf(block.id) } : {}),
+        block: {
+          data: block,
+          sources: stage.board.sources,
+          open: block.id === open,
           live: stage.live,
-          ...(head ? { title: head.title, opens: entry.result } : {}),
-        });
-      }
-      clusters.push({
-        id,
-        label: caption(group),
-        more: group.more,
-        members: group.members.filter((member) => !steps.has(member)),
-        ...(inner.length || areas.length
-          ? {
-              within: [
-                ...inner.map((entry) => entry.id),
-                ...areas.map((entry) => diagramArea(stage.card, entry.result)),
-              ],
-            }
-          : {}),
-        inset: LANE.pad,
-        live: stage.live,
+        },
       });
-      links.push({
-        id: `path:${stage.card}:${group.kind}`,
-        source: from,
-        target: id,
-        kind: "path",
-      });
-      for (const entry of inner.filter((entry) => !bare.has(entry.result)))
-        links.push({
-          id: `path:${stage.card}:steps:${entry.result}`,
-          source: entry.result,
-          target: entry.id,
-          kind: "path",
-        });
-      from = id;
-    }
   }
-  return { clusters, links };
+  return items;
 }

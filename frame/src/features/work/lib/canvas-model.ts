@@ -1,16 +1,17 @@
 import type { MediaAssetV1 } from "$domain/resources";
 import type { IconRef } from "$shared/ipc/bindings";
-import type { ArtifactView, FindingView, SubjectView } from "$shared/ui/data/Artifact";
+import type { ArtifactView, EvidenceReference, SubjectView } from "$shared/ui/data/Artifact";
 import type { Node } from "@xyflow/svelte";
 import type { HumanPage } from "./work-human";
-import { DIAGRAM, type DiagramPlate, type DiagramRoute } from "./diagram";
 import { defaultSize as cardSize } from "./card-size";
-import { firstRowAnchor } from "./stage-layout";
+import type { Block } from "./board/types";
+import type { TrailLine } from "./board/trail";
 
 /** The Sources card's line for pages that could not be read. */
 export const UNREAD_FOOTER = 24;
 /** A card's size before it renders; Sources grows by its unread line. */
 export function defaultSize(item: CanvasItem): CanvasSize {
+  if (item.size) return item.size;
   const size = cardSize(item);
   return item.unread?.length ? { ...size, height: size.height + UNREAD_FOOTER } : size;
 }
@@ -24,17 +25,14 @@ type CanvasKind =
   | "responsibility"
   | "result"
   | "subject"
-  | "finding"
   | "sources"
   | "folder"
   | "link"
   | "page"
   | "agent"
-  | "findings"
-  | "file"
-  | "command"
-  | "step"
-  | "diagram";
+  | "block"
+  | "head"
+  | "trail";
 type RelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
 /** Display values only; deliberately independent from the generated Work wire contract. */
 export type CanvasItem = {
@@ -55,43 +53,18 @@ export type CanvasItem = {
   subject?: SubjectView;
   /** What the run established about a subject, price first. */
   facts?: { label: string; value: string }[];
-  finding?: FindingView;
-  /** One findings artifact folded into one card: its claims, most confident first. */
-  findings?: {
-    items: {
-      claim: string;
-      confidence: FindingView["confidence"];
-      subject?: string;
-      evidence: number;
-    }[];
-    total: number;
+  /** One block of a request's board, with the sources its chips name. */
+  block?: {
+    data: Block;
+    sources: Readonly<Record<string, EvidenceReference>>;
+    open: boolean;
+    /** The request's run is still going. */
+    live: boolean;
   };
-  /** A file the run touched, one card per distinct path per run. */
-  file?: {
-    name: string;
-    folder: string;
-    what: "read" | "searched" | "changed" | "created";
-    delta?: { plus: number; minus: number };
-  };
-  /** A command the run executed; the tail is its last output lines. */
-  command?: {
-    line: string;
-    state: "running" | "exit";
-    exit?: number;
-    elapsed_ms?: number;
-    tail: string[];
-    reason?: string;
-    /** The settled command's record id; the lift opens it whole. */
-    record?: string;
-  };
-  /** One step of a result's plan, standing beside it as its own card. */
-  step?: {
-    index: number;
-    text: string;
-    icon: "dates" | "flight" | "stay" | "entry" | "money" | "document" | "check";
-  };
-  /** One part of a diagram result, standing in its diagram's area. */
-  diagram?: { kind: string; vendor?: string; note?: string; layer?: string };
+  /** What a request's runs did, as the process column tells it. */
+  trail?: readonly TrailLine[];
+  /** A lane card's size, set by its lane rather than saved. */
+  size?: CanvasSize;
   /** Transient agent presence: its orb's seed, what it does, where it stands, what it says. */
   agent?: {
     seed: number;
@@ -114,6 +87,8 @@ export type CanvasItem = {
     /** A file a step disclosed; the lift shows what the run recorded of it. */
     file?: { record: string; path: string; kind: string };
   }[];
+  /** Frames of the pages the request read, kept once its run is done. */
+  frames?: readonly { key: string; url: string; host: string; frame: string }[];
   /** Pages a run opened and could not read: the Sources card lists them, never as cards. */
   unread?: readonly { key: string; url: string; host: string; note: string }[];
   /** A page a browser step opened: its newest frame while the agent works there. */
@@ -134,12 +109,6 @@ export type CanvasItem = {
   active?: boolean;
   /** The user's recorded choice about this element. */
   decision?: string;
-  /** A request: how long its runs' steps took, in milliseconds, once any were measured. */
-  elapsed?: number;
-  /** A request: what its lane read, once it read anything. */
-  counts?: { sources: number; pages: number };
-  /** A request: each signed-in origin its runs were granted, and the pages used of it. */
-  accounts?: { host: string; used: number; pages: number }[];
   /** An admitted media asset; the image URL is derived from profile and digest. */
   media?: { profile: string; asset: MediaAssetV1 };
   /** An admitted image related to this element, shown as its picture. */
@@ -149,23 +118,13 @@ export type CanvasLink = {
   id: string;
   source: string;
   target: string;
-  /**
-   * `path` joins a lane's groups at rest and `thread` joins one request to the
-   * next; relation kinds show only while an end is hovered or selected.
-   */
-  kind: "dependency" | "reference" | "path" | "thread" | "diagram" | RelationKind;
-  /** A diagram's flow between parts of one column: down or up the connector, or beside it. */
-  route?: DiagramRoute;
-  /** Why a lane relation exists: a page is evidence for what was found, a step names a subject. */
-  role?: "evidence" | "named";
+  /** `thread` joins one request to the next; relation kinds show only while an end is hovered or selected. */
+  kind: "dependency" | "reference" | "thread" | RelationKind;
   label?: string;
-  /** Where a diagram flow's name stands so it never covers a part. */
-  plate?: DiagramPlate;
 };
 /** Past this many ties a focused card lights none: a fan of lines says nothing. */
 const RELATION_CAP = 6;
-const FOUND = new Set<CanvasKind | undefined>(["subject", "finding", "findings"]);
-/** Cards that never light a tie: the lane's edges already say where they stand. */
+/** Cards that never light a tie: the lane already says where they stand. */
 const QUIET = new Set<CanvasKind | undefined>([
   "objective",
   "request",
@@ -173,22 +132,17 @@ const QUIET = new Set<CanvasKind | undefined>([
   "result",
   "agent",
   "page",
-  "file",
-  "command",
   "responsibility",
-  "diagram",
+  "block",
+  "head",
+  "trail",
 ]);
-/** Drawn at rest: a lane's group edges, the thread, a diagram's flows, and a plan's own structure. */
+/** Drawn at rest: the thread, and a plan's own structure. */
 export const restLink = (link: CanvasLink) =>
-  link.kind === "path" ||
-  link.kind === "diagram" ||
-  link.kind === "thread" ||
-  link.kind === "dependency" ||
-  link.kind === "reference";
+  link.kind === "thread" || link.kind === "dependency" || link.kind === "reference";
 /**
- * The relations a focused card lights: a Found card its evidence pages, a
- * step the subjects it names, a card the person placed its own ties. The
- * request, Sources and a result light nothing; more than six light nothing.
+ * The relations a focused card lights: the ties the person drew between their
+ * own cards. More than six light nothing.
  */
 export function relationLinks(
   links: readonly CanvasLink[],
@@ -200,12 +154,9 @@ export function relationLinks(
     const item = items.get(id);
     if (!item) continue;
     const type = item.type ?? (item.artifact ? "result" : "objective");
-    if (!FOUND.has(type) && (QUIET.has(type) || item.artifact)) continue;
+    if (QUIET.has(type) || item.artifact) continue;
     const ties = links.filter((link) => {
       if (restLink(link)) return false;
-      if (FOUND.has(type)) return link.role === "evidence" && link.target === id;
-      if (type === "step") return link.role === "named" && link.source === id;
-      if (link.role) return false;
       const other = items.get(link.source === id ? link.target : link.source);
       return (
         (link.source === id || link.target === id) &&
@@ -228,69 +179,17 @@ export type CanvasView = {
   viewport: { x: number; y: number; zoom: number };
 };
 export type AreaData = { title: string; count: number };
-/** A lane's group of cards; derived by projection, never persisted. */
-export type CanvasCluster = {
-  id: string;
-  label: string;
-  more: number;
-  members: readonly string[];
-  /** Groups drawn inside this one, which its box also holds. */
-  within?: readonly string[];
-  /** The air between the box and its cards; the caption sits above them. */
-  inset?: number;
-  /** Whether the lane's run is still going: only then does a new group arrive in motion. */
-  live?: boolean;
-  /** An area of parts (a diagram): drawn as an area, taken whole by its caption. */
-  tone?: "area";
-  /** The caption band above the cards, when it is not the group's 20 px. */
-  caption?: number;
-  /** Faint captions above columns of members: a diagram's layers. */
-  layers?: readonly { name: string; members: readonly string[] }[];
-  /** The least room the members take from the first one: a diagram's plates. */
-  extent?: CanvasSize;
-  /** Where a diagram's whole picture stands (parts, flows, bands); its layers then need no captions. */
-  frame?: CanvasPosition & CanvasSize;
-  /** The result this group stands for: its title leads the caption and opens it. */
-  opens?: string;
-  title?: string;
-  /** A line under the lane's last group: what it holds past its cards, opening where it is. */
-  footer?: ClusterFooter;
-};
-type ClusterFooter = { text: string; opens: string };
-export type ClusterData = {
-  label: string;
-  more: number;
-  active: boolean;
-  inset: number;
-  tone?: "area";
-  /** Where each layer's caption sits, from the box's top-left. */
-  layers?: { name: string; x: number; y: number }[];
-  opens?: string;
-  title?: string;
-  /** Where the group's lines attach, from its top; its centre when absent. */
-  anchor?: number;
-  footer?: ClusterFooter;
-};
 export type WorkItemNode = Node<CanvasItem, "work">;
 type AgentNode = Node<CanvasItem, "agent">;
-type ClusterNode = Node<ClusterData, "cluster">;
-/** A diagram layer's swimlane, behind its parts. */
-export type BandData = { name: string };
-type BandNode = Node<BandData, "band">;
-export type WorkNode = WorkItemNode | Node<AreaData, "area"> | ClusterNode | AgentNode | BandNode;
+export type WorkNode = WorkItemNode | Node<AreaData, "area"> | AgentNode;
 const AREA_PREFIX = "area:";
 const areaNodeId = (id: string) => `${AREA_PREFIX}${id}`;
 export const isAreaNode = (node: WorkNode): node is Node<AreaData, "area"> => node.type === "area";
-const isClusterNode = (node: WorkNode): node is ClusterNode => node.type === "cluster";
 export const isItemNode = (node: WorkNode): node is WorkItemNode => node.type === "work";
 export const isAgentNode = (node: WorkNode): node is AgentNode => node.type === "agent";
-const isBandNode = (node: WorkNode): node is BandNode => node.type === "band";
 const DEFAULT_AREA: CanvasSize = { width: 640, height: 420 };
 /** The agent's orb; its caption hangs outside the node. */
 const MARK_SIZE = 24;
-/** A group box pads its cards by 24 and holds a 20 px caption above them. */
-const CLUSTER_PAD = 24;
-const CLUSTER_CAPTION = 20;
 const validPosition = (p: CanvasPosition | undefined): p is CanvasPosition =>
   !!p &&
   Number.isFinite(p.x) &&
@@ -334,8 +233,7 @@ export function clipText(value: string, max: number): string {
 export function sanitizeScene(
   items: readonly CanvasItem[],
   links: readonly CanvasLink[],
-  clusters: readonly CanvasCluster[] = [],
-): { items: CanvasItem[]; links: CanvasLink[]; clusters: CanvasCluster[] } {
+): { items: CanvasItem[]; links: CanvasLink[] } {
   const ids = new Set<string>();
   const kept: CanvasItem[] = [];
   for (const item of items) {
@@ -352,44 +250,23 @@ export function sanitizeScene(
         : { ...item, title, detail, kind, status },
     );
   }
-  // Clusters count against no limit: they are added once the cards are settled.
-  const groups: CanvasCluster[] = [];
-  const endpoints = new Set(ids);
-  for (const cluster of clusters) {
-    if (!cluster.id || cluster.id.length > TEXT_LIMIT.id || endpoints.has(cluster.id)) continue;
-    const members = cluster.members.filter((member) => ids.has(member));
-    // A group of groups (Made holding only an area or steps) has no cards of its own.
-    if (!members.length && !cluster.within?.some((id) => endpoints.has(id))) continue;
-    endpoints.add(cluster.id);
-    groups.push({
-      ...cluster,
-      label: clipText(cluster.label, TEXT_LIMIT.title),
-      ...(cluster.title ? { title: clipText(cluster.title, TEXT_LIMIT.title) } : {}),
-      members,
-    });
-  }
   const seen = new Set<string>();
   const edges: CanvasLink[] = [];
   for (const link of links) {
     if (edges.length >= CANVAS_LINK_LIMIT) break;
     if (!link.id || link.id.length > TEXT_LIMIT.id || seen.has(link.id)) continue;
-    if (link.source === link.target || !endpoints.has(link.source) || !endpoints.has(link.target))
-      continue;
+    if (link.source === link.target || !ids.has(link.source) || !ids.has(link.target)) continue;
     seen.add(link.id);
     edges.push(link);
   }
-  return { items: kept, links: edges, clusters: groups };
+  return { items: kept, links: edges };
 }
 
-export function validScene(
-  items: readonly CanvasItem[],
-  links: readonly CanvasLink[],
-  clusters: readonly CanvasCluster[] = [],
-): boolean {
+export function validScene(items: readonly CanvasItem[], links: readonly CanvasLink[]): boolean {
   if (items.length > CANVAS_ITEM_LIMIT || links.length > CANVAS_LINK_LIMIT) return false;
-  const ids = new Set([...items.map((item) => item.id), ...clusters.map((cluster) => cluster.id)]);
+  const ids = new Set(items.map((item) => item.id));
   return (
-    ids.size === items.length + clusters.length &&
+    ids.size === items.length &&
     items.every(
       (item) =>
         item.id.length > 0 &&
@@ -498,24 +375,20 @@ export function reconcileNodes(
         node.data.layout === item.layout &&
         node.data.actionLabel === item.actionLabel &&
         node.data.subject === item.subject &&
-        node.data.finding === item.finding &&
         node.data.decision === item.decision &&
         node.data.active === item.active &&
-        node.data.elapsed === item.elapsed &&
-        JSON.stringify(node.data.counts) === JSON.stringify(item.counts) &&
         JSON.stringify(node.data.sources) === JSON.stringify(item.sources) &&
         JSON.stringify(node.data.unread) === JSON.stringify(item.unread) &&
+        JSON.stringify(node.data.frames) === JSON.stringify(item.frames) &&
         node.data.media?.asset.digest === item.media?.asset.digest &&
         node.data.image?.digest === item.image?.digest &&
         JSON.stringify(node.data.agent) === JSON.stringify(item.agent) &&
         JSON.stringify(node.data.page) === JSON.stringify(item.page) &&
         JSON.stringify(node.data.facts) === JSON.stringify(item.facts) &&
         JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility) &&
-        JSON.stringify(node.data.findings) === JSON.stringify(item.findings) &&
-        JSON.stringify(node.data.file) === JSON.stringify(item.file) &&
-        JSON.stringify(node.data.command) === JSON.stringify(item.command) &&
-        JSON.stringify(node.data.step) === JSON.stringify(item.step) &&
-        JSON.stringify(node.data.diagram) === JSON.stringify(item.diagram);
+        JSON.stringify(node.data.block) === JSON.stringify(item.block) &&
+        JSON.stringify(node.data.trail) === JSON.stringify(item.trail) &&
+        JSON.stringify(node.data.size) === JSON.stringify(item.size);
       // The agent follows its work; a card follows its lane when the lane moves it.
       const target = positions[item.id];
       const followed =
@@ -523,14 +396,7 @@ export function reconcileNodes(
         (!parent &&
           !!target &&
           (before[item.id]?.x !== target.x || before[item.id]?.y !== target.y));
-      // A diagram's part keeps the person's offset: it moves by what its area moved.
-      const kept =
-        followed && item.diagram && before[item.id] && validPosition(target)
-          ? {
-              x: node.position.x + target!.x - before[item.id]!.x,
-              y: node.position.y + target!.y - before[item.id]!.y,
-            }
-          : target;
+      const kept = target;
       const relocated =
         followed &&
         validPosition(kept) &&
@@ -544,13 +410,15 @@ export function reconcileNodes(
           ariaLabel: item.status,
           ...(relocated ? { position: { ...kept! } } : {}),
         };
-      // A card nobody sized follows what it says; a saved or resized one keeps its size.
+      // A lane card takes the size its lane gives it; one nobody sized follows what it
+      // says; a saved or resized one keeps its size.
       const was = defaultSize(node.data);
-      const grown =
-        !same &&
-        !Object.hasOwn(sizes, item.id) &&
-        node.width === was.width &&
-        node.height === was.height
+      const grown = item.size
+        ? item.size
+        : !same &&
+            !Object.hasOwn(sizes, item.id) &&
+            node.width === was.width &&
+            node.height === was.height
           ? defaultSize(item)
           : undefined;
       const size = grown ? { width: grown.width, height: grown.height } : {};
@@ -596,7 +464,7 @@ export function reconcileNodes(
     const position = parent
       ? { x: absolute.x - parent.position.x, y: absolute.y - parent.position.y }
       : absolute;
-    const size = sizes[item.id];
+    const size = item.size ?? sizes[item.id];
     const restoredSize =
       size &&
       Number.isInteger(size.width) &&
@@ -612,8 +480,8 @@ export function reconcileNodes(
       type: "work",
       position,
       ...(parent ? { parentId } : {}),
-      // A diagram's part slides to where the layout engine settles it.
-      ...(item.type === "diagram" ? { class: "diagram-part" } : {}),
+      // A board's block glides when its board makes room.
+      ...(item.type === "block" ? { class: "board-block" } : {}),
       data: item,
       width: restoredSize?.width ?? defaultSize(item).width,
       height: restoredSize?.height ?? defaultSize(item).height,
@@ -623,204 +491,10 @@ export function reconcileNodes(
       ariaLabel: `${item.title}. ${item.status}`,
     };
   });
-  // Clusters and bands are derived from the cards afterwards; they keep their node until then.
-  const clusters = previous.filter((node) => isClusterNode(node) || isBandNode(node));
-  const combined: WorkNode[] = [...areaNodes, ...clusters, ...next];
+  const combined: WorkNode[] = [...areaNodes, ...next];
   return combined.length === previous.length &&
     combined.every((node, index) => node === previous[index])
     ? previous
-    : combined;
-}
-
-/**
- * Group nodes around their members as they stand now: padded on every side,
- * a caption's height above, and around any group drawn inside. Members are
- * fixed by projection, so a card dragged away stretches its group.
- */
-export function withClusters(
-  nodes: WorkNode[],
-  clusters: readonly CanvasCluster[],
-  active: ReadonlySet<string> = new Set(),
-): WorkNode[] {
-  const byId = new Map(nodes.map((node) => [node.id, node]));
-  const boxes = new Map<string, CanvasPosition & CanvasSize>();
-  const derived: ClusterNode[] = [];
-  // Inner groups first, so an outer one can hold them.
-  const ordered = [
-    ...clusters.filter((cluster) => clusters.some((outer) => outer.within?.includes(cluster.id))),
-    ...clusters.filter((cluster) => !clusters.some((outer) => outer.within?.includes(cluster.id))),
-  ];
-  for (const cluster of ordered) {
-    const inset = cluster.inset ?? CLUSTER_PAD;
-    const caption = cluster.caption ?? CLUSTER_CAPTION;
-    const rects = cluster.members.flatMap((id) => {
-      const node = byId.get(id);
-      if (!node || !isItemNode(node)) return [];
-      const p = absolutePosition(node, nodes);
-      return [
-        {
-          x: p.x,
-          y: p.y,
-          width: node.measured?.width ?? node.width ?? 280,
-          height: node.measured?.height ?? node.height ?? 160,
-        },
-      ];
-    });
-    const inner = (cluster.within ?? []).flatMap((id) => {
-      const box = boxes.get(id);
-      return box ? [box] : [];
-    });
-    if (!rects.length && !inner.length) continue;
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const rect of rects) {
-      minX = Math.min(minX, rect.x - inset);
-      minY = Math.min(minY, rect.y - inset - caption);
-      maxX = Math.max(maxX, rect.x + rect.width + inset);
-      maxY = Math.max(maxY, rect.y + rect.height + inset);
-    }
-    if (cluster.extent && rects.length) {
-      const left = Math.min(...rects.map((rect) => rect.x));
-      const top = Math.min(...rects.map((rect) => rect.y));
-      maxX = Math.max(maxX, left + cluster.extent.width + inset);
-      maxY = Math.max(maxY, top + cluster.extent.height + inset);
-    }
-    // A diagram's picture reaches past its parts: its flows, plates and bands.
-    if (cluster.frame && rects.length) {
-      const band = cluster.layers?.length ? DIAGRAM.layer : 0;
-      minX = Math.min(minX, cluster.frame.x - inset);
-      minY = Math.min(minY, cluster.frame.y - inset - (caption - band));
-      maxX = Math.max(maxX, cluster.frame.x + cluster.frame.width + inset);
-      maxY = Math.max(maxY, cluster.frame.y + cluster.frame.height + inset);
-    }
-    // An inner group is padded like a card, so a group holding only one reads the same.
-    for (const box of inner) {
-      minX = Math.min(minX, box.x - inset);
-      minY = Math.min(minY, box.y - inset - caption);
-      maxX = Math.max(maxX, box.x + box.width + inset);
-      maxY = Math.max(maxY, box.y + box.height + inset);
-    }
-    const position = { x: Math.round(minX), y: Math.round(minY) };
-    const width = Math.round(maxX - minX);
-    const height = Math.round(maxY - minY);
-    boxes.set(cluster.id, { ...position, width, height });
-    const layers = (cluster.frame ? [] : (cluster.layers ?? [])).flatMap((layer) => {
-      const column = layer.members.flatMap((id) => {
-        const node = byId.get(id);
-        return node && isItemNode(node) ? [absolutePosition(node, nodes)] : [];
-      });
-      if (!column.length) return [];
-      return [
-        {
-          name: layer.name,
-          x: Math.round(Math.min(...column.map((p) => p.x)) - position.x),
-          y: Math.round(Math.min(...column.map((p) => p.y)) - position.y),
-        },
-      ];
-    });
-    const anchor = firstRowAnchor({ y: position.y, height }, [...rects, ...inner], inset);
-    const data: ClusterData = {
-      label: cluster.label,
-      more: cluster.more,
-      active: cluster.members.some((id) => active.has(id)),
-      inset,
-      ...(cluster.tone ? { tone: cluster.tone } : {}),
-      ...(layers?.length ? { layers } : {}),
-      ...(cluster.opens ? { opens: cluster.opens } : {}),
-      ...(cluster.title ? { title: cluster.title } : {}),
-      ...(anchor === undefined ? {} : { anchor }),
-      ...(cluster.footer ? { footer: cluster.footer } : {}),
-    };
-    const node = byId.get(cluster.id);
-    derived.push(
-      node &&
-        isClusterNode(node) &&
-        node.position.x === position.x &&
-        node.position.y === position.y &&
-        node.width === width &&
-        node.height === height &&
-        node.data.label === data.label &&
-        node.data.more === data.more &&
-        node.data.active === data.active &&
-        node.data.inset === data.inset &&
-        node.data.title === data.title &&
-        node.data.opens === data.opens &&
-        node.data.anchor === data.anchor &&
-        node.data.footer?.text === data.footer?.text &&
-        node.data.footer?.opens === data.footer?.opens &&
-        JSON.stringify(node.data.layers) === JSON.stringify(data.layers)
-        ? node
-        : {
-            id: cluster.id,
-            type: "cluster",
-            position,
-            width,
-            height,
-            data,
-            class: "cluster-node",
-            selectable: false,
-            draggable: false,
-            focusable: false,
-            deletable: false,
-            connectable: false,
-            zIndex: -1,
-            ariaLabel: cluster.label,
-          },
-    );
-  }
-  // Outer groups draw first, so an inner one sits on top of its plate.
-  derived.reverse();
-  const others = nodes.filter((node) => !isClusterNode(node));
-  const areas = others.filter(isAreaNode);
-  const cards = others.filter((node) => !isAreaNode(node));
-  const next = [...areas, ...derived, ...cards];
-  return next.length === nodes.length && next.every((node, index) => node === nodes[index])
-    ? nodes
-    : next;
-}
-
-/**
- * A diagram's swimlanes as nodes behind its parts, just after the groups; the
- * same nodes come back when nothing moved.
- */
-export function withBands(
-  nodes: WorkNode[],
-  bands: readonly { id: string; name: string; rect: CanvasPosition & CanvasSize }[],
-): WorkNode[] {
-  const before = new Map(nodes.filter(isBandNode).map((node) => [node.id, node]));
-  const next: BandNode[] = bands.map(({ id, name, rect }) => {
-    const node = before.get(id);
-    return node &&
-      node.data.name === name &&
-      node.position.x === rect.x &&
-      node.position.y === rect.y &&
-      node.width === rect.width &&
-      node.height === rect.height
-      ? node
-      : {
-          id,
-          type: "band",
-          position: { x: rect.x, y: rect.y },
-          width: rect.width,
-          height: rect.height,
-          data: { name },
-          class: "band-node",
-          selectable: false,
-          draggable: false,
-          focusable: false,
-          deletable: false,
-          connectable: false,
-          zIndex: -1,
-          ariaLabel: name,
-        };
-  });
-  const rest = nodes.filter((node) => !isBandNode(node));
-  const at = rest.findLastIndex((node) => isClusterNode(node) || isAreaNode(node)) + 1;
-  const combined = [...rest.slice(0, at), ...next, ...rest.slice(at)];
-  return combined.length === nodes.length && combined.every((node, i) => node === nodes[i])
-    ? nodes
     : combined;
 }
 

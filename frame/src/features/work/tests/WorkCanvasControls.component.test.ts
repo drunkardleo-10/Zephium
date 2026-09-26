@@ -39,7 +39,7 @@ test("the zoom is a quiet level: it fits the view, and 1 goes back to actual siz
   await expect.poll(() => level.element().textContent).not.toBe("100%");
   const beta = () => screen.getByText("Beta", { exact: true }).element().getBoundingClientRect();
   await expect.poll(() => beta().right).toBeLessThanOrEqual(1200);
-  expect(beta().bottom).toBeLessThanOrEqual(800);
+  await expect.poll(() => beta().bottom).toBeLessThanOrEqual(800);
   await userEvent.keyboard("1");
   await expect.poll(() => level.element().textContent).toBe("100%");
   await screen.unmount();

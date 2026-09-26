@@ -58,13 +58,18 @@
   import Lift from "./Lift.svelte";
   import LiftHeader from "./LiftHeader.svelte";
   import { commandRecord, pageGroups } from "../lib/project-environment-stage";
+  import {
+    elementPictures,
+    environmentStages,
+    laneElement,
+    measureKey,
+  } from "../lib/project-environment-board";
+  import type { BoardActions } from "../lib/canvas-context";
   import HostGlyph from "./cards/HostGlyph.svelte";
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
   import { youtubeThumbnail } from "../lib/link-media";
-  import { resultPlan, stepResult } from "../lib/plan-steps";
-  import { diagramResult } from "../lib/diagram";
-  import { renamedPart } from "../lib/correct";
+  import { resultPlan } from "../lib/plan-steps";
   import { stepPlan, WorkTasks, workTasksKey, type StepPlan } from "../lib/work-tasks";
   import { documentMarkdown, resultKey, WorkNotes } from "../lib/work-notes";
   import type { LiftAction } from "./LiftHeader.svelte";
@@ -72,26 +77,20 @@
   import { environmentPlan } from "../lib/project-environment-plan";
   import {
     environmentAgents,
-    environmentClusters,
-    environmentFiles,
+    environmentBoards,
     environmentItems,
     environmentLinks,
     environmentPages,
     environmentPictures,
     environmentSources,
-    environmentSteps,
-    environmentDiagrams,
     environmentView,
     fileEvidence,
-    resultHeads,
     viewPlacements,
   } from "../lib/project-environment";
   import { canvasProbe } from "../lib/canvas-context";
-  import {
-    environmentRequests,
-    environmentStages,
-    type WorkStage,
-  } from "../lib/project-environment-thread";
+  import { environmentRequests } from "../lib/project-environment-thread";
+  import { artifactView } from "../lib/project-work";
+  import RunView from "./board/RunView.svelte";
   import { failureLine, humanPage, regionOf, sameRegion } from "../lib/work-human";
   import { openOver, type PaneRect } from "../lib/pane-geometry";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
@@ -213,11 +212,16 @@
   function openLift(id: string) {
     const item = items.find((item) => item.id === id);
     if (!item) return;
-    // A step or a diagram's part is part of its result: it opens the result whole.
-    const owner =
-      item.type === "step" ? stepResult(id) : item.type === "diagram" ? diagramResult(id) : null;
-    if (owner) {
-      openLift(owner);
+    // A block opens where it stands; its board makes room.
+    if (item.type === "block") {
+      // A reviewed plan's result keeps its review: it opens in the lift, on its run.
+      if (results.references.has(id) && !agentBlock(id)) void openResult(id);
+      else toggleBlock(id);
+      return;
+    }
+    if (item.type === "head" || item.type === "trail") return;
+    if (item.type === "objective" || item.type === "request") {
+      lift(id);
       return;
     }
     if (results.references.has(id)) {
@@ -263,6 +267,7 @@
   function lift(id: string) {
     panel = null;
     inspected = null;
+    liftRecord = null;
     lifted = { id, origin: canvasRef?.screenRect(id) ?? null };
     if (snapshot?.elements.find((element) => element.id === id)?.reference.kind === "subject")
       void admitGallery(id);
@@ -520,7 +525,8 @@
       case "tab":
         return { width: 520, height: 260 };
       case "objective":
-        return { width: 640, height: 560 };
+      case "request":
+        return { width: 640, height: 600 };
       case "responsibility":
         return { width: 480, height: 320 };
       case "sources":
@@ -735,39 +741,66 @@
     objectiveSession?.selected === objective && objectiveSession.pages.length
       ? objectiveSession.pages
       : (context.pages.get(objective) ?? []);
-  /** Every message of the thread, in order, with the card its run hangs from. */
+  /** The block opened in place, and every block's height as it measured itself. */
+  let openBlock = $state<string | null>(null);
+  const measured = new SvelteMap<string, number>();
+  /** Blocks the person dragged: only those can leave their board's flow. */
+  const moved = new SvelteSet<string>();
+  function toggleBlock(id: string) {
+    inspected = null;
+    openBlock = openBlock === id ? null : id;
+  }
+  // Escape closes the block that is open, when nothing sits over the canvas.
+  $effect(() => {
+    if (!openBlock) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || lifted || pane || takeover) return;
+      openBlock = null;
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  });
+  const chosen = $derived(
+    new Set(
+      (snapshot?.decisions ?? []).flatMap((decision) =>
+        decision.choice ? [decision.element] : [],
+      ),
+    ),
+  );
+  /** Every request of the canvas as a lane: its process column and its board. */
   const stages = $derived(
-    snapshot ? environmentStages(snapshot, context.objectives, recordedPages) : [],
+    snapshot
+      ? environmentStages(snapshot, context.objectives, {
+          recorded: recordedPages,
+          pictures: elementPictures(snapshot, context.media),
+          chosen,
+          measured,
+          open: openBlock,
+        })
+      : [],
   );
   const agents = $derived(
     snapshot
       ? environmentAgents(snapshot, context.objectives, signalOf, stages)
       : { items: [], links: [], positions: {} },
   );
-  const sources = $derived(
-    snapshot
-      ? environmentSources(snapshot, context.objectives, stages)
-      : { items: [], links: [], positions: {} },
-  );
+  const sources = $derived(environmentSources(context.objectives, stages, recordedPages));
   const pages = $derived(
-    snapshot
-      ? environmentPages(
-          snapshot,
-          context.objectives,
-          stages,
-          recordedPages,
-          signalOf,
-          new Set(agents.items.map((item) => item.id)),
-          (objective) => human.pages.get(objective) ?? [],
-        )
-      : { items: [], links: [], positions: {} },
+    environmentPages(
+      context.objectives,
+      stages,
+      recordedPages,
+      signalOf,
+      (objective) => human.pages.get(objective) ?? [],
+    ),
   );
+  const boards = $derived(environmentBoards(stages, openBlock, blockArtifact));
   /** The page this canvas's run is held on, so the line can point at its card. */
   const agentWaiting = $derived.by(() => {
     const work = objectiveSession?.projection?.work.id;
     const opened = work ? (human.pages.get(work) ?? []) : [];
     if (!opened.length) return null;
-    for (const item of pages.items) {
+    for (const item of pages) {
       const state = item.page?.human;
       if (state?.phase !== "waiting_for_human") continue;
       if (
@@ -789,85 +822,18 @@
     return null;
   });
   const requests = $derived(environmentRequests(stages));
-  const steps = $derived(
-    snapshot
-      ? environmentSteps(snapshot, context.objectives, stages)
-      : { items: [], links: [], positions: {} },
-  );
-  const files = $derived(
-    snapshot ? environmentFiles(context.objectives, stages) : { items: [], positions: {} },
-  );
-  const diagrams = $derived(
-    snapshot
-      ? environmentDiagrams(snapshot, context.objectives, stages)
-      : { items: [], links: [], positions: {}, clusters: [] },
-  );
-  const clusters = $derived.by(() => {
-    const lanes = environmentClusters(
-      stages,
-      snapshot ? resultHeads(snapshot, context.objectives, stages) : new Map(),
-    );
-    // Results past the canvas's cap: one line under the lane's last group opens its request.
-    const remaining = results.remaining;
-    const lane = remaining
-      ? stages.find(
-          (stage) =>
-            stage.objective === remaining.objective &&
-            stage.executions.includes(remaining.execution),
-        )
-      : undefined;
-    const last = lane?.layout.groups.at(-1);
-    const footer = lane && last ? `group:${lane.card}:${last.kind}` : null;
-    const laneClusters = footer
-      ? lanes.clusters.map((cluster) =>
-          cluster.id === footer
-            ? {
-                ...cluster,
-                footer: {
-                  text: m.work_env_other_results({ count: remaining!.count }),
-                  opens: lane!.element,
-                },
-              }
-            : cluster,
-        )
-      : lanes.clusters;
-    return {
-      ...lanes,
-      clusters: [...diagrams.clusters, ...laneClusters],
-      footed: laneClusters !== lanes.clusters,
-    };
-  });
   const items = $derived([
     ...results.items,
     ...requests.items,
-    ...sources.items,
-    ...pages.items,
-    ...files.items,
-    ...steps.items,
-    ...diagrams.items,
+    ...boards,
+    ...sources,
+    ...pages,
     ...agents.items,
   ]);
-  /** Results drawn without a card: a diagram's area or a checklist's steps stand for them. */
-  const bare = $derived(
-    new Set(
-      stages.flatMap(
-        (stage) =>
-          stage.contents.results?.members.flatMap((member) => (member.bare ? [member.id] : [])) ??
-          [],
-      ),
-    ),
-  );
-  const canvasItems = $derived(bare.size ? items.filter((item) => !bare.has(item.id)) : items);
   const links = $derived([
     ...scene.links,
     ...(snapshot ? environmentLinks(snapshot) : []),
-    ...clusters.links,
     ...requests.links,
-    ...sources.links,
-    ...pages.links,
-    ...steps.links,
-    ...diagrams.links,
-    ...agents.links,
   ]);
   const organizing = new SvelteSet<string>();
   // Planned placements render new elements where organize intends them before
@@ -882,7 +848,7 @@
     if (!snapshot) return { positions, sizes };
     const saved = new Set(snapshot.view.placements.map((place) => place.element));
     for (const element of snapshot.elements) {
-      if (saved.has(element.id)) continue;
+      if (saved.has(element.id) || laneElement(snapshot, element)) continue;
       const place = planned[JSON.stringify(element.reference)];
       if (!place) continue;
       positions[element.id] = { x: place.x, y: place.y };
@@ -904,12 +870,10 @@
       const stage = stages.find((stage) => stage.executions.includes(execution.id));
       const place =
         stage?.place ?? current.view.placements.find((place) => place.element === element.id);
-      // What a run places lands in its stage's clusters, beside its request.
+      // What a run places lands on its request's board; the anchor is only a record.
       const anchor = place ? { x: place.x, y: place.y } : { x: 80, y: 120 };
       void untrack(() =>
-        organize(projection, execution, anchor, stage).finally(() =>
-          organizing.delete(execution.id),
-        ),
+        organize(projection, execution, anchor).finally(() => organizing.delete(execution.id)),
       );
     }
   });
@@ -917,10 +881,9 @@
     projection: WorkRuntimeProjection,
     execution: WorkExecutionFact,
     anchor: { x: number; y: number },
-    stage: WorkStage | undefined,
   ) {
     if (!session.snapshot) return;
-    const plan = organizeExecution(projection, execution, anchor, session.snapshot, stage);
+    const plan = organizeExecution(projection, execution, anchor, session.snapshot);
     if (!plan.adds.length || !(await session.flushView())) return;
     planned = {
       ...planned,
@@ -1240,12 +1203,80 @@
       onclick: () => void workTasks.make(id),
     };
   }
+  /** A trail's command opened whole, as the run recorded it. */
+  let liftRecord = $state<string | null>(null);
   const liftedCommand = $derived(
-    liftedItem?.command?.record
-      ? commandRecord(context.objectives, liftedItem.command.record)
-      : undefined,
+    liftRecord ? commandRecord(context.objectives, liftRecord) : undefined,
   );
+  /** Whether a block came from an agent's run rather than a reviewed plan. */
+  function agentBlock(id: string) {
+    const reference = results.references.get(id);
+    const execution = reference
+      ? context.objectives
+          .get(reference.objective)
+          ?.executions.find((entry) => entry.id === reference.execution)
+      : undefined;
+    return !!execution && isAgentExecution(execution);
+  }
+  /** What a block is when it is one published result: its note and its tasks come from it. */
+  function blockArtifact(id: string) {
+    const reference = snapshot?.elements.find((element) => element.id === id)?.reference;
+    if (reference?.kind !== "artifact") return undefined;
+    const execution = context.objectives
+      .get(reference.objective)
+      ?.executions.find((entry) => entry.id === reference.execution);
+    const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
+    return execution && artifact ? artifactView(artifact, execution) : undefined;
+  }
+  const boardActions: BoardActions = {
+    measure(id, width, open, height) {
+      const key = measureKey(id, width, open);
+      if (measured.get(key) !== height) measured.set(key, height);
+    },
+    toggle: toggleBlock,
+    ask: (name) => askAbout(name),
+    choose(element, choose) {
+      void session.edit(
+        choose
+          ? { kind: "decide", element, choice: m.work_env_chosen() }
+          : { kind: "undecide", element },
+      );
+    },
+    evidence(reference) {
+      if (reference.file) {
+        liftFile = fileEvidence(context.objectives, reference.file.record) ?? null;
+        if (liftFile) lifted = { id: "", origin: null };
+        return;
+      }
+      if (reference.url) openCitation(reference.url);
+    },
+    entity: (element) => lift(element),
+    command(record) {
+      panel = null;
+      liftFile = null;
+      liftRecord = record;
+      lifted = { id: "", origin: null };
+    },
+    page: (url) => openCitation(url),
+    note: (id) => noteAction(id),
+  };
   const liftedElement = $derived(snapshot?.elements.find((element) => element.id === lifted?.id));
+  /** A request opens its run: what it did, its steps, its sources. */
+  const liftedStage = $derived(stages.find((stage) => stage.card === lifted?.id));
+  /** A reviewed plan's objective keeps its plan view; an agent's request opens its run. */
+  const liftedAgent = $derived.by(() => {
+    const stage = liftedStage;
+    if (!stage) return false;
+    // The run the canvas is watching is the freshest word on what this request is.
+    const projection =
+      objectiveSession?.projection?.work.id === stage.objective
+        ? objectiveSession.projection
+        : context.objectives.get(stage.objective);
+    return !!projection?.executions.some(
+      (run) => stage.executions.includes(run.id) && isAgentExecution(run),
+    );
+  });
+
   /** Every admitted picture of one subject element, in the order it admitted them. */
   function picturesOf(element: string) {
     const current = snapshot;
@@ -1271,11 +1302,10 @@
   const foldedPages = $derived.by(() => {
     const item = liftedItem;
     if (item?.type !== "sources") return [];
-    const run = item.id.split(":").at(-1) ?? "";
-    const stage = stages.find((entry) => entry.executions.includes(run));
+    const stage = stages.find((entry) => entry.column.sources === item.id);
     const projection = stage ? context.objectives.get(stage.objective) : undefined;
     if (!stage || !projection) return [];
-    const shown = new Set(pages.items.map((page) => page.id));
+    const shown = new Set(pages.map((page) => page.id));
     return stage.executions
       .flatMap((id) => {
         const execution = projection.executions.find((entry) => entry.id === id);
@@ -1331,6 +1361,7 @@
   const loadResult = () => import("./WorkResultInspector.svelte");
   const loadFile = () => import("./WorkFileInspector.svelte");
   const loadSubject = () => import("./WorkSubjectInspector.svelte");
+  const loadDetail = () => import("./WorkObjectiveInspector.svelte");
   /** The file a source row opened, shown as the run recorded it. */
   let liftFile = $state.raw<WorkFileEvidenceV1 | null>(null);
   /** One surface: a result opens in the lift, on the run that produced it. */
@@ -1375,17 +1406,12 @@
           ...environmentView(snapshot),
           positions: {
             ...scene.positions,
-            ...requests.positions,
-            ...sources.positions,
-            ...pages.positions,
-            ...files.positions,
-            ...steps.positions,
-            ...diagrams.positions,
-            ...agents.positions,
             ...plannedGeometry.positions,
             ...planGeometry.positions,
             ...savedResultPositions,
             ...environmentView(snapshot).positions,
+            ...requests.positions,
+            ...agents.positions,
           },
           sizes: {
             ...plannedGeometry.sizes,
@@ -1453,7 +1479,6 @@
   const loadCanvas = () => import("./WorkCanvas.svelte");
   const loadAgentLine = () => import("./AgentLine.svelte");
   const loadTakeover = () => import("./pane/TakeoverPane.svelte");
-  const loadDetail = () => import("./WorkObjectiveInspector.svelte");
   $effect(() => {
     const current = snapshot;
     const focused = inspected;
@@ -1546,7 +1571,7 @@
   let signInRetry = $state.raw<{ work: string; origin: string; host: string } | null>(null);
   async function signIn(card: string) {
     const current = objectiveSession;
-    const url = pages.items.find((item) => item.id === card)?.page?.url;
+    const url = pages.find((item) => item.id === card)?.page?.url;
     const work = current?.projection?.work.id;
     const execution = current?.projection?.executions.at(-1);
     if (!current || !url || !work) return;
@@ -1807,7 +1832,7 @@
             ]
           : [];
       }),
-      placements: viewPlacements(snapshot, view, stages),
+      placements: viewPlacements(snapshot, view, stages, moved),
     };
     if (
       JSON.stringify({ ...next, revision: "" }) !==
@@ -1875,29 +1900,6 @@
       if (!(await session.edit({ kind: "remove", element: id }))) return;
       if (inspected === id) inspected = null;
     }
-  }
-  /** The run behind a diagram's part, while the person can still correct what it made. */
-  function partSource(id: string) {
-    const result = diagramResult(id);
-    const reference = snapshot?.elements.find((element) => element.id === result)?.reference;
-    const work = objectiveSession;
-    if (reference?.kind !== "artifact" || !work || work.pending) return null;
-    if (work.projection?.work.id !== reference.objective) return null;
-    const execution = work.projection.executions.find((entry) => entry.id === reference.execution);
-    const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
-    if (!execution || !artifact || !["needs_review", "completed"].includes(execution.status))
-      return null;
-    const user = execution.user_artifacts?.find((entry) => entry.artifact === artifact.id);
-    return { work, execution, artifact, data: user?.edited_data ?? artifact.data };
-  }
-  const canRenamePart = (id: string) => partSource(id)?.data.kind === "diagram";
-  async function renamePart(id: string, name: string) {
-    const source = partSource(id);
-    const next = source ? renamedPart(source.data, id.slice(id.lastIndexOf(":") + 1), name) : null;
-    if (!source || !next) return;
-    source.work.editArtifact(source.execution.id, source.artifact.id, next);
-    if (!(await source.work.saveArtifact(source.artifact.id)))
-      source.work.discardArtifact(source.artifact.id);
   }
   /** Opens one of the bar's panels; the tab and media tools open the attach panel on their kind. */
   function openPanel(next: typeof panel, open: boolean) {
@@ -2106,9 +2108,8 @@
           failureLabel={m.surface_render_failed()}
           retryLabel={m.surface_retry()}
           >{#snippet children(Canvas)}<Canvas
-              items={canvasItems}
+              {items}
               {links}
-              clusters={clusters.clusters}
               areas={snapshot.areas}
               author={profileLabel}
               {pictures}
@@ -2116,7 +2117,10 @@
               {remoteView}
               {authoritative}
               expose={(api) => (canvasRef = api)}
-              rename={{ can: canRenamePart, rename: (id, name) => void renamePart(id, name) }}
+              board={boardActions}
+              onmoved={(ids: string[]) => {
+                for (const id of ids) moved.add(id);
+              }}
               onprobe={(origin: string) =>
                 void commands.faviconProbe(session.profile, [origin]).catch(() => false)}
               fitBottomInset={composerHeight}
@@ -2126,10 +2130,7 @@
               onopen={openLift}
               onopenlink={openCitation}
               onselectionchange={(ids: string[]) => {
-                // A diagram's part is context as its diagram: the result is the element.
-                const owned = [...new Set(ids.map((id) => diagramResult(id) ?? id))].filter((id) =>
-                  authoritative.has(id),
-                );
+                const owned = ids.filter((id) => authoritative.has(id));
                 selectionCount = owned.length;
                 selectedIds = owned;
                 if (!ids.length) inspected = null;
@@ -2235,7 +2236,7 @@
           onrename={(title: string) => void session.edit({ kind: "rename", title })}
         />{/if}
       <span class="canvas-top-gap"></span>
-      {#if results.remaining && !clusters.footed}<button
+      {#if results.remaining}<button
           type="button"
           class="results-line"
           onclick={() => {
@@ -2284,6 +2285,7 @@
         lifted = null;
         liftSource = null;
         liftFile = null;
+        liftRecord = null;
       }}
     >
       {#if lifted.proposal && objectiveSession}
@@ -2309,6 +2311,17 @@
               onback={() => (liftFile = null)}
             />{/snippet}</LazyView
         >
+      {:else if liftedCommand}
+        <div class="lift-body">
+          <LiftHeader
+            kind={m.work_env_command()}
+            title={liftedCommand.command.command}
+            icon={ComputerTerminal01Icon}
+          />
+          {#await import("./local/CommandRecord.svelte") then module}
+            <module.default record={liftedCommand} />
+          {/await}
+        </div>
       {:else if liftedItem?.sources}
         <div class="lift-body">
           <LiftHeader
@@ -2442,7 +2455,7 @@
                 (liftFile = fileEvidence(context.objectives, record) ?? null)}
             />{/snippet}</LazyView
         >
-      {:else if liftedElement?.reference.kind === "objective" && objectiveSession}
+      {:else if !liftedAgent && liftedElement?.reference.kind === "objective" && objectiveSession}
         <LazyView
           loader={loadDetail}
           loadingLabel={m.surface_loading()}
@@ -2455,6 +2468,29 @@
               onattach={(reference) => void session.edit({ kind: "add", reference, area: null })}
             />{/snippet}</LazyView
         >
+      {:else if liftedStage}
+        <RunView
+          request={liftedStage.request}
+          trail={liftedStage.trail}
+          runs={context.objectives
+            .get(liftedStage.objective)
+            ?.executions.filter((run) => liftedStage.executions.includes(run.id)) ?? []}
+          made={liftedStage.board.blocks.flatMap((block) =>
+            block.title ? [{ id: block.id, title: block.title }] : [],
+          )}
+          onsource={(row) => {
+            if (row.file) {
+              liftFile = fileEvidence(context.objectives, row.file.record) ?? null;
+              return;
+            }
+            lifted = null;
+            openPane({ kind: "url", url: row.url }, null);
+          }}
+          onmade={(id) => {
+            lifted = null;
+            canvasRef?.focusCard(id);
+          }}
+        />
       {:else if liftedItem?.artifact}
         <div class="lift-result">
           {#if results.references.get(liftedItem.id) && objectiveSession}
@@ -2478,18 +2514,6 @@
                 />{/snippet}</LazyView
             >
           {:else}<LiftHeader kind={liftedItem.kind} title={liftedItem.title} />{/if}
-        </div>
-      {:else if liftedItem && liftedCommand}
-        <div class="lift-body">
-          <LiftHeader
-            kind={liftedItem.kind}
-            title={liftedItem.title}
-            meta={liftedItem.command?.reason ?? ""}
-            icon={ComputerTerminal01Icon}
-          />
-          {#await import("./local/CommandRecord.svelte") then module}
-            <module.default record={liftedCommand} />
-          {/await}
         </div>
       {:else if liftedItem}
         <div class="lift-body lift-plain">

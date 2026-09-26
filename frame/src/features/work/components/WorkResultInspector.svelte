@@ -6,7 +6,6 @@
   import AnswerView from "$shared/ui/data/Artifact/AnswerView.svelte";
   import Evidence, { type EvidenceView } from "$shared/ui/data/Evidence";
   import Compare from "./compare/Compare.svelte";
-  import FindingsLift from "./FindingsLift.svelte";
   import Button from "$shared/ui/Button";
   import LiftHeader, { type LiftAction } from "./LiftHeader.svelte";
   import SourcesRail from "./SourcesRail.svelte";
@@ -26,7 +25,8 @@
   import { untrack } from "svelte";
   import * as m from "$shared/i18n/messages";
   /** The diagram's picture and lists load only when a diagram is lifted. */
-  const loadDiagram = () => import("./DiagramLift.svelte");
+  const loadDiagram = () => import("./board/Diagram.svelte");
+  let room = $state(720);
   let {
     session,
     reference,
@@ -258,20 +258,22 @@
               {paragraph}
             </p>{/each}{/if}
       </div>
-    {:else if view.content.kind === "findings"}<FindingsLift
-        content={view.content}
-        onevidence={pick}
-      />
     {:else if view.content.kind === "code"}<div class="reading code">
         <Artifact artifact={view} embedded onevidence={pick} onlink={onopen} />
       </div>
-    {:else if view.content.kind === "diagram"}{@const content = view.content}<LazyView
-        loader={loadDiagram}
-        loadingLabel={m.surface_loading()}
-        failureLabel={m.work_artifact_unavailable()}
-        retryLabel={m.surface_retry()}
-        >{#snippet children(DiagramLift)}<DiagramLift {content} />{/snippet}</LazyView
-      >
+    {:else if view.content.kind === "diagram"}{@const diagram = view.content}
+      <div bind:clientWidth={room}>
+        <LazyView
+          loader={loadDiagram}
+          loadingLabel={m.surface_loading()}
+          failureLabel={m.work_artifact_unavailable()}
+          retryLabel={m.surface_retry()}
+          >{#snippet children(Diagram)}<Diagram
+              block={{ id: view.key, kind: "diagram", emphasis: "hero", state: "ready", diagram }}
+              width={room}
+            />{/snippet}</LazyView
+        >
+      </div>
     {:else}<Artifact artifact={view} embedded onevidence={pick} onlink={onopen} />{/if}
     {#if copied === "failed"}<p role="alert">{m.work_code_copy_failed()}</p>{/if}
     {#if evidence}<Evidence {evidence} {onopen} />{/if}

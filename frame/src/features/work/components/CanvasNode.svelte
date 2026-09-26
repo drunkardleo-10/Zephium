@@ -21,16 +21,13 @@
   import ResponsibilityCard from "./cards/ResponsibilityCard.svelte";
   import ResultCard from "./cards/ResultCard.svelte";
   import SubjectCard from "./cards/SubjectCard.svelte";
-  import FindingCard from "./cards/FindingCard.svelte";
-  import FindingsCard from "./cards/FindingsCard.svelte";
-  import FileCard from "./cards/FileCard.svelte";
-  import CommandCard from "./cards/CommandCard.svelte";
   import SourcesCard from "./cards/SourcesCard.svelte";
   import CompareCard from "./cards/CompareCard.svelte";
   import FolderCard from "./cards/FolderCard.svelte";
   import PageCard from "./cards/PageCard.svelte";
-  import StepCard from "./cards/StepCard.svelte";
-  import DiagramNodeCard from "./cards/DiagramNodeCard.svelte";
+  import BlockHost from "./board/BlockHost.svelte";
+  import BoardHead from "./board/BoardHead.svelte";
+  import Trail from "./board/Trail.svelte";
   import * as m from "$shared/i18n/messages";
   const open = getContext<(id: string) => void>(canvasOpen);
   const action = getContext<(id: string, action?: string) => void>(canvasAction);
@@ -50,35 +47,32 @@
   const type = $derived(data.type ?? (data.artifact ? "result" : "objective"));
   /** A card the run drew, not an element the person placed: it takes no orders. */
   const inert = $derived(
-    [
-      "responsibility",
-      "page",
-      "sources",
-      "request",
-      "findings",
-      "file",
-      "command",
-      "step",
-      "diagram",
-    ].includes(type),
+    ["responsibility", "page", "sources", "request", "block", "head", "trail"].includes(type),
   );
+  /** A lane card takes its size from its lane. */
+  const laid = $derived(!!data.size);
+  /** What a block shows past its first rows opens in place, and closes again. */
+  const OPENS = new Set(["table", "document", "code", "comparison", "gallery"]);
+  const opens = $derived(type === "block" && OPENS.has(data.block?.data.kind ?? ""));
+  /** Only a request is an end of a line: the thread runs through it. */
+  const ends = $derived(!["block", "head", "trail", "sources", "page"].includes(type));
   /** A tab's one page, read or changed with the person's session: each asks its own approval. */
   const signedIn = $derived(type === "tab" && !data.unavailable && !!data.detail);
   /** A page held for a person opens the takeover, never a copy in Browse. */
   const waiting = $derived(data.page?.human?.phase === "waiting_for_human");
 </script>
 
-<Handle
-  type="target"
-  position={Position.Left}
-  isConnectable={false}
-  tabindex={-1}
-  aria-hidden="true"
-/>
+{#if ends}<Handle
+    type="target"
+    position={Position.Left}
+    isConnectable={false}
+    tabindex={-1}
+    aria-hidden="true"
+  />{/if}
 <NodeResizer
   onResizeStart={() => resize(true)}
   onResizeEnd={() => resize(false)}
-  isVisible={selected && type !== "diagram"}
+  isVisible={selected && !laid}
   minWidth={160}
   minHeight={72}
   maxWidth={4096}
@@ -86,12 +80,18 @@
   lineClass="work-resize-line"
   handleClass="work-resize-handle"
 />
-<NodeToolbar isVisible={selected} position={Position.Top} offset={10}>
+<NodeToolbar
+  isVisible={selected && type !== "head" && type !== "trail" && (type !== "block" || opens)}
+  position={Position.Top}
+  offset={10}
+>
   <div class="bar" role="toolbar" aria-label={data.title}>
     <button type="button" onclick={() => (waiting ? action(id, "help") : open(id))}>
       <Icon icon={ArrowUpRight01Icon} size={14} />{waiting
         ? m.work_human_help()
-        : m.work_env_open()}
+        : type === "block" && data.block?.open
+          ? m.work_board_close()
+          : m.work_env_open()}
     </button>
     {#if data.artifact && !inert}<button
         type="button"
@@ -137,18 +137,15 @@
   {#if data.decision}<span class="decision" title={data.decision}
       ><Icon icon={Tick02Icon} size={12} />{m.work_env_decided()}</span
     >{/if}
-  {#if type === "tab" || type === "link"}<TabCard
+  {#if type === "block" && data.block}<BlockHost {id} item={data} {selected} />
+  {:else if type === "head"}<BoardHead {id} item={data} />
+  {:else if type === "trail"}<Trail item={data} {selected} />
+  {:else if type === "tab" || type === "link"}<TabCard
       item={data}
       {selected}
       onplay={() => action(id, "play")}
     />
   {:else if type === "subject"}<SubjectCard item={data} {selected} />
-  {:else if type === "finding"}<FindingCard item={data} {selected} />
-  {:else if type === "findings"}<FindingsCard item={data} {selected} />
-  {:else if type === "file"}<FileCard item={data} {selected} />
-  {:else if type === "command"}<CommandCard item={data} {selected} />
-  {:else if type === "step"}<StepCard item={data} {selected} />
-  {:else if type === "diagram"}<DiagramNodeCard item={data} {selected} />
   {:else if type === "sources"}<SourcesCard item={data} {selected} />
   {:else if type === "folder"}<FolderCard item={data} {selected} />
   {:else if type === "page"}<PageCard item={data} {selected} onhelp={() => action(id, "help")} />
@@ -165,30 +162,32 @@
     />
   {:else}<ObjectiveCard item={data} {selected} onaction={() => action(id)} />{/if}
 </div>
-<Handle
-  type="source"
-  position={Position.Right}
-  isConnectable={false}
-  tabindex={-1}
-  aria-hidden="true"
-/>
-<!-- The thread runs down from one request into the next; other edges read left to right. -->
-<Handle
-  id="below"
-  type="source"
-  position={Position.Bottom}
-  isConnectable={false}
-  tabindex={-1}
-  aria-hidden="true"
-/>
-<Handle
-  id="above"
-  type="target"
-  position={Position.Top}
-  isConnectable={false}
-  tabindex={-1}
-  aria-hidden="true"
-/>
+{#if ends}
+  <Handle
+    type="source"
+    position={Position.Right}
+    isConnectable={false}
+    tabindex={-1}
+    aria-hidden="true"
+  />
+  <!-- The thread runs down from one request into the next; other edges read left to right. -->
+  <Handle
+    id="below"
+    type="source"
+    position={Position.Bottom}
+    isConnectable={false}
+    tabindex={-1}
+    aria-hidden="true"
+  />
+  <Handle
+    id="above"
+    type="target"
+    position={Position.Top}
+    isConnectable={false}
+    tabindex={-1}
+    aria-hidden="true"
+  />
+{/if}
 
 <style>
   .node-root {

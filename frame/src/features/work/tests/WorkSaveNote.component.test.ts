@@ -95,14 +95,15 @@ async function workspace(edit?: (state: WorkRuntimeProjection) => void) {
 
 test("a document result is saved as a note only when asked, and then opens it", async () => {
   const { screen, notes, close } = await workspace();
-  const cover = () =>
-    screen.container.querySelector<HTMLElement>('[data-card-id="result-card"] .artifact-body');
+  const cover = () => screen.container.querySelector<HTMLElement>('[data-card-id="result-card"]');
   await expect.poll(cover).not.toBeNull();
   // The line offers the same action beside the agent's follow-ups, for a document.
   const next = screen.getByRole("button", { name: "Next", exact: true });
   await expect.element(next).toBeVisible();
   expect(notes.calls.some((call) => call.kind === "create")).toBe(false);
-  cover()!.click();
+  // A reviewed plan's result opens in the lift, where it is read and kept.
+  cover()!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  cover()!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   const lift = screen.getByRole("dialog", { name: "Dependency findings" });
   await expect.element(lift).toBeVisible();
   await screen.getByRole("button", { name: "Save as note", exact: true }).click();
@@ -156,10 +157,11 @@ test("an answer lifts as a reading page and is saved as its own Markdown under i
     state.executions[0]!.artifacts[0]!.data = { kind: "answer", markdown };
     state.executions[0]!.user_artifacts = [];
   });
-  const cover = () =>
-    screen.container.querySelector<HTMLElement>('[data-card-id="result-card"] .answer-body');
+  const cover = () => screen.container.querySelector<HTMLElement>('[data-card-id="result-card"]');
   await expect.poll(cover).not.toBeNull();
-  cover()!.click();
+  // A reviewed plan's result opens in the lift, where it is read and kept.
+  cover()!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  cover()!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   const lift = screen.getByRole("dialog", { name: "Dependency findings" });
   await expect.element(lift).toBeVisible();
   // The header says what it is and what it answers; the page reads whole.

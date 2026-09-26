@@ -6,6 +6,7 @@ import {
   DIAGRAM_REACH,
   bandsOf,
   lanesOf,
+  midpoint,
   plateHeight,
   plateWidth,
   primaryFlows,
@@ -23,8 +24,8 @@ export const ELK_OPTIONS: LayoutOptions = {
   "elk.layered.layering.strategy": "LONGEST_PATH",
   "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
   "elk.edgeRouting": "ORTHOGONAL",
-  "elk.spacing.nodeNode": "40",
-  "elk.layered.spacing.nodeNodeBetweenLayers": "96",
+  "elk.spacing.nodeNode": "36",
+  "elk.layered.spacing.nodeNodeBetweenLayers": "72",
   "elk.layered.spacing.edgeNodeBetweenLayers": "24",
   "elk.spacing.edgeNode": "16",
   "elk.spacing.edgeEdge": "12",
@@ -33,6 +34,8 @@ export const ELK_OPTIONS: LayoutOptions = {
   "elk.edgeLabels.placement": "CENTER",
   "elk.edgeLabels.inline": "true",
   "elk.randomSeed": "1",
+  // A tier's parts stay in its column even when nothing joins them to the rest.
+  "elk.separateConnectedComponents": "false",
 };
 /** Room around the picture: a band's caption above and its air beside the parts. */
 const LANE_PAD = { top: 28, side: 12, bottom: 12 };
@@ -52,6 +55,7 @@ function pairs(shape: DiagramShape): Pair[] {
   const out: Pair[] = [];
   const open = new Map<string, Pair>();
   for (const flow of shape.flows) {
+    if (within(shape, flow)) continue;
     const partner = open.get(`${flow.to}\n${flow.from}`);
     if (partner) {
       partner.back = flow.index;
@@ -65,26 +69,33 @@ function pairs(shape: DiagramShape): Pair[] {
   return out;
 }
 
-/** The ELK graph for a diagram: parts 220 × 72, one partition per lane, a port per flow end. */
+/**
+ * A flow inside one tier: the engine never lays it out, so a tier stays one
+ * column; it is drawn after, down the column or beside it.
+ */
+function within(shape: DiagramShape, flow: { from: string; to: string }): boolean {
+  if (!shape.lanes.length) return false;
+  const lane = (id: string) => shape.parts.find((part) => part.id === id)?.lane;
+  return lane(flow.from) === lane(flow.to);
+}
+
+/** The ELK graph for a diagram: its parts, one partition per tier, a port per flow end. */
 export function elkGraph(shape: DiagramShape): ElkNode {
   const lanes = shape.lanes.length > 0;
-  const lane = new Map(shape.parts.map((part) => [part.id, part.lane]));
   const node = new Map(shape.parts.map((part, index) => [part.id, `n${index}`]));
   const flow = new Map(shape.flows.map((entry) => [entry.index, entry]));
   const ports = new Map<string, ElkPort[]>(shape.parts.map((part) => [part.id, []]));
   const edges: ElkExtendedEdge[] = pairs(shape).map((pair) => {
     const lead = flow.get(pair.lead)!;
     const [from, to] = pair.reversed ? [lead.to, lead.from] : [lead.from, lead.to];
-    // Within one lane a flow leaves below and lands above; across lanes it runs east to west.
-    const within = lanes && lane.get(from) === lane.get(to);
     const port = (side: string) => ({
       id: `e${pair.lead}${side === "EAST" || side === "SOUTH" ? "s" : "t"}`,
       width: 0,
       height: 0,
       layoutOptions: { "elk.port.side": side },
     });
-    const source = port(within ? "SOUTH" : "EAST");
-    const target = port(within ? "NORTH" : "WEST");
+    const source = port("EAST");
+    const target = port("WEST");
     ports.get(from)!.push(source);
     ports.get(to)!.push(target);
     const names = [lead.label, pair.back === undefined ? "" : flow.get(pair.back)!.label].filter(
@@ -117,12 +128,15 @@ export function elkGraph(shape: DiagramShape): ElkNode {
     layoutOptions: {
       ...ELK_OPTIONS,
       "elk.partitioning.activate": String(lanes),
+      // A tier is one layer: its parts are handed their column and the engine keeps it.
+      ...(lanes ? { "elk.layered.layering.strategy": "INTERACTIVE" } : {}),
       "elk.padding": lanes
         ? `[top=${LANE_PAD.top},left=${LANE_PAD.side},bottom=${LANE_PAD.bottom},right=${LANE_PAD.side}]`
         : "[top=0,left=0,bottom=0,right=0]",
     },
-    children: shape.parts.map((part) => ({
+    children: shape.parts.map((part, index) => ({
       id: node.get(part.id)!,
+      ...(lanes ? { x: part.lane * 1000, y: index * 100 } : {}),
       width: DIAGRAM.node.width,
       height: DIAGRAM.node.height,
       ports: ports.get(part.id)!,
@@ -229,8 +243,31 @@ export function fromElk(shape: DiagramShape, out: ElkNode): DiagramLayout {
     drawn(pair.lead, offsetLine(line, CORRIDOR), !pair.reversed, 1);
     drawn(pair.back, offsetLine(line, -CORRIDOR), pair.reversed, -1);
   }
+  for (const entry of shape.flows)
+    if (within(shape, entry)) {
+      const twin = shape.flows.some((other) => other.from === entry.to && other.to === entry.from);
+      const points = besideOrDown(entry, at, shape, twin ? CORRIDOR : 0);
+      // A twin's name stands beside its own line, away from the other's.
+      const mid = midpoint(points);
+      const aside = twin
+        ? (plateWidth(entry.label) / 2 + CORRIDOR) * (points[0]!.y < points.at(-1)!.y ? -1 : 1)
+        : 0;
+      flows[entry.index] = {
+        from: entry.from,
+        to: entry.to,
+        points,
+        ...(entry.label ? { plate: { x: mid.x + aside, y: mid.y } } : {}),
+        primary: primary.has(entry.index),
+      };
+    }
   const box = { x: 0, y: 0, width: out.width ?? 0, height: out.height ?? 0 };
   const bounds = { ...shift(box, corner), width: box.width, height: box.height };
+  // A flow drawn beside its column may reach past what the engine measured.
+  const reach = Math.max(
+    bounds.x + bounds.width,
+    ...Object.values(flows).flatMap((entry) => entry.points.map((point) => point.x + 8)),
+  );
+  bounds.width = Math.ceil(reach - bounds.x);
   return {
     at,
     width: Math.min(DIAGRAM_REACH, Math.ceil(bounds.x + bounds.width)),
@@ -239,10 +276,50 @@ export function fromElk(shape: DiagramShape, out: ElkNode): DiagramLayout {
     layers: lanesOf(shape),
     bands: bandsOf(shape, at, bounds, LANE_PAD.side),
     flows,
-    plates: {},
-    routes: {},
     settled: true,
   };
+}
+
+/**
+ * A flow inside a tier: straight down or up to the next part of its column,
+ * or out beside the column and back when parts stand between them.
+ */
+function besideOrDown(
+  flow: { from: string; to: string },
+  at: Record<string, CanvasPosition>,
+  shape: DiagramShape,
+  /** Opposite flows between the same two parts run this far either side of one line. */
+  apart = 0,
+): CanvasPosition[] {
+  const { width, height } = DIAGRAM.node;
+  const a = at[flow.from]!;
+  const b = at[flow.to]!;
+  const lane = shape.parts.find((part) => part.id === flow.from)?.lane;
+  const column = shape.parts.filter((part) => part.lane === lane).map((part) => at[part.id]!);
+  const [top, bottom] = a.y < b.y ? [a, b] : [b, a];
+  const between = column.some(
+    (point) => point !== a && point !== b && point.y > top.y && point.y < bottom.y,
+  );
+  if (!between && Math.abs(a.x - b.x) < width / 2) {
+    const x = (Math.max(a.x, b.x) + Math.min(a.x, b.x) + width) / 2 + (a.y < b.y ? -apart : apart);
+    return a.y < b.y
+      ? [
+          { x, y: a.y + height },
+          { x, y: b.y },
+        ]
+      : [
+          { x, y: a.y },
+          { x, y: b.y + height },
+        ];
+  }
+  const turn = a.y < b.y ? apart : -apart;
+  const side = Math.max(...column.map((point) => point.x)) + width + 18 + turn;
+  return [
+    { x: a.x + width, y: a.y + height / 2 - turn },
+    { x: side, y: a.y + height / 2 - turn },
+    { x: side, y: b.y + height / 2 - turn },
+    { x: b.x + width, y: b.y + height / 2 - turn },
+  ];
 }
 
 /**

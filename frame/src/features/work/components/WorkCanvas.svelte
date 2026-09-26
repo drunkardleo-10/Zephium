@@ -23,14 +23,11 @@
     canvasAreaActions,
     canvasArrival,
     canvasProbe,
-    canvasRename,
-    canvasSelectGroup,
-    canvasDiagram,
+    canvasBoard,
+    type BoardActions,
   } from "../lib/canvas-context";
   import CanvasNode from "./CanvasNode.svelte";
   import AreaNode from "./AreaNode.svelte";
-  import ClusterNode from "./ClusterNode.svelte";
-  import DiagramBand from "./DiagramBand.svelte";
   import AgentMark from "./AgentMark.svelte";
   import WorkEdge from "./WorkEdge.svelte";
   import { arrivals } from "../lib/arrival";
@@ -59,12 +56,9 @@
     sanitizeScene,
     validScene,
     validViewport,
-    withClusters,
-    withBands,
     relationLinks,
     restLink,
     type CanvasArea,
-    type CanvasCluster,
     type CanvasItem,
     type CanvasLink,
     type CanvasPosition,
@@ -72,23 +66,11 @@
     type CanvasView,
     type WorkNode,
   } from "../lib/canvas-model";
-  import {
-    columnLayout,
-    diagramNodeId,
-    diagramOrigin,
-    layoutOf,
-    partAlong,
-    sceneShape,
-    settledLayout,
-    type DiagramLayout,
-    type DiagramShape,
-  } from "../lib/diagram";
   import * as m from "$shared/i18n/messages";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   let {
     items,
     links,
-    clusters = [],
     areas = [],
     author = "",
     pictures = new Map(),
@@ -109,14 +91,13 @@
     onareachange,
     onselectionaction,
     onareaedit,
-    rename,
+    onmoved,
+    board,
     onprobe,
     expose,
   }: {
     items: readonly CanvasItem[];
     links: readonly CanvasLink[];
-    /** Each stage's cards of one kind; frontend-only, never persisted. */
-    clusters?: readonly CanvasCluster[];
     areas?: readonly CanvasArea[];
     /** The person whose request starts a path on this canvas. */
     author?: string;
@@ -145,16 +126,26 @@
       area: string,
       edit: { kind: "rename"; title: string } | { kind: "remove" },
     ) => void;
-    /** A diagram part's name, where its result can still be corrected. */
-    rename?: { can: (id: string) => boolean; rename: (id: string, name: string) => void };
+    /** The person dragged these cards to where they stand now. */
+    onmoved?: (ids: string[]) => void;
+    /** What a board's blocks ask of the canvas's owner. */
+    board?: BoardActions;
     /** Asks native for the icon of an origin no tab has shown. */
     onprobe?: (origin: string) => void;
     expose?: (api: CanvasApi) => void;
   } = $props();
-  setContext(canvasRename, {
-    can: (id: string) => !!rename?.can(id),
-    rename: (id: string, name: string) => rename?.rename(id, name),
-  });
+  setContext(canvasBoard, {
+    measure: (id: string, width: number, open: boolean, height: number) =>
+      board?.measure(id, width, open, height),
+    toggle: (id: string) => board?.toggle(id),
+    ask: (name: string) => board?.ask(name),
+    choose: (element: string, chosen: boolean) => board?.choose(element, chosen),
+    evidence: (reference: EvidenceReference) => board?.evidence(reference),
+    entity: (element: string) => board?.entity(element),
+    command: (record: string) => board?.command(record),
+    page: (url: string) => board?.page(url),
+    note: (id: string) => board?.note(id),
+  } satisfies BoardActions);
   /** Each origin is asked for once per canvas. */
   const probed: Record<string, true> = {};
   setContext(canvasProbe, (origin: string) => {
@@ -192,10 +183,7 @@
   let canvasWidth = $state(0);
   let canvasHeight = $state(0);
   let host = $state<HTMLDivElement>();
-  /** A card, or the group that stands for a result drawn without one. */
-  const nodeFor = (id: string) =>
-    nodes.find((node) => node.id === id) ??
-    nodes.find((node) => node.type === "cluster" && node.data.opens === id);
+  const nodeFor = (id: string) => nodes.find((node) => node.id === id);
   function center(id: string) {
     const node = nodeFor(id);
     if (!node) return;
@@ -214,15 +202,9 @@
   const restoredViewport = untrack(() => validViewport(initialView?.viewport));
   let viewport = $state(restoredViewport ?? { x: 0, y: 0, zoom: 1 });
   // One bad card never hides the canvas: the scene is repaired, then guarded.
-  const scene = $derived(sanitizeScene(items, links, clusters));
-  let valid = $derived(validScene(scene.items, scene.links, scene.clusters));
-  const nodeTypes = {
-    work: CanvasNode,
-    area: AreaNode,
-    cluster: ClusterNode,
-    agent: AgentMark,
-    band: DiagramBand,
-  };
+  const scene = $derived(sanitizeScene(items, links));
+  let valid = $derived(validScene(scene.items, scene.links));
+  const nodeTypes = { work: CanvasNode, area: AreaNode, agent: AgentMark };
   const edgeTypes = { work: WorkEdge };
   let selection: string[] = [];
   let selectedIds = $state.raw<ReadonlySet<string>>(new Set());
@@ -236,172 +218,14 @@
   setContext(canvasArrival, (id: string) => arrival.motion(id));
   const byId = $derived(new Map(scene.items.map((item) => [item.id, item])));
   const lit = $derived(relationLinks(scene.links, byId, focused));
-  const title = (id: string) =>
-    byId.get(id)?.title ?? scene.clusters.find((cluster) => cluster.id === id)?.label ?? "";
+  const title = (id: string) => byId.get(id)?.title ?? "";
   /** The thread runs upright. */
   const handles = (link: CanvasLink) =>
     link.kind === "thread" ? { sourceHandle: "below", targetHandle: "above" } : {};
 
-  // Diagrams. Each area's parts stand by one layout: the engine's once it has
-  // answered, the columns until then; the canvas finds which by where they stand.
-  type Drawing = {
-    area: string;
-    prefix: string;
-    members: readonly string[];
-    layout: DiagramLayout;
-    origin: CanvasPosition | null;
-  };
-  let drawings = $state.raw<Drawing[]>([]);
-  const shapes = $derived(
-    scene.clusters.flatMap((cluster) =>
-      cluster.tone === "area" && cluster.opens
-        ? [
-            {
-              cluster,
-              shape: sceneShape(
-                cluster.opens,
-                cluster.members,
-                cluster.layers ?? [],
-                scene.links.filter(
-                  (link) => link.kind === "diagram" && cluster.members.includes(link.source),
-                ),
-              ),
-            },
-          ]
-        : [],
-    ),
-  );
-  function drawing(cluster: CanvasCluster, shape: DiagramShape, list: readonly WorkNode[]) {
-    const prefix = diagramNodeId(cluster.opens!, "");
-    const byNode = new Map(list.map((node) => [node.id, node]));
-    const vote = (layout: DiagramLayout) =>
-      diagramOrigin(
-        cluster.members.flatMap((id) => {
-          const node = byNode.get(id);
-          const at = layout.at[id.slice(prefix.length)];
-          return node && at ? [{ position: absolutePosition(node, list), at }] : [];
-        }),
-      );
-    const settled = settledLayout(shape);
-    let layout = settled ?? layoutOf(shape);
-    let found = vote(layout);
-    if (settled && (found?.count ?? 0) < cluster.members.length) {
-      const columns = columnLayout(shape);
-      const other = vote(columns);
-      if ((other?.count ?? 0) > (found?.count ?? 0)) [layout, found] = [columns, other];
-    }
-    return {
-      area: cluster.id,
-      prefix,
-      members: cluster.members,
-      layout,
-      origin: found?.origin ?? null,
-    };
-  }
-  const drawnBy = $derived(
-    new Map(drawings.flatMap((entry) => entry.members.map((id) => [id, entry] as const))),
-  );
-  /** Parts joined by a flow to a part being looked at. */
-  function joined(entry: Drawing, id: string): string[] {
-    const local = id.slice(entry.prefix.length);
-    return Object.values(entry.layout.flows).flatMap((flow) =>
-      flow.from === local
-        ? [entry.prefix + flow.to]
-        : flow.to === local
-          ? [entry.prefix + flow.from]
-          : [],
-    );
-  }
-  /** While a part is looked at, the parts no flow joins it to step back. */
-  const dimmed = $derived.by(() => {
-    const out: string[] = [];
-    for (const entry of drawings) {
-      const here = entry.members.filter((id) => focused.has(id));
-      if (!here.length || here.length === entry.members.length) continue;
-      const near = new Set([...here, ...here.flatMap((id) => joined(entry, id))]);
-      for (const id of entry.members) if (!near.has(id)) out.push(id);
-    }
-    return new Set(out);
-  });
-  setContext(canvasDiagram, (id: string) => dimmed.has(id));
-  /**
-   * A diagram's flow: named first flows at rest and the rest quiet; while one
-   * of its parts is looked at, that part's flows lit and every other quiet.
-   */
-  function flowData(link: CanvasLink) {
-    const entry = drawnBy.get(link.source);
-    const index = Number(link.id.slice(link.id.lastIndexOf(":") + 1));
-    const flow = entry?.layout.flows[index];
-    const looked = !!entry && entry.members.some((id) => focused.has(id));
-    const state = looked
-      ? focused.has(link.source) || focused.has(link.target)
-        ? "lit"
-        : "quiet"
-      : !flow || flow.primary
-        ? "rest"
-        : "quiet";
-    const at = (id: string) => entry?.layout.at[id.slice(entry.prefix.length)];
-    const from = at(link.source);
-    const to = at(link.target);
-    return {
-      state,
-      ...(link.label ? { label: link.label } : {}),
-      ...(flow && from && to
-        ? {
-            flow: {
-              points: flow.points,
-              from,
-              to,
-              ...(flow.plate ? { plate: flow.plate } : {}),
-              settled: entry!.layout.settled,
-            },
-          }
-        : {}),
-    };
-  }
-  /** Arrow keys walk a diagram along its flows, from the part that holds the keyboard. */
-  function diagramKeys(event: KeyboardEvent) {
-    if (event.metaKey || event.ctrlKey || event.altKey || !event.key.startsWith("Arrow")) return;
-    const target = event.target;
-    if (!(target instanceof HTMLElement) || !target.matches(".svelte-flow__node")) return;
-    const id = target.dataset.id ?? "";
-    const entry = drawnBy.get(id);
-    if (!entry) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const spot = (part: string) => {
-      const node = nodes.find((candidate) => candidate.id === part);
-      if (!node) return null;
-      const p = absolutePosition(node, nodes);
-      return { x: p.x + (node.width ?? 0) / 2, y: p.y + (node.height ?? 0) / 2 };
-    };
-    const from = spot(id);
-    if (!from) return;
-    const next = partAlong(
-      from,
-      [...new Set(joined(entry, id))].flatMap((part) => {
-        const at = spot(part);
-        return at ? [{ id: part, at }] : [];
-      }),
-      event.key,
-    );
-    if (next)
-      host
-        ?.querySelector<HTMLElement>(`.svelte-flow__node[data-id="${CSS.escape(next)}"]`)
-        ?.focus();
-  }
-  /** A part holding the keyboard is looked at, as one under the pointer is. */
-  function partFocus(event: FocusEvent, into: boolean) {
-    const target = event.target;
-    if (!(target instanceof HTMLElement) || !target.matches(".svelte-flow__node")) return;
-    const id = target.dataset.id ?? "";
-    if (!drawnBy.has(id)) return;
-    if (into) hovered = id;
-    else if (hovered === id) hovered = null;
-  }
   let edges = $derived.by<Edge[]>(() => {
     if (!valid) return [];
-    arrival.see(scene.clusters, scene.items);
+    arrival.see(scene.items);
     return scene.links.flatMap((link) => {
       const rest = restLink(link);
       if (!rest && !lit.has(link.id)) return [];
@@ -413,15 +237,7 @@
           type: "work",
           ...handles(link),
           data: {
-            tone:
-              link.kind === "thread"
-                ? "thread"
-                : link.kind === "diagram"
-                  ? "diagram"
-                  : rest
-                    ? "rest"
-                    : "relation",
-            ...(link.kind === "diagram" ? flowData(link) : {}),
+            tone: link.kind === "thread" ? "thread" : rest ? "rest" : "relation",
           },
           deletable: false,
           selectable: false,
@@ -483,7 +299,7 @@
     const placed = initialView?.positions ?? {};
     nodes = untrack(() => {
       if (!ready) return [];
-      arrival.see(scene.clusters, next);
+      arrival.see(next);
       const reconciled = reconcileNodes(
         nodes,
         next,
@@ -495,56 +311,6 @@
       );
       lastPositions = placed;
       return rest(nodes, reconciled);
-    });
-  });
-  $effect(() => {
-    const groups = scene.clusters;
-    const active = focused;
-    const current = nodes;
-    const drawn = valid ? shapes.map(({ cluster, shape }) => drawing(cluster, shape, current)) : [];
-    // A diagram's area holds its whole picture, and its layers are bands behind the parts.
-    const framed = groups.map((group) => {
-      const entry = drawn.find((candidate) => candidate.area === group.id);
-      if (!entry?.origin) return group;
-      const { bounds } = entry.layout;
-      const frame = {
-        x: entry.origin.x + bounds.x,
-        y: entry.origin.y + bounds.y,
-        width: bounds.width,
-        height: bounds.height,
-      };
-      return { ...group, frame };
-    });
-    const bands = drawn.flatMap((entry) =>
-      entry.origin
-        ? entry.layout.bands.map((band, index) => ({
-            id: `band:${entry.area}:${index}`,
-            name: band.name,
-            rect: {
-              x: entry.origin!.x + band.x,
-              y: entry.origin!.y + band.y,
-              width: band.width,
-              height: band.height,
-            },
-          }))
-        : [],
-    );
-    const next = withBands(withClusters(current, valid ? framed : [], active), bands);
-    if (next !== current) nodes = next;
-    untrack(() => {
-      const same =
-        drawn.length === drawings.length &&
-        drawn.every((entry, index) => {
-          const before = drawings[index]!;
-          return (
-            entry.area === before.area &&
-            entry.layout === before.layout &&
-            entry.members === before.members &&
-            entry.origin?.x === before.origin?.x &&
-            entry.origin?.y === before.origin?.y
-          );
-        });
-      if (!same) drawings = drawn;
     });
   });
   let publishedPositions = "";
@@ -773,19 +539,6 @@
     });
   });
   let lastClick = { id: "", at: 0 };
-  /** A group taken whole: its members become the selection, as a marquee would make it. */
-  function selectGroup(id: string) {
-    const members = new Set(scene.clusters.find((cluster) => cluster.id === id)?.members ?? []);
-    if (!members.size) return;
-    nodes = nodes.map((node) =>
-      !!node.selected === members.has(node.id) ? node : { ...node, selected: members.has(node.id) },
-    );
-    selection = [...members];
-    selectedIds = members;
-    onselectionchange?.(selection);
-  }
-  setContext(canvasSelectGroup, selectGroup);
-
   // Selection, marquee, arrange and areas.
   const pendingAreas: Record<string, CanvasPosition & CanvasSize> = {};
   /** Where a new area stands: kept until its node exists, or moved in place once it does. */
@@ -856,9 +609,6 @@
   bind:clientWidth={canvasWidth}
   bind:clientHeight={canvasHeight}
   aria-label={m.work_canvas_label()}
-  onkeydowncapture={diagramKeys}
-  onfocusin={(event) => partFocus(event, true)}
-  onfocusout={(event) => partFocus(event, false)}
 >
   {#if valid}
     <SvelteFlow
@@ -912,11 +662,6 @@
         )
           return;
         const now = performance.now();
-        // A part's double click names it; its lift is one click on Open away.
-        if (byId.get(node.id)?.type === "diagram" && rename?.can(node.id)) {
-          oninspect(node.id);
-          return;
-        }
         if (lastClick.id === node.id && now - lastClick.at < 320) {
           lastClick = { id: "", at: 0 };
           onopen?.(node.id);
@@ -940,7 +685,8 @@
         selectedIds = new Set(selection);
         onselectionchange?.(selection);
       }}
-      onnodedragstop={({ targetNode }) => {
+      onnodedragstop={({ targetNode, nodes: carried }) => {
+        onmoved?.(carried.map((node) => node.id));
         if (!targetNode || !isItemNode(targetNode as WorkNode)) return;
         const node = nodes.find((candidate) => candidate.id === targetNode.id);
         if (!node || !isItemNode(node) || !authoritative.has(node.id)) return;
@@ -1010,17 +756,16 @@
     transition: none;
   }
 
-  /* stylelint-disable selector-class-pattern */
-  .work-canvas :global(.svelte-flow__node.cluster-node),
-  .work-canvas :global(.svelte-flow__node.band-node) {
-    pointer-events: none;
-  }
-  /* stylelint-enable selector-class-pattern */
-
-  /* A diagram's part slides to where the layout engine settles it; a dragged one follows the pointer. */
+  /* A handle is where a line meets a card, never a thing to see. */
   /* stylelint-disable-next-line selector-class-pattern */
-  .work-canvas :global(.svelte-flow__node.diagram-part:not(.dragging)) {
-    transition: transform var(--motion-base) var(--ease-emphasized);
+  .work-canvas :global(.svelte-flow__handle) {
+    opacity: 0;
+  }
+
+  /* A board's block glides where its board makes room; a dragged one follows the pointer. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  .work-canvas :global(.svelte-flow__node.board-block:not(.dragging)) {
+    transition: transform var(--motion-slow) var(--ease-emphasized);
   }
 
   /* The agent's mark walks to its work on a spring; it never takes the pointer. */

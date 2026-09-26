@@ -6,7 +6,6 @@ import {
 } from "$shared/ui/data/Artifact/artifact";
 import { TABLE_CARD, tableGrid } from "$shared/ui/data/Artifact/table";
 import { CODE_CARD_LINES, codeLines } from "$shared/ui/data/Code";
-import { DIAGRAM } from "./diagram";
 import type { CanvasItem, CanvasSize } from "./canvas-model";
 
 /**
@@ -198,25 +197,6 @@ export function resultSize(
   }
 }
 
-/** Up to eight claims of two lines each, then "+n" when there are more. */
-export const FINDINGS_ROWS = 8;
-export function findingsSize(
-  claims: readonly { claim: string; subject?: string }[],
-  total = claims.length,
-): CanvasSize {
-  let body = 0;
-  for (const claim of claims.slice(0, FINDINGS_ROWS))
-    body +=
-      Math.max(
-        1,
-        textLines(claim.claim, 300 - 24 - 14 - (claim.subject ? 96 : 0), ADVANCE.label, 2),
-      ) *
-        LINE.label +
-      3;
-  if (total > FINDINGS_ROWS) body += LINE.caption + 3;
-  return { width: 300, height: clamp(header("", 276, true) + body + 6 + FRAME.end, 96, 420) };
-}
-
 /** The count, then up to six rows of mark, host and title. */
 export const SOURCE_ROWS = 6;
 export function sourcesSize(rows: number): CanvasSize {
@@ -231,7 +211,7 @@ export const factBeside = (fact: { label: string; value: string }) =>
 /** A subject: its picture or initial, its name on two lines, up to four whole facts, its host. */
 export const SUBJECT_FACTS = 4;
 const SUBJECT_TILE = 40;
-export function subjectSize(
+function subjectSize(
   title: string,
   pictured: boolean,
   facts: readonly { label: string; value: string }[] = [],
@@ -253,47 +233,14 @@ export function subjectSize(
   return { width: 220, height: clamp(top + body + FRAME.footer, 96, 300) };
 }
 
-/** A plan step: its glyph and number, then the whole step and its first line of detail. */
-const STEP_WIDTH = 220;
-export function stepSize(text: string, detail = ""): CanvasSize {
-  const inner = STEP_WIDTH - 28;
-  const body =
-    Math.max(1, textLines(text, inner, ADVANCE.strong, 8)) * LINE.label +
-    (detail ? textLines(detail, inner, ADVANCE.caption, 4) * 15 + 4 : 0);
-  return { width: STEP_WIDTH, height: clamp(14 + 28 + 8 + body + 14, 96, 240) };
-}
-
-/** A quiet mark, the person's words beside it up to eight lines, then the lane's counts once it has any. */
-export function requestSize(
-  text: string,
-  {
-    action = false,
-    footer = false,
-    accounts = 0,
-  }: { action?: boolean; footer?: boolean; accounts?: number } = {},
-): CanvasSize {
+/** A quiet mark and the person's words beside it, up to eight lines. */
+export function requestSize(text: string, action = false): CanvasSize {
   const lines = Math.max(1, textLines(text, 300 - 24 - 24, ADVANCE.body, 8));
-  return {
-    width: 300,
-    // Never under 80: a checkpoint refuses a shorter placement.
-    height: clamp(
-      12 +
-        lines * LINE.body +
-        12 +
-        (footer ? 22 : 0) +
-        (accounts ? 4 + accounts * LINE.label : 0) +
-        (action ? 28 : 0),
-      80,
-      240 + accounts * LINE.label,
-    ),
-  };
+  // Never under 80: a checkpoint refuses a shorter placement.
+  return { width: 300, height: clamp(12 + lines * LINE.body + 12 + (action ? 28 : 0), 80, 240) };
 }
 
 export function defaultSize(item: CanvasItem): CanvasSize {
-  if (item.type === "findings")
-    return findingsSize(item.findings?.items ?? [], item.findings?.total);
-  if (item.type === "step") return stepSize(item.step?.text ?? item.title, item.detail);
-  if (item.type === "diagram") return { ...DIAGRAM.node };
   if (item.artifact) return resultSize(item.title, item.artifact, !!item.actionLabel);
   switch (item.type) {
     case "tab":
@@ -306,26 +253,17 @@ export function defaultSize(item: CanvasItem): CanvasSize {
         item.facts,
         item.detail,
       );
-    case "finding":
-      return { width: 300, height: 140 };
     case "sources":
       return sourcesSize(item.sources?.length ?? 0);
     case "folder":
-    case "file":
       return { width: 248, height: 96 };
-    case "command":
-      return { width: 248, height: 120 };
     case "note":
       return { width: 300, height: 200 };
     case "media":
       return { width: 248, height: 200 };
     case "objective":
     case "request":
-      return requestSize(item.title, {
-        action: !!item.actionLabel,
-        footer: !!item.counts,
-        accounts: item.accounts?.length ?? 0,
-      });
+      return requestSize(item.title, !!item.actionLabel);
     case "responsibility":
       return { width: 280, height: 150 };
     case "page":

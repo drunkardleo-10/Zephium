@@ -189,7 +189,7 @@ test("opening an objective lifts it over the canvas and returns on close", async
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";
   root.style.width = "1100px";
-  await expect.poll(() => screen.container.querySelectorAll(".work-drag-handle").length).toBe(2);
+  await expect.poll(() => screen.container.querySelectorAll(".work-drag-handle").length).toBe(1);
   await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
   await screen.getByRole("button", { name: "Open", exact: true }).click();
   const panel = screen.getByRole("dialog", { name: "Request", exact: true });
@@ -296,8 +296,8 @@ test("a real attached objective expands its historical responsibilities directly
   expect(screen.container.textContent).not.toContain(
     "Operational prose should stay in optional details",
   );
-  // Two plan dependencies, and the path from the request to its result.
-  await expect.poll(() => screen.container.querySelectorAll(".svelte-flow__edge").length).toBe(3);
+  // Two plan dependencies; the result stands on its request's board, joined by no line.
+  await expect.poll(() => screen.container.querySelectorAll(".svelte-flow__edge").length).toBe(2);
   const dependency = screen.container.querySelector(
     '[aria-label="Compare findings depends on Read evidence"]',
   );
@@ -469,8 +469,8 @@ test("prompt submission keeps work on canvas and clarification choices above the
   expect(screen.container.querySelector(".detail")).toBeNull();
   // The card carries the answer; its citations live in the lift, named by kind, never numbered.
   expect(screen.container.querySelector(".work-canvas .chip")).toBeNull();
-  // The result is a cover: a click anywhere on it opens the lift.
-  await screen.getByText("Reviewed findings", { exact: true }).click();
+  // A reviewed plan's result opens in the lift, where it can be reviewed.
+  await screen.getByText("Reviewed findings", { exact: true }).dblClick();
   // The lift names its sources in one collapsed rail, not chips under the text.
   await screen.getByRole("button", { name: "Based on 1 source" }).click();
   await screen.getByRole("button", { name: "Page", exact: true }).first().click();

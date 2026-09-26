@@ -35,6 +35,7 @@ test("a diagram becomes an ELK graph: a partition per layer, a port per flow end
   const graph = elkGraph(diagramShape(FIVE));
   expect(graph.layoutOptions).toMatchObject({
     ...ELK_OPTIONS,
+    "elk.layered.layering.strategy": "INTERACTIVE",
     "elk.direction": "RIGHT",
     "elk.edgeRouting": "ORTHOGONAL",
     "elk.partitioning.activate": "true",
@@ -59,19 +60,15 @@ test("a diagram becomes an ELK graph: a partition per layer, a port per flow end
     ];
   // Across layers a flow leaves east and lands west.
   expect([side(0, "e0s"), side(2, "e0t")]).toEqual(["EAST", "WEST"]);
-  // Within a layer it leaves below and lands above.
-  expect([side(2, "e1s"), side(3, "e1t")]).toEqual(["SOUTH", "NORTH"]);
+  // Within a layer a flow is no part of the engine's graph: it is drawn down its column after.
+  expect(side(2, "e1s")).toBeUndefined();
   // A flow back to an earlier layer is laid out forward, from its target.
   expect([side(0, "e2s"), side(3, "e2t")]).toEqual(["EAST", "WEST"]);
-  // Two opposite flows are one ELK edge whose label holds both plates.
-  expect(graph.edges!.map((edge) => edge.id)).toEqual(["e0", "e1", "e2", "e3", "e5"]);
-  const pair = graph.edges!.find((edge) => edge.id === "e3")!;
-  expect(pair.labels![0]).toMatchObject({
-    width: Math.max(plateWidth("SQL"), plateWidth("rows")),
-    height: plateHeight("SQL") * 2 + 2,
+  expect(graph.edges!.map((edge) => edge.id)).toEqual(["e0", "e2"]);
+  expect(graph.edges!.find((edge) => edge.id === "e0")!.labels![0]).toMatchObject({
+    width: plateWidth("HTTPS"),
     layoutOptions: { "elk.edgeLabels.inline": "true" },
   });
-  expect(graph.edges!.find((edge) => edge.id === "e5")!.labels).toBeUndefined();
 });
 
 test("ELK's answer reads back as parts from the first corner, flows turned round, and bands", () => {
@@ -172,7 +169,7 @@ test("the engine lays out five parts in two lanes, opposite flows 12 px apart wi
   const sql = layout.flows[3]!;
   const rows = layout.flows[4]!;
   expect([sql.from, sql.to, rows.from, rows.to]).toEqual(["api", "db", "db", "api"]);
-  // One corridor: the same corners, 12 px apart, the reply running the other way.
+  // Down their column 12 px apart, the reply running the other way.
   const back = [...rows.points].reverse();
   expect(back).toHaveLength(sql.points.length);
   sql.points.forEach((point, i) => {
@@ -182,14 +179,18 @@ test("the engine lays out five parts in two lanes, opposite flows 12 px apart wi
     expect([dx, dy].every((d) => d === 0 || Math.abs(d - 12) < 0.01)).toBe(true);
     expect(dx + dy).toBeGreaterThan(0);
   });
-  // Both names stand on their own line, never on each other.
+  // Both names stand beside their own line, never on each other.
   const plate = (at: { x: number; y: number }, label: string) => ({
+    left: at.x - plateWidth(label) / 2,
+    right: at.x + plateWidth(label) / 2,
     top: at.y - plateHeight(label) / 2,
     bottom: at.y + plateHeight(label) / 2,
   });
   const a = plate(sql.plate!, "SQL");
   const b = plate(rows.plate!, "rows");
-  expect(a.bottom <= b.top || b.bottom <= a.top).toBe(true);
+  expect(a.bottom <= b.top || b.bottom <= a.top || a.right <= b.left || b.right <= a.left).toBe(
+    true,
+  );
 });
 
 test("layoutDiagram answers with the engine's layout off the page", async () => {

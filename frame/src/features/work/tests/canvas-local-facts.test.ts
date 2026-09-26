@@ -7,7 +7,8 @@ import type {
 } from "$shared/ipc/bindings";
 import { projection, snapshot } from "./environment-fixtures";
 import { environmentItems } from "../lib/project-environment";
-import { commandCards, commandRecord } from "../lib/project-environment-stage";
+import { commandRecord } from "../lib/project-environment-stage";
+import { runTrail } from "../lib/board/trail";
 
 const policy = (
   cls: WorkCommandPolicyV1["class"],
@@ -50,85 +51,58 @@ const record = (id: string, exit: number): WorkCommandRecordV1 => ({
   },
 });
 const run = (steps: WorkStepFact[], records: WorkCommandRecordV1[] = []) =>
-  ({ id: "run", steps, command_evidence: records }) as unknown as WorkExecutionFact;
+  ({
+    id: "run",
+    steps,
+    command_evidence: records,
+    artifacts: [],
+    status: "completed",
+  }) as unknown as WorkExecutionFact;
 
-describe("command cards", () => {
-  it("runs with the live elapsed time and output tail", () => {
-    const [card] = commandCards(
-      run([
-        command("s", "running", {
-          policy: policy("read", "none"),
-          output: { elapsed_ms: 2300, text: "a\nb\nc\nd", bytes: 7, truncated: false },
-        }),
-      ]),
+describe("commands on the trail", () => {
+  it("runs with its last line of output while it goes", () => {
+    const [line] = runTrail(
+      [
+        run([
+          command("s", "running", {
+            policy: policy("read", "none"),
+            output: { elapsed_ms: 2300, text: "a\nb\nc\nd", bytes: 7, truncated: false },
+          }),
+        ]),
+      ],
+      false,
     );
-    expect(card).toEqual({
-      id: "command:run:s",
-      command: {
-        line: "npm test",
-        state: "running",
-        elapsed_ms: 2300,
-        tail: ["b", "c", "d"],
-        reason: "Ran without asking",
-      },
-    });
-    const [started] = commandCards(
-      run([
-        command("s", "running", {
-          policy: policy("read", "none"),
-          output: { text: "", bytes: 0, truncated: false },
-        }),
-      ]),
-    );
-    expect(started?.command.elapsed_ms).toBe(0);
+    expect(line).toMatchObject({ icon: "command", text: "npm test", live: true, detail: "d" });
   });
 
   it("waits for the person without a timer before the process starts", () => {
-    const [card] = commandCards(
-      run([command("s", "running", { policy: policy("ask", "command") })]),
+    const [line] = runTrail(
+      [run([command("s", "running", { policy: policy("ask", "command") })])],
+      false,
     );
-    expect(card?.command).toEqual({
-      line: "npm test",
-      state: "running",
-      tail: [],
-      reason: "waiting for you",
-    });
+    expect(line).toMatchObject({ text: "npm test", detail: "waiting for you" });
   });
 
-  it("settles on the record's exit and duration with the policy's reason", () => {
-    const cards = commandCards(
-      run(
-        [
-          command("read", "succeeded", { policy: policy("read", "none") }, null, "r1"),
-          command("grant", "succeeded", { policy: policy("write", "folder") }, true, "r2"),
-          command("held", "succeeded", { policy: policy("write", "none") }, null, "r3"),
-          command("asked", "failed", { policy: policy("ask", "command") }, true, "r4"),
-        ],
-        [record("r1", 0), record("r2", 0), record("r3", 0), record("r4", 2)],
-      ),
+  it("settles on the record's exit and duration, and opens the record", () => {
+    const lines = runTrail(
+      [
+        run(
+          [command("asked", "failed", { policy: policy("ask", "command") }, true, "r4")],
+          [record("r4", 2)],
+        ),
+      ],
+      false,
     );
-    expect(cards.map((card) => card.command.reason)).toEqual([
-      "Ran without asking",
-      "Allowed for this folder",
-      "Allowed for this folder",
-      "You approved",
-    ]);
-    expect(cards[3]?.command).toMatchObject({
-      state: "exit",
-      exit: 2,
-      elapsed_ms: 4200,
-      tail: ["two", "three", "four"],
-      record: "r4",
-    });
+    expect(lines[0]).toMatchObject({ command: "r4", detail: "exit 2 · 4s", code: true });
     const objectives = new Map([
       ["objective", { ...projection, executions: [run([], [record("r4", 2)])] }],
     ]);
     expect(commandRecord(objectives, "r4")?.command.exit).toBe(2);
   });
 
-  it("keeps a declined command off the canvas", () => {
+  it("keeps a declined command off the trail", () => {
     expect(
-      commandCards(run([command("s", "failed", { policy: policy("ask", "command") }, false)])),
+      runTrail([run([command("s", "failed", { policy: policy("ask", "command") }, false)])], false),
     ).toEqual([]);
   });
 });

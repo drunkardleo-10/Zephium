@@ -42,7 +42,7 @@ const waiting = createSubscriber((update) => {
   return () => (arrived = null);
 });
 /** The notes parser loads beside Work rather than inside every graph that projects a result. */
-export const answerParser: Promise<void> = loadMarkdown().then(
+void loadMarkdown().then(
   (module) => {
     parse = module.parse;
     arrived?.();
