@@ -4,6 +4,7 @@
   import { preparationFailure } from "../lib/preparation-failure";
   import Button from "$shared/ui/Button";
   import ContextManifestList from "./composer/ContextManifestList.svelte";
+  import AccountGrantReview from "./AccountGrantReview.svelte";
   import * as m from "$shared/i18n/messages";
   let { session }: { session: WorkSession } = $props();
   const work = $derived(session.projection?.work);
@@ -108,6 +109,7 @@
       </p>{/if}
     {#if operation?.state.kind === "unknown"}<p role="status">{m.work_operation_unknown()}</p>{/if}
     {#if failure}<p role="alert">{m.work_request_failed()}</p>{/if}
+    {#if !unsettled}<AccountGrantReview {session} />{/if}
     {#if approval && !current && !unsettled && !executed}<p role="status">
         {m.work_approval_stale()}
       </p>{/if}

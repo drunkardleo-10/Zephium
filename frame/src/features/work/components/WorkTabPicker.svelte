@@ -12,6 +12,8 @@
     attachedTabIds = [],
     pending = false,
     status = "",
+    openTabs = false,
+    onopentabs,
     onattach,
     onopen,
     onnewtab,
@@ -24,6 +26,9 @@
     attachedTabIds?: readonly TabView["id"][];
     pending?: boolean;
     status?: string;
+    /** The person's consent to list every open tab, for the next request only. */
+    openTabs?: boolean;
+    onopentabs?: (on: boolean) => void;
     onattach: (ids: TabView["id"][]) => void;
     onopen: (id: TabView["id"]) => void;
     onnewtab: () => void;
@@ -59,6 +64,18 @@
 
 <section class="picker" aria-label={m.work_env_tabs()} aria-busy={pending}>
   <header><strong>{m.work_env_tabs()}</strong><span>{spaceName}</span></header>
+  {#if onopentabs}<label class="all" class:chosen={openTabs}>
+      <input
+        type="checkbox"
+        checked={openTabs}
+        disabled={pending}
+        onchange={(event) => onopentabs?.(event.currentTarget.checked)}
+      />
+      <span class="identity">
+        <strong>{m.work_env_all_tabs()}</strong>
+        <span class="where">{m.work_env_all_tabs_note()}</span>
+      </span>
+    </label>{/if}
   <label class="search" for={id}>{m.work_env_search_tabs()}</label>
   <input {id} type="search" bind:value={query} placeholder={m.work_env_search_tabs()} />
   <ul>
@@ -198,6 +215,31 @@
     background: var(--color-fill-hover);
   }
 
+  /* Every tab at once, as titles and addresses: a row of its own above the list. */
+  .all {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-block-size: 32px;
+    padding: 4px 8px 4px 6px;
+    border-radius: var(--radius-control);
+    background: var(--color-fill);
+    box-shadow: inset 0 0 0 1px transparent;
+    cursor: default;
+    transition:
+      background-color var(--motion-fast) var(--ease-smooth),
+      box-shadow var(--motion-fast) var(--ease-smooth);
+  }
+
+  .all:hover {
+    background: var(--color-fill-hover);
+  }
+
+  .all.chosen {
+    background: var(--color-accent-soft);
+    box-shadow: inset 0 0 0 1px var(--color-accent);
+  }
+
   li.current {
     background: var(--color-surface);
     box-shadow: inset 0 0 0 1px var(--color-border-strong);
@@ -290,5 +332,9 @@
 
   footer {
     flex-wrap: wrap;
+  }
+
+  .all .where {
+    white-space: normal;
   }
 </style>

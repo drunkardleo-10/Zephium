@@ -13,6 +13,8 @@
     WorkEnvironmentReference,
     WorkFileEvidenceV1,
     WorkAccountEffectV1,
+    WorkAccountModeV1,
+    WorkContextSelectionV1,
     WorkEnvironmentSnapshot,
     WorkExecutionFact,
     WorkRuntimeProjection,
@@ -52,6 +54,8 @@
   import Composer from "./composer/Composer.svelte";
   import ContextManifest from "./composer/ContextManifest.svelte";
   import AccountScopeChip from "./composer/AccountScopeChip.svelte";
+  import OpenTabsChip from "./composer/OpenTabsChip.svelte";
+  import AccountGrantReview from "./AccountGrantReview.svelte";
   import { contextSelection } from "../lib/context-selection";
   import WorkTabPicker from "./WorkTabPicker.svelte";
   import WorkMediaPicker from "./WorkMediaPicker.svelte";
@@ -200,12 +204,20 @@
   let selectionCount = $state(0);
   let selectedIds = $state.raw<string[]>([]);
   let accountEffect = $state.raw<WorkAccountEffectV1>({ kind: "read" });
+  /** The person's consent to list their open tabs, for the next request only. */
+  let openTabs = $state(false);
   const contextSel = $derived(
-    contextSelection(session.snapshot, selectedIds, tabs, {
-      notes: context.notes,
-      objectives: context.objectives,
-      media: context.mediaRevisions,
-    }),
+    contextSelection(
+      session.snapshot,
+      selectedIds,
+      tabs,
+      {
+        notes: context.notes,
+        objectives: context.objectives,
+        media: context.mediaRevisions,
+      },
+      openTabs,
+    ),
   );
   let cardHost = $state<HTMLElement>();
   let cardBounds = $state.raw<DOMRect | null>(null);
@@ -236,7 +248,7 @@
       // A page the run is waiting on opens as a takeover, not as a copy in the
       // person's own profile: a sign-in there never reaches the agent.
       if (item.page.human?.phase === "waiting_for_human") openTakeover(id);
-      else openPane({ kind: "url", url: item.page.url }, id);
+      else openPane({ kind: "url", url: item.page.url }, id, item.page.account);
       return;
     }
     const reference = session.snapshot?.elements.find((element) => element.id === id)?.reference;
@@ -281,6 +293,8 @@
     origin: DOMRect | null;
     phase: "opening" | "shown" | "failed";
     restore: HTMLElement | null;
+    /** The page was read with the person's session on this host. */
+    account?: string;
   } | null>(null);
   let paneRequest: Promise<void> | null = null;
   let paneRect: WorkPaneRect | null = null;
@@ -317,7 +331,7 @@
       current.restore?.focus({ preventScroll: true });
     }
   });
-  function openPane(target: WorkPaneTarget, originId: string | null) {
+  function openPane(target: WorkPaneTarget, originId: string | null, account?: string) {
     chrome?.close();
     lifted = null;
     endTakeover(true);
@@ -326,7 +340,13 @@
       (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     const origin = originId ? (canvasRef?.screenRect(originId) ?? null) : null;
     const rect = paneRect;
-    pane = { target, origin: pane ? pane.origin : origin, phase: "opening", restore };
+    pane = {
+      target,
+      origin: pane ? pane.origin : origin,
+      phase: "opening",
+      restore,
+      ...(account ? { account } : {}),
+    };
     if (rect && paneLayout) void requestPane(target, rect);
   }
   async function requestPane(target: WorkPaneTarget, rect: WorkPaneRect) {
@@ -1510,31 +1530,94 @@
           element.reference.objective === objectiveSession?.selected,
       ),
   );
+  /** A field change needs both values, and different ones, before it is sent. */
+  function accountInvalid() {
+    const account = session.accountScope;
+    return (
+      !!account &&
+      account.mode === "page" &&
+      accountEffect.kind === "update" &&
+      (!accountEffect.update.from.trim() ||
+        !accountEffect.update.to.trim() ||
+        accountEffect.update.from === accountEffect.update.to)
+    );
+  }
+  function clearAccount() {
+    session.accountScope = null;
+    accountEffect = { kind: "read" };
+  }
   /** One field, one meaning: the first message starts the work, the rest continue it. */
   async function send() {
     const text = session.composer.trim();
     if (!text || busy) return;
     const current = objectiveSession;
     if (runningObjective && current) {
+      const account = session.accountScope;
+      if (account && !activeExecution) {
+        await continueSignedIn(current, text, account);
+        return;
+      }
+      const context = contextSel;
       session.composer = "";
+      openTabs = false;
       if (activeExecution) current.enqueue(text);
-      else await current.continueWith(text);
+      else await current.continueWith(text, context);
       return;
     }
     await createObjective();
+  }
+  /** The next message of a work, read with the tab's signed-in session. */
+  async function continueSignedIn(
+    current: WorkSession,
+    text: string,
+    account: NonNullable<typeof session.accountScope>,
+  ) {
+    const environment = session.snapshot?.id;
+    if (!environment) return;
+    if (accountInvalid()) {
+      composerFailure = "account";
+      return;
+    }
+    composerFailure = null;
+    const context = account.mode === "origin" ? contextSel : null;
+    const effect = accountEffect;
+    if (!(await current.edit({ kind: "set_objective", objective: text }))) return;
+    const work = current.projection?.work;
+    if (!work) return;
+    session.composer = "";
+    openTabs = false;
+    clearAccount();
+    await prepareSignedIn(current, work.id, work.revision, environment, account, effect, context);
+  }
+  async function prepareSignedIn(
+    current: WorkSession,
+    work: string,
+    revision: string,
+    environment: string,
+    account: { element: string; mode?: WorkAccountModeV1 },
+    effect: WorkAccountEffectV1,
+    context: WorkContextSelectionV1 | null,
+  ) {
+    const request = {
+      version: 1,
+      work,
+      expected_revision: revision,
+      environment,
+      element: account.element,
+    };
+    if (account.mode === "origin") await current.prepareGrant(request, context);
+    else
+      await current.operations.begin({
+        kind: "prepare_account",
+        request: { ...request, effect },
+      });
   }
   async function createObjective() {
     if (!session.composer.trim() || objectivePending || busy) return;
     const current = workSession(session.profile);
     if (!current) return;
     const account = session.accountScope;
-    if (
-      account &&
-      accountEffect.kind === "update" &&
-      (!accountEffect.update.from.trim() ||
-        !accountEffect.update.to.trim() ||
-        accountEffect.update.from === accountEffect.update.to)
-    ) {
+    if (accountInvalid()) {
       composerFailure = "account";
       return;
     }
@@ -1542,8 +1625,11 @@
       objective: session.composer.trim(),
       command: commandId(),
       attached: false,
-      context: account ? null : contextSel,
-      account: account ? { element: account.element, effect: accountEffect } : null,
+      // An origin grant serves an ordinary request: its context rides along once allowed.
+      context: account?.mode === "page" ? null : contextSel,
+      account: account
+        ? { element: account.element, effect: accountEffect, mode: account.mode }
+        : null,
     };
     composerFailure = null;
     session.objectiveSubmission = submission;
@@ -1613,21 +1699,19 @@
       session.composer = "";
       session.objectiveToAttach = null;
       session.objectiveSubmission = null;
-      session.accountScope = null;
-      accountEffect = { kind: "read" };
+      openTabs = false;
+      clearAccount();
       const environmentId = session.snapshot?.id;
       if (submission.account && environmentId)
-        await current.operations.begin({
-          kind: "prepare_account",
-          request: {
-            version: 1,
-            work: objectiveId,
-            expected_revision: basis.revision,
-            environment: environmentId,
-            element: submission.account.element,
-            effect: submission.account.effect,
-          },
-        });
+        await prepareSignedIn(
+          current,
+          objectiveId,
+          basis.revision,
+          environmentId,
+          submission.account,
+          submission.account.effect,
+          submission.context,
+        );
       else await current.run(submission.context);
     } finally {
       objectivePending = false;
@@ -1784,6 +1868,8 @@
 
 {#snippet tabPanel()}<WorkTabPicker
     {tabs}
+    {openTabs}
+    onopentabs={(on: boolean) => (openTabs = on)}
     {spaceName}
     {currentTabId}
     attachedTabIds={attachedTabs}
@@ -2093,6 +2179,9 @@
   </div>
 {/snippet}
 {#snippet composerAbove()}
+  {#if runningObjective && objectiveSession?.grantDraft}<AccountGrantReview
+      session={objectiveSession}
+    />{/if}
   {#if runningObjective && objectiveSession}
     <LazyView
       loader={loadAgentLine}
@@ -2142,19 +2231,23 @@
     </p>{/if}
 {/snippet}
 {#snippet composerContext()}
+  {#if openTabs}<OpenTabsChip
+      disabled={objectivePending || !!session.objectiveSubmission}
+      onremove={() => (openTabs = false)}
+    />{/if}
   {#if session.accountScope}
     <AccountScopeChip
       title={session.accountScope.title}
       origin={session.accountScope.origin}
+      mode={session.accountScope.mode}
       bind:effect={accountEffect}
       disabled={objectivePending || !!session.objectiveSubmission}
       onremove={() => {
-        session.accountScope = null;
-        accountEffect = { kind: "read" };
+        clearAccount();
         composerFailure = null;
       }}
     />
-  {:else if contextSel}
+  {:else if contextSel?.items.length}
     <ContextManifest profile={session.profile} selection={contextSel} purpose="agent" />
   {/if}
 {/snippet}
@@ -2250,10 +2343,15 @@
                   composerElement?.querySelector<HTMLElement>("textarea")?.focus();
                   return;
                 }
-                if (action === "account") {
+                if (action === "account" || action === "account-origin") {
                   const item = items.find((item) => item.id === id);
                   if (item?.type === "tab" && !item.unavailable && item.detail) {
-                    session.accountScope = { element: id, title: item.title, origin: item.detail };
+                    session.accountScope = {
+                      element: id,
+                      title: item.title,
+                      origin: item.detail,
+                      mode: action === "account" ? "page" : "origin",
+                    };
                     accountEffect = { kind: "read" };
                     composerFailure = null;
                     composerElement?.querySelector<HTMLElement>("textarea")?.focus();
@@ -2553,6 +2651,7 @@
   {#if pane && cardBounds}
     <BrowserPane
       tab={paneTab}
+      account={pane.account}
       applied={paneLayout}
       bounds={cardBounds}
       origin={pane.origin}

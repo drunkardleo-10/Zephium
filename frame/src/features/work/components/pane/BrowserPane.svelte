@@ -19,9 +19,11 @@
     Search01Icon,
   } from "../../lib/icons";
   import { paneGeometry, remember, type PaneRect } from "../../lib/pane-geometry";
+  import AccountBadge from "../cards/AccountBadge.svelte";
   import * as m from "$shared/i18n/messages";
   let {
     tab,
+    account,
     applied,
     bounds,
     origin,
@@ -37,6 +39,8 @@
     onclose,
   }: {
     tab: TabView | undefined;
+    /** The card was read with the person's session on this host; the badge follows it here. */
+    account?: string;
     applied: WorkPaneHole | null;
     bounds: DOMRect;
     origin: DOMRect | null;
@@ -309,7 +313,7 @@
         loading={tab?.loading ?? false}
         size={16}
         lit
-      />
+      />{#if account && account === host}<AccountBadge host={account} />{/if}
     </span>
     <span class="nav">
       <IconButton
@@ -432,7 +436,8 @@
   .identity {
     display: inline-flex;
     align-items: center;
-    inline-size: 20px;
+    gap: 4px;
+    min-inline-size: 20px;
     justify-content: center;
     color: var(--color-muted);
   }

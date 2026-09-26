@@ -1,23 +1,33 @@
 <script lang="ts">
-  import type { WorkAccountEffectV1 } from "$shared/ipc/bindings";
+  import type { WorkAccountEffectV1, WorkAccountModeV1 } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
   import { BrowserIcon, Cancel01Icon } from "../../lib/icons";
   import * as m from "$shared/i18n/messages";
   let {
     title,
     origin,
+    mode = "page",
     effect = $bindable({ kind: "read" }),
     disabled = false,
     onremove,
   }: {
     title: string;
     origin: string;
+    /** `origin`: the agent may read pages across the tab's site for one request, reading only. */
+    mode?: WorkAccountModeV1;
     effect?: WorkAccountEffectV1;
     disabled?: boolean;
     onremove: () => void;
   } = $props();
   const id = $props.id();
   const update = $derived(effect.kind === "update" ? effect.update : null);
+  const host = $derived.by(() => {
+    try {
+      return new URL(origin).host;
+    } catch {
+      return origin;
+    }
+  });
   function setUpdate(patch: Partial<{ field: string | null; from: string; to: string }>) {
     const current = update ?? { field: null, from: "", to: "" };
     effect = { kind: "update", update: { ...current, ...patch } };
@@ -37,60 +47,61 @@
       onclick={onremove}><Icon icon={Cancel01Icon} size={12} /></button
     >
   </span>
-  <div class="effect">
-    <label
-      ><input
-        type="radio"
-        name={`${id}-effect`}
-        checked={effect.kind === "read"}
-        {disabled}
-        onchange={() => (effect = { kind: "read" })}
-      />{m.work_account_effect_read()}</label
-    >
-    <label
-      ><input
-        type="radio"
-        name={`${id}-effect`}
-        checked={effect.kind === "update"}
-        {disabled}
-        onchange={() => setUpdate({})}
-      />{m.work_account_effect_update()}</label
-    >
-  </div>
-  {#if update}
-    <div class="fields">
+  {#if mode === "origin"}<p class="note">{m.work_account_read_origin({ host })}</p>
+  {:else}<div class="effect">
       <label
-        >{m.work_account_field()}<input
-          type="text"
-          maxlength="128"
-          value={update.field ?? ""}
-          placeholder={m.work_account_field_placeholder()}
+        ><input
+          type="radio"
+          name={`${id}-effect`}
+          checked={effect.kind === "read"}
           {disabled}
-          oninput={(event) => setUpdate({ field: event.currentTarget.value || null })}
-        /></label
+          onchange={() => (effect = { kind: "read" })}
+        />{m.work_account_effect_read()}</label
       >
       <label
-        >{m.work_account_from()}<input
-          type="text"
-          maxlength="512"
-          value={update.from}
+        ><input
+          type="radio"
+          name={`${id}-effect`}
+          checked={effect.kind === "update"}
           {disabled}
-          oninput={(event) => setUpdate({ from: event.currentTarget.value })}
-        /></label
-      >
-      <label
-        >{m.work_account_to()}<input
-          type="text"
-          maxlength="512"
-          value={update.to}
-          {disabled}
-          oninput={(event) => setUpdate({ to: event.currentTarget.value })}
-        /></label
+          onchange={() => setUpdate({})}
+        />{m.work_account_effect_update()}</label
       >
     </div>
-    <p class="note">{m.work_account_update_note()}</p>
-  {/if}
-  <p class="note">{m.work_account_disclosure()}</p>
+    {#if update}
+      <div class="fields">
+        <label
+          >{m.work_account_field()}<input
+            type="text"
+            maxlength="128"
+            value={update.field ?? ""}
+            placeholder={m.work_account_field_placeholder()}
+            {disabled}
+            oninput={(event) => setUpdate({ field: event.currentTarget.value || null })}
+          /></label
+        >
+        <label
+          >{m.work_account_from()}<input
+            type="text"
+            maxlength="512"
+            value={update.from}
+            {disabled}
+            oninput={(event) => setUpdate({ from: event.currentTarget.value })}
+          /></label
+        >
+        <label
+          >{m.work_account_to()}<input
+            type="text"
+            maxlength="512"
+            value={update.to}
+            {disabled}
+            oninput={(event) => setUpdate({ to: event.currentTarget.value })}
+          /></label
+        >
+      </div>
+      <p class="note">{m.work_account_update_note()}</p>
+    {/if}
+    <p class="note">{m.work_account_disclosure()}</p>{/if}
 </div>
 
 <style>

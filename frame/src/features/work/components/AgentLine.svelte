@@ -4,7 +4,12 @@
   import type { WorkHumanReasonV1 } from "$shared/ipc/bindings";
   import { currentActivity } from "$domain/work";
   import { agentLine, endingNote, isLive } from "../lib/agent-steps";
-  import { cardCountdown, reasonSentence } from "../lib/work-human";
+  import {
+    accountRefusal,
+    accountRefusalSentence,
+    cardCountdown,
+    reasonSentence,
+  } from "../lib/work-human";
   import { preparationFailure } from "../lib/preparation-failure";
   import { fileName } from "../lib/work-files";
   import type { CanvasItem } from "../lib/canvas-model";
@@ -203,6 +208,11 @@
   const closing = $derived(execution ? agentLine(execution) : null);
   /** Why the run ended early, in Rust's words: the note its last unfinished step left. */
   const ending = $derived(execution ? endingNote(execution) : null);
+  /** A signed-in limit the run reached, said plainly where nothing more specific stands. */
+  const refusal = $derived.by(() => {
+    const found = execution ? accountRefusal(execution) : null;
+    return found ? accountRefusalSentence(found) : null;
+  });
   /** A request refused before it ran says why, never an older run's words. */
   const refusals: Record<string, () => string> = {
     capacity: m.work_line_full,
@@ -223,6 +233,9 @@
     if (live) {
       if (fileState) return fileState;
       if (activity === "reading" && readingHost) return m.work_line_reading({ host: readingHost });
+      // Past a signed-in limit, the plain sentence stands in for "Thinking".
+      const thinking = !activity || activity === "planning" || activity === "delegating";
+      if (refusal && thinking && execution?.status !== "cancel_requested") return refusal;
       if (activity) return activityStates[activity]?.() ?? m.work_line_thinking();
       return execution?.status === "cancel_requested"
         ? m.work_line_stopping()
@@ -231,13 +244,13 @@
     switch (execution?.status) {
       case "completed":
       case "needs_review":
-        return closing ?? m.work_env_status_done();
+        return closing ?? refusal ?? m.work_env_status_done();
       case "cancelled":
-        return ending ?? m.work_line_stopped();
+        return ending ?? refusal ?? m.work_line_stopped();
       case "interrupted":
-        return ending ?? m.work_line_interrupted();
+        return ending ?? refusal ?? m.work_line_interrupted();
       case "failed":
-        return ending ?? m.work_line_failed();
+        return ending ?? refusal ?? m.work_line_failed();
       default:
         return run?.state.kind === "pending" ? m.work_line_thinking() : m.work_line_ready();
     }

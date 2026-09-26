@@ -23,8 +23,10 @@ export function contextSelection(
     /** Media record revisions: an image or a document is context like a note. */
     media?: ReadonlyMap<string, string>;
   },
+  /** Consent, for this request, to list the window's open tabs: titles and addresses only. */
+  openTabs = false,
 ): WorkContextSelectionV1 | null {
-  if (!snapshot || !selected.length) return null;
+  if (!snapshot || (!selected.length && !openTabs)) return null;
   const items: WorkContextSelectionV1["items"] = [];
   for (const id of selected) {
     if (items.length >= MAX_CONTEXT_ITEMS) break;
@@ -59,7 +61,8 @@ export function contextSelection(
     }
     if (revision !== null) items.push({ element: id, revision });
   }
-  return items.length ? { environment: snapshot.id, items } : null;
+  if (!items.length && !openTabs) return null;
+  return { environment: snapshot.id, items, ...(openTabs ? { tabs: true } : {}) };
 }
 
 export function formatBytes(bytes: number): string {
