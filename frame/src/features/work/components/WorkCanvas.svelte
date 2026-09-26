@@ -218,6 +218,15 @@
   const lit = $derived(relationLinks(scene.links, byId, focused));
   const title = (id: string) =>
     byId.get(id)?.title ?? scene.clusters.find((cluster) => cluster.id === id)?.label ?? "";
+  /** The thread and a flow down a column run upright; a flow beside a column leaves and lands on the right. */
+  const handles = (link: CanvasLink) =>
+    link.kind === "thread" || link.route === "down"
+      ? { sourceHandle: "below", targetHandle: "above" }
+      : link.route === "up"
+        ? { sourceHandle: "above-out", targetHandle: "below-in" }
+        : link.route
+          ? { targetHandle: "right-in" }
+          : {};
   let edges = $derived.by<Edge[]>(() => {
     if (!valid) return [];
     arrival.see(scene.clusters, scene.items);
@@ -230,9 +239,7 @@
           source: link.source,
           target: link.target,
           type: "work",
-          ...(link.kind === "thread" || link.down
-            ? { sourceHandle: "below", targetHandle: "above" }
-            : {}),
+          ...handles(link),
           data: {
             tone:
               link.kind === "thread"
@@ -245,6 +252,7 @@
             ...(link.kind === "diagram" && link.label
               ? { label: link.label, ...(link.plate ? { plate: link.plate } : {}) }
               : {}),
+            ...(typeof link.route === "object" ? { bend: link.route.beside } : {}),
           },
           deletable: false,
           selectable: false,

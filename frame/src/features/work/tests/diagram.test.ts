@@ -3,13 +3,17 @@ import type { ArtifactContent } from "$shared/ui/data/Artifact";
 import type { WorkArtifactDataV1 } from "$shared/ipc/bindings";
 import { renamedPart } from "../lib/correct";
 import {
+  DIAGRAM,
   PLATE,
   curveY,
   diagramColumns,
   diagramLayout,
   diagramNodeId,
   diagramResult,
+  flowCurve,
+  plateHeight,
   plateWidth,
+  pointOn,
 } from "../lib/diagram";
 
 type Diagram = Extract<ArtifactContent, { kind: "diagram" }>;
@@ -78,14 +82,14 @@ test("stated layers are the columns, in their order, with unlayered parts last",
     { nodes: ["mail"] },
   ]);
   const layout = diagramLayout(diagram);
-  // 200 px cards 32 px apart where no flow is named, under a 16 px band for the layers' captions.
+  // 220 px cards 32 px apart where no flow is named, under a 16 px band for the layers' captions.
   expect(layout.at).toEqual({
     web: { x: 0, y: 16 },
-    api: { x: 232, y: 16 },
-    db: { x: 464, y: 16 },
-    mail: { x: 696, y: 16 },
+    api: { x: 252, y: 16 },
+    db: { x: 504, y: 16 },
+    mail: { x: 756, y: 16 },
   });
-  expect([layout.width, layout.height]).toEqual([896, 80]);
+  expect([layout.width, layout.height]).toEqual([976, 88]);
   expect(layout.layers.map((layer) => layer.name)).toEqual(["Edge", "Application", "Data"]);
 });
 
@@ -97,8 +101,8 @@ test("within a column parts stack in the order the edges name them, 12 px apart"
     layers: [],
   };
   const layout = diagramLayout(diagram);
-  expect(layout.at).toEqual({ app: { x: 0, y: 0 }, pg: { x: 232, y: 0 }, s3: { x: 232, y: 76 } });
-  expect(layout.height).toBe(140);
+  expect(layout.at).toEqual({ app: { x: 0, y: 0 }, pg: { x: 252, y: 0 }, s3: { x: 252, y: 84 } });
+  expect(layout.height).toBe(156);
 });
 
 test("a gap is 32 px plus the widest plate named in it, so every flow's name has room", () => {
@@ -118,9 +122,9 @@ test("a gap is 32 px plus the widest plate named in it, so every flow's name has
   const layout = diagramLayout(diagram);
   const first = 32 + plateWidth("HTTPS");
   const second = 32 + plateWidth("authenticated requests");
-  expect(layout.at.api!.x).toBe(200 + first);
-  expect(layout.at.db!.x).toBe(200 + first + 200 + second);
-  expect(layout.width).toBe(3 * 200 + first + second);
+  expect(layout.at.api!.x).toBe(220 + first);
+  expect(layout.at.db!.x).toBe(220 + first + 220 + second);
+  expect(layout.width).toBe(3 * 220 + first + second);
   // A plate sits in the gap before its target, on its curve.
   expect(layout.plates[0]).toEqual({ gap: first, shift: 0 });
   // Two plates in one gap that do not overlap stay on their curves.
@@ -144,23 +148,75 @@ test("plates that would overlap in one gap stagger by one plate's height", () =>
   // Both crossings meet at the gap's middle; the later one steps down.
   expect(layout.plates[2]).toMatchObject({ shift: 0 });
   expect(layout.plates[3]).toMatchObject({ shift: PLATE.height + PLATE.air });
-  const centre = 200 + (32 + plateWidth("writes")) / 2;
-  expect(curveY(200, 32, layout.at.d!.x, layout.at.d!.y + 32, centre)).toBeCloseTo(70, 0);
+  const centre = 220 + (32 + plateWidth("writes")) / 2;
+  expect(curveY(220, 36, layout.at.d!.x, layout.at.d!.y + 36, centre)).toBeCloseTo(78, 0);
 });
 
-test("a flow down one column names itself in the gap beside it, never over a part", () => {
+const { width: W, height: H } = DIAGRAM.node;
+
+test("a named flow between neighbours in a column widens their row gap and sits on its connector", () => {
   const diagram: Diagram = {
     kind: "diagram",
-    nodes: [node("api", "app"), node("jobs", "app")],
-    edges: [{ from: "api", to: "jobs", label: "queues work" }],
+    nodes: [node("api", "app"), node("jobs", "app"), node("mail", "app")],
+    edges: [{ from: "api", to: "jobs", label: "queues work" }, edge("jobs", "mail")],
     layers: [{ id: "app", name: "Application" }],
   };
   const layout = diagramLayout(diagram);
-  const gap = 32 + plateWidth("queues work");
-  // The only column gets a gap of its own to the right for the plate.
-  expect(layout.width).toBe(200 + gap);
-  // From its target's top centre: right by half a card and half the gap, up into the row gap.
-  expect(layout.plates[0]).toEqual({ dx: 100 + gap / 2, dy: -6 });
+  // No gap beside the column: the plate lives between the rows.
+  expect(layout.width).toBe(W);
+  const opened = PLATE.height + PLATE.air * 2;
+  expect(layout.at.jobs!.y - (layout.at.api!.y + H)).toBe(opened);
+  // A flow without a name keeps the 12 px gap.
+  expect(layout.at.mail!.y - (layout.at.jobs!.y + H)).toBe(DIAGRAM.row);
+  expect(layout.routes).toEqual({ 0: "down", 1: "down" });
+  expect(layout.plates[0]).toEqual({ along: 0.5 });
+  // Bottom centre to top centre: the plate's centre is the middle of the gap, on the line.
+  const curve = flowCurve(W / 2, 16 + H, "bottom", W / 2, layout.at.jobs!.y, "top");
+  expect(pointOn(curve, 0.5)).toEqual({ x: W / 2, y: 16 + H + opened / 2 });
+});
+
+test("a named flow past a neighbour bends out beside the column and carries its plate on the line", () => {
+  const diagram: Diagram = {
+    kind: "diagram",
+    nodes: [node("a", "app"), node("b", "app"), node("c", "app")],
+    edges: [edge("a", "b"), edge("b", "c"), { from: "a", to: "c", label: "audits" }],
+    layers: [{ id: "app", name: "Application" }],
+  };
+  const layout = diagramLayout(diagram);
+  const gap = 32 + plateWidth("audits");
+  expect(layout.width).toBe(W + gap);
+  const route = layout.routes[2];
+  expect(route).toMatchObject({ beside: expect.any(Number) });
+  const reach = (route as { beside: number }).beside;
+  const a = layout.at.a!.y + H / 2;
+  const c = layout.at.c!.y + H / 2;
+  const plate = layout.plates[2] as { along: number };
+  const spot = pointOn(flowCurve(W, a, "right", W, c, "right", reach), plate.along);
+  // The line's far point is the middle of the gap and the plate's centre.
+  expect(spot.x).toBeCloseTo(W + gap / 2, 0);
+  expect(spot.y).toBeCloseTo((a + c) / 2, 5);
+});
+
+test("a long flow name takes two lines, and its row gap grows to hold them", () => {
+  const long = "writes the session record and refreshes the cache";
+  expect(plateHeight("HTTPS")).toBe(PLATE.height);
+  expect(plateWidth(long)).toBe(PLATE.max);
+  expect(plateHeight(long)).toBe(PLATE.height + PLATE.line);
+  const layout = diagramLayout({
+    kind: "diagram",
+    nodes: [node("api"), node("db")],
+    edges: [{ from: "api", to: "db", label: long }],
+    layers: [],
+  });
+  // Across columns the plate stands in the gap, as wide as the widest plate.
+  expect(layout.at.db!.x).toBe(W + 32 + PLATE.max);
+  const stacked = diagramLayout({
+    kind: "diagram",
+    nodes: [node("api", "app"), node("db", "app")],
+    edges: [{ from: "api", to: "db", label: long }],
+    layers: [{ id: "app", name: "Application" }],
+  });
+  expect(stacked.at.db!.y - stacked.at.api!.y - H).toBe(plateHeight(long) + PLATE.air * 2);
 });
 
 test("a part's card names its result", () => {

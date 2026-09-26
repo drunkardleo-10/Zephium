@@ -1,9 +1,16 @@
 <script lang="ts">
   import { getContext, onMount } from "svelte";
-  import { EdgeLabel, Position, type EdgeProps } from "@xyflow/svelte";
+  import { EdgeLabel, type EdgeProps } from "@xyflow/svelte";
   import { canvasArrival } from "../lib/canvas-context";
   import { duration, easing, reducedMotion, type Duration } from "$shared/lib/motion";
-  import { curveY, levelCurve, type DiagramPlate } from "../lib/diagram";
+  import {
+    PLATE,
+    curveY,
+    flowCurve,
+    plateHeight,
+    pointOn,
+    type DiagramPlate,
+  } from "../lib/diagram";
   type Tone = "rest" | "thread" | "relation" | "diagram";
   let {
     target,
@@ -20,20 +27,34 @@
   /** What flows along a diagram's edge, on a plate at its midpoint. */
   const label = $derived(typeof data?.label === "string" ? data.label : "");
   const plate = $derived(data?.plate as DiagramPlate | undefined);
-  /** A cubic that leaves and lands along its handles: level for a lane, upright for the thread. */
+  /** Two lines once the words pass the widest plate. */
+  const tall = $derived(!!label && plateHeight(label) > PLATE.height);
+  /**
+   * A cubic that leaves and lands along its handles: level for a lane, upright
+   * for the thread and down a column, bent out beside a column by its `bend`.
+   */
+  const curve = $derived(
+    flowCurve(
+      sourceX,
+      sourceY,
+      `${sourcePosition}`,
+      targetX,
+      targetY,
+      `${targetPosition}`,
+      typeof data?.bend === "number" ? data.bend : undefined,
+    ),
+  );
   const path = $derived.by(() => {
-    const vertical = sourcePosition === Position.Bottom || targetPosition === Position.Top;
-    const reach = Math.max(24, Math.abs(targetY - sourceY) / 2);
-    const [c1x, c1y, c2x, c2y] = vertical
-      ? [sourceX, sourceY + reach, targetX, targetY - reach]
-      : levelCurve(sourceX, sourceY, targetX, targetY);
-    return `M ${sourceX},${sourceY} C ${c1x},${c1y} ${c2x},${c2y} ${targetX},${targetY}`;
+    const [x0, y0, x1, y1, x2, y2, x3, y3] = curve;
+    return `M ${x0},${y0} C ${x1},${y1} ${x2},${y2} ${x3},${y3}`;
   });
   /**
-   * The plate stands in the gap before its target, on the curve, or at its
-   * offset from the target; a flow the person dragged backwards keeps the middle.
+   * The plate stands on its own line: in the gap before its target, or along
+   * a flow in one column; a flow back left sits at its offset from the target.
+   * A flow the person dragged backwards keeps the middle.
    */
   const spot = $derived.by(() => {
+    if (plate && "along" in plate) return pointOn(curve, plate.along);
     if (plate && "gap" in plate) {
       const x = targetX - plate.gap / 2;
       if (x > sourceX) return { x, y: curveY(sourceX, sourceY, targetX, targetY, x) + plate.shift };
@@ -76,7 +97,9 @@
   fill="none"
 />
 <circle bind:this={dot} class="work-edge-dot {tone}" cx={targetX} cy={targetY} r="2" />
-{#if label}<EdgeLabel x={spot.x} y={spot.y} class="work-edge-label">{label}</EdgeLabel>{/if}
+{#if label}<EdgeLabel x={spot.x} y={spot.y} class={["work-edge-label", { tall }]} title={label}
+    >{label}</EdgeLabel
+  >{/if}
 
 <style>
   .work-edge-line {
@@ -93,22 +116,30 @@
     opacity: 0.6;
   }
 
-  /* A flow's name on a plate as wide as the room its layout left (PLATE.max). */
+  /* A flow's name on a plate up to PLATE.max wide and two lines tall; the whole name is its title. */
   /* stylelint-disable-next-line selector-class-pattern */
   :global(.svelte-flow__edge-label.work-edge-label) {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     box-sizing: border-box;
     max-inline-size: 220px;
     padding: 1px 6px;
     overflow: hidden;
+    overflow-wrap: anywhere;
     border-radius: var(--radius-capsule);
     background: var(--color-surface);
     box-shadow: inset 0 0 0 1px var(--color-border);
     color: var(--color-muted);
     font-size: var(--text-caption);
     line-height: 15px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    pointer-events: none !important;
+    text-align: center;
+  }
+
+  /* stylelint-disable-next-line selector-class-pattern */
+  :global(.svelte-flow__edge-label.work-edge-label.tall) {
+    border-radius: var(--radius-inset);
   }
 
   /* A tie lit by a focused card comes and goes with the pointer. */

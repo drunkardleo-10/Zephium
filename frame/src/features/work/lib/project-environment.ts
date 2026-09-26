@@ -987,7 +987,7 @@ export function environmentDiagrams(
         const position = stage.layout.positions[card];
         if (position) positions[card] = position;
       }
-      const { at, layers, plates, width, height } = diagramLayout(content);
+      const { layers, plates, routes, width, height } = diagramLayout(content);
       content.edges.forEach((edge, index) => {
         const plate = plates[index];
         links.push({
@@ -995,7 +995,7 @@ export function environmentDiagrams(
           source: id(edge.from),
           target: id(edge.to),
           kind: "diagram",
-          ...(at[edge.from]?.x === at[edge.to]?.x ? { down: true } : {}),
+          ...(routes[index] ? { route: routes[index] } : {}),
           ...(edge.label ? { label: clipText(edge.label, ROW_TEXT) } : {}),
           ...(edge.label && plate ? { plate } : {}),
         });

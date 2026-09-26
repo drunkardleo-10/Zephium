@@ -27,7 +27,7 @@ const DIAGRAM: WorkArtifactDataV1 = {
   edges: [
     { from: "web", to: "api", label: "HTTPS" },
     { from: "api", to: "db", label: "SQL" },
-    { from: "api", to: "jobs" },
+    { from: "api", to: "jobs", label: "enqueues" },
   ],
   layers: [
     { id: "edge", name: "Edge" },
@@ -100,7 +100,22 @@ test("a diagram result is its area of parts alone, layered left to right, joined
     .toHaveLength(3);
   expect(
     [...document.querySelectorAll(".work-edge-label")].map((label) => label.textContent),
-  ).toEqual(expect.arrayContaining(["HTTPS", "SQL"]));
+  ).toEqual(expect.arrayContaining(["HTTPS", "SQL", "enqueues"]));
+  // A named flow down a column sits on its connector, centred in the gap it opened.
+  const card = (id: string) =>
+    screen.container
+      .querySelector<HTMLElement>(`.svelte-flow__node[data-id="diagram:result-card:${id}"]`)!
+      .getBoundingClientRect();
+  const plate = [...document.querySelectorAll<HTMLElement>(".work-edge-label")].find(
+    (label) => label.textContent === "enqueues",
+  )!;
+  expect(plate.title).toBe("enqueues");
+  const at = plate.getBoundingClientRect();
+  const [api, jobs] = [card("api"), card("jobs")];
+  expect(at.left + at.width / 2).toBeCloseTo(api.left + api.width / 2, 0);
+  expect(at.top).toBeGreaterThan(api.bottom);
+  expect(at.bottom).toBeLessThan(jobs.top);
+  expect(at.top - api.bottom).toBeCloseTo(jobs.top - at.bottom, 0);
   // The title opens the diagram; the count takes it whole.
   await screen.getByRole("button", { name: "Checkout system" }).click();
   expect(opened).toEqual(["result-card"]);

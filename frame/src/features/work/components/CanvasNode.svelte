@@ -222,6 +222,31 @@
   tabindex={-1}
   aria-hidden="true"
 />
+<!-- A diagram's flow up its column, or out beside it and back into a part's right edge. -->
+{#if type === "diagram"}<Handle
+    id="above-out"
+    type="source"
+    position={Position.Top}
+    isConnectable={false}
+    tabindex={-1}
+    aria-hidden="true"
+  />
+  <Handle
+    id="below-in"
+    type="target"
+    position={Position.Bottom}
+    isConnectable={false}
+    tabindex={-1}
+    aria-hidden="true"
+  />
+  <Handle
+    id="right-in"
+    type="target"
+    position={Position.Right}
+    isConnectable={false}
+    tabindex={-1}
+    aria-hidden="true"
+  />{/if}
 
 <style>
   .node-root {

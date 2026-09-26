@@ -3,7 +3,7 @@ import type { IconRef } from "$shared/ipc/bindings";
 import type { ArtifactView, FindingView, SubjectView } from "$shared/ui/data/Artifact";
 import type { Node } from "@xyflow/svelte";
 import type { HumanPage } from "./work-human";
-import type { DiagramPlate } from "./diagram";
+import type { DiagramPlate, DiagramRoute } from "./diagram";
 import { defaultSize } from "./card-size";
 import { firstRowAnchor } from "./stage-layout";
 export { defaultSize };
@@ -145,8 +145,8 @@ export type CanvasLink = {
    * next; relation kinds show only while an end is hovered or selected.
    */
   kind: "dependency" | "reference" | "path" | "thread" | "diagram" | RelationKind;
-  /** A diagram's flow between parts of one column runs down, bottom to top. */
-  down?: boolean;
+  /** A diagram's flow between parts of one column: down or up the connector, or beside it. */
+  route?: DiagramRoute;
   /** Why a lane relation exists: a page is evidence for what was found, a step names a subject. */
   role?: "evidence" | "named";
   label?: string;
