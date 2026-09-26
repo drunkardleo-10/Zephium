@@ -368,6 +368,10 @@ impl WorkBrowserResourceRequest {
     pub fn human_deadline(&self) -> Option<AgentPolicyInstant> {
         self.human.as_ref().map(|human| human.deadline)
     }
+    /// A sign-in presentation: navigation may cross sites until it settles back.
+    pub fn human_sign_in(&self) -> bool {
+        self.human.as_ref().is_some_and(|human| human.sign_in)
+    }
     /// Exact source whose origin bounds human navigation; it grants no actor scope.
     pub fn human_source(&self) -> Option<&ContextNavigationTarget> {
         self.human.as_ref().map(|human| human.source.as_ref())

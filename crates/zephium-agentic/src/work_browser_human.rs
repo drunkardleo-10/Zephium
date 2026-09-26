@@ -2,7 +2,8 @@
 use super::*;
 
 /// Maximum total waiting/presentation interval; caller deadlines can shorten it.
-pub const MAX_WORK_HUMAN_WAIT_MILLIS: u64 = 180_000;
+/// A sign-in with a second factor takes minutes; the wait never spends the run.
+pub const MAX_WORK_HUMAN_WAIT_MILLIS: u64 = 540_000;
 
 /// Human navigation stays on the original scheme, port and registrable site.
 /// Private suffixes keep unrelated hosted tenants separate; IPs stay exact.
@@ -67,12 +68,15 @@ pub(super) struct HumanWindow {
     pub(super) deadline: AgentPolicyInstant,
     pub(super) source: Arc<ContextNavigationTarget>,
     pub(super) progress: WorkBrowserHumanProgress,
+    /// A sign-in: the person may pass through another site's sign-in pages.
+    pub(super) sign_in: bool,
 }
 
 /// Content-free native document revision; observational, never execution authority.
 #[derive(Clone, Debug, Default)]
 pub struct WorkBrowserHumanProgress(
     Arc<std::sync::atomic::AtomicU64>,
+    Arc<std::sync::atomic::AtomicBool>,
     Arc<std::sync::atomic::AtomicBool>,
 );
 impl WorkBrowserHumanProgress {
@@ -87,6 +91,14 @@ impl WorkBrowserHumanProgress {
     /// Monotonic revision for frontend document-change events.
     pub fn revision(&self) -> u64 {
         self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// The settled page is back on its own site and off any sign-in path.
+    pub fn clear_of_sign_in(&self) -> bool {
+        self.2.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// Native owner reports where the person's navigation settled.
+    pub fn record_clear_of_sign_in(&self, clear: bool) {
+        self.2.store(clear, std::sync::atomic::Ordering::Release);
     }
     /// Native owner publishes only increasing revisions of its retained page.
     pub fn record_revision(&self, revision: u64) {
@@ -130,6 +142,18 @@ impl WorkBrowserResources {
         now: AgentPolicyInstant,
         deadline: AgentPolicyInstant,
     ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
+        self.present_human_for(resource, region, now, deadline, false)
+    }
+    /// Presents a page for a sign-in: the person's navigation may pass through
+    /// another site's sign-in pages but must settle back on the page's site.
+    pub fn present_human_for(
+        &mut self,
+        resource: &WorkBrowserResourceJoin,
+        region: WorkBrowserHumanRegion,
+        now: AgentPolicyInstant,
+        deadline: AgentPolicyInstant,
+        sign_in: bool,
+    ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
         if self.sealed {
             return Err(WorkBrowserResourceError::Sealed);
         }
@@ -162,6 +186,7 @@ impl WorkBrowserResources {
                 .effective_document
                 .clone()
                 .ok_or(WorkBrowserResourceError::Source)?,
+            sign_in,
         }));
         row.document_available = false;
         row.observed = false;

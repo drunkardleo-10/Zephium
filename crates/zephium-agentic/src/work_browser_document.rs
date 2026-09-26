@@ -114,6 +114,26 @@ fn site_scheme(target: &ContextNavigationTarget) -> bool {
         }
 }
 
+/// The site a location belongs to: its registrable domain under a known
+/// public suffix, or the exact host for an IP address or an unknown suffix.
+pub fn registrable_site(target: &ContextNavigationTarget) -> Option<String> {
+    let host = target
+        .as_url()
+        .host_str()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if matches!(target.as_url().host(), Some(url::Host::Domain(_))) {
+        if let Some(domain) =
+            psl::domain(host.as_bytes()).filter(|domain| domain.suffix().is_known())
+        {
+            return std::str::from_utf8(domain.as_bytes())
+                .ok()
+                .map(str::to_owned);
+        }
+    }
+    Some(host)
+}
+
 /// Both locations are on one site: same scheme and port, same registrable
 /// domain (private suffixes keep hosted tenants apart; IPs stay exact).
 pub fn same_site(source: &ContextNavigationTarget, target: &ContextNavigationTarget) -> bool {
@@ -194,6 +214,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_site_is_its_registrable_domain() {
+        for (url, site) in [
+            ("https://app.slack.com/client", "slack.com"),
+            ("https://www.bbc.co.uk/news", "bbc.co.uk"),
+            ("https://alice.github.io/x", "alice.github.io"),
+            ("http://127.0.0.1:4100/", "127.0.0.1"),
+            ("https://intranet.invalid/", "intranet.invalid"),
+        ] {
+            let target = ContextNavigationTarget::parse(url).unwrap();
+            assert_eq!(registrable_site(&target).as_deref(), Some(site), "{url}");
+        }
+    }
     #[test]
     fn site_session_moves_within_the_registrable_domain_only() {
         let policy = WorkBrowserDocumentPolicy::SiteSession;

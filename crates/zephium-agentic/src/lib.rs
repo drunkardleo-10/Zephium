@@ -54,7 +54,9 @@ mod context_registry;
 mod work_browser_document;
 mod work_browser_resource;
 mod work_browser_session;
-pub use work_browser_document::{same_site as same_work_site, WorkBrowserDocumentPolicy};
+pub use work_browser_document::{
+    registrable_site, same_site as same_work_site, WorkBrowserDocumentPolicy,
+};
 pub use work_browser_resource::WorkBrowserConstructionAttempt;
 pub use work_browser_resource::{
     same_work_human_site, WorkBrowserActionCompletion, WorkBrowserActionCompletionCallback,
