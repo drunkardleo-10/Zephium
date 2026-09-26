@@ -7932,12 +7932,13 @@ mod tests {
             "'self' data: zephium-media: http://zephium-media.localhost"
         );
         assert_eq!(directive("font-src"), "'self' data:");
+        // Same-origin workers only: the diagram layout engine runs off the page thread.
+        assert_eq!(directive("worker-src"), "'self'");
 
         for name in [
             "child-src",
             "frame-src",
             "media-src",
-            "worker-src",
             "object-src",
             "base-uri",
             "form-action",
