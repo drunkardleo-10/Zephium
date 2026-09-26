@@ -15,7 +15,7 @@ import {
   environmentItems,
   resultHeads,
 } from "../lib/project-environment";
-import { artifactView } from "../lib/project-work";
+import { answerParser, artifactView } from "../lib/project-work";
 import { diagramShape, layoutDiagram, primaryFlows } from "../lib/diagram";
 import type { ArtifactContent } from "$shared/ui/data/Artifact";
 import type { CanvasItem } from "../lib/canvas-model";
@@ -306,6 +306,7 @@ test("an explanation reads diagram, then code and findings two across, then the 
 
 test("an answer leads Made full width, the diagram's area follows, then code and table two across", async () => {
   await page.viewport(1600, 1000);
+  await answerParser;
   const { scene: answered, objectives } = answerScene();
   const stages = environmentStages(answered, objectives);
   const layout = stages[0]!.layout;

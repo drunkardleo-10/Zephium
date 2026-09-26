@@ -13,7 +13,8 @@ import type {
   DocumentNodeView,
   EvidenceReference,
 } from "$shared/ui/data/Artifact";
-import { parseMarkdown } from "$features/notes";
+import { createSubscriber } from "svelte/reactivity";
+import { loadMarkdown } from "$features/notes";
 import * as m from "$shared/i18n/messages";
 import type { CanvasItem, CanvasLink } from "./canvas-model";
 import { fileFolder } from "./work-files";
@@ -31,7 +32,23 @@ function displayHost(value: string | undefined): string {
   }
 }
 
-type ParsedNode = ReturnType<typeof parseMarkdown>["doc"];
+type Parse = Awaited<ReturnType<typeof loadMarkdown>>["parse"];
+type ParsedNode = ReturnType<Parse>["doc"];
+let parse: Parse | null = null;
+let arrived: (() => void) | null = null;
+/** A projection read before the parser arrived runs again once it has. */
+const waiting = createSubscriber((update) => {
+  arrived = update;
+  return () => (arrived = null);
+});
+/** The notes parser loads beside Work rather than inside every graph that projects a result. */
+export const answerParser: Promise<void> = loadMarkdown().then(
+  (module) => {
+    parse = module.parse;
+    arrived?.();
+  },
+  () => {},
+);
 /**
  * An answer's Markdown as the notes parser reads it, in the view's own shape:
  * anything the subset refuses and still arrives (a raw block, a wiki link)
@@ -62,9 +79,17 @@ function answerBlock(node: ParsedNode): DocumentNodeView {
 /** Projections repeat per render; an answer is parsed once while it is recent. */
 const parsed = new Map<string, DocumentNodeView[]>();
 function answerBlocks(markdown: string): DocumentNodeView[] {
+  if (!parse) {
+    waiting();
+    // Until then its paragraphs as written.
+    return markdown
+      .split(/\n{2,}/u)
+      .filter((text) => text.trim())
+      .map((text) => ({ type: "paragraph", content: [{ type: "text", text }] }));
+  }
   let blocks = parsed.get(markdown);
   if (!blocks) {
-    blocks = (parseMarkdown(markdown).doc.content ?? []).map(answerBlock);
+    blocks = (parse(markdown).doc.content ?? []).map(answerBlock);
     if (parsed.size >= 32) parsed.delete(parsed.keys().next().value!);
     parsed.set(markdown, blocks);
   }

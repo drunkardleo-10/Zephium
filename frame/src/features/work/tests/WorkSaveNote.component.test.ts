@@ -167,7 +167,7 @@ test("an answer lifts as a reading page and is saved as its own Markdown under i
   expect(header.querySelector(".meta")).toBeNull();
   expect(header.querySelector(".glyph")).toBeNull();
   const reading = lift.element().querySelector<HTMLElement>(".reading .answer.page")!;
-  expect(reading.querySelector("h3")?.textContent).toBe("Why");
+  await expect.poll(() => reading.querySelector("h3")?.textContent).toBe("Why");
   expect(reading.querySelector("code")?.textContent).toBe("cargo update");
   expect(getComputedStyle(reading.parentElement!).maxInlineSize).toBe("640px");
   const copy = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
