@@ -180,6 +180,41 @@ Persisted recovery facts classify interruption after restart; they do not
 restore live executable state or fabricate a clean controller. Approval review
 requires fresh admission and never executes an old proposal.
 
+## Signed-in origin grants
+
+Zephium never infers an account. A routine agent request may carry
+`WorkAgentGrantV1.accounts`: each entry names one exact HTTPS origin, an
+opaque account identity Rust minted when it drafted the approval
+(`WorkAccountApprovalRequestV1` with `mode: origin`), and a page budget of at
+most 12. The person's approval of "read pages on this origin as this account
+for this request, up to N pages" is the attestation; nothing observes or
+detects the account. A drafted grant is claimed once, by the next request of
+its work: an undrafted or already used grant is refused as `ReviewRequired`,
+and the grant ends with that request's execution.
+
+Inside a granted origin the agent loop admits `read` directly. The page opens
+in a Work-owned page sharing the profile's cookies, the same construction
+`AccountRead` uses, counted against the budget and read with the same typed
+records as a public page. Every other read stays anonymous, in the run's own
+isolated storage; a signed-in page never joins the grouped anonymous pages and
+runs as its own lifetime. The engine refuses a load that leaves the approved
+document, so a redirect out of the origin ends the read as "The page left
+<host>", and subresources from other sites carry no cookies. A signed-in page is
+read-only: its page agent may only scroll, a path that names a change (sign
+out, delete, send, pay and the like) is refused before it opens, and either
+refusal reaches the model as `AccountWrite` with a notice to propose the
+change as a field update. `AccountUpdate` remains the only way to change
+anything on a signed-in page. Facts from a signed-in page never ride a search
+query, its title is not recorded, provider retention never applies to it, and
+diagnostics carry only the grant index, the path class, byte counts and
+outcome classes. The projection marks each such page (`WorkStepFact.account`)
+and the request's use of each origin (`WorkExecutionFact.accounts`).
+
+With the person's consent for one request, `WorkContextSelectionV1.tabs`
+lists the open tabs of the focused window as title, host and path (at most 60,
+never content or query). The agent sees them as `tabs`; reading one is
+anonymous unless its origin is granted.
+
 ## Evidence and remaining product seams
 
 The excluded public Luna qualifiers compose this actor with the actual

@@ -10,6 +10,9 @@ The supplied account scope is an initial product assertion, not a live sign-in
 detector. Later samples retain its original identity/time. Longer work needs an
 independently sourced [account adapter](agent-work-execution.md#stops-audit-and-terminal-truth);
 this task does not renew authority by changing a timestamp.
+A [signed-in origin grant](agent-work-execution.md#signed-in-origin-grants)
+only reads: a change it would make is refused as `AccountWrite`, and an
+approved field update through this task stays the only write path.
 
 ## Trusted admission, not automatic effect classification
 
