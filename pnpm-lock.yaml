@@ -87,18 +87,12 @@ importers:
       bits-ui:
         specifier: 2.18.1
         version: 2.18.1(@internationalized/date@3.12.2)(svelte@5.56.8(@typescript-eslint/types@8.65.0))
-      d3-array:
-        specifier: 3.2.4
-        version: 3.2.4
       d3-scale:
         specifier: 4.0.2
         version: 4.0.2
       d3-shape:
         specifier: 3.2.0
         version: 3.2.0
-      d3-time:
-        specifier: 3.1.0
-        version: 3.1.0
       elkjs:
         specifier: 0.12.0
         version: 0.12.0
@@ -127,18 +121,12 @@ importers:
       '@tailwindcss/vite':
         specifier: 4.3.3
         version: 4.3.3(vite@8.1.5(@types/node@24.13.4)(jiti@2.7.0)(yaml@2.9.0))
-      '@types/d3-array':
-        specifier: 3.2.1
-        version: 3.2.1
       '@types/d3-scale':
         specifier: 4.0.9
         version: 4.0.9
       '@types/d3-shape':
         specifier: 3.1.7
         version: 3.1.7
-      '@types/d3-time':
-        specifier: 3.0.4
-        version: 3.0.4
       '@types/node':
         specifier: ^24.13.4
         version: 24.13.4
