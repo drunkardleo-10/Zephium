@@ -66,6 +66,8 @@ export class WorkSession {
   queue = $state.raw<string[]>([]);
   /** Requests waiting on an origin grant, by work: the context rides with the run once allowed. */
   private readonly grantRequests = new SvelteMap<string, WorkContextSelectionV1 | null>();
+  /** A declined grant's work and its last run then: the anonymous run has not shown yet. */
+  private declined = $state.raw<{ work: string; last: string | undefined } | null>(null);
   private activityRefresh: ReturnType<typeof setTimeout> | undefined;
   private readonly artifacts = new SvelteMap<string, ArtifactDraft>();
   private readonly drafts = new SvelteMap<string, TextDraft>();
@@ -494,6 +496,7 @@ export class WorkSession {
     request: Omit<WorkAccountApprovalRequestV1, "mode" | "effect">,
     context: WorkContextSelectionV1 | null,
   ) {
+    this.declined = null;
     this.grantRequests.set(request.work, context);
     await this.operations.begin({
       kind: "prepare_account",
@@ -517,10 +520,25 @@ export class WorkSession {
     this.grantRequests.delete(work.id);
     await this.run(context, [grant]);
   }
-  /** Not now: the draft is forgotten and expires unclaimed. */
-  declineGrant() {
+  /** Not now: the draft expires unclaimed and the request runs without the session. */
+  async declineGrant() {
     const work = this.projection?.work;
-    if (work) this.grantRequests.delete(work.id);
+    if (!work || !this.grantRequests.has(work.id)) return;
+    const context = this.grantRequests.get(work.id) ?? null;
+    this.grantRequests.delete(work.id);
+    const before = this.operations.latest(work.id, "run")?.id;
+    this.declined = { work: work.id, last: this.projection?.executions.at(-1)?.id };
+    await this.run(context);
+    if (this.operations.latest(work.id, "run")?.id === before) this.declined = null;
+  }
+  /** The declined request is starting anonymously and its run has not shown yet. */
+  get grantDeclined(): boolean {
+    const declined = this.declined;
+    const projection = this.projection;
+    if (!declined || projection?.work.id !== declined.work) return false;
+    if (projection.executions.at(-1)?.id !== declined.last) return false;
+    const run = this.operations.latest(declined.work, "run")?.state;
+    return !run || run.kind === "pending";
   }
   /** Up to three next requests the finished run offers; empty while it works. */
   get followups(): readonly string[] {
