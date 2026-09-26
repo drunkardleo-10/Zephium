@@ -180,58 +180,37 @@ Persisted recovery facts classify interruption after restart; they do not
 restore live executable state or fabricate a clean controller. Approval review
 requires fresh admission and never executes an old proposal.
 
-## Signed-in origin grants
+## Working as you
 
-Zephium never infers an account. A routine agent request may carry
-`WorkAgentGrantV1.accounts`: each entry names one exact HTTPS origin, an
-opaque account identity Rust minted when it drafted the approval
-(`WorkAccountApprovalRequestV1` with `mode: origin`), and a page budget of at
-most 12. The person's approval of "read pages on this origin as this account
-for this request, up to N pages" is the attestation; nothing observes or
-detects the account. A drafted grant is claimed once, by the next request of
-its work: an undrafted or already used grant is refused as `ReviewRequired`,
-and the grant ends with that request's execution.
+A run works on a site in the person's own browser session. The lead's
+`browse { start, goal, records }` becomes a page task: one Work-owned page on
+the start URL's site (its registrable domain), driven by the page agent
+(`AgentWorkDiscoveryTask` with the site-session scope and `SiteWorkPolicy`,
+at most 60 actions, 40 model calls and 8 minutes of its own time; time held
+for the person does not count). The document gate follows the site's own
+redirects and same-document routes and cancels page-initiated and cross-site
+loads without losing the page.
 
-Inside a granted origin the agent loop admits `read` directly. The page opens
-in a Work-owned page sharing the profile's cookies, the same construction
-`AccountRead` uses, counted against the budget and read with the same typed
-records as a public page. Every other read stays anonymous, in the run's own
-isolated storage; a signed-in page never joins the grouped anonymous pages and
-runs as its own lifetime. The engine refuses a load that leaves the approved
-document, so a redirect out of the origin ends the read as "The page left
-<host>", and subresources from other sites carry no cookies. A signed-in page is
-read-only: its page agent may only scroll, a path that names a change (sign
-out, delete, send, pay and the like) is refused before it opens, and either
-refusal reaches the model as `AccountWrite` with a notice to propose the
-change as a field update. `AccountUpdate` remains the only way to change
-anything on a signed-in page. Facts from a signed-in page never ride a search
-query, its title is not recorded, provider retention never applies to it, and
-diagnostics carry only the grant index, the path class, byte counts and
-outcome classes. The projection marks each such page (`WorkStepFact.account`)
-and the request's use of each origin (`WorkExecutionFact.accounts`).
+Before a run first works on a site where the profile holds cookies (a
+presence fact, never their contents), it asks once: Allow (this run), Always
+for the site (kept per profile, `WorkRequest::SiteAccess`), or Not now (the
+site is worked privately). Never and the closed list of sensitive sites
+(banks, password managers, health and tax portals; Ask at most) keep the
+session closed; a private run (`WorkAgentGrantV1.private`) uses the run's own
+storage everywhere. A plain `read` uses the session only on a site the run
+already works on as the person.
 
-A request can also state the intent itself. When a run is sent with
-attached or consented tabs and no accounts (`WorkOperationV1::Run` with
-`signed_in: offer`, the default), Rust asks the engine, for each tab whose
-host, site or vendor-table product the request names as a whole word,
-whether the profile's own website data holds cookies for that site. The
-answer is one closed fact per host, "signed-in session present" (also
-`WorkContextTabV1.signed_in` on consented tabs), never a cookie, a name or
-an account; it only decides whether to ask. For the first such tab Rust
-drafts the same origin grant `prepare` mode origin drafts and the run
-replies `account_grant_draft` instead of starting. The person's answer is
-the attestation: Allow sends the request again with that grant, Not now
-sends it with `signed_in: declined` and it reads anonymously. After an
-anonymous read meets a sign-in wall, the person can sign in in the pane and
-send the request with `signed_in: origin`, which drafts a grant for that
-origin to approve the same way. No grant exists without an approval, and
-the limits, the claim-once ledger and the read-only rules above apply
-unchanged.
-
-With the person's consent for one request, `WorkContextSelectionV1.tabs`
-lists the open tabs of the focused window as title, host and path (at most 60,
-never content or query). The agent sees them as `tabs`; reading one is
-anonymous unless its origin is granted.
+The page agent reads, navigates, searches, filters and fills drafts. A step
+Rust reads as committing (send, post, pay, book, delete, share, save, submit a
+non-search form, Enter in a composer, an edit that saves as it types) is held
+back and reported to the lead; confirmation is a later stage. Password and
+secret fields are never typed into. A sign-in wall (a password field or a
+sign-in form, read by Rust or raised by the page agent) holds the page for the
+person; the page continues by itself once their navigation settles back on the
+site, off any sign-in path. Facts from the person's pages never ride a search
+query, provider retention never applies to them, and diagnostics carry only
+the page kind and its path class. Origin grants, their page budget and the
+single-field update are retired; stored runs that used them still load.
 
 ## Artifact kinds
 
