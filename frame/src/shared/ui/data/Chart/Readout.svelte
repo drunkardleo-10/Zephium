@@ -1,23 +1,14 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import type { ChartEvidence } from "./chart";
-  import type { Readout } from "./geometry";
-  /** A plain popover: the point, its value, and the sources behind it. */
+  import type { Readout } from "./layer";
+  /** The tooltip's content: the point, its value, and the sources behind it. */
   let {
     readout,
-    left,
-    top,
-    align,
-    below,
     onevidence,
     glyph,
   }: {
     readout: Readout;
-    /** Percentages of the plot box, so the popover follows the plot's own scale. */
-    left: number;
-    top: number;
-    align: "start" | "middle" | "end";
-    below: boolean;
     onevidence?: (reference: ChartEvidence) => void;
     glyph?: Snippet<[ChartEvidence]>;
   } = $props();
@@ -28,14 +19,7 @@
       .toLocaleUpperCase();
 </script>
 
-<div
-  class="tip"
-  class:start={align === "start"}
-  class:end={align === "end"}
-  class:below
-  style:left={`${left}%`}
-  style:top={`${top}%`}
->
+<div class="tip">
   <span class="title">{readout.title}</span>
   {#each readout.rows as row, index (index)}
     <span class="row">
@@ -68,32 +52,16 @@
 
 <style>
   .tip {
-    position: absolute;
-    z-index: 1;
     display: flex;
     flex-direction: column;
     gap: 3px;
     max-inline-size: 240px;
     padding: 6px 10px;
-    border-radius: var(--radius-control-compact);
+    border-radius: var(--radius-control);
     background: var(--color-float);
-    box-shadow: var(--shadow-float);
+    box-shadow: var(--shadow-control);
     color: var(--color-text);
     font-size: var(--text-caption);
-    transform: translate(-50%, calc(-100% - 8px));
-    animation: arrive var(--motion-fast) var(--ease-smooth) both;
-  }
-
-  .tip.start {
-    transform: translate(-12px, calc(-100% - 8px));
-  }
-
-  .tip.end {
-    transform: translate(calc(-100% + 12px), calc(-100% - 8px));
-  }
-
-  .tip.below {
-    translate: 0 calc(100% + 20px);
   }
 
   .title {
@@ -168,12 +136,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  @keyframes arrive {
-    from {
-      opacity: 0;
-    }
   }
 
   .chip:hover:not(:disabled) {

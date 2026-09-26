@@ -75,7 +75,7 @@ test("a Work chart of quoted ranges draws range bars and hands back the owner's 
   await expect
     .element(screen.getByRole("img", { name: /Builder; Quote\. Range chart/u }))
     .toBeInTheDocument();
-  expect(screen.container.querySelectorAll("path.bar")).toHaveLength(2);
+  await expect.poll(() => screen.container.querySelectorAll(".mark.bar").length).toBe(2);
   await expect.element(screen.getByText("Basis: Written quotes", { exact: true })).toBeVisible();
   await screen.getByText("Exact values", { exact: true }).click();
   await expect.element(screen.getByRole("cell", { name: "$3,000–8,000" })).toBeVisible();
