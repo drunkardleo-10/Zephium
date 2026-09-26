@@ -120,7 +120,6 @@ test("seven subjects with picture candidates all end up with a picture", async (
   const environment = new WorkEnvironmentSession(profile, snapshot.space);
   environment.snapshot = snapshot;
   environment.selected = snapshot.id;
-  environment.tabsIntroduced = true;
   native.resource.mockResolvedValue({ profile, response: { kind: "error", error: "not_found" } });
   native.call.mockImplementation(async (_profile: string, call: WorkCallV1) => {
     if (call.kind === "query")
@@ -194,10 +193,8 @@ test("seven subjects with picture candidates all end up with a picture", async (
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: false,
-    onreturn: vi.fn(),
     onopen: vi.fn(),
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const pictured = () =>
     names.filter((_, index) =>

@@ -3,6 +3,7 @@ import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import { WorkEnvironmentSession } from "$domain/work-environment";
+import * as tools from "$session/tools.svelte";
 import type { WorkCallV1, WorkRuntimeProjection } from "$shared/ipc/bindings";
 import WorkEnvironmentWorkspace from "../components/WorkEnvironmentWorkspace.svelte";
 import { documentMarkdown } from "../lib/work-notes";
@@ -14,6 +15,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     workCall: native.work,
     noteCall: native.note,
     resourceCall: native.resource,
+    sidebarSetWidth: async () => {},
   });
 });
 
@@ -60,7 +62,6 @@ async function workspace(edit?: (state: WorkRuntimeProjection) => void) {
   const environment = new WorkEnvironmentSession(snapshot.profile, snapshot.space);
   environment.snapshot = structuredClone(snapshot);
   environment.selected = snapshot.id;
-  environment.tabsIntroduced = true;
   const objective = workSession(snapshot.profile)!;
   vi.spyOn(objective, "start").mockResolvedValue();
   vi.spyOn(objective, "open").mockImplementation(async (id: string) => {
@@ -75,10 +76,8 @@ async function workspace(edit?: (state: WorkRuntimeProjection) => void) {
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: true,
-    onreturn: vi.fn(),
     onopen: vi.fn(),
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";
@@ -120,7 +119,9 @@ test("a document result is saved as a note only when asked, and then opens it", 
   await expect.element(next).not.toBeInTheDocument();
   await screen.getByRole("button", { name: "Open note", exact: true }).click();
   await expect.element(lift).not.toBeInTheDocument();
-  await expect.element(screen.getByRole("region", { name: "Notes" })).toBeVisible();
+  // The note opens in the sidebar's Notes, beside the canvas.
+  expect(tools.activeTool()).toBe("notes");
+  tools.close();
   await close();
 });
 

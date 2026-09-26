@@ -132,17 +132,14 @@ test("a page waiting for a person is taken over in the pane, handed back, and re
   const session = new WorkEnvironmentSession(PROFILE, scene.space);
   session.snapshot = snapshot;
   session.selected = scene.id;
-  session.tabsIntroduced = true;
   const screen = await render(WorkEnvironmentWorkspace, {
     session,
     tabs: [],
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: false,
-    onreturn: vi.fn(),
     onopen: vi.fn(),
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";

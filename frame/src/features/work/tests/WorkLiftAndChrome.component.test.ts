@@ -1,5 +1,4 @@
 import "$styles/global.css";
-import { createRawSnippet } from "svelte";
 import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
@@ -10,7 +9,6 @@ import Findings from "$shared/ui/data/Artifact/Findings.svelte";
 import WorkSubjectInspector from "../components/WorkSubjectInspector.svelte";
 import FindingsLift from "../components/FindingsLift.svelte";
 import Compare from "../components/compare/Compare.svelte";
-import TasksCapsule from "../components/chrome/TasksCapsule.svelte";
 import ObjectiveCard from "../components/cards/ObjectiveCard.svelte";
 import { compareModel } from "../lib/compare";
 import { requestSize } from "../lib/card-size";
@@ -124,25 +122,6 @@ test("the table lift sorts by a header, marks the best price and copies CSV", as
     'Plan,Price,Region\r\nStarter,$300,Amsterdam\r\nTeam,$90,berlin\r\nPro,"$1,200",Oslo',
   );
   writeText.mockRestore();
-  await screen.unmount();
-});
-
-test("the tasks pill says how many are done and opens their panel under it", async () => {
-  await page.viewport(900, 700);
-  const screen = await render(TasksCapsule, {
-    done: 3,
-    total: 8,
-    open: false,
-    panel: createRawSnippet(() => ({ render: () => "<p>Buy the bricks</p>" })),
-    onopenchange: (next: boolean) => void screen.rerender({ open: next }),
-  });
-  const pill = screen.getByRole("button", { name: "Tasks: 3 of 8 done" });
-  await expect.element(pill).toHaveTextContent("3 of 8");
-  expect(pill.element().getBoundingClientRect().height).toBeLessThanOrEqual(28);
-  await pill.click();
-  await expect.element(page.getByText("Buy the bricks")).toBeVisible();
-  const panel = page.getByText("Buy the bricks").element().getBoundingClientRect();
-  expect(panel.top).toBeGreaterThan(pill.element().getBoundingClientRect().bottom);
   await screen.unmount();
 });
 

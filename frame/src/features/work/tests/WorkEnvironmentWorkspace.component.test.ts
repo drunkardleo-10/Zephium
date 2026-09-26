@@ -113,21 +113,20 @@ test("the production manual environment attaches a real tab, opens it in the pan
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: false,
-    onreturn: vi.fn(),
     onopen,
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";
   root.style.width = "1100px";
+  await screen.getByRole("button", { name: "Page or tab", exact: true }).click();
   await screen.getByRole("checkbox", { name: /Research tab/ }).click();
   await screen.getByRole("button", { name: "Add to Work (1)" }).click();
   await expect
     .poll(() => session.snapshot?.elements[0]?.reference)
     .toEqual({ kind: "browser", tab: "retained-tab" });
   expect(onopen).not.toHaveBeenCalled();
-  await screen.getByRole("button", { name: "Tabs", exact: true }).click();
+  await screen.getByRole("button", { name: "Page or tab", exact: true }).click();
   await expect.poll(() => screen.container.querySelectorAll(".work-drag-handle").length).toBe(1);
   await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
   await screen.getByRole("button", { name: "Open", exact: true }).click();
@@ -166,7 +165,6 @@ test("opening an objective lifts it over the canvas and returns on close", async
   const environment = new WorkEnvironmentSession(snapshot.profile, snapshot.space);
   environment.snapshot = structuredClone(snapshot);
   environment.selected = snapshot.id;
-  environment.tabsIntroduced = true;
   const objective = workSession(snapshot.profile)!;
   vi.spyOn(objective, "start").mockResolvedValue();
   vi.spyOn(objective, "open").mockImplementation(async () => {
@@ -185,10 +183,8 @@ test("opening an objective lifts it over the canvas and returns on close", async
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: false,
-    onreturn: vi.fn(),
     onopen: vi.fn(),
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";
@@ -214,7 +210,6 @@ test("a real attached objective expands its historical responsibilities directly
   const environment = new WorkEnvironmentSession("graph-profile", snapshot.space);
   environment.snapshot = { ...structuredClone(snapshot), profile: "graph-profile" };
   environment.selected = snapshot.id;
-  environment.tabsIntroduced = true;
   native.call.mockImplementation((_profile: string, call: WorkCallV1) => {
     if (call.kind === "query")
       return {
@@ -286,10 +281,8 @@ test("a real attached objective expands its historical responsibilities directly
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: false,
-    onreturn: vi.fn(),
     onopen: vi.fn(),
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";
@@ -326,7 +319,6 @@ test("prompt submission keeps work on canvas and clarification choices above the
   const { projection, snapshot } = await import("./environment-fixtures");
   const environment = new WorkEnvironmentSession("interaction-profile", "space");
   environment.snapshot = { ...snapshot, profile: "interaction-profile", elements: [] };
-  environment.tabsIntroduced = true;
   const objective = workSession("interaction-profile")!;
   vi.spyOn(objective, "start").mockResolvedValue();
   vi.spyOn(objective, "open").mockResolvedValue(true);
@@ -364,10 +356,8 @@ test("prompt submission keeps work on canvas and clarification choices above the
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: true,
-    onreturn: vi.fn(),
     onopen: vi.fn(),
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "600px";
@@ -425,12 +415,12 @@ test("prompt submission keeps work on canvas and clarification choices above the
   objective.projection = { ...objective.projection!, executions: [asking] };
   await screen.getByRole("button", { name: "Answer", exact: true }).click();
   await screen.getByRole("button", { name: "Under 150", exact: true }).click();
-  // One field, two meanings: the same composer now continues the work it started.
+  // One field, two meanings: while the run asks, the same field adds to it.
   await expect
-    .element(screen.getByRole("textbox", { name: "Message the agent…", exact: true }))
+    .element(screen.getByRole("textbox", { name: "Add to this…", exact: true }))
     .toBeVisible();
   const question = screen.container.querySelector(".agent-line input")!;
-  const prompt = screen.container.querySelector(".panel textarea")!;
+  const prompt = screen.container.querySelector(".work-bar textarea")!;
   expect(question.compareDocumentPosition(prompt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(question.getBoundingClientRect().bottom).toBeLessThan(prompt.getBoundingClientRect().top);
   const answerStep = vi.spyOn(objective, "answerStep").mockResolvedValue(true);
@@ -471,10 +461,9 @@ test("prompt submission keeps work on canvas and clarification choices above the
       search_call_id: "search-call",
     },
   });
-  // The zoom capsule and the tasks pill sit in the top row, not over the canvas.
-  const chrome = screen.container.querySelector("[data-zephium-work-chrome]")!;
-  expect(chrome.querySelector("[data-work-zoom-slot] [role='group']")).not.toBeNull();
-  expect(chrome.querySelector(".work-tasks-pill")).not.toBeNull();
+  // The zoom reads at the canvas's bottom edge; the canvas draws no top toolbar.
+  expect(screen.container.querySelector("[data-work-zoom-slot] [role='group']")).not.toBeNull();
+  expect(screen.container.querySelector("[data-zephium-work-chrome]")).toBeNull();
   await screen.getByRole("button", { name: "Fit view", exact: true }).click();
   await expect.element(screen.getByText("Reviewed findings", { exact: true })).toBeVisible();
   expect(screen.container.querySelector(".detail")).toBeNull();
@@ -497,7 +486,7 @@ test("prompt submission keeps work on canvas and clarification choices above the
     .poll(() => screen.container.querySelector(".agent-line.settled") !== null)
     .toBe(true);
   await expect
-    .poll(() => screen.container.querySelector(".above")!.getBoundingClientRect().height)
+    .poll(() => screen.container.querySelector(".line-slot")!.getBoundingClientRect().height)
     .toBeLessThan(110);
   await screen.getByRole("button", { name: "View 1 other results", exact: true }).click();
   await expect

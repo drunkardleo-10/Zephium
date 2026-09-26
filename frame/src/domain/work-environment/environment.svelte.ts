@@ -30,7 +30,6 @@ export class WorkEnvironmentSession {
   delivery = $state<"ready" | "pending" | "unknown" | "conflict" | "rejected">("ready");
   failure = $state<string | null>(null);
   loading = $state(false);
-  tabsIntroduced = false;
   /** The Work whose run the canvas last saw live; the sidebar marks its row. */
   running = $state<string | null>(null);
   remoteView = $state.raw<{ sequence: number; view: WorkEnvironmentView } | null>(null);

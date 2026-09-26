@@ -106,7 +106,6 @@ test("Area from a selection creates the area, moves every selected element in, a
   const session = new WorkEnvironmentSession(profile, space);
   session.snapshot = snapshot;
   session.selected = snapshot.id;
-  session.tabsIntroduced = true;
   const screen = await render(WorkEnvironmentWorkspace, {
     session,
     tabs: [
@@ -116,10 +115,8 @@ test("Area from a selection creates the area, moves every selected element in, a
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: true,
-    onreturn: vi.fn(),
     onopen: vi.fn(),
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";

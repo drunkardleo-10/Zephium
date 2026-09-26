@@ -138,17 +138,14 @@ test("a decision is recorded on the element, shown on the card, and disclosed as
   const session = new WorkEnvironmentSession(profile, space);
   session.snapshot = snapshot;
   session.selected = snapshot.id;
-  session.tabsIntroduced = true;
   const screen = await render(WorkEnvironmentWorkspace, {
     session,
     tabs: [tabFixture({ id: "tab-1", title: "Keychron K2" })],
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: true,
-    onreturn: vi.fn(),
     onopen: vi.fn(),
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";

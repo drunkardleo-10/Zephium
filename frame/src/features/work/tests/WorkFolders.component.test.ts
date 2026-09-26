@@ -103,17 +103,14 @@ test("a Finder drop admits its folders, keeps quiet about the files beside them,
   const session = new WorkEnvironmentSession(profile, space);
   session.snapshot = snapshot;
   session.selected = snapshot.id;
-  session.tabsIntroduced = true;
   const screen = await render(WorkEnvironmentWorkspace, {
     session,
     tabs: [],
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: false,
-    onreturn: vi.fn(),
     onopen: vi.fn(),
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";

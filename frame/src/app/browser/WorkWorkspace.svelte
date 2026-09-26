@@ -50,13 +50,8 @@
             profileLabel={tabs.profile()?.name ?? ""}
             currentTabId={tabs.activeId()}
             aiEnabled={preferences.value("ai.enabled") !== "false"}
-            onreturn={() =>
-              void owner.flushView().then(() => {
-                void surface.open(null);
-              })}
             onopen={(id: string) => void browse(id)}
             onnewtab={() => void browse()}
-            onsettings={() => void surface.open("settings")}
           />{/snippet}</LazyView
       >
     {/key}{:else}<p>{m.work_regular_profile()}</p>{/if}

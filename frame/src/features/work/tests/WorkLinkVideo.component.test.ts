@@ -55,7 +55,6 @@ test("a video link admits its thumbnail as its picture and plays in the pane", a
   const environment = new WorkEnvironmentSession(profile, snapshot.space);
   environment.snapshot = snapshot;
   environment.selected = snapshot.id;
-  environment.tabsIntroduced = true;
   native.call.mockImplementation(async (_profile: string, _call: WorkCallV1) => ({
     version: 1,
     profile,
@@ -123,10 +122,8 @@ test("a video link admits its thumbnail as its picture and plays in the pane", a
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: false,
-    onreturn: vi.fn(),
     onopen: vi.fn(),
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";

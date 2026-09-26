@@ -195,17 +195,14 @@ async function ask(profile: string, attached: boolean, earlier = false) {
   const environment = new WorkEnvironmentSession(profile, "space");
   environment.snapshot = snapshot;
   environment.selected = snapshot.id;
-  environment.tabsIntroduced = true;
   const screen = await render(WorkEnvironmentWorkspace, {
     session: environment,
     tabs: [tabFixture({ id: "slack-tab", title: "Slack", url: "https://app.slack.com/client/T1" })],
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: true,
-    onreturn: vi.fn(),
     onopen: vi.fn(),
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";

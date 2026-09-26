@@ -16,7 +16,6 @@ test("the lift grows from the card it was opened on, even with another card on t
   const environment = new WorkEnvironmentSession(snapshot.profile, snapshot.space);
   environment.snapshot = structuredClone(snapshot);
   environment.selected = snapshot.id;
-  environment.tabsIntroduced = true;
   const objective = workSession(snapshot.profile)!;
   vi.spyOn(objective, "start").mockResolvedValue();
   vi.spyOn(objective, "open").mockImplementation(async () => {
@@ -35,10 +34,8 @@ test("the lift grows from the card it was opened on, even with another card on t
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: false,
-    onreturn: vi.fn(),
     onopen: vi.fn(),
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";

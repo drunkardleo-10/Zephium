@@ -5,6 +5,8 @@
   import { commandId, workSession, type WorkSession } from "$domain/work";
   import { taskSession } from "$domain/resources";
   import { noteSession } from "$domain/notes";
+  import * as toolHost from "$session/tools.svelte";
+  import { editTool, toolSession } from "$session/tool-drafts.svelte";
   import type {
     TabView,
     WorkHumanAccountV1,
@@ -23,35 +25,27 @@
   import { layout } from "$domain/layout";
   import { workPane, type WorkPaneRect, type WorkPaneTarget } from "$domain/work-pane";
   import { WorkHumanSession, type WorkHumanFailure } from "$domain/work-human";
-  import { preferences } from "$domain/preferences";
-  import { loadNotes, loadNoteHost } from "$features/notes";
-  import { loadTasks } from "$features/tasks";
-  import { IS_MAC } from "$shared/platform";
+  import { loadNoteHost } from "$features/notes";
   import Button from "$shared/ui/Button";
-  import Icon from "$shared/ui/Icon";
   import LazyView from "$shared/ui/LazyView";
   import {
-    Archive01Icon,
-    ArrowLeft02Icon,
-    ChartColumnIcon,
+    SquareDashedTopSolidIcon,
+    BrowserIcon,
     ComputerTerminal01Icon,
     File01Icon,
     FolderAddIcon,
     GlobalIcon,
     Image01Icon,
-    LayoutGridIcon,
-    Link04Icon,
-    MapsIcon,
-    NoteAddIcon,
+    Image02Icon,
     Pdf01Icon,
-    Search01Icon,
-    Settings02Icon,
-    Table01Icon,
-    Tick02Icon,
+    PlusSignIcon,
+    StickyNote03Icon,
   } from "../lib/icons";
-  import WorkChrome from "./chrome/WorkChrome.svelte";
-  import TasksCapsule from "./chrome/TasksCapsule.svelte";
-  import Composer from "./composer/Composer.svelte";
+  import WorkBar from "./bar/WorkBar.svelte";
+  import BarTool from "./bar/BarTool.svelte";
+  import AttachPanel, { type AttachKind } from "./bar/AttachPanel.svelte";
+  import AreaPanel from "./bar/AreaPanel.svelte";
+  import CanvasTitle from "./top/CanvasTitle.svelte";
   import ContextManifest from "./composer/ContextManifest.svelte";
   import AccountScopeChip from "./composer/AccountScopeChip.svelte";
   import OpenTabsChip from "./composer/OpenTabsChip.svelte";
@@ -105,7 +99,7 @@
   import { environmentResults, type ResultReference } from "../lib/project-environment-results";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import type { CanvasView, CanvasItem, CanvasPosition } from "../lib/canvas-model";
-  import type { WorkEnvironmentPanel } from "../lib/work-environment";
+  import { currentModel } from "../lib/model-name";
   import * as m from "$shared/i18n/messages";
   let {
     session,
@@ -114,10 +108,8 @@
     profileLabel,
     currentTabId = null,
     aiEnabled = true,
-    onreturn,
     onopen,
     onnewtab,
-    onsettings,
   }: {
     session: WorkEnvironmentSession;
     tabs: readonly TabView[];
@@ -126,11 +118,9 @@
     /** The Space's current tab, so the picker reads like its tab strip. */
     currentTabId?: string | null;
     aiEnabled?: boolean;
-    onreturn: () => void;
     /** Explicit Browse handoff for one Space tab; the pane is the default way to look at a page. */
     onopen: (id: string) => void;
     onnewtab: () => void;
-    onsettings: () => void;
   } = $props();
   const context = untrack(() => new WorkEnvironmentContext(session.profile));
   onMount(() => {
@@ -146,22 +136,12 @@
   $effect(() => {
     human.update([...context.objectives.keys()]);
   });
-  onMount(() => {
-    session.tabsIntroduced = true;
-  });
   const notesHost = $derived(`environment:${session.space}`);
   const notes = untrack(() => noteSession(session.profile, notesHost));
   onMount(() => {
     void notes?.start();
     return () => notes?.stop();
   });
-  const taskList = untrack(() => taskSession(session.profile, `environment:${session.space}`));
-  onMount(() => {
-    void taskList.start();
-    return () => taskList.stop();
-  });
-  /** What the panel lists: its own scope, or every task once a step opens one. */
-  let tasksScope = $state<"today" | "all">("today");
   // Steps read their tasks from a session of their own, whose scope never changes.
   const stepTaskSession = untrack(() => taskSession(session.profile, `work:${session.space}`));
   onMount(() => {
@@ -281,7 +261,7 @@
     openPane({ kind: "url", url: reference.url }, id);
   }
   function lift(id: string) {
-    chrome?.close();
+    panel = null;
     inspected = null;
     lifted = { id, origin: canvasRef?.screenRect(id) ?? null };
     if (snapshot?.elements.find((element) => element.id === id)?.reference.kind === "subject")
@@ -332,7 +312,7 @@
     }
   });
   function openPane(target: WorkPaneTarget, originId: string | null, account?: string) {
-    chrome?.close();
+    panel = null;
     lifted = null;
     endTakeover(true);
     const restore =
@@ -456,7 +436,7 @@
       ),
     )?.[0];
     if (!work) return;
-    chrome?.close();
+    panel = null;
     lifted = null;
     inspected = null;
     closePane();
@@ -554,16 +534,13 @@
       }
     }
   }
-  let notesOpen = $state(false);
-  let tasksOpen = $state(false);
-  let title = $state("");
-  let workQuery = $state("");
-  let areaTitle = $state("");
+  /** The bar's one open panel: a tool's, or the field's own attach. */
+  let panel = $state<"area" | "tabs" | "media" | "attach" | null>(null);
+  let attachKind = $state<AttachKind>("tabs");
   let objectivePending = $state(false);
   let composerFailure = $state<"account" | null>(null);
   let composerElement = $state<HTMLElement>();
   let composerHeight = $state(0);
-  let chrome = $state<WorkChrome>();
   $effect(() => {
     const element = composerElement;
     if (!element) {
@@ -576,12 +553,6 @@
     observer.observe(element);
     return () => observer.disconnect();
   });
-  let archived = $state(false);
-  let mediaKind = $state<"document" | "image" | "link" | "folder">("document");
-  let linkDraft = $state("");
-  let linkPending = $state(false);
-  let linkFailure = $state(false);
-  let folderDraft = $state("");
   let folderPending = $state(false);
   let folderRefused = $state(false);
   let folderNotice: ReturnType<typeof setTimeout> | undefined;
@@ -625,7 +596,7 @@
         refuseFolder();
         return;
       }
-      if (await placeFolder(chosen.data, null)) chrome?.close();
+      if (await placeFolder(chosen.data, null)) panel = null;
     } finally {
       folderPending = false;
     }
@@ -637,7 +608,7 @@
   /** Adds an element and stands it where the person put it, or in the middle. */
   async function place(
     reference: WorkEnvironmentReference,
-    type: "folder" | "link",
+    type: CanvasItem["type"],
     at: CanvasPosition | null,
   ) {
     if (session.snapshot && elementFor(session.snapshot, reference)) return true;
@@ -714,22 +685,12 @@
     }
   }
   /** A pasted link becomes a card of its own; it opens in the pane, like a source. */
-  async function addLink() {
-    const url = linkUrl(linkDraft);
-    if (!url || linkPending || busy) return;
-    linkPending = true;
-    linkFailure = false;
-    try {
-      const title = host(url);
-      if (!(await place({ kind: "link", url, title }, "link", null))) {
-        linkFailure = true;
-        return;
-      }
-      linkDraft = "";
-      chrome?.close();
-    } finally {
-      linkPending = false;
-    }
+  async function addLink(raw: string) {
+    const url = linkUrl(raw);
+    if (!url || busy) return false;
+    if (!(await place({ kind: "link", url, title: host(url) }, "link", null))) return false;
+    panel = null;
+    return true;
   }
   function host(url: string): string {
     try {
@@ -1176,14 +1137,15 @@
     probedOrigins[origin] = true;
     void commands.faviconProbe(session.profile, [origin]).catch(() => false);
   });
-  /** A step's task opens in the Tasks panel, listed whatever its day. */
+  /** A step's task opens in the sidebar's Tasks, listed whatever its day. */
   function openTask(id: string) {
-    chrome?.close();
+    panel = null;
     lifted = null;
-    tasksScope = "all";
-    taskList.selectedId = id;
-    void taskList.load(id);
-    tasksOpen = true;
+    editTool(toolSession("sidebar", session.profile, "tasks"), { filter: "all" });
+    const tasks = taskSession(session.profile, "sidebar");
+    tasks.selectedId = id;
+    toolHost.open("tasks");
+    void tasks.load(id);
   }
   const workNotes = new WorkNotes();
   /** A document result written as the person's note, only when they ask. */
@@ -1194,11 +1156,12 @@
     if (!reference || !markdown) return;
     await workNotes.save(resultKey(reference), markdown, notes);
   }
+  /** A kept note opens in the sidebar's Notes, beside the canvas. */
   function openNote(id: string) {
-    chrome?.close();
+    panel = null;
     lifted = null;
-    notesOpen = true;
-    void notes?.open(id);
+    toolHost.open("notes");
+    void noteSession(session.profile, "sidebar")?.requestOpen(id);
   }
   /** Save as note until the note exists, then Open note. */
   function noteAction(id: string): LiftAction | undefined {
@@ -1379,7 +1342,6 @@
     objectiveSession = current;
     await current.start();
     if (!(await current.open(reference.objective))) return;
-    notesOpen = false;
     liftSource = source;
     lift(id);
   }
@@ -1550,34 +1512,22 @@
       )
         break;
     }
-    chrome?.close();
+    panel = null;
   }
-  async function attachNote() {
-    const environmentId = session.snapshot?.id;
-    const current = notes;
-    if (
-      !current ||
-      !(await current.flush()) ||
-      !current.note?.id ||
-      environmentId !== session.snapshot?.id
-    )
-      return;
-    await session.edit({
-      kind: "add",
-      reference: { kind: "resource", resource: current.note.id },
-      area: null,
-    });
-  }
+  /** A new note joins the canvas and opens over it, ready to write in. */
   async function createNote() {
     const current = notes;
-    if (!current) return;
+    const environment = session.snapshot?.id;
+    if (!current || busy) return;
     await current.start();
     // A note has no file, and so no identity to attach, until it has text.
     await current.create(`# ${m.note_untitled()}\n`);
-    if (!current.note?.id) return;
-    await attachNote();
-    chrome?.close();
-    notesOpen = true;
+    const id = current.note?.id;
+    if (!id || !(await current.flush()) || environment !== session.snapshot?.id) return;
+    const reference = { kind: "resource" as const, resource: id };
+    if (!(await place(reference, "link", null))) return;
+    const element = session.snapshot ? elementFor(session.snapshot, reference) : undefined;
+    if (element) lift(element.id);
   }
   /** The work this canvas is already talking to, if its request card is here. */
   const runningObjective = $derived(
@@ -1865,11 +1815,6 @@
     )
       session.checkpoint(next);
   }
-  async function closeNotes() {
-    if (!notes || (await notes.flush())) notesOpen = false;
-  }
-  const taskItems = $derived(taskList.rows);
-  const tasksDone = $derived(taskItems.filter((task) => task.status === "done").length);
   const activeExecution = $derived.by(() => {
     const projection = objectiveSession?.projection;
     return !!projection?.executions.some((execution) => isLive(projection, execution));
@@ -1886,24 +1831,13 @@
   const needsDecision = $derived(
     !!objectiveSession?.projection?.work.questions.some((question) => question.state === "active"),
   );
-  const visibleWorks = $derived(
-    session.works.filter(
-      (work) =>
-        (work.lifecycle === "archived") === archived &&
-        work.title.toLocaleLowerCase().includes(workQuery.trim().toLocaleLowerCase()),
-    ),
-  );
   /** One click makes an Area: around the selection when there is one. */
   async function createArea(title: string = m.work_env_area()) {
     const name = title.trim() || m.work_env_area();
-    if (selectionCount > 0) {
-      await groupSelection(name);
-      return;
-    }
-    if (await session.edit({ kind: "create_area", title: name })) {
-      areaTitle = "";
-      chrome?.close();
-    }
+    if (selectionCount > 0) return groupSelection(name);
+    if (!(await session.edit({ kind: "create_area", title: name }))) return false;
+    panel = null;
+    return true;
   }
   const ownedElements = (ids: readonly string[]) =>
     ids.filter((id) => snapshot?.elements.some((element) => element.id === id));
@@ -1911,19 +1845,20 @@
   async function groupSelection(title: string, ids: readonly string[] = selectedIds) {
     const bounds = canvasRef?.selectionBounds(ownedElements(ids));
     const current = snapshot;
-    if (!bounds || !current || !title.trim()) return;
-    if (!(await session.flushView())) return;
-    if (!(await session.edit({ kind: "create_area", title: title.trim() }))) return;
+    if (!bounds || !current || !title.trim()) return false;
+    if (!(await session.flushView())) return false;
+    if (!(await session.edit({ kind: "create_area", title: title.trim() }))) return false;
     const created = session.snapshot?.areas.find(
       (area) => !current.areas.some((known) => known.id === area.id),
     );
-    if (!created) return;
+    if (!created) return false;
     const { ids: members, ...rect } = bounds;
     canvasRef?.placeArea(created.id, rect);
     for (const id of members)
-      if (!(await session.edit({ kind: "assign_area", element: id, area: created.id }))) return;
-    areaTitle = "";
-    chrome?.close();
+      if (!(await session.edit({ kind: "assign_area", element: id, area: created.id })))
+        return false;
+    panel = null;
+    return true;
   }
   async function selectionAction(action: "area" | "ask" | "remove", ids: string[]) {
     const owned = ownedElements(ids);
@@ -1964,378 +1899,181 @@
     if (!(await source.work.saveArtifact(source.artifact.id)))
       source.work.discardArtifact(source.artifact.id);
   }
-  function onPanelChange(panel: WorkEnvironmentPanel | null) {
-    session.tabsIntroduced = true;
-    if (panel === "notes") notesOpen = false;
+  /** Opens one of the bar's panels; the tab and media tools open the attach panel on their kind. */
+  function openPanel(next: typeof panel, open: boolean) {
+    if (!open) {
+      if (panel === next) panel = null;
+      return;
+    }
+    if (next === "tabs") attachKind = "tabs";
+    if (next === "media" && (attachKind === "tabs" || !attachKind)) attachKind = "document";
+    panel = next;
   }
+  const model = $derived(currentModel(objectiveSession?.projection));
+  const grantOpen = $derived(
+    runningObjective && !!(objectiveSession?.grantDraft || objectiveSession?.grantDeclined),
+  );
+  /** The run on this canvas is going, or waits on the person: the bar is its line. */
+  const lineRunning = $derived(
+    runningObjective && (activeExecution || needsDecision || !!agentWaiting),
+  );
+  const runStatus = $derived(
+    runningObjective && needsDecision
+      ? m.work_env_needs_you()
+      : runningObjective && activeExecution
+        ? m.work_env_working()
+        : null,
+  );
+  // A different project on the canvas starts with nothing lifted or open over it.
+  let shownProject: string | undefined;
+  $effect(() => {
+    const id = snapshot?.id;
+    untrack(() => {
+      if (shownProject !== undefined && id !== shownProject) {
+        inspected = null;
+        lifted = null;
+        panel = null;
+      }
+      shownProject = id;
+    });
+  });
 </script>
 
-{#snippet tabPanel()}<WorkTabPicker
-    {tabs}
-    {openTabs}
-    onopentabs={(on: boolean) => (openTabs = on)}
-    {spaceName}
-    {currentTabId}
-    attachedTabIds={attachedTabs}
-    pending={busy}
-    onattach={(ids) => void attach(ids)}
-    onopen={(id) => openPane({ kind: "tab", id }, null)}
-    {onnewtab}
-  />{/snippet}
-{#snippet switcher()}
-  <div class="menu">
-    <button type="button" class="menu-row" onclick={onreturn}>
-      <span class="menu-icon"><Icon icon={ArrowLeft02Icon} /></span>{m.work_env_return()}
-    </button>
-    <div class="menu-separator"></div>
-    <label class="menu-search">
-      <Icon icon={Search01Icon} size={14} />
-      <input
-        type="search"
-        placeholder={m.work_env_search_works()}
-        bind:value={workQuery}
-        aria-label={m.work_env_search_works()}
-      />
-    </label>
-    <div class="menu-heading">{archived ? m.work_archived() : m.work_env_recent()}</div>
-    <ul class="menu-list">
-      {#each visibleWorks as work (work.id)}<li>
-          <button
-            type="button"
-            class="menu-row"
-            class:selected={snapshot?.id === work.id}
-            disabled={busy}
-            onclick={() => {
-              inspected = null;
-              void session.open(work.id);
-              chrome?.close();
-            }}
-            ><span class="menu-check"
-              >{#if snapshot?.id === work.id}<Icon icon={Tick02Icon} size={14} />{/if}</span
-            >{work.title}</button
-          >
-        </li>{:else}<li class="menu-empty">{m.work_env_no_works()}</li>{/each}
-      {#if session.next && session.works.length < 256}<li>
-          <button type="button" class="menu-row quiet" onclick={() => void session.reload(true)}
-            >{m.resource_more()}</button
-          >
-        </li>{/if}
-    </ul>
-    <div class="menu-separator"></div>
-    <form
-      class="menu-create"
-      onsubmit={(event) => {
-        event.preventDefault();
-        if (title.trim())
-          void session.create(title.trim()).then((okay) => {
-            if (okay) {
-              title = "";
-              chrome?.close();
-            }
-          });
-      }}
-    >
-      <input
-        aria-label={m.work_env_work_title()}
-        bind:value={title}
-        maxlength="128"
-        placeholder={m.work_env_new_work()}
-        disabled={busy}
-      /><Button type="submit" size="compact" disabled={busy || !title.trim()}
-        >{m.work_env_create()}</Button
-      >
-    </form>
-    <button type="button" class="menu-row quiet" onclick={() => (archived = !archived)}>
-      <span class="menu-icon"><Icon icon={Archive01Icon} /></span>{archived
-        ? m.work_env_recent()
-        : m.work_archived()}
-    </button>
-    {#if snapshot}<button
-        type="button"
-        class="menu-row quiet"
-        disabled={busy}
-        onclick={() =>
-          void session.edit({
-            kind: "set_lifecycle",
-            lifecycle: snapshot.lifecycle === "active" ? "archived" : "active",
-          })}
-        >{snapshot.lifecycle === "active" ? m.work_env_archive() : m.work_env_restore()}</button
-      >{/if}
-  </div>
-{/snippet}
-{#snippet createPanel()}
-  <div class="palette" role="group" aria-label={m.work_env_components()}>
-    {@render component(Table01Icon, m.work_env_component_table())}
-    {@render component(ChartColumnIcon, m.work_env_component_chart())}
-    {@render component(MapsIcon, m.work_env_component_map())}
-    {@render component(LayoutGridIcon, m.work_env_area(), () => void createArea())}
-  </div>
-{/snippet}
-{#snippet component(
-  icon: typeof Table01Icon,
-  label: string,
-  onchoose: (() => void) | undefined = undefined,
-)}
-  <button type="button" class="menu-row" disabled={!onchoose || busy} onclick={onchoose}>
-    <span class="menu-icon"><Icon {icon} /></span>{label}{#if !onchoose}<span class="soon"
-        >{m.work_env_component_soon()}</span
-      >{/if}
-  </button>
-{/snippet}
-{#snippet areaPanel()}
-  <div class="menu">
-    <div class="menu-heading">{m.work_env_new_area_hint()}</div>
-    <form
-      class="menu-create"
-      onsubmit={(event) => {
-        event.preventDefault();
-        if (!areaTitle.trim()) return;
-        void createArea(areaTitle);
-      }}
-    >
-      <span class="menu-icon"><Icon icon={FolderAddIcon} /></span>
-      <input
-        aria-label={m.work_env_new_area()}
-        bind:value={areaTitle}
-        maxlength="128"
-        placeholder={m.work_env_area()}
-        disabled={busy}
-      /><Button type="submit" size="compact" disabled={busy || !areaTitle.trim()}
-        >{selectionCount > 0
-          ? m.work_env_group_selection({ count: selectionCount })
-          : m.work_env_create()}</Button
-      >
-    </form>
-    {#if snapshot?.areas.length}<div class="menu-heading">{m.work_env_area()}</div>
-      <ul class="menu-list">
-        {#each snapshot.areas as area (area.id)}<li class="menu-row static">{area.title}</li>{/each}
-      </ul>{/if}
-  </div>
-{/snippet}
-{#snippet mediaPanel()}
-  <div class="palette-stack">
-    <div class="segments" role="group" aria-label={m.work_env_media()}>
-      {@render segment("document", File01Icon, m.work_env_documents())}
-      {@render segment("image", Image01Icon, m.work_env_images())}
-      {@render segment("link", Link04Icon, m.work_env_links())}
-      {@render segment("folder", FolderAddIcon, m.work_env_folders())}
-    </div>
-    {#if mediaKind === "folder"}
-      <form
-        class="menu-create"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void addFolder(folderDraft.trim()).then((placed) => {
-            if (placed) {
-              folderDraft = "";
-              chrome?.close();
-            }
-          });
-        }}
-      >
-        <span class="menu-icon"><Icon icon={FolderAddIcon} /></span>
-        <input
-          aria-label={m.work_env_folder_placeholder()}
-          placeholder={m.work_env_folder_placeholder()}
-          bind:value={folderDraft}
-          maxlength="1024"
-          disabled={busy || folderPending}
-        /><Button
-          type="submit"
-          size="compact"
-          disabled={busy || folderPending || !folderDraft.trim()}>{m.work_env_folder_add()}</Button
-        >
-      </form>
-      <div class="menu-footer">
-        <Button size="compact" disabled={busy || folderPending} onclick={() => void chooseFolder()}
-          >{m.work_env_folder_choose()}</Button
-        >
-      </div>
-      <p class="menu-status">{m.work_env_folder_hint()}</p>
-    {:else if mediaKind === "link"}
-      <form
-        class="menu-create"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void addLink();
-        }}
-      >
-        <span class="menu-icon"><Icon icon={Link04Icon} /></span>
-        <input
-          type="url"
-          aria-label={m.work_env_link_placeholder()}
-          placeholder={m.work_env_link_placeholder()}
-          bind:value={linkDraft}
-          maxlength="2048"
-          disabled={busy || linkPending}
-        /><Button type="submit" size="compact" disabled={busy || linkPending || !linkDraft.trim()}
-          >{m.work_env_link_add()}</Button
-        >
-      </form>
-      {#if linkFailure}<p class="menu-status" role="alert">{m.work_env_link_failed()}</p>{/if}
-    {:else}
-      <WorkMediaPicker
+{#snippet attachPanel()}<AttachPanel
+    bind:kind={attachKind}
+    {busy}
+    {folderPending}
+    onaddlink={addLink}
+    onaddfolder={(path: string) =>
+      addFolder(path).then((placed) => {
+        if (placed) panel = null;
+        return placed;
+      })}
+    onchoosefolder={() => void chooseFolder()}
+    >{#snippet picker()}<WorkTabPicker
+        {tabs}
+        {openTabs}
+        onopentabs={(on: boolean) => (openTabs = on)}
+        {spaceName}
+        {currentTabId}
+        attachedTabIds={attachedTabs}
+        pending={busy}
+        onattach={(ids) => void attach(ids)}
+        onopen={(id) => openPane({ kind: "tab", id }, null)}
+        {onnewtab}
+      />{/snippet}{#snippet media(kind: "document" | "image")}<WorkMediaPicker
         profile={session.profile}
-        kind={mediaKind}
+        {kind}
         attachedIds={snapshot?.elements.flatMap((element) =>
           element.reference.kind === "resource" ? [element.reference.resource] : [],
         ) ?? []}
         pending={busy}
         onattach={(ids) => void attachResources(ids)}
-      />
-    {/if}
-  </div>
-{/snippet}
-{#snippet segment(
-  key: "document" | "image" | "link" | "folder",
-  icon: typeof File01Icon,
-  label: string,
-)}
-  <button
-    type="button"
-    class="segment"
-    aria-pressed={mediaKind === key}
-    onclick={() => (mediaKind = key)}
+      />{/snippet}</AttachPanel
+  >{/snippet}
+{#snippet barTools()}
+  <BarTool
+    icon={StickyNote03Icon}
+    label={m.work_tool_note()}
+    disabled={busy || !snapshot}
+    onclick={() => void createNote()}
+  />
+  <BarTool
+    icon={SquareDashedTopSolidIcon}
+    label={m.work_env_area()}
+    disabled={!snapshot}
+    open={panel === "area"}
+    onopenchange={(open) => openPanel("area", open)}
+    >{#snippet content()}<AreaPanel
+        areas={snapshot?.areas ?? []}
+        selected={selectionCount}
+        {busy}
+        oncreate={createArea}
+      />{/snippet}</BarTool
   >
-    <Icon {icon} size={14} />{label}
-  </button>
+  <BarTool
+    icon={BrowserIcon}
+    label={m.work_tool_page()}
+    disabled={!snapshot}
+    wide
+    open={panel === "tabs"}
+    onopenchange={(open) => openPanel("tabs", open)}
+    content={attachPanel}
+  />
+  <BarTool
+    icon={Image02Icon}
+    label={m.work_tool_media()}
+    disabled={!snapshot}
+    wide
+    open={panel === "media"}
+    onopenchange={(open) => openPanel("media", open)}
+    content={attachPanel}
+  />
 {/snippet}
-{#snippet notesPanel()}
-  <button type="button" class="menu-row" disabled={busy} onclick={() => void createNote()}>
-    <span class="menu-icon"><Icon icon={NoteAddIcon} /></span>{m.work_env_new_note()}
-  </button>
-  <div class="notes-panel">
-    <LazyView
-      loader={loadNotes}
-      loadingLabel={m.surface_loading()}
-      failureLabel={m.surface_render_failed()}
-      retryLabel={m.surface_retry()}
-      >{#snippet children(Notes)}{#if notes}<Notes session={notes} />{/if}{/snippet}</LazyView
-    >
-  </div>
-  <div class="menu-footer">
-    <Button
-      size="compact"
-      disabled={busy ||
-        !notes?.note?.id ||
-        snapshot?.elements.some(
-          (element) =>
-            element.reference.kind === "resource" && element.reference.resource === notes?.note?.id,
-        )}
-      onclick={() => void attachNote()}>{m.work_env_attach_note()}</Button
-    >
-  </div>
-{/snippet}
-{#snippet profilePanel()}<div class="menu">
-    <div class="menu-identity">
-      <span class="menu-avatar">{profileLabel.slice(0, 1).toLocaleUpperCase()}</span>
-      <span class="menu-identity-text"
-        ><strong>{profileLabel}</strong><span>{m.work_env_local_profile()}</span></span
-      >
-    </div>
-    <div class="menu-separator"></div>
-    <div class="menu-heading">{m.work_env_provider()}</div>
-    <div class="menu-row static">OpenAI · GPT-5.6 Luna</div>
-    <div class="menu-heading">{m.work_env_usage()}</div>
-    <div class="menu-row quiet static">{m.work_env_usage_none()}</div>
-    <div class="menu-separator"></div>
-    <label class="menu-row toggle"
-      ><span>{m.work_env_ai_enabled()}</span><input
-        type="checkbox"
-        role="switch"
-        checked={preferences.value("ai.enabled") !== "false"}
-        disabled={preferences.saving()}
-        onchange={(event) =>
-          void preferences.set("ai.enabled", String(event.currentTarget.checked))}
-      /></label
-    >
-    <label class="menu-row toggle"
-      ><span>{m.work_env_work_enabled()}</span><input
-        type="checkbox"
-        role="switch"
-        checked={preferences.value("work.enabled") !== "false"}
-        disabled={preferences.saving()}
-        onchange={(event) =>
-          void preferences.set("work.enabled", String(event.currentTarget.checked))}
-      /></label
-    >
-    {#if preferences.saveFailed()}<p class="menu-status" role="status">
-        {m.work_env_setting_failed()}
-      </p>{/if}
-    <div class="menu-separator"></div>
-    <button type="button" class="menu-row" onclick={onsettings}>
-      <span class="menu-icon"><Icon icon={Settings02Icon} /></span>{m.work_env_settings()}
-    </button>
-  </div>{/snippet}
-{#snippet tasksPanel()}
-  <div class="tasks-panel">
-    <LazyView
-      loader={loadTasks}
-      loadingLabel={m.surface_loading()}
-      failureLabel={m.surface_render_failed()}
-      retryLabel={m.surface_retry()}
-      >{#snippet children(Tasks)}<Tasks
-          session={taskList}
-          density="panel"
-          scope={tasksScope}
-        />{/snippet}</LazyView
-    >
-  </div>
-{/snippet}
-{#snippet composerAbove()}
-  <!-- An open grant question takes the agent line's place until it is answered. -->
-  {#if runningObjective && (objectiveSession?.grantDraft || objectiveSession?.grantDeclined)}
-    <AccountGrantReview session={objectiveSession} />
-  {:else if runningObjective && objectiveSession}
-    <LazyView
-      loader={loadAgentLine}
-      loadingLabel={m.surface_loading()}
-      failureLabel={m.surface_render_failed()}
-      retryLabel={m.surface_retry()}
-      >{#snippet children(Line)}
-        <Line
-          session={objectiveSession!}
-          agents={agents.items}
-          draft={session.composer}
-          onreview={(step: string) => {
-            chrome?.close();
-            inspected = null;
-            liftFile = null;
-            lifted = { id: "", origin: null, proposal: step };
-          }}
-          waiting={agentWaiting}
-          problem={workTasks.failed
-            ? m.work_tasks_failed()
-            : workNotes.failed
-              ? m.work_note_failed()
-              : null}
-          ondismissproblem={() => {
-            workTasks.dismiss();
-            workNotes.dismiss();
-          }}
-          {writeup}
-          onwaitingpage={(card: string) => {
-            chrome?.close();
-            canvasRef?.focusCard(card);
-          }}
-          onfocusagent={(id) => canvasRef?.center(id)}
-          onsteered={() => (session.composer = "")}
-          onsignin={(card: string) => void signIn(card)}
-          retry={signInRetry?.work === objectiveSession?.selected ? signInRetry : null}
-          onretry={() => void retrySignedIn()}
-          onopenpage={(tab) => {
-            if (!tabs.some((candidate) => candidate.id === tab)) return;
-            const origin = snapshot?.elements.find(
-              (element) => element.reference.kind === "browser" && element.reference.tab === tab,
-            );
-            openPane({ kind: "tab", id: tab }, origin?.id ?? null);
-          }}
-        />{/snippet}</LazyView
-    >
-  {/if}
+{#snippet barAttach()}<BarTool
+    icon={PlusSignIcon}
+    label={m.work_tool_attach()}
+    small
+    wide
+    disabled={!snapshot}
+    open={panel === "attach"}
+    onopenchange={(open) => openPanel("attach", open)}
+    content={attachPanel}
+  />{/snippet}
+{#snippet barAbove()}
+  <!-- An open grant question stands over the bar, in the line's place, until it is answered. -->
+  {#if grantOpen}<AccountGrantReview session={objectiveSession!} />{/if}
   {#if composerFailure}<p class="composer-alert" role="alert">
       {m.work_account_update_invalid()}
     </p>{/if}
+{/snippet}
+{#snippet barLine()}
+  <LazyView
+    loader={loadAgentLine}
+    loadingLabel=""
+    failureLabel={m.surface_render_failed()}
+    retryLabel={m.surface_retry()}
+    >{#snippet children(Line)}
+      <Line
+        docked
+        session={objectiveSession!}
+        agents={agents.items}
+        draft={session.composer}
+        onreview={(step: string) => {
+          panel = null;
+          inspected = null;
+          liftFile = null;
+          lifted = { id: "", origin: null, proposal: step };
+        }}
+        waiting={agentWaiting}
+        problem={workTasks.failed
+          ? m.work_tasks_failed()
+          : workNotes.failed
+            ? m.work_note_failed()
+            : null}
+        ondismissproblem={() => {
+          workTasks.dismiss();
+          workNotes.dismiss();
+        }}
+        {writeup}
+        onwaitingpage={(card: string) => {
+          panel = null;
+          canvasRef?.focusCard(card);
+        }}
+        onfocusagent={(id) => canvasRef?.center(id)}
+        onsteered={() => (session.composer = "")}
+        onsignin={(card: string) => void signIn(card)}
+        retry={signInRetry?.work === objectiveSession?.selected ? signInRetry : null}
+        onretry={() => void retrySignedIn()}
+        onopenpage={(tab) => {
+          if (!tabs.some((candidate) => candidate.id === tab)) return;
+          const origin = snapshot?.elements.find(
+            (element) => element.reference.kind === "browser" && element.reference.tab === tab,
+          );
+          openPane({ kind: "tab", id: tab }, origin?.id ?? null);
+        }}
+      />{/snippet}</LazyView
+  >
 {/snippet}
 {#snippet composerContext()}
   {#if openTabs}<OpenTabsChip
@@ -2359,11 +2097,7 @@
   {/if}
 {/snippet}
 <svelte:window onbeforeunload={abandonTakeover} />
-<div
-  class="environment"
-  style:--work-header-height="52px"
-  style:--work-header-inset-start={IS_MAC ? "84px" : "12px"}
->
+<div class="environment">
   <div class="canvas-card" bind:this={cardHost}>
     {#if snapshot}{#key snapshot.id}
         <LazyView
@@ -2386,6 +2120,7 @@
               onprobe={(origin: string) =>
                 void commands.faviconProbe(session.profile, [origin]).catch(() => false)}
               fitBottomInset={composerHeight}
+              fitTopInset={56}
               still={!!lifted || !!pane || !!takeover}
               oninspect={(id: string) => (inspected = id)}
               onopen={openLift}
@@ -2483,50 +2218,59 @@
             />{/snippet}</LazyView
         >
         {#if snapshot.elements.length === 0}<div class="welcome">
-            <h1>{snapshot.title}</h1>
             <p>{aiEnabled ? m.work_env_manual_hint() : m.work_env_ai_off_hint()}</p>
           </div>{/if}
       {/key}{:else}<div class="welcome">
         <p>{session.loading ? m.surface_loading() : m.work_env_preparing()}</p>
       </div>{/if}
-    {#if session.failure || session.pending || session.viewDraft || folderRefused}<div
-        class="status"
-        role="status"
-      >
-        <span
-          >{session.failure
-            ? m.work_request_failed()
-            : session.pending
-              ? m.work_env_pending()
-              : session.viewDraft
-                ? m.work_env_unsaved_view()
-                : m.work_env_folder_refused()}</span
-        >{#if session.delivery === "unknown"}<Button
-            size="compact"
-            onclick={() => void session.retry()}>{m.work_reconcile()}</Button
-          >{:else if session.delivery === "conflict" && session.viewDraft}<Button
-            size="compact"
-            onclick={() => void session.discardView()}>{m.work_env_discard_view()}</Button
-          >{:else if session.failure}<Button size="compact" onclick={() => void session.refresh()}
-            >{m.work_env_reload()}</Button
-          >{/if}
-      </div>{/if}
-    {#if results.remaining && !clusters.footed}<button
-        type="button"
-        class="results-line"
-        onclick={() => {
-          const objective = results.remaining?.objective;
-          const request = snapshot?.elements.find(
-            (element) =>
-              element.reference.kind === "objective" && element.reference.objective === objective,
-          );
-          if (request) lift(request.id);
-        }}>{m.work_env_other_results({ count: results.remaining.count })}</button
-      >{/if}
-    {#if notesOpen}<section class="detail" aria-label={m.work_env_notes()}>
-        <Button onclick={() => void closeNotes()}>{m.work_env_close()}</Button
-        >{@render notesPanel()}
-      </section>{/if}
+    <!-- The canvas never ends in a hard edge: it fades under what sits at its
+         top and bottom, and costs nothing while nothing moves. -->
+    <div class="edge-scrim top" aria-hidden="true"></div>
+    <div class="edge-scrim bottom" aria-hidden="true"></div>
+    <div class="canvas-top">
+      {#if snapshot}<CanvasTitle
+          title={snapshot.title}
+          disabled={busy || snapshot.lifecycle !== "active"}
+          status={runStatus}
+          onrename={(title: string) => void session.edit({ kind: "rename", title })}
+        />{/if}
+      <span class="canvas-top-gap"></span>
+      {#if results.remaining && !clusters.footed}<button
+          type="button"
+          class="results-line"
+          onclick={() => {
+            const objective = results.remaining?.objective;
+            const request = snapshot?.elements.find(
+              (element) =>
+                element.reference.kind === "objective" && element.reference.objective === objective,
+            );
+            if (request) lift(request.id);
+          }}>{m.work_env_other_results({ count: results.remaining.count })}</button
+        >{/if}
+      {#if session.failure || session.pending || session.viewDraft || folderRefused}<div
+          class="status"
+          role="status"
+        >
+          <span
+            >{session.failure
+              ? m.work_request_failed()
+              : session.pending
+                ? m.work_env_pending()
+                : session.viewDraft
+                  ? m.work_env_unsaved_view()
+                  : m.work_env_folder_refused()}</span
+          >{#if session.delivery === "unknown"}<Button
+              size="compact"
+              onclick={() => void session.retry()}>{m.work_reconcile()}</Button
+            >{:else if session.delivery === "conflict" && session.viewDraft}<Button
+              size="compact"
+              onclick={() => void session.discardView()}>{m.work_env_discard_view()}</Button
+            >{:else if session.failure}<Button size="compact" onclick={() => void session.refresh()}
+              >{m.work_env_reload()}</Button
+            >{/if}
+        </div>{/if}
+    </div>
+    <div class="zoom-slot" data-work-zoom-slot></div>
   </div>
   {#if lifted && cardBounds}
     <Lift
@@ -2811,51 +2555,30 @@
         />{/snippet}</LazyView
     >
   {/if}
-  <WorkChrome
-    bind:this={chrome}
-    {spaceName}
-    workTitle={snapshot?.title ?? m.work_env_default_title()}
-    {profileLabel}
-    initialTabsOpen={!session.tabsIntroduced}
-    panels={{
-      tabs: tabPanel,
-      switcher,
-      create: createPanel,
-      notes: notesPanel,
-      media: mediaPanel,
-      area: areaPanel,
-      profile: profilePanel,
-    }}
-    {onreturn}
-    onpanelchange={onPanelChange}
-  >
-    {#snippet tasks()}<TasksCapsule
-        done={tasksDone}
-        total={taskItems.length}
-        active={activeExecution}
-        {needsDecision}
-        open={tasksOpen}
-        panel={tasksPanel}
-        onopenchange={(open) => {
-          tasksOpen = open;
-          if (!open) tasksScope = "today";
-        }}
-      />{/snippet}
-  </WorkChrome>
-  {#if aiEnabled}
-    <div class="composer-dock">
-      <Composer
+  <div class="bar-dock">
+    {#if aiEnabled}<WorkBar
         bind:ref={composerElement}
         bind:value={session.composer}
-        placeholder={runningObjective ? m.work_composer_continue() : m.work_composer_start()}
+        placeholder={lineRunning
+          ? m.work_composer_steer()
+          : runningObjective
+            ? m.work_composer_continue()
+            : m.work_composer_start()}
         disabled={objectivePending || !!session.objectiveSubmission}
         {busy}
-        above={composerAbove}
+        running={lineRunning && !grantOpen}
+        holding={panel === "attach"}
+        {model}
+        tools={barTools}
+        attach={barAttach}
+        line={runningObjective && objectiveSession && !grantOpen ? barLine : undefined}
+        above={grantOpen || composerFailure ? barAbove : undefined}
         context={contextSel || session.accountScope ? composerContext : undefined}
         onsubmit={() => void send()}
-      />
-    </div>
-  {/if}
+      />{:else}<div class="tools-only" role="toolbar" aria-label={m.work_env_toolbar()}>
+        {@render barTools()}
+      </div>{/if}
+  </div>
 </div>
 
 <style>
@@ -2872,20 +2595,81 @@
 
   .canvas-card {
     position: absolute;
-    inset: var(--work-header-height) 8px 8px;
+    inset: 0;
     border-radius: var(--content-radius);
     background: var(--color-canvas);
     box-shadow: inset 0 0 0 1px var(--color-border);
     overflow: hidden;
   }
 
-  .composer-dock {
+  /* The canvas keeps its cards' stacking to itself, so the edges can lie over them. */
+  .canvas-card :global(.work-canvas) {
+    isolation: isolate;
+  }
+
+  /* The canvas's edge fades to its own ground under the title and the bar. */
+  .edge-scrim {
+    position: absolute;
+    inset-inline: 0;
+    z-index: 4;
+    block-size: 72px;
+    pointer-events: none;
+  }
+
+  .edge-scrim.top {
+    inset-block-start: 0;
+    background: linear-gradient(to bottom, var(--color-canvas), transparent);
+  }
+
+  .edge-scrim.bottom {
+    inset-block-end: 0;
+    background: linear-gradient(to top, var(--color-canvas), transparent);
+  }
+
+  .canvas-top {
+    position: absolute;
+    inset-block-start: 12px;
+    inset-inline: 12px 16px;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-inline-size: 0;
+    pointer-events: none;
+  }
+
+  .canvas-top-gap {
+    flex: 1;
+  }
+
+  .zoom-slot {
+    position: absolute;
+    inset-block-end: 12px;
+    inset-inline-end: 12px;
+    z-index: 5;
+    display: flex;
+  }
+
+  .bar-dock {
     position: absolute;
     inset-block-end: 0;
-    inset-inline-start: 50%;
-    inline-size: min(680px, calc(100% - 200px));
-    translate: -50% 0;
+    inset-inline: 0;
     z-index: 30;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+  }
+
+  /* With AI off the bar is its tools alone. */
+  .tools-only {
+    display: flex;
+    gap: 2px;
+    padding: 8px;
+    border-radius: var(--radius-panel) var(--radius-panel) 0 0;
+    background: var(--color-menu);
+    backdrop-filter: blur(14px) saturate(1.2);
+    box-shadow: var(--shadow-popover);
+    pointer-events: auto;
   }
 
   .welcome {
@@ -2895,40 +2679,23 @@
     text-align: center;
   }
 
-  .welcome h1 {
-    margin-block: 0 8px;
-    font-size: var(--text-title);
-    font-weight: 500;
-    letter-spacing: -0.01em;
-  }
-
   .welcome p {
     margin: 0;
     color: var(--color-muted);
   }
 
   .status {
-    position: absolute;
-    inset-inline-end: 16px;
-    inset-block-end: 16px;
     display: flex;
     align-items: center;
-    gap: 12px;
-    max-inline-size: calc(100% - 32px);
-    padding: 8px 12px;
-    border-radius: var(--radius-control);
-    background: var(--color-menu);
-    backdrop-filter: blur(10px);
-    box-shadow: var(--shadow-popover);
+    gap: 10px;
+    min-inline-size: 0;
     color: var(--color-muted);
     font-size: var(--text-label);
+    pointer-events: auto;
   }
 
   /* Results past the cap, when their lane has no group to hang the line under. */
   .results-line {
-    position: absolute;
-    inset-block-start: 12px;
-    inset-inline-end: 16px;
     padding: 0;
     border: 0;
     background: transparent;
@@ -2936,6 +2703,7 @@
     font: inherit;
     font-size: var(--text-caption);
     cursor: default;
+    pointer-events: auto;
   }
 
   .results-line:hover {
@@ -3039,240 +2807,6 @@
   .lift-plain p {
     margin: 0;
     color: var(--color-muted);
-  }
-
-  .detail {
-    position: absolute;
-    inset-block: 16px;
-    inset-inline-end: 16px;
-    inline-size: min(520px, calc(100% - 32px));
-    box-sizing: border-box;
-    overflow: auto;
-    padding: 16px;
-    border-radius: var(--radius-menu);
-    background: var(--color-menu);
-    backdrop-filter: blur(14px) saturate(1.2);
-    box-shadow: var(--shadow-popover);
-    z-index: 20;
-  }
-
-  .menu {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .palette {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 2px;
-  }
-
-  .palette-stack {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    min-inline-size: 0;
-  }
-
-  .soon {
-    margin-inline-start: auto;
-    padding: 1px 7px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill-active);
-    color: var(--color-faint);
-    font-size: var(--text-caption);
-  }
-
-  .segments {
-    display: flex;
-    gap: 2px;
-    padding: 2px;
-    border-radius: var(--radius-control-compact);
-    background: var(--color-fill);
-  }
-
-  .segment {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    flex: 1;
-    min-inline-size: 0;
-    block-size: 28px;
-    overflow: hidden;
-    white-space: nowrap;
-    border: 0;
-    border-radius: var(--radius-row);
-    background: transparent;
-    color: var(--color-muted);
-    font: inherit;
-    font-size: var(--text-label);
-    cursor: default;
-  }
-
-  .segment:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: 2px;
-  }
-
-  .segment[aria-pressed="true"] {
-    background: var(--color-surface);
-    color: var(--color-text);
-    box-shadow: var(--shadow-control);
-  }
-
-  .menu-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    box-sizing: border-box;
-    inline-size: 100%;
-    min-block-size: 34px;
-    padding: 6px 10px;
-    border: 0;
-    border-radius: var(--radius-control-compact);
-    background: transparent;
-    color: var(--color-text);
-    font: inherit;
-    text-align: start;
-    cursor: default;
-    transition: background-color var(--motion-instant) ease;
-  }
-
-  .menu-row:disabled {
-    opacity: 0.5;
-  }
-
-  .menu-row:not(.static):hover:not(:disabled),
-  .menu-row.selected {
-    background: var(--color-control-hover);
-  }
-
-  .menu-row.quiet {
-    color: var(--color-muted);
-  }
-
-  .menu-row.static {
-    cursor: default;
-  }
-
-  .menu-row.toggle {
-    justify-content: space-between;
-  }
-
-  .menu-icon,
-  .menu-check {
-    display: grid;
-    place-items: center;
-    flex: none;
-    inline-size: 16px;
-    color: var(--color-muted);
-  }
-
-  .menu-separator {
-    block-size: 1px;
-    margin: 6px -2px;
-    background: var(--color-border);
-  }
-
-  .menu-heading {
-    padding: 8px 10px 4px;
-    color: var(--color-faint);
-    font-size: var(--text-caption);
-  }
-
-  .menu-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    max-block-size: 280px;
-    overflow: auto;
-  }
-
-  .menu-empty,
-  .menu-status {
-    padding: 8px 10px;
-    color: var(--color-muted);
-    font-size: var(--text-caption);
-  }
-
-  .menu-search {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 10px;
-    block-size: 32px;
-    border-radius: var(--radius-control-compact);
-    background: var(--color-field);
-    color: var(--color-muted);
-  }
-
-  .menu-search input,
-  .menu-create input {
-    flex: 1;
-    min-inline-size: 0;
-    border: 0;
-    background: transparent;
-    color: var(--color-text);
-    font: inherit;
-    outline: none;
-  }
-
-  .menu-create {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 4px 4px 10px;
-    border-radius: var(--radius-control-compact);
-    background: var(--color-field);
-  }
-
-  .menu-identity {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 8px 10px;
-  }
-
-  .menu-avatar {
-    display: grid;
-    place-items: center;
-    inline-size: 36px;
-    block-size: 36px;
-    border-radius: 50%;
-    background: var(--color-control);
-    box-shadow: var(--shadow-control);
-    font-weight: 600;
-  }
-
-  .menu-identity-text {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .menu-identity-text span {
-    color: var(--color-muted);
-    font-size: var(--text-caption);
-  }
-
-  .menu-footer {
-    display: flex;
-    justify-content: flex-end;
-    padding: 8px 4px 0;
-  }
-
-  .notes-panel {
-    display: flex;
-    block-size: 440px;
-    min-inline-size: 0;
-  }
-
-  .tasks-panel {
-    display: flex;
-    block-size: min(60vh, 520px);
-    min-inline-size: 0;
   }
 
   .composer-alert {

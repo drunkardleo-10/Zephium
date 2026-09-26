@@ -15,7 +15,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 const profile = "00000000000000000000000001";
 const tabElement = "00000000000000000000000004";
 
-async function mountCanvas({ tabsIntroduced = true } = {}) {
+async function mountCanvas() {
   await page.viewport(1200, 800);
   const { workSession } = await import("$domain/work");
   const { projection } = await import("./environment-fixtures");
@@ -45,7 +45,6 @@ async function mountCanvas({ tabsIntroduced = true } = {}) {
   const environment = new WorkEnvironmentSession(profile, snapshot.space);
   environment.snapshot = snapshot;
   environment.selected = snapshot.id;
-  environment.tabsIntroduced = tabsIntroduced;
   const objective = workSession(profile)!;
   vi.spyOn(objective, "start").mockResolvedValue();
   vi.spyOn(objective, "open").mockResolvedValue(true);
@@ -70,10 +69,8 @@ async function mountCanvas({ tabsIntroduced = true } = {}) {
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: true,
-    onreturn: vi.fn(),
     onopen: vi.fn(),
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";
@@ -157,9 +154,8 @@ test("the tab card offers its one page as the person, and a request with it runs
 });
 
 test("all open tabs is consent for one request, shown in the composer", async () => {
-  const { screen, environment, snapshot, run, composer } = await mountCanvas({
-    tabsIntroduced: false,
-  });
+  const { screen, environment, snapshot, run, composer } = await mountCanvas();
+  await screen.getByRole("button", { name: "Page or tab", exact: true }).click();
   const all = screen.getByRole("checkbox", { name: /All open tabs/ });
   await expect
     .element(

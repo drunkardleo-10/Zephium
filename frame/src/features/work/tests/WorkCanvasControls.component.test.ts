@@ -14,7 +14,7 @@ const note = (id: string, title: string): CanvasItem => ({
   status: "",
 });
 
-test("one capsule zooms: its number fits the view, 1 goes back to actual size", async () => {
+test("the zoom is a quiet level: it fits the view, and 1 goes back to actual size", async () => {
   await page.viewport(1200, 800);
   const screen = await render(WorkCanvas, {
     items: [note("a", "Alpha"), note("b", "Beta")],
@@ -33,8 +33,8 @@ test("one capsule zooms: its number fits the view, 1 goes back to actual size", 
   await expect.element(level).toHaveTextContent("100%");
   // The pointer tools are gone: panning is the default, Shift draws a marquee.
   expect(screen.container.textContent).not.toContain("Select (V)");
-  await expect.element(capsule.getByRole("button", { name: "Zoom in" })).toBeVisible();
-  await expect.element(capsule.getByRole("button", { name: "Zoom out" })).toBeVisible();
+  // Pinch and the keys zoom; the edge carries only the level.
+  expect(capsule.element().querySelectorAll("button")).toHaveLength(1);
   await level.click();
   await expect.poll(() => level.element().textContent).not.toBe("100%");
   const beta = () => screen.getByText("Beta", { exact: true }).element().getBoundingClientRect();

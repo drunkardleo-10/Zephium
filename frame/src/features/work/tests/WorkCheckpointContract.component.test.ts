@@ -138,7 +138,6 @@ test("every placement a canvas publishes holds to the checkpoint contract", asyn
   const environment = new WorkEnvironmentSession(profile, initial.space);
   environment.snapshot = initial;
   environment.selected = initial.id;
-  environment.tabsIntroduced = true;
   const views: WorkEnvironmentView[] = [];
   native.call.mockImplementation(async (_profile: string, call: WorkCallV1) => {
     if (call.kind === "query")
@@ -177,10 +176,8 @@ test("every placement a canvas publishes holds to the checkpoint contract", asyn
     spaceName: "Personal",
     profileLabel: "Reader",
     aiEnabled: false,
-    onreturn: vi.fn(),
     onopen: vi.fn(),
     onnewtab: vi.fn(),
-    onsettings: vi.fn(),
   });
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "800px";
