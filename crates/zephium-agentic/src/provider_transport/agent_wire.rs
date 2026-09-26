@@ -190,6 +190,11 @@ fn fetch_fault(value: &Value) -> (String, &'static str) {
     let fields: &[(&'static str, Shape)] = match value.get("kind").and_then(Value::as_str) {
         Some("search") => &[("query", Shape::Text)],
         Some("read") => &[("url", Shape::Text), ("records", Shape::Records)],
+        Some("browse") => &[
+            ("start", Shape::Text),
+            ("goal", Shape::Text),
+            ("records", Shape::Records),
+        ],
         Some("discover") => &[("query", Shape::Text), ("records", Shape::Records)],
         Some("list" | "read_file") => &[("path", Shape::Text)],
         Some("search_files") => &[("path", Shape::Text), ("query", Shape::Text)],
