@@ -4146,6 +4146,48 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_page_capture_follows_snapshots_an_unverified_action_consumed() {
+        let provider = AgentProviderKind::OpenAiResponses;
+        let previous = observation(context(), 1, 1, 1, "old state");
+        let config = config(provider)
+            .restrict_to_navigation_and_extraction()
+            .with_baseline_read()
+            .with_progressive_observation();
+        let checkpoint = || {
+            snapshot_scope_continuation(
+                provider,
+                SemanticObservationAcknowledgement::from_fingerprint(
+                    SemanticObservationFingerprint::from_observation(&previous),
+                ),
+                config.clone(),
+                json!({"kind":"initial"}),
+            )
+            .retire_for_observation(&previous, &config)
+            .unwrap()
+        };
+        for (generation, admitted) in [(2, true), (4, true)] {
+            let request = checkpoint()
+                .request(&previous, SemanticObservationId::new(generation).unwrap())
+                .unwrap();
+            let snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(SemanticInvocationId::new(generation).unwrap(), previous.frames()[0].frame().clone(), SemanticSnapshotGeneration::new(generation).unwrap()),
+                &serde_json::to_vec(&json!({"v":1,"i":generation,"g":generation,"c":"complete","n":[{"k":99,"r":"document"}]})).unwrap(),
+            ).unwrap();
+            let current = SemanticObservationAssembler::new(request, snapshot)
+                .unwrap()
+                .finish()
+                .unwrap();
+            assert_eq!(
+                checkpoint()
+                    .validate_successor(&previous, &current, model_request(context(), 2), &config)
+                    .is_ok(),
+                admitted,
+                "{generation}"
+            );
+        }
+    }
+
+    #[test]
     fn anchor_loss_recovery_requires_exact_same_document_refresh_lineage() {
         for provider in [
             AgentProviderKind::OpenAiResponses,

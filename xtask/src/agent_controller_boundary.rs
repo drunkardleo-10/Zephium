@@ -1068,8 +1068,9 @@ fn validate_progressive_observation(inspection: &str, checkpoint: &str) -> Resul
         "request.lease() != self.prior_call.lease()",
         "self.validate_successor(previous, current, request, &config)",
         "AgentPreparedObservationRequest::try_for_config_with_inspections_and_action_authority(",
-        "Some(current.frames()[0].generation())",
-        "if self.anchor_lost",
+        "successor_generation(previous, current, self.anchor_lost)",
+        "!anchor_lost && matches!(current.request().scope(), crate::SemanticScope::Initial)",
+        "== Some(current_generation)",
         "node.parent().is_some()",
         "self.context == observation.request().context()",
         "capture.snapshot == observation.frames()[0].generation().get()",
@@ -1361,8 +1362,9 @@ mod tests {
         }
         for boundary in [
             "request.lease() != self.prior_call.lease()",
-            "Some(current.frames()[0].generation())",
-            "if self.anchor_lost",
+            "successor_generation(previous, current, self.anchor_lost)",
+            "!anchor_lost && matches!(current.request().scope(), crate::SemanticScope::Initial)",
+            "== Some(current_generation)",
             "node.parent().is_some()",
             "self.context == observation.request().context()",
             "capture.snapshot == observation.frames()[0].generation().get()",

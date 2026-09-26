@@ -481,17 +481,7 @@ impl AgentProviderObservationCheckpoint {
         if &expected != current.request()
             || current.frames().len() != 1
             || current.frames()[0].frame() != previous.frames()[0].frame()
-            || Some(current.frames()[0].generation())
-                != previous.frames()[0]
-                    .generation()
-                    .next()
-                    .and_then(|generation| {
-                        if self.anchor_lost {
-                            generation.next()
-                        } else {
-                            Some(generation)
-                        }
-                    })
+            || !successor_generation(previous, current, self.anchor_lost)
         {
             return Err(AgentProviderContinuationError::Baseline);
         }
@@ -519,6 +509,31 @@ impl AgentProviderObservationCheckpoint {
         }
         Ok(())
     }
+}
+
+/// A scoped capture, or an anchor-loss recovery, must be the exact next
+/// snapshot of its document. A requested whole-page capture replaces every
+/// earlier ref, so snapshots an intervening unverified or refused action
+/// consumed do not break its lineage.
+fn successor_generation(
+    previous: &SemanticObservation,
+    current: &SemanticObservation,
+    anchor_lost: bool,
+) -> bool {
+    let (previous, current_generation) = (
+        previous.frames()[0].generation(),
+        current.frames()[0].generation(),
+    );
+    if !anchor_lost && matches!(current.request().scope(), crate::SemanticScope::Initial) {
+        return current_generation > previous;
+    }
+    previous.next().and_then(|generation| {
+        if anchor_lost {
+            generation.next()
+        } else {
+            Some(generation)
+        }
+    }) == Some(current_generation)
 }
 
 /// The fixed runtime returns the anchor followed by independent readable source
@@ -664,17 +679,7 @@ impl AgentInspectionProgress {
             || previous.frames().len() != 1
             || current.frames().len() != 1
             || previous.frames()[0].frame() != current.frames()[0].frame()
-            || previous.frames()[0]
-                .generation()
-                .next()
-                .and_then(|generation| {
-                    if anchor_lost {
-                        generation.next()
-                    } else {
-                        Some(generation)
-                    }
-                })
-                != Some(current.frames()[0].generation())
+            || !successor_generation(previous, current, anchor_lost)
         {
             return Err(crate::AgentPolicyError::Authority.into());
         }
