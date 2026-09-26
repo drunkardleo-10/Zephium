@@ -124,15 +124,17 @@ impl WorkDocumentNavigation {
             return Err(());
         }
         let mut state = self.0.lock().map_err(|_| ())?;
+        let site = state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession;
+        let current = state.effective.clone().ok_or(())?;
         if state.phase != Phase::Ready
             || state.human.is_some()
-            || state.effective.as_ref() != Some(source)
+            || (current != *source && !(site && zephium_agentic::same_work_site(source, &current)))
         {
             return Err(());
         }
         state.human = Some(HumanNavigation {
             source: source.clone(),
-            current: source.clone(),
+            current,
             native_id: state.native_id.ok_or(())?,
             requested: false,
             loading: None,

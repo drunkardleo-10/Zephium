@@ -43,6 +43,10 @@ struct State {
     navigation_epoch: u64,
     operation: Option<ContextOperationJoin>,
     human: Option<human::HumanNavigation>,
+    /// Script redirects a site session followed before its document settled.
+    site_loads: u8,
+    /// A site-session load a script redirect replaced; its late events are noise.
+    superseded: Option<wry::NavigationId>,
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     url_observation_failure: Option<crate::WorkUrlObservationFailure>,
     #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -172,11 +176,53 @@ impl Default for WorkDocumentNavigation {
             navigation_epoch: 1,
             operation: None,
             human: None,
+            site_loads: 0,
+            superseded: None,
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             url_observation_failure: None,
             #[cfg(feature = "native-agentic-work-resource-probe")]
             evidence: NavigationEvidence::default(),
         })))
+    }
+}
+
+/// Script redirects one site-session load may follow before it settles.
+const MAX_SITE_LOADS: u8 = 6;
+
+impl State {
+    /// A site-session GET the gate follows: the tracked load's own server
+    /// redirect, or a script redirect before the document settles. After it
+    /// is ready, page-initiated loads are cancelled and the page stays.
+    fn site_follows(&mut self, raw: &str) -> bool {
+        let Some(requested) = self.target.as_ref() else {
+            return false;
+        };
+        if !ContextNavigationTarget::parse(raw)
+            .is_ok_and(|target| zephium_agentic::same_work_site(requested, &target))
+        {
+            return false;
+        }
+        match self.phase {
+            Phase::Loading => self.requested && self.native_id.is_some(),
+            Phase::Committed | Phase::Finalizing | Phase::Sampling
+                if self.site_loads < MAX_SITE_LOADS =>
+            {
+                let (Some(generation), Some(loads)) = (
+                    self.finalization_generation.checked_add(1),
+                    self.site_loads.checked_add(1),
+                ) else {
+                    return false;
+                };
+                self.site_loads = loads;
+                self.superseded = self.native_id.take();
+                self.finalization_generation = generation;
+                self.location_revision = 0;
+                self.requested = true;
+                self.phase = Phase::Armed;
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -389,6 +435,9 @@ impl WorkDocumentNavigation {
             state.requested = true;
             return true;
         }
+        if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession {
+            return state.site_follows(target);
+        }
         // A refused unsolicited navigation grants no replacement document.
         false
     }
@@ -436,6 +485,13 @@ impl WorkDocumentNavigation {
                     | Phase::Sampling
                     | Phase::Ready
             )
+        {
+            return true;
+        }
+        if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            && action.target_is_main_frame == Some(true)
+            && action.is_get
+            && state.site_follows(target)
         {
             return true;
         }
@@ -513,11 +569,29 @@ impl WorkDocumentNavigation {
                 }
             };
         }
-        let exact = state
-            .target
-            .as_ref()
-            .is_some_and(|target| target.as_url().as_str() == event.url);
+        let site = state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession;
+        if site && state.superseded == Some(event.id) {
+            return Ok((false, false));
+        }
+        if site
+            && state.phase == Phase::Ready
+            && state.native_id != Some(event.id)
+            && matches!(event.phase, E::Failed | E::Cancelled)
+        {
+            return Ok((false, false));
+        }
+        let exact = state.target.as_ref().is_some_and(|target| {
+            if site {
+                ContextNavigationTarget::parse(&event.url)
+                    .is_ok_and(|url| zephium_agentic::same_work_site(target, &url))
+            } else {
+                target.as_url().as_str() == event.url
+            }
+        });
         match (state.phase, event.phase) {
+            (Phase::Loading, E::Redirected) if site && state.native_id == Some(event.id) => {
+                Ok((false, false))
+            }
             (Phase::Armed, E::Started) if exact && state.requested && state.native_id.is_none() => {
                 state.native_id = Some(event.id);
                 state.phase = Phase::Loading;
@@ -584,8 +658,11 @@ impl WorkDocumentNavigation {
             }
             // Ready retains the exact committed native ID. Every unarmed load
             // is still refused by the navigation delegate and event state machine.
-            if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::PublicSameDocumentQuery
-                && state.native_id.is_some()
+            if matches!(
+                state.policy,
+                zephium_agentic::WorkBrowserDocumentPolicy::PublicSameDocumentQuery
+                    | zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            ) && state.native_id.is_some()
                 && state.operation.is_none()
             {
                 let observed = current.and_then(|raw| {
@@ -891,6 +968,94 @@ mod tests {
             assert!(!gate.allows_apple_action(target, apple_action(kind, is_get)));
         }
         assert!(gate.allows_apple_action(target, apple_action(T::Other, true)));
+    }
+    fn site_gate(url: &str) -> WorkDocumentNavigation {
+        let gate = WorkDocumentNavigation::default();
+        assert!(gate.allows("about:blank"));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(9, phase, "about:blank")).unwrap();
+        }
+        gate.arm_with_policy(
+            ContextNavigationTarget::parse(url).unwrap(),
+            zephium_agentic::WorkBrowserDocumentPolicy::SiteSession,
+        )
+        .unwrap();
+        assert!(gate.allows(url));
+        gate
+    }
+    fn settle(gate: &WorkDocumentNavigation, current: &str) {
+        let ticket = gate.finalization_ticket().unwrap();
+        gate.finalize_after_quiet_period(ticket, || Some(current.to_owned()))
+            .unwrap()
+            .unwrap();
+    }
+    #[test]
+    fn site_session_follows_same_site_redirects_and_script_loads_until_ready() {
+        let start = "https://app.slack.com/client";
+        let gate = site_gate(start);
+        gate.observe(event(1, E::Started, start)).unwrap();
+        assert!(!gate.allows("https://accounts.google.com/login"));
+        assert!(gate.allows("https://slack.com/signin"));
+        gate.observe(event(1, E::Redirected, start)).unwrap();
+        gate.observe(event(1, E::Committed, "https://slack.com/signin"))
+            .unwrap();
+        // A script redirect before the document settles continues the load.
+        assert!(gate.allows("https://app.slack.com/client/T1"));
+        gate.observe(event(1, E::Finished, "https://slack.com/signin"))
+            .unwrap();
+        gate.observe(event(2, E::Started, "https://app.slack.com/client/T1"))
+            .unwrap();
+        gate.observe(event(2, E::Committed, "https://app.slack.com/client/T1"))
+            .unwrap();
+        gate.observe(event(2, E::Finished, "https://app.slack.com/client/T1"))
+            .unwrap();
+        settle(&gate, "https://app.slack.com/client/T1");
+        assert!(gate.ready(Some("https://app.slack.com/client/T1")));
+        assert!(!gate.failed());
+    }
+    #[test]
+    fn site_session_routes_in_place_and_cancels_page_loads_without_losing_the_page() {
+        let start = "https://app.slack.com/client";
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        let route = "https://app.slack.com/client/T1/C2";
+        assert_eq!(gate.location_changed(Some(route)), Ok(false));
+        assert!(gate.ready(Some(route)));
+        for foreign in [
+            "https://evil.test/",
+            "https://app.slack.com/other",
+            "https://files.slack.com/x",
+        ] {
+            assert!(!gate.allows(foreign), "{foreign}");
+        }
+        gate.observe(event(7, E::Cancelled, "https://evil.test/"))
+            .unwrap();
+        assert!(gate.ready(Some(route)));
+        assert!(!gate.failed());
+        assert_eq!(gate.location_changed(Some("https://evil.test/x")), Ok(true));
+        assert!(gate.failed());
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn site_session_never_follows_posts_or_cross_site_redirects() {
+        use wry::AppleNavigationType as T;
+        let start = "https://app.slack.com/client";
+        let gate = site_gate(start);
+        gate.observe(event(1, E::Started, start)).unwrap();
+        assert!(!gate.allows_apple_action(
+            "https://app.slack.com/login",
+            apple_action(T::FormSubmitted, false)
+        ));
+        assert!(
+            !gate.allows_apple_action("https://accounts.google.com/", apple_action(T::Other, true))
+        );
+        assert!(gate.allows_apple_action("https://slack.com/signin", apple_action(T::Other, true)));
+        let mut popup = apple_action(T::LinkActivated, true);
+        popup.target_is_main_frame = None;
+        assert!(!gate.allows_apple_action("https://app.slack.com/x", popup));
     }
     #[test]
     fn successor_uses_same_gate_exact_lineage_and_one_terminal_without_bootstrap() {
