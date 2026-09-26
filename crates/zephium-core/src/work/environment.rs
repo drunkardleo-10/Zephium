@@ -180,41 +180,85 @@ impl Default for WorkEnvironmentView {
         }
     }
 }
+/// Which bound a refused view broke; a closed name for diagnostics only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkViewFault {
+    Coordinate,
+    Zoom,
+    PlacementSize,
+    PlacementDuplicate,
+    PlacementRevision,
+    AreaSize,
+    AreaDuplicate,
+    TooMany,
+}
+impl WorkViewFault {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Coordinate => "coordinate",
+            Self::Zoom => "zoom",
+            Self::PlacementSize => "placement_size",
+            Self::PlacementDuplicate => "placement_duplicate",
+            Self::PlacementRevision => "placement_revision",
+            Self::AreaSize => "area_size",
+            Self::AreaDuplicate => "area_duplicate",
+            Self::TooMany => "too_many",
+        }
+    }
+}
+
 impl WorkEnvironmentView {
     pub fn validate(&self) -> Result<(), WorkError> {
-        let coordinate = |value: i32| (-1_000_000..=1_000_000).contains(&value);
-        if !coordinate(self.x)
-            || !coordinate(self.y)
-            || !(100..=4000).contains(&self.zoom_milli)
-            || self.placements.len() > MAX_ENVIRONMENT_ELEMENTS
+        match self.fault() {
+            Some(_) => Err(WorkError::Invalid),
+            None => Ok(()),
+        }
+    }
+    pub fn fault(&self) -> Option<WorkViewFault> {
+        use WorkViewFault as F;
+        let coordinate = |x: i32, y: i32| {
+            let bound = -1_000_000..=1_000_000;
+            bound.contains(&x) && bound.contains(&y)
+        };
+        if !coordinate(self.x, self.y) {
+            return Some(F::Coordinate);
+        }
+        if !(100..=4000).contains(&self.zoom_milli) {
+            return Some(F::Zoom);
+        }
+        if self.placements.len() > MAX_ENVIRONMENT_ELEMENTS
             || self.areas.len() > MAX_ENVIRONMENT_AREAS
         {
-            return Err(WorkError::Invalid);
+            return Some(F::TooMany);
         }
         let mut ids = BTreeSet::new();
         for p in &self.placements {
-            if !ids.insert(p.element)
-                || !coordinate(p.x)
-                || !coordinate(p.y)
-                || !(120..=4096).contains(&p.width)
-                || !(80..=4096).contains(&p.height)
-                || !matches!(p.revision, 0 | 2)
-            {
-                return Err(WorkError::Invalid);
+            if !ids.insert(p.element) {
+                return Some(F::PlacementDuplicate);
+            }
+            if !coordinate(p.x, p.y) {
+                return Some(F::Coordinate);
+            }
+            if !(120..=4096).contains(&p.width) || !(80..=4096).contains(&p.height) {
+                return Some(F::PlacementSize);
+            }
+            if !matches!(p.revision, 0 | 2) {
+                return Some(F::PlacementRevision);
             }
         }
         let mut areas = BTreeSet::new();
         for a in &self.areas {
-            if !areas.insert(a.area)
-                || !coordinate(a.x)
-                || !coordinate(a.y)
-                || !(240..=8192).contains(&a.width)
-                || !(160..=8192).contains(&a.height)
-            {
-                return Err(WorkError::Invalid);
+            if !areas.insert(a.area) {
+                return Some(F::AreaDuplicate);
+            }
+            if !coordinate(a.x, a.y) {
+                return Some(F::Coordinate);
+            }
+            if !(240..=8192).contains(&a.width) || !(160..=8192).contains(&a.height) {
+                return Some(F::AreaSize);
             }
         }
-        Ok(())
+        None
     }
 }
 

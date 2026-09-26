@@ -233,6 +233,7 @@ fn view_admits_boundary_geometry_and_rejects_overflow_duplicates_and_capacity() 
     assert_eq!(read.revision, 0);
     let lane = serde_json::to_string(&valid.placements[0]).unwrap();
     assert!(lane.contains(r#""revision":2"#));
+    assert_eq!(valid.fault(), None);
     for mutate in [
         |v: &mut WorkEnvironmentView| v.x = -1_000_001,
         |v: &mut WorkEnvironmentView| v.y = 1_000_001,
@@ -257,9 +258,11 @@ fn view_admits_boundary_geometry_and_rejects_overflow_duplicates_and_capacity() 
     let mut duplicate = valid.clone();
     duplicate.placements.push(duplicate.placements[0].clone());
     assert!(duplicate.validate().is_err());
+    assert_eq!(duplicate.fault(), Some(WorkViewFault::PlacementDuplicate));
     let mut duplicate_area = valid.clone();
     duplicate_area.areas.push(duplicate_area.areas[0].clone());
     assert!(duplicate_area.validate().is_err());
+    assert_eq!(duplicate_area.fault(), Some(WorkViewFault::AreaDuplicate));
     let mut full = valid;
     full.zoom_milli = 4000;
     full.placements = (0..MAX_ENVIRONMENT_ELEMENTS)
@@ -268,6 +271,40 @@ fn view_admits_boundary_geometry_and_rejects_overflow_duplicates_and_capacity() 
     full.validate().unwrap();
     full.placements.push(placement(9999.into()));
     assert!(full.validate().is_err());
+    assert_eq!(full.fault(), Some(WorkViewFault::TooMany));
+}
+
+#[test]
+fn view_fault_names_the_bound_a_refused_view_broke() {
+    let view = WorkEnvironmentView {
+        placements: vec![placement(10.into())],
+        areas: vec![WorkAreaPlacement {
+            area: 1.into(),
+            x: 0,
+            y: 0,
+            width: 300,
+            height: 200,
+        }],
+        ..Default::default()
+    };
+    assert_eq!(view.fault(), None);
+    let cases: [(fn(&mut WorkEnvironmentView), WorkViewFault); 8] = [
+        (|v| v.y = -1_000_001, WorkViewFault::Coordinate),
+        (|v| v.placements[0].x = 1_000_001, WorkViewFault::Coordinate),
+        (|v| v.areas[0].y = 1_000_001, WorkViewFault::Coordinate),
+        (|v| v.zoom_milli = 4001, WorkViewFault::Zoom),
+        (|v| v.placements[0].height = 79, WorkViewFault::PlacementSize),
+        (|v| v.placements[0].width = 4097, WorkViewFault::PlacementSize),
+        (|v| v.placements[0].revision = 1, WorkViewFault::PlacementRevision),
+        (|v| v.areas[0].height = 159, WorkViewFault::AreaSize),
+    ];
+    for (mutate, fault) in cases {
+        let mut invalid = view.clone();
+        mutate(&mut invalid);
+        assert_eq!(invalid.fault(), Some(fault));
+        assert_eq!(invalid.validate(), Err(WorkError::Invalid));
+    }
+    assert_eq!(WorkViewFault::PlacementSize.name(), "placement_size");
 }
 
 #[test]
