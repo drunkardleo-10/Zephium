@@ -17,6 +17,8 @@ mod work_commerce;
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]
 mod work_durable;
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_account;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
 mod acceptance;
 mod work_navigation;
 mod work_route;
@@ -126,6 +128,8 @@ fn main() {
         [argument, scenario] if argument == "--live-acceptance-only" => {
             acceptance::run_one(scenario)
         }
+        #[cfg(feature = "durable-runtime")]
+        [argument, check] if argument == "--loopback-account" => work_account::run(check),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-work" => work_durable::run_agent(),
         #[cfg(feature = "durable-runtime")]

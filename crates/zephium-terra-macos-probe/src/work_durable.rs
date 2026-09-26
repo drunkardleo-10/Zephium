@@ -113,9 +113,9 @@ const ARCHITECTURE_DEADLINE: Duration = Duration::from_secs(180);
 static AGENT_ELAPSED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const AGENT_OBJECTIVE: &str = "Compare Svelte Flow and React Flow as the canvas library for a desktop app: bundle size, license, and how actively each is maintained in 2026. Place the two libraries as subjects with cited findings, and finish with a short comparison.";
 
-struct WorkflowResult {
-    state: WorkRuntimeProjection,
-    failure: Option<&'static str>,
+pub(super) struct WorkflowResult {
+    pub(super) state: WorkRuntimeProjection,
+    pub(super) failure: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -152,6 +152,12 @@ enum Mode {
     AgentExplainMechanism,
     /// A pasted function reviewed as a code excerpt with line notes.
     AgentCodeReview,
+    /// Signed-in origin grants against two loopback sites; no public site.
+    LoopbackAccount,
+}
+
+pub(super) fn run_loopback_account() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::LoopbackAccount)
 }
 
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
@@ -480,6 +486,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     let relay = Arc::new(Mutex::new(None::<zephium_app::CallbackHandle>));
     let events = relay.clone();
     let execution_timeout = Duration::from_secs(match mode {
+        Mode::LoopbackAccount => 840,
         Mode::Agent
         | Mode::AgentRead
         | Mode::AgentGovernment
@@ -624,6 +631,19 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             );
             Error::Runtime
         })?;
+    if mode == Mode::LoopbackAccount {
+        let _ = state;
+        return match failure {
+            None => Ok(()),
+            Some(failure) => {
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "loopback-account: failure={failure}"
+                );
+                Err(Error::Verification)
+            }
+        };
+    }
     drop(store);
     let reopened = zephium_store::SqliteStore::open(data.path()).map_err(|_| Error::Runtime)?;
     let (tx, rx) = mpsc::sync_channel(1);
@@ -1033,6 +1053,11 @@ async fn workflow(
             _ => return Err("profile_not_ready"),
         }
     };
+    if mode == Mode::LoopbackAccount {
+        let _ = planning_key;
+        return super::work_account::workflow(handle, composition, profile, binding, browser_keys)
+            .await;
+    }
     if matches!(
         mode,
         Mode::Agent
@@ -2382,7 +2407,7 @@ fn money_schema(
     .with_subject_image_field("image_url")
 }
 
-fn browser_settings(
+pub(super) fn browser_settings(
     profile: zephium_app::AgentWorkProfileBinding,
     credential: zephium_agentic::AgentProviderCredential,
 ) -> WorkBrowserAdapterSettings {
