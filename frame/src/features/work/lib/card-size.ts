@@ -1,4 +1,9 @@
-import { documentDigest, type ArtifactView } from "$shared/ui/data/Artifact/artifact";
+import {
+  answerCover,
+  documentDigest,
+  type ArtifactView,
+  type DocumentNodeView,
+} from "$shared/ui/data/Artifact/artifact";
 import { TABLE_CARD, tableGrid } from "$shared/ui/data/Artifact/table";
 import { CODE_CARD_LINES, codeLines } from "$shared/ui/data/Code";
 import { DIAGRAM } from "./diagram";
@@ -41,6 +46,67 @@ const TABLE_ROW = { pad: 8, header: 24 } as const;
 const CODE_LINE = 19.2;
 /** The chart card's plot box. */
 const CHART_PLOT = { width: 300, height: 160 } as const;
+
+/** An answer card: 520 wide, its lead and first section at the body size, up to 360 tall. */
+const ANSWER = { width: 520, cap: 360, line: 20, gap: 8, list: 6, indent: 18, fence: 16 } as const;
+const plain = (node: DocumentNodeView): string =>
+  node.type === "text" ? (node.text ?? "") : (node.content ?? []).map(plain).join("");
+/** One block's height as `AnswerView` sets it, counted by the lines each block wraps to. */
+function answerBlock(block: DocumentNodeView, width: number): number {
+  switch (block.type) {
+    case "heading":
+      return 12 + 4 + Math.max(1, textLines(plain(block), width, ADVANCE.strong)) * LINE.label;
+    case "bulletList":
+    case "orderedList": {
+      const items = block.content ?? [];
+      return (
+        items.reduce(
+          (sum, item) => sum + answerBlocks(item.content ?? [], width - ANSWER.indent, 0),
+          0,
+        ) +
+        Math.max(0, items.length - 1) * ANSWER.list
+      );
+    }
+    case "blockquote":
+      return answerBlocks(block.content ?? [], width - 12);
+    case "codeBlock":
+      return codeLines(plain(block)).length * CODE_LINE + ANSWER.fence;
+    case "horizontalRule":
+      return 1;
+    default:
+      return Math.max(1, textLines(plain(block), width, ADVANCE.body)) * ANSWER.line;
+  }
+}
+function answerBlocks(
+  blocks: readonly DocumentNodeView[],
+  width: number,
+  gap: number = ANSWER.gap,
+) {
+  return blocks.reduce(
+    (sum, block, index) => sum + answerBlock(block, width) + (index ? gap : 0),
+    0,
+  );
+}
+/**
+ * The card's size, and whether it holds less than the whole answer: then it
+ * fades at its foot and the footer offers the rest. Chips need the footer too.
+ */
+export function answerCard(
+  title: string,
+  blocks: readonly DocumentNodeView[],
+  { action = false, cited = false }: { action?: boolean; cited?: boolean } = {},
+): { size: CanvasSize; more: boolean } {
+  const inner = ANSWER.width - 24;
+  const cover = answerCover(blocks);
+  const top = KIND + header(title, inner, false);
+  const body = answerBlocks(cover, inner);
+  const more = cover.length < blocks.length || top + body + FRAME.end + 4 > ANSWER.cap;
+  const foot = more || action || cited ? FRAME.footer : FRAME.end + 4;
+  return {
+    size: { width: ANSWER.width, height: clamp(top + body + foot, 120, ANSWER.cap) },
+    more,
+  };
+}
 
 /** A document is as tall as its kind caption, its whole summary and its section headings. */
 export function resultSize(
@@ -93,6 +159,11 @@ export function resultSize(
         ),
       };
     }
+    case "answer":
+      return answerCard(title, view.content.blocks, {
+        action,
+        cited: !view.knowledge && view.evidence.length > 0,
+      }).size;
     case "diagram":
       return {
         width: 300,

@@ -80,12 +80,18 @@ const blocks = (nodes: readonly DocumentNodeView[]) =>
     .join("\n\n");
 
 /**
- * A document result as the person's note: its title as the heading, then the
- * formatted document, or its paragraphs as written when it has no formatting.
+ * A document or an answer as the person's note: its title as the heading,
+ * then an answer's Markdown as written, or the formatted document, or its
+ * paragraphs as written when it has no formatting.
  */
 export function documentMarkdown(view: ArtifactView): string | null {
-  if (view.content.kind !== "document") return null;
   const title = view.title.replace(/\s+/gu, " ").trim();
+  if (view.content.kind === "answer") {
+    const body = view.content.markdown.trim();
+    const text = [title ? `# ${escape(title)}` : "", body].filter(Boolean).join("\n\n");
+    return text ? `${text}\n` : null;
+  }
+  if (view.content.kind !== "document") return null;
   let nodes = view.content.formatted?.document.content ?? null;
   // A document that opens on its own title says it once.
   const first = nodes?.[0];

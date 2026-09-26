@@ -3,6 +3,7 @@
   import type { ResultReference } from "../lib/project-environment-results";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import Artifact, { DocumentView } from "$shared/ui/data/Artifact";
+  import AnswerView from "$shared/ui/data/Artifact/AnswerView.svelte";
   import Evidence, { type EvidenceView } from "$shared/ui/data/Evidence";
   import Compare from "./compare/Compare.svelte";
   import Button from "$shared/ui/Button";
@@ -102,34 +103,41 @@
     if (content.kind === "findings") for (const item of content.items) all.push(...item.evidence);
     return [...new Map(all.map((entry) => [entry.key, entry])).values()];
   });
+  const answer = $derived(view?.content.kind === "answer" ? view.content : undefined);
+  /** An answer's header is its kind and its question, nothing more. */
   const icon = $derived(
-    compare || view?.content.kind === "comparison"
-      ? GitCompareIcon
-      : view?.content.kind === "findings"
-        ? CheckListIcon
-        : view?.content.kind === "table"
-          ? Table01Icon
-          : view?.content.kind === "chart"
-            ? ChartColumnIcon
-            : view?.content.kind === "diagram"
-              ? CubeIcon
-              : view?.content.kind === "code"
-                ? SourceCodeIcon
-                : Doc01Icon,
+    answer
+      ? undefined
+      : compare || view?.content.kind === "comparison"
+        ? GitCompareIcon
+        : view?.content.kind === "findings"
+          ? CheckListIcon
+          : view?.content.kind === "table"
+            ? Table01Icon
+            : view?.content.kind === "chart"
+              ? ChartColumnIcon
+              : view?.content.kind === "diagram"
+                ? CubeIcon
+                : view?.content.kind === "code"
+                  ? SourceCodeIcon
+                  : Doc01Icon,
   );
   const kind = $derived(
-    compare || view?.content.kind === "comparison"
-      ? m.work_lift_comparison()
-      : view?.content.kind === "findings"
-        ? m.work_env_findings()
-        : view?.content.kind === "diagram"
-          ? m.work_card_kind_diagram()
-          : view?.content.kind === "code"
-            ? `${m.work_card_kind_code()} · ${view.content.language}`
-            : m.work_env_result(),
+    answer
+      ? m.work_card_kind_answer()
+      : compare || view?.content.kind === "comparison"
+        ? m.work_lift_comparison()
+        : view?.content.kind === "findings"
+          ? m.work_env_findings()
+          : view?.content.kind === "diagram"
+            ? m.work_card_kind_diagram()
+            : view?.content.kind === "code"
+              ? `${m.work_card_kind_code()} · ${view.content.language}`
+              : m.work_env_result(),
   );
   const meta = $derived.by(() => {
     const content = view?.content;
+    if (answer) return "";
     if (compare)
       return m.work_lift_compare_meta({
         subjects: compare.columns.length,
@@ -142,14 +150,22 @@
     return session.projection?.work.objective ?? "";
   });
   let copied = $state<"idle" | "copied" | "failed">("idle");
-  /** Code's primary action copies the whole text. */
+  /** Code's primary action copies the whole text; an answer's copies its Markdown. */
   const copy = $derived.by((): LiftAction | undefined => {
     const content = view?.content;
-    if (content?.kind !== "code") return undefined;
+    if (content?.kind !== "code" && content?.kind !== "answer") return undefined;
+    const text = content.kind === "code" ? content.text : content.markdown;
     return {
-      label: copied === "copied" ? m.work_code_copied() : m.work_code_copy(),
+      label:
+        content.kind === "answer"
+          ? copied === "copied"
+            ? m.work_answer_copied()
+            : m.work_answer_copy()
+          : copied === "copied"
+            ? m.work_code_copied()
+            : m.work_code_copy(),
       onclick: () =>
-        void navigator.clipboard.writeText(content.text).then(
+        void navigator.clipboard.writeText(text).then(
           () => (copied = "copied"),
           () => (copied = "failed"),
         ),
@@ -210,7 +226,10 @@
 {#if view}
   <section class="result">
     <LiftHeader {kind} title={view.title} {meta} {icon} primary={primary ?? copy}>
-      {#snippet actions()}{#if secondary}<Button
+      {#snippet actions()}{#if answer && primary && copy}<Button
+            size="compact"
+            onclick={copy.onclick}>{copy.label}</Button
+          >{/if}{#if secondary}<Button
             size="compact"
             disabled={secondary.disabled}
             title={secondary.title}
@@ -223,6 +242,9 @@
         onevidence={pick}
         oncorrect={(cell, text) => void correct(cell, text)}
       />
+    {:else if answer}<div class="reading">
+        <AnswerView blocks={answer.blocks} label={view.title} page />
+      </div>
     {:else if view.content.kind === "document"}<div class="reading">
         {#if view.content.formatted}<DocumentView
             document={view.content.formatted}

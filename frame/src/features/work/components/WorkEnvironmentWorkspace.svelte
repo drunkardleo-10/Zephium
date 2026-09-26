@@ -1172,8 +1172,9 @@
   /** Save as note until the note exists, then Open note. */
   function noteAction(id: string): LiftAction | undefined {
     const reference = results.references.get(id);
-    if (!reference || items.find((item) => item.id === id)?.artifact?.content.kind !== "document")
-      return undefined;
+    // A document or an answer: whatever has Markdown to keep.
+    const view = items.find((item) => item.id === id)?.artifact;
+    if (!reference || !view || !documentMarkdown(view)) return undefined;
     const key = resultKey(reference);
     const note = workNotes.note(key);
     if (note) return { label: m.work_open_note(), onclick: () => openNote(note) };

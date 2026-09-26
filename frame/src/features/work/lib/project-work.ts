@@ -7,7 +7,13 @@ import type {
   WorkSignalV1,
   WorkEvidenceLink,
 } from "$domain/work";
-import type { ArtifactView, ArtifactContent, EvidenceReference } from "$shared/ui/data/Artifact";
+import type {
+  ArtifactView,
+  ArtifactContent,
+  DocumentNodeView,
+  EvidenceReference,
+} from "$shared/ui/data/Artifact";
+import { parseMarkdown } from "$features/notes";
 import * as m from "$shared/i18n/messages";
 import type { CanvasItem, CanvasLink } from "./canvas-model";
 import { fileFolder } from "./work-files";
@@ -23,6 +29,46 @@ function displayHost(value: string | undefined): string {
   } catch {
     return "";
   }
+}
+
+type ParsedNode = ReturnType<typeof parseMarkdown>["doc"];
+/**
+ * An answer's Markdown as the notes parser reads it, in the view's own shape:
+ * anything the subset refuses and still arrives (a raw block, a wiki link)
+ * stays its written text.
+ */
+function answerBlock(node: ParsedNode): DocumentNodeView {
+  const attrs = node.attrs ?? {};
+  if (node.type === "rawBlock")
+    return { type: "paragraph", content: [{ type: "text", text: String(attrs.source ?? "") }] };
+  if (node.type === "rawInline" || node.type === "wikiLink")
+    return {
+      type: "text",
+      text: String(attrs.source ?? attrs.alias ?? attrs.target ?? ""),
+      marks: (node.marks ?? []).map((mark) => ({ type: mark.type })),
+    };
+  return {
+    type: node.type ?? "paragraph",
+    ...(node.text !== undefined ? { text: node.text } : {}),
+    ...(node.marks?.length ? { marks: node.marks.map((mark) => ({ type: mark.type })) } : {}),
+    ...(node.type === "heading" ? { attrs: { level: Number(attrs.level ?? 2) } } : {}),
+    ...(node.type === "orderedList" ? { attrs: { start: Number(attrs.start ?? 1) } } : {}),
+    ...(node.type === "codeBlock"
+      ? { attrs: { language: typeof attrs.language === "string" ? attrs.language : null } }
+      : {}),
+    ...(node.content?.length ? { content: node.content.map(answerBlock) } : {}),
+  };
+}
+/** Projections repeat per render; an answer is parsed once while it is recent. */
+const parsed = new Map<string, DocumentNodeView[]>();
+function answerBlocks(markdown: string): DocumentNodeView[] {
+  let blocks = parsed.get(markdown);
+  if (!blocks) {
+    blocks = (parseMarkdown(markdown).doc.content ?? []).map(answerBlock);
+    if (parsed.size >= 32) parsed.delete(parsed.keys().next().value!);
+    parsed.set(markdown, blocks);
+  }
+  return blocks;
 }
 
 /** Display derivation of one objective; neither WorkProjectionV1 nor a store. */
@@ -187,6 +233,8 @@ function content(data: WorkArtifactDataV1, refs: Refs): ArtifactContent {
         })),
         layers: data.layers ?? [],
       };
+    case "answer":
+      return { kind: "answer", markdown: data.markdown, blocks: answerBlocks(data.markdown) };
     case "code":
       return {
         kind: "code",

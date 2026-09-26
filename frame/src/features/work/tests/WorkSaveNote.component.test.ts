@@ -149,6 +149,44 @@ test("the line writes a document up from its row, and offers nothing for any oth
   await table.close();
 });
 
+test("an answer lifts as a reading page and is saved as its own Markdown under its title", async () => {
+  const markdown = "Pin the lockfile first.\n\n## Why\n\n- `cargo update` moves every crate\n";
+  const { screen, notes, close } = await workspace((state) => {
+    state.executions[0]!.artifacts[0]!.data = { kind: "answer", markdown };
+    state.executions[0]!.user_artifacts = [];
+  });
+  const cover = () =>
+    screen.container.querySelector<HTMLElement>('[data-card-id="result-card"] .answer-body');
+  await expect.poll(cover).not.toBeNull();
+  cover()!.click();
+  const lift = screen.getByRole("dialog", { name: "Dependency findings" });
+  await expect.element(lift).toBeVisible();
+  // The header says what it is and what it answers; the page reads whole.
+  const header = lift.element().querySelector(".lift-header")!;
+  expect(header.querySelector(".kind")?.textContent).toBe("Answer");
+  expect(header.querySelector(".meta")).toBeNull();
+  expect(header.querySelector(".glyph")).toBeNull();
+  const reading = lift.element().querySelector<HTMLElement>(".reading .answer.page")!;
+  expect(reading.querySelector("h3")?.textContent).toBe("Why");
+  expect(reading.querySelector("code")?.textContent).toBe("cargo update");
+  expect(getComputedStyle(reading.parentElement!).maxInlineSize).toBe("640px");
+  const copy = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+  await screen.getByRole("button", { name: "Copy", exact: true }).click();
+  expect(copy).toHaveBeenCalledExactlyOnceWith(markdown);
+  copy.mockRestore();
+  await screen.getByRole("button", { name: "Save as note", exact: true }).click();
+  await expect
+    .element(screen.getByRole("button", { name: "Open note", exact: true }))
+    .toBeVisible();
+  const created = notes.calls.filter((call) => call.kind === "create");
+  expect(created).toHaveLength(1);
+  expect(created[0]).toMatchObject({
+    kind: "create",
+    markdown: `# Dependency findings\n\n${markdown.trim()}\n`,
+  });
+  await close();
+});
+
 test("a formatted document becomes Markdown under its title", () => {
   const markdown = documentMarkdown({
     key: "k",

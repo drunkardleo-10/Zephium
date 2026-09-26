@@ -3,6 +3,7 @@
   import CardFrame from "./CardFrame.svelte";
   import TableCard from "./TableCard.svelte";
   import CodeCard from "./CodeCard.svelte";
+  import AnswerCard from "./AnswerCard.svelte";
   import { TABLE_CARD, tableGrid } from "$shared/ui/data/Artifact/table";
   import Artifact, { documentDigest } from "$shared/ui/data/Artifact";
   import { CODE_CARD_LINES, codeLines } from "$shared/ui/data/Code";
@@ -57,6 +58,7 @@
     content?.kind === "table" || content?.kind === "comparison" ? content : undefined,
   );
   const code = $derived(content?.kind === "code" ? content : undefined);
+  const answer = $derived(content?.kind === "answer" ? content : undefined);
   /** Rows past the six a table card shows. */
   const hidden = $derived(tabular ? tableGrid(tabular).rows.length - TABLE_CARD.rows : 0);
   /** Lines past the fourteen a code card shows. */
@@ -74,41 +76,41 @@
 </script>
 
 <!-- A cover: what it is, its title, the whole summary and its sections; the lift has the rest. -->
-<CardFrame
-  {id}
-  {kind}
-  title={item.title}
-  {selected}
-  footer={item.actionLabel || hidden > 0 || lines > 0 || notes > 0 ? action : undefined}
->
-  {#if item.artifact}
-    <div
-      class="artifact-body"
-      role="button"
-      aria-label={item.title}
-      tabindex="0"
-      onpointerdown={(event) => (pressed = { x: event.clientX, y: event.clientY })}
-      onclick={openCover}
-      onkeydown={(event) => {
-        if (event.target !== event.currentTarget) return;
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        open?.(id);
-      }}
-    >
-      {#if tabular}<TableCard content={tabular} />{:else if code}<CodeCard
-          content={code}
-          label={item.title}
-        />{:else}<Artifact
-          artifact={item.artifact}
-          embedded
-          card
-          onevidence={evidence?.open ? (reference) => evidence.open?.(id, reference) : undefined}
-          onlink={openLink}
-        />{/if}
-    </div>
-  {:else}<p class="summary">{item.detail || item.status}</p>{/if}
-</CardFrame>
+{#if answer}<AnswerCard {id} {item} content={answer} {selected} {onaction} />{:else}<CardFrame
+    {id}
+    {kind}
+    title={item.title}
+    {selected}
+    footer={item.actionLabel || hidden > 0 || lines > 0 || notes > 0 ? action : undefined}
+  >
+    {#if item.artifact}
+      <div
+        class="artifact-body"
+        role="button"
+        aria-label={item.title}
+        tabindex="0"
+        onpointerdown={(event) => (pressed = { x: event.clientX, y: event.clientY })}
+        onclick={openCover}
+        onkeydown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          open?.(id);
+        }}
+      >
+        {#if tabular}<TableCard content={tabular} />{:else if code}<CodeCard
+            content={code}
+            label={item.title}
+          />{:else}<Artifact
+            artifact={item.artifact}
+            embedded
+            card
+            onevidence={evidence?.open ? (reference) => evidence.open?.(id, reference) : undefined}
+            onlink={openLink}
+          />{/if}
+      </div>
+    {:else}<p class="summary">{item.detail || item.status}</p>{/if}
+  </CardFrame>{/if}
 {#snippet action()}<span class="notes">
     {#if hidden > 0}<span class="rows"
         >{hidden === 1
