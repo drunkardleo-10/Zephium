@@ -171,6 +171,14 @@ fn main() {
             work_durable::run_agent_code_review()
         }
         #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-explain-rust-work" => {
+            work_durable::run_agent_explain_rust()
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--live-agent-concept-comparison-work" => {
+            work_durable::run_agent_concept_comparison()
+        }
+        #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-trip-work" => work_durable::run_agent_trip(),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-airbnb-work" => work_durable::run_agent_airbnb(),

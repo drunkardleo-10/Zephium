@@ -105,6 +105,14 @@ const CODE_REVIEW_FUNCTION: &str = r#"pub fn rolling_report(readings: &[Reading]
 const CODE_REVIEW_BUG: &str = "window..=readings.len()";
 const AGENT_EXPLAIN_MECHANISM_OBJECTIVE: &str =
     "Explain how virtual memory works, with the prerequisites first.";
+/// The same scenario on a mechanism of a programming language.
+const AGENT_EXPLAIN_RUST_OBJECTIVE: &str =
+    "Explain how ownership and borrowing work in Rust, with the prerequisites first.";
+static EXPLAIN_IN_RUST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const AGENT_CONCEPT_COMPARISON_OBJECTIVE: &str =
+    "Compare Rust ownership with tracing garbage collection.";
+/// Objects the loop refused as malformed during the run.
+static MALFORMED_REFUSALS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Explanation and review answer from knowledge: a tighter wall time.
 const EXPLANATION_DEADLINE: Duration = Duration::from_secs(120);
 /// A making request answers from knowledge: a bounded wall time for the loop.
@@ -152,6 +160,8 @@ enum Mode {
     AgentExplainMechanism,
     /// A pasted function reviewed as a code excerpt with line notes.
     AgentCodeReview,
+    /// Two ideas compared from knowledge in one matrix.
+    AgentConceptComparison,
     /// Signed-in origin grants against two loopback sites; no public site.
     LoopbackAccount,
 }
@@ -198,6 +208,15 @@ pub(super) fn run_agent_explain_mechanism() -> Result<(), super::ProbeFailure> {
 
 pub(super) fn run_agent_code_review() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::AgentCodeReview)
+}
+
+pub(super) fn run_agent_explain_rust() -> Result<(), super::ProbeFailure> {
+    EXPLAIN_IN_RUST.store(true, std::sync::atomic::Ordering::Relaxed);
+    run_mode(Mode::AgentExplainMechanism)
+}
+
+pub(super) fn run_agent_concept_comparison() -> Result<(), super::ProbeFailure> {
+    run_mode(Mode::AgentConceptComparison)
 }
 
 pub(super) fn run_agent_money() -> Result<(), super::ProbeFailure> {
@@ -473,6 +492,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentEngineChart
             | Mode::AgentExplainMechanism
             | Mode::AgentCodeReview
+            | Mode::AgentConceptComparison
     ) {
         6
     } else {
@@ -503,7 +523,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         | Mode::AgentArchitecture
         | Mode::AgentEngineChart
         | Mode::AgentExplainMechanism
-        | Mode::AgentCodeReview => 720,
+        | Mode::AgentCodeReview
+        | Mode::AgentConceptComparison => 720,
         Mode::Public => 160,
         _ => 240,
     });
@@ -752,6 +773,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentEngineChart
             | Mode::AgentExplainMechanism
             | Mode::AgentCodeReview
+            | Mode::AgentConceptComparison
     ) {
         let execution = &state.executions[0];
         let counts = |kind: &str| {
@@ -855,6 +877,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         Mode::AgentArchitecture => architecture_accepted(&state.executions[0]),
         Mode::AgentExplainMechanism => mechanism_accepted(&state.executions[0]),
         Mode::AgentCodeReview => code_review_accepted(&state.executions[0]),
+        Mode::AgentConceptComparison => concept_comparison_accepted(&state.executions[0]),
         _ => true,
     };
     let chart_accepted =
@@ -943,6 +966,12 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
                 "agent-code-review-run.json"
             } else {
                 "agent-code-review-incomplete.json"
+            }
+        } else if mode == Mode::AgentConceptComparison {
+            if design_accepted {
+                "agent-concept-comparison-run.json"
+            } else {
+                "agent-concept-comparison-incomplete.json"
             }
         } else if mode == Mode::AgentEngineChart {
             if chart_accepted {
@@ -1077,6 +1106,7 @@ async fn workflow(
             | Mode::AgentEngineChart
             | Mode::AgentExplainMechanism
             | Mode::AgentCodeReview
+            | Mode::AgentConceptComparison
             | Mode::AgentFiles
     ) {
         return agent_workflow(
@@ -1825,15 +1855,104 @@ fn mechanism_accepted(execution: &WorkExecutionFact) -> bool {
         .sum::<usize>();
     let brief = data().any(|artifact| matches!(artifact.data, Data::Document { .. }));
     let terms = data().any(|artifact| matches!(artifact.data, Data::Table { .. }));
+    let language = named_language(explain_objective());
+    let example = language.is_none_or(|language| {
+        data().any(|artifact| {
+            matches!(&artifact.data, Data::Code { language: named, text, notes }
+                if named == language && notes.len() >= 3 && text.lines().count() <= 30)
+        })
+    });
     let (reads, elapsed_ms) = reads_and_elapsed(execution);
     let accepted = diagram
         && findings >= 5
         && brief
+        && example
         && reads <= 1
         && u128::from(elapsed_ms) < EXPLANATION_DEADLINE.as_millis();
     let _ = writeln!(
         std::io::stdout().lock(),
-        "mechanism_qualification diagram={diagram} findings_items={findings} brief={brief} terms={terms} reads={reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
+        "mechanism_qualification diagram={diagram} findings_items={findings} brief={brief} terms={terms} language={} example={example} reads={reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
+        language.unwrap_or("none"),
+        sorted_kinds(execution),
+    );
+    accepted
+}
+
+fn explain_objective() -> &'static str {
+    if EXPLAIN_IN_RUST.load(std::sync::atomic::Ordering::Relaxed) {
+        AGENT_EXPLAIN_RUST_OBJECTIVE
+    } else {
+        AGENT_EXPLAIN_MECHANISM_OBJECTIVE
+    }
+}
+
+/// The code language a programming language named in the objective maps to.
+fn named_language(objective: &str) -> Option<&'static str> {
+    const NAMES: [(&str, &str); 9] = [
+        ("rust", "rust"),
+        ("python", "python"),
+        ("typescript", "typescript"),
+        ("javascript", "javascript"),
+        ("golang", "go"),
+        ("java", "java"),
+        ("kotlin", "kotlin"),
+        ("swift", "swift"),
+        ("c++", "cpp"),
+    ];
+    objective
+        .split(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | '?' | '!' | ':' | ';'))
+        .find_map(|word| {
+            let word = word.to_ascii_lowercase();
+            NAMES
+                .iter()
+                .find(|(name, _)| *name == word)
+                .map(|(_, language)| *language)
+        })
+}
+
+/// Two ideas compared from knowledge: exactly one knowledge-marked matrix of
+/// two subjects and at least four criteria with every cell filled, no reads,
+/// no object refused as malformed, and the loop under its deadline.
+fn concept_comparison_accepted(execution: &WorkExecutionFact) -> bool {
+    use zephium_core::work::artifact::{WorkArtifactDataV1 as Data, WorkCellValue};
+    let matrices: Vec<_> = execution
+        .artifacts
+        .iter()
+        .filter_map(|artifact| match &artifact.data {
+            Data::ComparisonMatrix {
+                subjects,
+                criteria,
+                cells,
+                ..
+            } => Some((artifact.general_knowledge, subjects.len(), criteria.len(), cells)),
+            _ => None,
+        })
+        .collect();
+    let (knowledge, subjects, criteria, filled) = matrices.first().map_or(
+        (false, 0, 0, false),
+        |(knowledge, subjects, criteria, cells)| {
+            let filled = cells.iter().flatten().all(|cell| match &cell.value {
+                WorkCellValue::Unknown => false,
+                WorkCellValue::Text { text } => !text.trim().is_empty(),
+                _ => true,
+            });
+            (*knowledge, *subjects, *criteria, filled)
+        },
+    );
+    let malformed = MALFORMED_REFUSALS.load(std::sync::atomic::Ordering::Relaxed);
+    let (reads, elapsed_ms) = reads_and_elapsed(execution);
+    let accepted = matrices.len() == 1
+        && knowledge
+        && subjects == 2
+        && criteria >= 4
+        && filled
+        && reads == 0
+        && malformed == 0
+        && u128::from(elapsed_ms) < EXPLANATION_DEADLINE.as_millis();
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "concept_comparison_qualification matrices={} knowledge={knowledge} subjects={subjects} criteria={criteria} filled={filled} malformed={malformed} reads={reads} elapsed_ms={elapsed_ms} kinds={} accepted={accepted}",
+        matrices.len(),
         sorted_kinds(execution),
     );
     accepted
@@ -1934,7 +2053,8 @@ async fn agent_workflow(
         Mode::AgentMoney => AGENT_MONEY_OBJECTIVE,
         Mode::AgentArchitecture => AGENT_ARCHITECTURE_OBJECTIVE,
         Mode::AgentEngineChart => AGENT_ENGINE_CHART_OBJECTIVE,
-        Mode::AgentExplainMechanism => AGENT_EXPLAIN_MECHANISM_OBJECTIVE,
+        Mode::AgentExplainMechanism => explain_objective(),
+        Mode::AgentConceptComparison => AGENT_CONCEPT_COMPARISON_OBJECTIVE,
         Mode::AgentCodeReview => code_review_objective.as_str(),
         Mode::AgentListing => "Read https://www.airbnb.com/rooms/23813739?adults=1 in one browser read and collect this one listing: its name, displayed nightly price, displayed monthly total, stay dates or minimum stay, its own page address as an optional url column named listing_url, and picture. Dates are unspecified, so leave any value the page does not show unknown. Do not search, follow links, book, sign in or interact with verification controls.",
         Mode::AgentRead => AGENT_READ_OBJECTIVE,
@@ -2145,6 +2265,13 @@ async fn agent_workflow(
     let agent_run = async {
         WorkAgentService::new(handle.clone())
             .with_diagnostic(|event| {
+                if let zephium_app::work_agent::WorkAgentDiagnostic::ArtifactRefused {
+                    reason: zephium_core::work::agent::WorkAgentArtifactRefusal::Malformed(_),
+                    ..
+                } = event
+                {
+                    MALFORMED_REFUSALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 let _ = writeln!(std::io::stdout().lock(), "agent-work: loop={event:?}");
             })
             .run(
@@ -2581,6 +2708,17 @@ async fn human_government_input(
                 std::future::pending::<()>().await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod explain_tests {
+    #[test]
+    fn an_objective_names_its_programming_language_by_whole_word() {
+        assert_eq!(super::named_language(super::AGENT_EXPLAIN_RUST_OBJECTIVE), Some("rust"));
+        assert_eq!(super::named_language("How does C++ move semantics work?"), Some("cpp"));
+        assert_eq!(super::named_language(super::AGENT_EXPLAIN_MECHANISM_OBJECTIVE), None);
+        assert_eq!(super::named_language("Explain trusted computing"), None);
     }
 }
 
