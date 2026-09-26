@@ -285,6 +285,62 @@ test("subjects that only share a homepage stay separate hubs", () => {
   ]);
 });
 
+test("a comparison of two concepts from what the agent knows stands alone in Made", () => {
+  const execution = agentRun();
+  const text = (value: string) => ({ value: { kind: "text" as const, text: value } });
+  execution.artifacts = [
+    {
+      ...execution.artifacts[0]!,
+      id: "compare",
+      title: "Rust memory and garbage collection",
+      general_knowledge: true,
+      data: {
+        kind: "comparison_matrix",
+        subjects: [{ name: "Rust ownership" }, { name: "Garbage collection" }],
+        criteria: [{ name: "When memory is freed", kind: { kind: "text" } }],
+        cells: [[text("At scope end")], [text("When the collector runs")]],
+        notes: [],
+      },
+      evidence: [],
+    },
+    {
+      ...execution.artifacts[0]!,
+      id: "points",
+      title: "What differs",
+      general_knowledge: true,
+      data: {
+        kind: "findings",
+        subjects: [{ name: "Rust ownership" }],
+        items: [{ claim: "No pauses", subject: 0, evidence: [], confidence: "supported" }],
+      },
+      evidence: [],
+    },
+  ];
+  execution.steps = [
+    {
+      id: "publish",
+      turn: 1,
+      kind: { kind: "publish" },
+      status: "succeeded",
+      artifacts: ["compare", "points"],
+    },
+  ];
+  const state = {
+    ...projection,
+    work: { ...projection.work, objective: "Compare Rust memory with garbage collection" },
+    executions: [execution],
+  };
+  const plan = organizeExecution(state, execution, { x: 100, y: 300 }, snapshot);
+  // No subject cards and no ties to them: the table and the findings, nothing else new.
+  expect(plan.adds.map((add) => add.reference)).toEqual([
+    expect.objectContaining({ kind: "artifact", artifact: "compare" }),
+    expect.objectContaining({ kind: "artifact", artifact: "points" }),
+  ]);
+  expect(plan.relations).toEqual([]);
+  // Made stands in the first slot, right after the request.
+  expect(Math.min(...plan.adds.map((add) => add.placement.x))).toBe(348 + 24);
+});
+
 test("a full canvas plans no more than it can hold and stops asking", () => {
   const execution = agentRun();
   execution.artifacts.push({

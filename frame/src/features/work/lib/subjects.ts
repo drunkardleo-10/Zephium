@@ -74,6 +74,18 @@ export function subjectsOf(artifact: WorkArtifactV1): readonly Subject[] {
 }
 
 /**
+ * A comparison or findings from what the agent knows weighs ideas, not
+ * products: its table or findings stand alone in Made and name no subject cards.
+ */
+export const conceptual = (artifact: WorkArtifactV1) =>
+  !!artifact.general_knowledge &&
+  (artifact.data.kind === "comparison_matrix" || artifact.data.kind === "findings");
+
+/** The subjects an artifact gives cards of their own. */
+export const cardSubjects = (artifact: WorkArtifactV1) =>
+  conceptual(artifact) ? [] : subjectsOf(artifact);
+
+/**
  * Artifacts a browser step recorded: their subjects were observed on the page
  * itself, so their pictures are the ones worth admitting.
  */

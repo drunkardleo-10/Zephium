@@ -8,7 +8,14 @@ import type {
 } from "$shared/ipc/bindings";
 import { isAgentExecution } from "./agent-steps";
 import type { CanvasPosition, CanvasSize } from "./canvas-model";
-import { listingArtifacts, recordArtifacts, subjectKey, subjectsOf } from "./subjects";
+import {
+  cardSubjects,
+  conceptual,
+  listingArtifacts,
+  recordArtifacts,
+  subjectKey,
+  subjectsOf,
+} from "./subjects";
 import { environmentStages, type WorkStage } from "./project-environment-thread";
 import { artifactSize, subjectCardSize } from "./project-environment-stage";
 import { SIZES, stageLayout, type ClusterKind, type StageContents } from "./stage-layout";
@@ -79,7 +86,7 @@ function unplacedRoots(
     if (!records.has(artifact.id)) return true;
     return (
       hubs.size < SUBJECTS_PER_RUN &&
-      subjectsOf(artifact).some((subject) => !hubs.has(subjectKey(subject)))
+      cardSubjects(artifact).some((subject) => !hubs.has(subjectKey(subject)))
     );
   });
 }
@@ -150,11 +157,10 @@ function organizeReviewedRun(
   const matrix = artifacts.find((artifact) => artifact.data.kind === "comparison_matrix");
   const findings = artifacts.filter((artifact) => artifact.data.kind === "findings");
   const sources = artifacts.filter((artifact) => artifact.data.kind === "evidence_collection");
-  const subjectOwner =
-    matrix ??
-    findings.find((artifact) => (artifact.data.subjects?.length ?? 0) > 0) ??
-    sources.find((artifact) => (artifact.data.subjects?.length ?? 0) > 0);
-  const subjects = subjectOwner ? (subjectOwner.data.subjects ?? []) : [];
+  const subjectOwner = [matrix, ...findings, ...sources].find(
+    (artifact) => !!artifact && cardSubjects(artifact).length > 0,
+  );
+  const subjects = subjectOwner ? cardSubjects(subjectOwner) : [];
   // A reviewed run stands beside its request, not under it.
   let y = anchor.y;
   const x0 = anchor.x + SIZES.request.width + 48;
@@ -265,7 +271,7 @@ function organizeAgentRun(
   ).length;
   const subjectByName = placedSubjects(snapshot, execution);
   const admitSubjects = (artifact: WorkArtifactV1): WorkEnvironmentReference[] =>
-    subjectsOf(artifact).map((subject, index) => {
+    cardSubjects(artifact).map((subject, index) => {
       const name = subjectKey(subject);
       const known = subjectByName.get(name);
       if (known) return known;
@@ -292,7 +298,7 @@ function organizeAgentRun(
       execution: execution.id,
       artifact: artifact.id,
     };
-    if (artifact.data.kind === "findings") {
+    if (artifact.data.kind === "findings" && !conceptual(artifact)) {
       join("findings", reference, artifactSize(artifact, execution));
       const named = new Set<number>();
       for (const item of artifact.data.items)

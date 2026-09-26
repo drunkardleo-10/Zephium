@@ -16,7 +16,14 @@ import { bareResult, resultPlan, stepId } from "./plan-steps";
 import { DIAGRAM, diagramLayout, diagramNodeId } from "./diagram";
 import { artifactView } from "./project-work";
 import { CLUSTER_CAP, SIZES, type StageContents, type StageMember } from "./stage-layout";
-import { listingArtifacts, subjectFacts, subjectKey, subjectsOf } from "./subjects";
+import {
+  cardSubjects,
+  conceptual,
+  listingArtifacts,
+  subjectFacts,
+  subjectKey,
+  subjectsOf,
+} from "./subjects";
 import { fileFolder, fileName, homePath } from "./work-files";
 import * as m from "$shared/i18n/messages";
 
@@ -473,7 +480,7 @@ export function stageContents(
     } else if (reference.kind === "finding") findings.push(member(element.id, SIZES.findings));
     else if (reference.kind === "artifact") {
       const size = artifact && execution ? artifactSize(artifact, execution) : SIZES.result;
-      if (artifact?.data.kind === "findings") {
+      if (artifact?.data.kind === "findings" && !conceptual(artifact)) {
         findings.push(member(element.id, size));
         continue;
       }
@@ -512,7 +519,7 @@ export function stageContents(
     const listings = listingArtifacts(execution);
     for (const artifact of execution.artifacts)
       if (!listings.has(artifact.id))
-        for (const subject of subjectsOf(artifact)) named.add(subjectKey(subject));
+        for (const subject of cardSubjects(artifact)) named.add(subjectKey(subject));
   }
   const unshown = [...named].filter((key) => !hubs.has(key)).length;
   return {
