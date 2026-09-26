@@ -8,6 +8,9 @@ use zephium_core::work::{runtime::*, *};
 mod human;
 pub use human::*;
 
+#[path = "work_sites.rs"]
+mod sites;
+pub use sites::*;
 #[path = "work_decision.rs"]
 mod decision;
 pub use decision::*;
@@ -508,6 +511,7 @@ impl WorkResponseV1 {
             Ok(
                 port::WorkReply::RuntimeStarted { .. }
                 | port::WorkReply::Deleted { .. }
+                | port::WorkReply::SiteAccess(_)
                 | port::WorkReply::MediaContext(_),
             ) => WorkReplyV1::Error {
                 error: WorkFailureV1::Invalid,
