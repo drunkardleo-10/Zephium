@@ -326,6 +326,7 @@ pub(super) fn artifact_data_schema_with_evidence_limit(maximum: u16) -> Value {
         "items":array(object(json!({"spans":array(span,1,64)})),0,64)
     }));
     let data = json!({"anyOf":[
+        variant("answer", answer_schema()),
         variant("document", json!({"blocks":array(block,1,128)})),
         variant("table", json!({"columns":array(text.clone(),1,16),"rows":array(array(text.clone(),1,16),1,128)})),
         variant("comparison_matrix", json!({
@@ -374,6 +375,15 @@ fn diagram_schema() -> Value {
     })
 }
 
+/// The reply itself, in the closed Markdown subset core admits.
+fn answer_schema() -> Value {
+    use zephium_core::work::artifact::MAX_ANSWER_BYTES;
+    json!({"markdown":{
+        "type":"string","minLength":1,"maxLength":MAX_ANSWER_BYTES,
+        "description":"Markdown subset: ## and ### headings, paragraphs, - or 1. lists nested at most one level, **bold**, `inline code`, ``` fences naming a code language, > quotes; no links, URLs, images, HTML, # headings or tables; at most 400 lines."
+    }})
+}
+
 /// An excerpt with notes on 1-based inclusive line ranges.
 fn code_schema() -> Value {
     use zephium_core::work::artifact::{
@@ -399,7 +409,7 @@ mod tests {
         let variants = schema["properties"]["artifacts"]["items"]["properties"]["data"]["anyOf"]
             .as_array()
             .unwrap();
-        assert_eq!(variants.len(), 10);
+        assert_eq!(variants.len(), 11);
         for variant in variants {
             let keys = variant["properties"]
                 .as_object()
@@ -479,6 +489,23 @@ mod tests {
         assert!(
             schema_text.contains("\"dockerfile\"") && schema_text.contains("\"maxLength\":16384")
         );
+        let answer = json!({"output":0,"title":"How ownership works","evidence":[],"data":{"kind":"answer","value":{
+            "markdown":"Each value has one owner.\n\n## Moves\n\n- `let t = s;` moves `s`"
+        }}});
+        let resolved = serde_json::from_value::<WireArtifact>(answer)
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert!(resolved.data.validate(0).is_ok());
+        assert_eq!(
+            serde_json::to_value(&resolved.data).unwrap()["kind"],
+            json!("answer")
+        );
+        assert_eq!(variants[0]["properties"]["kind"]["enum"][0], "answer");
+        let subset = variants[0]["properties"]["value"]["properties"]["markdown"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(subset.contains("no links, URLs, images, HTML, # headings or tables"));
         let code = json!({"output":0,"title":"Parser loop","evidence":[],"data":{"kind":"code","value":{
             "language":"rust","text":"for i in 0..=n {\n    step(i);\n}",
             "notes":[{"from":1,"to":1,"text":"Runs one step past the end"}]
