@@ -19,6 +19,7 @@ const GRANT: WorkAgentGrantV1 = WorkAgentGrantV1 {
     browse_hops: 1,
     folders: vec![],
     accounts: Vec::new(),
+    private: false,
 };
 
 fn begin(work: WorkId, expected: WorkRevision, timeout_seconds: u32) -> WorkCommandV1 {
@@ -99,6 +100,8 @@ struct Seen {
     decisions: Vec<planning::PlanningAnswer>,
     artifacts: usize,
     bytes: usize,
+    notices: Vec<String>,
+    sites: Vec<(String, &'static str)>,
 }
 /// Plays scripted turns in order and keeps what each turn saw.
 #[derive(Default)]
@@ -130,6 +133,12 @@ impl WorkAgentTurnProvider for Script {
                 decisions: context.decisions.clone(),
                 artifacts: context.artifacts.len(),
                 bytes: serde_json::to_vec(context).unwrap().len(),
+                notices: context.notices.clone(),
+                sites: context
+                    .sites
+                    .iter()
+                    .map(|site| (site.site.clone(), site.session))
+                    .collect(),
             });
             let output = self
                 .turns
@@ -217,7 +226,7 @@ async fn page(
                 note: None,
                 measurements: None,
                 helped: false,
-                account_write: false,
+                held_back: false,
             });
         }
         if !hang {
@@ -249,7 +258,7 @@ async fn page(
         note: None,
         measurements: None,
         helped: false,
-        account_write: false,
+        held_back: false,
     })
 }
 
@@ -953,7 +962,7 @@ async fn work_a_human_check_is_read_again_only_after_a_person_continued_it() {
                             note: Some(read_note::HUMAN_CHECK.into()),
                             measurements: None,
                             helped,
-                            account_write: false,
+                            held_back: false,
                         })
                     }
                 },
@@ -1022,3 +1031,6 @@ async fn work_a_person_on_a_page_does_not_spend_the_run() {
 
 #[path = "work_local_tests.rs"]
 mod local_tests;
+
+#[path = "work_site_session_tests.rs"]
+mod site_session_tests;

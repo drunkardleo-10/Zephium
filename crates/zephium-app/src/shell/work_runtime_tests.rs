@@ -687,9 +687,6 @@ mod search_tests;
 #[path = "work_parallel_read_tests.rs"]
 mod parallel_read_tests;
 
-#[path = "work_account_grant_tests.rs"]
-mod account_grant_tests;
-
 #[tokio::test]
 async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
     use crate::work_agent::*;
@@ -786,6 +783,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                         browse_hops: 1,
                         folders: vec![],
                         accounts: Vec::new(),
+                        private: false,
                     },
                     limits: WorkExecutionLimits {
                         model_tokens: 100_000,
@@ -821,7 +819,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                             formatted: None,
                         },
                     }],
-                    account_write: false,
+                    held_back: false,
                 })
             },
             |_| {},
@@ -914,6 +912,7 @@ async fn a_run_that_runs_out_of_time_says_so() {
                         browse_hops: 1,
                         folders: vec![],
                         accounts: Vec::new(),
+                        private: false,
                     },
                     limits: WorkExecutionLimits {
                         model_tokens: 100_000,
@@ -939,7 +938,7 @@ async fn a_run_that_runs_out_of_time_says_so() {
                     measurements: None,
                     helped: false,
                     artifacts: vec![],
-                    account_write: false,
+                    held_back: false,
                 })
             },
             |_| {},

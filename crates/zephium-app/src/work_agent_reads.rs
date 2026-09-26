@@ -20,37 +20,47 @@ impl Driver {
         B: FnMut(WorkAttemptProbe, WorkAgentBrowseRequest) -> F,
         F: Future<Output = Result<WorkBrowserOutcome, WorkError>>,
     {
+        use crate::work_sites::SiteSession;
         let mut reads = Vec::new();
-        let mut opened = self.account_pages.clone();
         for kind in browses {
             if matches!(kind, WorkStepKindV1::Discover { .. }) {
                 self.notice("Native discovery is not available in this run: provider search covers the web. Use search for facts and read for exact URLs listed in sources.");
                 continue;
             }
-            let kind = job_listing(kind);
-            let WorkStepKindV1::Read { url, .. } = &kind else {
+            let mut kind = job_listing(kind);
+            let WorkStepKindV1::Read { url, goal, .. } = &mut kind else {
                 continue;
             };
-            let granted = self
-                .grant
-                .accounts
-                .iter()
-                .position(|grant| grant.admits(url));
-            if let Some(index) = granted {
-                let refusal = if path_class(url) == WorkPathClass::Action {
-                    Some(WorkAccountRefusal::AccountWrite)
-                } else if opened[index] >= self.grant.accounts[index].pages {
-                    Some(WorkAccountRefusal::PageBudget)
-                } else {
-                    None
-                };
-                if let Some(reason) = refusal {
-                    self.refuse_account(index, reason);
-                    continue;
+            let Some(site) = crate::work_sites::site_of(url) else {
+                continue;
+            };
+            let session = match goal.clone() {
+                Some(goal) => {
+                    if let Some(entry) = crate::work_sites::entry_url(url) {
+                        *url = entry.to_owned();
+                    }
+                    let enough = remaining_limits(self.limits, self.used).is_some_and(|left| {
+                        left.operations >= PAGE_TASK_MIN.operations
+                            && left.cost_micro_usd >= PAGE_TASK_MIN.cost_micro_usd
+                    });
+                    if !enough {
+                        match self.keep_going().await? {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                self.notice(BUDGET_EXHAUSTED);
+                                continue;
+                            }
+                            Err(status) => return Ok(Some(status)),
+                        }
+                    }
+                    match self.page_task_session(&site, &goal).await? {
+                        Ok(session) => session,
+                        Err(status) => return Ok(Some(status)),
+                    }
                 }
-                opened[index] += 1;
-            }
-            reads.push((kind, granted));
+                None => self.sites.read_session(&site),
+            };
+            reads.push((kind, session));
         }
         let cap = usize::from(self.limits.max_workers).clamp(1, MAX_CONCURRENT_PAGE_READS);
         let mut offset = 0;
@@ -64,13 +74,19 @@ impl Driver {
                 self.notice(BUDGET_EXHAUSTED);
                 break;
             };
-            // A signed-in page runs alone: the engine groups only isolated pages.
-            let run = match reads[offset].1 {
-                Some(_) => 1,
-                None => reads[offset..]
+            // A page task or a page in the person's session runs alone: the
+            // engine groups only isolated reads.
+            let alone = |(kind, session): &(WorkStepKindV1, SiteSession)| {
+                *session != SiteSession::Private
+                    || matches!(kind, WorkStepKindV1::Read { goal: Some(_), .. })
+            };
+            let run = if alone(&reads[offset]) {
+                1
+            } else {
+                reads[offset..]
                     .iter()
-                    .take_while(|(_, granted)| granted.is_none())
-                    .count(),
+                    .take_while(|read| !alone(read))
+                    .count()
             };
             let count = cap
                 .min(run)
@@ -90,19 +106,25 @@ impl Driver {
             )> = Vec::new();
             let mut terminal = None;
             let mut failure = None;
-            for ((kind, granted), limits) in batch.iter().zip(limits) {
+            for ((kind, session), limits) in batch.iter().zip(limits) {
                 if self.cancelled().await {
                     terminal = Some(WorkAttemptStatus::Cancelled);
                     break;
                 }
-                let account = granted.and_then(|index| self.grant.accounts.get(index).cloned());
+                let WorkStepKindV1::Read { url, goal, .. } = kind else {
+                    continue;
+                };
+                let task = goal.is_some();
+                let limits = if task {
+                    page_task_limits(limits)
+                } else {
+                    limits
+                };
                 let mut step = self.step(kind.clone(), WorkStepStatus::Running);
-                step.account = account.as_ref().map(|grant| {
-                    Box::new(WorkPageAccountV1 {
-                        host: grant.host().to_owned(),
-                        badge: true,
-                    })
-                });
+                if *session != SiteSession::Private {
+                    step.account = crate::work_sites::host_of(url)
+                        .map(|host| Box::new(WorkPageAccountV1 { host, badge: true }));
+                }
                 let id = match self.begin(step, vec![], None).await {
                     Ok(id) => id,
                     Err(error) => {
@@ -110,11 +132,10 @@ impl Driver {
                         break;
                     }
                 };
-                if let (Some(index), WorkStepKindV1::Read { url, .. }) = (*granted, kind) {
-                    self.account_pages[index] += 1;
-                    self.signed_in.push((id, index));
-                    self.report(WorkAgentDiagnostic::AccountRead {
-                        grant: u8::try_from(index).unwrap_or(u8::MAX),
+                if *session != SiteSession::Private {
+                    self.session_steps.push(id);
+                    self.report(WorkAgentDiagnostic::SessionPage {
+                        task,
                         path: path_class(url),
                     });
                 }
@@ -138,7 +159,7 @@ impl Driver {
                         self.objective.clone()
                     },
                     output: self.output.clone(),
-                    account,
+                    session: session.clone(),
                 };
                 let future = Box::pin(browser(self.probe.clone(), request.clone()));
                 pending.push(PendingRead {
@@ -173,7 +194,9 @@ impl Driver {
                     next_read(&mut pending).await
                 };
                 let outcome = checked_outcome(outcome, request.limits);
+                // A page task may have drafted something: it is never run twice.
                 let retry = prior.is_none()
+                    && !matches!(request.step, WorkStepKindV1::Read { goal: Some(_), .. })
                     && terminal.is_none()
                     && failure.is_none()
                     && matches!(&outcome, Ok(WorkBrowserOutcome { status: WorkStepStatus::Failed, usage: Some(_), note: Some(note), helped, .. })
@@ -224,6 +247,31 @@ impl Driver {
     }
 }
 
+/// A page task's own ceiling inside the run's remaining budget: room for
+/// sixty actions and forty model calls, and the least it starts with.
+const PAGE_TASK_MAX: WorkExecutionLimits = WorkExecutionLimits {
+    model_tokens: 600_000,
+    cost_micro_usd: 600_000,
+    operations: 160,
+    timeout_seconds: 540,
+    max_workers: 1,
+};
+const PAGE_TASK_MIN: WorkExecutionLimits = WorkExecutionLimits {
+    model_tokens: 40_000,
+    cost_micro_usd: 100_000,
+    operations: 40,
+    timeout_seconds: 60,
+    max_workers: 1,
+};
+fn page_task_limits(share: WorkExecutionLimits) -> WorkExecutionLimits {
+    WorkExecutionLimits {
+        model_tokens: share.model_tokens.min(PAGE_TASK_MAX.model_tokens),
+        cost_micro_usd: share.cost_micro_usd.min(PAGE_TASK_MAX.cost_micro_usd),
+        operations: share.operations.min(PAGE_TASK_MAX.operations),
+        ..share
+    }
+}
+
 /// Job boards whose listings a script renders after the page loads. Closed.
 const JOB_BOARDS: &[&str] = &[
     "ashbyhq.com",
@@ -258,8 +306,10 @@ fn job_listing(kind: WorkStepKindV1) -> WorkStepKindV1 {
         WorkStepKindV1::Read {
             url,
             collection: None,
+            goal: None,
         } if job_board(&url) => WorkStepKindV1::Read {
             url,
+            goal: None,
             collection: Some(WorkBrowseCollection {
                 title: "Open positions".into(),
                 columns: vec![
@@ -288,7 +338,7 @@ fn retry_request(
     outcome: &Result<WorkBrowserOutcome, WorkError>,
     limits: WorkExecutionLimits,
 ) -> WorkAgentBrowseRequest {
-    let construction_attempt = if request.account.is_none()
+    let construction_attempt = if request.session == crate::work_sites::SiteSession::Private
         && matches!(outcome, Ok(WorkBrowserOutcome { note: Some(note), .. }) if note == read_note::CONSTRUCTION_TIMEOUT)
     {
         zephium_agentic::WorkBrowserConstructionAttempt::SlowPageRetry
@@ -449,6 +499,7 @@ mod tests {
             } = job_listing(WorkStepKindV1::Read {
                 url: url.into(),
                 collection: None,
+                goal: None,
             })
             else {
                 panic!("a board read carries its listings");
@@ -468,6 +519,7 @@ mod tests {
             let kind = WorkStepKindV1::Read {
                 url: url.into(),
                 collection: None,
+                goal: None,
             };
             assert_eq!(job_listing(kind.clone()), kind);
         }
@@ -484,6 +536,7 @@ mod tests {
                 }],
                 max_items: 5,
             }),
+            goal: None,
         };
         assert_eq!(job_listing(chosen.clone()), chosen);
     }
@@ -550,7 +603,7 @@ mod tests {
                 note: None,
                 measurements: None,
                 helped: false,
-                account_write: false,
+                held_back: false,
             };
             assert!(matches!(
                 checked_outcome(Ok(outcome), limits),

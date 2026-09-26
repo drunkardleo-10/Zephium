@@ -208,7 +208,8 @@ impl WorkDocumentSubmission {
             | WorkRequest::Delete { id, .. } => Some(*id),
             WorkRequest::List { .. }
             | WorkRequest::Environment { .. }
-            | WorkRequest::ReadMediaContext { .. } => None,
+            | WorkRequest::ReadMediaContext { .. }
+            | WorkRequest::SiteAccess { .. } => None,
         };
         PENDING
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {

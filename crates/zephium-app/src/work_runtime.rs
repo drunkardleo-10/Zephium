@@ -582,6 +582,16 @@ impl WorkAttemptProbe {
         self.lifetime.hold();
         WorkPersonHold(self.lifetime.clone())
     }
+    /// The person let the run keep going: its limits grow durably first.
+    pub async fn extend_limits(&self, limits: WorkExecutionLimits) -> Result<(), WorkError> {
+        self.commit_step(WorkRuntimeUpdate::ExtendLimits {
+            execution: self.execution,
+            attempt: self.attempt,
+            limits,
+        })
+        .await
+        .map(|_| ())
+    }
     /// Persists the observed public title of a running page-read step.
     pub async fn record_page_title(&self, step: WorkStepId, title: &str) -> Result<(), WorkError> {
         self.commit_step(WorkRuntimeUpdate::PageTitle {

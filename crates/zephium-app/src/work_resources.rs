@@ -484,7 +484,7 @@ impl WorkResourceOwner {
     fn human_lifecycle(
         &self,
         join: &WorkBrowserResourceJoin,
-        region: Option<WorkBrowserHumanRegion>,
+        region: Option<(WorkBrowserHumanRegion, bool)>,
         now: AgentPolicyInstant,
         deadline: AgentPolicyInstant,
     ) -> Result<PendingLifecycle, Refusal> {
@@ -495,13 +495,13 @@ impl WorkResourceOwner {
         {
             return Err(Refusal::Busy);
         }
-        let request = if let Some(region) = region {
+        let request = if let Some((region, sign_in)) = region {
             if !resource.reusable.load(Ordering::Acquire) {
                 return Err(Refusal::Busy);
             }
             self.shared
                 .lock_rows()?
-                .present_human(join, region, now, deadline)?
+                .present_human_for(join, region, now, deadline, sign_in)?
         } else {
             self.shared.lock_rows()?.continue_after_human(join, now)?
         };

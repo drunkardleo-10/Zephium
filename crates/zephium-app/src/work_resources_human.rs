@@ -18,6 +18,8 @@ pub struct RetainedHumanSnapshot {
     pub deadline: Instant,
     pub document_revision: u64,
     pub can_continue: bool,
+    /// The person's navigation settled back on the site, off any sign-in path.
+    pub clear_of_sign_in: bool,
 }
 
 /// Native-finalized successor operands; this object grants no provider scope.
@@ -106,6 +108,11 @@ impl RetainedWork {
                     .progress
                     .as_ref()
                     .is_some_and(WorkBrowserHumanProgress::ready),
+            clear_of_sign_in: human.phase == RetainedHumanPhase::Presented
+                && human
+                    .progress
+                    .as_ref()
+                    .is_some_and(WorkBrowserHumanProgress::clear_of_sign_in),
         })
     }
     pub(in crate::work_resources) fn human_deadline(&self) -> Option<Instant> {
@@ -130,14 +137,15 @@ impl RetainedWork {
         }) else {
             return false;
         };
-        let pending =
-            match self
-                .owner
-                .human_lifecycle(&self.resource, Some(region), now, human.expires)
-            {
-                Ok(pending) => pending,
-                Err(_) => return false,
-            };
+        let pending = match self.owner.human_lifecycle(
+            &self.resource,
+            Some((region, human.reason == AgentBrowserHumanReason::SignIn)),
+            now,
+            human.expires,
+        ) {
+            Ok(pending) => pending,
+            Err(_) => return false,
+        };
         human.progress = self
             .owner
             .shared

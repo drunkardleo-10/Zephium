@@ -18,9 +18,8 @@ use zephium_ipc::work::WorkActivityV1;
 #[path = "work_agent_reads.rs"]
 mod reads;
 
-/// A browser read or discovery the loop admitted for one step. The host
-/// compiles it into a read-only browsing task: anonymous and public, or, for
-/// a read inside a granted origin, with the profile's signed-in session.
+/// A page read or page task the loop admitted for one step. The host opens
+/// it in the session the run decided for its site.
 #[derive(Clone)]
 pub struct WorkAgentBrowseRequest {
     pub construction_attempt: zephium_agentic::WorkBrowserConstructionAttempt,
@@ -30,8 +29,8 @@ pub struct WorkAgentBrowseRequest {
     pub objective: String,
     pub output: String,
     pub limits: WorkExecutionLimits,
-    /// The approved origin this read lies inside; None reads anonymously.
-    pub account: Option<WorkAccountGrantV1>,
+    /// The person's session on the page's site, or the run's own storage.
+    pub session: crate::work_sites::SiteSession,
 }
 pub struct WorkBrowserOutcome {
     pub status: WorkStepStatus,
@@ -44,8 +43,8 @@ pub struct WorkBrowserOutcome {
     pub measurements: Option<WorkStepMeasurementsV1>,
     /// A person was shown this page and continued it.
     pub helped: bool,
-    /// The page agent tried to change something on a signed-in page and was refused.
-    pub account_write: bool,
+    /// The page agent was stopped before a step that would commit something.
+    pub held_back: bool,
 }
 pub struct WorkAgentProviders<'a> {
     pub turn: &'a dyn WorkAgentTurnProvider,
@@ -85,6 +84,9 @@ const NO_PROGRESS: &str = "The agent stopped making progress";
 const PRIVATE_QUERY: &str = "A search would have repeated private context";
 const UNPUBLISHED: &str = "The result could not be placed on the canvas";
 const OVER_BUDGET: &str = "The model's turn cost more than the run had left";
+const HELD_BACK: &str = "A browse stopped before a step that would commit something for the person (send, post, publish, pay, book, delete, share, save or submit). This version cannot ask them to confirm it: tell them in say what is ready and what is left for them to do.";
+const KEEP_GOING: &str = "Keep going";
+const STOP_HERE: &str = "Stop";
 
 /// Closed loop facts for development logs; never model, page or user text.
 #[derive(Clone, Copy, Debug)]
@@ -135,13 +137,20 @@ pub enum WorkAgentDiagnostic {
         kind: &'static str,
         error: WorkError,
     },
-    /// A read admitted inside a granted origin: its grant and path shape.
-    AccountRead { grant: u8, path: WorkPathClass },
-    /// A signed-in step the loop refused.
-    AccountRefused {
-        grant: u8,
-        reason: WorkAccountRefusal,
+    /// A page opened in the person's session: a task or a read, and its path shape.
+    SessionPage { task: bool, path: WorkPathClass },
+    /// A page task without the person's session, and why.
+    PrivatePage {
+        because: crate::work_sites::PrivateBecause,
     },
+    /// The person answered a site's entry question.
+    SiteEntered {
+        answer: crate::work_sites::EntryAnswer,
+    },
+    /// A page task stopped before a committing step.
+    HeldBack,
+    /// The run reached its budget and asked whether to keep going.
+    KeepGoing { granted: bool },
     /// The person's open tabs listed as context, by count.
     TabsListed { count: u8 },
 }
@@ -186,7 +195,11 @@ impl WorkAgentService {
         let command_id = command.command;
         if let WorkRuntimeIntent::BeginAgent { grant, .. } = &command.intent {
             grant.validate()?;
-            crate::work_account_scope::claim_account_grants(profile, work, &grant.accounts)?;
+            // Origin grants are retired: a run works in the person's session
+            // per site, asking first.
+            if !grant.accounts.is_empty() {
+                return Err(WorkError::Invalid);
+            }
         }
         let (request, bodies, private, tabs) = match selection {
             Some(selection) => {
@@ -260,7 +273,10 @@ impl WorkAgentService {
             return Err(WorkError::Invalid);
         }
         let node = execution.spec.nodes[0].node;
-        let grant_accounts = grant.accounts.len();
+        let standing = crate::work_sites::standing(&self.handle, profile)
+            .await
+            .unwrap_or_default();
+        let sites = crate::work_sites::RunSites::new(grant.private, standing);
         let attempt = WorkRuntimeService::new(self.handle.clone())
             .begin_node(
                 profile,
@@ -299,8 +315,11 @@ impl WorkAgentService {
             published: 0,
             finish_refusals: 0,
             pending_output_repair: false,
-            account_pages: vec![0; grant_accounts],
-            signed_in: Vec::new(),
+            sites,
+            session_steps: Vec::new(),
+            base_limits: attempt.specification().limits,
+            handle: self.handle.clone(),
+            profile,
             tabs,
         };
         if !driver.tabs.is_empty() {
@@ -378,10 +397,14 @@ struct Driver {
     published: usize,
     finish_refusals: u8,
     pending_output_repair: bool,
-    /// Signed-in pages opened per granted origin, in grant order.
-    account_pages: Vec<u8>,
-    /// Steps read with a signed-in session, and their grant.
-    signed_in: Vec<(WorkStepId, usize)>,
+    /// Which session each site's pages open in, decided once per run.
+    sites: crate::work_sites::RunSites,
+    /// Steps worked in the person's session: their facts never ride a search.
+    session_steps: Vec<WorkStepId>,
+    /// The limits the run started with: one Keep going adds them again.
+    base_limits: WorkExecutionLimits,
+    handle: crate::Handle,
+    profile: ProfileId,
     /// The person's open tabs, listed with their consent.
     tabs: Vec<context::WorkContextTabV1>,
 }
@@ -541,17 +564,6 @@ impl Driver {
             return Err(error);
         }
         Ok(())
-    }
-    /// Tells the model and the log why a signed-in step did not run.
-    fn refuse_account(&mut self, grant: usize, reason: WorkAccountRefusal) {
-        let Some(host) = self.grant.accounts.get(grant).map(|g| g.host().to_owned()) else {
-            return;
-        };
-        self.notice(&reason.notice(&host));
-        self.report(WorkAgentDiagnostic::AccountRefused {
-            grant: u8::try_from(grant).unwrap_or(u8::MAX),
-            reason,
-        });
     }
     fn report(&self, event: WorkAgentDiagnostic) {
         if let Some(diagnostic) = self.diagnostic {
@@ -740,6 +752,15 @@ impl Driver {
                 return Ok(WorkAttemptStatus::Cancelled);
             }
             if !self.budget_left() {
+                if self.turn < self.grant.max_turns
+                    && self.steps + 3 <= u32::from(self.grant.max_steps)
+                {
+                    match self.keep_going().await? {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(status) => return Ok(status),
+                    }
+                }
                 self.report(WorkAgentDiagnostic::BudgetSpent);
                 return self.fail_turn(BUDGET_SPENT).await;
             }
@@ -764,15 +785,13 @@ impl Driver {
                 browse_available: true,
             };
             let notices = std::mem::take(&mut self.notices);
-            let accounts: Vec<WorkAgentAccountView> = self
-                .grant
-                .accounts
-                .iter()
-                .zip(&self.account_pages)
-                .map(|(grant, used)| WorkAgentAccountView {
-                    origin: grant.origin.clone(),
-                    pages_left: grant.pages.saturating_sub(*used),
-                })
+            let sites: Vec<WorkAgentSiteView> = self
+                .sites
+                .view()
+                .into_iter()
+                .rev()
+                .take(MAX_AGENT_SITES)
+                .map(|(site, session)| WorkAgentSiteView { site, session })
                 .collect();
             let view = TurnView {
                 objective: &self.objective,
@@ -783,7 +802,7 @@ impl Driver {
                 budget,
                 remaining: self.remaining(),
                 notices: &notices,
-                accounts: &accounts,
+                sites: &sites,
                 tabs: &self.tabs,
             };
             let disclosed = disclose(
@@ -1523,13 +1542,10 @@ impl Driver {
                         if let Some(usage) = outcome.usage {
                             self.charge(usage);
                         }
-                        let signed_in = self
-                            .signed_in
-                            .iter()
-                            .find(|(step, _)| *step == id)
-                            .map(|(_, grant)| *grant);
-                        if let Some(grant) = signed_in.filter(|_| outcome.account_write) {
-                            self.refuse_account(grant, WorkAccountRefusal::AccountWrite);
+                        let signed_in = self.session_steps.contains(&id);
+                        if outcome.held_back {
+                            self.report(WorkAgentDiagnostic::HeldBack);
+                            self.notice(HELD_BACK);
                         }
                         let measurements = outcome.measurements;
                         let usage = if outcome.status == WorkStepStatus::OutcomeUnknown {
@@ -1573,8 +1589,8 @@ impl Driver {
                                 outcome.note.as_deref().unwrap_or("the page gave nothing")
                             ));
                         }
-                        // Facts from a signed-in page never ride a search query.
-                        if signed_in.is_some() {
+                        // Facts from the person's own pages never ride a search query.
+                        if signed_in {
                             self.private.extend(
                                 artifacts.iter().map(|artifact| artifact.data.plain_text()),
                             );
@@ -1651,11 +1667,31 @@ impl Driver {
         &mut self,
         question: WorkAgentQuestion,
     ) -> Result<Option<WorkAttemptStatus>, WorkError> {
+        let prompt = question.prompt.clone();
+        match self.ask_person(question.prompt, question.options).await? {
+            Ok(answer) => {
+                self.decisions.push(planning::PlanningAnswer {
+                    question: prompt,
+                    answer,
+                });
+                Ok(None)
+            }
+            Err(status) => Ok(Some(status)),
+        }
+    }
+
+    /// Puts one question to the person and waits for the answer; an
+    /// unanswered question past the wait, or a stop, ends the run.
+    async fn ask_person(
+        &mut self,
+        prompt: String,
+        options: Vec<String>,
+    ) -> Result<Result<String, WorkAttemptStatus>, WorkError> {
         self.probe.record_activity(WorkActivityV1::WaitingForHuman);
         let step = self.step(
             WorkStepKindV1::Ask {
-                prompt: question.prompt,
-                options: question.options,
+                prompt,
+                options,
                 answer: None,
             },
             WorkStepStatus::Running,
@@ -1677,18 +1713,14 @@ impl Driver {
                 .ok_or(WorkError::NotFound)?;
             if asked.status == WorkStepStatus::Succeeded {
                 self.resume(since);
-                if let WorkStepKindV1::Ask {
-                    prompt,
+                let WorkStepKindV1::Ask {
                     answer: Some(answer),
                     ..
                 } = &asked.kind
-                {
-                    self.decisions.push(planning::PlanningAnswer {
-                        question: prompt.clone(),
-                        answer: answer.clone(),
-                    });
-                }
-                return Ok(None);
+                else {
+                    return Ok(Ok(String::new()));
+                };
+                return Ok(Ok(answer.clone()));
             }
             // An open question never spends the run; unanswered past the
             // wait, the run stops on it and an answer or Continue resumes it.
@@ -1704,7 +1736,7 @@ impl Driver {
                     None,
                 )
                 .await?;
-                return Ok(Some(WorkAttemptStatus::Cancelled));
+                return Ok(Err(WorkAttemptStatus::Cancelled));
             }
             if self.cancelled().await {
                 let note = self.stop_note().unwrap_or(INTERRUPTED);
@@ -1718,9 +1750,115 @@ impl Driver {
                     None,
                 )
                 .await?;
-                return Ok(Some(WorkAttemptStatus::Cancelled));
+                return Ok(Err(WorkAttemptStatus::Cancelled));
             }
         }
+    }
+
+    /// The run spent its budget: the person decides whether it keeps going
+    /// with the same amount again. False when they stop it or it cannot grow.
+    async fn keep_going(&mut self) -> Result<Result<bool, WorkAttemptStatus>, WorkError> {
+        let grown = WorkExecutionLimits {
+            model_tokens: self
+                .limits
+                .model_tokens
+                .saturating_add(self.base_limits.model_tokens)
+                .min(1_000_000),
+            cost_micro_usd: self
+                .limits
+                .cost_micro_usd
+                .saturating_add(self.base_limits.cost_micro_usd)
+                .min(10_000_000),
+            operations: self
+                .limits
+                .operations
+                .saturating_add(self.base_limits.operations)
+                .min(1024),
+            ..self.limits
+        };
+        if grown.cost_micro_usd == self.limits.cost_micro_usd
+            && grown.operations == self.limits.operations
+        {
+            return Ok(Ok(false));
+        }
+        let spent = f64::from(self.used.cost_micro_usd) / 1_000_000.0;
+        let answer = match self
+            .ask_person(
+                format!("Used ${spent:.2}. Keep going?"),
+                vec![KEEP_GOING.into(), STOP_HERE.into()],
+            )
+            .await?
+        {
+            Ok(answer) => answer,
+            Err(status) => return Ok(Err(status)),
+        };
+        let granted = answer.trim().eq_ignore_ascii_case(KEEP_GOING);
+        self.report(WorkAgentDiagnostic::KeepGoing { granted });
+        if !granted {
+            return Ok(Ok(false));
+        }
+        self.probe.extend_limits(grown).await?;
+        self.limits = grown;
+        Ok(Ok(true))
+    }
+
+    /// The session a page task on `site` opens in, asking the person first
+    /// when the profile holds a session there. A stop ends the run.
+    async fn page_task_session(
+        &mut self,
+        site: &str,
+        goal: &str,
+    ) -> Result<Result<crate::work_sites::SiteSession, WorkAttemptStatus>, WorkError> {
+        use crate::work_sites::*;
+        let present = crate::work_context::sessions_present(self.profile, vec![site.to_owned()])
+            .await
+            .first()
+            .copied()
+            .unwrap_or(false);
+        let mut entry = self.sites.entry(site, present);
+        if entry == Entry::Ask {
+            let (prompt, options) = entry_question(site, goal);
+            let answer = match self.ask_person(prompt, options).await? {
+                Ok(answer) => entry_answer(site, &answer),
+                Err(status) => return Ok(Err(status)),
+            };
+            self.report(WorkAgentDiagnostic::SiteEntered { answer });
+            if answer == EntryAnswer::Always {
+                if let Err(error) = set_standing(
+                    &self.handle,
+                    self.profile,
+                    site.to_owned(),
+                    Some(zephium_core::work::sites::WorkSiteAccessV1::Always),
+                )
+                .await
+                {
+                    self.report(WorkAgentDiagnostic::CommitRefused {
+                        kind: "site",
+                        error,
+                    });
+                }
+            }
+            entry = self.sites.answer(site, answer);
+        }
+        Ok(Ok(match entry {
+            Entry::Session(session) => session,
+            Entry::Private(because) => {
+                self.report(WorkAgentDiagnostic::PrivatePage { because });
+                self.notice(&format!(
+                    "{} is worked on without the person's session in this run: {}.",
+                    site_name(site),
+                    match because {
+                        PrivateBecause::PrivateRun => "this is a private run",
+                        PrivateBecause::Never => "the person never lets the agent use it",
+                        PrivateBecause::Sensitive =>
+                            "it is a sensitive site the person has not opened to the agent",
+                        PrivateBecause::Declined => "the person said not now",
+                    }
+                ));
+                SiteSession::Private
+            }
+            Entry::Ask => SiteSession::Private,
+        }))
     }
 
     /// Seeds the thread from this work's earlier executions. Objects come
@@ -1862,7 +2000,7 @@ struct TurnView<'a> {
     budget: WorkAgentBudget,
     remaining: WorkExecutionLimits,
     notices: &'a [String],
-    accounts: &'a [WorkAgentAccountView],
+    sites: &'a [WorkAgentSiteView],
     tabs: &'a [context::WorkContextTabV1],
 }
 
@@ -1900,7 +2038,7 @@ fn disclose(
             view.notices.to_vec(),
         )
         .and_then(|disclosure| disclosure.with_thread(thread.clone()))
-        .and_then(|disclosure| disclosure.with_accounts(view.accounts.to_vec()))
+        .and_then(|disclosure| disclosure.with_sites(view.sites.to_vec()))
         .and_then(|disclosure| disclosure.with_tabs(view.tabs));
         match disclosed {
             Err(WorkError::Capacity) => {}
@@ -2048,10 +2186,15 @@ fn reuses_completed_read(request: &WorkStepKindV1, step: &WorkStepFact) -> bool 
     }
     match (request, &step.kind) {
         (
-            WorkStepKindV1::Read { url, collection },
+            WorkStepKindV1::Read {
+                url,
+                collection,
+                goal: None,
+            },
             WorkStepKindV1::Read {
                 url: previous_url,
                 collection: previous,
+                goal: None,
             },
         ) if url == previous_url => match (collection, previous) {
             (None, None) => true,
@@ -2343,6 +2486,7 @@ mod tests {
         let request = WorkStepKindV1::Read {
             url: "https://shop.example.test/catalog?q=sets".into(),
             collection: Some(collection),
+            goal: None,
         };
         let mut step = WorkStepFact {
             id: 1.into(),
@@ -2546,7 +2690,7 @@ mod tests {
                 max_workers: 1,
             },
             notices: &[],
-            accounts: &[],
+            sites: &[],
             tabs: &[],
         };
         let disclosure = disclose(&view, &mut previews, &mut inherited, &kept, &mut thread)
