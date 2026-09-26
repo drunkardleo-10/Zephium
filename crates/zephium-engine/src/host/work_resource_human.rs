@@ -82,9 +82,11 @@ impl WorkNativeResource {
                         deadline,
                     )
                     .ok_or(())?;
-                    view.work_navigation()
-                        .ok_or(())?
-                        .begin_human(request.human_source().ok_or(())?, deadline)?;
+                    view.work_navigation().ok_or(())?.begin_human(
+                        request.human_source().ok_or(())?,
+                        deadline,
+                        request.human_sign_in(),
+                    )?;
                     self.human_presentation = Some(presentation);
                     self.human_progress = request.human_progress();
                     if !self
@@ -164,6 +166,14 @@ impl WorkNativeResource {
                     .as_ref()
                     .and_then(|view| view.work_navigation())
                     .is_some_and(|gate| gate.human_ready()),
+            );
+        }
+        if let Some(progress) = &self.human_progress {
+            progress.record_clear_of_sign_in(
+                self.view
+                    .as_ref()
+                    .and_then(|view| view.work_navigation())
+                    .is_some_and(|gate| gate.human_clear_of_sign_in()),
             );
         }
         if let Some((progress, revision)) = self.human_progress.as_ref().zip(

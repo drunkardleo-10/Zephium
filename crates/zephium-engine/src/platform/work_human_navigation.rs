@@ -3,6 +3,8 @@ use std::time::{Duration, Instant};
 
 pub(super) struct HumanNavigation {
     source: ContextNavigationTarget,
+    /// A sign-in may pass through another site's sign-in pages.
+    open: bool,
     current: ContextNavigationTarget,
     native_id: wry::NavigationId,
     requested: bool,
@@ -17,8 +19,42 @@ impl HumanNavigation {
     fn target(&self, raw: &str) -> Option<ContextNavigationTarget> {
         ContextNavigationTarget::parse(raw).ok().filter(|target| {
             target.as_url().as_str() == raw
-                && zephium_agentic::same_work_human_site(&self.source, target)
+                && (zephium_agentic::same_work_human_site(&self.source, target)
+                    || (self.open && target.as_url().scheme() == "https"))
         })
+    }
+    /// Settled back on the page's own site and off any sign-in path.
+    fn clear_of_sign_in(&self) -> bool {
+        self.finished
+            && self.loading.is_none()
+            && zephium_agentic::same_work_human_site(&self.source, &self.current)
+            && !self
+                .current
+                .as_url()
+                .path_segments()
+                .into_iter()
+                .flatten()
+                .any(|segment| {
+                    let segment = segment.to_ascii_lowercase();
+                    [
+                        "login",
+                        "signin",
+                        "sign-in",
+                        "sign_in",
+                        "log-in",
+                        "logon",
+                        "sso",
+                        "auth",
+                        "oauth",
+                        "authorize",
+                        "2fa",
+                        "mfa",
+                        "verify",
+                        "challenge",
+                        "checkpoint",
+                    ]
+                    .contains(&segment.as_str())
+                })
     }
     pub(super) fn allows(&mut self, raw: &str, main_frame: Option<bool>) -> bool {
         if Instant::now() >= self.deadline {
@@ -111,10 +147,20 @@ impl WorkDocumentNavigation {
                         .is_some_and(|human| human.loading.is_none() && !human.requested)
             })
     }
+    pub(crate) fn human_clear_of_sign_in(&self) -> bool {
+        self.0.lock().is_ok_and(|state| {
+            state.phase == Phase::Human
+                && state
+                    .human
+                    .as_ref()
+                    .is_some_and(HumanNavigation::clear_of_sign_in)
+        })
+    }
     pub(crate) fn begin_human(
         &self,
         source: &ContextNavigationTarget,
         deadline: Instant,
+        open: bool,
     ) -> Result<(), ()> {
         let now = Instant::now();
         if deadline <= now
@@ -134,6 +180,7 @@ impl WorkDocumentNavigation {
         }
         state.human = Some(HumanNavigation {
             source: source.clone(),
+            open,
             current,
             native_id: state.native_id.ok_or(())?,
             requested: false,
@@ -170,6 +217,7 @@ impl WorkDocumentNavigation {
             || human.requested
             || human.revision != revision
             || human.current.as_url().as_str() != current
+            || !zephium_agentic::same_work_human_site(&human.source, &human.current)
         {
             return Err(());
         }
@@ -199,7 +247,7 @@ mod tests {
     fn human_navigation_seals_agent_stamps_and_accepts_only_the_original_origin() {
         let gate = ready_gate();
         let source = ContextNavigationTarget::parse(URL).unwrap();
-        gate.begin_human(&source, Instant::now() + Duration::from_secs(30))
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30), false)
             .unwrap();
         assert!(gate.ready_target().is_none());
         assert!(!gate.ready(Some(URL)));
@@ -229,7 +277,7 @@ mod tests {
     fn human_form_followup_before_start_keeps_one_navigation_episode() {
         let gate = ready_gate();
         let source = ContextNavigationTarget::parse(URL).unwrap();
-        gate.begin_human(&source, Instant::now() + Duration::from_secs(30))
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30), false)
             .unwrap();
         assert!(gate.allows_apple_action(URL, apple_action(T::FormSubmitted, false)));
         assert!(gate.allows_apple_action(URL, apple_action(T::FormSubmitted, true)));
@@ -256,8 +304,8 @@ mod tests {
     fn foreign_redirect_and_expired_human_window_cannot_be_frozen() {
         let gate = ready_gate();
         let source = ContextNavigationTarget::parse(URL).unwrap();
-        assert!(gate.begin_human(&source, Instant::now()).is_err());
-        gate.begin_human(&source, Instant::now() + Duration::from_secs(30))
+        assert!(gate.begin_human(&source, Instant::now(), false).is_err());
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30), false)
             .unwrap();
         assert!(gate.allows_apple_action(URL, apple_action(T::Reload, true)));
         gate.observe(event(2, E::Started, URL)).unwrap();
@@ -265,5 +313,32 @@ mod tests {
             .unwrap();
         assert!(gate.failed());
         assert!(gate.finish_human(URL, 0).is_err());
+    }
+
+    #[test]
+    fn a_sign_in_may_pass_through_another_site_but_must_settle_back() {
+        let gate = ready_gate();
+        let source = ContextNavigationTarget::parse(URL).unwrap();
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30), true)
+            .unwrap();
+        let idp = "https://accounts.google.com/signin";
+        assert!(gate.allows_apple_action(idp, apple_action(T::LinkActivated, true)));
+        assert!(
+            !gate.allows_apple_action("http://plain.test/", apple_action(T::LinkActivated, true))
+        );
+        gate.observe(event(2, E::Started, idp)).unwrap();
+        gate.observe(event(2, E::Committed, idp)).unwrap();
+        gate.observe(event(2, E::Finished, idp)).unwrap();
+        assert!(!gate.human_clear_of_sign_in());
+        let revision = gate.human_revision().unwrap();
+        assert!(gate.finish_human(idp, revision).is_err());
+        let back = "https://example.test/home";
+        assert!(gate.allows_apple_action(back, apple_action(T::Other, true)));
+        gate.observe(event(3, E::Started, back)).unwrap();
+        gate.observe(event(3, E::Committed, back)).unwrap();
+        gate.observe(event(3, E::Finished, back)).unwrap();
+        assert!(gate.human_clear_of_sign_in());
+        gate.finish_human(back, gate.human_revision().unwrap())
+            .unwrap();
     }
 }
