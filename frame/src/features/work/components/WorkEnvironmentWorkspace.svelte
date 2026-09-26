@@ -2180,10 +2180,10 @@
   </div>
 {/snippet}
 {#snippet composerAbove()}
-  {#if runningObjective && objectiveSession?.grantDraft}<AccountGrantReview
-      session={objectiveSession}
-    />{/if}
-  {#if runningObjective && objectiveSession}
+  <!-- An open grant question takes the agent line's place until it is answered. -->
+  {#if runningObjective && (objectiveSession?.grantDraft || objectiveSession?.grantDeclined)}
+    <AccountGrantReview session={objectiveSession} />
+  {:else if runningObjective && objectiveSession}
     <LazyView
       loader={loadAgentLine}
       loadingLabel={m.surface_loading()}

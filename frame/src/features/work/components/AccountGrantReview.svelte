@@ -23,56 +23,63 @@
   );
 </script>
 
-<!-- The approval is the attestation: the account is the one this tab is signed in as, never a name we detect. -->
+<!-- The approval is the attestation: the account is the one this tab is signed in as, never a name we detect.
+     It stands in the agent line's place while the question is open. -->
 {#if grant}
   <section class="grant" aria-label={m.work_account_read_origin({ host })}>
-    <div class="who">
+    <div class="line">
       <span class="mark"
-        ><HostGlyph {host} url={grant.origin} size={20} initial={false} /><AccountBadge
+        ><HostGlyph {host} url={grant.origin} size={18} initial={false} /><AccountBadge
           {host}
-          size={14}
+          size={12}
         /></span
       >
-      <span class="titles">
-        <strong>{host}</strong>
-        <span>{m.work_account_grant_as()}</span>
+      <span class="words">
+        <strong>{m.work_account_grant_question({ host })}</strong>
+        <span class="caption">{m.work_account_grant_pages({ pages: grant.pages })}</span>
+      </span>
+      <span class="actions">
+        <Button size="compact" disabled={blocked} onclick={() => void session.declineGrant()}
+          >{m.work_account_grant_decline()}</Button
+        >
+        <Button
+          size="compact"
+          variant="primary"
+          disabled={blocked}
+          onclick={() => void session.allowGrant()}>{m.work_account_grant_allow()}</Button
+        >
       </span>
     </div>
-    <p class="scope">{m.work_account_grant_pages({ pages: grant.pages })}</p>
-    <p class="note">{m.work_account_grant_note()}</p>
-    <div class="actions">
-      <Button size="compact" onclick={() => session.declineGrant()}
-        >{m.work_account_grant_decline()}</Button
-      >
-      <Button
-        size="compact"
-        variant="primary"
-        disabled={blocked}
-        onclick={() => void session.allowGrant()}>{m.work_account_grant_allow()}</Button
-      >
-    </div>
+  </section>
+{:else if session.grantDeclined}
+  <section class="grant" aria-live="polite">
+    <p class="line declined">{m.work_account_grant_declined()}</p>
   </section>
 {/if}
 
 <style>
   .grant {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
     box-sizing: border-box;
     inline-size: 100%;
-    padding: 12px;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-control);
-    background: var(--color-surface);
-    font-size: var(--text-caption);
+    border-radius: var(--radius-panel);
+    background: var(--color-float);
+    box-shadow: var(--shadow-popover);
   }
 
-  .who {
+  .line {
     display: flex;
     align-items: center;
-    gap: 8px;
-    min-inline-size: 0;
+    gap: 10px;
+    box-sizing: border-box;
+    min-block-size: 36px;
+    margin: 0;
+    padding: 6px 6px 6px 9px;
+  }
+
+  .declined {
+    padding-inline-start: 14px;
+    color: var(--color-muted);
+    font-size: var(--text-label);
   }
 
   .mark {
@@ -80,52 +87,44 @@
     display: inline-grid;
     flex: none;
     place-items: center;
-    inline-size: 28px;
-    block-size: 28px;
+    inline-size: 24px;
+    block-size: 24px;
   }
 
   .mark :global(.account-badge) {
     position: absolute;
     inset-block-end: -2px;
     inset-inline-end: -2px;
-    box-shadow: 0 0 0 2px var(--color-surface);
+    box-shadow: 0 0 0 2px var(--color-float);
   }
 
-  .titles {
+  .words {
     display: flex;
+    flex: 1;
     flex-direction: column;
     min-inline-size: 0;
   }
 
-  .titles strong,
-  .titles span {
+  .words strong,
+  .caption {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .titles strong {
-    font-size: var(--text-body);
-    font-weight: 600;
-  }
-
-  .titles span,
-  .note {
-    color: var(--color-muted);
-  }
-
-  p {
-    margin: 0;
-  }
-
-  .scope {
-    color: var(--color-text);
+  .words strong {
+    font-size: var(--text-label);
     font-weight: 500;
+  }
+
+  .caption {
+    color: var(--color-muted);
+    font-size: var(--text-caption);
   }
 
   .actions {
     display: flex;
-    justify-content: flex-end;
-    gap: 8px;
+    flex: none;
+    gap: 6px;
   }
 </style>
