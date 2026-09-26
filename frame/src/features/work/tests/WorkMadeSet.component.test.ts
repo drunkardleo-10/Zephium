@@ -9,10 +9,15 @@ import WorkCanvas from "../components/WorkCanvas.svelte";
 import DiagramNodeCard from "../components/cards/DiagramNodeCard.svelte";
 import ResultCard from "../components/cards/ResultCard.svelte";
 import { environmentStages, environmentRequests } from "../lib/project-environment-thread";
-import { environmentClusters, environmentDiagrams, resultHeads } from "../lib/project-environment";
+import {
+  environmentClusters,
+  environmentDiagrams,
+  environmentItems,
+  resultHeads,
+} from "../lib/project-environment";
 import { artifactView } from "../lib/project-work";
 import type { CanvasItem } from "../lib/canvas-model";
-import { projection, snapshot } from "./environment-fixtures";
+import { explanationScene, projection, snapshot } from "./environment-fixtures";
 
 afterEach(() => favicons.dispose());
 
@@ -224,6 +229,66 @@ test("the person's architecture fits its group, and no flow's name sits on a par
   )!;
   expect(name.textContent).toBe("Background workers and schedulers");
   expect(name.scrollHeight).toBeLessThanOrEqual(name.clientHeight + 1);
+  await screen.unmount();
+});
+
+test("an explanation reads diagram, then code and findings two across, then the table, the brief last", async () => {
+  await page.viewport(1600, 1000);
+  const { scene: explained, objectives } = explanationScene();
+  const stages = environmentStages(explained, objectives);
+  const layout = stages[0]!.layout;
+  const diagrams = environmentDiagrams(explained, objectives, stages);
+  const lanes = environmentClusters(stages, resultHeads(explained, objectives, stages));
+  const requests = environmentRequests(stages);
+  const positions = { ...requests.positions, ...layout.positions, ...diagrams.positions };
+  const items = [
+    ...environmentItems(explained, [], [], objectives).filter((item) => positions[item.id]),
+    ...diagrams.items,
+  ];
+  // The diagram's area leads; its result draws no cover of its own.
+  expect(layout.positions["diagram-card"]).toBeUndefined();
+  const area = layout.groups[0]!.diagrams![0]!.box;
+  const at = (id: string) => layout.positions[`${id}-card`]!;
+  expect(at("code").y).toBeGreaterThan(area.y + area.height);
+  expect(at("points").y).toBe(at("code").y);
+  expect(at("points").x).toBeGreaterThan(at("code").x);
+  expect(at("table").y).toBeGreaterThan(at("code").y);
+  expect(at("table").x).toBe(at("code").x);
+  expect(at("brief").y).toBe(at("table").y);
+  expect(at("brief").x).toBeGreaterThan(at("table").x);
+  const screen = await render(WorkCanvas, {
+    items,
+    links: [...lanes.links, ...diagrams.links],
+    clusters: [...diagrams.clusters, ...lanes.clusters],
+    authoritative: new Set(explained.elements.map((element) => element.id)),
+    initialView: { positions, viewport: { x: 0, y: 20, zoom: 0.55 } },
+    oninspect: () => {},
+  });
+  screen.container.style.width = "1600px";
+  screen.container.style.height = "1000px";
+  const node = (id: string) =>
+    screen.container.querySelector(`.svelte-flow__node[data-id="${id}"]`)?.getBoundingClientRect();
+  await expect.poll(() => node("brief-card")).toBeDefined();
+  const boxes = [
+    ["area", node("group:objective-card:diagram:diagram-card")!],
+    ...["code", "points", "table", "brief"].map((id) => [id, node(`${id}-card`)!] as const),
+  ] as const;
+  const made = node("group:objective-card:made")!;
+  // Nothing overlaps, and the Made group holds all of it.
+  for (const [name, box] of boxes) {
+    expect(box.left, name).toBeGreaterThanOrEqual(made.left);
+    expect(box.right, name).toBeLessThanOrEqual(made.right + 0.5);
+    expect(box.bottom, name).toBeLessThanOrEqual(made.bottom + 0.5);
+    for (const [other, next] of boxes)
+      if (other !== name)
+        expect(
+          box.left < next.right - 0.5 &&
+            next.left < box.right - 0.5 &&
+            box.top < next.bottom - 0.5 &&
+            next.top < box.bottom - 0.5,
+          `${name} over ${other}`,
+        ).toBe(false);
+  }
   await screen.unmount();
 });
 

@@ -1,4 +1,9 @@
-import type { WorkEnvironmentSnapshot, WorkRuntimeProjection } from "$shared/ipc/bindings";
+import type {
+  WorkArtifactDataV1,
+  WorkArtifactV1,
+  WorkEnvironmentSnapshot,
+  WorkRuntimeProjection,
+} from "$shared/ipc/bindings";
 export const projection: WorkRuntimeProjection = {
   version: 1,
   interrupted: [],
@@ -164,4 +169,88 @@ export function planScene(): {
     } as WorkEnvironmentSnapshot,
     objectives: new Map([["objective", state]]),
   };
+}
+
+const OWNERSHIP: WorkArtifactDataV1 = {
+  kind: "diagram",
+  nodes: [
+    { id: "stack", name: "Stack", kind: "store", note: "Frames freed when a function returns" },
+    { id: "heap", name: "Heap", kind: "store", note: "Box, Vec and String own their buffers" },
+    { id: "owner", name: "Owner", kind: "service", note: "One binding owns each value" },
+    { id: "drop", name: "Drop", kind: "worker", note: "Runs when the owner leaves scope" },
+  ],
+  edges: [
+    { from: "owner", to: "stack", label: "lives in" },
+    { from: "owner", to: "heap", label: "points to" },
+    { from: "owner", to: "drop", label: "scope ends" },
+    { from: "drop", to: "heap", label: "frees" },
+  ],
+};
+
+/** An explanation about programming: a diagram, an annotated example, findings, a table and a brief. */
+export function explanationScene() {
+  const { scene, objectives } = planScene();
+  const run = objectives.get("objective")!.executions[0]!;
+  const base = run.artifacts[0]!;
+  const artifact = (id: string, title: string, data: WorkArtifactDataV1): WorkArtifactV1 => ({
+    ...base,
+    id,
+    title,
+    data,
+    general_knowledge: true,
+  });
+  run.artifacts = [
+    artifact("brief", "How Rust manages memory", {
+      kind: "document",
+      paragraphs: [
+        "Rust frees memory when its owner goes out of scope, without a garbage collector.",
+        "## Ownership",
+        "Every value has one owner.",
+      ],
+    }),
+    artifact("diagram", "Ownership at a glance", OWNERSHIP),
+    artifact("code", "Ownership in practice", {
+      kind: "code",
+      language: "rust",
+      text: [
+        "fn main() {",
+        '    let s = String::from("hi");',
+        "    let t = s; // moved",
+        '    println!("{t}");',
+        "} // t dropped here",
+      ].join("\n"),
+      notes: [{ from: 3, to: 3, text: "Ownership moves; s is no longer usable" }],
+    }),
+    artifact("points", "What to remember", {
+      kind: "findings",
+      items: [
+        { claim: "One owner per value", evidence: [], confidence: "supported" },
+        { claim: "Borrows never outlive the owner", evidence: [], confidence: "supported" },
+      ],
+    }),
+    artifact("table", "Stack and heap", {
+      kind: "table",
+      columns: ["Place", "Freed"],
+      rows: [
+        ["Stack", "When the frame returns"],
+        ["Heap", "When the owner drops"],
+      ],
+    }),
+  ];
+  const ids = run.artifacts.map((entry) => entry.id);
+  scene.elements = [
+    scene.elements[0]!,
+    ...ids.map((id) => ({
+      id: `${id}-card`,
+      area: null,
+      reference: {
+        kind: "artifact" as const,
+        objective: "objective",
+        execution: "execution",
+        artifact: id,
+      },
+    })),
+  ];
+  scene.relations = [];
+  return { scene, objectives };
 }

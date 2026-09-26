@@ -418,9 +418,21 @@ export function laneFacts(
   };
 }
 
-/** Made reads as a set: documents first (the first is the cover), then diagrams, then the rest. */
-const rank = (artifact: WorkArtifactV1 | undefined) =>
-  artifact?.data.kind === "document" ? 0 : artifact?.data.kind === "diagram" ? 1 : 2;
+/**
+ * Made reads as a set: documents first (the first is the cover), then the
+ * rest. An explanation leads with its diagram instead: then the code and the
+ * findings, the tables and charts, and its brief last.
+ */
+function rank(kind: WorkArtifactV1["data"]["kind"] | undefined, drawn: boolean): number {
+  if (!drawn) return kind === "document" ? 0 : 2;
+  return kind === "diagram"
+    ? 0
+    : kind === "code" || kind === "findings"
+      ? 1
+      : kind === "document"
+        ? 3
+        : 2;
+}
 
 /** What one message's runs put in each group, in projection order. */
 export function stageContents(
@@ -454,7 +466,7 @@ export function stageContents(
   }
   const subjects: StageMember[] = [];
   const findings: StageMember[] = [];
-  const results: (StageMember & { rank: number })[] = [];
+  const results: (StageMember & { kind?: WorkArtifactV1["data"]["kind"] })[] = [];
   const plan: StageMember[] = [];
   const diagram: StageMember[] = [];
   const hubs = new Set<string>();
@@ -492,7 +504,7 @@ export function stageContents(
       const layout = view?.content.kind === "diagram" ? diagramLayout(view.content) : undefined;
       results.push({
         ...member(element.id, size),
-        rank: rank(artifact),
+        ...(artifact ? { kind: artifact.data.kind } : {}),
         ...(bare ? { bare: true } : {}),
         ...(bare && layout ? { extent: { width: layout.width, height: layout.height } } : {}),
       });
@@ -522,6 +534,7 @@ export function stageContents(
         for (const subject of cardSubjects(artifact)) named.add(subjectKey(subject));
   }
   const unshown = [...named].filter((key) => !hubs.has(key)).length;
+  const drawn = results.some((result) => result.kind === "diagram");
   return {
     sources: { members: sources },
     pages: { members: pages },
@@ -529,15 +542,15 @@ export function stageContents(
     subjects: { members: subjects, more: subjects.length >= CLUSTER_CAP.subjects ? unshown : 0 },
     findings: { members: findings },
     results: {
-      members: [0, 1, 2].flatMap((order) =>
+      members: [0, 1, 2, 3].flatMap((order) =>
         results
-          .filter((result) => result.rank === order)
+          .filter((result) => rank(result.kind, drawn) === order)
           .map((result, index) => ({
             id: result.id,
             size: result.size,
             ...(result.bare ? { bare: true } : {}),
             ...(result.extent ? { extent: result.extent } : {}),
-            ...(order === 0 && !index ? { cover: true } : {}),
+            ...(order === 0 && !index && !drawn ? { cover: true } : {}),
           })),
       ),
     },
