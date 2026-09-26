@@ -8,7 +8,7 @@
     Area,
     Axis,
     Bars,
-    Chart as Plot,
+    ChartCore as Plot,
     Grid,
     Highlight,
     Pie,
