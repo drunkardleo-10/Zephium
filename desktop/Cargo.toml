@@ -12,10 +12,6 @@ file-workflows-qa = ["tauri/custom-protocol"]
 resource-ui-qa = ["tauri/custom-protocol"]
 # The extension runtime in an isolated, bundled QA application.
 webext-qa = ["tauri/custom-protocol"]
-external-extensions = ["dep:zephium-extension-distribution", "zephium-extension-distribution/beta-admission", "zephium-extension-service/external-extensions"]
-external-extensions-qa = ["external-extensions", "tauri/custom-protocol"]
-external-capabilities-v2-qa = ["external-extensions-qa", "zephium-extension-service/capabilities-v2-qa"]
-windows-namespace-validation = ["external-extensions-qa", "zephium-extension-distribution/windows-namespace-validation"]
 # Same release-excluded retained path, one closed real-public product-brief task.
 macos-work-retained-public-probe = [
     "macos-work-retained-controller-probe",
@@ -42,32 +38,6 @@ macos-work = ["dep:zephium-work-composition", "zephium-work-composition/macos-wo
 # Explicit release-gate forwarding only. Default product builds remain
 # deny-only until the packaged WKWebView/TCC gate is recorded as passing.
 macos-page-permission-prompts = ["zephium-app/macos-page-permission-prompts"]
-# Product-only curated acquisition. The default desktop graph deliberately
-# excludes its HTTP client, async runtime, and updater worker.
-curated-extension-distribution = [
-    "dep:url",
-    "dep:zephium-extension-authority",
-    "dep:zephium-extension-distribution",
-    "dep:zephium-extension-updater",
-    "zephium-extension-service/acquired-packages",
-]
-# Explicit local product gate. This embeds one reviewed public catalog and its
-# immutable objects; it is never enabled by the ordinary or release feature
-# set and accepts no runtime configuration.
-staging-extension-catalog = [
-    "curated-extension-distribution",
-    "zephium-extension-authority/staging-extension-catalog",
-    "zephium-extension-distribution/staging-extension-catalog",
-]
-# Private candidate validation in the real Zephium shell. Exact authority and
-# object bytes are generated beneath target/ and remain outside source control.
-local-extension-lab = [
-    "curated-extension-distribution",
-    "zephium-engine/native-extension-lab-diagnostics",
-    "zephium-extension-service/local-extension-lab",
-    "zephium-extension-authority/local-extension-lab",
-    "zephium-extension-distribution/local-extension-lab",
-]
 
 [lib]
 name = "zephium_desktop_lib"
@@ -90,10 +60,6 @@ zephium-app.workspace = true
 zephium-work-composition = { workspace = true, optional = true }
 zephium-engine.workspace = true
 zephium-extension-service.workspace = true
-url = { workspace = true, optional = true }
-zephium-extension-authority = { workspace = true, optional = true }
-zephium-extension-distribution = { workspace = true, optional = true }
-zephium-extension-updater = { workspace = true, optional = true }
 zephium-store.workspace = true
 zephium-notes.workspace = true
 zephium-blocker-service.workspace = true

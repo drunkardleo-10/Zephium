@@ -3,16 +3,11 @@ use std::{env, error::Error, fs, io, path::Path};
 use serde_json::Value;
 use tauri_utils::platform::Target;
 
-mod external_qa_config;
 #[allow(dead_code)]
 mod foreground_probe_config;
 
 const MAIN_LABEL: &str = "main";
 const LINUX_APP_ID: &str = "app.zephium";
-const EXTENSIONS_STAGING_PRODUCT_NAME: &str = "Zephium Extensions Staging";
-const EXTENSIONS_STAGING_IDENTIFIER: &str = "app.zephium.extensions-staging";
-const EXTENSION_LAB_PRODUCT_NAME: &str = "Zephium Extension Lab";
-const EXTENSION_LAB_IDENTIFIER: &str = "app.zephium.extension-lab";
 const LINUX_DESKTOP_TEMPLATE: &str = "linux/zephium.desktop.hbs";
 const PACKAGE_LICENSE: &str = "MPL-2.0 AND CC-BY-SA-3.0";
 const LEGAL_RESOURCES: [(&str, &str); 3] = [
@@ -60,11 +55,8 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
         Err(env::VarError::NotPresent) => None,
         Err(error) => return Err(Box::new(error)),
     };
-    let extensions_staging = env::var_os("CARGO_FEATURE_STAGING_EXTENSION_CATALOG").is_some();
-    let extension_lab = env::var_os("CARGO_FEATURE_LOCAL_EXTENSION_LAB").is_some();
     let resource_ui_qa = env::var_os("CARGO_FEATURE_RESOURCE_UI_QA").is_some();
     let rendering_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_RENDERING_PROBE").is_some();
-    let external_qa = env::var_os("CARGO_FEATURE_EXTERNAL_EXTENSIONS_QA").is_some();
     let file_workflows_qa = env::var_os("CARGO_FEATURE_FILE_WORKFLOWS_QA").is_some();
     let webext_qa = env::var_os("CARGO_FEATURE_WEBEXT_QA").is_some();
     if webext_qa {
@@ -77,18 +69,13 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
             return Err("the extensions QA app must use its exact isolated identity".into());
         }
     }
-    if usize::from(resource_ui_qa) + usize::from(file_workflows_qa) + usize::from(external_qa) > 1 {
+    if resource_ui_qa && file_workflows_qa {
         return Err("product QA identities are mutually exclusive".into());
     }
     if resource_ui_qa || file_workflows_qa {
         let target = env::var("CARGO_CFG_TARGET_OS")?;
         let supported_target = target == "macos" || (file_workflows_qa && target == "windows");
-        if !supported_target
-            || env::var("PROFILE").as_deref() != Ok("debug")
-            || extensions_staging
-            || extension_lab
-            || rendering_probe
-        {
+        if !supported_target || env::var("PROFILE").as_deref() != Ok("debug") || rendering_probe {
             return Err("product UI QA requires an isolated supported-platform debug build".into());
         }
         let (qa_id, qa_name) = if file_workflows_qa {
@@ -115,12 +102,6 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
             );
         }
     }
-    if external_qa {
-        external_qa_config::validate(
-            config_override.as_ref(),
-            extensions_staging || extension_lab || rendering_probe,
-        )?;
-    }
     if rendering_probe {
         if env::var_os("CARGO_FEATURE_MACOS_WORK_RESOURCE_PROBE").is_some()
             && env::var_os("CARGO_FEATURE_MACOS_WORK_RETAINED_CONTROLLER_PROBE").is_some()
@@ -129,8 +110,6 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
         }
         if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
             || env::var("PROFILE").as_deref() != Ok("debug")
-            || extensions_staging
-            || extension_lab
             || env::var_os("CARGO_FEATURE_MACOS_WORK").is_some()
         {
             return Err("the rendering probe is an isolated macOS debug-only application".into());
@@ -141,28 +120,6 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
                 .ok_or("the rendering probe requires its isolated configuration override")?,
         )?;
     }
-    if extensions_staging && extension_lab {
-        return Err("the extension staging catalog and private lab are mutually exclusive".into());
-    }
-    if extensions_staging {
-        if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
-            return Err("the extension staging catalog may be built only for macOS".into());
-        }
-        let override_config = config_override.as_ref().ok_or(
-            "the extension staging feature requires its isolated Tauri configuration override",
-        )?;
-        validate_extensions_staging_override(override_config)?;
-    }
-    if extension_lab {
-        if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
-            return Err("the private extension lab may be built only for macOS".into());
-        }
-        let override_config = config_override.as_ref().ok_or(
-            "the private extension lab feature requires its isolated Tauri configuration override",
-        )?;
-        validate_extension_lab_override(override_config)?;
-    }
-
     for target in [Target::MacOS, Target::Linux, Target::Windows] {
         let (mut config, paths) = tauri_utils::config::parse::read_from(target, &root)?;
         for path in paths {
@@ -179,47 +136,14 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
             validate_target_window(target, "effective", &config)?;
             validate_legal_resources("effective", &config, &root)?;
             if matches!(target, Target::Linux)
-                && !extensions_staging
-                && !extension_lab
                 && !rendering_probe
                 && !resource_ui_qa
                 && !file_workflows_qa
-                && !external_qa
                 && !webext_qa
             {
                 validate_linux_identity("effective", &config, &root)?;
             }
         }
-    }
-    Ok(())
-}
-
-fn validate_extension_lab_override(config: &Value) -> io::Result<()> {
-    if config.get("productName").and_then(Value::as_str) != Some(EXTENSION_LAB_PRODUCT_NAME)
-        || config.get("identifier").and_then(Value::as_str) != Some(EXTENSION_LAB_IDENTIFIER)
-        || config
-            .pointer("/app/windows/0/title")
-            .and_then(Value::as_str)
-            != Some(EXTENSION_LAB_PRODUCT_NAME)
-    {
-        return Err(io::Error::other(
-            "the private extension lab must use its exact isolated product identity",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_extensions_staging_override(config: &Value) -> io::Result<()> {
-    if config.get("productName").and_then(Value::as_str) != Some(EXTENSIONS_STAGING_PRODUCT_NAME)
-        || config.get("identifier").and_then(Value::as_str) != Some(EXTENSIONS_STAGING_IDENTIFIER)
-        || config
-            .pointer("/app/windows/0/title")
-            .and_then(Value::as_str)
-            != Some(EXTENSIONS_STAGING_PRODUCT_NAME)
-    {
-        return Err(io::Error::other(
-            "the extension staging build must use its exact isolated product identity",
-        ));
     }
     Ok(())
 }

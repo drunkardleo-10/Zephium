@@ -33,21 +33,9 @@ pub use work::{admit_successor_trusted_work, admit_trusted_work, WorkAdmissionFa
 
 #[cfg(zephium_internal_repository_e2e)]
 compile_error!("the internal repository E2E authority may not link into the Zephium desktop");
-#[cfg(all(feature = "staging-extension-catalog", not(target_os = "macos")))]
-compile_error!("the embedded extension staging catalog is a macOS-only product gate");
-#[cfg(all(feature = "local-extension-lab", not(target_os = "macos")))]
-compile_error!("the private extension lab is a macOS-only product gate");
-#[cfg(all(feature = "staging-extension-catalog", feature = "local-extension-lab"))]
-compile_error!("staging-extension-catalog and local-extension-lab are mutually exclusive");
 
 mod blocker_service;
 mod browser_credentials;
-#[cfg(feature = "curated-extension-distribution")]
-mod extension_distribution;
-#[cfg(feature = "external-extensions-qa")]
-mod extension_qa_data;
-#[cfg(feature = "external-extensions")]
-mod extension_source_updates;
 #[cfg(target_os = "linux")]
 mod linux_global_shortcuts;
 #[cfg(any(target_os = "linux", test))]
@@ -85,9 +73,8 @@ use zephium_app::{
 };
 use zephium_blocker_service::ManagedBlocker;
 use zephium_core::extensions::{
-    ExtensionActionRevision, ExtensionGrantRevision, ExtensionInstallCatalogRevision,
-    ExtensionInstallRevision, ExtensionPopupAnchor, ExtensionProfilePolicyRevision,
-    ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
+    ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeGeneration,
+    ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::ScriptId;
@@ -97,7 +84,6 @@ use zephium_core::ports::blocker::{BlockerCompiler as _, BlockerShutdownOutcome}
 use zephium_core::ports::engine::{
     Engine as _, ScriptOwner, UserContent, UserContentGeneration, UserStyle,
 };
-use zephium_core::ports::extensions::ExtensionGrantEditTarget;
 use zephium_core::ports::extensions::ExtensionServiceShutdownOutcome as ExtensionLifecycleShutdownOutcome;
 use zephium_core::ports::store::{Store as _, StoreShutdownOutcome};
 use zephium_core::split::Axis;
@@ -105,11 +91,6 @@ use zephium_engine::{InitialUserContent, MainThreadDispatch, WebviewEngine};
 use zephium_extension_service::{
     prepare_extension_service_boot, ExtensionRepositoryRoot, ExtensionServiceBootPlan,
     ExtensionServiceOwner,
-};
-#[cfg(feature = "curated-extension-distribution")]
-use zephium_extension_updater::{
-    ExtensionDistributionRefreshAdmission, ExtensionDistributionShutdownOutcome,
-    ExtensionDistributionWorker,
 };
 use zephium_ipc::Projection;
 use zephium_store::SqliteStore;
@@ -130,8 +111,6 @@ static AUTH_DENIAL_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(16);
 static NAVIGATION_DENIAL_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(16);
 static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
 static NATIVE_APPEARANCE: AtomicU8 = AtomicU8::new(APPEARANCE_SYSTEM);
-#[cfg(feature = "external-extensions")]
-static STORE_EXTENSION_INSTALL_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static BLOCKER_STATUS_QUERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 struct AtomicFlagReset(&'static AtomicBool);
@@ -186,8 +165,6 @@ struct ShutdownCoordinator {
     terminal_failure: Arc<AtomicBool>,
     authorized_exit_code: Arc<AtomicI32>,
     watchdog: Arc<HardExitWatchdog>,
-    #[cfg(feature = "curated-extension-distribution")]
-    extension_distribution: Arc<Mutex<Option<ExtensionDistributionWorker>>>,
 }
 
 /// Retains the move-only extension-service lifecycle authority between worker
@@ -480,19 +457,6 @@ fn shutdown_startup_extension_service_until(
     )
 }
 
-#[cfg(feature = "curated-extension-distribution")]
-fn shutdown_extension_distribution_until(
-    worker: ExtensionDistributionWorker,
-    deadline: std::time::Instant,
-) -> bool {
-    matches!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            worker.shutdown_until(deadline)
-        })),
-        Ok(ExtensionDistributionShutdownOutcome::Clean)
-    )
-}
-
 fn cleanup_pre_shell_resources_until(
     resources: ClaimedTerminalStartupResources,
     deadline: std::time::Instant,
@@ -670,8 +634,6 @@ impl Default for ShutdownCoordinator {
             terminal_failure: Arc::new(AtomicBool::new(false)),
             authorized_exit_code: Arc::new(AtomicI32::new(NO_AUTHORIZED_EXIT_CODE)),
             watchdog: Arc::new(HardExitWatchdog::default()),
-            #[cfg(feature = "curated-extension-distribution")]
-            extension_distribution: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -701,66 +663,6 @@ impl ShutdownCoordinator {
 
     fn try_admit_shell(&self, shell: &Handle) -> bool {
         self.try_startup_admission(|| shell.admit_startup())
-    }
-
-    fn request_extension_distribution_refresh(&self) -> ExtensionDistributionRefreshAdmissionView {
-        if self.terminal_started() {
-            return ExtensionDistributionRefreshAdmissionView::ShuttingDown;
-        }
-        #[cfg(feature = "curated-extension-distribution")]
-        {
-            // Serialize refresh admission with unique-owner removal. The
-            // second terminal check makes a shutdown that won before this
-            // lock authoritative; one that starts afterward observes the
-            // admitted request and cancels it while consuming the owner.
-            let owner = self
-                .extension_distribution
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if self.terminal_started() {
-                return ExtensionDistributionRefreshAdmissionView::ShuttingDown;
-            }
-            let Some(worker) = owner.as_ref() else {
-                return ExtensionDistributionRefreshAdmissionView::Unavailable;
-            };
-            extension_distribution_refresh_view(worker.handle().request_synchronize())
-        }
-        #[cfg(not(feature = "curated-extension-distribution"))]
-        {
-            ExtensionDistributionRefreshAdmissionView::Unavailable
-        }
-    }
-
-    #[cfg(feature = "curated-extension-distribution")]
-    fn try_install_extension_distribution(
-        &self,
-        worker: ExtensionDistributionWorker,
-    ) -> Result<(), ExtensionDistributionWorker> {
-        let mut pending = Some(worker);
-        let installed = self.try_startup_admission(|| {
-            let mut owner = self
-                .extension_distribution
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if owner.is_some() {
-                return false;
-            }
-            *owner = pending.take();
-            true
-        });
-        if installed {
-            Ok(())
-        } else {
-            Err(pending.expect("a refused extension distribution owner remains local"))
-        }
-    }
-
-    #[cfg(feature = "curated-extension-distribution")]
-    fn take_extension_distribution(&self) -> Option<ExtensionDistributionWorker> {
-        self.extension_distribution
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
     }
 
     fn prepare_hard_exit_watchdog(&self) -> std::io::Result<()> {
@@ -800,30 +702,6 @@ impl ShutdownCoordinator {
             self.schedule_authorized_exit(app, 1);
             return;
         }
-        #[cfg(feature = "curated-extension-distribution")]
-        if let Some(extension_distribution) = self.take_extension_distribution() {
-            let deadline = shell.shutdown_deadline();
-            let coordinator = self.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                let extension_distribution_clean =
-                    shutdown_extension_distribution_until(extension_distribution, deadline);
-                if !extension_distribution_clean {
-                    diagnostic!(
-                        "shutdown: extension distribution worker termination was not proven"
-                    );
-                }
-                let completion = shell.shutdown_with_deadline(deadline);
-                let shell_outcome = shutdown_receive_outcome(completion.recv_until_deadline());
-                let outcome = if extension_distribution_clean {
-                    shell_outcome
-                } else {
-                    ShutdownOutcome::Unclean
-                };
-                coordinator.finish_requested_shutdown(app, outcome);
-            });
-            return;
-        }
-
         let completion = shell.shutdown();
         let coordinator = self.clone();
         // SQLite and the shell actor are blocking by design. Wait away from
@@ -948,21 +826,6 @@ impl ShutdownCoordinator {
             write_diagnostic(format_args!(
                 "security: hard-exit watchdog was not prepared; requesting immediate unsuccessful event-loop exit"
             ));
-        }
-        #[cfg(feature = "curated-extension-distribution")]
-        if let Some(extension_distribution) = self.take_extension_distribution() {
-            let coordinator = self.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                let now = std::time::Instant::now();
-                let deadline = now.checked_add(PRE_SHELL_CLEANUP_TIMEOUT).unwrap_or(now);
-                if !shutdown_extension_distribution_until(extension_distribution, deadline) {
-                    diagnostic!(
-                        "security: extension distribution worker termination was not proven after native failure"
-                    );
-                }
-                coordinator.schedule_authorized_exit(app, 1);
-            });
-            return;
         }
         self.schedule_authorized_exit(app, 1);
     }
@@ -1356,42 +1219,6 @@ struct ExtensionManagementChanged(zephium_ipc::ExtensionManagementView);
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ExtensionDistributionChanged(zephium_ipc::ExtensionDistributionView);
 
-/// Closed response for the argument-free product update trigger. This is an
-/// admission result, not completion; authoritative progress and settlement
-/// continue to arrive through `ExtensionDistributionChanged`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, specta::Type)]
-#[serde(rename_all = "snake_case")]
-// Keep one stable IPC schema in default builds even though the three live
-// worker admissions are reachable only when the optional product graph links.
-#[cfg_attr(not(feature = "curated-extension-distribution"), allow(dead_code))]
-enum ExtensionDistributionRefreshAdmissionView {
-    Accepted,
-    Busy,
-    Quarantined,
-    Unavailable,
-    ShuttingDown,
-}
-
-#[cfg(feature = "curated-extension-distribution")]
-fn extension_distribution_refresh_view(
-    admission: ExtensionDistributionRefreshAdmission,
-) -> ExtensionDistributionRefreshAdmissionView {
-    match admission {
-        ExtensionDistributionRefreshAdmission::Accepted => {
-            ExtensionDistributionRefreshAdmissionView::Accepted
-        }
-        ExtensionDistributionRefreshAdmission::Busy => {
-            ExtensionDistributionRefreshAdmissionView::Busy
-        }
-        ExtensionDistributionRefreshAdmission::Quarantined => {
-            ExtensionDistributionRefreshAdmissionView::Quarantined
-        }
-        ExtensionDistributionRefreshAdmission::Shutdown => {
-            ExtensionDistributionRefreshAdmissionView::ShuttingDown
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ExtensionRuntimeGrantPromptChanged(zephium_ipc::ExtensionRuntimeGrantPromptView);
 
@@ -1575,19 +1402,6 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             webext::web_extension_list,
             webext::web_extension_set_enabled,
             webext::web_extension_uninstall,
-            extension_management_set_visible,
-            extension_distribution_refresh,
-            extension_management_install,
-            extension_store_prepare,
-            extension_store_check_update,
-            extension_management_approve_update,
-            extension_management_set_enabled,
-            extension_management_edit_optional_grant,
-            extension_management_set_profile_paused,
-            extension_management_set_current_site_enabled,
-            extension_management_open_options,
-            extension_management_uninstall,
-            extension_runtime_grant_respond,
             browser_credentials::browser_credential_capability,
             browser_credentials::browser_passkey_authorization_request,
             page_permission_respond,
@@ -2113,27 +1927,6 @@ fn fixed_nonzero_hex(value: &str) -> Option<u64> {
     (parsed != 0).then_some(parsed)
 }
 
-fn extension_management_selector(
-    install_id: &str,
-    catalog_revision: &str,
-    install_revision: &str,
-) -> Option<(
-    ExtensionInstallId,
-    ExtensionInstallCatalogRevision,
-    ExtensionInstallRevision,
-)> {
-    if !bounded(install_id, MAX_ITEM_ID_BYTES) {
-        return None;
-    }
-    let install = ExtensionInstallId::parse(install_id)
-        .filter(|install| install.to_string() == install_id)?;
-    let catalog =
-        fixed_nonzero_hex(catalog_revision).and_then(ExtensionInstallCatalogRevision::new)?;
-    let install_revision =
-        fixed_nonzero_hex(install_revision).and_then(ExtensionInstallRevision::new)?;
-    Some((install, catalog, install_revision))
-}
-
 fn extension_popup_anchor_in_bounds(
     x: f64,
     y: f64,
@@ -2595,100 +2388,6 @@ fn rejected_extension_action(stage: &'static str) -> zephium_ipc::OperationAdmis
     rejected_operation()
 }
 
-/// Opens or closes the one focused-profile management subscription.
-/// This is deliberately an explicit, non-polling visibility signal: the Shell
-/// retains authenticated management metadata only while privileged chrome is
-/// displaying it and performs no extension repository work at browser startup.
-#[tauri::command]
-#[specta::specta]
-fn extension_management_set_visible(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-    visible: bool,
-) -> bool {
-    authorize(
-        &caller,
-        CallerPolicy::Main,
-        "extension_management_set_visible",
-    ) && !shutdown_started(caller.app_handle())
-        && shell.dispatch(Command::SetExtensionManagementVisible(visible))
-}
-
-/// Requests the one product-sealed extension catalog synchronization. The
-/// caller supplies no URL, profile, package, runtime target, or selection;
-/// those authorities were bound immutably before the worker was launched.
-#[tauri::command]
-#[specta::specta]
-fn extension_distribution_refresh(
-    caller: WebviewWindow,
-    shutdown: State<'_, ShutdownCoordinator>,
-) -> ExtensionDistributionRefreshAdmissionView {
-    if !authorize(
-        &caller,
-        CallerPolicy::Main,
-        "extension_distribution_refresh",
-    ) {
-        return ExtensionDistributionRefreshAdmissionView::Unavailable;
-    }
-    shutdown.request_extension_distribution_refresh()
-}
-
-/// Answers only the exact Shell-projected native permission prompt. The four
-/// identities are short-lived stale fences; permission names never cross this
-/// command boundary and the actor remains the sole owner of the retained
-/// request payload.
-#[tauri::command]
-#[specta::specta]
-fn extension_runtime_grant_respond(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-    profile_id: String,
-    install_id: String,
-    runtime_generation: String,
-    request_id: String,
-    allow: bool,
-) -> zephium_ipc::OperationAdmission {
-    if !authorize(
-        &caller,
-        CallerPolicy::Main,
-        "extension_runtime_grant_respond",
-    ) || shutdown_started(caller.app_handle())
-        || !bounded(&profile_id, MAX_ITEM_ID_BYTES)
-        || !bounded(&install_id, MAX_ITEM_ID_BYTES)
-    {
-        return rejected_operation();
-    }
-    let Some(profile) =
-        ProfileId::parse(&profile_id).filter(|profile| profile.to_string() == profile_id)
-    else {
-        return rejected_operation();
-    };
-    let Some(install) =
-        ExtensionInstallId::parse(&install_id).filter(|install| install.to_string() == install_id)
-    else {
-        return rejected_operation();
-    };
-    let Some(generation) =
-        fixed_nonzero_hex(&runtime_generation).and_then(ExtensionRuntimeGeneration::new)
-    else {
-        return rejected_operation();
-    };
-    let Some(request) = fixed_nonzero_hex(&request_id)
-        .and_then(zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId::new)
-    else {
-        return rejected_operation();
-    };
-    dispatch_operation(
-        caller.app_handle(),
-        &shell,
-        Command::RespondToExtensionRuntimeGrantPrompt {
-            runtime: ExtensionRuntimeInstance::new(profile, install, generation),
-            request,
-            allow,
-        },
-    )
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 enum PagePermissionPromptDecisionInput {
@@ -2745,573 +2444,6 @@ fn page_permission_respond(
             item,
             request,
             decision,
-        },
-    )
-}
-
-/// Installs only a candidate from Shell's latest authenticated, retained
-/// management catalog. The frontend supplies no profile, package path,
-/// manifest declaration, or permission-name authority.
-#[derive(Debug, Deserialize, specta::Type)]
-struct ExtensionInstallGrantSelectionInput {
-    optional_api_indices: Vec<u8>,
-    optional_host_indices: Vec<u8>,
-    file_access: bool,
-    private_access: bool,
-}
-
-/// Downloads only the extension selected by the actor-owned foreground store
-/// page. The renderer supplies a tab ID, never a package URL or package bytes.
-#[tauri::command]
-#[specta::specta]
-async fn extension_store_prepare(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-    tab_id: String,
-) -> Result<String, String> {
-    if !authorize(&caller, CallerPolicy::Main, "extension_store_prepare")
-        || shutdown_started(caller.app_handle())
-    {
-        return Err("Extension installation is unavailable".into());
-    }
-    #[cfg(not(feature = "external-extensions"))]
-    {
-        let _ = (shell, tab_id);
-        Err("Store installation is not enabled in this build".into())
-    }
-    #[cfg(feature = "external-extensions")]
-    {
-        if STORE_EXTENSION_INSTALL_IN_FLIGHT
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err("Another extension installation is being prepared".into());
-        }
-        let _busy = AtomicFlagReset(&STORE_EXTENSION_INSTALL_IN_FLIGHT);
-        let tab = ItemId::parse(&tab_id)
-            .filter(|tab| tab.to_string() == tab_id)
-            .ok_or("Invalid tab")?;
-        let source = shell.store_extension_context(tab);
-        let context = tauri::async_runtime::spawn_blocking(move || source.recv_timeout(std::time::Duration::from_secs(2))).await.map_err(|_| "Browser is unavailable")?.map_err(|_| "Browser did not respond")?.ok_or("Installation is not ready yet. Keep this store tab active, let the page finish loading, and try again")?;
-        let StoreSelectionDownload::Prepared { id, outcome } = download_store_selection(
-            &caller.state::<ShutdownCoordinator>().terminal_started,
-            &shell.callback_handle(),
-            context,
-        )
-        .await?
-        else {
-            return Err("The store did not offer an installation package".into());
-        };
-        use zephium_core::ports::extensions::ExtensionStorePackagePreparationOutcome as Outcome;
-        match outcome {
-            Outcome::Prepared(_) => Ok(id),
-            Outcome::UpToDate | Outcome::UpdateAvailable | Outcome::UpdateSettled(_) => Err("Unexpected update response for installation".into()),
-            Outcome::StorageLimit => Err("Extension package storage is full. Remove unused extensions and try again".into()),
-            Outcome::AlreadyInstalled => Err("This extension is already installed in this profile".into()),
-            Outcome::Unsupported(features) => Err(store_unsupported_message(&features, false)),
-            Outcome::InvalidPackage => Err("The extension package could not be authenticated or safely prepared".into()),
-            Outcome::Unavailable => Err("Installation was canceled or is temporarily unavailable; keep the store tab active and retry".into()),
-            Outcome::FailedClosed => Err("Extension storage needs recovery before installation can continue".into()),
-        }
-    }
-}
-
-#[cfg(feature = "external-extensions")]
-enum StoreSelectionDownload {
-    Prepared {
-        id: String,
-        outcome: zephium_core::ports::extensions::ExtensionStorePackagePreparationOutcome,
-    },
-    NoNewerVersionOffered,
-}
-
-#[cfg(feature = "external-extensions")]
-async fn download_store_selection(
-    shutdown: &AtomicBool,
-    shell: &zephium_app::CallbackHandle,
-    context: zephium_app::StoreExtensionContext,
-) -> Result<StoreSelectionDownload, String> {
-    let listing = zephium_extension_distribution::chrome_store::ChromeStoreListing::parse(
-        context.listing_url(),
-    )
-    .ok_or("Unsupported extension store page")?;
-    let id = listing.extension_id().to_owned();
-    let client = zephium_extension_distribution::chrome_store::ChromeStoreClient::new()
-        .map_err(|_| "Extension download is unavailable")?;
-    #[cfg(feature = "external-capabilities-v2-qa")]
-    let qa_adapter_refresh = context.update_selector().is_some()
-        && !context.is_automatic_update()
-        && id.as_str() == "nngceckbapebfimnlniiiahkandclblb"
-        && std::env::var("ZEPHIUM_BITWARDEN_CAPABILITIES_V2_QA").as_deref() == Ok("1");
-    #[cfg(not(feature = "external-capabilities-v2-qa"))]
-    let qa_adapter_refresh = false;
-    let downloaded = match context.installed_version() {
-        Some(version) if !qa_adapter_refresh => client.download_update(listing, version).await,
-        None => client.download(listing).await.map(Some),
-        Some(_) => client.download(listing).await.map(Some),
-    }
-    .map_err(|error| error.to_string())?;
-    if shutdown.load(Ordering::Acquire) {
-        return Err("Extension installation was canceled".into());
-    }
-    let Some(downloaded) = downloaded else {
-        // This is only an offered-version observation. It does not mutate
-        // install state, authenticate metadata freshness, or advance rollback
-        // protection, and therefore does not enter the package service.
-        return Ok(StoreSelectionDownload::NoNewerVersionOffered);
-    };
-    let (requested_id, bytes) = downloaded.into_parts();
-    let request = match context.update_selector() {
-        Some(selector) if context.is_automatic_update() => {
-            zephium_core::ports::extensions::ExtensionStorePackageRequest::for_background_update(
-                requested_id,
-                bytes,
-                selector,
-            )
-        }
-        Some(selector) => {
-            zephium_core::ports::extensions::ExtensionStorePackageRequest::for_update(
-                requested_id,
-                bytes,
-                selector,
-            )
-        }
-        None => {
-            zephium_core::ports::extensions::ExtensionStorePackageRequest::new(requested_id, bytes)
-        }
-    }
-    .ok_or("Extension exceeds the installation limit")?;
-    let deadline = context.deadline();
-    let (reply, result) = std::sync::mpsc::sync_channel(1);
-    if shell.begin_prepare_store_extension(
-        context,
-        request,
-        Box::new(move |outcome| {
-            let _ = reply.send(outcome);
-        }),
-    ) != zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted
-    {
-        return Err("Extension service is busy; please retry".into());
-    }
-    let outcome = tauri::async_runtime::spawn_blocking(move || {
-        result.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
-    })
-    .await
-    .map_err(|_| "Extension preparation failed")?
-    .map_err(|_| "Extension preparation timed out")?;
-    Ok(StoreSelectionDownload::Prepared { id, outcome })
-}
-
-#[tauri::command]
-#[specta::specta]
-async fn extension_store_check_update(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-    install_id: String,
-) -> Result<String, String> {
-    if !authorize(&caller, CallerPolicy::Main, "extension_store_check_update")
-        || shutdown_started(caller.app_handle())
-    {
-        return Err("Extension updates are unavailable".into());
-    }
-    #[cfg(not(feature = "external-extensions"))]
-    {
-        let _ = (shell, install_id);
-        Err("Store updates are not enabled in this build".into())
-    }
-    #[cfg(feature = "external-extensions")]
-    {
-        if STORE_EXTENSION_INSTALL_IN_FLIGHT
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err("Another extension operation is being prepared".into());
-        }
-        let _busy = AtomicFlagReset(&STORE_EXTENSION_INSTALL_IN_FLIGHT);
-        let install = zephium_core::ids::ExtensionInstallId::parse(&install_id)
-            .filter(|id| id.to_string() == install_id)
-            .ok_or("Invalid installed extension")?;
-        let source = shell.store_extension_update_context(install);
-        let context = tauri::async_runtime::spawn_blocking(move || {
-            source.recv_timeout(std::time::Duration::from_secs(2))
-        })
-        .await
-        .map_err(|_| "Browser is unavailable")?
-        .map_err(|_| "Browser did not respond")?
-        .ok_or("Refresh the extension manager and try again")?;
-        let StoreSelectionDownload::Prepared { outcome, .. } = download_store_selection(
-            &caller.state::<ShutdownCoordinator>().terminal_started,
-            &shell.callback_handle(),
-            context,
-        )
-        .await?
-        else {
-            return Ok("No newer version offered by the store".into());
-        };
-        use zephium_core::ports::extensions::{
-            ExtensionStorePackagePreparationOutcome as Outcome, ExtensionUpdateOutcome as Update,
-            ExtensionUpdateRuntimeState as Runtime,
-        };
-        match outcome {
-            Outcome::StorageLimit => Err("There is not enough extension package storage for this update. Remove unused extensions and retry".into()),
-            Outcome::UpToDate => Ok("Up to date".into()),
-            Outcome::UpdateAvailable => Ok("Update ready for permission review".into()),
-            Outcome::UpdateSettled(settlement) => match settlement.into_outcome() {
-                Update::Updated { runtime: Runtime::Active(_) | Runtime::Disabled } => Ok("Updated".into()),
-                Update::Updated { runtime: Runtime::PendingActivation(_) } => Ok("Updated; activation is pending".into()),
-                Update::Conflict => Err("The extension changed during the update. Refresh and retry".into()),
-                Update::Rejected => Err("The replacement was rejected; the current version was kept".into()),
-                Update::Unavailable => Err("The update could not finish; refresh and retry".into()),
-                Update::OutcomeUnknown | Update::FailedClosed => Err("The update needs recovery; restart Zephium before retrying".into()),
-            },
-            Outcome::Unsupported(features) => Err(store_unsupported_message(&features, true)),
-            Outcome::InvalidPackage => Err("The replacement could not be authenticated or safely prepared; the current version was kept".into()),
-            Outcome::Unavailable => Err("Update check was canceled or is temporarily unavailable".into()),
-            Outcome::FailedClosed => Err("Extension storage needs recovery before updating".into()),
-            Outcome::Prepared(_) | Outcome::AlreadyInstalled => Err("Unexpected installation response for update".into()),
-        }
-    }
-}
-
-#[cfg(feature = "external-extensions")]
-fn store_unsupported_message(
-    features: &zephium_core::ports::extensions::ExtensionUnsupportedFeatures,
-    updating: bool,
-) -> String {
-    use zephium_core::extensions::ExtensionManifestDeclaration as D;
-    let mut labels = Vec::new();
-    for declaration in features.declarations() {
-        let label = match declaration {
-            D::RequiredApiPermission(name) | D::OptionalApiPermission(name) => {
-                match name.as_str() {
-                    "offscreen" => "offscreen documents".into(),
-                    "sidePanel" => "extension side panels".into(),
-                    "identity" => "extension sign-in".into(),
-                    "idle" => "idle detection".into(),
-                    "webRequest" | "webRequestBlocking" => "network request interception".into(),
-                    "declarativeNetRequest" | "declarativeNetRequestWithHostAccess" => {
-                        "extension network rules".into()
-                    }
-                    "unlimitedStorage" => "unlimited extension storage".into(),
-                    "webNavigation" => "navigation events for this extension".into(),
-                    _ => name.as_str().to_owned(),
-                }
-            }
-            D::Background => "this background-script format".into(),
-            D::Offscreen => "offscreen documents".into(),
-            D::NativeMessaging => "native application connections".into(),
-            D::Sandbox => "sandboxed extension pages".into(),
-            D::ContentScript { .. } => "this page-script configuration".into(),
-            D::SidePanel { .. } => "extension side panels".into(),
-            D::DeclarativeNetRequest(_) => "extension network rules".into(),
-            _ => "additional manifest features".into(),
-        };
-        if !labels.contains(&label) {
-            labels.push(label);
-        }
-    }
-    if labels.is_empty() {
-        return "Zephium cannot yet adapt this extension's required features for this platform"
-            .into();
-    }
-    format!(
-        "Zephium does not yet support {}{}. {}",
-        labels.join(", "),
-        if features.has_more() {
-            " and other unsupported features"
-        } else {
-            ""
-        },
-        if updating {
-            "The current version was kept."
-        } else {
-            "This extension has not been installed."
-        }
-    )
-}
-
-#[tauri::command]
-#[specta::specta]
-fn extension_management_install(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-    candidate_index: u8,
-    catalog_revision: String,
-    selection: ExtensionInstallGrantSelectionInput,
-) -> zephium_ipc::OperationAdmission {
-    if !authorize(&caller, CallerPolicy::Main, "extension_management_install")
-        || shutdown_started(caller.app_handle())
-    {
-        return rejected_operation();
-    }
-    let Some(expected_catalog) =
-        fixed_nonzero_hex(&catalog_revision).and_then(ExtensionInstallCatalogRevision::new)
-    else {
-        return rejected_operation();
-    };
-    if selection.optional_api_indices.len()
-        > zephium_core::extensions::MAX_EXTENSION_API_PERMISSIONS
-        || selection.optional_host_indices.len()
-            > zephium_core::extensions::MAX_EXTENSION_HOST_PERMISSION_PATTERNS
-    {
-        return rejected_operation();
-    }
-    dispatch_operation(
-        caller.app_handle(),
-        &shell,
-        Command::InstallFocusedExtension {
-            candidate_index,
-            expected_catalog,
-            optional_api_indices: selection.optional_api_indices,
-            optional_host_indices: selection.optional_host_indices,
-            file_access: selection.file_access,
-            private_access: selection.private_access,
-        },
-    )
-}
-
-/// Approves only the exact changed-authority replacement retained by Shell's
-/// current focused-profile subscription. Package identity and permission names
-/// never cross this IPC boundary.
-#[tauri::command]
-#[specta::specta]
-fn extension_management_approve_update(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-    review_id: String,
-) -> zephium_ipc::OperationAdmission {
-    if !authorize(
-        &caller,
-        CallerPolicy::Main,
-        "extension_management_approve_update",
-    ) || shutdown_started(caller.app_handle())
-    {
-        return rejected_operation();
-    }
-    let Some(review) = fixed_nonzero_hex(&review_id) else {
-        return rejected_operation();
-    };
-    dispatch_operation(
-        caller.app_handle(),
-        &shell,
-        Command::ApproveFocusedExtensionUpdate { review },
-    )
-}
-
-#[tauri::command]
-#[specta::specta]
-fn extension_management_set_enabled(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-    install_id: String,
-    catalog_revision: String,
-    install_revision: String,
-    enabled: bool,
-) -> zephium_ipc::OperationAdmission {
-    if !authorize(
-        &caller,
-        CallerPolicy::Main,
-        "extension_management_set_enabled",
-    ) || shutdown_started(caller.app_handle())
-    {
-        return rejected_operation();
-    }
-    let Some((install, expected_catalog, expected_install)) =
-        extension_management_selector(&install_id, &catalog_revision, &install_revision)
-    else {
-        return rejected_operation();
-    };
-    dispatch_operation(
-        caller.app_handle(),
-        &shell,
-        Command::SetFocusedExtensionEnabled {
-            install,
-            expected_catalog,
-            expected_install,
-            enabled,
-        },
-    )
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, specta::Type)]
-#[serde(rename_all = "snake_case")]
-enum ExtensionOptionalGrantKindInput {
-    Api,
-    Host,
-}
-
-/// Mutates only one bounded optional declaration from the exact installed
-/// management projection. Permission text never crosses this IPC boundary.
-#[tauri::command]
-#[specta::specta]
-#[allow(clippy::too_many_arguments)]
-fn extension_management_edit_optional_grant(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-    install_id: String,
-    catalog_revision: String,
-    install_revision: String,
-    grant_revision: String,
-    kind: ExtensionOptionalGrantKindInput,
-    index: u8,
-    granted: bool,
-) -> zephium_ipc::OperationAdmission {
-    if !authorize(
-        &caller,
-        CallerPolicy::Main,
-        "extension_management_edit_optional_grant",
-    ) || shutdown_started(caller.app_handle())
-    {
-        return rejected_operation();
-    }
-    let Some((install, expected_catalog, expected_install)) =
-        extension_management_selector(&install_id, &catalog_revision, &install_revision)
-    else {
-        return rejected_operation();
-    };
-    let Some(expected_grant) =
-        fixed_nonzero_hex(&grant_revision).and_then(ExtensionGrantRevision::new)
-    else {
-        return rejected_operation();
-    };
-    let target = match kind {
-        ExtensionOptionalGrantKindInput::Api => ExtensionGrantEditTarget::OptionalApi(index),
-        ExtensionOptionalGrantKindInput::Host => ExtensionGrantEditTarget::OptionalHost(index),
-    };
-    dispatch_operation(
-        caller.app_handle(),
-        &shell,
-        Command::EditFocusedExtensionOptionalGrant {
-            install,
-            expected_catalog,
-            expected_install,
-            expected_grant,
-            target,
-            granted,
-        },
-    )
-}
-
-fn extension_profile_policy_revision(value: &str) -> Option<ExtensionProfilePolicyRevision> {
-    fixed_nonzero_hex(value).and_then(ExtensionProfilePolicyRevision::new)
-}
-
-#[tauri::command]
-#[specta::specta]
-fn extension_management_set_profile_paused(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-    policy_revision: String,
-    paused: bool,
-) -> zephium_ipc::OperationAdmission {
-    if !authorize(
-        &caller,
-        CallerPolicy::Main,
-        "extension_management_set_profile_paused",
-    ) || shutdown_started(caller.app_handle())
-    {
-        return rejected_operation();
-    }
-    let Some(expected_policy) = extension_profile_policy_revision(&policy_revision) else {
-        return rejected_operation();
-    };
-    dispatch_operation(
-        caller.app_handle(),
-        &shell,
-        Command::SetFocusedProfileExtensionsPaused {
-            expected_policy,
-            paused,
-        },
-    )
-}
-
-#[tauri::command]
-#[specta::specta]
-fn extension_management_set_current_site_enabled(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-    policy_revision: String,
-    enabled: bool,
-) -> zephium_ipc::OperationAdmission {
-    if !authorize(
-        &caller,
-        CallerPolicy::Main,
-        "extension_management_set_current_site_enabled",
-    ) || shutdown_started(caller.app_handle())
-    {
-        return rejected_operation();
-    }
-    let Some(expected_policy) = extension_profile_policy_revision(&policy_revision) else {
-        return rejected_operation();
-    };
-    dispatch_operation(
-        caller.app_handle(),
-        &shell,
-        Command::SetFocusedSiteExtensionsEnabled {
-            expected_policy,
-            enabled,
-        },
-    )
-}
-
-#[tauri::command]
-#[specta::specta]
-fn extension_management_open_options(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-    install_id: String,
-    catalog_revision: String,
-    install_revision: String,
-) -> bool {
-    if !authorize(
-        &caller,
-        CallerPolicy::Main,
-        "extension_management_open_options",
-    ) || shutdown_started(caller.app_handle())
-    {
-        return false;
-    }
-    let Some((install, expected_catalog, expected_install)) =
-        extension_management_selector(&install_id, &catalog_revision, &install_revision)
-    else {
-        return false;
-    };
-    shell.dispatch(Command::OpenFocusedExtensionOptions {
-        install,
-        expected_catalog,
-        expected_install,
-    })
-}
-
-#[tauri::command]
-#[specta::specta]
-fn extension_management_uninstall(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-    install_id: String,
-    catalog_revision: String,
-    install_revision: String,
-) -> zephium_ipc::OperationAdmission {
-    if !authorize(
-        &caller,
-        CallerPolicy::Main,
-        "extension_management_uninstall",
-    ) || shutdown_started(caller.app_handle())
-    {
-        return rejected_operation();
-    }
-    let Some((install, expected_catalog, expected_install)) =
-        extension_management_selector(&install_id, &catalog_revision, &install_revision)
-    else {
-        return rejected_operation();
-    };
-    dispatch_operation(
-        caller.app_handle(),
-        &shell,
-        Command::UninstallFocusedExtension {
-            install,
-            expected_catalog,
-            expected_install,
         },
     )
 }
@@ -4230,7 +3362,7 @@ fn setting_set(
     if shutdown_started(&app) {
         return rejected_operation();
     }
-    #[cfg(any(feature = "file-workflows-qa", feature = "external-extensions-qa"))]
+    #[cfg(feature = "file-workflows-qa")]
     if key == "__files_qa_diagnostic" && value.len() <= 4096 {
         eprintln!("files-qa: {value}");
         return rejected_operation();
@@ -5007,10 +4139,6 @@ pub fn run() {
                 shutdown.prepare_hard_exit_watchdog()?;
                 specta.mount_events(app);
                 let data_dir = app.path().app_data_dir()?;
-                #[cfg(feature = "external-extensions-qa")]
-                let data_dir = extension_qa_data::select(data_dir, std::env::var_os("ZEPHIUM_EXTERNAL_QA_ISOLATED").as_deref())?;
-                #[cfg(feature = "external-extensions-qa")]
-                eprintln!("external-qa: isolated={}", std::env::var_os("ZEPHIUM_EXTERNAL_QA_ISOLATED").is_some());
                 #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
                 foreground_rendering_probe::validate_data_root(&data_dir)?;
                 std::fs::create_dir_all(&data_dir)?;
@@ -5093,7 +4221,7 @@ pub fn run() {
                 .additional_browser_args(PRIVILEGED_WEBVIEW2_BROWSER_ARGS);
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             let main_builder = main_builder.on_download(|_, _| false);
-            #[cfg(any(feature = "file-workflows-qa", feature = "external-extensions-qa"))]
+            #[cfg(feature = "file-workflows-qa")]
             let main_builder = main_builder.initialization_script(r#"
               (() => {
                 const report = value => {
@@ -5591,8 +4719,6 @@ pub fn run() {
             let web_extensions = webext::WebExtensions::new(&data_dir);
             web_extensions.restore(&shell);
             app.manage(web_extensions);
-            #[cfg(feature = "external-extensions")]
-            extension_source_updates::configure(&shell, &store, &shutdown);
             #[cfg(feature = "macos-work")]
             if !work::install(app.handle(), engine.clone(), store.clone()) {
                 let error = std::io::Error::other("Work composition owner is already installed");
@@ -5605,28 +4731,6 @@ pub fn run() {
             #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
             if !foreground_rendering_probe::install(app.handle(), engine.clone(), store.clone()) {
                 return Err(std::io::Error::other("rendering probe owner already installed").into());
-            }
-            #[cfg(feature = "curated-extension-distribution")]
-            if let Some(extension_distribution) =
-                extension_distribution::launch(shell.callback_handle())?
-            {
-                if let Err(extension_distribution) =
-                    shutdown.try_install_extension_distribution(extension_distribution)
-                {
-                    let now = std::time::Instant::now();
-                    let deadline = now
-                        .checked_add(PRE_SHELL_CLEANUP_TIMEOUT)
-                        .unwrap_or(now);
-                    if !shutdown_extension_distribution_until(extension_distribution, deadline) {
-                        write_diagnostic(format_args!(
-                            "startup: refused extension distribution worker cleanup was not proven"
-                        ));
-                    }
-                    return Err(std::io::Error::other(
-                        "terminal shutdown overtook extension distribution ownership",
-                    )
-                    .into());
-                }
             }
             if !startup_engine.transfer_to(&engine) {
                 return Err(std::io::Error::other(
@@ -5662,15 +4766,6 @@ pub fn run() {
             if shutdown.terminal_started() {
                 return Err(std::io::Error::other(
                     "terminal shutdown overtook Shell actor admission",
-                )
-                .into());
-            }
-            #[cfg(feature = "local-extension-lab")]
-            if shutdown.request_extension_distribution_refresh()
-                != ExtensionDistributionRefreshAdmissionView::Accepted
-            {
-                return Err(std::io::Error::other(
-                    "private extension lab initial synchronization was not admitted",
                 )
                 .into());
             }
@@ -6041,10 +5136,6 @@ pub fn run() {
 mod frame_sources;
 
 #[cfg(test)]
-#[path = "../external_qa_config.rs"]
-mod external_qa_config_tests;
-
-#[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -6199,156 +5290,6 @@ mod tests {
             super::extension_popup_anchor_in_bounds(f64::NAN, 8.0, 28.0, 28.0, 240.0, 800.0),
         ] {
             assert!(invalid.is_none());
-        }
-    }
-
-    #[test]
-    fn extension_management_selector_requires_canonical_identity_and_exact_revisions() {
-        let install = zephium_core::ids::ExtensionInstallId::from(17);
-        assert_eq!(
-            super::extension_management_selector(
-                &install.to_string(),
-                "0000000000000001",
-                "0000000000000002",
-            ),
-            Some((
-                install,
-                zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
-                zephium_core::extensions::ExtensionInstallRevision::new(2).unwrap(),
-            ))
-        );
-        let canonical_install = install.to_string();
-        let noncanonical_install = canonical_install.to_ascii_lowercase();
-        for (install_id, catalog_revision, install_revision) in [
-            ("not-an-install", "0000000000000001", "0000000000000002"),
-            (
-                noncanonical_install.as_str(),
-                "0000000000000001",
-                "0000000000000002",
-            ),
-            (
-                canonical_install.as_str(),
-                "0000000000000000",
-                "0000000000000002",
-            ),
-            (
-                canonical_install.as_str(),
-                "0000000000000001",
-                "0000000000000000",
-            ),
-            (
-                canonical_install.as_str(),
-                "0000000000000001",
-                "000000000000000A",
-            ),
-        ] {
-            assert!(super::extension_management_selector(
-                install_id,
-                catalog_revision,
-                install_revision,
-            )
-            .is_none());
-        }
-    }
-
-    #[test]
-    fn extension_management_commands_are_main_only_and_profile_implicit() {
-        let source = include_str!("lib.rs");
-        for command_name in [
-            "extension_management_set_visible",
-            "extension_management_install",
-            "extension_management_set_enabled",
-            "extension_management_edit_optional_grant",
-            "extension_management_set_profile_paused",
-            "extension_management_set_current_site_enabled",
-            "extension_management_uninstall",
-        ] {
-            let command = source
-                .split(&format!("fn {command_name}("))
-                .nth(1)
-                .expect("extension management command")
-                .split("#[tauri::command]")
-                .next()
-                .expect("bounded extension management command");
-            assert!(command.contains("CallerPolicy::Main"));
-            assert!(command.contains("shutdown_started"));
-            assert!(!command.contains("profile_id"));
-            assert!(!command.contains("ProfileId"));
-        }
-
-        let delivery = source
-            .split("Projection::ExtensionManagement(management)")
-            .nth(1)
-            .expect("extension management projection route")
-            .split("Projection::UiCommand")
-            .next()
-            .expect("bounded extension management projection route");
-        assert!(delivery.contains("MAIN_LABEL"));
-        assert!(delivery.contains("EVENT_EXTENSION_MANAGEMENT"));
-        assert!(!delivery.contains("PANEL_LABEL"));
-    }
-
-    #[test]
-    fn extension_distribution_refresh_is_argument_free_and_terminal_bounded() {
-        let coordinator = super::ShutdownCoordinator::default();
-        assert_eq!(
-            coordinator.request_extension_distribution_refresh(),
-            super::ExtensionDistributionRefreshAdmissionView::Unavailable
-        );
-        coordinator.mark_terminal_start();
-        assert_eq!(
-            coordinator.request_extension_distribution_refresh(),
-            super::ExtensionDistributionRefreshAdmissionView::ShuttingDown
-        );
-
-        let source = include_str!("lib.rs");
-        let command = source
-            .split("fn extension_distribution_refresh(")
-            .nth(1)
-            .expect("extension distribution refresh command")
-            .split("#[tauri::command]")
-            .next()
-            .expect("bounded extension distribution refresh command");
-        assert!(command.contains("CallerPolicy::Main"));
-        for forbidden_authority in [
-            "profile_id",
-            "install_id",
-            "runtime_target",
-            "metadata_base",
-            "targets_base",
-            "selection",
-        ] {
-            assert!(!command.contains(forbidden_authority));
-        }
-    }
-
-    #[cfg(feature = "curated-extension-distribution")]
-    #[test]
-    fn extension_distribution_refresh_maps_every_worker_admission() {
-        use zephium_extension_updater::ExtensionDistributionRefreshAdmission as Core;
-
-        for (admission, expected) in [
-            (
-                Core::Accepted,
-                super::ExtensionDistributionRefreshAdmissionView::Accepted,
-            ),
-            (
-                Core::Busy,
-                super::ExtensionDistributionRefreshAdmissionView::Busy,
-            ),
-            (
-                Core::Quarantined,
-                super::ExtensionDistributionRefreshAdmissionView::Quarantined,
-            ),
-            (
-                Core::Shutdown,
-                super::ExtensionDistributionRefreshAdmissionView::ShuttingDown,
-            ),
-        ] {
-            assert_eq!(
-                super::extension_distribution_refresh_view(admission),
-                expected
-            );
         }
     }
 
@@ -7272,9 +6213,6 @@ mod tests {
         let post_admission_terminal_gate = setup
             .find("terminal shutdown overtook Shell actor admission")
             .expect("post-admission terminal gate");
-        let local_lab_initial_sync = setup
-            .find("private extension lab initial synchronization was not admitted")
-            .expect("post-admission local lab synchronization");
         let pre_panel_terminal_gate = setup
             .find("terminal shutdown started before privileged panel construction")
             .expect("pre-panel terminal gate");
@@ -7325,8 +6263,7 @@ mod tests {
         assert!(store_transfer < callback_publication);
         assert!(callback_publication < actor_admission);
         assert!(actor_admission < post_admission_terminal_gate);
-        assert!(post_admission_terminal_gate < local_lab_initial_sync);
-        assert!(local_lab_initial_sync < pre_panel_terminal_gate);
+        assert!(post_admission_terminal_gate < pre_panel_terminal_gate);
         assert!(post_admission_terminal_gate < pre_panel_terminal_gate);
         assert!(pre_panel_terminal_gate < panel_webview);
         assert!(actor_admission < panel_webview);
@@ -7434,55 +6371,6 @@ mod tests {
             !production.contains("std::process::exit(70)"),
             "terminal native failures must preserve App/run_return finalization"
         );
-    }
-
-    #[cfg(feature = "curated-extension-distribution")]
-    #[test]
-    fn curated_distribution_is_owned_before_admission_and_stops_before_shell_shutdown() {
-        let source = include_str!("lib.rs");
-        let production = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("desktop production source");
-        let request = production
-            .split("fn request(&self, app: tauri::AppHandle, shell: Handle)")
-            .nth(1)
-            .and_then(|body| body.split("fn finish_requested_shutdown").next())
-            .expect("bounded terminal request");
-        let take = request
-            .find("self.take_extension_distribution()")
-            .expect("unique distribution owner take");
-        let deadline = request
-            .find("shell.shutdown_deadline()")
-            .expect("shared shutdown deadline");
-        let updater_shutdown = request
-            .find("shutdown_extension_distribution_until(extension_distribution, deadline)")
-            .expect("bounded distribution shutdown");
-        let shell_shutdown = request
-            .find("shell.shutdown_with_deadline(deadline)")
-            .expect("Shell shutdown under the same deadline");
-        assert!(
-            take < deadline && deadline < updater_shutdown && updater_shutdown < shell_shutdown
-        );
-
-        let setup = production
-            .split(".setup(move |app| {")
-            .nth(1)
-            .and_then(|body| body.split(".build(tauri::generate_context!())").next())
-            .expect("bounded desktop setup hook");
-        let shell_owner = setup
-            .find("if !app.manage(shell.clone())")
-            .expect("published suspended Shell owner");
-        let launch = setup
-            .find("extension_distribution::launch(shell.callback_handle())")
-            .expect("product worker launch");
-        let install = setup
-            .find("shutdown.try_install_extension_distribution")
-            .expect("coordinator ownership transfer");
-        let admission = setup
-            .find("shutdown.try_admit_shell(&shell)")
-            .expect("Shell startup admission");
-        assert!(shell_owner < launch && launch < install && install < admission);
     }
 
     #[test]

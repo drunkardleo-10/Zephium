@@ -28,49 +28,6 @@ export const commands = {
 	webExtensionSetEnabled: (id: string, enabled: boolean) => typedError<null, string>(__TAURI_INVOKE("web_extension_set_enabled", { id, enabled })),
 	webExtensionUninstall: (id: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_uninstall", { id })),
 	/**
-	 *  Opens or closes the one focused-profile management subscription.
-	 *  This is deliberately an explicit, non-polling visibility signal: the Shell
-	 *  retains authenticated management metadata only while privileged chrome is
-	 *  displaying it and performs no extension repository work at browser startup.
-	 */
-	extensionManagementSetVisible: (visible: boolean) => __TAURI_INVOKE<boolean>("extension_management_set_visible", { visible }),
-	/**
-	 *  Requests the one product-sealed extension catalog synchronization. The
-	 *  caller supplies no URL, profile, package, runtime target, or selection;
-	 *  those authorities were bound immutably before the worker was launched.
-	 */
-	extensionDistributionRefresh: () => __TAURI_INVOKE<ExtensionDistributionRefreshAdmissionView>("extension_distribution_refresh"),
-	extensionManagementInstall: (candidateIndex: number, catalogRevision: string, selection: ExtensionInstallGrantSelectionInput) => __TAURI_INVOKE<OperationAdmission>("extension_management_install", { candidateIndex, catalogRevision, selection }),
-	/**
-	 *  Downloads only the extension selected by the actor-owned foreground store
-	 *  page. The renderer supplies a tab ID, never a package URL or package bytes.
-	 */
-	extensionStorePrepare: (tabId: string) => typedError<string, string>(__TAURI_INVOKE("extension_store_prepare", { tabId })),
-	extensionStoreCheckUpdate: (installId: string) => typedError<string, string>(__TAURI_INVOKE("extension_store_check_update", { installId })),
-	/**
-	 *  Approves only the exact changed-authority replacement retained by Shell's
-	 *  current focused-profile subscription. Package identity and permission names
-	 *  never cross this IPC boundary.
-	 */
-	extensionManagementApproveUpdate: (reviewId: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_approve_update", { reviewId }),
-	extensionManagementSetEnabled: (installId: string, catalogRevision: string, installRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_enabled", { installId, catalogRevision, installRevision, enabled }),
-	/**
-	 *  Mutates only one bounded optional declaration from the exact installed
-	 *  management projection. Permission text never crosses this IPC boundary.
-	 */
-	extensionManagementEditOptionalGrant: (installId: string, catalogRevision: string, installRevision: string, grantRevision: string, kind: ExtensionOptionalGrantKindInput, index: number, granted: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_edit_optional_grant", { installId, catalogRevision, installRevision, grantRevision, kind, index, granted }),
-	extensionManagementSetProfilePaused: (policyRevision: string, paused: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_profile_paused", { policyRevision, paused }),
-	extensionManagementSetCurrentSiteEnabled: (policyRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_current_site_enabled", { policyRevision, enabled }),
-	extensionManagementOpenOptions: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<boolean>("extension_management_open_options", { installId, catalogRevision, installRevision }),
-	extensionManagementUninstall: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_uninstall", { installId, catalogRevision, installRevision }),
-	/**
-	 *  Answers only the exact Shell-projected native permission prompt. The four
-	 *  identities are short-lived stale fences; permission names never cross this
-	 *  command boundary and the actor remains the sole owner of the retained
-	 *  request payload.
-	 */
-	extensionRuntimeGrantRespond: (profileId: string, installId: string, runtimeGeneration: string, requestId: string, allow: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_runtime_grant_respond", { profileId, installId, runtimeGeneration, requestId, allow }),
-	/**
 	 *  Reads only platform capability state. It never enumerates credentials,
 	 *  relying parties, or extension-owned vault data and never opens native UI.
 	 */
@@ -541,13 +498,6 @@ export type ExtensionDistributionFailureReasonView = "acquisition" | "busy" | "s
 /**  Stable distribution failure stage exposed only to privileged chrome. */
 export type ExtensionDistributionFailureStageView = { type: "catalog" } | { type: "package_fetch"; index: number } | { type: "package_provision"; index: number } | { type: "catalog_activation" };
 
-/**
- *  Closed response for the argument-free product update trigger. This is an
- *  admission result, not completion; authoritative progress and settlement
- *  continue to arrive through `ExtensionDistributionChanged`.
- */
-export type ExtensionDistributionRefreshAdmissionView = "accepted" | "busy" | "quarantined" | "unavailable" | "shutting_down";
-
 /**  Exact replacement state for the dormant product distribution worker. */
 export type ExtensionDistributionStateView = { phase: "idle" } | { phase: "synchronizing" } | { phase: "ready"; package_count: number; materialized_packages: number; reused_packages: number; exact_retries: number; newly_activated: boolean } | { phase: "failed"; stage: ExtensionDistributionFailureStageView; reason: ExtensionDistributionFailureReasonView } | { phase: "quarantined"; stage: ExtensionDistributionFailureStageView; reason: ExtensionDistributionFailureReasonView } | { phase: "shutdown" };
 
@@ -587,18 +537,6 @@ export type ExtensionInstallCandidateView = {
 	private_access_available: boolean,
 	compatibility: ExtensionManagementCompatibilityView,
 	limitations: ExtensionManagementLimitationView[],
-};
-
-/**
- *  Installs only a candidate from Shell's latest authenticated, retained
- *  management catalog. The frontend supplies no profile, package path,
- *  manifest declaration, or permission-name authority.
- */
-export type ExtensionInstallGrantSelectionInput = {
-	optional_api_indices: number[],
-	optional_host_indices: number[],
-	file_access: boolean,
-	private_access: boolean,
 };
 
 export type ExtensionManagementAvailabilityChanged = ExtensionManagementAvailabilityChangedView;
@@ -698,8 +636,6 @@ export type ExtensionManagementView = {
 	/**  Present only while `phase` is `update_consent_required`. */
 	pending_update: ExtensionUpdateConsentView | null,
 };
-
-export type ExtensionOptionalGrantKindInput = "api" | "host";
 
 export type ExtensionProfilePolicyView = {
 	revision: string,
