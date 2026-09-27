@@ -7,5 +7,6 @@ pub mod archive;
 pub mod crx;
 pub mod id;
 pub mod manifest;
+pub mod permissions;
 
 pub use id::ExtensionId;
