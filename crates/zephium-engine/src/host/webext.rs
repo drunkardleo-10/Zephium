@@ -252,7 +252,13 @@ impl WebextHost {
             let icon = crate::platform::imp::rasterize_webext_action_icon(&action);
             let revision = presentation_revision(&label, &badge, icon.as_ref().map(|i| i.rgba()));
             let runtime = ExtensionRuntimeInstance::new(profile, *install_id, install.generation);
-            if let Ok(state) = ExtensionActionState::new(
+            let badge = truncate(
+                &badge,
+                zephium_core::extensions::MAX_EXTENSION_ACTION_BADGE_BYTES,
+            );
+            // WebKit keeps the unread flag after an extension clears its badge.
+            let unread = unsafe { action.hasUnreadBadgeText() } && !badge.is_empty();
+            match ExtensionActionState::new(
                 runtime,
                 ExtensionActionScope::Tab(tab),
                 revision,
@@ -260,16 +266,19 @@ impl WebextHost {
                     &label,
                     zephium_core::extensions::MAX_EXTENSION_ACTION_LABEL_BYTES,
                 ),
-                truncate(
-                    &badge,
-                    zephium_core::extensions::MAX_EXTENSION_ACTION_BADGE_BYTES,
-                ),
+                badge,
                 icon,
                 unsafe { action.isEnabled() },
                 unsafe { action.presentsPopup() },
-                unsafe { action.hasUnreadBadgeText() },
+                unread,
             ) {
-                actions.push(state);
+                Ok(state) => actions.push(state),
+                Err(error) => {
+                    eprintln!(
+                        "extensions: {} action not shown: {error:?}",
+                        install.extension_id
+                    )
+                }
             }
         }
         actions.sort_by_key(|action| action.runtime().install_id());
