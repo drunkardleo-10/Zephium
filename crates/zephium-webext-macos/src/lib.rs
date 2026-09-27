@@ -87,6 +87,9 @@ pub trait Host {
     /// [`Runtime::publish`] before `done` reports it.
     fn tab_request(&self, request: TabRequest, done: TabRequestDone);
 
+    /// Opens an extension's options page, as `runtime.openOptionsPage` asks.
+    fn open_options(&self, extension: &str, url: &str);
+
     /// Shows WebKit's popup for an extension's action (its `popupPopover`, or
     /// its `popupWebView` in a view of the host's own). Returning false
     /// declines it, and WebKit closes the popup.

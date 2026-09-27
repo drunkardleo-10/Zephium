@@ -218,29 +218,79 @@ impl EngineHost {
         )>,
     ) -> bool {
         #[cfg(feature = "webext")]
-        if self
+        match self
             .webext
             .settle_browser_request(profile, request, settlement)
         {
-            if let (
-                ExtensionBrowserRequestSettlement::Applied(
-                    zephium_core::extensions::ExtensionBrowserRequestResult::CreatedTab(tab),
-                ),
-                Some((url, intent)),
-            ) = (settlement, first_url_after_reply)
-            {
-                self.sink.emit(
-                    zephium_core::ports::engine::EngineEvent::ExtensionCreatedTabReplied {
-                        profile,
-                        request,
-                        tab,
-                        url,
-                        intent,
-                    },
-                );
+            super::webext::BrowserRequestOutcome::NotOurs => {}
+            super::webext::BrowserRequestOutcome::Settled => {
+                if let (
+                    ExtensionBrowserRequestSettlement::Applied(
+                        zephium_core::extensions::ExtensionBrowserRequestResult::CreatedTab(tab),
+                    ),
+                    Some((url, intent)),
+                ) = (settlement, first_url_after_reply)
+                {
+                    self.sink.emit(
+                        zephium_core::ports::engine::EngineEvent::ExtensionCreatedTabReplied {
+                            profile,
+                            request,
+                            tab,
+                            url,
+                            intent,
+                        },
+                    );
+                }
+                return true;
             }
-            let _ = page_token;
-            return true;
+            super::webext::BrowserRequestOutcome::Page {
+                extension_id,
+                url,
+                done,
+            } => {
+                let ExtensionBrowserRequestSettlement::Applied(
+                    zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized {
+                        tab,
+                        window,
+                    },
+                ) = settlement
+                else {
+                    return true;
+                };
+                let sink = self.sink.clone();
+                let presented = match (self.ensure_stage(window), page_token) {
+                    (Some(stage), Some(permit)) => self.webext.present_page(
+                        profile,
+                        tab,
+                        stage,
+                        permit,
+                        &extension_id,
+                        &url,
+                        &sink,
+                    ),
+                    _ => Err("the window is gone".to_owned()),
+                };
+                match presented {
+                    Ok(()) => {
+                        if let Some(done) = done {
+                            done(Ok(Some(self.webext.tab_number(profile, tab))));
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("extensions: could not show {extension_id} page: {error}");
+                        if let Some(done) = done {
+                            done(Err(error));
+                        }
+                        self.sink.emit(
+                            zephium_core::ports::engine::EngineEvent::ExtensionPageClosed {
+                                profile,
+                                id: tab,
+                            },
+                        );
+                    }
+                }
+                return true;
+            }
         }
         let created_tab = match settlement {
             ExtensionBrowserRequestSettlement::Applied(

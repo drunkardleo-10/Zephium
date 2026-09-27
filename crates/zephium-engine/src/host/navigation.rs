@@ -827,6 +827,10 @@ impl EngineHost {
     }
 
     pub(crate) fn reload(&mut self, id: ItemId) {
+        #[cfg(feature = "webext")]
+        if self.webext.navigate_page(id, 0) {
+            return;
+        }
         #[cfg(target_os = "macos")]
         if self
             .macos_extension_controllers
@@ -838,6 +842,10 @@ impl EngineHost {
     }
 
     pub(crate) fn stop(&self, id: ItemId) {
+        #[cfg(feature = "webext")]
+        if self.webext.navigate_page(id, 3) {
+            return;
+        }
         #[cfg(target_os = "macos")]
         if self
             .macos_extension_controllers
@@ -851,6 +859,10 @@ impl EngineHost {
     }
 
     pub(crate) fn go_back(&mut self, id: ItemId) {
+        #[cfg(feature = "webext")]
+        if self.webext.navigate_page(id, 1) {
+            return;
+        }
         #[cfg(target_os = "macos")]
         if self
             .macos_extension_controllers
@@ -862,6 +874,10 @@ impl EngineHost {
     }
 
     pub(crate) fn go_forward(&mut self, id: ItemId) {
+        #[cfg(feature = "webext")]
+        if self.webext.navigate_page(id, 2) {
+            return;
+        }
         #[cfg(target_os = "macos")]
         if self
             .macos_extension_controllers

@@ -27,11 +27,37 @@ use zephium_webext_macos::{
     WindowSnapshot,
 };
 
+use objc2::runtime::ProtocolObject;
+use objc2::{DefinedClass, MainThreadOnly};
+use objc2_foundation::{NSObjectProtocol, NSURLRequest, NSURL};
+use objc2_web_kit::{WKNavigationDelegate, WKUIDelegate};
+
 use super::permits::Sink;
 
 #[derive(Default)]
 pub(crate) struct WebextHost {
     profiles: HashMap<ProfileId, ProfileRuntime>,
+    pages: HashMap<ItemId, Page>,
+}
+
+/// An extension page shown in an extension-owned tab.
+struct Page {
+    profile: ProfileId,
+    view: Retained<WKWebView>,
+    stage: Retained<crate::platform::imp::ContentStage>,
+    _delegate: Retained<PageDelegate>,
+}
+
+pub(crate) enum BrowserRequestOutcome {
+    NotOurs,
+    Settled,
+    /// The shell made an extension-owned tab; the page still has to be put
+    /// into it.
+    Page {
+        extension_id: String,
+        url: String,
+        done: Option<TabRequestDone>,
+    },
 }
 
 struct ProfileRuntime {
@@ -75,6 +101,7 @@ impl WebextHost {
                 sink: sink.clone(),
                 ids: RefCell::new(IdMap::default()),
                 pending: RefCell::new(HashMap::new()),
+                pending_pages: RefCell::new(HashMap::new()),
                 next_request: Cell::new(1),
                 popup: RefCell::new(None),
                 repeats: RefCell::new(HashMap::new()),
@@ -327,12 +354,29 @@ impl WebextHost {
         profile: ProfileId,
         request: ExtensionBrowserRequestId,
         settlement: ExtensionBrowserRequestSettlement,
-    ) -> bool {
+    ) -> BrowserRequestOutcome {
         let Some(entry) = self.profiles.get(&profile) else {
-            return false;
+            return BrowserRequestOutcome::NotOurs;
         };
+        if let Some(page) = entry.bridge.pending_pages.borrow_mut().remove(&request) {
+            return match settlement {
+                ExtensionBrowserRequestSettlement::Applied(
+                    ExtensionBrowserRequestResult::ExtensionPageAuthorized { .. },
+                ) => BrowserRequestOutcome::Page {
+                    extension_id: page.extension_id,
+                    url: page.url,
+                    done: page.done,
+                },
+                _ => {
+                    if let Some(done) = page.done {
+                        done(Err("The browser declined to open the page.".into()));
+                    }
+                    BrowserRequestOutcome::Settled
+                }
+            };
+        }
         let Some(done) = entry.bridge.pending.borrow_mut().remove(&request) else {
-            return false;
+            return BrowserRequestOutcome::NotOurs;
         };
         match settlement {
             ExtensionBrowserRequestSettlement::Applied(
@@ -346,6 +390,128 @@ impl WebextHost {
                 "The browser declined the request ({rejection:?})."
             ))),
         }
+        BrowserRequestOutcome::Settled
+    }
+
+    /// Shows an extension page in the tab the shell created for it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn present_page(
+        &mut self,
+        profile: ProfileId,
+        tab: ItemId,
+        stage: Retained<crate::platform::imp::ContentStage>,
+        permit: Arc<std::sync::atomic::AtomicBool>,
+        extension_id: &str,
+        url: &str,
+        sink: &Sink,
+    ) -> Result<(), String> {
+        let entry = self
+            .profiles
+            .get(&profile)
+            .ok_or("no runtime for this profile")?;
+        let context = entry
+            .runtime
+            .context(extension_id)
+            .ok_or("the extension is not running")?;
+        let configuration = unsafe { context.webViewConfiguration() }
+            .ok_or("the extension has no page configuration")?;
+        let mtm = MainThreadMarker::new().ok_or("main thread required")?;
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(960.0, 720.0));
+        let view = unsafe {
+            WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &configuration)
+        };
+        let origin = format!("chrome-extension://{extension_id}/");
+        let delegate = PageDelegate::new(
+            mtm,
+            profile,
+            tab,
+            origin,
+            sink.clone(),
+            Rc::downgrade(&entry.bridge),
+        );
+        unsafe {
+            view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+            view.setUIDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+            view.setInspectable(true);
+        }
+        let url = NSURL::URLWithString(&NSString::from_str(url)).ok_or("invalid page address")?;
+        if !stage.insert_view(tab, Retained::into_super(view.clone()), permit) {
+            return Err("the tab could not take the page".into());
+        }
+        unsafe { view.loadRequest(&NSURLRequest::requestWithURL(&url)) };
+        let _ = stage.set_ready(tab);
+        let id = entry.bridge.ids.borrow_mut().tab(tab);
+        entry.runtime.bind_view(id, Some(&view));
+        self.pages.insert(
+            tab,
+            Page {
+                profile,
+                view,
+                stage,
+                _delegate: delegate,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn tab_number(&self, profile: ProfileId, tab: ItemId) -> u64 {
+        self.profiles
+            .get(&profile)
+            .map_or(0, |entry| entry.bridge.ids.borrow_mut().tab(tab))
+    }
+
+    /// Closes an extension page; false when `tab` shows none.
+    pub(crate) fn close_page(&mut self, tab: ItemId) -> bool {
+        let Some(page) = self.pages.remove(&tab) else {
+            return false;
+        };
+        unsafe {
+            page.view.stopLoading();
+            page.view.setNavigationDelegate(None);
+            page.view.setUIDelegate(None);
+        }
+        page.stage.remove_view(tab);
+        if let Some(entry) = self.profiles.get(&page.profile) {
+            let id = entry.bridge.ids.borrow_mut().tab(tab);
+            entry.runtime.bind_view(id, None);
+        }
+        true
+    }
+
+    /// Reload (0), back (1), forward (2) or stop (3) on an extension page.
+    pub(crate) fn navigate_page(&self, tab: ItemId, action: u8) -> bool {
+        let Some(page) = self.pages.get(&tab) else {
+            return false;
+        };
+        unsafe {
+            match action {
+                0 => drop(page.view.reload()),
+                1 => drop(page.view.goBack()),
+                2 => drop(page.view.goForward()),
+                _ => page.view.stopLoading(),
+            }
+        }
+        true
+    }
+
+    pub(crate) fn open_options(&mut self, runtime: ExtensionRuntimeInstance) -> bool {
+        let Some(entry) = self.profiles.get(&runtime.profile()) else {
+            return false;
+        };
+        let Some(install) = entry.installs.get(&runtime.install_id()) else {
+            return false;
+        };
+        let Some(url) = entry
+            .runtime
+            .context(&install.extension_id)
+            .and_then(|context| unsafe { context.optionsPageURL() })
+            .and_then(|url| url.absoluteString())
+        else {
+            return false;
+        };
+        entry
+            .bridge
+            .open_page(install.extension_id.clone(), url.to_string(), None);
         true
     }
 }
@@ -412,6 +578,7 @@ struct Bridge {
     sink: Sink,
     ids: RefCell<IdMap>,
     pending: RefCell<HashMap<ExtensionBrowserRequestId, TabRequestDone>>,
+    pending_pages: RefCell<HashMap<ExtensionBrowserRequestId, PendingPage>>,
     next_request: Cell<u64>,
     popup: RefCell<Option<(Retained<NSView>, Rect)>>,
     repeats: RefCell<HashMap<u64, (std::time::Instant, u32)>>,
@@ -438,6 +605,56 @@ impl Bridge {
     fn item(&self, tab: u64) -> Option<ItemId> {
         self.ids.borrow().tabs_back.get(&tab).copied()
     }
+
+    /// Asks the shell for an extension-owned tab showing one of an
+    /// extension's own pages; WebKit serves those pages only to views built
+    /// from that extension's configuration.
+    fn open_page(&self, extension_id: String, url: String, done: Option<TabRequestDone>) {
+        let number = self.next_request.get();
+        self.next_request.set(number + 1);
+        let Some(id) = ExtensionBrowserRequestId::new(number | (1 << 63)) else {
+            if let Some(done) = done {
+                done(Err("request identity exhausted".into()));
+            }
+            return;
+        };
+        match ExtensionBrowserRequest::new(
+            self.profile,
+            id,
+            ExtensionBrowserRequestAction::OpenExtensionPage,
+        ) {
+            Ok(request) => {
+                self.pending_pages.borrow_mut().insert(
+                    id,
+                    PendingPage {
+                        extension_id,
+                        url,
+                        done,
+                    },
+                );
+                self.sink
+                    .emit(EngineEvent::ExtensionBrowserRequested { request });
+            }
+            Err(_) => {
+                if let Some(done) = done {
+                    done(Err("The page cannot be opened.".into()));
+                }
+            }
+        }
+    }
+}
+
+struct PendingPage {
+    extension_id: String,
+    url: String,
+    done: Option<TabRequestDone>,
+}
+
+/// The extension a `chrome-extension://<id>/…` address belongs to.
+fn extension_of(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix(concat!("chrome-extension", "://"))?;
+    let id = rest.split('/').next()?;
+    (id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b))).then_some(id)
 }
 
 impl Host for Bridge {
@@ -477,6 +694,27 @@ impl Host for Bridge {
 
     fn tab_request(&self, request: TabRequest, done: TabRequestDone) {
         let tab = |id: u64| self.item(id);
+        match &request {
+            TabRequest::Create { url: Some(url), .. } => {
+                if let Some(extension) = extension_of(url) {
+                    return self.open_page(extension.to_owned(), url.clone(), Some(done));
+                }
+            }
+            TabRequest::Load { tab: id, url } => {
+                if let (Some(extension), Some(item)) = (extension_of(url), tab(*id)) {
+                    // A website sending its tab to an extension page (1Password's
+                    // sign-in) gets the page in an extension-owned tab instead.
+                    let extension = extension.to_owned();
+                    let url = url.clone();
+                    self.request(
+                        ExtensionBrowserRequestAction::CloseTab { tab: item },
+                        Box::new(|_| {}),
+                    );
+                    return self.open_page(extension, url, Some(done));
+                }
+            }
+            _ => {}
+        }
         let action = match request {
             TabRequest::Create {
                 window,
@@ -522,6 +760,10 @@ impl Host for Bridge {
         self.request(action, done);
     }
 
+    fn open_options(&self, extension: &str, url: &str) {
+        self.open_page(extension.to_owned(), url.to_owned(), None);
+    }
+
     fn present_popup(&self, _extension: &str, action: &WKWebExtensionAction) -> bool {
         let Some((parent, anchor)) = self.popup.borrow_mut().take() else {
             return false;
@@ -560,5 +802,153 @@ impl super::EngineHost {
     pub(crate) fn unload_web_extension(&mut self, profile: ProfileId, install: ExtensionInstallId) {
         let sink = self.sink.clone();
         self.webext.unload(profile, install, &sink);
+    }
+}
+
+struct PageIvars {
+    profile: ProfileId,
+    tab: ItemId,
+    origin: String,
+    sink: Sink,
+    bridge: std::rc::Weak<Bridge>,
+}
+
+objc2::define_class!(
+    #[unsafe(super(objc2::runtime::NSObject))]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[name = "ZephiumWebExtPageDelegate"]
+    #[ivars = PageIvars]
+    struct PageDelegate;
+
+    unsafe impl NSObjectProtocol for PageDelegate {}
+
+    unsafe impl WKNavigationDelegate for PageDelegate {
+        #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
+        fn decide_policy(
+            &self,
+            _view: &WKWebView,
+            action: &objc2_web_kit::WKNavigationAction,
+            decision: &block2::DynBlock<dyn Fn(objc2_web_kit::WKNavigationActionPolicy)>,
+        ) {
+            use objc2_web_kit::WKNavigationActionPolicy as Policy;
+            let url = unsafe { action.request() }
+                .URL()
+                .and_then(|url| url.absoluteString())
+                .map(|url| url.to_string())
+                .unwrap_or_default();
+            let main_frame =
+                unsafe { action.targetFrame() }.is_some_and(|frame| unsafe { frame.isMainFrame() });
+            // An extension-owned tab only shows its extension's pages; leaving
+            // for the web continues in a normal tab.
+            if main_frame && !url.starts_with(&self.ivars().origin) && url.starts_with("http") {
+                decision.call((Policy::Cancel,));
+                if let Some(bridge) = self.ivars().bridge.upgrade() {
+                    bridge.request(
+                        ExtensionBrowserRequestAction::CreateTab {
+                            window: None,
+                            url: Some(Arc::from(url.as_str())),
+                            active: true,
+                        },
+                        Box::new(|_| {}),
+                    );
+                }
+                return;
+            }
+            decision.call((Policy::Allow,));
+        }
+
+        #[unsafe(method(webView:didCommitNavigation:))]
+        fn did_commit(&self, view: &WKWebView, _navigation: Option<&objc2_web_kit::WKNavigation>) {
+            self.changed(view);
+        }
+
+        #[unsafe(method(webView:didFinishNavigation:))]
+        fn did_finish(&self, view: &WKWebView, _navigation: Option<&objc2_web_kit::WKNavigation>) {
+            self.changed(view);
+        }
+
+        #[unsafe(method(webView:didFailNavigation:withError:))]
+        fn did_fail(
+            &self,
+            view: &WKWebView,
+            _navigation: Option<&objc2_web_kit::WKNavigation>,
+            _error: &objc2_foundation::NSError,
+        ) {
+            self.changed(view);
+        }
+    }
+
+    unsafe impl WKUIDelegate for PageDelegate {
+        #[unsafe(method(webViewDidClose:))]
+        fn did_close(&self, _view: &WKWebView) {
+            let ivars = self.ivars();
+            ivars.sink.emit(EngineEvent::ExtensionPageClosed {
+                profile: ivars.profile,
+                id: ivars.tab,
+            });
+        }
+
+        #[unsafe(method_id(webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:))]
+        fn create_view(
+            &self,
+            _view: &WKWebView,
+            _configuration: &WKWebViewConfiguration,
+            action: &objc2_web_kit::WKNavigationAction,
+            _features: &objc2_web_kit::WKWindowFeatures,
+        ) -> Option<Retained<WKWebView>> {
+            let url: Option<String> = unsafe { action.request() }
+                .URL()
+                .and_then(|url| url.absoluteString())
+                .map(|url| url.to_string());
+            if let (Some(url), Some(bridge)) = (url, self.ivars().bridge.upgrade()) {
+                match extension_of(&url) {
+                    Some(extension) => bridge.open_page(extension.to_owned(), url, None),
+                    None => bridge.request(
+                        ExtensionBrowserRequestAction::CreateTab {
+                            window: None,
+                            url: Some(Arc::from(url.as_str())),
+                            active: true,
+                        },
+                        Box::new(|_| {}),
+                    ),
+                }
+            }
+            None
+        }
+    }
+);
+
+impl PageDelegate {
+    fn new(
+        mtm: MainThreadMarker,
+        profile: ProfileId,
+        tab: ItemId,
+        origin: String,
+        sink: Sink,
+        bridge: std::rc::Weak<Bridge>,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(PageIvars {
+            profile,
+            tab,
+            origin,
+            sink,
+            bridge,
+        });
+        unsafe { objc2::msg_send![super(this), init] }
+    }
+
+    fn changed(&self, view: &WKWebView) {
+        let ivars = self.ivars();
+        let title = unsafe { view.title() }
+            .map(|title| title.to_string())
+            .unwrap_or_default();
+        ivars.sink.emit(EngineEvent::ExtensionPageChanged {
+            profile: ivars.profile,
+            id: ivars.tab,
+            title: zephium_core::item::sanitize_page_title(&title),
+            loading: unsafe { view.isLoading() },
+            can_go_back: unsafe { view.canGoBack() },
+            can_go_forward: unsafe { view.canGoForward() },
+        });
     }
 }

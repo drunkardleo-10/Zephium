@@ -10,7 +10,7 @@ use objc2_web_kit::{
     WKWebExtensionAction, WKWebExtensionContext, WKWebExtensionController,
     WKWebExtensionControllerDelegate, WKWebExtensionMatchPattern, WKWebExtensionMessagePort,
     WKWebExtensionPermission, WKWebExtensionTab, WKWebExtensionTabConfiguration,
-    WKWebExtensionWindow,
+    WKWebExtensionWindow, WKWebExtensionWindowConfiguration,
 };
 
 use crate::runtime::Shared;
@@ -111,6 +111,70 @@ define_class!(
                     }
                 }),
             );
+        }
+
+        // Extension windows open as tabs of the focused window.
+        #[unsafe(method(webExtensionController:openNewWindowUsingConfiguration:forExtensionContext:completionHandler:))]
+        fn open_new_window(
+            &self,
+            _controller: &WKWebExtensionController,
+            configuration: &WKWebExtensionWindowConfiguration,
+            _context: &WKWebExtensionContext,
+            completion: &DynBlock<
+                dyn Fn(*mut ProtocolObject<dyn WKWebExtensionWindow>, *mut NSError),
+            >,
+        ) {
+            let completion = completion.copy();
+            let Some(shared) = self.shared() else {
+                return completion.call((std::ptr::null_mut(), std::ptr::null_mut()));
+            };
+            let urls: Vec<String> = unsafe { configuration.tabURLs() }
+                .iter()
+                .filter_map(|url| url.absoluteString().map(|url| url.to_string()))
+                .collect();
+            for url in &urls {
+                shared.host().tab_request(
+                    TabRequest::Create {
+                        window: None,
+                        url: Some(url.clone()),
+                        active: true,
+                        pinned: false,
+                        index: None,
+                    },
+                    Box::new(|_| {}),
+                );
+            }
+            let window = shared.graph.borrow().focused_window();
+            match window {
+                Some(window) => {
+                    let window = ProtocolObject::<dyn WKWebExtensionWindow>::from_retained(window);
+                    completion.call((Retained::as_ptr(&window).cast_mut(), std::ptr::null_mut()));
+                }
+                None => completion.call((std::ptr::null_mut(), std::ptr::null_mut())),
+            }
+        }
+
+        #[unsafe(method(webExtensionController:openOptionsPageForExtensionContext:completionHandler:))]
+        fn open_options(
+            &self,
+            _controller: &WKWebExtensionController,
+            context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            let id = unsafe { context.uniqueIdentifier() }.to_string();
+            match (
+                self.shared(),
+                unsafe { context.optionsPageURL() }.and_then(|url| url.absoluteString()),
+            ) {
+                (Some(shared), Some(url)) => {
+                    shared.host().open_options(&id, &url.to_string());
+                    completion.call((std::ptr::null_mut(),));
+                }
+                _ => {
+                    let error = error("This extension has no options page.");
+                    completion.call((Retained::as_ptr(&error).cast_mut(),));
+                }
+            }
         }
 
         #[unsafe(method(webExtensionController:promptForPermissions:inTab:forExtensionContext:completionHandler:))]

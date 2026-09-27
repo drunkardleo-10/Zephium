@@ -99,6 +99,10 @@ impl Host for LabHost {
         true
     }
 
+    fn open_options(&self, extension: &str, url: &str) {
+        eprintln!("[lab] {extension} opens its options page {url}");
+    }
+
     fn tab_request(&self, request: TabRequest, done: TabRequestDone) {
         eprintln!("[lab] extension tab request: {request:?}");
         let Some(lab) = self.lab.borrow().upgrade() else {

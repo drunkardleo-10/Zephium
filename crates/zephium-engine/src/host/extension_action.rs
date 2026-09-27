@@ -300,6 +300,18 @@ impl EngineHost {
             ),
         >,
     ) -> Option<ExtensionOptionsPageSettlement> {
+        #[cfg(feature = "webext")]
+        {
+            let _ = completion;
+            return Some(if self.webext.open_options(runtime) {
+                ExtensionOptionsPageSettlement::Opened
+            } else {
+                ExtensionOptionsPageSettlement::Rejected(
+                    ExtensionActionRejection::RuntimeUnavailable,
+                )
+            });
+        }
+        #[allow(unreachable_code)]
         let profile = runtime.profile();
         let runtimes = match self.extension_runtime_registry.published_runtimes(profile) {
             Ok(runtimes) => runtimes,
