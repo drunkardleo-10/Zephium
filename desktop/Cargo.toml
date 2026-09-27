@@ -59,7 +59,6 @@ zephium-ipc.workspace = true
 zephium-app.workspace = true
 zephium-work-composition = { workspace = true, optional = true }
 zephium-engine.workspace = true
-zephium-extension-service.workspace = true
 zephium-store.workspace = true
 zephium-notes.workspace = true
 zephium-blocker-service.workspace = true

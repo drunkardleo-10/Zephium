@@ -40,17 +40,6 @@ impl ExtensionBrowserSurfaceSync {
 }
 
 impl ExtensionBrowserSurfaceState {
-    pub(super) fn activate(
-        &mut self,
-        profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
-    ) -> bool {
-        if !self.active_profiles.is_empty() && self.active_profiles != profiles {
-            return false;
-        }
-        self.active_profiles = profiles;
-        true
-    }
-
     pub(super) fn retire_profile(&mut self, profile: ProfileId) {
         self.active_profiles.remove(profile);
         self.retry_profiles.remove(profile);

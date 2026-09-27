@@ -49,7 +49,6 @@ enum CoalescedKey {
     ExtensionActions(ProfileId),
     ExtensionPageClosed(ItemId),
     ExtensionPageChanged(ItemId),
-    ExtensionDistributionStatus,
     Split(zephium_core::ids::WindowId),
     WindowSize,
     WindowVisible,
@@ -107,9 +106,7 @@ const NORMAL_COMMAND_CAPACITY: usize = 960;
 const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 9
     + zephium_core::session::MAX_SESSION_PROFILES * 7
     + zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
-    + zephium_core::ports::extensions::MAX_PENDING_EXTENSION_RUNTIME_GRANT_REQUESTS
     + zephium_core::permissions::MAX_PENDING_PAGE_PERMISSION_REQUESTS
-    + crate::api::MAX_PENDING_EXTENSION_MANAGEMENT_OPERATIONS
     + 3
     + cfg!(feature = "work-execution") as usize;
 const COMMAND_QUEUE_CAPACITY: usize = NORMAL_COMMAND_CAPACITY + MAX_CRITICAL_LIFECYCLE_FACTS + 1;
@@ -135,7 +132,6 @@ pub(crate) struct TimerState {
     #[cfg(feature = "work-execution")]
     work_deadline: Option<std::time::Instant>,
     stopped: bool,
-    extension_startup_deadline: Option<std::time::Instant>,
     pub(crate) persist_deadline: Option<std::time::Instant>,
     favicon_deadlines: std::collections::HashMap<ItemId, (std::time::Instant, u8)>,
     pub(crate) presentation_deadlines: std::collections::HashMap<ItemId, PresentationDeadline>,
@@ -162,7 +158,6 @@ pub(crate) enum TimerWake {
     #[cfg(feature = "work-execution")]
     Work,
     Maintenance,
-    ExtensionStartup,
     Persist,
     Favicon {
         id: ItemId,
@@ -236,7 +231,6 @@ enum RecoveryKey {
     ContentRules(ProfileId, ContentPolicyGeneration),
     UserContent(ContentScope),
     ProfileDeletion(ProfileId),
-    ExtensionManagement(u64),
     Split(zephium_core::ids::WindowId),
 }
 
@@ -272,9 +266,6 @@ fn recovery_key(command: &Command) -> Option<RecoveryKey> {
             Some(RecoveryKey::UserContent(*scope))
         }
         Command::ProfileDeletionReady(profile) => Some(RecoveryKey::ProfileDeletion(*profile)),
-        Command::ExtensionManagementSettled { request, .. } => {
-            Some(RecoveryKey::ExtensionManagement(*request))
-        }
         Command::Engine(EngineEvent::SplitChanged { window, .. }) => {
             Some(RecoveryKey::Split(*window))
         }
@@ -501,7 +492,6 @@ impl CommandQueue {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         timer.stopped = true;
-        timer.extension_startup_deadline = None;
         timer.persist_deadline = None;
         timer.favicon_deadlines.clear();
         timer.presentation_deadlines.clear();
@@ -523,23 +513,6 @@ impl CommandQueue {
             return;
         }
         timer.persist_deadline = Some(deadline);
-        self.inner.timer_ready.notify_one();
-    }
-
-    pub(crate) fn schedule_extension_startup(&self, deadline: std::time::Instant) {
-        let mut timer = self
-            .inner
-            .timer_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if timer.stopped {
-            return;
-        }
-        timer.extension_startup_deadline = Some(
-            timer
-                .extension_startup_deadline
-                .map_or(deadline, |current| current.min(deadline)),
-        );
         self.inner.timer_ready.notify_one();
     }
 
@@ -580,28 +553,6 @@ impl CommandQueue {
         ) {
             timer.page_permission_deadline = None;
         }
-    }
-
-    pub(crate) fn cancel_extension_startup(&self) {
-        self.inner
-            .timer_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .extension_startup_deadline = None;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn has_extension_startup_deadline_for_test(&self) -> bool {
-        self.extension_startup_deadline_for_test().is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn extension_startup_deadline_for_test(&self) -> Option<std::time::Instant> {
-        self.inner
-            .timer_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .extension_startup_deadline
     }
 
     pub(crate) fn cancel_persist(&self) {
@@ -878,13 +829,6 @@ impl CommandQueue {
                 return TimerWake::Work;
             }
             if timer
-                .extension_startup_deadline
-                .is_some_and(|deadline| now >= deadline)
-            {
-                timer.extension_startup_deadline = None;
-                return TimerWake::ExtensionStartup;
-            }
-            if timer
                 .persist_deadline
                 .is_some_and(|deadline| now >= deadline)
             {
@@ -979,9 +923,6 @@ impl CommandQueue {
                 .map_or(maintenance_deadline, |persist| {
                     persist.min(maintenance_deadline)
                 });
-            if let Some(extension_startup) = timer.extension_startup_deadline {
-                deadline = deadline.min(extension_startup);
-            }
             #[cfg(feature = "work-execution")]
             if let Some(work) = timer.work_deadline {
                 deadline = deadline.min(work);
@@ -1107,9 +1048,6 @@ fn command_is_critical(command: &Command) -> bool {
         Command::BlockerReady(_)
             | Command::BlockerStoreReady(_)
             | Command::ProfileDeletionReady(_)
-            | Command::ExtensionManagementSettled { .. }
-            | Command::ExtensionRuntimeGrantSettled { .. }
-            | Command::IsolatedExtensionResourceSettled { .. }
             | Command::PagePermissionCatalogLoaded { .. }
             | Command::PagePermissionCatalogMutated { .. }
             | Command::PagePermissionTimeout { .. }
@@ -1127,11 +1065,8 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::UserContentSettled { .. }
                     | EngineEvent::ExtensionBrowserRequested { .. }
                     | EngineEvent::ExtensionCreatedTabReplied { .. }
-                    | EngineEvent::IsolatedExtensionResourceRequested { .. }
                     | EngineEvent::ExtensionPageClosed { .. }
                     | EngineEvent::ExtensionPageChanged { .. }
-                    | EngineEvent::ExtensionRuntimeGrantRequested { .. }
-                    | EngineEvent::ExtensionRuntimeGrantCancelled { .. }
                     | EngineEvent::PermissionRequested { .. }
                     | EngineEvent::ExtensionActionsInvalidated { .. }
                     | EngineEvent::NavigationFailed { .. }
@@ -1165,9 +1100,6 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
         Command::DragOver { .. } => Some(CoalescedKey::DragOver),
         Command::DividerDrag { .. } => Some(CoalescedKey::DividerDrag),
         Command::Search(_) | Command::SearchScoped { .. } => Some(CoalescedKey::Search),
-        Command::ExtensionDistributionStatusChanged(_) => {
-            Some(CoalescedKey::ExtensionDistributionStatus)
-        }
         Command::FaviconPoll { id, .. } => Some(CoalescedKey::FaviconPoll(*id)),
         Command::PresentationFallback { id, .. } => Some(CoalescedKey::PresentationFallback(*id)),
         Command::ChromePresentationApplied { id, .. } => {

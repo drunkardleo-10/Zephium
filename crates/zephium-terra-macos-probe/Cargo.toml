@@ -34,6 +34,5 @@ zephium-app = { workspace = true, optional = true }
 zephium-work-composition.workspace = true
 zephium-blocker = { workspace = true, features = ["webkit"] }
 zephium-blocker-service.workspace = true
-zephium-extension-service.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }

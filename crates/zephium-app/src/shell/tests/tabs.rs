@@ -59,96 +59,7 @@ fn recently_closed_tab_restores_with_a_fresh_identity_and_durable_metadata() {
 }
 
 #[test]
-fn brokered_sessions_select_nonlatest_close_across_restart_without_crossing_scope() {
-    let store = Arc::new(FakeStore::default());
-    let (mut shell, engine, screen) = setup_with(store.clone());
-    shell.handle(Command::Bootstrap);
-    let profile = shell.windows.focused().unwrap().profile;
-    for _ in 0..2 {
-        let tab = active_id(&screen);
-        navigate_and_commit(&mut shell, tab, "same.example/path");
-        shell.handle(Command::Close(tab));
-        shell.handle(Command::Open);
-    }
-
-    let listed = shell.brokered_recently_closed_tabs(profile, 25).unwrap();
-    assert_eq!(listed.len(), 2);
-    assert_eq!(
-        listed[0].url, listed[1].url,
-        "same URLs remain separate closes"
-    );
-    let newest = listed[0].session_id.unwrap();
-    let older = listed[1].session_id.unwrap();
-    assert_ne!(newest, older);
-    assert!(listed
-        .iter()
-        .all(|entry| entry.closed_at_ms.is_some_and(|ms| ms > 0)));
-    assert_eq!(
-        shell
-            .brokered_recently_closed_tabs(profile, 1)
-            .unwrap()
-            .len(),
-        1
-    );
-
-    let snapshot = store.saved.lock().unwrap().clone().unwrap();
-    let restart_store = Arc::new(FakeStore::default());
-    *restart_store.saved.lock().unwrap() = Some(snapshot);
-    let (mut restarted, _, _) = setup_with(restart_store);
-    restarted.handle(Command::Bootstrap);
-    let after_restart = restarted
-        .brokered_recently_closed_tabs(profile, 25)
-        .unwrap();
-    assert_eq!(after_restart[1].session_id, Some(older));
-    assert_eq!(after_restart[1].closed_at_ms, listed[1].closed_at_ms);
-
-    let (entry, restored, work) = shell
-        .restore_brokered_closed_tab(profile, Some(older))
-        .expect("selected older close should restore");
-    assert_eq!(entry.session_id, Some(older));
-    assert!(shell.items.tab(restored).is_some());
-    assert!(!work.rejected);
-    assert_eq!(
-        shell
-            .brokered_recently_closed_tabs(profile, 25)
-            .unwrap()
-            .len(),
-        1
-    );
-    let calls = engine.calls().len();
-    assert!(shell
-        .restore_brokered_closed_tab(profile, Some(older))
-        .is_none());
-    assert_eq!(
-        engine.calls().len(),
-        calls,
-        "consumed ID never restores again"
-    );
-
-    let mut foreign_space = listed[0].clone();
-    foreign_space.space = SpaceId::from(999);
-    foreign_space.session_id = Some(zephium_core::ids::ClosedSessionId::from(999));
-    shell.recently_closed.push(foreign_space);
-    assert_eq!(
-        shell
-            .brokered_recently_closed_tabs(profile, 25)
-            .unwrap()
-            .len(),
-        1
-    );
-    assert!(shell
-        .restore_brokered_closed_tab(profile, Some(zephium_core::ids::ClosedSessionId::from(999)),)
-        .is_none());
-    assert!(shell
-        .brokered_recently_closed_tabs(ProfileId::from(999), 25)
-        .is_none());
-    assert!(shell
-        .restore_brokered_closed_tab(ProfileId::from(999), Some(newest))
-        .is_none());
-}
-
-#[test]
-fn legacy_closed_tab_has_no_v2_identity_but_normal_reopen_still_works() {
+fn legacy_closed_tab_without_identity_still_reopens() {
     let (mut shell, _, screen) = setup();
     shell.handle(Command::Bootstrap);
     let tab = active_id(&screen);
@@ -158,11 +69,6 @@ fn legacy_closed_tab_has_no_v2_identity_but_normal_reopen_still_works() {
     shell.recently_closed[0].session_id = None;
     shell.recently_closed[0].closed_at_ms = None;
 
-    assert!(shell
-        .brokered_recently_closed_tabs(profile, 25)
-        .unwrap()
-        .is_empty());
-    assert!(shell.restore_brokered_closed_tab(profile, None).is_none());
     assert!(shell.restore_recently_closed_tab(profile).is_some());
 }
 

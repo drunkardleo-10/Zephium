@@ -6526,7 +6526,6 @@ dependencies = [
  "zephium-blocker-service",
  "zephium-core",
  "zephium-engine",
- "zephium-extension-service",
  "zephium-ipc",
  "zephium-notes",
  "zephium-store",
@@ -6720,16 +6719,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zephium-extension-updater"
-version = "0.1.0"
-dependencies = [
- "tokio",
- "zephium-app",
- "zephium-core",
- "zephium-extension-distribution",
-]
-
-[[package]]
 name = "zephium-ipc"
 version = "0.1.0"
 dependencies = [
@@ -6797,7 +6786,6 @@ dependencies = [
  "zephium-blocker-service",
  "zephium-core",
  "zephium-engine",
- "zephium-extension-service",
  "zephium-store",
  "zephium-work-composition",
 ]

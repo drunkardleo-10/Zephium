@@ -5,7 +5,7 @@ use zephium_core::blocker::{
     ContentRuleCoverage, ContentRuleDigest, ContentRules, NetworkDecision, NetworkRequest,
     NetworkRequestPolicy, ProfileBlockerConfig,
 };
-use zephium_core::extensions::{ExtensionActionRequest, ExtensionRuntimeInstance};
+use zephium_core::extensions::ExtensionActionRequest;
 use zephium_core::ids::WindowId;
 use zephium_core::ports::blocker::{
     BlockerCatalog, BlockerCatalogPhase, BlockerCatalogRefreshDispatch, BlockerCatalogSnapshot,
@@ -15,7 +15,6 @@ use zephium_core::ports::blocker::{
 use zephium_core::ports::engine::{
     ContentScope, NavigationRequestId, UserContent, UserContentGeneration, ZoomRequestId,
 };
-use zephium_core::ports::extensions::ExtensionRuntimeGrantPromptSettlement;
 use zephium_core::ports::store::{BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome};
 use zephium_core::ports::store::{
     PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
@@ -32,28 +31,6 @@ type HeldBlockerUpdate = (
     Box<dyn FnOnce(BlockerConfigUpdateOutcome) + Send>,
 );
 type HeldBlockerLoad = (ProfileId, Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>);
-type HeldExtensionInstall = zephium_core::ports::extensions::ExtensionInstallCallback;
-type HeldExtensionSetEnabled = zephium_core::ports::extensions::ExtensionSetEnabledCallback;
-type HeldExtensionUninstall = zephium_core::ports::extensions::ExtensionUninstallCallback;
-type HeldExtensionManagementCatalog =
-    zephium_core::ports::extensions::ExtensionManagementCatalogCallback;
-type HeldExtensionRuntimeGrant = zephium_core::ports::extensions::ExtensionRuntimeGrantCallback;
-type HeldExtensionGrantEdit = zephium_core::ports::extensions::ExtensionGrantEditCallback;
-type HeldExtensionProfilePolicyEdit =
-    zephium_core::ports::extensions::ExtensionProfilePolicyEditCallback;
-type HeldExtensionRepositoryMaintenance =
-    zephium_core::ports::extensions::ExtensionRepositoryMaintenanceCallback;
-type HeldAcquiredPackage = (
-    zephium_core::ports::extensions::ExtensionAcquiredPackageProvisioningRequest,
-    std::time::Instant,
-    zephium_core::ports::extensions::ExtensionAcquiredPackageProvisioningCallback,
-);
-type HeldAcquiredCatalog = (
-    zephium_core::ports::extensions::ExtensionAcquiredCatalogActivationRequest,
-    std::time::Instant,
-    zephium_core::ports::extensions::ExtensionAcquiredCatalogActivationCallback,
-);
-
 pub(crate) struct ImmediateAllowAllCompiler;
 
 pub(super) fn test_catalog_snapshot() -> BlockerCatalogSnapshot {
@@ -152,574 +129,6 @@ impl BlockerCatalog for ImmediateAllowAllCompiler {
     fn request_refresh(&self) -> BlockerCatalogRefreshDispatch {
         BlockerCatalogRefreshDispatch::Busy
     }
-}
-
-#[derive(Default)]
-pub(super) struct FakeExtensionLifecycleState {
-    pub(super) startup_calls: std::sync::atomic::AtomicUsize,
-    pub(super) panic_on_startup: std::sync::atomic::AtomicBool,
-    pub(super) wait_until_startup_deadline: std::sync::atomic::AtomicBool,
-    pub(super) startup_outcomes: Mutex<
-        std::collections::VecDeque<zephium_core::ports::extensions::ExtensionServiceStartupOutcome>,
-    >,
-    pub(super) management_not_configured: std::sync::atomic::AtomicBool,
-    pub(super) retirement_calls: std::sync::atomic::AtomicUsize,
-    pub(super) retirement_continuation_calls: std::sync::atomic::AtomicUsize,
-    pub(super) retirement_profiles: Mutex<Vec<ProfileId>>,
-    pub(super) retirement_deadlines: Mutex<Vec<std::time::Instant>>,
-    pub(super) retirement_outcomes: Mutex<
-        std::collections::VecDeque<
-            zephium_core::ports::extensions::ExtensionProfileRetirementDisposition,
-        >,
-    >,
-    /// Overrides whether the fake invokes the continuation, allowing tests to
-    /// prove the application detects a lifecycle implementation that violates
-    /// disposition/callback consistency.
-    pub(super) retirement_invoke_override: Mutex<Option<bool>>,
-    pub(super) panic_on_retirement: std::sync::atomic::AtomicBool,
-    pub(super) panic_after_retirement_continuation: std::sync::atomic::AtomicBool,
-    pub(super) management_admission:
-        Mutex<Option<zephium_core::ports::extensions::ExtensionManagementAdmission>>,
-    pub(super) acquired_package_calls: Mutex<Vec<HeldAcquiredPackage>>,
-    pub(super) acquired_catalog_calls: Mutex<Vec<HeldAcquiredCatalog>>,
-    pub(super) panic_on_acquired_distribution: std::sync::atomic::AtomicBool,
-    pub(super) management_catalog_admission:
-        Mutex<Option<zephium_core::ports::extensions::ExtensionManagementCatalogAdmission>>,
-    pub(super) management_catalog_calls: Mutex<Vec<(ProfileId, std::time::Instant)>>,
-    pub(super) management_catalog_callbacks: Mutex<Vec<HeldExtensionManagementCatalog>>,
-    pub(super) install_calls: Mutex<
-        Vec<(
-            zephium_core::ports::extensions::ExtensionInstallCandidateSelector,
-            zephium_core::ports::extensions::ExtensionInitialGrantSelection,
-            std::time::Instant,
-        )>,
-    >,
-    pub(super) install_callbacks: Mutex<Vec<HeldExtensionInstall>>,
-    pub(super) set_enabled_calls: Mutex<
-        Vec<(
-            zephium_core::ports::extensions::ExtensionInstallSelector,
-            bool,
-            std::time::Instant,
-        )>,
-    >,
-    pub(super) set_enabled_callbacks: Mutex<Vec<HeldExtensionSetEnabled>>,
-    pub(super) uninstall_calls: Mutex<
-        Vec<(
-            zephium_core::ports::extensions::ExtensionInstallSelector,
-            std::time::Instant,
-        )>,
-    >,
-    pub(super) uninstall_callbacks: Mutex<Vec<HeldExtensionUninstall>>,
-    pub(super) runtime_grant_calls: Mutex<
-        Vec<(
-            zephium_core::extensions::ExtensionNativeOwnershipKey,
-            zephium_core::extensions::ExtensionRuntimeGeneration,
-            zephium_core::ports::extensions::ExtensionRuntimeGrantRequest,
-            std::time::Instant,
-        )>,
-    >,
-    pub(super) runtime_grant_callbacks: Mutex<Vec<HeldExtensionRuntimeGrant>>,
-    pub(super) grant_edit_calls: Mutex<
-        Vec<(
-            zephium_core::ports::extensions::ExtensionGrantEditRequest,
-            std::time::Instant,
-        )>,
-    >,
-    pub(super) grant_edit_callbacks: Mutex<Vec<HeldExtensionGrantEdit>>,
-    pub(super) profile_policy_edit_calls: Mutex<
-        Vec<(
-            ProfileId,
-            zephium_core::extensions::ExtensionProfilePolicyRevision,
-            zephium_core::extensions::ExtensionProfilePolicyMutation,
-            std::time::Instant,
-        )>,
-    >,
-    pub(super) profile_policy_edit_callbacks: Mutex<Vec<HeldExtensionProfilePolicyEdit>>,
-    pub(super) repository_maintenance_available: std::sync::atomic::AtomicBool,
-    pub(super) repository_maintenance_admission:
-        Mutex<Option<zephium_core::ports::extensions::ExtensionRepositoryMaintenanceAdmission>>,
-    pub(super) repository_maintenance_calls: Mutex<Vec<std::time::Instant>>,
-    pub(super) repository_maintenance_callbacks: Mutex<Vec<HeldExtensionRepositoryMaintenance>>,
-    pub(super) shutdown_calls: std::sync::atomic::AtomicUsize,
-    pub(super) panic_on_shutdown: std::sync::atomic::AtomicBool,
-    pub(super) dropped_without_shutdown: std::sync::atomic::AtomicBool,
-    pub(super) shutdown_outcome: Mutex<Option<ExtensionServiceShutdownOutcome>>,
-    pub(super) shutdown_order: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
-    pub(super) deadlines: Mutex<Vec<std::time::Instant>>,
-}
-
-struct FakeExtensionLifecycle {
-    state: Arc<FakeExtensionLifecycleState>,
-}
-
-impl Drop for FakeExtensionLifecycle {
-    fn drop(&mut self) {
-        if self
-            .state
-            .shutdown_calls
-            .load(std::sync::atomic::Ordering::Acquire)
-            == 0
-        {
-            self.state
-                .dropped_without_shutdown
-                .store(true, std::sync::atomic::Ordering::Release);
-        }
-    }
-}
-
-impl zephium_core::ports::extensions::ExtensionServiceLifecycle for FakeExtensionLifecycle {
-    fn settle_startup_until(
-        &mut self,
-        deadline: std::time::Instant,
-    ) -> zephium_core::ports::extensions::ExtensionServiceStartupOutcome {
-        self.state
-            .startup_calls
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        if self
-            .state
-            .wait_until_startup_deadline
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            while std::time::Instant::now() < deadline {
-                std::thread::yield_now();
-            }
-        }
-        assert!(
-            !self
-                .state
-                .panic_on_startup
-                .load(std::sync::atomic::Ordering::Acquire),
-            "injected extension startup panic"
-        );
-        self.state
-            .startup_outcomes
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or(
-                zephium_core::ports::extensions::ExtensionServiceStartupOutcome::Ready(
-                    zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY,
-                ),
-            )
-    }
-
-    fn extension_management_availability(
-        &self,
-    ) -> zephium_core::ports::extensions::ExtensionManagementAvailability {
-        if self
-            .state
-            .management_not_configured
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            zephium_core::ports::extensions::ExtensionManagementAvailability::NotConfigured
-        } else {
-            zephium_core::ports::extensions::ExtensionManagementAvailability::Configured
-        }
-    }
-
-    fn begin_provision_acquired_package(
-        &mut self,
-        request: zephium_core::ports::extensions::ExtensionAcquiredPackageProvisioningRequest,
-        deadline: std::time::Instant,
-        done: zephium_core::ports::extensions::ExtensionAcquiredPackageProvisioningCallback,
-    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
-        assert!(
-            !self
-                .state
-                .panic_on_acquired_distribution
-                .load(std::sync::atomic::Ordering::Acquire),
-            "injected acquired-package distribution panic"
-        );
-        let admission = self
-            .state
-            .management_admission
-            .lock()
-            .unwrap()
-            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
-        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
-            self.state
-                .acquired_package_calls
-                .lock()
-                .unwrap()
-                .push((request, deadline, done));
-        } else {
-            drop((request, done));
-        }
-        admission
-    }
-
-    fn begin_activate_acquired_catalog(
-        &mut self,
-        request: zephium_core::ports::extensions::ExtensionAcquiredCatalogActivationRequest,
-        deadline: std::time::Instant,
-        done: zephium_core::ports::extensions::ExtensionAcquiredCatalogActivationCallback,
-    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
-        assert!(
-            !self
-                .state
-                .panic_on_acquired_distribution
-                .load(std::sync::atomic::Ordering::Acquire),
-            "injected acquired-catalog distribution panic"
-        );
-        let admission = self
-            .state
-            .management_admission
-            .lock()
-            .unwrap()
-            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
-        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
-            self.state
-                .acquired_catalog_calls
-                .lock()
-                .unwrap()
-                .push((request, deadline, done));
-        } else {
-            drop((request, done));
-        }
-        admission
-    }
-
-    fn with_profile_retired_until(
-        &mut self,
-        profile: ProfileId,
-        deadline: std::time::Instant,
-        continuation: Box<dyn FnOnce() + '_>,
-    ) -> zephium_core::ports::extensions::ExtensionProfileRetirementDisposition {
-        self.state
-            .retirement_calls
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        self.state.retirement_profiles.lock().unwrap().push(profile);
-        self.state
-            .retirement_deadlines
-            .lock()
-            .unwrap()
-            .push(deadline);
-        assert!(
-            !self
-                .state
-                .panic_on_retirement
-                .load(std::sync::atomic::Ordering::Acquire),
-            "injected extension profile-retirement panic"
-        );
-        let disposition = self
-            .state
-            .retirement_outcomes
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or(
-                zephium_core::ports::extensions::ExtensionProfileRetirementDisposition::Continued,
-            );
-        let invoke = self
-            .state
-            .retirement_invoke_override
-            .lock()
-            .unwrap()
-            .unwrap_or(
-                disposition
-                    == zephium_core::ports::extensions::ExtensionProfileRetirementDisposition::Continued,
-            );
-        if invoke {
-            self.state
-                .retirement_continuation_calls
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            continuation();
-            assert!(
-                !self
-                    .state
-                    .panic_after_retirement_continuation
-                    .load(std::sync::atomic::Ordering::Acquire),
-                "injected post-continuation extension profile-retirement panic"
-            );
-        }
-        disposition
-    }
-
-    fn begin_set_install_enabled(
-        &mut self,
-        selector: zephium_core::ports::extensions::ExtensionInstallSelector,
-        enabled: bool,
-        deadline: std::time::Instant,
-        done: zephium_core::ports::extensions::ExtensionSetEnabledCallback,
-    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
-        self.state
-            .set_enabled_calls
-            .lock()
-            .unwrap()
-            .push((selector, enabled, deadline));
-        let admission = self
-            .state
-            .management_admission
-            .lock()
-            .unwrap()
-            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
-        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
-            self.state.set_enabled_callbacks.lock().unwrap().push(done);
-        } else {
-            drop(done);
-        }
-        admission
-    }
-
-    fn begin_install(
-        &mut self,
-        selector: zephium_core::ports::extensions::ExtensionInstallCandidateSelector,
-        selection: zephium_core::ports::extensions::ExtensionInitialGrantSelection,
-        deadline: std::time::Instant,
-        done: zephium_core::ports::extensions::ExtensionInstallCallback,
-    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
-        self.state
-            .install_calls
-            .lock()
-            .unwrap()
-            .push((selector, selection, deadline));
-        let admission = self
-            .state
-            .management_admission
-            .lock()
-            .unwrap()
-            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
-        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
-            self.state.install_callbacks.lock().unwrap().push(done);
-        } else {
-            drop(done);
-        }
-        admission
-    }
-
-    fn begin_load_management_catalog(
-        &mut self,
-        profile: ProfileId,
-        deadline: std::time::Instant,
-        done: zephium_core::ports::extensions::ExtensionManagementCatalogCallback,
-    ) -> zephium_core::ports::extensions::ExtensionManagementCatalogAdmission {
-        self.state
-            .management_catalog_calls
-            .lock()
-            .unwrap()
-            .push((profile, deadline));
-        let admission = self
-            .state
-            .management_catalog_admission
-            .lock()
-            .unwrap()
-            .unwrap_or(
-                zephium_core::ports::extensions::ExtensionManagementCatalogAdmission::Accepted,
-            );
-        if admission
-            == zephium_core::ports::extensions::ExtensionManagementCatalogAdmission::Accepted
-        {
-            self.state
-                .management_catalog_callbacks
-                .lock()
-                .unwrap()
-                .push(done);
-        } else {
-            drop(done);
-        }
-        admission
-    }
-
-    fn begin_uninstall(
-        &mut self,
-        selector: zephium_core::ports::extensions::ExtensionInstallSelector,
-        deadline: std::time::Instant,
-        done: zephium_core::ports::extensions::ExtensionUninstallCallback,
-    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
-        self.state
-            .uninstall_calls
-            .lock()
-            .unwrap()
-            .push((selector, deadline));
-        let admission = self
-            .state
-            .management_admission
-            .lock()
-            .unwrap()
-            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
-        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
-            self.state.uninstall_callbacks.lock().unwrap().push(done);
-        } else {
-            drop(done);
-        }
-        admission
-    }
-
-    fn begin_request_runtime_grants(
-        &mut self,
-        key: zephium_core::extensions::ExtensionNativeOwnershipKey,
-        generation: zephium_core::extensions::ExtensionRuntimeGeneration,
-        request: zephium_core::ports::extensions::ExtensionRuntimeGrantRequest,
-        deadline: std::time::Instant,
-        done: zephium_core::ports::extensions::ExtensionRuntimeGrantCallback,
-    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
-        self.state
-            .runtime_grant_calls
-            .lock()
-            .unwrap()
-            .push((key, generation, request, deadline));
-        let admission = self
-            .state
-            .management_admission
-            .lock()
-            .unwrap()
-            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
-        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
-            self.state
-                .runtime_grant_callbacks
-                .lock()
-                .unwrap()
-                .push(done);
-        } else {
-            drop(done);
-        }
-        admission
-    }
-
-    fn begin_edit_optional_grant(
-        &mut self,
-        request: zephium_core::ports::extensions::ExtensionGrantEditRequest,
-        deadline: std::time::Instant,
-        done: zephium_core::ports::extensions::ExtensionGrantEditCallback,
-    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
-        self.state
-            .grant_edit_calls
-            .lock()
-            .unwrap()
-            .push((request, deadline));
-        let admission = self
-            .state
-            .management_admission
-            .lock()
-            .unwrap()
-            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
-        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
-            self.state.grant_edit_callbacks.lock().unwrap().push(done);
-        } else {
-            drop(done);
-        }
-        admission
-    }
-
-    fn begin_edit_profile_policy(
-        &mut self,
-        profile: ProfileId,
-        expected: zephium_core::extensions::ExtensionProfilePolicyRevision,
-        mutation: zephium_core::extensions::ExtensionProfilePolicyMutation,
-        deadline: std::time::Instant,
-        done: zephium_core::ports::extensions::ExtensionProfilePolicyEditCallback,
-    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
-        self.state
-            .profile_policy_edit_calls
-            .lock()
-            .unwrap()
-            .push((profile, expected, mutation, deadline));
-        let admission = self
-            .state
-            .management_admission
-            .lock()
-            .unwrap()
-            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
-        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
-            self.state
-                .profile_policy_edit_callbacks
-                .lock()
-                .unwrap()
-                .push(done);
-        } else {
-            drop(done);
-        }
-        admission
-    }
-
-    fn repository_maintenance_is_available(&self) -> bool {
-        self.state
-            .repository_maintenance_available
-            .load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    fn begin_repository_maintenance(
-        &mut self,
-        deadline: std::time::Instant,
-        done: zephium_core::ports::extensions::ExtensionRepositoryMaintenanceCallback,
-    ) -> zephium_core::ports::extensions::ExtensionRepositoryMaintenanceAdmission {
-        self.state
-            .repository_maintenance_calls
-            .lock()
-            .unwrap()
-            .push(deadline);
-        let admission = self
-            .state
-            .repository_maintenance_admission
-            .lock()
-            .unwrap()
-            .unwrap_or(
-                zephium_core::ports::extensions::ExtensionRepositoryMaintenanceAdmission::Accepted,
-            );
-        if admission
-            == zephium_core::ports::extensions::ExtensionRepositoryMaintenanceAdmission::Accepted
-        {
-            self.state
-                .repository_maintenance_callbacks
-                .lock()
-                .unwrap()
-                .push(done);
-        } else {
-            drop(done);
-        }
-        admission
-    }
-
-    fn shutdown_until(
-        self: Box<Self>,
-        deadline: std::time::Instant,
-    ) -> ExtensionServiceShutdownOutcome {
-        self.state
-            .shutdown_calls
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        self.state.deadlines.lock().unwrap().push(deadline);
-        if let Some(order) = self.state.shutdown_order.lock().unwrap().as_ref() {
-            order.lock().unwrap().push("extensions");
-        }
-        assert!(
-            !self
-                .state
-                .panic_on_shutdown
-                .load(std::sync::atomic::Ordering::Acquire),
-            "injected extension shutdown panic"
-        );
-        self.state
-            .shutdown_outcome
-            .lock()
-            .unwrap()
-            .unwrap_or(ExtensionServiceShutdownOutcome::Clean)
-    }
-}
-
-pub(super) fn extension_lifecycle_with_outcome(
-    outcome: ExtensionServiceShutdownOutcome,
-) -> (ExtensionLifecycle, Arc<FakeExtensionLifecycleState>) {
-    let state = Arc::new(FakeExtensionLifecycleState::default());
-    *state.shutdown_outcome.lock().unwrap() = Some(outcome);
-    (
-        Box::new(FakeExtensionLifecycle {
-            state: Arc::clone(&state),
-        }),
-        state,
-    )
-}
-
-pub(super) fn clean_extension_lifecycle() -> ExtensionLifecycle {
-    extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean).0
-}
-
-pub(super) fn extension_lifecycle_with_startup_outcomes(
-    outcomes: impl IntoIterator<Item = zephium_core::ports::extensions::ExtensionServiceStartupOutcome>,
-) -> (ExtensionLifecycle, Arc<FakeExtensionLifecycleState>) {
-    let (lifecycle, state) =
-        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
-    state.startup_outcomes.lock().unwrap().extend(outcomes);
-    (lifecycle, state)
 }
 
 #[cfg(feature = "agentic-browser")]
@@ -864,7 +273,6 @@ pub(crate) struct FakeEngine {
     extension_browser_surfaces: Mutex<Vec<ExtensionBrowserSurface>>,
     extension_action_requests: Mutex<Vec<(ProfileId, ItemId, ExtensionBrowserSurfaceGeneration)>>,
     extension_action_invocations: Mutex<Vec<ExtensionActionRequest>>,
-    extension_options_requests: Mutex<Vec<ExtensionRuntimeInstance>>,
     extension_browser_settlements: Mutex<
         Vec<(
             ProfileId,
@@ -873,20 +281,6 @@ pub(crate) struct FakeEngine {
         )>,
     >,
     extension_browser_first_urls: Mutex<Vec<Option<(Arc<str>, NavigationRequestId)>>>,
-    extension_compatibility_settlements: Mutex<
-        Vec<(
-            ExtensionRuntimeInstance,
-            zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
-            zephium_core::extensions::ExtensionCompatibilityBrokerSettlement,
-        )>,
-    >,
-    extension_runtime_grant_settlements: Mutex<
-        Vec<(
-            ExtensionRuntimeInstance,
-            zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId,
-            ExtensionRuntimeGrantPromptSettlement,
-        )>,
-    >,
     page_permission_settlements: Mutex<
         Vec<(
             ProfileId,
@@ -989,10 +383,6 @@ impl FakeEngine {
         self.extension_action_invocations.lock().unwrap().clone()
     }
 
-    fn extension_options_requests(&self) -> Vec<ExtensionRuntimeInstance> {
-        self.extension_options_requests.lock().unwrap().clone()
-    }
-
     fn extension_browser_settlements(
         &self,
     ) -> Vec<(
@@ -1005,32 +395,6 @@ impl FakeEngine {
 
     fn extension_browser_first_urls(&self) -> Vec<Option<(Arc<str>, NavigationRequestId)>> {
         self.extension_browser_first_urls.lock().unwrap().clone()
-    }
-
-    fn extension_compatibility_settlements(
-        &self,
-    ) -> Vec<(
-        ExtensionRuntimeInstance,
-        zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
-        zephium_core::extensions::ExtensionCompatibilityBrokerSettlement,
-    )> {
-        self.extension_compatibility_settlements
-            .lock()
-            .unwrap()
-            .clone()
-    }
-
-    fn extension_runtime_grant_settlements(
-        &self,
-    ) -> Vec<(
-        ExtensionRuntimeInstance,
-        zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId,
-        ExtensionRuntimeGrantPromptSettlement,
-    )> {
-        self.extension_runtime_grant_settlements
-            .lock()
-            .unwrap()
-            .clone()
     }
 
     fn page_permission_settlements(
@@ -1125,16 +489,6 @@ impl Engine for FakeEngine {
         }
         admission
     }
-    fn open_extension_options(&self, runtime: ExtensionRuntimeInstance) -> NativeDispatch {
-        let admission = self.native_admission();
-        if admission == NativeDispatch::Scheduled {
-            self.extension_options_requests
-                .lock()
-                .unwrap()
-                .push(runtime);
-        }
-        admission
-    }
     fn settle_extension_browser_request(
         &self,
         profile: ProfileId,
@@ -1153,30 +507,6 @@ impl Engine for FakeEngine {
             .lock()
             .unwrap()
             .push(first_url_after_reply);
-        self.native_admission()
-    }
-    fn settle_extension_compatibility_broker_request(
-        &self,
-        runtime: ExtensionRuntimeInstance,
-        request: zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
-        settlement: zephium_core::extensions::ExtensionCompatibilityBrokerSettlement,
-    ) -> NativeDispatch {
-        self.extension_compatibility_settlements
-            .lock()
-            .unwrap()
-            .push((runtime, request, settlement));
-        self.native_admission()
-    }
-    fn settle_extension_runtime_grant_prompt(
-        &self,
-        runtime: ExtensionRuntimeInstance,
-        request: zephium_core::ports::extensions::ExtensionRuntimeGrantRequestId,
-        settlement: ExtensionRuntimeGrantPromptSettlement,
-    ) -> NativeDispatch {
-        self.extension_runtime_grant_settlements
-            .lock()
-            .unwrap()
-            .push((runtime, request, settlement));
         self.native_admission()
     }
     fn settle_page_permission_request(
@@ -2034,14 +1364,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
     }
 }
 
-fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
-    setup_with_extension_lifecycle(store, clean_extension_lifecycle())
-}
-
-pub(super) fn setup_with_extension_lifecycle(
-    store: Arc<FakeStore>,
-    extension_service: ExtensionLifecycle,
-) -> (Shell, Arc<FakeEngine>, Screen) {
+pub(super) fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
     let engine = Arc::new(FakeEngine::default());
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
@@ -2054,11 +1377,11 @@ pub(super) fn setup_with_extension_lifecycle(
         split_group: None,
     }));
     let sink = screen.clone();
-    let mut shell = Shell::new_with_extension_lifecycle(
+    let mut shell = Shell::new_with_failure(
         engine.clone(),
         store,
         Arc::new(ImmediateAllowAllCompiler),
-        extension_service,
+        Box::new(|_| {}),
         Arc::new(FakeChrome),
         Box::new(move |p| apply_projection(&mut sink.lock().unwrap(), p)),
     );
@@ -2088,11 +1411,11 @@ fn setup_with_icon_log(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen
     let icons: IconLog = Arc::new(Mutex::new(Vec::new()));
     let sink = screen.clone();
     let icon_sink = icons.clone();
-    let mut shell = Shell::new_with_extension_lifecycle(
+    let mut shell = Shell::new_with_failure(
         engine.clone(),
         store,
         Arc::new(ImmediateAllowAllCompiler),
-        clean_extension_lifecycle(),
+        Box::new(|_| {}),
         Arc::new(FakeChrome),
         Box::new(move |p| {
             if let Projection::Favicons(view) = &p {
@@ -2134,12 +1457,11 @@ type OperationLog = Arc<Mutex<Vec<OperationDisposition>>>;
 fn setup_with_operation_log(
     store: Arc<FakeStore>,
 ) -> (Shell, Arc<FakeEngine>, Screen, OperationLog) {
-    setup_with_operation_log_and_lifecycle(store, clean_extension_lifecycle(), Box::new(|_| {}))
+    setup_with_operation_log_and_failure(store, Box::new(|_| {}))
 }
 
-fn setup_with_operation_log_and_lifecycle(
+pub(super) fn setup_with_operation_log_and_failure(
     store: Arc<FakeStore>,
-    extension_service: ExtensionLifecycle,
     terminal_failure: ShellTerminalFailureCallback,
 ) -> (Shell, Arc<FakeEngine>, Screen, OperationLog) {
     let engine = Arc::new(FakeEngine::default());
@@ -2156,11 +1478,10 @@ fn setup_with_operation_log_and_lifecycle(
     let operations: OperationLog = Arc::new(Mutex::new(Vec::new()));
     let sink = screen.clone();
     let operation_sink = operations.clone();
-    let mut shell = Shell::new_with_extension_lifecycle_and_failure(
+    let mut shell = Shell::new_with_failure(
         engine.clone(),
         store,
         Arc::new(ImmediateAllowAllCompiler),
-        extension_service,
         terminal_failure,
         Arc::new(FakeChrome),
         Box::new(move |projection| {
@@ -2309,10 +1630,6 @@ mod engine_events;
 mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
-mod extension_compatibility_broker;
-mod extension_distribution;
-mod extension_repository_maintenance;
-mod extension_runtime_grants;
 mod favicons;
 mod history;
 #[path = "navigation.rs"]

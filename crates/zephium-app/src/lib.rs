@@ -46,19 +46,14 @@ pub use actor::{
     FocusedContentPolicyStatusRequest, Handle, ShutdownRequest, SpawnError, SpawnFailure,
 };
 #[cfg(feature = "agentic-browser")]
-pub use actor::{spawn_agentic, spawn_agentic_suspended, AgenticLifecycles, AgenticSpawnFailure};
+pub use actor::{spawn_agentic, spawn_agentic_suspended, AgenticSpawnFailure};
 #[cfg(feature = "agentic-browser")]
 pub use api::AgentLifecycle;
 pub use api::{
-    AcquiredExtensionCatalogSubmission, AcquiredExtensionPackageSubmission, BrowserPage,
-    ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command,
-    ContentPolicyStatusQueryOutcome, EmitFn, ExtensionLifecycle, PagePermissionPromptDecision,
+    BrowserPage, ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch,
+    Command, ContentPolicyStatusQueryOutcome, EmitFn, PagePermissionPromptDecision,
     PresentationChrome, SharedBlocker, SharedChrome, SharedEngine, SharedStore,
     ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,
-};
-pub use api::{
-    StoreExtensionContext, StoreExtensionPackageSubmission, StoreExtensionPreparationCompletion,
-    StoreExtensionUpdateDispatch, StoreExtensionUpdateResult,
 };
 pub use shell::{Shell, WebExtensionStatus, WebExtensionTarget};
 

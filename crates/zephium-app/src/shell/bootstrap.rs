@@ -8,26 +8,9 @@ impl Shell {
         let started = *self
             .bootstrap_started
             .get_or_insert_with(std::time::Instant::now);
-        // Native-owner recovery can dispatch onto the platform event loop, so
-        // this settlement runs on the shell actor rather than Tauri's setup
-        // callback. Nothing below may inspect recovered deletion authority or
-        // create a raw content view without explicit service readiness.
-        if !self.extension_service_ready_for_bootstrap() {
-            if !self.extension_lifecycle_terminal && !self.startup_preview_attempted {
-                self.startup_preview_attempted = true;
-                self.project_startup_session_preview();
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "bootstrap: session preview attempted at {}ms",
-                    started.elapsed().as_millis()
-                );
-            }
+        if self.profile_deletion.failed_closed {
             return;
         }
-        // Product provisioning is immutable for the process. Project the
-        // non-authorizing fact on every trusted frontend bootstrap so ordinary
-        // inert builds stay silent without probing or constructing a worker.
-        self.project_extension_management_availability();
         // Runtime update state is independent of session recovery and chrome
         // reloads. Querying the sticky engine state also repairs a callback
         // that arrived before the shell callback ingress was installed.
@@ -224,7 +207,7 @@ impl Shell {
             } else {
                 self.schedule_profile_deletion_retry(profile);
             }
-            if self.extension_lifecycle_terminal {
+            if self.profile_deletion.failed_closed {
                 self.profile_deletion.batch_deadline = None;
                 crate::diagnostic!(
                     "bootstrap: recovered profile deletion failed closed; refusing native view construction"

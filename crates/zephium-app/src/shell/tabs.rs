@@ -2,13 +2,6 @@
 
 use super::*;
 
-#[derive(Clone, Copy)]
-enum ClosedTabSelection {
-    AnyRecent,
-    IdentifiedRecent,
-    Exact(zephium_core::ids::ClosedSessionId),
-}
-
 impl Shell {
     pub(super) fn open_tab(&mut self) -> Vec<Effect> {
         self.open_tab_with_id()
@@ -65,7 +58,6 @@ impl Shell {
         self.residency.recent.retain(|r| *r != id);
         self.residency.recent.push(id);
         self.touch(id);
-        self.reproject_extension_site_policy_if_visible(profile);
         self.items.ensure_view(id)
     }
 
@@ -137,9 +129,6 @@ impl Shell {
             if let (Some(pos), false) = (pos, tabs.is_empty()) {
                 fx.extend(self.focus_tab(tabs[pos.min(tabs.len() - 1)]));
             }
-            if let Some(profile) = self.windows.focused().map(|window| window.profile) {
-                self.reproject_extension_site_policy_if_visible(profile);
-            }
         }
         self.commit(fx)
     }
@@ -201,89 +190,15 @@ impl Shell {
         &mut self,
         profile: ProfileId,
     ) -> Option<(ItemId, NativeWork)> {
-        self.restore_closed_tab(profile, ClosedTabSelection::AnyRecent)
-            .map(|(_, id, work)| (id, work))
-    }
-
-    /// Returns only actual close records with durable identity and timestamp.
-    /// Legacy records remain available to the ordinary reopen-last-tab path.
-    pub(super) fn brokered_recently_closed_tabs(
-        &self,
-        profile: ProfileId,
-        limit: usize,
-    ) -> Option<Vec<zephium_core::session::PersistedClosedTab>> {
-        self.profiles
-            .get(profile)
-            .filter(|entry| entry.kind != ProfileKind::Incognito)?;
         let space = self
             .windows
             .focused()
             .filter(|window| window.profile == profile)
             .map(|window| window.space)?;
-        Some(
-            self.recently_closed
-                .iter()
-                .rev()
-                .filter(|entry| {
-                    entry.profile == profile
-                        && entry.space == space
-                        && entry.session_id.is_some()
-                        && entry.closed_at_ms.is_some()
-                })
-                .take(limit)
-                .cloned()
-                .collect(),
-        )
-    }
-
-    pub(super) fn restore_brokered_closed_tab(
-        &mut self,
-        profile: ProfileId,
-        id: Option<zephium_core::ids::ClosedSessionId>,
-    ) -> Option<(
-        zephium_core::session::PersistedClosedTab,
-        ItemId,
-        NativeWork,
-    )> {
-        self.profiles
-            .get(profile)
-            .filter(|entry| entry.kind != ProfileKind::Incognito)?;
-        self.restore_closed_tab(
-            profile,
-            id.map_or(
-                ClosedTabSelection::IdentifiedRecent,
-                ClosedTabSelection::Exact,
-            ),
-        )
-    }
-
-    fn restore_closed_tab(
-        &mut self,
-        profile: ProfileId,
-        selection: ClosedTabSelection,
-    ) -> Option<(
-        zephium_core::session::PersistedClosedTab,
-        ItemId,
-        NativeWork,
-    )> {
-        let space = self
-            .windows
-            .focused()
-            .filter(|window| window.profile == profile)
-            .map(|window| window.space)?;
-        let position = self.recently_closed.iter().rposition(|entry| {
-            entry.profile == profile
-                && entry.space == space
-                && match selection {
-                    ClosedTabSelection::AnyRecent => true,
-                    ClosedTabSelection::IdentifiedRecent => {
-                        entry.session_id.is_some() && entry.closed_at_ms.is_some()
-                    }
-                    ClosedTabSelection::Exact(id) => {
-                        entry.session_id == Some(id) && entry.closed_at_ms.is_some()
-                    }
-                }
-        })?;
+        let position = self
+            .recently_closed
+            .iter()
+            .rposition(|entry| entry.profile == profile && entry.space == space)?;
         let entry = self.recently_closed[position].clone();
         let id = (0..8).find_map(|_| {
             let candidate = ItemId::generate();
@@ -305,7 +220,7 @@ impl Shell {
         self.items.set_zoom(id, entry.zoom);
         self.recently_closed.remove(position);
         let effects = self.focus_tab(id);
-        Some((entry, id, self.commit(effects)))
+        Some((id, self.commit(effects)))
     }
 
     /// Removes a failed native leaf from the retained split immediately. A
