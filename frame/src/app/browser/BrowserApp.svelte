@@ -2,7 +2,6 @@
   import { installCloseService } from "$shared/lib/close";
   import "$styles/global.css";
   import { onMount, untrack } from "svelte";
-  import { ExtensionPermissionPrompt } from "$features/extensions";
   import { WebExtensionReview } from "$features/webext";
   import { webext } from "$domain/webext";
   import { PagePermissionPrompt } from "$features/permissions";
@@ -42,9 +41,8 @@
     );
   });
 
-  let extensionPermissionPrompt = $derived(extensions.permissionPrompt());
   let pagePermissionPrompt = $derived(pagePermissions.prompt());
-  let consentActive = $derived(extensionPermissionPrompt !== null || pagePermissionPrompt !== null);
+  let consentActive = $derived(pagePermissionPrompt !== null);
 
   type ChromeShortcut = {
     matches: (event: KeyboardEvent) => boolean;
@@ -193,10 +191,6 @@
 </div>
 {#if webext.review() !== null}
   <WebExtensionReview review={webext.review()!} />
-{:else if extensionPermissionPrompt !== null}
-  {#key `${extensionPermissionPrompt.runtime_generation}:${extensionPermissionPrompt.request_id}`}
-    <ExtensionPermissionPrompt prompt={extensionPermissionPrompt} />
-  {/key}
 {:else if pagePermissionPrompt !== null}
   {#key `${pagePermissionPrompt.profile_id}:${pagePermissionPrompt.item_id}:${pagePermissionPrompt.request_id}`}
     <PagePermissionPrompt prompt={pagePermissionPrompt} />

@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { PuzzleIcon } from "@hugeicons/core-free-icons";
-  import { onMount } from "svelte";
+  import { Key01Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
+  import { onDestroy, onMount } from "svelte";
+  import { browserCredentials, browserPasskeyStatus } from "$domain/credentials";
   import { webext } from "$domain/webext";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
@@ -8,8 +9,13 @@
   let extensions = $derived(webext.list());
   let failure = $derived(webext.error());
   let removing = $state<string | null>(null);
+  let credentials = $derived(browserCredentials.current());
 
-  onMount(() => void webext.refresh());
+  onMount(() => {
+    void webext.refresh();
+    void browserCredentials.activate();
+  });
+  onDestroy(() => browserCredentials.deactivate());
 
   const stateLabel = (state: string) =>
     state === "running"
@@ -31,6 +37,44 @@
 
   {#if failure !== null}
     <p role="alert" class="mt-4 text-[12px] leading-4 text-danger">{failure}</p>
+  {/if}
+
+  {#if credentials !== null && (credentials.system_password_autofill || credentials.passkey_authorization !== "unsupported")}
+    <div class="mt-6 flex items-start gap-3 rounded-panel border border-border bg-raised p-3">
+      <span
+        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control-compact bg-fill text-muted"
+        aria-hidden="true"
+      >
+        <Icon icon={Key01Icon} size={18} />
+      </span>
+      <div class="min-w-0 flex-1">
+        <h2 class="text-[13.5px] leading-5 font-semibold text-text">System passwords & passkeys</h2>
+        {#if credentials.system_password_autofill}
+          <p class="text-[11.5px] leading-4 text-muted">
+            Password AutoFill is available through macOS credential providers.
+          </p>
+        {/if}
+        <p
+          class="text-[11.5px] leading-4 text-faint"
+          class:text-warning={credentials.passkey_authorization === "denied" ||
+            credentials.passkey_authorization === "entitlement_required" ||
+            credentials.passkey_authorization === "unknown" ||
+            credentials.passkey_authorization === "unavailable"}
+          role="status"
+        >
+          {browserPasskeyStatus(credentials.passkey_authorization)}
+        </p>
+      </div>
+      {#if credentials.can_request_passkey_authorization}
+        <Button
+          size="compact"
+          variant="secondary"
+          pending={browserCredentials.busy()}
+          onclick={() => void browserCredentials.requestPasskeyAuthorization()}
+          >{browserCredentials.busy() ? "Waiting…" : "Enable passkeys"}</Button
+        >
+      {/if}
+    </div>
   {/if}
 
   {#if extensions.length === 0}

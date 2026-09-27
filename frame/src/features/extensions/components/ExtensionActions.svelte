@@ -14,7 +14,6 @@
   let actions = $derived(extensions.activeActions(profileId, tabId));
   let failure = $derived(extensions.failureReason(profileId, tabId));
   let shortcut = $derived(extensions.actionShortcut(profileId, tabId));
-  let managementAvailability = $derived(extensions.managementAvailability());
   let actionRoot = $state<HTMLDivElement>();
 
   const failureMessage = (reason: ReturnType<typeof extensions.failureReason>) => {
@@ -50,10 +49,6 @@
     if (profileId === null || tabId === null || !(target instanceof HTMLButtonElement)) return;
     void extensions.invoke(profileId, tabId, action, target.getBoundingClientRect());
   }
-
-  $effect(() => {
-    if (extensions.storeReviewRequest() !== null) void browserPage.open("extensions");
-  });
 
   $effect(() => {
     const request = shortcut;
@@ -112,7 +107,7 @@
     {/each}
   {/if}
 
-  {#if managementAvailability === "configured" || webext.isAvailable()}
+  {#if webext.isAvailable()}
     <button
       type="button"
       aria-label="Open Extensions"

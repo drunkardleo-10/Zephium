@@ -10,10 +10,6 @@ import type {
   ExtensionActionFailed,
   ExtensionActionShortcut,
   ExtensionActionsChanged,
-  ExtensionManagementAvailabilityChanged,
-  ExtensionManagementChanged,
-  ExtensionDistributionChanged,
-  ExtensionRuntimeGrantPromptChanged,
   ItemsChanged,
   LayoutChanged,
   OperationProcessed,
@@ -56,10 +52,6 @@ export const nativeEventNames = {
   extensionActionsChanged: "zephium:extension-actions",
   extensionActionFailed: "zephium:extension-action-failed",
   extensionActionShortcut: "zephium:extension-action-shortcut",
-  extensionManagementAvailabilityChanged: "zephium:extension-management-availability",
-  extensionManagementChanged: "zephium:extension-management",
-  extensionDistributionChanged: "zephium:extension-distribution",
-  extensionRuntimeGrantPromptChanged: "zephium:extension-runtime-grant-prompt",
   pagePermissionPromptChanged: "zephium:page-permission-prompt",
   browserReturn: "zephium:browser-return",
   presentationTab: "zephium:presentation-tab",
@@ -91,18 +83,6 @@ export const events = {
   extensionActionFailed: scopedEvent<ExtensionActionFailed>(nativeEventNames.extensionActionFailed),
   extensionActionShortcut: scopedEvent<ExtensionActionShortcut>(
     nativeEventNames.extensionActionShortcut,
-  ),
-  extensionManagementAvailabilityChanged: scopedEvent<ExtensionManagementAvailabilityChanged>(
-    nativeEventNames.extensionManagementAvailabilityChanged,
-  ),
-  extensionManagementChanged: scopedEvent<ExtensionManagementChanged>(
-    nativeEventNames.extensionManagementChanged,
-  ),
-  extensionDistributionChanged: scopedEvent<ExtensionDistributionChanged>(
-    nativeEventNames.extensionDistributionChanged,
-  ),
-  extensionRuntimeGrantPromptChanged: scopedEvent<ExtensionRuntimeGrantPromptChanged>(
-    nativeEventNames.extensionRuntimeGrantPromptChanged,
   ),
   pagePermissionPromptChanged: scopedEvent<PagePermissionPromptChanged>(
     nativeEventNames.pagePermissionPromptChanged,

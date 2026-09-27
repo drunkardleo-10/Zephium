@@ -12,10 +12,8 @@
   import { Dock } from "$features/dock";
   import { DownloadStatus } from "$features/downloads";
   import { EssentialsRail } from "$features/essentials";
-  import { ExtensionActions, ExtensionManager } from "$features/extensions";
+  import { ExtensionActions } from "$features/extensions";
   import { WebExtensionManager } from "$features/webext";
-  import { webext } from "$domain/webext";
-  import { extensions } from "$domain/extensions";
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
@@ -182,7 +180,7 @@
         <div class="sidebar-head"><ModeTabs /></div>
         <AddressField {compact}>
           {#snippet trailing()}
-            <UtilityTray openRequest={extensions.storeReviewRequest()}>
+            <UtilityTray>
               <div class="utility-panel">
                 <BlockerShield />
                 <ExtensionActions />
@@ -312,9 +310,7 @@
                 retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
               >
             {:else if browserPage.currentPage() === "extensions"}
-              {#if webext.isAvailable()}<WebExtensionManager />{:else}<ExtensionManager
-                  embedded
-                />{/if}
+              <WebExtensionManager />
             {:else if browserPage.currentPage() === "work"}
               {#key tabs.profile()?.id}<LazyView
                   loader={loadWorkWorkspace}

@@ -4,75 +4,29 @@ import type {
   ExtensionActionFailure,
   ExtensionActionView,
   ExtensionActionsView,
-  ExtensionDistributionView,
-  ExtensionInstallCandidateView,
-  ExtensionManagementEntryView,
-  ExtensionManagementView,
-  ExtensionUpdateConsentView,
-  ExtensionRuntimeGrantPromptEntryView,
-  ExtensionRuntimeGrantPromptView,
-  OperationAdmission,
-  OperationDisposition,
 } from "$shared/ipc/bindings";
 import { SvelteSet } from "svelte/reactivity";
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
-import { operations } from "$domain/operations";
 import {
-  ExtensionDistributionProjectionModel,
   ExtensionActionShortcutProjectionModel,
-  ExtensionManagementAvailabilityProjectionModel,
-  ExtensionManagementProjectionModel,
   ExtensionProjectionModel,
-  ExtensionRuntimeGrantPromptProjectionModel,
-  extensionDistributionNotice,
-  extensionDistributionRefreshMessage,
-  extensionManagementDispositionMessage,
   failureForContext,
-  initialExtensionManagement,
-  initialExtensionManagementAvailability,
-  managementForProfile,
-} from "./extensions-model";
+} from "./action-model";
 export { isChromeStoreListing } from "./store-listing";
 
 const NOTICE_LIFETIME_MS = 5_000;
 const ACTION_SHORTCUT_LIFETIME_MS = 1_000;
-const MANAGEMENT_IPC_TIMEOUT_MS = 5_000;
-const MANAGEMENT_SETTLEMENT_TIMEOUT_MS = 30_000;
 
 const model = new ExtensionProjectionModel();
 const shortcutModel = new ExtensionActionShortcutProjectionModel();
-const managementModel = new ExtensionManagementProjectionModel();
-const managementAvailabilityModel = new ExtensionManagementAvailabilityProjectionModel();
-const distributionModel = new ExtensionDistributionProjectionModel();
-const runtimeGrantModel = new ExtensionRuntimeGrantPromptProjectionModel();
 let state = $state.raw<ExtensionActionsView>(model.actions);
 let shortcutState = $state.raw<ExtensionActionShortcutView | null>(shortcutModel.view);
-let managementState = $state.raw<ExtensionManagementView>(managementModel.management);
-let managementAvailabilityState = $state.raw(managementAvailabilityModel.view);
-let distributionState = $state.raw<ExtensionDistributionView | null>(distributionModel.view);
-let runtimeGrantState = $state.raw<ExtensionRuntimeGrantPromptView>(runtimeGrantModel.view);
 type VisibleFailure = Omit<ExtensionActionFailedView, "projection_revision"> & {
   projectionRevision?: string;
 };
 let failure = $state.raw<VisibleFailure | null>(null);
 const invoking = new SvelteSet<string>();
-type ManagementMutation = {
-  subject: string;
-  kind: "install" | "update" | "enable" | "disable" | "uninstall" | "grant" | "policy";
-};
-let managementMutation = $state.raw<ManagementMutation | null>(null);
-let managementNotice = $state<string | null>(null);
-let distributionRefreshPending = $state(false);
-let distributionRefreshNotice = $state<string | null>(null);
-let storePreparationBusy = $state(false);
-let storePreparationNotice = $state<string | null>(null);
-let requestedStoreReview = $state<string | null>(null);
-let storeUpdateSubject = $state<string | null>(null);
-let storeUpdateMessage = $state<{ profile: string; text: string; failed: boolean } | null>(null);
-let managementVisible = false;
-let runtimeGrantResponding = $state(false);
-let runtimeGrantNotice = $state<string | null>(null);
 
 let lifecycle = 0;
 let initialized = false;
@@ -83,7 +37,6 @@ let shortcutTimer: ReturnType<typeof setTimeout> | null = null;
 
 type Unlisten = () => void;
 
-export const snapshot = () => state;
 export const failureReason = (profileId: string | null, tabId: string | null) =>
   failureForContext(failure, profileId, tabId);
 export const isInvoking = (installId: string) => invoking.has(installId);
@@ -100,82 +53,6 @@ export const consumeActionShortcut = (revision: string) => {
   }
   return consumed;
 };
-export const management = (profileId: string | null) =>
-  managementForProfile(managementState, profileId);
-export const managementAvailability = () => managementAvailabilityState.availability;
-export const distribution = () => distributionState;
-export const distributionNotice = () => extensionDistributionNotice(distributionState);
-export const distributionRefreshBusy = () =>
-  distributionRefreshPending || distributionState?.state.phase === "synchronizing";
-export const distributionRefreshFailure = () => distributionRefreshNotice;
-export const storeInstallBusy = () => storePreparationBusy;
-export const storeInstallFailure = () => storePreparationNotice;
-export const storeReviewRequest = () => requestedStoreReview;
-export const consumeStoreReviewRequest = () => {
-  requestedStoreReview = null;
-};
-export const storeUpdateBusy = () => storeUpdateSubject;
-export const storeUpdateNotice = (profile: string | null) =>
-  storeUpdateMessage?.profile === profile ? storeUpdateMessage : null;
-export const activeManagementMutation = () => managementMutation;
-export const managementFailure = () => managementNotice;
-export const permissionPrompt = () => runtimeGrantState.prompt;
-export const permissionPromptBusy = () =>
-  runtimeGrantResponding || runtimeGrantState.prompt?.processing === true;
-export const permissionPromptFailure = () => runtimeGrantNotice;
-
-export async function prepareStoreInstall(tabId: string): Promise<void> {
-  if (storePreparationBusy) return;
-  const owner = lifecycle;
-  storePreparationBusy = true;
-  storePreparationNotice = null;
-  try {
-    const result = await commands.extensionStorePrepare(tabId);
-    if (owner !== lifecycle) return;
-    if (result.status === "ok") requestedStoreReview = result.data;
-    else storePreparationNotice = result.error;
-  } catch {
-    if (owner === lifecycle)
-      storePreparationNotice = "Extension installation is temporarily unavailable.";
-  } finally {
-    if (owner === lifecycle) storePreparationBusy = false;
-  }
-}
-
-export async function checkStoreUpdate(
-  profile: string,
-  entry: ExtensionManagementEntryView,
-): Promise<void> {
-  if (storePreparationBusy || managementMutation !== null) return;
-  const owner = lifecycle;
-  storePreparationBusy = true;
-  storeUpdateSubject = entry.install_id;
-  storeUpdateMessage = null;
-  try {
-    const result = await commands.extensionStoreCheckUpdate(entry.install_id);
-    if (owner !== lifecycle) return;
-    const text = result.status === "ok" ? result.data : result.error;
-    if (managementVisible && management(profile) !== null) await setManagementVisible(true);
-    if (owner === lifecycle)
-      storeUpdateMessage = {
-        profile,
-        text: `${entry.name}: ${text}`,
-        failed: result.status !== "ok",
-      };
-  } catch {
-    if (owner === lifecycle)
-      storeUpdateMessage = {
-        profile,
-        text: `${entry.name}: update check is temporarily unavailable`,
-        failed: true,
-      };
-  } finally {
-    if (owner === lifecycle) {
-      storePreparationBusy = false;
-      storeUpdateSubject = null;
-    }
-  }
-}
 
 export function activeActions(profileId: string | null, tabId: string | null) {
   return profileId !== null &&
@@ -228,20 +105,6 @@ async function resolveListeners(promises: readonly Promise<Unlisten>[]): Promise
   return listeners;
 }
 
-async function boundedIpc<T>(request: Promise<T>, milliseconds: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      request,
-      new Promise<T>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error("bounded privileged IPC timeout")), milliseconds);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
 async function initialize(generation: number) {
   const listeners = await resolveListeners([
     events.extensionActionsChanged.listen((event) => {
@@ -280,28 +143,6 @@ async function initialize(generation: number) {
         if (generation !== lifecycle || !shortcutModel.consume(revision)) return;
         shortcutState = shortcutModel.view;
       }, ACTION_SHORTCUT_LIFETIME_MS);
-    }),
-    events.extensionManagementChanged.listen((event) => {
-      if (generation !== lifecycle || !managementModel.apply(event.payload)) return;
-      managementState = managementModel.management;
-    }),
-    events.extensionManagementAvailabilityChanged.listen((event) => {
-      if (generation !== lifecycle || !managementAvailabilityModel.apply(event.payload)) return;
-      managementAvailabilityState = managementAvailabilityModel.view;
-    }),
-    events.extensionDistributionChanged.listen((event) => {
-      if (generation !== lifecycle || !distributionModel.apply(event.payload)) return;
-      distributionState = distributionModel.view;
-      distributionRefreshPending = false;
-      distributionRefreshNotice = null;
-    }),
-    events.extensionRuntimeGrantPromptChanged.listen((event) => {
-      if (generation !== lifecycle || !runtimeGrantModel.apply(event.payload)) return;
-      runtimeGrantState = runtimeGrantModel.view;
-      // The actor's exact replacement supersedes any in-flight presentation
-      // guard or diagnostic from the prior revision.
-      runtimeGrantResponding = false;
-      runtimeGrantNotice = null;
     }),
   ]);
   if (generation !== lifecycle) {
@@ -344,109 +185,7 @@ export function dispose() {
   invoking.clear();
   shortcutModel.clear();
   shortcutState = shortcutModel.view;
-  managementMutation = null;
-  managementAvailabilityState = initialExtensionManagementAvailability();
-  managementNotice = null;
-  distributionRefreshPending = false;
-  distributionRefreshNotice = null;
-  storePreparationBusy = false;
-  storePreparationNotice = null;
-  requestedStoreReview = null;
-  storeUpdateSubject = null;
-  storeUpdateMessage = null;
-  runtimeGrantResponding = false;
-  runtimeGrantNotice = null;
   failure = null;
-  if (managementVisible) void commands.extensionManagementSetVisible(false).catch(() => {});
-  managementVisible = false;
-}
-
-function samePermissionPrompt(
-  left: ExtensionRuntimeGrantPromptEntryView | null,
-  right: ExtensionRuntimeGrantPromptEntryView,
-): boolean {
-  return (
-    left?.profile_id === right.profile_id &&
-    left.install_id === right.install_id &&
-    left.runtime_generation === right.runtime_generation &&
-    left.request_id === right.request_id
-  );
-}
-
-function runtimeGrantDispositionMessage(disposition: OperationDisposition): string | null {
-  if (disposition.outcome === "applied" || disposition.outcome === "no_op") return null;
-  switch (disposition.reason) {
-    case "invalid_scope":
-      return "This permission request is no longer available.";
-    case "store_conflict":
-      return "The extension's access changed. Review the new request and try again.";
-    case "store_outcome_unknown":
-    case "store_reconciliation_failed":
-      return "Zephium couldn't safely verify this permission change. Restart before trying again.";
-    case "store_admission_rejected":
-      return "Extension permissions are temporarily unavailable.";
-    default:
-      return "Zephium couldn't apply this permission change.";
-  }
-}
-
-async function settlePermissionPrompt(
-  prompt: ExtensionRuntimeGrantPromptEntryView,
-  allow: boolean,
-): Promise<void> {
-  if (!samePermissionPrompt(runtimeGrantState.prompt, prompt) || permissionPromptBusy()) return;
-  runtimeGrantResponding = true;
-  runtimeGrantNotice = null;
-  try {
-    try {
-      await operations.init();
-    } catch {
-      // The bounded native ledger remains the reconciliation path if scoped
-      // event registration races this foreground response.
-    }
-    const admission = await boundedIpc(
-      commands.extensionRuntimeGrantRespond(
-        prompt.profile_id,
-        prompt.install_id,
-        prompt.runtime_generation,
-        prompt.request_id,
-        allow,
-      ),
-      MANAGEMENT_IPC_TIMEOUT_MS,
-    );
-    if (!admission.accepted || admission.operation_id === null) {
-      runtimeGrantNotice = "This permission request is no longer available.";
-      runtimeGrantResponding = false;
-      return;
-    }
-
-    const resolution = await operations.waitForDisposition(
-      admission.operation_id,
-      MANAGEMENT_SETTLEMENT_TIMEOUT_MS,
-    );
-    if (!samePermissionPrompt(runtimeGrantState.prompt, prompt)) return;
-    if (resolution.state === "processed") {
-      runtimeGrantNotice = runtimeGrantDispositionMessage(resolution.disposition);
-      if (runtimeGrantNotice !== null) runtimeGrantResponding = false;
-    } else if (resolution.state === "pending") {
-      runtimeGrantNotice = "Zephium is still applying this permission change.";
-    } else {
-      runtimeGrantNotice = "Zephium couldn't verify this permission change.";
-      runtimeGrantResponding = false;
-    }
-  } catch {
-    if (samePermissionPrompt(runtimeGrantState.prompt, prompt)) {
-      runtimeGrantNotice = "Extension permissions are temporarily unavailable.";
-      runtimeGrantResponding = false;
-    }
-  }
-}
-
-export function respondToPermissionPrompt(
-  prompt: ExtensionRuntimeGrantPromptEntryView,
-  allow: boolean,
-): void {
-  void settlePermissionPrompt(prompt, allow);
 }
 
 export async function invoke(
@@ -475,193 +214,4 @@ export async function invoke(
   } finally {
     invoking.delete(key);
   }
-}
-
-export async function setManagementVisible(visible: boolean): Promise<boolean> {
-  managementNotice = null;
-  distributionRefreshNotice = null;
-  if (visible && managementAvailabilityState.availability !== "configured") {
-    managementVisible = false;
-    return false;
-  }
-  // Selectors from the previous subscription generation are never rendered
-  // while a new visibility command is in flight (or after close).
-  managementState = initialExtensionManagement();
-  try {
-    const accepted = await boundedIpc(
-      commands.extensionManagementSetVisible(visible),
-      MANAGEMENT_IPC_TIMEOUT_MS,
-    );
-    managementVisible = visible && accepted;
-    if (!accepted && visible) managementNotice = "Extension management is unavailable.";
-    return accepted;
-  } catch {
-    managementVisible = false;
-    if (visible) managementNotice = "Zephium couldn't load extensions.";
-    return false;
-  }
-}
-
-export async function refreshDistribution(): Promise<void> {
-  if (distributionState === null || distributionRefreshBusy()) return;
-  distributionRefreshPending = true;
-  distributionRefreshNotice = null;
-  try {
-    const admission = await boundedIpc(
-      commands.extensionDistributionRefresh(),
-      MANAGEMENT_IPC_TIMEOUT_MS,
-    );
-    distributionRefreshNotice = extensionDistributionRefreshMessage(admission);
-  } catch {
-    distributionRefreshNotice = "Extension updates are temporarily unavailable.";
-  } finally {
-    distributionRefreshPending = false;
-  }
-}
-
-async function settleManagementMutation(
-  mutation: ManagementMutation,
-  dispatch: () => Promise<OperationAdmission>,
-): Promise<void> {
-  if (managementMutation !== null) return;
-  managementMutation = mutation;
-  managementNotice = null;
-  try {
-    try {
-      await operations.init();
-    } catch {
-      // The bounded desktop ledger remains available even if event listener
-      // registration races this trusted-UI invocation.
-    }
-    const admission = await boundedIpc(dispatch(), MANAGEMENT_IPC_TIMEOUT_MS);
-    if (!admission.accepted || admission.operation_id === null) {
-      managementNotice = "The extension list changed. Refresh it and try again.";
-      return;
-    }
-    // The admitted write consumes this exact compare-and-swap cohort. Keep
-    // controls absent until Shell publishes its post-settlement replacement.
-    managementState = initialExtensionManagement();
-    const resolution = await operations.waitForDisposition(
-      admission.operation_id,
-      MANAGEMENT_SETTLEMENT_TIMEOUT_MS,
-    );
-    if (resolution.state === "processed") {
-      managementNotice = extensionManagementDispositionMessage(resolution.disposition);
-    } else if (resolution.state === "pending") {
-      managementNotice = "The extension change is still pending.";
-    } else {
-      managementNotice = "Zephium couldn't verify the extension change.";
-    }
-  } catch {
-    managementNotice = "Extension management is temporarily unavailable.";
-  } finally {
-    managementMutation = null;
-  }
-}
-
-export function setEnabled(
-  entry: ExtensionManagementEntryView,
-  catalogRevision: string,
-  enabled: boolean,
-): void {
-  void settleManagementMutation(
-    { subject: entry.install_id, kind: enabled ? "enable" : "disable" },
-    () =>
-      commands.extensionManagementSetEnabled(
-        entry.install_id,
-        catalogRevision,
-        entry.install_revision,
-        enabled,
-      ),
-  );
-}
-
-export function approveUpdate(update: ExtensionUpdateConsentView): void {
-  void settleManagementMutation({ subject: update.review_id, kind: "update" }, () =>
-    commands.extensionManagementApproveUpdate(update.review_id),
-  );
-}
-
-export function uninstall(entry: ExtensionManagementEntryView, catalogRevision: string): void {
-  void settleManagementMutation({ subject: entry.install_id, kind: "uninstall" }, () =>
-    commands.extensionManagementUninstall(
-      entry.install_id,
-      catalogRevision,
-      entry.install_revision,
-    ),
-  );
-}
-
-export function editOptionalGrant(
-  entry: ExtensionManagementEntryView,
-  catalogRevision: string,
-  kind: "api" | "host",
-  index: number,
-  granted: boolean,
-): void {
-  const grantRevision = entry.grants.revision;
-  if (!entry.grants.initialized || grantRevision === null) return;
-  void settleManagementMutation({ subject: entry.install_id, kind: "grant" }, () =>
-    commands.extensionManagementEditOptionalGrant(
-      entry.install_id,
-      catalogRevision,
-      entry.install_revision,
-      grantRevision,
-      kind,
-      index,
-      granted,
-    ),
-  );
-}
-
-export function setProfilePaused(policyRevision: string, paused: boolean): void {
-  void settleManagementMutation({ subject: "profile", kind: "policy" }, () =>
-    commands.extensionManagementSetProfilePaused(policyRevision, paused),
-  );
-}
-
-export function setCurrentSiteEnabled(policyRevision: string, enabled: boolean): void {
-  void settleManagementMutation({ subject: "current-site", kind: "policy" }, () =>
-    commands.extensionManagementSetCurrentSiteEnabled(policyRevision, enabled),
-  );
-}
-
-export function openOptions(entry: ExtensionManagementEntryView, catalogRevision: string): void {
-  void (async () => {
-    try {
-      const admitted = await boundedIpc(
-        commands.extensionManagementOpenOptions(
-          entry.install_id,
-          catalogRevision,
-          entry.install_revision,
-        ),
-        MANAGEMENT_IPC_TIMEOUT_MS,
-      );
-      if (!admitted) {
-        managementNotice = "The extension settings are no longer available.";
-      }
-    } catch {
-      managementNotice = "Extension settings are temporarily unavailable.";
-    }
-  })();
-}
-
-export function install(
-  candidate: ExtensionInstallCandidateView,
-  catalogRevision: string,
-  optionalApiIndices: number[],
-  optionalHostIndices: number[],
-  fileAccess: boolean,
-  privateAccess: boolean,
-): void {
-  void settleManagementMutation(
-    { subject: String(candidate.candidate_index), kind: "install" },
-    () =>
-      commands.extensionManagementInstall(candidate.candidate_index, catalogRevision, {
-        optional_api_indices: optionalApiIndices,
-        optional_host_indices: optionalHostIndices,
-        file_access: fileAccess,
-        private_access: privateAccess,
-      }),
-  );
 }
