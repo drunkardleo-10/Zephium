@@ -66,6 +66,10 @@ pub struct CompatLayer {
     /// Shared JavaScript body, appended after the generated configuration.
     pub script: String,
     pub file_name: String,
+    /// API permissions the layer itself needs, added when the manifest lacks
+    /// them. They are reported so consent never attributes them to the
+    /// extension.
+    pub permissions: Vec<String>,
 }
 
 impl CompatLayer {
@@ -73,7 +77,13 @@ impl CompatLayer {
         Self {
             script: script.into(),
             file_name: "compat.js".to_owned(),
+            permissions: Vec::new(),
         }
+    }
+
+    pub fn with_permissions(mut self, permissions: &[&str]) -> Self {
+        self.permissions = permissions.iter().map(|p| (*p).to_owned()).collect();
+        self
     }
 }
 
@@ -87,6 +97,8 @@ pub struct PrepareReport {
     /// The service worker that now loads the compat layer.
     pub worker: Option<String>,
     pub manifest_rewritten: bool,
+    /// Permissions the compat layer added to the manifest.
+    pub added_permissions: Vec<String>,
 }
 
 #[derive(Debug, Error)]
@@ -124,7 +136,14 @@ pub fn prepare(dir: &Path, compat: &CompatLayer) -> Result<PrepareReport, Prepar
 
     let manifest_path = dir.join("manifest.json");
     let original = fs::read_to_string(&manifest_path)?;
-    let rewritten = edit_manifest(&original, manifest.raw(), &resource)?;
+    let declared = manifest.permissions();
+    let added_permissions: Vec<String> = compat
+        .permissions
+        .iter()
+        .filter(|permission| !declared.contains(permission))
+        .cloned()
+        .collect();
+    let rewritten = edit_manifest(&original, manifest.raw(), &resource, &added_permissions)?;
 
     let worker = match manifest.background() {
         Some(Background::ServiceWorker { path, module }) => {
@@ -155,6 +174,7 @@ pub fn prepare(dir: &Path, compat: &CompatLayer) -> Result<PrepareReport, Prepar
 
     let mut report = PrepareReport {
         events,
+        added_permissions,
         ..PrepareReport::default()
     };
 
@@ -476,11 +496,37 @@ fn html_insertion_point(html: &str) -> usize {
 /// across the workspace, and a textual edit also keeps number formatting and
 /// layout. The output is strict JSON since WebKit may not share Chrome's
 /// leniency.
-fn edit_manifest(original: &str, raw: &Value, resource: &str) -> Result<String, PrepareError> {
+fn edit_manifest(
+    original: &str,
+    raw: &Value,
+    resource: &str,
+    added_permissions: &[String],
+) -> Result<String, PrepareError> {
     let text = manifest::to_strict_json(original);
     let root = SpanParser::parse(&text).ok_or(PrepareError::ManifestLayout)?;
     let entry = format!("\"{resource}\"");
     let mut inserts = Vec::new();
+
+    if !added_permissions.is_empty() {
+        let list = added_permissions
+            .iter()
+            .map(|permission| serde_json::to_string(permission).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(", ");
+        match root.get("permissions") {
+            Some(
+                node @ Node {
+                    kind: Kind::Array(items),
+                    ..
+                },
+            ) => match items.first() {
+                Some(_) => inserts.extend(prepend(&text, node, &list)),
+                None => inserts.push((node.start + 1, list)),
+            },
+            Some(_) => return Err(PrepareError::ManifestLayout),
+            None => inserts.push((root.start + 1, format!("\"permissions\": [{list}], "))),
+        }
+    }
 
     if let Some(scripts) = root.get("background").and_then(|b| b.get("scripts")) {
         inserts.extend(prepend(&text, scripts, &entry));
@@ -879,5 +925,31 @@ mod tests {
             prepare(dir, &CompatLayer::new("")),
             Err(PrepareError::MissingWorker(_))
         ));
+    }
+
+    #[test]
+    fn compat_permissions_are_added_only_when_missing() {
+        let edit = |manifest: &str, add: &[&str]| {
+            let raw: Value = serde_json::from_str(manifest).unwrap();
+            let add: Vec<String> = add.iter().map(|p| (*p).to_owned()).collect();
+            let out = edit_manifest(manifest, &raw, "__zephium__/compat.js", &add).unwrap();
+            serde_json::from_str::<Value>(&out).unwrap()["permissions"].clone()
+        };
+        assert_eq!(
+            edit(r#"{"name":"a","version":"1"}"#, &["nativeMessaging"]),
+            json!(["nativeMessaging"])
+        );
+        assert_eq!(
+            edit(r#"{"permissions":[],"name":"a"}"#, &["nativeMessaging"]),
+            json!(["nativeMessaging"])
+        );
+        assert_eq!(
+            edit(
+                r#"{"permissions":["tabs", "storage"]}"#,
+                &["nativeMessaging"]
+            ),
+            json!(["nativeMessaging", "tabs", "storage"])
+        );
+        assert_eq!(edit(r#"{"permissions":["tabs"]}"#, &[]), json!(["tabs"]));
     }
 }
