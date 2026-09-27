@@ -37,6 +37,9 @@ use super::permits::Sink;
 #[derive(Default)]
 pub(crate) struct WebextHost {
     profiles: HashMap<ProfileId, ProfileRuntime>,
+    // Extensions loaded earlier in this session: loading one again (turning it
+    // back on, an update) gets no startup event to wake its worker.
+    loaded_before: std::collections::HashSet<(ProfileId, String)>,
     pages: HashMap<ItemId, Page>,
 }
 
@@ -120,6 +123,9 @@ impl WebextHost {
     }
 
     pub(crate) fn load(&mut self, profile: ProfileId, load: WebExtensionLoad, sink: &Sink) {
+        let reloaded = !self
+            .loaded_before
+            .insert((profile, load.extension_id.clone()));
         let entry = self.profile(profile, sink);
         if let Some(install) = entry.installs.remove(&load.install) {
             entry.runtime.unload(&install.extension_id);
@@ -149,7 +155,7 @@ impl WebextHost {
             inspectable: true,
         };
         let install = load.install;
-        let start_background = load.start_background;
+        let start_background = load.start_background || reloaded;
         let sink = sink.clone();
         entry.runtime.load(spec, move |result| {
             let result = result.map(|loaded| {
@@ -344,11 +350,22 @@ impl WebextHost {
             *entry.bridge.popup.borrow_mut() = Some((parent, request.anchor().rect()));
         }
         let tab = entry.bridge.ids.borrow_mut().tab(request.tab());
-        if entry.runtime.perform_action(&extension_id, Some(tab)) {
-            ExtensionActionSettlement::Dispatched
-        } else {
-            ExtensionActionSettlement::Rejected(ExtensionActionRejection::RuntimeUnavailable)
+        if entry.runtime.context(&extension_id).is_none() {
+            return ExtensionActionSettlement::Rejected(
+                ExtensionActionRejection::RuntimeUnavailable,
+            );
         }
+        // WebKit drops what a popup sends while the worker sleeps, and the
+        // popup then waits forever; wake it first (immediate when running).
+        let waking = extension_id.clone();
+        entry.runtime.start_background(&waking, move |_| {
+            super::dispatch::best_effort_with(move |host| {
+                if let Some(entry) = host.webext.profiles.get(&profile) {
+                    entry.runtime.perform_action(&extension_id, Some(tab));
+                }
+            });
+        });
+        ExtensionActionSettlement::Dispatched
     }
 
     /// Completes an extension's tab request with the shell's answer. Returns
