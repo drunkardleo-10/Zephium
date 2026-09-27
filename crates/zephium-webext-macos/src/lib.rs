@@ -87,9 +87,10 @@ pub trait Host {
     /// [`Runtime::publish`] before `done` reports it.
     fn tab_request(&self, request: TabRequest, done: TabRequestDone);
 
-    /// Shows WebKit's popup view for an extension's action. Returning false
+    /// Shows WebKit's popup for an extension's action (its `popupPopover`, or
+    /// its `popupWebView` in a view of the host's own). Returning false
     /// declines it, and WebKit closes the popup.
-    fn present_popup(&self, extension: &str, view: Retained<objc2_web_kit::WKWebView>) -> bool;
+    fn present_popup(&self, extension: &str, action: &objc2_web_kit::WKWebExtensionAction) -> bool;
 }
 
 /// The application name every web view in the browser must share.

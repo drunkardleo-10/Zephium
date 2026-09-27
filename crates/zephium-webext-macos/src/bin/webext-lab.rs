@@ -78,8 +78,11 @@ impl Host for LabHost {
         eprintln!("[{extension} {tag}] {message}");
     }
 
-    fn present_popup(&self, extension: &str, view: Retained<WKWebView>) -> bool {
+    fn present_popup(&self, extension: &str, action: &objc2_web_kit::WKWebExtensionAction) -> bool {
         eprintln!("[lab] WebKit popup for {extension}");
+        let Some(view) = (unsafe { action.popupWebView() }) else {
+            return false;
+        };
         let Some(lab) = self.lab.borrow().upgrade() else {
             return false;
         };

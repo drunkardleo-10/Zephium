@@ -178,10 +178,9 @@ define_class!(
             completion: &DynBlock<dyn Fn(*mut NSError)>,
         ) {
             let id = unsafe { context.uniqueIdentifier() }.to_string();
-            let shown = match (self.shared(), unsafe { action.popupWebView() }) {
-                (Some(shared), Some(view)) => shared.host().present_popup(&id, view),
-                _ => false,
-            };
+            let shown = self
+                .shared()
+                .is_some_and(|shared| shared.host().present_popup(&id, action));
             if !shown {
                 unsafe { action.closePopup() };
                 let error = error("The popup could not be shown.");
