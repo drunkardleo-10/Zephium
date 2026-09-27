@@ -17,6 +17,26 @@ function context(kind) {
       connectNative: () => ({ onMessage: event(), onDisconnect: event(), postMessage() {}, disconnect() {} }),
       onMessage: event(),
       onConnect: event(),
+      getManifest: () => ({ name: "__MSG_name__", version: "1.2", permissions: ["tabs", "https://a.test/*"], options_page: "options.html" }),
+      getURL: (path) => `chrome-extension://abcdefghijklmnopabcdefghijklmnop/${path}`,
+    },
+    i18n: { getMessage: (key) => (key === "name" ? "Probe" : "") },
+    webRequest: {
+      onBeforeRequest: {
+        addListener(_listener, filter) {
+          if (filter.urls.some((url) => url.startsWith("ws"))) throw new Error("invalid match pattern");
+          this.filters.push(filter.urls);
+        },
+        filters: [],
+      },
+    },
+    declarativeNetRequest: {
+      updateSessionRules(options) {
+        const index = options.addRules.findIndex((rule) => rule.custom);
+        if (index >= 0) throw new Error(`The 'addRules' value is invalid, because an error with rule at index ${index}: bad header.`);
+        this.applied = options.addRules.map((rule) => rule.id);
+        return Promise.resolve();
+      },
     },
     permissions: {
       contains(request) {
@@ -27,13 +47,22 @@ function context(kind) {
       request: () => Promise.resolve(true),
       remove: () => Promise.resolve(true),
     },
-    storage: { local: {}, onChanged: event() },
+    storage: {
+      local: {
+        set(items) {
+          if (Object.getPrototypeOf(items) !== Object.prototype) throw new Error("The 'items' value is invalid, because an object is expected.");
+          this.saved = items;
+          return Promise.resolve();
+        },
+      },
+      onChanged: event(),
+    },
     scripting: {
       registerContentScripts: () => Promise.reject(new Error("Duplicate ID 'a'.")),
       updateContentScripts: () => Promise.resolve(),
     },
     webNavigation: { onCommitted: event() },
-    tabs: { onUpdated: event(), onRemoved: event(), sendMessage() {} },
+    tabs: { onUpdated: event(), onRemoved: event(), sendMessage() {}, query: () => Promise.resolve([{ id: 1 }]) },
   };
   const g = {
     chrome,
@@ -41,7 +70,7 @@ function context(kind) {
     // As in WebKit, the user agent lives on Navigator.prototype.
     navigator: Object.create({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15" }),
     addEventListener() {},
-    setTimeout: () => 0,
+    setTimeout: (callback) => (queueMicrotask(callback), 0),
     setInterval: () => 0,
     clearInterval() {},
     console: { error() {}, warn() {} },
@@ -61,6 +90,8 @@ function context(kind) {
     Date,
     Math,
     RegExp,
+    Number,
+    queueMicrotask,
   };
   if (kind === "worker") {
     g.ServiceWorkerGlobalScope = class {
@@ -98,6 +129,35 @@ test("pages and workers get every API fix", async () => {
     assert.equal(saving.value, true, kind);
     await chrome.privacy.services.passwordSavingEnabled.set({ value: false });
     assert.equal((await chrome.privacy.services.passwordSavingEnabled.get({})).value, false, kind);
+
+    assert.equal(chrome.runtime.OnInstalledReason.INSTALL, "install", kind);
+    assert.equal(typeof chrome.runtime.onUpdateAvailable.addListener, "function", kind);
+    assert.equal((await chrome.runtime.requestUpdateCheck()).status, "no_update", kind);
+
+    assert.equal(chrome.webRequest.OnHeadersReceivedOptions.EXTRA_HEADERS, "extraHeaders", kind);
+    chrome.webRequest.onBeforeRequest.addListener(() => {}, { urls: ["ws://*/*", "https://*/*"] });
+    chrome.webRequest.onBeforeRequest.addListener(() => {}, { urls: ["wss://*/*"] });
+    assert.equal(JSON.stringify(chrome.webRequest.onBeforeRequest.filters.at(-1)), JSON.stringify(["https://*/*"]), kind);
+
+    await chrome.declarativeNetRequest.updateSessionRules({ addRules: [{ id: 1 }, { id: 2, custom: true }, { id: 3 }] });
+    assert.equal(JSON.stringify(chrome.declarativeNetRequest.applied), JSON.stringify([1, 3]), kind);
+
+    assert.equal(JSON.stringify(await chrome.tabs.query({ windowType: "app" })), JSON.stringify([]), kind);
+    assert.equal((await chrome.tabs.query({ active: true })).length, 1, kind);
+
+    class State {
+      constructor() {
+        this.vault = { locked: true };
+      }
+    }
+    await chrome.storage.local.set(new State());
+    assert.equal(JSON.stringify(chrome.storage.local.saved), JSON.stringify({ vault: { locked: true } }), kind);
+
+    const self = await chrome.management.getSelf();
+    assert.equal(self.name, "Probe", kind);
+    assert.equal(self.installType, "normal", kind);
+    assert.equal(JSON.stringify(self.permissions), JSON.stringify(["tabs"]), kind);
+    assert.equal(self.optionsUrl, "chrome-extension://abcdefghijklmnopabcdefghijklmnop/options.html", kind);
   }
 });
 

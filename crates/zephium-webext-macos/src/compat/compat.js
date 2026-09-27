@@ -352,6 +352,30 @@
     });
   }
 
+  // Chrome serializes whatever object it's given; WebKit accepts only plain
+  // ones, rejecting class instances and proxies such as MetaMask's state.
+  if (storage) {
+    for (const name of ["local", "session", "sync"]) {
+      const area = storage[name];
+      if (!area || typeof area.set !== "function") continue;
+      kept.push(area);
+      const set = area.set;
+      pin(area, "set", function (items, callback) {
+        const retry = (error) => {
+          if (!/an object is expected/.test(String(error && error.message))) throw error;
+          return set.call(area, JSON.parse(JSON.stringify(items)));
+        };
+        let result;
+        try {
+          result = Promise.resolve(set.call(area, items)).catch(retry);
+        } catch (error) {
+          result = Promise.resolve().then(() => retry(error));
+        }
+        return withCallback(result, callback);
+      });
+    }
+  }
+
   const scripting = namespace("scripting");
   if (scripting && !scripting.ExecutionWorld) {
     pin(scripting, "ExecutionWorld", Object.freeze({ ISOLATED: "ISOLATED", MAIN: "MAIN" }));
@@ -450,6 +474,160 @@
       onPermissionLevelChanged: event(),
       onShowSettings: event(),
     });
+  }
+
+  // Constants Chrome always defines. Extensions read them at startup, before
+  // registering listeners, so a missing one takes the whole worker down.
+  const constants = (target, values) => {
+    if (!target) return;
+    for (const [name, value] of Object.entries(values)) {
+      if (target[name] === undefined) pin(target, name, Object.freeze(value));
+    }
+  };
+  const chromeRuntime = namespace("runtime");
+  constants(chromeRuntime, {
+    OnInstalledReason: { INSTALL: "install", UPDATE: "update", CHROME_UPDATE: "chrome_update", SHARED_MODULE_UPDATE: "shared_module_update" },
+    OnRestartRequiredReason: { APP_UPDATE: "app_update", OS_UPDATE: "os_update", PERIODIC: "periodic" },
+    PlatformOs: { MAC: "mac", WIN: "win", ANDROID: "android", CROS: "cros", LINUX: "linux", OPENBSD: "openbsd", FUCHSIA: "fuchsia" },
+    PlatformArch: { ARM: "arm", ARM64: "arm64", X86_32: "x86-32", X86_64: "x86-64", MIPS: "mips", MIPS64: "mips64", RISCV64: "riscv64" },
+    PlatformNaclArch: { ARM: "arm", X86_32: "x86-32", X86_64: "x86-64", MIPS: "mips", MIPS64: "mips64" },
+    RequestUpdateCheckStatus: { THROTTLED: "throttled", NO_UPDATE: "no_update", UPDATE_AVAILABLE: "update_available" },
+    ContextType: { TAB: "TAB", POPUP: "POPUP", BACKGROUND: "BACKGROUND", OFFSCREEN_DOCUMENT: "OFFSCREEN_DOCUMENT", SIDE_PANEL: "SIDE_PANEL", DEVELOPER_TOOLS: "DEVELOPER_TOOLS" },
+  });
+  if (chromeRuntime && !isContent) {
+    // Updates are applied by the browser, which reloads the extension.
+    for (const name of ["onUpdateAvailable", "onRestartRequired", "onBrowserUpdateAvailable"]) {
+      if (!chromeRuntime[name]) pin(chromeRuntime, name, makeEvent());
+    }
+    if (typeof chromeRuntime.requestUpdateCheck !== "function") {
+      pin(chromeRuntime, "requestUpdateCheck", (callback) => withCallback(Promise.resolve({ status: "no_update" }), callback));
+    }
+  }
+
+  const webRequest = !isContent && namespace("webRequest");
+  if (webRequest) {
+    const headers = { REQUEST_HEADERS: "requestHeaders", RESPONSE_HEADERS: "responseHeaders" };
+    const BLOCKING = "blocking";
+    const EXTRA_HEADERS = "extraHeaders";
+    constants(webRequest, {
+      OnBeforeRequestOptions: { BLOCKING, REQUEST_BODY: "requestBody", EXTRA_HEADERS },
+      OnBeforeSendHeadersOptions: { REQUEST_HEADERS: headers.REQUEST_HEADERS, BLOCKING, EXTRA_HEADERS },
+      OnSendHeadersOptions: { REQUEST_HEADERS: headers.REQUEST_HEADERS, EXTRA_HEADERS },
+      OnHeadersReceivedOptions: { BLOCKING, RESPONSE_HEADERS: headers.RESPONSE_HEADERS, EXTRA_HEADERS },
+      OnAuthRequiredOptions: { RESPONSE_HEADERS: headers.RESPONSE_HEADERS, BLOCKING, ASYNC_BLOCKING: "asyncBlocking", EXTRA_HEADERS },
+      OnResponseStartedOptions: { RESPONSE_HEADERS: headers.RESPONSE_HEADERS, EXTRA_HEADERS },
+      OnBeforeRedirectOptions: { RESPONSE_HEADERS: headers.RESPONSE_HEADERS, EXTRA_HEADERS },
+      OnCompletedOptions: { RESPONSE_HEADERS: headers.RESPONSE_HEADERS, EXTRA_HEADERS },
+      OnErrorOccurredOptions: { EXTRA_HEADERS },
+      ResourceType: {
+        MAIN_FRAME: "main_frame", SUB_FRAME: "sub_frame", STYLESHEET: "stylesheet", SCRIPT: "script", IMAGE: "image",
+        FONT: "font", OBJECT: "object", XMLHTTPREQUEST: "xmlhttprequest", PING: "ping", CSP_REPORT: "csp_report",
+        MEDIA: "media", WEBSOCKET: "websocket", WEBBUNDLE: "webbundle", OTHER: "other",
+      },
+    });
+    // WebKit doesn't parse ws:// and wss:// patterns and rejects the whole
+    // filter; it doesn't report WebSocket requests either way.
+    const socket = /^wss?:/i;
+    for (const name of Object.keys(webRequest)) {
+      const event = webRequest[name];
+      if (!/^on[A-Z]/.test(name) || !event || typeof event.addListener !== "function") continue;
+      kept.push(event);
+      const add = event.addListener;
+      pin(event, "addListener", function (listener, filter, ...rest) {
+        const urls = filter && Array.isArray(filter.urls) ? filter.urls : null;
+        if (!urls || !urls.some((url) => socket.test(url))) return add.call(this, listener, filter, ...rest);
+        const usable = urls.filter((url) => !socket.test(url));
+        if (usable.length === 0) return undefined;
+        return add.call(this, listener, Object.assign({}, filter, { urls: usable }), ...rest);
+      });
+    }
+  }
+
+  // WebKit rejects a whole rule update over one rule it can't apply, such as
+  // one setting a header it doesn't know. Chrome would apply the rest.
+  const netRequest = !isContent && namespace("declarativeNetRequest");
+  if (netRequest) {
+    const rejected = /rule at index (\d+)/;
+    for (const method of ["updateSessionRules", "updateDynamicRules"]) {
+      const original = netRequest[method];
+      if (typeof original !== "function") continue;
+      pin(netRequest, method, function (options, callback) {
+        let current = Object.assign({}, options);
+        const run = (attempts) => {
+          let result;
+          try {
+            result = Promise.resolve(original.call(netRequest, current));
+          } catch (error) {
+            result = Promise.reject(error);
+          }
+          return result.catch((error) => {
+            const index = Number((rejected.exec(String(error && error.message)) || [])[1]);
+            const rules = Array.isArray(current.addRules) ? current.addRules : [];
+            if (!(index < rules.length) || attempts <= 0) throw error;
+            if (Z.report) Z.report("warning", `skipped a network rule WebKit can't apply: ${error.message}`);
+            current = Object.assign({}, current, { addRules: rules.filter((_, i) => i !== index) });
+            return run(attempts - 1);
+          });
+        };
+        return withCallback(run(50), callback);
+      });
+    }
+  }
+
+  // Only normal and popup windows exist here; Chrome answers other types
+  // with no tabs, WebKit throws.
+  const tabsApi = !isContent && namespace("tabs");
+  if (tabsApi && typeof tabsApi.query === "function") {
+    const query = tabsApi.query;
+    pin(tabsApi, "query", function (info, callback) {
+      const type = info && info.windowType;
+      if (type !== undefined && type !== "normal" && type !== "popup") return withCallback(Promise.resolve([]), callback);
+      return query.apply(this, arguments);
+    });
+  }
+
+  // Extensions check how they were installed and read their own details.
+  if (!isContent) {
+    const management = namespace("management") || {};
+    if (typeof management.getSelf !== "function") {
+      const self = () => {
+        const manifest = chromeRuntime.getManifest();
+        const text = (value) => {
+          const key = /^__MSG_(\w+)__$/.exec(String(value || ""));
+          return key && chromeApi.i18n ? chromeApi.i18n.getMessage(key[1]) || "" : String(value || "");
+        };
+        const options = (manifest.options_ui && manifest.options_ui.page) || manifest.options_page;
+        const icons = Object.entries(manifest.icons || {}).map(([size, path]) => ({ size: Number(size), url: chromeRuntime.getURL(path) }));
+        return {
+          id: chromeRuntime.id,
+          name: text(manifest.name),
+          shortName: text(manifest.short_name || manifest.name),
+          description: text(manifest.description),
+          version: manifest.version,
+          versionName: manifest.version_name,
+          mayDisable: true,
+          mayEnable: true,
+          enabled: true,
+          isApp: false,
+          type: "extension",
+          installType: "normal",
+          offlineEnabled: Boolean(manifest.offline_enabled),
+          homepageUrl: manifest.homepage_url || "",
+          updateUrl: manifest.update_url || "",
+          optionsUrl: options ? chromeRuntime.getURL(options) : "",
+          permissions: (manifest.permissions || []).filter((name) => !name.includes("://") && name !== "<all_urls>"),
+          hostPermissions: manifest.host_permissions || [],
+          icons,
+        };
+      };
+      pin(management, "getSelf", (callback) => withCallback(Promise.resolve().then(self), callback));
+      constants(management, {
+        ExtensionInstallType: { ADMIN: "admin", DEVELOPMENT: "development", NORMAL: "normal", SIDELOAD: "sideload", OTHER: "other" },
+        ExtensionType: { EXTENSION: "extension", HOSTED_APP: "hosted_app", PACKAGED_APP: "packaged_app", LEGACY_PACKAGED_APP: "legacy_packaged_app", THEME: "theme", LOGIN_SCREEN_EXTENSION: "login_screen_extension" },
+        ExtensionDisabledReason: { UNKNOWN: "unknown", PERMISSIONS_INCREASE: "permissions_increase" },
+      });
+      if (!chromeApi.management) pin(chromeApi, "management", management);
+    }
   }
   Z.kept = kept;
 
