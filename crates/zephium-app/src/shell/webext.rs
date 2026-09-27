@@ -10,6 +10,8 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct WebExtensionState {
+    // Restored at launch before the session exists; applied once it does.
+    deferred: HashMap<ProfileId, Vec<WebExtensionLoad>>,
     loaded: HashMap<ProfileId, HashMap<ExtensionInstallId, WebExtensionLoad>>,
     status: HashMap<ExtensionInstallId, WebExtensionStatus>,
 }
@@ -31,6 +33,10 @@ pub struct WebExtensionTarget {
 
 impl Shell {
     pub(super) fn set_web_extensions(&mut self, profile: ProfileId, wanted: Vec<WebExtensionLoad>) {
+        if !self.bootstrapped {
+            self.web_extensions.deferred.insert(profile, wanted);
+            return;
+        }
         let current = self.web_extensions.loaded.entry(profile).or_default();
         let wanted: HashMap<_, _> = wanted
             .into_iter()
@@ -81,6 +87,13 @@ impl Shell {
             self.project_extension_actions(profile);
         }
         let _ = self.refresh_extension_actions(profile);
+    }
+
+    pub(super) fn apply_deferred_web_extensions(&mut self) {
+        let deferred = std::mem::take(&mut self.web_extensions.deferred);
+        for (profile, wanted) in deferred {
+            self.set_web_extensions(profile, wanted);
+        }
     }
 
     pub(super) fn on_web_extension_settled(

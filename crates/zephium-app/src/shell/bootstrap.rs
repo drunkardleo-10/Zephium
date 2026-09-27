@@ -298,6 +298,7 @@ impl Shell {
         self.project_items();
         self.project_browser_page();
         self.bootstrapped = true;
+        self.apply_deferred_web_extensions();
         if !retired_settings.is_empty() {
             self.schedule_persist();
         }
