@@ -6487,6 +6487,7 @@ name = "zephium-desktop"
 version = "0.1.0"
 dependencies = [
  "async-io",
+ "base64 0.22.1",
  "block2",
  "dispatch2",
  "futures-lite",
@@ -6533,6 +6534,8 @@ dependencies = [
  "zephium-ipc",
  "zephium-notes",
  "zephium-store",
+ "zephium-webext",
+ "zephium-webext-macos",
  "zephium-work-composition",
 ]
 
@@ -6571,6 +6574,7 @@ dependencies = [
  "zephium-extension-acquisition",
  "zephium-extension-package",
  "zephium-extension-runtime-api",
+ "zephium-webext-macos",
  "zeroize",
 ]
 

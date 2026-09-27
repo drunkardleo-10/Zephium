@@ -1069,6 +1069,17 @@ impl RetirementGate {
             | event @ EngineEvent::ExtensionRuntimeGrantRequested { .. }
             | event @ EngineEvent::ExtensionRuntimeGrantCancelled { .. }
             | event @ EngineEvent::PermissionRequested { .. } => Some(event),
+            EngineEvent::WebExtensionSettled {
+                profile,
+                install,
+                result,
+            } => self
+                .profile_is_active(profile)
+                .then_some(EngineEvent::WebExtensionSettled {
+                    profile,
+                    install,
+                    result,
+                }),
             EngineEvent::ExtensionPageChanged {
                 profile,
                 id,
@@ -1935,6 +1946,31 @@ impl Engine for WebviewEngine {
         }))
     }
 
+    #[cfg(all(target_os = "macos", feature = "webext"))]
+    fn load_web_extension(
+        &self,
+        profile: ProfileId,
+        load: zephium_core::ports::engine::WebExtensionLoad,
+    ) -> NativeDispatch {
+        if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
+            return NativeDispatch::Rejected;
+        }
+        NativeDispatch::from_scheduled(self.run(move || {
+            host::best_effort_with(move |host| host.load_web_extension(profile, load));
+        }))
+    }
+
+    #[cfg(all(target_os = "macos", feature = "webext"))]
+    fn unload_web_extension(
+        &self,
+        profile: ProfileId,
+        install: zephium_core::ids::ExtensionInstallId,
+    ) -> NativeDispatch {
+        NativeDispatch::from_scheduled(self.run(move || {
+            host::best_effort_with(move |host| host.unload_web_extension(profile, install));
+        }))
+    }
+
     fn request_extension_actions(
         &self,
         profile: ProfileId,
@@ -2190,7 +2226,8 @@ impl Engine for WebviewEngine {
         {
             NativeDispatch::from_scheduled(self.run(move || {
                 let _ = host::with_extension_browser_request_terminal(move |host| {
-                    let _ = host.settle_isolated_extension_resource(runtime, kind, request, outcome);
+                    let _ =
+                        host.settle_isolated_extension_resource(runtime, kind, request, outcome);
                 });
             }))
         }
@@ -4277,7 +4314,9 @@ pub fn run_macos_original_google_translate_offscreen_probe(
 /// isolated same-origin host. This probe has no product installation authority.
 #[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
 #[doc(hidden)]
-pub fn run_macos_original_bitwarden_offscreen_probe(path: &std::path::Path) -> Result<bool, String> {
+pub fn run_macos_original_bitwarden_offscreen_probe(
+    path: &std::path::Path,
+) -> Result<bool, String> {
     platform::macos::run_original_bitwarden_offscreen_probe(path).map(|()| true)
 }
 

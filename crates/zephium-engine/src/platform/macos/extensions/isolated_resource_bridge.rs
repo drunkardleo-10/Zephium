@@ -27,10 +27,9 @@ use objc2_web_kit::{
 use zephium_core::extensions::ExtensionRuntimeInstance;
 use zephium_core::ports::engine::EngineEvent;
 use zephium_core::ports::extensions::{
-    IsolatedExtensionDocumentKind, IsolatedExtensionResourceOutcome,
-    IsolatedExtensionResourceCancel, IsolatedExtensionResourceRequest,
-    VerifiedIsolatedExtensionResource,
-    MAX_ISOLATED_EXTENSION_RESOURCE_PATH_BYTES,
+    IsolatedExtensionDocumentKind, IsolatedExtensionResourceCancel,
+    IsolatedExtensionResourceOutcome, IsolatedExtensionResourceRequest,
+    VerifiedIsolatedExtensionResource, MAX_ISOLATED_EXTENSION_RESOURCE_PATH_BYTES,
 };
 
 use crate::{EngineEventIngress, EngineEventIngressSink};
@@ -233,16 +232,14 @@ impl BridgeState {
                 _reservation: reservation,
             },
         );
-        let Some(request) =
-            IsolatedExtensionResourceRequest::new(
-                self.runtime,
-                self.kind,
-                id,
-                &path,
-                deadline,
-                gate.cancel.clone(),
-            )
-        else {
+        let Some(request) = IsolatedExtensionResourceRequest::new(
+            self.runtime,
+            self.kind,
+            id,
+            &path,
+            deadline,
+            gate.cancel.clone(),
+        ) else {
             self.fail(id);
             return;
         };
@@ -609,8 +606,7 @@ fn publish_verified(
     // facade, so it must never load a withheld sandbox document as its main
     // document even if the publisher asks for that path dynamically.
     if kind == IsolatedExtensionDocumentKind::Offscreen
-        && receipt.bytes()
-            == zephium_extension_package::sandbox_withholding::SANDBOX_WITHHELD_HTML
+        && receipt.bytes() == zephium_extension_package::sandbox_withholding::SANDBOX_WITHHELD_HTML
     {
         return Delivery::Failed;
     }

@@ -665,8 +665,7 @@ fn trace_error_domain(error: &NSError) -> &'static str {
 }
 
 fn trace_error_resource(value: &str) -> &'static str {
-    if value.contains("__zephium_background_v1.js")
-        || value.contains("__zephium_background_v2.js")
+    if value.contains("__zephium_background_v1.js") || value.contains("__zephium_background_v2.js")
     {
         "background_wrapper"
     } else if value.contains("webkit-api-v1.js") {

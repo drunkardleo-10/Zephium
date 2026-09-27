@@ -631,16 +631,14 @@ impl ActionPopupBroker {
                 super::trace_action_qa_stage("popup-action-no-longer-presented");
                 return Err(ExtensionActionRejection::RuntimeSuperseded);
             }
-            let popover = unsafe { action.popupPopover() }
-                .ok_or_else(|| {
-                    super::trace_action_qa_stage("popup-popover-missing");
-                    ExtensionActionRejection::PopupUnavailable
-                })?;
-            let popup_webview = unsafe { action.popupWebView() }
-                .ok_or_else(|| {
-                    super::trace_action_qa_stage("popup-webview-missing");
-                    ExtensionActionRejection::PopupUnavailable
-                })?;
+            let popover = unsafe { action.popupPopover() }.ok_or_else(|| {
+                super::trace_action_qa_stage("popup-popover-missing");
+                ExtensionActionRejection::PopupUnavailable
+            })?;
+            let popup_webview = unsafe { action.popupWebView() }.ok_or_else(|| {
+                super::trace_action_qa_stage("popup-webview-missing");
+                ExtensionActionRejection::PopupUnavailable
+            })?;
             let mtm =
                 MainThreadMarker::new().ok_or(ExtensionActionRejection::NativeAdmissionFailed)?;
             let anchor = popup_anchor_rect(request, &pending.parent)

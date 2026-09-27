@@ -217,6 +217,31 @@ impl EngineHost {
             zephium_core::ports::engine::NavigationRequestId,
         )>,
     ) -> bool {
+        #[cfg(feature = "webext")]
+        if self
+            .webext
+            .settle_browser_request(profile, request, settlement)
+        {
+            if let (
+                ExtensionBrowserRequestSettlement::Applied(
+                    zephium_core::extensions::ExtensionBrowserRequestResult::CreatedTab(tab),
+                ),
+                Some((url, intent)),
+            ) = (settlement, first_url_after_reply)
+            {
+                self.sink.emit(
+                    zephium_core::ports::engine::EngineEvent::ExtensionCreatedTabReplied {
+                        profile,
+                        request,
+                        tab,
+                        url,
+                        intent,
+                    },
+                );
+            }
+            let _ = page_token;
+            return true;
+        }
         let created_tab = match settlement {
             ExtensionBrowserRequestSettlement::Applied(
                 zephium_core::extensions::ExtensionBrowserRequestResult::CreatedTab(tab),
@@ -432,7 +457,9 @@ impl EngineHost {
             .offscreen_subject(profile, request)
             .ok()
             .flatten();
-        let Some((context, needs_lease)) = subject else { return; };
+        let Some((context, needs_lease)) = subject else {
+            return;
+        };
         let witness = self.extension_runtime_registry
             .compatibility_broker_witness_for_macos_context(
                 profile,
@@ -448,13 +475,16 @@ impl EngineHost {
         } else {
             None
         };
-        let _ = self.macos_extension_controllers
+        let _ = self
+            .macos_extension_controllers
             .authorize_offscreen(profile, request, witness, lease);
     }
 
     #[cfg(target_os = "macos")]
     pub(crate) fn retry_pending_extension_offscreen_authorization(&mut self, profile: ProfileId) {
-        let pending = self.macos_extension_controllers.pending_offscreen_authorization_ids(profile);
+        let pending = self
+            .macos_extension_controllers
+            .pending_offscreen_authorization_ids(profile);
         for request in pending {
             self.finalize_extension_offscreen_request(profile, request);
         }
@@ -470,7 +500,8 @@ impl EngineHost {
     ) -> bool {
         match kind {
             zephium_core::ports::extensions::IsolatedExtensionDocumentKind::Offscreen => {
-                let context = self.macos_extension_controllers
+                let context = self
+                    .macos_extension_controllers
                     .offscreen_resource_context(runtime)
                     .ok()
                     .flatten();
@@ -741,7 +772,22 @@ impl EngineHost {
             return false;
         }
 
+        #[cfg(feature = "webext")]
+        {
+            let views = &self.views;
+            let partitions = &self.partitions;
+            self.webext.publish(&surface, |id| {
+                partitions
+                    .get(&id)
+                    .filter(|partition| partition.profile() == profile)
+                    .and_then(|_| views.get(&id))
+                    .map(|view| crate::platform::imp::native_webview(&view.view))
+            });
+            self.extension_browser_surfaces.insert(profile, surface);
+            return true;
+        }
         #[cfg(target_os = "macos")]
+        #[allow(unreachable_code)]
         let was_ready = self
             .macos_extension_controllers
             .browser_surface_ready_for_document_background(profile)
@@ -825,6 +871,12 @@ impl EngineHost {
             .views
             .get(&id)
             .map(|view| crate::platform::imp::native_webview(&view.view));
+        #[cfg(feature = "webext")]
+        {
+            self.webext.bind_view(profile, id, webview.as_deref());
+            return true;
+        }
+        #[allow(unreachable_code)]
         let binding = self.macos_extension_controllers.bind_browser_surface_view(
             profile,
             id,
@@ -842,6 +894,12 @@ impl EngineHost {
         profile: ProfileId,
         id: ItemId,
     ) -> bool {
+        #[cfg(feature = "webext")]
+        {
+            self.webext.bind_view(profile, id, None);
+            return true;
+        }
+        #[allow(unreachable_code)]
         self.macos_extension_controllers
             .bind_browser_surface_view(profile, id, None)
             .is_ok()

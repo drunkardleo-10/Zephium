@@ -543,6 +543,8 @@ pub(crate) fn install(
                 crate::platform::imp::PersistentControllerRegistry::with_browser_request_sink(
                     sink.clone(),
                 ),
+            #[cfg(all(target_os = "macos", feature = "webext"))]
+            webext: Default::default(),
             #[cfg(target_os = "windows")]
             hidden: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]

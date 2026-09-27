@@ -7,8 +7,8 @@
 
 mod artifact_tree;
 mod bitwarden_contract;
-mod bitwarden_worker_startup;
 mod bitwarden_core_artifact;
+mod bitwarden_worker_startup;
 mod compatibility_artifact;
 mod compatibility_fixture;
 mod content_script_globs;
@@ -16,8 +16,8 @@ mod file_access;
 mod major_extension_contract;
 mod native_broker_contract;
 mod oauth_redirect_observation;
-mod original_glob_relay;
 mod offscreen;
+mod original_glob_relay;
 mod permission_requests;
 mod persistent_runtime;
 mod profile_isolation;
@@ -683,7 +683,15 @@ impl FixtureServer {
         let worker_oauth_callback_entered = oauth_callback_entered.clone();
         let worker = thread::Builder::new()
             .name("zephium-wk-extension-probe-http".into())
-            .spawn(move || serve_fixture(listener, cross_origin, worker_stop, worker_oauth_callback_release, worker_oauth_callback_entered))
+            .spawn(move || {
+                serve_fixture(
+                    listener,
+                    cross_origin,
+                    worker_stop,
+                    worker_oauth_callback_release,
+                    worker_oauth_callback_entered,
+                )
+            })
             .map_err(|error| format!("cannot start fixture server: {error}"))?;
         Ok(Self {
             address,
@@ -705,7 +713,6 @@ impl FixtureServer {
     fn oauth_callback_entered(&self) -> bool {
         self.oauth_callback_entered.load(Ordering::Acquire)
     }
-
 }
 
 impl Drop for FixtureServer {
@@ -934,7 +941,9 @@ pub(crate) fn run_resource_transport_probe() -> Result<bool, String> {
 }
 
 pub(crate) fn run_shared_extension_origin_probe(custom_origin: bool) -> Result<bool, String> {
-    let Some(_) = supported_runtime()? else { return Ok(false); };
+    let Some(_) = supported_runtime()? else {
+        return Ok(false);
+    };
     let watchdog_completed = arm_process_watchdog();
     let result = resource_transport::run_shared_origin(custom_origin);
     watchdog_completed.store(true, Ordering::Release);
@@ -2929,13 +2938,25 @@ fn write_fixture_file(directory: &Path, name: &str, contents: &str) -> Result<()
         .map_err(|error| format!("cannot write extension fixture {name}: {error}"))
 }
 
-fn serve_fixture(listener: TcpListener, cross_origin: Option<SocketAddr>, stop: Arc<AtomicBool>, oauth_callback_release: Arc<AtomicBool>, oauth_callback_entered: Arc<AtomicBool>) {
+fn serve_fixture(
+    listener: TcpListener,
+    cross_origin: Option<SocketAddr>,
+    stop: Arc<AtomicBool>,
+    oauth_callback_release: Arc<AtomicBool>,
+    oauth_callback_entered: Arc<AtomicBool>,
+) {
     let mut handled = 0_usize;
     while !stop.load(Ordering::Acquire) && handled < MAX_HTTP_REQUESTS {
         match listener.accept() {
             Ok((mut stream, _)) => {
                 handled += 1;
-                let _ = respond_to_fixture_request(&mut stream, cross_origin, &stop, &oauth_callback_release, &oauth_callback_entered);
+                let _ = respond_to_fixture_request(
+                    &mut stream,
+                    cross_origin,
+                    &stop,
+                    &oauth_callback_release,
+                    &oauth_callback_entered,
+                );
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(5));
@@ -2976,37 +2997,49 @@ fn respond_to_fixture_request(
         if method != "POST" && method != "OPTIONS" {
             return Err("fixture token route received unexpected method".into());
         }
-        let origin = request.lines().find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("origin").then(|| value.trim())
-        }).filter(|origin| origin.len() <= 256 && !origin.chars().any(char::is_control));
+        let origin = request
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("origin").then(|| value.trim())
+            })
+            .filter(|origin| origin.len() <= 256 && !origin.chars().any(char::is_control));
         let allow_origin = if path == "/oauth-token-cors" {
             origin.map(|origin| format!("Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Credentials: true\r\nVary: Origin\r\n")).unwrap_or_default()
         } else {
             String::new()
         };
-        let body = if method == "POST" { "{\"fixed\":true}" } else { "" };
+        let body = if method == "POST" {
+            "{\"fixed\":true}"
+        } else {
+            ""
+        };
         let response = format!(
             "HTTP/1.1 200 OK\r\n{allow_origin}Access-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: content-type\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
-        return stream.write_all(response.as_bytes())
+        return stream
+            .write_all(response.as_bytes())
             .map_err(|error| format!("cannot write local JSON POST response: {error}"));
     }
     if path == "/oauth-start" {
         let callback = format!(
             "http://{}/oauth-callback?code=fixed-synthetic",
-            stream.local_addr().map_err(|error| format!("fixture address unavailable: {error}"))?
+            stream
+                .local_addr()
+                .map_err(|error| format!("fixture address unavailable: {error}"))?
         );
         let response = format!(
             "HTTP/1.1 302 Found\r\nLocation: {callback}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
         );
-        return stream.write_all(response.as_bytes())
+        return stream
+            .write_all(response.as_bytes())
             .map_err(|error| format!("cannot write synthetic OAuth redirect: {error}"));
     }
     if path == "/oauth-dns-start" {
         let response = "HTTP/1.1 302 Found\r\nLocation: https://synthetic-callback.invalid/oauth/cb?code=fixed&state=fixed\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
-        return stream.write_all(response.as_bytes())
+        return stream
+            .write_all(response.as_bytes())
             .map_err(|error| format!("cannot write synthetic DNS-failure redirect: {error}"));
     }
     if path == "/oauth-callback" {
@@ -3039,7 +3072,10 @@ fn respond_to_fixture_request(
         "/login" => password_manager_login_page(run),
         "/editor" => original_glob_editor_page(),
         "/oauth-base" => "<!doctype html><title>OAuth origin base</title>".to_owned(),
-        "/oauth-frame" => "<!doctype html><title>frame probe</title><iframe src='/oauth-start'></iframe>".to_owned(),
+        "/oauth-frame" => {
+            "<!doctype html><title>frame probe</title><iframe src='/oauth-start'></iframe>"
+                .to_owned()
+        }
         "/theme" => representative_theme_page(run),
         "/theme/frame" => representative_theme_frame(run),
         "/frame/same" => child_page("same", run),

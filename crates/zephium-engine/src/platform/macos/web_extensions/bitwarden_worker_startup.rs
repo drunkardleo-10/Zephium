@@ -88,7 +88,8 @@ pub(super) fn run(path: &Path, scheme: &str, user_agent_mode: &str) -> Result<bo
         }
         let run_loop = NSRunLoop::mainRunLoop();
         let manifest: Value = serde_json::from_slice(
-            &std::fs::read(path.join("manifest.json")).map_err(|_| "prepared manifest unavailable")?,
+            &std::fs::read(path.join("manifest.json"))
+                .map_err(|_| "prepared manifest unavailable")?,
         )
         .map_err(|_| "prepared manifest invalid")?;
         let wrapper_path = manifest["background"]["service_worker"]
@@ -154,7 +155,10 @@ pub(super) fn run(path: &Path, scheme: &str, user_agent_mode: &str) -> Result<bo
         }
         println!(
             "native-probe: prepared Bitwarden popup-document={}",
-            observation.popup_document.as_deref().unwrap_or("unavailable")
+            observation
+                .popup_document
+                .as_deref()
+                .unwrap_or("unavailable")
         );
         Ok(true)
     })();
@@ -185,10 +189,9 @@ fn run_case(
         }
         let extension = load_extension(path, run_loop, mtm)?;
         let context = new_context(&extension, BITWARDEN_ID)?;
-        let base = NSURL::URLWithString(&NSString::from_str(&format!(
-            "{scheme}://{BITWARDEN_ID}/"
-        )))
-        .ok_or("invalid probe base URL")?;
+        let base =
+            NSURL::URLWithString(&NSString::from_str(&format!("{scheme}://{BITWARDEN_ID}/")))
+                .ok_or("invalid probe base URL")?;
         objc2::exception::catch(AssertUnwindSafe(|| unsafe { context.setBaseURL(&base) }))
             .map_err(|exception| {
                 let bounded = exception.as_ref().map_or_else(
@@ -308,9 +311,7 @@ fn observe_popup_document(
             .map(|title| title.to_string())
             .and_then(|title| title.strip_prefix(PREFIX).map(str::to_owned))
         {
-            if value.contains("\"popupPage\":true")
-                && value.contains("\"ready\":\"complete\"")
-            {
+            if value.contains("\"popupPage\":true") && value.contains("\"ready\":\"complete\"") {
                 return Some(value.chars().take(300).collect());
             }
         }

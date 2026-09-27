@@ -863,6 +863,17 @@ impl EngineHost {
                         None,
                     )
                 }
+                #[cfg(feature = "webext")]
+                Partition::Default(profile) | Partition::Persistent(profile) => {
+                    use wry::WebViewBuilderExtMacos;
+                    let configuration = self.webext.configuration(profile, &self.sink);
+                    (
+                        builder.with_webview_configuration(configuration),
+                        None,
+                        None,
+                    )
+                }
+                #[cfg(not(feature = "webext"))]
                 Partition::Default(profile) | Partition::Persistent(profile) => {
                     match self
                         .macos_extension_controllers

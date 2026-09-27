@@ -18,7 +18,7 @@ use zephium_core::extensions::{
     EXTENSION_ACTION_ICON_WIDTH,
 };
 
-pub(super) fn rasterize_action_icon(action: &WKWebExtensionAction) -> Option<ExtensionActionIcon> {
+pub(crate) fn rasterize_action_icon(action: &WKWebExtensionAction) -> Option<ExtensionActionIcon> {
     objc2::exception::catch(AssertUnwindSafe(|| rasterize_action_icon_inner(action)))
         .ok()
         .flatten()

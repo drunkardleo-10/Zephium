@@ -30,31 +30,31 @@ mod stage;
 #[cfg(feature = "native-web-extension-probes")]
 mod web_extensions;
 
-pub(crate) use extensions::{
-    begin_prepared_native_runtime_activation, prepare_native_runtime_activation,
-    schedule_authorization_retry, ControllerActionPopupPreparation,
-    ControllerBrowserRequestSettlement, ControllerCommandDispatch,
-    ControllerCompatibilityBrokerSettlement, ControllerErasureSettlement, ControllerErasureTicket,
-    ControllerNamespaceRecoveryAudit, ControllerPreparation, ControllerRegistryError,
-    ControllerRuntimeGrantSettlement, IdentityRequestId, OffscreenSessionId,
-    MacosNativeActionFailure,
-    MacosNativeRuntimeActivation, MacosNativeRuntimeFailure, MacosNativeRuntimeOwner,
-    MacosNativeRuntimeOwnerIdentity, MacosNativeRuntimeReconciliation,
-    MacosNativeRuntimeRetirement, NativeHostWorkerEvent, PersistentControllerRegistry,
-    ProfileControllerErasure, PublisherNativeMessagingAuthorization,
-    PublisherNativeMessagingRequestId, has_pending_offscreen_authorization,
-    trace_action_qa_stage,
-};
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use extensions::run_original_bitwarden_offscreen_erasure_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use extensions::{ControllerSurfaceApplication, ProbeControllerPreparation};
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use extensions::run_identity_redirect_probe;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use extensions::probe_new_window_callbacks;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use extensions::probe_new_window_policy;
+#[cfg(feature = "webext")]
+pub(crate) use extensions::rasterize_webext_action_icon;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use extensions::run_identity_redirect_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use extensions::run_original_bitwarden_offscreen_erasure_probe;
+pub(crate) use extensions::{
+    begin_prepared_native_runtime_activation, has_pending_offscreen_authorization,
+    prepare_native_runtime_activation, schedule_authorization_retry, trace_action_qa_stage,
+    ControllerActionPopupPreparation, ControllerBrowserRequestSettlement,
+    ControllerCommandDispatch, ControllerCompatibilityBrokerSettlement,
+    ControllerErasureSettlement, ControllerErasureTicket, ControllerNamespaceRecoveryAudit,
+    ControllerPreparation, ControllerRegistryError, ControllerRuntimeGrantSettlement,
+    IdentityRequestId, MacosNativeActionFailure, MacosNativeRuntimeActivation,
+    MacosNativeRuntimeFailure, MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity,
+    MacosNativeRuntimeReconciliation, MacosNativeRuntimeRetirement, NativeHostWorkerEvent,
+    OffscreenSessionId, PersistentControllerRegistry, ProfileControllerErasure,
+    PublisherNativeMessagingAuthorization, PublisherNativeMessagingRequestId,
+};
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use extensions::{ControllerSurfaceApplication, ProbeControllerPreparation};
 
 pub(crate) use content_filter::{
     compile as compile_content_policy, content_policy_digest, enumerate_content_policy_cache,
@@ -324,6 +324,12 @@ pub(crate) fn new_configuration_with_data_store(
     // SAFETY: `mtm` proves AppKit/WebKit main-thread affinity. `new` returns
     // an owned Objective-C object and has no additional preconditions.
     let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
+    #[cfg(feature = "webext")]
+    unsafe {
+        configuration.setApplicationNameForUserAgent(Some(&objc2_foundation::NSString::from_str(
+            zephium_webext_macos::application_name(),
+        )));
+    }
     unsafe { configuration.setWebsiteDataStore(store) };
     let configured_store = unsafe { configuration.websiteDataStore() };
     if Retained::as_ptr(&configured_store) != Retained::as_ptr(store) {
@@ -800,24 +806,24 @@ mod tests {
 }
 
 #[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_web_extension_content_script_globs_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_web_extension_side_panel_unavailable_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_web_extension_document_id_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_oauth_redirect_observation_probe;
+pub(crate) use web_extensions::run_oauth_redirect_broker_order_probe;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_oauth_redirect_immediate_failure_probe;
 #[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_oauth_redirect_synchronous_clear_probe;
+pub(crate) use web_extensions::run_oauth_redirect_observation_probe;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_oauth_redirect_same_turn_nonresident_probe;
 #[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_oauth_redirect_broker_order_probe;
-#[cfg(feature = "native-web-extension-probes")]
-pub(crate) use web_extensions::run_worker_json_post_probe;
+pub(crate) use web_extensions::run_oauth_redirect_synchronous_clear_probe;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_original_main_document_glob_probe;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_prepared_bitwarden_worker_startup_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_web_extension_content_script_globs_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_web_extension_document_id_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_web_extension_side_panel_unavailable_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_worker_json_post_probe;

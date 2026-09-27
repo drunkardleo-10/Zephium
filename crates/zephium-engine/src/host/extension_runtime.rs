@@ -4252,7 +4252,8 @@ impl ExtensionRuntimeHostPublicationPort for EnginePublicationPort {
         authority: ExtensionRuntimeOperationAuthority,
     ) -> Result<(), ExtensionRuntimeHostPublicationPortRefusal> {
         let owner = OwnerKey::from_address(owner);
-        let published = self.reservation
+        let published = self
+            .reservation
             .publish_authority(owner, generation, owned_entry, evidence, authority)
             .map_err(|refusal| {
                 let (reason, authority) = *refusal;

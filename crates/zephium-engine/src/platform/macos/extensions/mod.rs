@@ -21,8 +21,8 @@ mod identity_broker;
 mod isolated_resource_bridge;
 mod native_messaging;
 mod native_runtime;
-mod offscreen_host;
 mod offscreen_broker;
+mod offscreen_host;
 #[cfg(feature = "native-extension-qa-inspector")]
 mod qa_popup_errors;
 mod record_erasure;
@@ -44,12 +44,21 @@ pub(crate) use grant_application::{apply_probe_grants, apply_probe_grants_with_d
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use grants::MacosNativeApiPermission;
 pub(crate) use identity_broker::IdentityRequestId;
-pub(crate) use offscreen_broker::OffscreenSessionId;
 pub(crate) use offscreen_broker::has_pending_authorization as has_pending_offscreen_authorization;
+pub(crate) use offscreen_broker::OffscreenSessionId;
+
+#[cfg(feature = "webext")]
+pub(crate) fn rasterize_webext_action_icon(
+    action: &objc2_web_kit::WKWebExtensionAction,
+) -> Option<zephium_core::extensions::ExtensionActionIcon> {
+    action_icon::rasterize_action_icon(action)
+}
 
 /// Chrome Web Store extensions need Chrome's extension-platform branch in their
 /// own worker/pages. Ordinary browser tabs keep their existing user agent.
-pub(super) fn configure_extension_user_agent(configuration: &objc2_web_kit::WKWebViewConfiguration) {
+pub(super) fn configure_extension_user_agent(
+    configuration: &objc2_web_kit::WKWebViewConfiguration,
+) {
     unsafe {
         configuration.setApplicationNameForUserAgent(Some(&objc2_foundation::NSString::from_str(
             "Zephium Chrome/152.0.4191.66",
@@ -117,9 +126,8 @@ pub(crate) use native_runtime::{
 };
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use offscreen_host::{
-    run_offscreen_host_probe, run_original_bitwarden_offscreen_probe,
-    run_original_bitwarden_offscreen_erasure_probe,
-    run_original_google_translate_offscreen_probe,
+    run_offscreen_host_probe, run_original_bitwarden_offscreen_erasure_probe,
+    run_original_bitwarden_offscreen_probe, run_original_google_translate_offscreen_probe,
 };
 
 #[cfg(feature = "native-web-extension-probes")]

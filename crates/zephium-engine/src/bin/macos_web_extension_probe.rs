@@ -99,7 +99,9 @@ fn main() {
     }
     let result = if let Some(position) = original_main_document_globs {
         let Some(path) = arguments.get(position + 1) else {
-            eprintln!("--original-main-document-globs-extension requires a prepared extension path");
+            eprintln!(
+                "--original-main-document-globs-extension requires a prepared extension path"
+            );
             std::process::exit(2);
         };
         zephium_engine::run_macos_original_main_document_glob_probe(std::path::Path::new(path))
@@ -128,7 +130,9 @@ fn main() {
             eprintln!("--original-bitwarden-offscreen-erasure-crx requires a CRX path");
             std::process::exit(2);
         };
-        zephium_engine::run_macos_original_bitwarden_offscreen_erasure_probe(std::path::Path::new(path))
+        zephium_engine::run_macos_original_bitwarden_offscreen_erasure_probe(std::path::Path::new(
+            path,
+        ))
     } else if let Some(position) = original_bitwarden {
         let Some(path) = arguments.get(position + 1) else {
             eprintln!("--original-bitwarden-offscreen-crx requires a CRX path");
@@ -148,9 +152,11 @@ fn main() {
             eprintln!("--prepared-bitwarden-worker-extension requires a user-agent mode");
             std::process::exit(2);
         };
-        zephium_engine::run_macos_prepared_bitwarden_worker_startup_probe(std::path::Path::new(
-            path,
-        ), scheme, user_agent_mode)
+        zephium_engine::run_macos_prepared_bitwarden_worker_startup_probe(
+            std::path::Path::new(path),
+            scheme,
+            user_agent_mode,
+        )
     } else if let Some(position) = original_offscreen {
         let Some(path) = arguments.get(position + 1) else {
             eprintln!("--original-google-translate-offscreen-crx requires a CRX path");

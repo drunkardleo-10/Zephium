@@ -36,6 +36,8 @@ mod profiles;
 mod resources;
 mod scripts;
 mod stages;
+#[cfg(all(target_os = "macos", feature = "webext"))]
+mod webext;
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
 mod work_resource;
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
@@ -773,6 +775,8 @@ pub(crate) struct EngineHost {
     // it here establishes exact construction, erasure, and shutdown ownership.
     #[cfg(target_os = "macos")]
     macos_extension_controllers: crate::platform::imp::PersistentControllerRegistry,
+    #[cfg(all(target_os = "macos", feature = "webext"))]
+    webext: webext::WebextHost,
     // Off-screen views carrying the low-memory hint, and the subset the
     // shell's idle policy asked WebView2 to suspend.
     #[cfg(target_os = "windows")]

@@ -35,6 +35,9 @@ impl EngineHost {
         tab: ItemId,
         surface_generation: ExtensionBrowserSurfaceGeneration,
     ) -> ExtensionActionSnapshotSettlement {
+        #[cfg(feature = "webext")]
+        return self.webext.actions(profile, tab, surface_generation);
+        #[allow(unreachable_code)]
         let (native_tab, resident) =
             match self
                 .macos_extension_controllers
@@ -107,6 +110,12 @@ impl EngineHost {
         &mut self,
         request: ExtensionActionRequest,
     ) -> ExtensionActionInvocationOutcome {
+        #[cfg(feature = "webext")]
+        {
+            let parent = popup_parent_view(&self.parent);
+            return ExtensionActionInvocationOutcome::Settled(self.webext.invoke(request, parent));
+        }
+        #[allow(unreachable_code)]
         let profile = request.runtime().profile();
         let (native_tab, resident) = match self.macos_extension_controllers.action_tab(
             profile,
