@@ -77,6 +77,7 @@ impl WebextHost {
                 pending: RefCell::new(HashMap::new()),
                 next_request: Cell::new(1),
                 popup: RefCell::new(None),
+                repeats: RefCell::new(HashMap::new()),
             });
             let runtime = Runtime::new(mtm, &store, Some(&identifier), bridge.clone());
             ProfileRuntime {
@@ -197,10 +198,11 @@ impl WebextHost {
             .focused()
             .map(|window| entry.bridge.ids.borrow_mut().window(window));
         entry.runtime.publish(&windows, focused);
+        // The engine's own views are the truth for residency; the shell's flag
+        // trails view creation and would unbind a view bound on insertion.
         for tab in surface.tabs() {
             let id = entry.bridge.ids.borrow_mut().tab(tab.id());
-            let view = tab.resident().then(|| view_for(tab.id())).flatten();
-            entry.runtime.bind_view(id, view.as_deref());
+            entry.runtime.bind_view(id, view_for(tab.id()).as_deref());
         }
         entry.surface = Some(surface.clone());
     }
@@ -394,6 +396,7 @@ struct Bridge {
     pending: RefCell<HashMap<ExtensionBrowserRequestId, TabRequestDone>>,
     next_request: Cell<u64>,
     popup: RefCell<Option<(Retained<NSView>, Rect)>>,
+    repeats: RefCell<HashMap<u64, (std::time::Instant, u32)>>,
 }
 
 impl Bridge {
@@ -421,12 +424,37 @@ impl Bridge {
 
 impl Host for Bridge {
     fn log(&self, extension: &str, level: LogLevel, message: &str) {
+        // Extensions retry failing calls in loops; print each distinct line
+        // once a minute with how often it repeated.
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (extension, message).hash(&mut hasher);
+        let now = std::time::Instant::now();
+        let repeated = {
+            let mut repeats = self.repeats.borrow_mut();
+            if repeats.len() > 512 {
+                repeats.retain(|_, (since, _)| now.duration_since(*since).as_secs() < 60);
+            }
+            let entry = repeats.entry(hasher.finish()).or_insert((now, 0));
+            if entry.1 > 0 && now.duration_since(entry.0).as_secs() < 60 {
+                entry.1 += 1;
+                return;
+            }
+            let repeated = entry.1.saturating_sub(1);
+            *entry = (now, 1);
+            repeated
+        };
+        let suffix = if repeated > 0 {
+            format!(" (repeated {repeated} more times)")
+        } else {
+            String::new()
+        };
         let tag = match level {
             LogLevel::Info => "info",
             LogLevel::Warning => "warning",
             LogLevel::Error => "error",
         };
-        eprintln!("extension {extension} {tag}: {message}");
+        eprintln!("extension {extension} {tag}: {message}{suffix}");
     }
 
     fn tab_request(&self, request: TabRequest, done: TabRequestDone) {
