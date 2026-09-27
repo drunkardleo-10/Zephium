@@ -168,7 +168,8 @@
   };
 
   // Chrome answers "not granted" for permissions a browser doesn't know;
-  // WebKit throws, which takes down callers such as Bitwarden's popup.
+  // WebKit throws, which takes down callers such as Bitwarden's popup. The
+  // retry stays synchronous so a request keeps the user's gesture.
   const permissions = namespace("permissions");
   if (permissions) {
     const invalid = /'([^']+)' is not a valid permission/;
@@ -176,28 +177,35 @@
       const original = permissions[method];
       if (typeof original !== "function") return;
       pin(permissions, method, function (request, callback) {
-        const run = async () => {
-          let current = Object.assign({}, request);
-          const unknown = [];
-          for (;;) {
-            try {
-              const result = await original.call(permissions, current);
-              return unknown.length > 0 ? withUnknown(result) : result;
-            } catch (error) {
-              const name = (invalid.exec(String(error && error.message)) || [])[1];
-              const listed = Array.isArray(current.permissions) ? current.permissions : [];
-              if (!name || !listed.includes(name)) throw error;
-              unknown.push(name);
-              current.permissions = listed.filter((permission) => permission !== name);
-            }
+        const current = Object.assign({}, request);
+        let unknown = false;
+        let result;
+        for (;;) {
+          const listed = Array.isArray(current.permissions) ? current.permissions : [];
+          const origins = Array.isArray(current.origins) ? current.origins : [];
+          if (unknown && listed.length === 0 && origins.length === 0) {
+            result = Promise.resolve();
+            break;
           }
-        };
-        return withCallback(run(), callback);
+          try {
+            result = Promise.resolve(original.call(permissions, current));
+            break;
+          } catch (error) {
+            const name = (invalid.exec(String(error && error.message)) || [])[1];
+            if (!name || !listed.includes(name)) {
+              result = Promise.reject(error);
+              break;
+            }
+            unknown = true;
+            current.permissions = listed.filter((permission) => permission !== name);
+          }
+        }
+        return withCallback(unknown ? result.then(withUnknown) : result, callback);
       });
     };
     guard("contains", () => false);
     guard("request", () => false);
-    guard("remove", (result) => result);
+    guard("remove", (removed) => removed !== false);
   }
 
   const scripting = namespace("scripting");
@@ -205,16 +213,78 @@
     pin(scripting, "ExecutionWorld", Object.freeze({ ISOLATED: "ISOLATED", MAIN: "MAIN" }));
   }
 
-  if (!isContent && !chromeApi.notifications) {
-    const event = () => {
-      const listeners = new Set();
-      return {
-        addListener: (listener) => void listeners.add(listener),
-        removeListener: (listener) => void listeners.delete(listener),
-        hasListener: (listener) => listeners.has(listener),
-        hasListeners: () => listeners.size > 0,
-      };
+  const makeEvent = () => {
+    const listeners = new Set();
+    return {
+      addListener: (listener) => void listeners.add(listener),
+      removeListener: (listener) => void listeners.delete(listener),
+      hasListener: (listener) => listeners.has(listener),
+      hasListeners: () => listeners.size > 0,
+      dispatch: (...args) => {
+        for (const listener of listeners) {
+          try {
+            listener(...args);
+          } catch (error) {
+            setTimeout(() => {
+              throw error;
+            });
+          }
+        }
+      },
     };
+  };
+
+  // WebKit implements webNavigation's load events but not these; code that
+  // subscribes to them at startup would otherwise throw and kill the worker.
+  const webNavigation = namespace("webNavigation");
+  if (webNavigation) {
+    const added = {};
+    for (const name of ["onHistoryStateUpdated", "onReferenceFragmentUpdated", "onCreatedNavigationTarget", "onTabReplaced"]) {
+      if (!webNavigation[name]) {
+        added[name] = makeEvent();
+        pin(webNavigation, name, added[name]);
+      }
+    }
+    const used = (event) => (config.events || []).includes(`webNavigation.${event}`);
+    const tabs = chromeApi.tabs;
+    // Same-document navigations change a tab's URL without a commit. Only
+    // extensions that listen for them pay for following every tab update.
+    if (
+      isWorker &&
+      tabs &&
+      webNavigation.onCommitted &&
+      ((added.onHistoryStateUpdated && used("onHistoryStateUpdated")) ||
+        (added.onReferenceFragmentUpdated && used("onReferenceFragmentUpdated")))
+    ) {
+      const committed = new Map();
+      webNavigation.onCommitted.addListener((details) => {
+        if (details.frameId === 0) committed.set(details.tabId, details.url);
+      });
+      tabs.onRemoved.addListener((tabId) => committed.delete(tabId));
+      tabs.onUpdated.addListener((tabId, change) => {
+        if (!change.url) return;
+        const previous = committed.get(tabId);
+        committed.set(tabId, change.url);
+        if (previous === undefined || previous === change.url) return;
+        const details = {
+          tabId,
+          url: change.url,
+          frameId: 0,
+          parentFrameId: -1,
+          processId: -1,
+          timeStamp: Date.now(),
+          transitionType: "link",
+          transitionQualifiers: [],
+        };
+        const fragmentOnly = previous.split("#")[0] === change.url.split("#")[0];
+        const event = fragmentOnly ? added.onReferenceFragmentUpdated : added.onHistoryStateUpdated;
+        if (event) event.dispatch(details);
+      });
+    }
+  }
+
+  if (!isContent && !chromeApi.notifications) {
+    const event = makeEvent;
     let created = 0;
     pin(chromeApi, "notifications", {
       TemplateType: Object.freeze({ BASIC: "basic", IMAGE: "image", LIST: "list", PROGRESS: "progress" }),

@@ -281,6 +281,14 @@ impl Lab {
                     }
                 },
             );
+        } else if let Some(keys) = step.get("keys").and_then(Value::as_str) {
+            if let Some(view) = this.tab_view(this.active.get()) {
+                this.window.makeFirstResponder(Some(&view));
+                for key in keys.chars() {
+                    press(&this.window, key);
+                }
+            }
+            after(300, next);
         } else if step.get("errors").is_some() {
             let id = this.extension.borrow().clone().unwrap_or_default();
             if let Some(context) = this.runtime.context(&id) {
@@ -471,6 +479,40 @@ fn wait_loaded(view: Retained<WKWebView>, next: impl FnOnce() + 'static) {
         }
     });
     unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.1, true, &block) };
+}
+
+/// Sends a real key press, so pages see trusted events.
+fn press(window: &NSWindow, key: char) {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+    const CODES: &[(char, u16)] = &[
+        ('f', 3),
+        ('j', 38),
+        ('k', 40),
+        ('?', 44),
+        ('d', 2),
+        ('u', 32),
+    ];
+    let code = CODES
+        .iter()
+        .find(|(c, _)| *c == key)
+        .map_or(0, |(_, code)| *code);
+    let text = NSString::from_str(&key.to_string());
+    for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
+        if let Some(event) = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            kind,
+            NSPoint::new(0.0, 0.0),
+            NSEventModifierFlags::empty(),
+            0.0,
+            window.windowNumber(),
+            None,
+            &text,
+            &text,
+            false,
+            code,
+        ) {
+            window.sendEvent(&event);
+        }
+    }
 }
 
 fn wait_until(condition: impl Fn() -> bool + 'static, then: impl FnOnce() + 'static) {
