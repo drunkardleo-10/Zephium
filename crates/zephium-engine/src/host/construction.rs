@@ -958,6 +958,10 @@ impl EngineHost {
             // policy. Wry currently ignores this setting on WebKit platforms.
             .with_general_autofill_enabled(false)
             .with_navigation_handler(move |target| {
+                #[cfg(feature = "webext")]
+                if super::webext::intercept_auth_redirect(&target) {
+                    return false;
+                }
                 navigation_permit.allows_navigation(&target)
                     && policy_navigation.admits_target(&target)
             })

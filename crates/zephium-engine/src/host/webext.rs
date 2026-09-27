@@ -104,8 +104,10 @@ impl WebextHost {
                 pending_pages: RefCell::new(HashMap::new()),
                 next_request: Cell::new(1),
                 popup: RefCell::new(None),
+                self_weak: RefCell::new(std::rc::Weak::new()),
                 repeats: RefCell::new(HashMap::new()),
             });
+            *bridge.self_weak.borrow_mut() = Rc::downgrade(&bridge);
             let runtime = Runtime::new(mtm, &store, Some(&identifier), bridge.clone());
             ProfileRuntime {
                 runtime,
@@ -225,6 +227,8 @@ impl WebextHost {
             .focused()
             .map(|window| entry.bridge.ids.borrow_mut().window(window));
         entry.runtime.publish(&windows, focused);
+        let open: std::collections::HashSet<ItemId> = surface.tabs().map(|tab| tab.id()).collect();
+        settle_abandoned_auth_flows(surface.profile(), &open);
         // The engine's own views are the truth for residency; the shell's flag
         // trails view creation and would unbind a view bound on insertion.
         for tab in surface.tabs() {
@@ -581,6 +585,7 @@ struct Bridge {
     pending_pages: RefCell<HashMap<ExtensionBrowserRequestId, PendingPage>>,
     next_request: Cell<u64>,
     popup: RefCell<Option<(Retained<NSView>, Rect)>>,
+    self_weak: RefCell<std::rc::Weak<Bridge>>,
     repeats: RefCell<HashMap<u64, (std::time::Instant, u32)>>,
 }
 
@@ -648,6 +653,58 @@ struct PendingPage {
     extension_id: String,
     url: String,
     done: Option<TabRequestDone>,
+}
+
+/// A pending `identity.launchWebAuthFlow`.
+struct AuthFlow {
+    profile: ProfileId,
+    prefix: String,
+    tab: Rc<Cell<Option<ItemId>>>,
+    bridge: std::rc::Weak<Bridge>,
+    done: Box<dyn FnOnce(Result<String, String>)>,
+}
+
+thread_local! {
+    static AUTH_FLOWS: RefCell<Vec<AuthFlow>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Called for every main-frame navigation in a tab: a provider redirecting to
+/// an extension's `chromiumapp.org` address completes that extension's
+/// sign-in instead of loading. Returns true when the navigation must stop.
+pub(crate) fn intercept_auth_redirect(url: &str) -> bool {
+    let flow = AUTH_FLOWS.with(|flows| {
+        let mut flows = flows.borrow_mut();
+        let index = flows
+            .iter()
+            .position(|flow| url.starts_with(&flow.prefix))?;
+        Some(flows.remove(index))
+    });
+    let Some(flow) = flow else {
+        return false;
+    };
+    (flow.done)(Ok(url.to_owned()));
+    if let (Some(tab), Some(bridge)) = (flow.tab.get(), flow.bridge.upgrade()) {
+        bridge.request(
+            ExtensionBrowserRequestAction::CloseTab { tab },
+            Box::new(|_| {}),
+        );
+    }
+    true
+}
+
+/// Fails the sign-in of every flow whose tab the user closed.
+fn settle_abandoned_auth_flows(profile: ProfileId, open: &std::collections::HashSet<ItemId>) {
+    let abandoned: Vec<AuthFlow> = AUTH_FLOWS.with(|flows| {
+        let mut flows = flows.borrow_mut();
+        let (gone, kept) = std::mem::take(&mut *flows).into_iter().partition(|flow| {
+            flow.profile == profile && flow.tab.get().is_some_and(|tab| !open.contains(&tab))
+        });
+        *flows = kept;
+        gone
+    });
+    for flow in abandoned {
+        (flow.done)(Err("The user did not approve access.".into()));
+    }
 }
 
 /// The extension a `chrome-extension://<id>/…` address belongs to.
@@ -760,6 +817,51 @@ impl Host for Bridge {
         self.request(action, done);
     }
 
+    fn start_auth_flow(
+        &self,
+        extension: &str,
+        url: &str,
+        done: Box<dyn FnOnce(Result<String, String>)>,
+    ) {
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return done(Err("The authorization page must be a web address.".into()));
+        }
+        eprintln!("extension {extension} info: sign-in flow started");
+        let prefix = format!("https://{extension}.chromiumapp.org/");
+        let tab = Rc::new(Cell::new(None));
+        // A new flow replaces the extension's previous one, as in Chrome.
+        let replaced = AUTH_FLOWS.with(|flows| {
+            let mut flows = flows.borrow_mut();
+            let index = flows.iter().position(|flow| flow.prefix == prefix)?;
+            Some(flows.remove(index))
+        });
+        if let Some(previous) = replaced {
+            (previous.done)(Err("Another sign-in started.".into()));
+        }
+        AUTH_FLOWS.with(|flows| {
+            flows.borrow_mut().push(AuthFlow {
+                profile: self.profile,
+                prefix,
+                tab: tab.clone(),
+                bridge: self.self_weak.borrow().clone(),
+                done,
+            })
+        });
+        let ids = self.self_weak.borrow().clone();
+        self.request(
+            ExtensionBrowserRequestAction::CreateTab {
+                window: None,
+                url: Some(Arc::from(url)),
+                active: true,
+            },
+            Box::new(move |result| {
+                if let (Ok(Some(number)), Some(bridge)) = (result, ids.upgrade()) {
+                    tab.set(bridge.item(number));
+                }
+            }),
+        );
+    }
+
     fn open_options(&self, extension: &str, url: &str) {
         self.open_page(extension.to_owned(), url.to_owned(), None);
     }
@@ -805,9 +907,11 @@ impl super::EngineHost {
     }
 }
 
+// objc2 lays out ivars only up to 8-byte alignment; the 16-byte-aligned
+// identities stay behind pointers.
 struct PageIvars {
-    profile: ProfileId,
-    tab: ItemId,
+    profile: Box<ProfileId>,
+    tab: Box<ItemId>,
     origin: String,
     sink: Sink,
     bridge: std::rc::Weak<Bridge>,
@@ -883,8 +987,8 @@ objc2::define_class!(
         fn did_close(&self, _view: &WKWebView) {
             let ivars = self.ivars();
             ivars.sink.emit(EngineEvent::ExtensionPageClosed {
-                profile: ivars.profile,
-                id: ivars.tab,
+                profile: *ivars.profile,
+                id: *ivars.tab,
             });
         }
 
@@ -928,8 +1032,8 @@ impl PageDelegate {
         bridge: std::rc::Weak<Bridge>,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(PageIvars {
-            profile,
-            tab,
+            profile: Box::new(profile),
+            tab: Box::new(tab),
             origin,
             sink,
             bridge,
@@ -943,8 +1047,8 @@ impl PageDelegate {
             .map(|title| title.to_string())
             .unwrap_or_default();
         ivars.sink.emit(EngineEvent::ExtensionPageChanged {
-            profile: ivars.profile,
-            id: ivars.tab,
+            profile: *ivars.profile,
+            id: *ivars.tab,
             title: zephium_core::item::sanitize_page_title(&title),
             loading: unsafe { view.isLoading() },
             can_go_back: unsafe { view.canGoBack() },

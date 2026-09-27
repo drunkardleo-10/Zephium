@@ -22,6 +22,29 @@ pub(crate) fn handle(
     reply: &DynBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
 ) {
     let message = json::from_object(Some(message));
+    if message.get("api").and_then(Value::as_str) == Some("identity.launch") {
+        let url = message
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let reply = reply.copy();
+        let extension = unsafe { context.uniqueIdentifier() }.to_string();
+        shared.host().start_auth_flow(
+            &extension,
+            url,
+            Box::new(move |result| match result {
+                Ok(url) => {
+                    let object = json::to_object(&serde_json::json!({ "url": url }));
+                    reply.call((Retained::as_ptr(&object).cast_mut(), std::ptr::null_mut()));
+                }
+                Err(message) => {
+                    let error = error(&message);
+                    reply.call((std::ptr::null_mut(), Retained::as_ptr(&error).cast_mut()));
+                }
+            }),
+        );
+        return;
+    }
     let result = match message.get("api").and_then(Value::as_str) {
         Some("log") => {
             let level = match message.get("level").and_then(Value::as_str) {

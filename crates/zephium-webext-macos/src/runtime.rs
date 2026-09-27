@@ -334,6 +334,22 @@ impl Runtime {
             graph.focused = focused;
         }
 
+        if crate::tracing()
+            && (!opened_tabs.is_empty() || !closed_tabs.is_empty() || !activated.is_empty())
+        {
+            eprintln!(
+                "webext-trace: graph opened {:?} closed {:?} activated {:?}",
+                opened_tabs.iter().map(|tab| tab.id()).collect::<Vec<_>>(),
+                closed_tabs
+                    .iter()
+                    .map(|(tab, _)| tab.id())
+                    .collect::<Vec<_>>(),
+                activated
+                    .iter()
+                    .map(|(window, _)| window.active_id())
+                    .collect::<Vec<_>>(),
+            );
+        }
         let controller = &self.controller;
         unsafe {
             for window in &opened_windows {

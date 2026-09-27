@@ -87,6 +87,16 @@ pub trait Host {
     /// [`Runtime::publish`] before `done` reports it.
     fn tab_request(&self, request: TabRequest, done: TabRequestDone);
 
+    /// Runs `identity.launchWebAuthFlow`: shows `url` and reports the
+    /// `https://<extension>.chromiumapp.org/…` address the provider redirects
+    /// to, or why there is none.
+    fn start_auth_flow(
+        &self,
+        extension: &str,
+        url: &str,
+        done: Box<dyn FnOnce(Result<String, String>)>,
+    );
+
     /// Opens an extension's options page, as `runtime.openOptionsPage` asks.
     fn open_options(&self, extension: &str, url: &str);
 

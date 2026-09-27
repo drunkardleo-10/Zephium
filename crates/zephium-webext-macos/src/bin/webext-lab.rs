@@ -99,6 +99,16 @@ impl Host for LabHost {
         true
     }
 
+    fn start_auth_flow(
+        &self,
+        extension: &str,
+        url: &str,
+        done: Box<dyn FnOnce(Result<String, String>)>,
+    ) {
+        eprintln!("[lab] {extension} starts sign-in at {url}");
+        done(Err("sign-in is not available in the lab".into()));
+    }
+
     fn open_options(&self, extension: &str, url: &str) {
         eprintln!("[lab] {extension} opens its options page {url}");
     }
