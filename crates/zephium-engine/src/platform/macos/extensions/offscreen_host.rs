@@ -97,6 +97,8 @@ impl PackageReader {
     }
 }
 
+type ReplyBlock = RcBlock<dyn Fn(*mut AnyObject, *mut NSString)>;
+
 struct Core {
     base_url: Box<str>,
     document_url: Box<str>,
@@ -109,7 +111,7 @@ struct Core {
     on_failure: RefCell<Option<Box<dyn FnOnce()>>>,
     closed: Cell<bool>,
     next_message: Cell<u64>,
-    pending: RefCell<HashMap<u64, RcBlock<dyn Fn(*mut AnyObject, *mut NSString)>>>,
+    pending: RefCell<HashMap<u64, ReplyBlock>>,
     requests: Cell<usize>,
     responses: Cell<usize>,
     rejections: Cell<usize>,
@@ -773,7 +775,7 @@ impl OffscreenHost {
                 let Some(complete) = complete.borrow_mut().take() else {
                     return;
                 };
-                if !weak.upgrade().is_some_and(|core| !core.closed.get()) {
+                if weak.upgrade().is_none_or(|core| core.closed.get()) {
                     complete(Err(OffscreenHostError::Closed));
                     return;
                 }
@@ -861,9 +863,11 @@ struct OriginErasure {
     store: Retained<WKWebsiteDataStore>,
     extension_id: Box<str>,
     cookies: RefCell<VecDeque<Retained<NSHTTPCookie>>>,
-    completion: RefCell<Option<Box<dyn FnOnce(ExtensionRuntimeHostDataErasureDisposition)>>>,
+    completion: RefCell<Option<ErasureCompletion>>,
     deadline: Instant,
 }
+
+type ErasureCompletion = Box<dyn FnOnce(ExtensionRuntimeHostDataErasureDisposition)>;
 
 impl OriginErasure {
     fn finish(&self, disposition: ExtensionRuntimeHostDataErasureDisposition) {

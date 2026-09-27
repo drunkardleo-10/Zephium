@@ -267,6 +267,8 @@ pub(super) fn agent_lifecycle_with_clean(
     )
 }
 
+type FirstUrlAfterReply = Option<(Arc<str>, NavigationRequestId)>;
+
 #[derive(Default)]
 pub(crate) struct FakeEngine {
     calls: Mutex<Vec<String>>,
@@ -280,7 +282,7 @@ pub(crate) struct FakeEngine {
             ExtensionBrowserRequestSettlement,
         )>,
     >,
-    extension_browser_first_urls: Mutex<Vec<Option<(Arc<str>, NavigationRequestId)>>>,
+    extension_browser_first_urls: Mutex<Vec<FirstUrlAfterReply>>,
     page_permission_settlements: Mutex<
         Vec<(
             ProfileId,
@@ -393,7 +395,7 @@ impl FakeEngine {
         self.extension_browser_settlements.lock().unwrap().clone()
     }
 
-    fn extension_browser_first_urls(&self) -> Vec<Option<(Arc<str>, NavigationRequestId)>> {
+    fn extension_browser_first_urls(&self) -> Vec<FirstUrlAfterReply> {
         self.extension_browser_first_urls.lock().unwrap().clone()
     }
 

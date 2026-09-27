@@ -53,7 +53,8 @@ pub(super) struct IsolatedResourceTaskPool {
 impl IsolatedResourceTaskPool {
     pub(super) fn shared() -> Rc<Self> {
         thread_local! {
-            static LIVE_POOL: RefCell<RcWeak<IsolatedResourceTaskPool>> = RefCell::new(RcWeak::new());
+            static LIVE_POOL: RefCell<RcWeak<IsolatedResourceTaskPool>> =
+                const { RefCell::new(RcWeak::new()) };
         }
         LIVE_POOL.with(|slot| {
             if let Some(pool) = slot.borrow().upgrade() {
