@@ -11,14 +11,9 @@ mod blocker;
 mod compatibility;
 mod deletion;
 mod downloads;
-mod extension_grants;
-mod extension_profile_policy;
-mod extension_provenance;
-mod extensions;
 mod favicons;
 mod filesystem;
 mod history;
-mod native_ownership;
 mod page_permissions;
 mod resources;
 mod session;
@@ -99,12 +94,6 @@ pub struct Hub {
     fail_profile_deletion_after_local_purge_once: bool,
     #[cfg(test)]
     ambiguous_page_permission_commit_once: bool,
-    #[cfg(test)]
-    ambiguous_extension_install_commit_once: bool,
-    #[cfg(test)]
-    ambiguous_extension_grant_commit_once: bool,
-    #[cfg(test)]
-    ambiguous_extension_native_ownership_commit_once: bool,
 }
 
 pub(crate) struct AuthoritativeLoad {
@@ -159,12 +148,6 @@ impl Hub {
             fail_profile_deletion_after_local_purge_once: false,
             #[cfg(test)]
             ambiguous_page_permission_commit_once: false,
-            #[cfg(test)]
-            ambiguous_extension_install_commit_once: false,
-            #[cfg(test)]
-            ambiguous_extension_grant_commit_once: false,
-            #[cfg(test)]
-            ambiguous_extension_native_ownership_commit_once: false,
         };
         hub.load_registry()?;
         let _ = hub.recover_qa_settings_tab_quarantine()?;
@@ -263,12 +246,6 @@ impl Hub {
             fail_profile_deletion_after_local_purge_once: false,
             #[cfg(test)]
             ambiguous_page_permission_commit_once: false,
-            #[cfg(test)]
-            ambiguous_extension_install_commit_once: false,
-            #[cfg(test)]
-            ambiguous_extension_grant_commit_once: false,
-            #[cfg(test)]
-            ambiguous_extension_native_ownership_commit_once: false,
         })
     }
 

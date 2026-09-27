@@ -2614,69 +2614,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn every_store_write_payload_stays_inside_its_exported_retained_bound() {
-        use crate::ports::store::{ExtensionGrantWrite, MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES};
-
-        let manifest = manifest_for(
-            package(1, 1),
-            &["storage"],
-            &[],
-            &["https://example.com/*"],
-            &[],
-        );
-        let authority =
-            ExtensionGrantAuthority::new(&install(manifest.package().clone()), &manifest).unwrap();
-        let writes = [
-            ExtensionGrantWrite::Initialize {
-                authority: Box::new(authority),
-            },
-            ExtensionGrantWrite::Apply {
-                expected: ExtensionGrantRevision::INITIAL,
-                mutation: ExtensionGrantMutation::SetApi {
-                    name: ApiPermissionName::parse_exact("storage").unwrap(),
-                    granted: true,
-                },
-            },
-            ExtensionGrantWrite::Apply {
-                expected: ExtensionGrantRevision::INITIAL,
-                mutation: ExtensionGrantMutation::SetHost {
-                    pattern: MatchPattern::parse("https://example.com/*").unwrap(),
-                    granted: true,
-                },
-            },
-            ExtensionGrantWrite::Apply {
-                expected: ExtensionGrantRevision::INITIAL,
-                mutation: ExtensionGrantMutation::SetFileAccess { granted: false },
-            },
-            ExtensionGrantWrite::Apply {
-                expected: ExtensionGrantRevision::INITIAL,
-                mutation: ExtensionGrantMutation::SetPrivateAccess { granted: true },
-            },
-            ExtensionGrantWrite::ApplyPatch {
-                expected: ExtensionGrantRevision::INITIAL,
-                patch: ExtensionGrantPatch::new(vec![
-                    ExtensionGrantMutation::SetApi {
-                        name: ApiPermissionName::parse_exact("storage").unwrap(),
-                        granted: true,
-                    },
-                    ExtensionGrantMutation::SetHost {
-                        pattern: MatchPattern::parse("https://example.com/*").unwrap(),
-                        granted: true,
-                    },
-                    ExtensionGrantMutation::SetPrivateAccess { granted: true },
-                ])
-                .unwrap(),
-            },
-        ];
-        for write in writes {
-            assert!(
-                write.retained_bytes() <= MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
-                "{write:?} exceeded the actor admission ceiling"
-            );
-        }
-    }
-
     proptest! {
         #[test]
         fn arbitrary_private_toggle_sequence_advances_only_on_change(

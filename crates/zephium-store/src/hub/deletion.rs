@@ -3,13 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use zephium_core::extensions::{
-    ExtensionNativeNamespaceScope, MAX_EXTENSION_NATIVE_NAMESPACE_OBLIGATIONS,
-};
-use zephium_core::ports::store::{
-    ExtensionNativeOwnershipJournalLoadOutcome, PendingProfileDeletion,
-    ProfileDeletionAuthorizeOutcome,
-};
+use zephium_core::ports::store::{PendingProfileDeletion, ProfileDeletionAuthorizeOutcome};
 
 use super::filesystem::profile_artifacts_absent;
 use super::*;
@@ -21,7 +15,6 @@ pub(super) struct ProfileDeletionJournalEntry {
     pub(super) profile: ProfileId,
     native_erasure_verified: bool,
     local_unlink_process: Option<ProfileId>,
-    extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
 }
 
 impl ProfileDeletionJournalEntry {
@@ -29,7 +22,7 @@ impl ProfileDeletionJournalEntry {
         PendingProfileDeletion {
             profile: self.profile,
             native_erasure_verified: self.native_erasure_verified,
-            extension_native_namespace: self.extension_native_namespace,
+            extension_native_namespace: None,
         }
     }
 }
@@ -48,17 +41,6 @@ impl Hub {
         profile: ProfileId,
         filtered: &SessionState,
     ) -> rusqlite::Result<ProfileDeletionAuthorizeOutcome> {
-        match self.has_extension_native_ownership_for_profile(profile) {
-            Ok(false) => {}
-            Ok(true) | Err(_) => {
-                // The actor's outer authorization error path is reserved for
-                // durability-ambiguous session/journal commits. Do not let a
-                // corrupt or unreadable ownership cohort enter that path and
-                // be mistaken for an already-authorized deletion after
-                // reconciliation. Unknown ownership is pending ownership.
-                return Ok(ProfileDeletionAuthorizeOutcome::ExtensionNativeOwnershipPending);
-            }
-        }
         let prepared = self.prepare_session(filtered)?;
         if prepared.registry.contains(&profile) {
             return Ok(ProfileDeletionAuthorizeOutcome::InvalidSession);
@@ -176,7 +158,6 @@ impl Hub {
                 profile,
                 native_erasure_verified,
                 local_unlink_process,
-                extension_native_namespace: None,
             });
         }
         if profiles.len() != count as usize {
@@ -184,85 +165,7 @@ impl Hub {
                 "profile deletion journal changed while loading",
             ));
         }
-        self.attach_native_namespace_obligations(&mut profiles)?;
         Ok(profiles)
-    }
-
-    fn attach_native_namespace_obligations(
-        &self,
-        deletions: &mut [ProfileDeletionJournalEntry],
-    ) -> rusqlite::Result<()> {
-        let count = self.meta.query_row(
-            "SELECT count(*) FROM extension_native_namespace_obligations",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
-        if !(0..=MAX_EXTENSION_NATIVE_NAMESPACE_OBLIGATIONS as i64).contains(&count) {
-            return Err(invalid_data(
-                "native extension namespace obligation cohort exceeds limit",
-            ));
-        }
-        let mut statement = self.meta.prepare(
-            "SELECT CASE
-                        WHEN length(CAST(profile_id AS BLOB)) <= 26 THEN profile_id
-                    END,
-                    namespace_version
-             FROM extension_native_namespace_obligations
-             ORDER BY profile_id, namespace_version",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        let mut observed = 0_usize;
-        for row in rows {
-            observed = observed
-                .checked_add(1)
-                .ok_or_else(|| invalid_data("native namespace obligation count overflow"))?;
-            let (raw_profile, raw_version) = row?;
-            let raw_profile = raw_profile
-                .ok_or_else(|| invalid_data("native namespace profile id exceeds limit"))?;
-            let profile = ProfileId::parse(&raw_profile)
-                .filter(|profile| profile.to_string() == raw_profile)
-                .ok_or_else(|| invalid_data("native namespace profile id is not canonical"))?;
-            let version = u8::try_from(raw_version)
-                .ok()
-                .and_then(ExtensionNativeNamespaceScope::from_persisted_version)
-                .ok_or_else(|| invalid_data("native namespace version is unsupported"))?;
-            if self.registry.contains(&profile) {
-                if deletions.iter().any(|deletion| deletion.profile == profile) {
-                    return Err(invalid_data(
-                        "native namespace obligation has ambiguous durable anchors",
-                    ));
-                }
-                continue;
-            }
-            let deletion = deletions
-                .iter_mut()
-                .find(|deletion| deletion.profile == profile)
-                .ok_or_else(|| {
-                    invalid_data("native namespace obligation has no durable profile anchor")
-                })?;
-            if deletion.native_erasure_verified {
-                return Err(invalid_data(
-                    "native namespace obligation survives native-erasure proof",
-                ));
-            }
-            if deletion
-                .extension_native_namespace
-                .replace(version)
-                .is_some()
-            {
-                return Err(invalid_data(
-                    "profile has multiple native namespace obligations",
-                ));
-            }
-        }
-        if observed != count as usize {
-            return Err(invalid_data(
-                "native namespace obligation cohort changed while loading",
-            ));
-        }
-        Ok(())
     }
 
     fn pending_profile_deletion_entries(
@@ -390,30 +293,6 @@ impl Hub {
         self.profiles
             .retain(|profile, _| self.registry.contains(profile));
         let journal = self.profile_deletion_journal_entries()?;
-        let ExtensionNativeOwnershipJournalLoadOutcome::Loaded(native_ownership) =
-            self.load_extension_native_ownership_journal()?
-        else {
-            return Err(invalid_data(
-                "native extension ownership is unavailable during profile deletion recovery",
-            ));
-        };
-        if journal.iter().any(|deletion| {
-            native_ownership
-                .entries()
-                .iter()
-                .any(|owner| owner.key().profile() == deletion.profile)
-        }) {
-            // A deletion authorization can predate the native-ownership
-            // interlock (or survive an outcome-unknown boundary). Never hand
-            // that stale capability to the application while cleanup still
-            // has a possible native owner for the same profile. Loading the
-            // complete bounded ownership cohort above also makes a malformed
-            // sibling fail the whole reconciliation instead of hiding it
-            // behind a targeted lookup.
-            return Err(invalid_data(
-                "profile deletion recovery is blocked by native extension ownership",
-            ));
-        }
         let pending = Self::pending_profile_deletion_entries(&journal);
         if !journal.is_empty() {
             let authoritative = self.meta.query_row(
@@ -463,14 +342,6 @@ impl Hub {
         profile: ProfileId,
         require_restart_confirmation: bool,
     ) -> rusqlite::Result<bool> {
-        // Authorization cannot be used as a stale capability to purge the
-        // local profile while a native extension owner remains unresolved.
-        // Validate the complete global cohort; malformed siblings fail closed.
-        if self.has_extension_native_ownership_for_profile(profile)? {
-            return Err(invalid_data(
-                "profile deletion is blocked by native extension ownership",
-            ));
-        }
         // Validate every row first. A malformed sibling must not be hidden by
         // a targeted query and later crowd a valid authorization out of the
         // bounded cohort.
@@ -495,48 +366,17 @@ impl Hub {
         // this commit resumes only the local file phase; a crash before it
         // safely repeats the idempotent native verification.
         if !deletion.native_erasure_verified {
-            let tx = self.meta.transaction()?;
-            let profile_text = profile.to_string();
-            let changed = match deletion.extension_native_namespace {
-                Some(ExtensionNativeNamespaceScope::MacosControllerV1) => tx.execute(
-                    "DELETE FROM extension_native_namespace_obligations
-                     WHERE profile_id = ?1 AND namespace_version = 1",
-                    [&profile_text],
-                )?,
-                Some(_) => {
-                    return Err(invalid_data(
-                        "profile deletion carries an unsupported native namespace",
-                    ))
-                }
-                None => tx.execute(
-                    "UPDATE profile_deletion_journal
-                     SET native_erasure_verified = 1
-                     WHERE profile_id = ?1 AND native_erasure_verified = 0",
-                    [&profile_text],
-                )?,
-            };
+            let changed = self.meta.execute(
+                "UPDATE profile_deletion_journal
+                 SET native_erasure_verified = 1
+                 WHERE profile_id = ?1 AND native_erasure_verified = 0",
+                [profile.to_string()],
+            )?;
             if changed != 1 {
                 return Err(invalid_data(
                     "profile deletion native proof changed no exact durable obligation",
                 ));
             }
-            let settled = tx.query_row(
-                "SELECT native_erasure_verified,
-                        NOT EXISTS(
-                            SELECT 1 FROM extension_native_namespace_obligations
-                            WHERE profile_id = ?1
-                        )
-                 FROM profile_deletion_journal
-                 WHERE profile_id = ?1",
-                [&profile_text],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
-            )?;
-            if settled != (1, true) {
-                return Err(invalid_data(
-                    "profile deletion native proof did not settle namespace obligation",
-                ));
-            }
-            tx.commit()?;
         }
 
         self.profiles.remove(&profile);
@@ -741,81 +581,8 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use rusqlite::{params, Connection};
-    use zephium_core::extensions::{
-        ExtensionAuthorityId, ExtensionCatalogGenerationRole, ExtensionCatalogSetDigest,
-        ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
-        ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDigest,
-        ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
-        ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIntent,
-        ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation,
-        ExtensionNativeOwnershipPhase, ExtensionPackageIdentity, ExtensionPackageKey,
-        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionRuntimeBackendTarget,
-        ExtensionTreeDigest,
-    };
-    use zephium_core::ids::ExtensionInstallId;
-    use zephium_core::profiles::ProfileKind;
-    use zephium_core::session::PersistedProfile;
 
     const PROFILE_SCRUB_MARKER: &str = "zephiumscrubmarker97613";
-
-    fn native_entry(
-        profile: ProfileId,
-        install: ExtensionInstallId,
-    ) -> ExtensionNativeOwnershipEntry {
-        ExtensionNativeOwnershipEntry::from_persisted(
-            ExtensionNativeOwnershipKey::new(
-                profile,
-                install,
-                ExtensionGrantBrowsingContext::Regular,
-            ),
-            ExtensionNativeOwnershipOperation::INITIAL,
-            ExtensionNativeOwnershipEntryRevision::new(2).unwrap(),
-            ExtensionPackageIdentity::new(
-                ExtensionAuthorityId::from_bytes([1; 32]),
-                ExtensionPackageKey::from_bytes([2; 32]),
-                ExtensionPackageRevision::INITIAL,
-                ExtensionPackagePayloadIdentity::BundledTree,
-                ExtensionManifestDigest::from_bytes([3; 32]),
-                ExtensionTreeDigest::from_bytes([4; 32]),
-            ),
-            ExtensionCatalogSetDigest::from_bytes([5; 32]),
-            ExtensionCatalogGenerationRole::Active,
-            ExtensionInstallCatalogRevision::INITIAL,
-            ExtensionInstallRevision::INITIAL,
-            ExtensionGrantRevision::INITIAL,
-            ExtensionGrantDigest::from_bytes([6; 32]),
-            ExtensionRuntimeBackendTarget::MacosNative,
-            ExtensionNativeIncarnation::INITIAL,
-            ExtensionNativeOwnershipIntent::Acquire,
-            ExtensionNativeOwnershipPhase::NativeMayOwn,
-        )
-        .unwrap()
-    }
-
-    fn deletion_sessions() -> (SessionState, SessionState) {
-        let survivor = PersistedProfile {
-            id: ProfileId::from(1),
-            name: "Personal".into(),
-            kind: ProfileKind::Default,
-        };
-        let deleted = PersistedProfile {
-            id: ProfileId::from(2),
-            name: "Work".into(),
-            kind: ProfileKind::Named,
-        };
-        let filtered = SessionState {
-            profiles: vec![survivor.clone()],
-            spaces: Vec::new(),
-            items: Vec::new(),
-            active_space: None,
-            active_item: None,
-            splits: None,
-            recently_closed: Vec::new(),
-        };
-        let mut full = filtered.clone();
-        full.profiles.push(deleted);
-        (full, filtered)
-    }
 
     #[test]
     fn profile_scrub_covers_every_current_user_data_and_authority_table() {
@@ -1088,184 +855,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn local_profile_purge_refuses_stale_authorization_while_native_owner_is_unresolved() {
-        let mut hub = Hub::in_memory().unwrap();
-        let profile = ProfileId::from(81);
-        hub.meta
-            .execute(
-                "INSERT INTO profile_deletion_journal(
-                     profile_id, authorized_at, native_erasure_verified,
-                     local_unlink_completed, local_unlink_process
-                 ) VALUES (?1, 1, 0, 0, NULL)",
-                [profile.to_string()],
-            )
-            .unwrap();
-        let entry = native_entry(profile, ExtensionInstallId::from(82));
-        hub.inject_extension_native_ownership_entry_for_interlock_test(&entry)
-            .unwrap();
-
-        assert!(hub.finalize_profile_deletion(profile).is_err());
-        let journal = hub.profile_deletion_journal_entries().unwrap();
-        assert_eq!(journal.len(), 1);
-        assert!(!journal[0].native_erasure_verified);
-    }
-
-    #[test]
-    fn pending_deletion_recovery_refuses_a_profile_with_unresolved_native_ownership() {
-        let mut hub = Hub::in_memory().unwrap();
-        let (full, filtered) = deletion_sessions();
-        let profile = ProfileId::from(2);
-        hub.save(&full).unwrap();
-        assert_eq!(
-            hub.authorize_profile_deletion(profile, &filtered).unwrap(),
-            ProfileDeletionAuthorizeOutcome::Authorized
-        );
-        let entry = native_entry(profile, ExtensionInstallId::from(83));
-        hub.inject_extension_native_ownership_entry_for_interlock_test(&entry)
-            .unwrap();
-
-        let error = hub
-            .reconcile_profile_deletion_journal()
-            .expect_err("possible native ownership must hide stale deletion authority");
-        assert!(
-            error.to_string().contains("native extension ownership"),
-            "{error}"
-        );
-        let journal = hub.profile_deletion_journal_entries().unwrap();
-        assert_eq!(journal.len(), 1);
-        assert!(!journal[0].native_erasure_verified);
-    }
-
-    #[test]
-    fn pending_deletion_recovery_allows_valid_ownership_for_another_profile() {
-        let mut hub = Hub::in_memory().unwrap();
-        let (full, filtered) = deletion_sessions();
-        let profile = ProfileId::from(2);
-        hub.save(&full).unwrap();
-        assert_eq!(
-            hub.authorize_profile_deletion(profile, &filtered).unwrap(),
-            ProfileDeletionAuthorizeOutcome::Authorized
-        );
-        let unrelated = native_entry(ProfileId::from(1), ExtensionInstallId::from(84));
-        hub.inject_extension_native_ownership_entry_for_interlock_test(&unrelated)
-            .unwrap();
-
-        assert_eq!(
-            hub.reconcile_profile_deletion_journal().unwrap(),
-            vec![PendingProfileDeletion {
-                profile,
-                native_erasure_verified: false,
-                extension_native_namespace: None,
-            }]
-        );
-    }
-
-    #[test]
-    fn deletion_projects_and_atomically_settles_exact_native_namespace_scope() {
-        let mut hub = Hub::in_memory().unwrap();
-        let (full, filtered) = deletion_sessions();
-        let profile = ProfileId::from(2);
-        hub.save(&full).unwrap();
-        hub.meta
-            .execute(
-                "INSERT INTO extension_native_namespace_obligations(
-                     profile_id, namespace_version
-                 ) VALUES (?1, 1)",
-                [profile.to_string()],
-            )
-            .unwrap();
-        // An ordinary authoritative save updates rows in place and must not
-        // transiently orphan the retained native namespace.
-        hub.save(&full).unwrap();
-
-        assert_eq!(
-            hub.authorize_profile_deletion(profile, &filtered).unwrap(),
-            ProfileDeletionAuthorizeOutcome::Authorized
-        );
-        assert_eq!(
-            hub.pending_profile_deletions().unwrap(),
-            vec![PendingProfileDeletion {
-                profile,
-                native_erasure_verified: false,
-                extension_native_namespace: Some(ExtensionNativeNamespaceScope::MacosControllerV1),
-            }]
-        );
-
-        hub.fail_next_profile_deletion_after_local_purge();
-        assert!(hub.finalize_profile_deletion(profile).is_err());
-        assert_eq!(
-            hub.pending_profile_deletions().unwrap(),
-            vec![PendingProfileDeletion {
-                profile,
-                native_erasure_verified: true,
-                extension_native_namespace: None,
-            }],
-            "a crash after proof must retain only the settled deletion tombstone"
-        );
-        assert_eq!(
-            hub.meta
-                .query_row(
-                    "SELECT count(*) FROM extension_native_namespace_obligations
-                     WHERE profile_id = ?1",
-                    [profile.to_string()],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            0
-        );
-        assert!(hub.finalize_profile_deletion(profile).unwrap());
-        assert!(hub.pending_profile_deletions().unwrap().is_empty());
-    }
-
-    #[test]
-    fn malformed_native_ownership_sibling_blocks_authorization_and_final_purge() {
-        let mut hub = Hub::in_memory().unwrap();
-        let (full, filtered) = deletion_sessions();
-        hub.save(&full).unwrap();
-        let target = ProfileId::from(2);
-        let sibling = native_entry(ProfileId::from(1), ExtensionInstallId::from(1));
-        hub.inject_extension_native_ownership_entry_for_interlock_test(&sibling)
-            .unwrap();
-        hub.meta
-            .pragma_update(None, "ignore_check_constraints", true)
-            .unwrap();
-        hub.meta
-            .execute(
-                "UPDATE extension_native_ownership_journal SET phase = 'unknown'",
-                [],
-            )
-            .unwrap();
-
-        assert_eq!(
-            hub.authorize_profile_deletion(target, &filtered).unwrap(),
-            ProfileDeletionAuthorizeOutcome::ExtensionNativeOwnershipPending
-        );
-        assert!(hub.profile_deletion_journal_entries().unwrap().is_empty());
-
-        // Reproduce a stale pre-interlock authorization without using the
-        // production path, then prove finalization still validates every
-        // ownership sibling before marking native proof or purging locally.
-        hub.meta
-            .execute("DELETE FROM profiles WHERE id = ?1", [target.to_string()])
-            .unwrap();
-        hub.load_registry().unwrap();
-        hub.meta
-            .execute(
-                "INSERT INTO profile_deletion_journal(
-                     profile_id, authorized_at, native_erasure_verified,
-                     local_unlink_completed, local_unlink_process
-                 ) VALUES (?1, 1, 0, 0, NULL)",
-                [target.to_string()],
-            )
-            .unwrap();
-        assert!(hub.reconcile_profile_deletion_journal().is_err());
-        assert!(hub.finalize_profile_deletion(target).is_err());
-        let journal = hub.profile_deletion_journal_entries().unwrap();
-        assert_eq!(journal.len(), 1);
-        assert!(!journal[0].native_erasure_verified);
     }
 
     fn database_files(path: &Path) -> [PathBuf; 3] {

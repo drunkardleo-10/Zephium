@@ -1096,17 +1096,6 @@ impl Store for FakeStore {
         true
     }
 
-    fn recent_history(
-        &self,
-        _profile: ProfileId,
-        limit: u32,
-    ) -> Vec<zephium_core::ports::store::HistoryHit> {
-        self.history
-            .iter()
-            .take(usize::try_from(limit).unwrap_or(usize::MAX))
-            .cloned()
-            .collect()
-    }
     fn favicon_age(&self, _profile: ProfileId, origin: &str) -> Option<i64> {
         self.icon_ages.lock().unwrap().get(origin).copied()
     }
