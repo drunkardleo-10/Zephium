@@ -189,10 +189,15 @@ the start URL's site (its registrable domain), driven by the page agent
 at most 60 actions, 40 model calls and 8 minutes of its own time; time held
 for the person does not count). The document gate follows the site's own
 redirects and same-document routes and cancels page-initiated and cross-site
-loads without losing the page.
+loads without losing the page. A same-site load a step starts (a search or
+filter form, a script navigation) is cancelled and followed as the page
+agent's own navigation; a same-site form POST passes only for an approved
+commitment.
 
 Before a run first works on a site where the profile holds cookies (a
-presence fact, never their contents), it asks once: Allow (this run), Always
+presence fact, never their contents), Rust reads the whole start page before
+any model call; a signed-out page goes on without a question, otherwise it
+asks once: Allow (this run), Always
 for the site (kept per profile, `WorkRequest::SiteAccess`), or Not now (the
 site is worked privately). Never and the closed list of sensitive sites
 (banks, password managers, health and tax portals; Ask at most) keep the
@@ -202,12 +207,21 @@ already works on as the person.
 
 The page agent reads, navigates, searches, filters and fills drafts. A step
 Rust reads as committing (send, post, pay, book, delete, share, save, submit a
-non-search form, Enter in a composer, an edit that saves as it types) is held
-back and reported to the lead; confirmation is a later stage. Password and
+non-search form, Enter in a composer, an edit that saves as it types), or one
+the page agent declares so, is held: the page stays as it is and the run
+records a `Confirm` step (headline, action, the exact text, facts from the
+page's own region, the page's frame, other sites the text quotes). The person
+decides through `ApproveStep`; an autosaving edit also offers "Allow edits on
+this site for this run" (`for_run`). An approval runs once, and only while the
+step and its preview are unchanged; a changed page asks again, a decline is
+never retried. The step's status is its receipt. A step read as harmless whose
+page then says it committed something stops the page task. Password and
 secret fields are never typed into. A sign-in wall (a password field or a
 sign-in form, read by Rust or raised by the page agent) holds the page for the
 person; the page continues by itself once their navigation settles back on the
-site, off any sign-in path. Facts from the person's pages never ride a search
+site, off any sign-in path. A page load the person finishes on the site in an
+ordinary tab (a count, never its URL) wakes a held page, which starts over
+once in the fresh session. Facts from the person's pages never ride a search
 query, provider retention never applies to them, and diagnostics carry only
 the page kind and its path class. Origin grants, their page budget and the
 single-field update are retired; stored runs that used them still load.
