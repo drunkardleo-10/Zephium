@@ -94,6 +94,10 @@ test("pages and workers get every API fix", async () => {
     assert.equal(typeof chrome.webNavigation.onHistoryStateUpdated.addListener, "function", kind);
     assert.equal(typeof chrome.notifications.create, "function", kind);
     assert.match(chrome.identity.getRedirectURL("cb"), /^https:\/\/abcdefghijklmnopabcdefghijklmnop\.chromiumapp\.org\/cb$/);
+    const saving = await chrome.privacy.services.passwordSavingEnabled.get({});
+    assert.equal(saving.value, true, kind);
+    await chrome.privacy.services.passwordSavingEnabled.set({ value: false });
+    assert.equal((await chrome.privacy.services.passwordSavingEnabled.get({})).value, false, kind);
   }
 });
 

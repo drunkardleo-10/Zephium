@@ -71,6 +71,14 @@
   }
 
   // ---- Language gaps -------------------------------------------------------
+  if (typeof g.scheduler !== "object" || g.scheduler === null) {
+    try {
+      Object.defineProperty(g, "scheduler", { value: {}, configurable: true, writable: true });
+    } catch {}
+  }
+  if (g.scheduler && typeof g.scheduler.yield !== "function") {
+    g.scheduler.yield = () => new Promise((resolve) => setTimeout(resolve, 0));
+  }
   if (typeof Symbol.dispose !== "symbol") {
     Object.defineProperty(Symbol, "dispose", { value: Symbol.for("Symbol.dispose") });
   }
@@ -281,6 +289,53 @@
       }
       if (!identity) pin(chromeApi, "identity", target);
     }
+  }
+
+  // Password managers turn off the browser's own password saving through
+  // chrome.privacy; WebKit has no privacy API. The settings answer as
+  // controllable by the extension and remember what it sets.
+  if (!isContent && !chromeApi.privacy) {
+    const setting = (initial) => {
+      let value = initial;
+      const changed = makeEvent();
+      const details = () => ({ value, levelOfControl: "controllable_by_this_extension" });
+      return {
+        get: (_details, callback) => withCallback(Promise.resolve(details()), callback),
+        set: (next, callback) => {
+          if (next && "value" in next) value = next.value;
+          return withCallback(Promise.resolve(), callback);
+        },
+        clear: (_details, callback) => {
+          value = initial;
+          return withCallback(Promise.resolve(), callback);
+        },
+        onChange: changed,
+      };
+    };
+    pin(chromeApi, "privacy", {
+      services: {
+        passwordSavingEnabled: setting(true),
+        autofillEnabled: setting(true),
+        autofillAddressEnabled: setting(true),
+        autofillCreditCardEnabled: setting(true),
+        alternateErrorPagesEnabled: setting(false),
+        safeBrowsingEnabled: setting(false),
+        searchSuggestEnabled: setting(true),
+        spellingServiceEnabled: setting(false),
+        translationServiceEnabled: setting(false),
+      },
+      network: {
+        networkPredictionEnabled: setting(true),
+        webRTCIPHandlingPolicy: setting("default"),
+      },
+      websites: {
+        thirdPartyCookiesAllowed: setting(true),
+        hyperlinkAuditingEnabled: setting(false),
+        referrersEnabled: setting(true),
+        doNotTrackEnabled: setting(false),
+        protectedContentEnabled: setting(true),
+      },
+    });
   }
 
   // Chrome always has the enterprise-policy storage area, empty when no
