@@ -596,8 +596,15 @@ pub(crate) fn protected_script_specs_for_native_probe(
     PROTECTED_SCRIPT_SPECS.map(|spec| (spec.source, spec.all_frames))
 }
 
-fn protected_scripts() -> [UserScript; PROTECTED_SCRIPT_SPECS.len()] {
-    PROTECTED_SCRIPT_SPECS.map(|spec| builtin_script(spec.id, spec.source, spec.all_frames))
+fn protected_scripts() -> &'static [UserScript; PROTECTED_SCRIPT_SPECS.len()] {
+    // These descriptors contain only immutable, profile-independent source
+    // and matching rules. Each view still gets its own native registrations
+    // and document state; sharing Rust source buffers grants no shared world.
+    static SCRIPTS: std::sync::OnceLock<[UserScript; PROTECTED_SCRIPT_SPECS.len()]> =
+        std::sync::OnceLock::new();
+    SCRIPTS.get_or_init(|| {
+        PROTECTED_SCRIPT_SPECS.map(|spec| builtin_script(spec.id, spec.source, spec.all_frames))
+    })
 }
 
 fn is_protected_builtin_id(id: ScriptId) -> bool {
@@ -796,15 +803,21 @@ impl UserContentRegistry {
     }
 
     fn scripts_for(&self, partition: Partition) -> Vec<UserScript> {
-        let mut out = Vec::with_capacity(PROTECTED_SCRIPT_SPECS.len());
-        out.extend(protected_scripts());
-        for scope in [
+        let scopes = [
             ContentScope::Global,
             ContentScope::Profile(partition.profile()),
-        ] {
-            if let Some(entry) = self.scopes.get(&scope) {
-                out.extend(entry.scripts.iter().cloned());
-            }
+        ]
+        .map(|scope| self.scopes.get(&scope));
+        let capacity = PROTECTED_SCRIPT_SPECS.len()
+            + scopes
+                .iter()
+                .flatten()
+                .map(|entry| entry.scripts.len())
+                .sum::<usize>();
+        let mut out = Vec::with_capacity(capacity);
+        out.extend(protected_scripts().iter().cloned());
+        for entry in scopes.into_iter().flatten() {
+            out.extend(entry.scripts.iter().cloned());
         }
         out
     }
@@ -1208,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_style_wrapper_is_shared_across_view_snapshots() {
+    fn immutable_host_sources_are_shared_across_view_snapshots() {
         let registry = UserContentRegistry::with_initial_global(
             generation(1),
             UserContent {
@@ -1226,6 +1239,22 @@ mod tests {
         let partition = Partition::Persistent(ProfileId::from(22));
         let first = registry.scripts_for(partition);
         let second = registry.scripts_for(partition);
+        let private = registry.scripts_for(Partition::Ephemeral(ProfileId::from(23)));
+        for index in 0..PROTECTED_SCRIPT_SPECS.len() {
+            assert!(std::sync::Arc::ptr_eq(
+                &first[index].source,
+                &second[index].source
+            ));
+            assert!(std::sync::Arc::ptr_eq(
+                &first[index].source,
+                &private[index].source
+            ));
+            assert_eq!(first[index].owner, ScriptOwner::Builtin);
+            assert_eq!(
+                first[index].all_frames,
+                PROTECTED_SCRIPT_SPECS[index].all_frames
+            );
+        }
         let first_style = first
             .iter()
             .find(|script| script.id == ScriptId::from(4))

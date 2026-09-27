@@ -8,6 +8,8 @@
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
+pub mod chrome_store;
+
 use std::fmt;
 use std::time::Duration;
 

@@ -1,4 +1,4 @@
-//! Bounded descriptor-relative private-tree removal for Unix.
+//! Bounded handle-relative private-tree removal shared by supported adapters.
 
 use std::collections::HashSet;
 use std::fs::File;

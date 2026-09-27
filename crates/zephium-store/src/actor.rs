@@ -152,6 +152,12 @@ type UserscriptCatalogMutationDone = Box<dyn FnOnce(UserscriptCatalogMutationOut
 type PagePermissionCatalogLoadDone = Box<dyn FnOnce(PagePermissionCatalogLoadOutcome) + Send>;
 type PagePermissionCatalogMutationDone =
     Box<dyn FnOnce(PagePermissionCatalogMutationOutcome) + Send>;
+type ExtensionPackageStorageRootsLoadDone =
+    Box<dyn FnOnce(ExtensionPackageStorageRootsLoadOutcome) + Send>;
+type ExtensionInstallProvenanceLoadDone =
+    Box<dyn FnOnce(zephium_core::ports::store::ExtensionInstallProvenanceLoadOutcome) + Send>;
+type ExtensionUpstreamCheckpointLoadDone =
+    Box<dyn FnOnce(zephium_core::ports::store::ExtensionUpstreamCheckpointLoadOutcome) + Send>;
 type ExtensionInstallCatalogLoadDone = Box<dyn FnOnce(ExtensionInstallCatalogLoadOutcome) + Send>;
 type ExtensionInstallCatalogMutationDone =
     Box<dyn FnOnce(ExtensionInstallCatalogMutationOutcome) + Send>;
@@ -670,6 +676,16 @@ enum Cmd {
         PagePermissionCatalogMutationDone,
     ),
     LoadExtensionInstallCatalog(ProfileId, ExtensionInstallCatalogLoadDone),
+    LoadExtensionInstallProvenance(
+        ProfileId,
+        zephium_core::ids::ExtensionInstallId,
+        ExtensionInstallProvenanceLoadDone,
+    ),
+    LoadExtensionUpstreamCheckpoint(
+        ProfileId,
+        zephium_core::extensions::ExtensionPackageKey,
+        ExtensionUpstreamCheckpointLoadDone,
+    ),
     LoadExtensionNativeNamespace(ProfileId, ExtensionNativeNamespaceLoadDone),
     MutateExtensionInstallCatalog(
         ProfileId,
@@ -733,6 +749,7 @@ enum Cmd {
     ),
     LoadExtensionNativeOwnershipJournal(ExtensionNativeOwnershipJournalLoadDone),
     LoadExtensionRuntimeStartupInventory(ExtensionRuntimeStartupInventoryLoadDone),
+    LoadExtensionPackageStorageRoots(ExtensionPackageStorageRootsLoadDone),
     MutateExtensionNativeOwnershipJournal(
         ExtensionNativeOwnershipJournalRevision,
         ExtensionNativeOwnershipJournalMutation,
@@ -788,6 +805,11 @@ enum Cmd {
     ForgetHistoryUrls(ProfileId, Vec<String>, Sender<u32>),
     ClearHistory(ProfileId, Option<i64>, Sender<u32>),
     AmendVisitTitle(ProfileId, String, String),
+    ExtensionHistorySearch(
+        ProfileId,
+        zephium_core::extensions::ExtensionHistorySearchQuery,
+        Sender<Vec<HistoryHit>>,
+    ),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
     FaviconRasterWithAge(ProfileId, String, Sender<Option<(Vec<u8>, i64)>>),
     SaveFavicon(ProfileId, String, Option<String>, Vec<u8>),
@@ -917,6 +939,16 @@ pub enum ExtensionRuntimeStartupInventoryLoadOutcome {
     Failed,
 }
 
+/// Complete package-retention snapshot for the exclusive extension coordinator.
+/// Disabled installs and all unresolved native journal entries are included.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExtensionPackageStorageRootsLoadOutcome {
+    /// Canonical bounded object identities; these are retention data, not runtime authority.
+    Loaded(Vec<zephium_core::extensions::ExtensionBetaObjectDigest>),
+    /// Any unavailable/degraded profile or invalid journal prevents collection.
+    Failed,
+}
+
 /// Move-only Store capability for the serialized extension service.
 ///
 /// In addition to the crash-critical native-ownership journal, this is the
@@ -1031,6 +1063,29 @@ impl ExtensionServiceStoreAuthority {
         if !self
             .store
             .try_load_extension_runtime_startup_inventory(deadline, done)
+        {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    /// Reads retention roots across every registered profile and the native journal.
+    /// Only the exclusive coordinator may use this snapshot, without interleaving
+    /// new install/update/native ownership mutations before collection.
+    pub fn load_package_storage_roots_until(
+        &self,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionPackageStorageRootsLoadOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self
+            .store
+            .try_load_extension_package_storage_roots(deadline, done)
         {
             return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
@@ -1197,6 +1252,83 @@ impl ExtensionServiceStoreAuthority {
         {
             return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    /// Reads the profile-local publisher high-water before source admission or
+    /// cached-package recovery. Only this claimed service capability exposes
+    /// the read; caller-supplied checkpoints cannot replace durable history.
+    pub fn load_upstream_checkpoint_until(
+        &self,
+        profile: ProfileId,
+        publisher: zephium_core::extensions::ExtensionPackageKey,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<
+        zephium_core::ports::store::ExtensionUpstreamCheckpointLoadOutcome,
+    > {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        let lifecycle = match self.store.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return ExtensionServiceStoreCallOutcome::NotAdmitted,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.store.shutdown_clean.load(Ordering::Acquire)
+            || self
+                .store
+                .tx
+                .try_send(Cmd::LoadExtensionUpstreamCheckpoint(
+                    profile, publisher, done,
+                ))
+                .is_err()
+        {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        drop(lifecycle);
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    /// Loads bounded source provenance for offline package reauthentication.
+    /// Only the serialized extension service can obtain this read capability.
+    pub fn load_install_provenance_until(
+        &self,
+        profile: ProfileId,
+        install: zephium_core::ids::ExtensionInstallId,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<
+        zephium_core::ports::store::ExtensionInstallProvenanceLoadOutcome,
+    > {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        let lifecycle = match self.store.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return ExtensionServiceStoreCallOutcome::NotAdmitted,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.store.shutdown_clean.load(Ordering::Acquire)
+            || self
+                .store
+                .tx
+                .try_send(Cmd::LoadExtensionInstallProvenance(profile, install, done))
+                .is_err()
+        {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        drop(lifecycle);
         observe_extension_service_store_call(result, deadline)
     }
 
@@ -1802,6 +1934,27 @@ impl SqliteStore {
         }
         self.tx
             .try_send(Cmd::LoadExtensionRuntimeStartupInventory(done))
+            .is_ok()
+    }
+
+    fn try_load_extension_package_storage_roots(
+        &self,
+        deadline: Instant,
+        done: ExtensionPackageStorageRootsLoadDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::LoadExtensionPackageStorageRoots(done))
             .is_ok()
     }
 
@@ -3158,6 +3311,22 @@ impl Store for SqliteStore {
             .is_ok()
     }
 
+    fn extension_history_search(
+        &self,
+        profile: ProfileId,
+        query: &zephium_core::extensions::ExtensionHistorySearchQuery,
+    ) -> Vec<HistoryHit> {
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::ExtensionHistorySearch(profile, query.clone(), tx))
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
+    }
+
     fn recent_history(&self, profile: ProfileId, limit: u32) -> Vec<HistoryHit> {
         if limit == 0 {
             return Vec::new();
@@ -3289,6 +3458,7 @@ fn admissible_session(session: &SessionState) -> bool {
                     && zoom.is_finite()
                     && (0.3..=3.0).contains(zoom)
             }
+            PersistedKind::BrowserTab { .. } => true,
         })
         && session.recently_closed.len() <= MAX_RECENTLY_CLOSED_TABS
         && session.recently_closed.iter().all(|entry| {
@@ -3517,6 +3687,24 @@ fn actor(
                 };
                 done(outcome);
             }
+            Some(Cmd::LoadExtensionUpstreamCheckpoint(profile, publisher, done)) => {
+                let outcome = match hub.load_extension_upstream_checkpoint(profile, publisher) {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        zephium_core::ports::store::ExtensionUpstreamCheckpointLoadOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::LoadExtensionInstallProvenance(profile, install, done)) => {
+                let outcome = match hub.load_extension_install_provenance(profile, install) {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        zephium_core::ports::store::ExtensionInstallProvenanceLoadOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
             Some(Cmd::LoadExtensionNativeNamespace(profile, done)) => {
                 let outcome = match hub.load_extension_native_namespace(profile) {
                     Ok(outcome) => outcome,
@@ -3691,6 +3879,18 @@ fn actor(
                 };
                 done(outcome);
             }
+            Some(Cmd::LoadExtensionPackageStorageRoots(done)) => {
+                let outcome = match hub.load_extension_package_storage_roots() {
+                    Ok(inventory) => ExtensionPackageStorageRootsLoadOutcome::Loaded(inventory),
+                    Err(error) => {
+                        eprintln!(
+                            "store: extension package retention inventory load failed: {error}"
+                        );
+                        ExtensionPackageStorageRootsLoadOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
             Some(Cmd::MutateExtensionNativeOwnershipJournal(expected, mutation, _permit, done)) => {
                 let outcome =
                     match hub.mutate_extension_native_ownership_journal(expected, mutation) {
@@ -3829,6 +4029,9 @@ fn actor(
             }
             Some(Cmd::AmendVisitTitle(profile, url, title)) => {
                 hub.amend_visit_title(profile, &url, &title);
+            }
+            Some(Cmd::ExtensionHistorySearch(profile, query, reply)) => {
+                let _ = reply.send(hub.extension_history_search(profile, &query));
             }
             Some(Cmd::RecentHistory(profile, limit, reply)) => {
                 let _ = reply.send(hub.recent_history(profile, limit));

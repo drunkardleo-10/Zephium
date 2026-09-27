@@ -14,27 +14,23 @@ use std::rc::{Rc, Weak as RcWeak};
 use std::time::Duration;
 
 use block2::{DynBlock, RcBlock};
-use objc2::rc::{Retained, Weak};
-use objc2::runtime::{NSObject, ProtocolObject};
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSBackingStoreType, NSPopover, NSPopoverBehavior, NSPopoverDelegate,
-    NSView, NSViewFrameDidChangeNotification, NSWindow, NSWindowDelegate, NSWindowOrderingMode,
-    NSWindowStyleMask,
+    NSPopover, NSPopoverBehavior, NSPopoverDelegate, NSView, NSViewFrameDidChangeNotification,
 };
 use objc2_foundation::{
     MainThreadMarker, NSError, NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint,
-    NSRect, NSRectEdge, NSSize, NSString, NSURLRequest, NSURL,
+    NSRect, NSRectEdge, NSSize, NSString,
 };
 use objc2_web_kit::{
-    WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKNavigationType,
     WKWebExtensionAction, WKWebExtensionContext, WKWebExtensionController, WKWebExtensionTab,
     WKWebView,
 };
 use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRequestId,
-    ExtensionActionSettlement, ExtensionBrowserRequestAction,
-    MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES, MAX_EXTENSION_POPUP_HEIGHT, MAX_EXTENSION_POPUP_WIDTH,
+    ExtensionActionSettlement, MAX_EXTENSION_POPUP_HEIGHT, MAX_EXTENSION_POPUP_WIDTH,
     MIN_EXTENSION_POPUP_HEIGHT, MIN_EXTENSION_POPUP_WIDTH,
 };
 use zephium_core::geometry::{Rect, Size};
@@ -45,10 +41,28 @@ use crate::host::NativeResourceLease;
 use crate::{EngineEventIngress, EngineEventIngressSink};
 
 use super::browser_request_broker::BrowserRequestBroker;
-use super::browser_surface::request_url;
 
 const POPUP_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 const POPUP_ERROR_DOMAIN: &str = "app.zephium.extension-action";
+
+fn same_native_target(
+    actual: Option<&ProtocolObject<dyn WKWebExtensionTab>>,
+    expected: Option<&ProtocolObject<dyn WKWebExtensionTab>>,
+) -> bool {
+    match (actual, expected) {
+        (Some(actual), Some(expected)) => std::ptr::eq(actual, expected),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn popup_target_current(
+    current: Option<(ItemId, bool)>,
+    request: ExtensionActionRequest,
+    tab_specific: bool,
+) -> bool {
+    current == Some((request.tab(), tab_specific))
+}
 #[cfg(feature = "native-extension-lab-diagnostics")]
 const LAB_RETAIN_POPUP_ENV: &str = "ZEPHIUM_EXTENSION_LAB_RETAIN_POPUP";
 
@@ -56,7 +70,7 @@ struct PendingPopup {
     request: ExtensionActionRequest,
     controller: Retained<WKWebExtensionController>,
     context: Retained<WKWebExtensionContext>,
-    tab: Retained<ProtocolObject<dyn WKWebExtensionTab>>,
+    tab: Option<Retained<ProtocolObject<dyn WKWebExtensionTab>>>,
     parent: Retained<NSView>,
     _lease: NativeResourceLease,
     watchdog: crate::platform::imp::ContentPolicyTimeout,
@@ -71,19 +85,18 @@ struct ActivePopup {
     parent: Retained<NSView>,
     delegate: Retained<ActionPopoverDelegate>,
     frame_observation: Option<PopupFrameObservation>,
-    _lease: NativeResourceLease,
-}
-
-struct ActiveOptionsPage {
-    context: Retained<WKWebExtensionContext>,
-    window: Retained<NSWindow>,
-    webview: Retained<WKWebView>,
-    delegate: Retained<OptionsWindowDelegate>,
+    initial_options_match: Option<bool>,
     _lease: NativeResourceLease,
 }
 
 struct ClosingPopup {
     token: u64,
+    context: Retained<WKWebExtensionContext>,
+    _parent: Retained<NSView>,
+    _lease: NativeResourceLease,
+}
+
+struct PopupTransition {
     context: Retained<WKWebExtensionContext>,
     parent: Retained<NSView>,
     lease: NativeResourceLease,
@@ -137,7 +150,7 @@ define_class!(
         #[unsafe(method(popoverDidClose:))]
         fn popover_did_close(&self, _notification: &NSNotification) {
             if let Some(broker) = self.ivars().broker.upgrade() {
-                broker.finish_native_close();
+                broker.finish_native_close(self);
             }
         }
     }
@@ -165,130 +178,6 @@ impl ActionPopoverDelegate {
     }
 }
 
-struct OptionsWindowDelegateIvars {
-    broker: RcWeak<ActionPopupBroker>,
-    browser_requests: Rc<BrowserRequestBroker>,
-    context: Retained<WKWebExtensionContext>,
-    extension_origin: Box<str>,
-}
-
-define_class!(
-    #[unsafe(super(NSObject))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "ZephiumExtensionOptionsWindowDelegate"]
-    #[ivars = OptionsWindowDelegateIvars]
-    struct OptionsWindowDelegate;
-
-    unsafe impl NSObjectProtocol for OptionsWindowDelegate {}
-
-    unsafe impl NSWindowDelegate for OptionsWindowDelegate {
-        #[unsafe(method(windowWillClose:))]
-        fn window_will_close(&self, _notification: &NSNotification) {
-            if let Some(broker) = self.ivars().broker.upgrade() {
-                broker.finish_options_close();
-            }
-        }
-    }
-
-    unsafe impl WKNavigationDelegate for OptionsWindowDelegate {
-        #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
-        unsafe fn decide_navigation(
-            &self,
-            _webview: &WKWebView,
-            action: &WKNavigationAction,
-            decision: &DynBlock<dyn Fn(WKNavigationActionPolicy)>,
-        ) {
-            let Some(url) = action.request().URL() else {
-                decision.call((WKNavigationActionPolicy::Cancel,));
-                return;
-            };
-            let absolute = url.absoluteString();
-            let classification = absolute.as_ref().and_then(|absolute| {
-                (absolute.lengthOfBytesUsingEncoding(objc2_foundation::NSUTF8StringEncoding)
-                    <= MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES)
-                    .then(|| {
-                        objc2::rc::autoreleasepool(|pool| {
-                            classify_options_navigation(
-                                self.ivars().extension_origin.as_ref(),
-                                unsafe { absolute.to_str(pool) },
-                                unsafe { action.navigationType() }
-                                    == WKNavigationType::LinkActivated,
-                            )
-                        })
-                    })
-            });
-            match classification.flatten() {
-                Some(OptionsNavigation::Extension) => {
-                    decision.call((WKNavigationActionPolicy::Allow,));
-                }
-                Some(OptionsNavigation::External) => {
-                    self.route_external_link(&url);
-                    decision.call((WKNavigationActionPolicy::Cancel,));
-                }
-                None => decision.call((WKNavigationActionPolicy::Cancel,)),
-            }
-        }
-
-        #[unsafe(method(webViewWebContentProcessDidTerminate:))]
-        fn web_content_process_did_terminate(&self, webview: &WKWebView) {
-            let Some(broker) = self.ivars().broker.upgrade() else {
-                return;
-            };
-            // The callback is borrowed. Retain only long enough to mint a
-            // non-owning exact-generation witness for the deferred main-turn
-            // teardown; the active options owner remains the sole strong
-            // lifetime authority.
-            let Some(webview) = (unsafe { Retained::retain(webview as *const _ as *mut _) }) else {
-                return;
-            };
-            broker.schedule_options_process_termination(&self.ivars().context, &webview);
-        }
-    }
-);
-
-impl OptionsWindowDelegate {
-    fn new(
-        mtm: MainThreadMarker,
-        broker: RcWeak<ActionPopupBroker>,
-        browser_requests: Rc<BrowserRequestBroker>,
-        context: Retained<WKWebExtensionContext>,
-        extension_origin: Box<str>,
-    ) -> Retained<Self> {
-        let object = Self::alloc(mtm).set_ivars(OptionsWindowDelegateIvars {
-            broker,
-            browser_requests,
-            context,
-            extension_origin,
-        });
-        // SAFETY: NSObject is the declared superclass and the sole ivar is
-        // initialized before its initializer runs.
-        unsafe { msg_send![super(object), init] }
-    }
-
-    fn route_external_link(&self, url: &NSURL) {
-        if !self
-            .ivars()
-            .browser_requests
-            .accepts(None, &self.ivars().context)
-        {
-            return;
-        }
-        let Ok(url) = request_url(url) else {
-            return;
-        };
-        let completion: RcBlock<dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut NSError)> =
-            RcBlock::new(|_, _| {});
-        self.ivars().browser_requests.begin_tab(
-            ExtensionBrowserRequestAction::CreateTab {
-                window: None,
-                url: Some(url),
-                active: true,
-            },
-            &completion,
-        );
-    }
-}
-
 /// Main-thread owner for one profile controller's pending or visible popup.
 pub(super) struct ActionPopupBroker {
     profile: ProfileId,
@@ -298,7 +187,6 @@ pub(super) struct ActionPopupBroker {
     active: RefCell<Option<ActivePopup>>,
     closing: RefCell<Option<ClosingPopup>>,
     next_closing_token: Cell<u64>,
-    options: RefCell<Option<ActiveOptionsPage>>,
     size_clamp_active: Cell<bool>,
     sealed: Cell<bool>,
 }
@@ -313,7 +201,13 @@ struct PopupSizeClampGuard<'a> {
 
 impl<'a> PopupSizeClampGuard<'a> {
     fn enter(active: &'a Cell<bool>) -> Option<Self> {
-        (!active.replace(true)).then_some(Self { active })
+        if active.replace(true) {
+            // Constructing then dropping a refused guard would clear the
+            // outer operation's flag. Only the admitted owner may release it.
+            None
+        } else {
+            Some(Self { active })
+        }
     }
 }
 
@@ -343,23 +237,20 @@ impl ActionPopupBroker {
             active: RefCell::new(None),
             closing: RefCell::new(None),
             next_closing_token: Cell::new(1),
-            options: RefCell::new(None),
             size_clamp_active: Cell::new(false),
             sealed: Cell::new(false),
         })
     }
 
     /// Applies native toolbar-toggle semantics before a new popup lease is
-    /// acquired. Only the exact same authenticated context and native tab may
-    /// dismiss its pending or visible popup. A different target continues to
-    /// observe the one-popup capacity boundary, while a new trusted gesture
-    /// may supersede the short post-close options-navigation grace period for
-    /// its own context.
+    /// acquired. The same authenticated target toggles closed; a different
+    /// target replaces it after releasing the old popup. A fresh toolbar
+    /// gesture also supersedes the post-close options-navigation grace period.
     pub(super) fn prepare_toggle(
         &self,
         request: ExtensionActionRequest,
         context: &WKWebExtensionContext,
-        tab: &Retained<ProtocolObject<dyn WKWebExtensionTab>>,
+        tab: Option<&Retained<ProtocolObject<dyn WKWebExtensionTab>>>,
     ) -> Result<ActionPopupPreparation, ExtensionActionRejection> {
         if request.runtime().profile() != self.profile {
             return Err(ExtensionActionRejection::InvalidRequest);
@@ -367,15 +258,6 @@ impl ActionPopupBroker {
         if self.sealed.get() {
             return Err(ExtensionActionRejection::ShuttingDown);
         }
-        if self
-            .options
-            .try_borrow()
-            .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?
-            .is_some()
-        {
-            return Err(ExtensionActionRejection::PopupCapacityExceeded);
-        }
-
         let pending_target = self
             .pending
             .try_borrow()
@@ -384,21 +266,16 @@ impl ActionPopupBroker {
             .map(|pending| {
                 (
                     pending.request,
-                    std::ptr::eq(&*pending.context, context) && std::ptr::eq(&*pending.tab, &**tab),
+                    std::ptr::eq(&*pending.context, context)
+                        && same_native_target(pending.tab.as_deref(), tab.map(|tab| &**tab)),
                 )
             });
         if let Some((pending, native_target_matches)) = pending_target {
-            if pending.runtime() != request.runtime()
-                || pending.tab() != request.tab()
-                || !native_target_matches
-            {
-                return Err(ExtensionActionRejection::PopupCapacityExceeded);
-            }
-            if !self.cancel_pending(pending.id(), ExtensionActionRejection::RuntimeSuperseded) {
+            let disposition = popup_switch_disposition(pending, request, native_target_matches)?;
+            if !self.settle_pending(pending.id(), ExtensionActionSettlement::PopupDismissed) {
                 return Err(ExtensionActionRejection::NativeAdmissionFailed);
             }
-            crate::diagnostic!("extensions: pending native popup toggle-dismissed");
-            return Ok(ActionPopupPreparation::Dismissed);
+            return Ok(disposition);
         }
 
         let active_target = self
@@ -411,54 +288,33 @@ impl ActionPopupBroker {
                 (
                     active.request,
                     std::ptr::eq(&*active.context, context)
-                        && associated_tab
-                            .as_ref()
-                            .is_some_and(|actual| std::ptr::eq(&**actual, &**tab)),
+                        && same_native_target(associated_tab.as_deref(), tab.map(|tab| &**tab)),
                 )
             });
         if let Some((active, native_target_matches)) = active_target {
-            if active.runtime() != request.runtime()
-                || active.tab() != request.tab()
-                || !native_target_matches
-            {
-                return Err(ExtensionActionRejection::PopupCapacityExceeded);
-            }
-            self.close_active();
-            crate::diagnostic!("extensions: visible native popup toggle-dismissed");
-            return Ok(ActionPopupPreparation::Dismissed);
+            let disposition = popup_switch_disposition(active, request, native_target_matches)?;
+            self.close_active_for_replacement()?;
+            return Ok(disposition);
         }
 
-        let closing_matches = self
-            .closing
-            .try_borrow()
+        self.closing
+            .try_borrow_mut()
             .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?
-            .as_ref()
-            .map(|closing| std::ptr::eq(&*closing.context, context));
-        match closing_matches {
-            Some(false) => return Err(ExtensionActionRejection::PopupCapacityExceeded),
-            Some(true) => {
-                self.closing
-                    .try_borrow_mut()
-                    .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?
-                    .take();
-            }
-            None => {}
-        }
+            .take();
 
         Ok(ActionPopupPreparation::Present)
     }
 
     /// Reserves the exact native callback expected from `performActionForTab:`.
     /// The host acquires the global resource lease and revalidates the action
-    /// before this call. A background-bearing extension is warmed only for
-    /// this trusted gesture so its MV3 listeners exist before popup messaging;
-    /// ordinary startup remains fully lazy.
+    /// before this call. Document backgrounds receive a gesture-bound warm-up;
+    /// service-worker backgrounds use normal native action dispatch.
     pub(super) fn begin(
         self: &Rc<Self>,
         request: ExtensionActionRequest,
         controller: Retained<WKWebExtensionController>,
-        context: Retained<WKWebExtensionContext>,
-        tab: Retained<ProtocolObject<dyn WKWebExtensionTab>>,
+        owner: super::native_runtime::MacosNativeActionPopupOwner,
+        tab: Option<Retained<ProtocolObject<dyn WKWebExtensionTab>>>,
         parent: Retained<NSView>,
         lease: NativeResourceLease,
     ) -> Result<(), ExtensionActionRejection> {
@@ -495,6 +351,8 @@ impl ActionPopupBroker {
         else {
             return Err(ExtensionActionRejection::NativeAdmissionFailed);
         };
+        let warm_document = owner.requires_popup_background_warmup();
+        let context = owner.into_context();
         *self.pending.borrow_mut() = Some(PendingPopup {
             request,
             controller,
@@ -504,7 +362,11 @@ impl ActionPopupBroker {
             _lease: lease,
             watchdog,
         });
-        self.warm_background_and_perform(request_id);
+        if warm_document {
+            self.warm_background_and_perform(request_id);
+        } else {
+            self.perform_pending_action(request_id);
+        }
         Ok(())
     }
 
@@ -556,6 +418,7 @@ impl ActionPopupBroker {
                 crate::diagnostic!(
                     "extensions: popup background warm-up failed before presentation"
                 );
+                super::trace_action_qa_stage("background-warmup-error");
                 broker.cancel_pending(request, ExtensionActionRejection::PopupUnavailable);
                 return;
             }
@@ -568,6 +431,7 @@ impl ActionPopupBroker {
         }))
         .is_err()
         {
+            super::trace_action_qa_stage("background-warmup-exception");
             self.cancel_pending(request, ExtensionActionRejection::PopupUnavailable);
         }
     }
@@ -581,7 +445,7 @@ impl ActionPopupBroker {
             return;
         };
         if objc2::exception::catch(AssertUnwindSafe(|| unsafe {
-            context.performActionForTab(Some(&tab));
+            context.performActionForTab(tab.as_deref());
         }))
         .is_err()
         {
@@ -589,127 +453,128 @@ impl ActionPopupBroker {
         }
     }
 
-    /// Transfers the one already-admitted popup surface into an unprivileged
-    /// options window for the context's exact authenticated URL. Popup close
-    /// and options presentation share one lease, so no additional native-view
-    /// budget can be minted by extension code.
+    /// Requests the exact options document as a browser-owned extension tab.
+    /// The tab completion settles only after Shell and the native guest host
+    /// admit the actual tab. The popup is closed before the tab request.
     pub(super) fn open_options_page(
         self: &Rc<Self>,
         controller: &WKWebExtensionController,
         context: &WKWebExtensionContext,
         completion: &DynBlock<dyn Fn(*mut NSError)>,
     ) {
-        let result = objc2::exception::catch(AssertUnwindSafe(|| {
-            if self.sealed.get() {
-                return Err(ExtensionActionRejection::ShuttingDown);
-            }
-            if let Some(options) = self.options.borrow().as_ref() {
-                if !std::ptr::eq(&*options.context, context) {
-                    return Err(ExtensionActionRejection::PopupCapacityExceeded);
-                }
-                options.window.makeKeyAndOrderFront(None);
-                return Ok(());
-            }
-            if unsafe { context.webExtensionController() }
-                .as_ref()
-                .is_none_or(|actual| !std::ptr::eq(&**actual, controller))
-            {
-                return Err(ExtensionActionRejection::InvalidRequest);
-            }
-            let transition = if let Some(active) = self
-                .active
-                .try_borrow_mut()
-                .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?
-                .take()
-            {
-                if !std::ptr::eq(&*active.context, context)
-                    || unsafe { active.action.webExtensionContext() }
-                        .as_ref()
-                        .is_none_or(|actual| !std::ptr::eq(&**actual, context))
-                {
-                    *self.active.borrow_mut() = Some(active);
-                    return Err(ExtensionActionRejection::InvalidRequest);
-                }
-                transition_popup_to_options(active)
-            } else {
-                let closing = self
-                    .closing
-                    .try_borrow_mut()
-                    .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?
-                    .take()
-                    .ok_or(ExtensionActionRejection::PopupUnavailable)?;
-                if !std::ptr::eq(&*closing.context, context) {
-                    *self.closing.borrow_mut() = Some(closing);
-                    return Err(ExtensionActionRejection::InvalidRequest);
-                }
-                PopupTransition {
-                    context: closing.context,
-                    parent: closing.parent,
-                    lease: closing.lease,
-                }
-            };
-            self.present_options_transition(transition)?;
-            Ok(())
-        }))
-        .unwrap_or(Err(ExtensionActionRejection::NativeAdmissionFailed));
-        match result {
-            Ok(()) => completion.call((std::ptr::null_mut(),)),
-            Err(reason) => {
-                crate::diagnostic!(
-                    "extensions: options-page presentation rejected with typed reason {reason:?}"
-                );
-                complete_rejected(completion, reason);
-            }
+        if self.sealed.get() {
+            complete_rejected(completion, ExtensionActionRejection::ShuttingDown);
+            return;
+        }
+        if !self.browser_requests.accepts(Some(controller), context) {
+            complete_rejected(completion, ExtensionActionRejection::InvalidRequest);
+            return;
+        }
+        let Some(context) = (unsafe { Retained::retain(context as *const _ as *mut _) }) else {
+            complete_rejected(completion, ExtensionActionRejection::InvalidRequest);
+            return;
+        };
+        if let Err(reason) = self.close_popup_for_options(&context) {
+            complete_rejected(completion, reason);
+            return;
+        }
+        let unit = completion.copy();
+        let callback: RcBlock<dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut NSError)> =
+            RcBlock::new(
+                move |tab: *mut ProtocolObject<dyn WKWebExtensionTab>, error: *mut NSError| {
+                    if tab.is_null() && error.is_null() {
+                        let error = popup_error(ExtensionActionRejection::NativeAdmissionFailed);
+                        unit.call((Retained::as_ptr(&error).cast_mut(),));
+                    } else {
+                        unit.call((error,));
+                    }
+                },
+            );
+        if let Err(reason) = self.request_options_tab(context, &callback) {
+            complete_rejected(completion, reason);
         }
     }
 
     pub(super) fn open_options_page_authorized(
         self: &Rc<Self>,
         context: &WKWebExtensionContext,
+        reply: &DynBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
     ) -> bool {
-        let Some(controller) = (unsafe { context.webExtensionController() }) else {
+        let Some(context) = (unsafe { Retained::retain(context as *const _ as *mut _) }) else {
             return false;
         };
-        let opened = Rc::new(Cell::new(false));
-        let callback_opened = opened.clone();
-        let completion: RcBlock<dyn Fn(*mut NSError)> = RcBlock::new(move |error: *mut NSError| {
-            callback_opened.set(error.is_null());
-        });
-        self.open_options_page(&controller, context, &completion);
-        opened.get()
+        if self.close_popup_for_options(&context).is_err() {
+            return false;
+        }
+        let reply = reply.copy();
+        let callback: RcBlock<dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut NSError)> =
+            RcBlock::new(
+                move |tab: *mut ProtocolObject<dyn WKWebExtensionTab>, error: *mut NSError| {
+                    if !error.is_null() {
+                        reply.call((std::ptr::null_mut(), error));
+                    } else if tab.is_null() {
+                        let error = popup_error(ExtensionActionRejection::NativeAdmissionFailed);
+                        reply.call((std::ptr::null_mut(), Retained::as_ptr(&error).cast_mut()));
+                    } else {
+                        let result = NSString::from_str("{\"v\":1,\"opened\":true}");
+                        reply.call((
+                            Retained::as_ptr(&result).cast_mut().cast(),
+                            std::ptr::null_mut(),
+                        ));
+                    }
+                },
+            );
+        self.request_options_tab(context, &callback).is_ok()
     }
 
-    /// Opens settings from trusted browser chrome without requiring a popup
-    /// to exist first. The caller supplies the same bounded native-view lease
-    /// used by popup-to-options transfer, so this path cannot expand the
-    /// extension resource pool.
+    /// Trusted browser chrome requests the same browser-owned options tab.
+    /// Its old popup-view lease is released before the tab request; the tab
+    /// has its own exact browser resource admission.
     pub(super) fn open_options_page_from_browser(
         self: &Rc<Self>,
         context: Retained<WKWebExtensionContext>,
-        parent: Retained<NSView>,
-        lease: NativeResourceLease,
+        completion: &DynBlock<dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut NSError)>,
     ) -> Result<(), ExtensionActionRejection> {
-        if self.sealed.get() {
-            return Err(ExtensionActionRejection::ShuttingDown);
-        }
-        if let Some(options) = self.options.borrow().as_ref() {
-            if !std::ptr::eq(&*options.context, &*context) {
-                return Err(ExtensionActionRejection::PopupCapacityExceeded);
-            }
-            options.window.makeKeyAndOrderFront(None);
-            return Ok(());
-        }
-        if self.pending.borrow().is_some()
-            || self.active.borrow().is_some()
-            || self.closing.borrow().is_some()
+        self.close_popup_for_options(&context)?;
+        self.request_options_tab(context, completion)
+    }
+
+    fn close_popup_for_options(
+        &self,
+        context: &WKWebExtensionContext,
+    ) -> Result<(), ExtensionActionRejection> {
+        if self
+            .active
+            .borrow()
+            .as_ref()
+            .is_some_and(|active| std::ptr::eq(&*active.context, context))
         {
-            return Err(ExtensionActionRejection::PopupCapacityExceeded);
+            self.close_active_for_replacement()?;
         }
-        self.present_options_transition(PopupTransition {
-            context,
-            parent,
-            lease,
-        })
+        if self
+            .closing
+            .borrow()
+            .as_ref()
+            .is_some_and(|closing| std::ptr::eq(&*closing.context, context))
+        {
+            self.closing.borrow_mut().take();
+        }
+        Ok(())
+    }
+
+    fn request_options_tab(
+        &self,
+        context: Retained<WKWebExtensionContext>,
+        completion: &DynBlock<dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut NSError)>,
+    ) -> Result<(), ExtensionActionRejection> {
+        if self.sealed.get() || !self.browser_requests.accepts(None, &context) {
+            return Err(ExtensionActionRejection::InvalidRequest);
+        }
+        let url = unsafe { context.optionsPageURL() }
+            .ok_or(ExtensionActionRejection::PopupUnavailable)?;
+        self.browser_requests
+            .begin_extension_page(context, url, completion);
+        Ok(())
     }
 
     /// Handles WebKit's loaded-and-ready callback. Only the exact context and
@@ -736,13 +601,16 @@ impl ActionPopupBroker {
                     && std::ptr::eq(&*expected_context, context)
                     && unsafe { action.webExtensionContext() }
                         .is_some_and(|actual| std::ptr::eq(&*actual, context))
-                    && unsafe { action.associatedTab() }
-                        .is_some_and(|actual| std::ptr::eq(&*actual, &*expected_tab))
+                    && same_native_target(
+                        unsafe { action.associatedTab() }.as_deref(),
+                        expected_tab.as_deref(),
+                    )
                     && unsafe { controller.extensionContexts() }.containsObject(context)
             })
         }))
         .unwrap_or(false);
         if !matches || self.sealed.get() {
+            super::trace_action_qa_stage("popup-delegate-target-mismatch");
             complete_rejected(completion, ExtensionActionRejection::PopupUnavailable);
             return;
         }
@@ -760,12 +628,19 @@ impl ActionPopupBroker {
         let request = pending.request;
         let presentation = objc2::exception::catch(AssertUnwindSafe(|| {
             if !unsafe { action.presentsPopup() } {
+                super::trace_action_qa_stage("popup-action-no-longer-presented");
                 return Err(ExtensionActionRejection::RuntimeSuperseded);
             }
             let popover = unsafe { action.popupPopover() }
-                .ok_or(ExtensionActionRejection::PopupUnavailable)?;
+                .ok_or_else(|| {
+                    super::trace_action_qa_stage("popup-popover-missing");
+                    ExtensionActionRejection::PopupUnavailable
+                })?;
             let popup_webview = unsafe { action.popupWebView() }
-                .ok_or(ExtensionActionRejection::PopupUnavailable)?;
+                .ok_or_else(|| {
+                    super::trace_action_qa_stage("popup-webview-missing");
+                    ExtensionActionRejection::PopupUnavailable
+                })?;
             let mtm =
                 MainThreadMarker::new().ok_or(ExtensionActionRejection::NativeAdmissionFailed)?;
             let anchor = popup_anchor_rect(request, &pending.parent)
@@ -811,6 +686,7 @@ impl ActionPopupBroker {
                 .ok_or(ExtensionActionRejection::NativeAdmissionFailed)?;
             let active = ActivePopup {
                 request,
+                initial_options_match: popup_matches_options(&popup_webview, &pending.context),
                 context: pending.context,
                 action: retained_action,
                 webview: popup_webview,
@@ -842,6 +718,7 @@ impl ActionPopupBroker {
             );
             self.clamp_active_size();
             if !popover.isShown() {
+                super::trace_action_qa_stage("popup-not-shown");
                 return Err(ExtensionActionRejection::PopupUnavailable);
             }
             Ok(clamp_popup_size(popover.contentSize()))
@@ -869,6 +746,14 @@ impl ActionPopupBroker {
         request: ExtensionActionRequestId,
         reason: ExtensionActionRejection,
     ) -> bool {
+        self.settle_pending(request, ExtensionActionSettlement::Rejected(reason))
+    }
+
+    fn settle_pending(
+        &self,
+        request: ExtensionActionRequestId,
+        settlement: ExtensionActionSettlement,
+    ) -> bool {
         let matches = self
             .pending
             .try_borrow()
@@ -891,11 +776,12 @@ impl ActionPopupBroker {
             return false;
         };
         drop(pending.watchdog);
-        self.emit(request, ExtensionActionSettlement::Rejected(reason));
+        self.emit(request, settlement);
         true
     }
 
     pub(super) fn timeout(&self, request: ExtensionActionRequestId) -> bool {
+        super::trace_action_qa_stage("popup-pending-timeout");
         self.cancel_pending(request, ExtensionActionRejection::PopupUnavailable)
     }
 
@@ -927,33 +813,35 @@ impl ActionPopupBroker {
         if clears_closing {
             self.closing.borrow_mut().take();
         }
-        let closes_options = self
-            .options
-            .borrow()
-            .as_ref()
-            .is_some_and(|options| std::ptr::eq(Retained::as_ptr(&options.context), context));
-        if closes_options {
-            self.close_options();
-        }
     }
 
-    /// Popups are tied to the current resident tab. A surface generation that
-    /// removes, discards, or deactivates that tab cancels loading or closes the
-    /// visible transient surface without creating a view.
-    pub(super) fn reconcile_tab(&self, is_current_resident: impl Fn(ItemId) -> bool) {
+    /// Keep a popup only while its logical active tab and native action target
+    /// still match. A default popup has no tab-specific page authority.
+    pub(super) fn reconcile_tab(&self, current: Option<(ItemId, bool)>) {
         let pending = self
             .pending
             .borrow()
             .as_ref()
-            .map(|pending| pending.request);
-        if pending.is_some_and(|request| !is_current_resident(request.tab())) {
+            .map(|pending| (pending.request, pending.tab.is_some()));
+        if pending
+            .is_some_and(|(request, resident)| !popup_target_current(current, request, resident))
+        {
+            super::trace_action_qa_stage("pending-target-changed");
             self.cancel_pending(
-                pending.expect("checked pending request").id(),
+                pending.expect("checked pending request").0.id(),
                 ExtensionActionRejection::RuntimeSuperseded,
             );
         }
-        let active = self.active.borrow().as_ref().map(|active| active.request);
-        if active.is_some_and(|request| !is_current_resident(request.tab())) {
+        let active = self.active.borrow().as_ref().map(|active| {
+            (
+                active.request,
+                unsafe { active.action.associatedTab() }.is_some(),
+            )
+        });
+        if active
+            .is_some_and(|(request, resident)| !popup_target_current(current, request, resident))
+        {
+            super::trace_action_qa_stage("active-target-changed");
             self.close_active();
         }
     }
@@ -970,7 +858,6 @@ impl ActionPopupBroker {
         }
         self.close_active();
         self.closing.borrow_mut().take();
-        self.close_options();
     }
 
     fn clamp_active_size(&self) {
@@ -994,7 +881,17 @@ impl ActionPopupBroker {
         }));
     }
 
-    fn finish_native_close(self: &Rc<Self>) {
+    fn finish_native_close(self: &Rc<Self>, delegate: &ActionPopoverDelegate) {
+        // A delayed notification from the previous popup must not retire the
+        // replacement opened by a newer toolbar gesture.
+        if !self
+            .active
+            .borrow()
+            .as_ref()
+            .is_some_and(|active| std::ptr::eq(&*active.delegate, delegate))
+        {
+            return;
+        }
         let Some(active) = self.active.borrow_mut().take() else {
             return;
         };
@@ -1004,7 +901,10 @@ impl ActionPopupBroker {
         );
         let transition = finish_popup_for_options_transition(active);
         if options_requested {
-            if let Err(reason) = self.present_options_transition(transition) {
+            let callback: RcBlock<
+                dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut NSError),
+            > = RcBlock::new(|_, _| {});
+            if let Err(reason) = self.request_options_tab(transition.context, &callback) {
                 crate::diagnostic!(
                     "extensions: popup options navigation failed with typed reason {reason:?}"
                 );
@@ -1019,8 +919,8 @@ impl ActionPopupBroker {
         *self.closing.borrow_mut() = Some(ClosingPopup {
             token,
             context: transition.context,
-            parent: transition.parent,
-            lease: transition.lease,
+            _parent: transition.parent,
+            _lease: transition.lease,
         });
         if !schedule_closing_expiry(self, token) {
             self.expire_closing(token);
@@ -1034,139 +934,30 @@ impl ActionPopupBroker {
         teardown_active(active, true);
     }
 
-    fn finish_options_close(&self) {
-        let Some(options) = self.options.borrow_mut().take() else {
-            return;
+    fn close_active_for_replacement(&self) -> Result<(), ExtensionActionRejection> {
+        let Some(mut active) = self
+            .active
+            .try_borrow_mut()
+            .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?
+            .take()
+        else {
+            return Ok(());
         };
-        retire_options_native_surface(&options);
-        let _keep_delegate_alive_through_close = options.delegate;
-    }
-
-    fn schedule_options_process_termination(
-        self: &Rc<Self>,
-        context: &Retained<WKWebExtensionContext>,
-        webview: &Retained<WKWebView>,
-    ) {
-        let broker = Rc::downgrade(self);
-        let context = Weak::from_retained(context);
-        let webview = Weak::from_retained(webview);
-        let completion: RcBlock<dyn Fn()> = RcBlock::new(move || {
-            let (Some(broker), Some(context), Some(webview)) =
-                (broker.upgrade(), context.load(), webview.load())
-            else {
-                return;
-            };
-            broker.finish_options_process_termination(&context, &webview);
-        });
-        // SAFETY: dispatch_async copies this heap block onto the main queue.
-        // Every captured native owner and the broker are main-thread-only; the
-        // deferred turn also prevents the weak navigation delegate from being
-        // released while WebKit is still invoking it.
-        unsafe {
-            dispatch2::DispatchQueue::main().exec_async_with_block(RcBlock::as_ptr(&completion));
+        let closed = objc2::exception::catch(AssertUnwindSafe(|| {
+            active.popover.setDelegate(None);
+            active.popover.setAnimates(false);
+            unsafe { active.action.closePopup() };
+            active.popover.close();
+        }));
+        if closed.is_err() {
+            crate::diagnostic!("extensions: native popup replacement close raised an exception");
+            // Keep the existing resource lease if native closure is uncertain.
+            // A replacement must never create a second live popup.
+            self.active.borrow_mut().replace(active);
+            return Err(ExtensionActionRejection::NativeAdmissionFailed);
         }
-    }
-
-    fn finish_options_process_termination(
-        &self,
-        context: &WKWebExtensionContext,
-        webview: &WKWebView,
-    ) {
-        let matches = self.options.borrow().as_ref().is_some_and(|options| {
-            std::ptr::eq(&*options.context, context) && std::ptr::eq(&*options.webview, webview)
-        });
-        if !matches {
-            return;
-        }
-        let Some(options) = self.options.borrow_mut().take() else {
-            return;
-        };
-        crate::diagnostic!("extensions: options-page web content process terminated");
-        retire_options_native_surface(&options);
-        let _keep_delegate_alive_through_close = options.delegate;
-        options.window.close();
-    }
-
-    fn close_options(&self) {
-        let Some(options) = self.options.borrow_mut().take() else {
-            return;
-        };
-        retire_options_native_surface(&options);
-        let _keep_delegate_alive_through_close = options.delegate;
-        options.window.close();
-    }
-
-    fn present_options_transition(
-        self: &Rc<Self>,
-        transition: PopupTransition,
-    ) -> Result<(), ExtensionActionRejection> {
-        let url = unsafe { transition.context.optionsPageURL() }
-            .ok_or(ExtensionActionRejection::PopupUnavailable)?;
-        let extension_origin =
-            options_extension_origin(&url).ok_or(ExtensionActionRejection::PopupUnavailable)?;
-        let configuration = unsafe { transition.context.webViewConfiguration() }
-            .ok_or(ExtensionActionRejection::PopupUnavailable)?;
-        let mtm = MainThreadMarker::new().ok_or(ExtensionActionRejection::NativeAdmissionFailed)?;
-        let parent_window = transition
-            .parent
-            .window()
-            .ok_or(ExtensionActionRejection::PopupUnavailable)?;
-        let frame = NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(MAX_EXTENSION_POPUP_WIDTH, MAX_EXTENSION_POPUP_HEIGHT),
-        );
-        let webview = unsafe {
-            WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &configuration)
-        };
-        webview.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable
-                | NSAutoresizingMaskOptions::ViewHeightSizable,
-        );
-        let delegate = OptionsWindowDelegate::new(
-            mtm,
-            Rc::downgrade(self),
-            Rc::clone(&self.browser_requests),
-            transition.context.clone(),
-            extension_origin,
-        );
-        unsafe {
-            webview.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-        }
-        let request = NSURLRequest::requestWithURL(&url);
-        if unsafe { webview.loadRequest(&request) }.is_none() {
-            return Err(ExtensionActionRejection::PopupUnavailable);
-        }
-        let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(mtm),
-                frame,
-                NSWindowStyleMask::Titled
-                    | NSWindowStyleMask::Closable
-                    | NSWindowStyleMask::Miniaturizable
-                    | NSWindowStyleMask::Resizable,
-                NSBackingStoreType::Buffered,
-                false,
-            )
-        };
-        unsafe {
-            window.setReleasedWhenClosed(false);
-            window.setTitle(&NSString::from_str("Extension Settings"));
-        }
-        window.setContentView(Some(&webview));
-        window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-        // SAFETY: both retained windows belong to this main-thread
-        // application and the options owner removes/closes the child before
-        // releasing its resource lease.
-        unsafe { parent_window.addChildWindow_ordered(&window, NSWindowOrderingMode::Above) };
-        window.center();
-        window.makeKeyAndOrderFront(None);
-        *self.options.borrow_mut() = Some(ActiveOptionsPage {
-            context: transition.context,
-            window,
-            webview,
-            delegate,
-            _lease: transition.lease,
-        });
+        drop(active.frame_observation.take());
+        drop(active);
         Ok(())
     }
 
@@ -1198,6 +989,22 @@ impl ActionPopupBroker {
     }
 }
 
+fn popup_switch_disposition(
+    previous: ExtensionActionRequest,
+    next: ExtensionActionRequest,
+    native_target_matches: bool,
+) -> Result<ActionPopupPreparation, ExtensionActionRejection> {
+    if previous.runtime().profile() != next.runtime().profile() {
+        return Err(ExtensionActionRejection::InvalidRequest);
+    }
+    if previous.runtime() == next.runtime() && previous.tab() == next.tab() && native_target_matches
+    {
+        Ok(ActionPopupPreparation::Dismissed)
+    } else {
+        Ok(ActionPopupPreparation::Present)
+    }
+}
+
 fn teardown_active(mut active: ActivePopup, close_popover: bool) {
     drop(active.frame_observation.take());
     let _keep_delegate_alive_through_close = active.delegate;
@@ -1210,44 +1017,25 @@ fn teardown_active(mut active: ActivePopup, close_popover: bool) {
     }));
 }
 
-fn retire_options_native_surface(options: &ActiveOptionsPage) {
-    options.window.setDelegate(None);
-    unsafe {
-        options.webview.setNavigationDelegate(None);
-        options.webview.stopLoading();
-    }
-    if let Some(parent) = options.window.parentWindow() {
-        parent.removeChildWindow(&options.window);
-    }
-    options.window.setContentView(None);
-    options.window.orderOut(None);
-}
-
-struct PopupTransition {
-    context: Retained<WKWebExtensionContext>,
-    parent: Retained<NSView>,
-    lease: NativeResourceLease,
-}
-
 fn popup_requested_options(active: &ActivePopup) -> bool {
-    let requested = unsafe { active.webview.URL() }.and_then(|url| url.absoluteString());
-    let options = unsafe { active.context.optionsPageURL() }.and_then(|url| url.absoluteString());
-    matches!((requested, options), (Some(requested), Some(options)) if requested.isEqualToString(&options))
+    popup_navigated_to_options(
+        active.initial_options_match,
+        popup_matches_options(&active.webview, &active.context),
+    )
 }
 
-fn transition_popup_to_options(mut active: ActivePopup) -> PopupTransition {
-    drop(active.frame_observation.take());
-    let _keep_delegate_alive_through_close = active.delegate;
-    let _ = objc2::exception::catch(AssertUnwindSafe(|| {
-        active.popover.setDelegate(None);
-        unsafe { active.action.closePopup() };
-        active.popover.close();
-    }));
-    PopupTransition {
-        context: active.context,
-        parent: active.parent,
-        lease: active._lease,
-    }
+fn popup_matches_options(webview: &WKWebView, context: &WKWebExtensionContext) -> Option<bool> {
+    let requested = unsafe { webview.URL() }?.absoluteString()?;
+    let options = unsafe { context.optionsPageURL() }?.absoluteString()?;
+    Some(requested.isEqualToString(&options))
+}
+
+fn popup_navigated_to_options(initial: Option<bool>, current: Option<bool>) -> bool {
+    // Sharing one document for popup and options is legal. Dismissing that
+    // popup is not an options request. Infer a transition only from a known
+    // different initial page; explicit native openOptionsPage callbacks keep
+    // their existing path, including when the initial URL was unavailable.
+    initial == Some(false) && current == Some(true)
 }
 
 fn finish_popup_for_options_transition(mut active: ActivePopup) -> PopupTransition {
@@ -1287,48 +1075,6 @@ impl Drop for ActionPopupBroker {
     fn drop(&mut self) {
         self.seal_and_close();
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OptionsNavigation {
-    Extension,
-    External,
-}
-
-fn options_extension_origin(url: &NSURL) -> Option<Box<str>> {
-    let absolute = url.absoluteString()?;
-    if absolute.lengthOfBytesUsingEncoding(objc2_foundation::NSUTF8StringEncoding)
-        > MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES
-    {
-        return None;
-    }
-    objc2::rc::autoreleasepool(|pool| {
-        let parsed = url::Url::parse(unsafe { absolute.to_str(pool) }).ok()?;
-        if parsed.scheme() != "webkit-extension"
-            || !parsed.username().is_empty()
-            || parsed.password().is_some()
-            || parsed.port().is_some()
-        {
-            return None;
-        }
-        let host = parsed.host_str()?;
-        Some(format!("webkit-extension://{host}/").into_boxed_str())
-    })
-}
-
-fn classify_options_navigation(
-    extension_origin: &str,
-    requested: &str,
-    link_activated: bool,
-) -> Option<OptionsNavigation> {
-    if requested.len() > MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES {
-        return None;
-    }
-    if requested.starts_with(extension_origin) {
-        return Some(OptionsNavigation::Extension);
-    }
-    (link_activated && zephium_core::navigation::is_allowed_str(requested))
-        .then_some(OptionsNavigation::External)
 }
 
 fn popup_anchor_rect(request: ExtensionActionRequest, parent: &NSView) -> Option<NSRect> {
@@ -1422,7 +1168,74 @@ fn popup_error(reason: ExtensionActionRejection) -> Retained<NSError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dismissing_a_shared_popup_options_document_does_not_open_settings() {
+        assert!(!super::popup_navigated_to_options(Some(true), Some(true)));
+        assert!(!super::popup_navigated_to_options(None, Some(true)));
+        assert!(!super::popup_navigated_to_options(Some(false), None));
+        assert!(!super::popup_navigated_to_options(Some(false), Some(false)));
+        assert!(super::popup_navigated_to_options(Some(false), Some(true)));
+    }
     use super::*;
+
+    fn switch_request(
+        profile: u128,
+        extension: u128,
+        tab: u128,
+        request: u64,
+    ) -> ExtensionActionRequest {
+        use zephium_core::extensions::{
+            ExtensionActionRevision, ExtensionBrowserSurfaceGeneration, ExtensionPopupAnchor,
+            ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
+        };
+        ExtensionActionRequest::new(
+            ExtensionActionRequestId::new(request).unwrap(),
+            ExtensionRuntimeInstance::new(
+                ProfileId::from(profile),
+                zephium_core::ids::ExtensionInstallId::from(extension),
+                ExtensionRuntimeGeneration::INITIAL,
+            ),
+            ItemId::from(tab),
+            ExtensionBrowserSurfaceGeneration::INITIAL,
+            ExtensionActionRevision::INITIAL,
+            ExtensionPopupAnchor::new(Rect::new(12.0, 12.0, 24.0, 24.0)).unwrap(),
+        )
+    }
+
+    #[test]
+    fn toolbar_gestures_toggle_the_same_target_and_replace_different_targets() {
+        let previous = switch_request(1, 1, 1, 1);
+        assert_eq!(
+            popup_switch_disposition(previous, switch_request(1, 1, 1, 2), true),
+            Ok(ActionPopupPreparation::Dismissed)
+        );
+        assert_eq!(
+            popup_switch_disposition(previous, switch_request(1, 2, 1, 2), false),
+            Ok(ActionPopupPreparation::Present)
+        );
+        assert_eq!(
+            popup_switch_disposition(previous, switch_request(1, 1, 2, 2), false),
+            Ok(ActionPopupPreparation::Present)
+        );
+        assert_eq!(
+            popup_switch_disposition(previous, switch_request(1, 1, 1, 2), false),
+            Ok(ActionPopupPreparation::Present)
+        );
+        assert_eq!(
+            popup_switch_disposition(previous, switch_request(2, 2, 1, 2), false),
+            Err(ExtensionActionRejection::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn default_popup_stays_on_nonresident_tab_and_retires_when_view_returns() {
+        let request = switch_request(1, 1, 1, 1);
+        let tab = request.tab();
+        assert!(popup_target_current(Some((tab, false)), request, false));
+        assert!(!popup_target_current(Some((tab, true)), request, false));
+        assert!(!popup_target_current(Some((tab, false)), request, true));
+        assert!(!popup_target_current(None, request, false));
+    }
 
     #[test]
     fn popup_size_is_finite_and_bounded() {
@@ -1440,8 +1253,15 @@ mod tests {
     fn popup_size_clamp_rejects_synchronous_reentry_and_reopens_after_return() {
         let active = Cell::new(false);
         let outer = PopupSizeClampGuard::enter(&active).expect("first clamp enters");
-        assert!(PopupSizeClampGuard::enter(&active).is_none());
+        for _ in 0..3 {
+            assert!(PopupSizeClampGuard::enter(&active).is_none());
+            assert!(
+                active.get(),
+                "a refused callback must not release the outer guard"
+            );
+        }
         drop(outer);
+        assert!(!active.get());
         assert!(PopupSizeClampGuard::enter(&active).is_some());
     }
 
@@ -1478,67 +1298,5 @@ mod tests {
         assert_eq!(error.code(), 10);
         assert_eq!(error.domain().to_string(), POPUP_ERROR_DOMAIN);
         assert_eq!(error.userInfo().count(), 0);
-    }
-
-    #[test]
-    fn options_navigation_is_origin_exact_and_external_links_require_a_user_gesture() {
-        let origin = "webkit-extension://00000000-0000-0000-0000-000000000001/";
-        assert_eq!(
-            classify_options_navigation(
-                origin,
-                "webkit-extension://00000000-0000-0000-0000-000000000001/pages/options.html#x",
-                false,
-            ),
-            Some(OptionsNavigation::Extension)
-        );
-        assert_eq!(
-            classify_options_navigation(origin, "https://example.com/docs", true),
-            Some(OptionsNavigation::External)
-        );
-        for (url, user_gesture) in [
-            ("https://example.com/programmatic", false),
-            ("javascript:alert(1)", true),
-            ("file:///tmp/secret", true),
-            (
-                "webkit-extension://00000000-0000-0000-0000-000000000002/pages/options.html",
-                true,
-            ),
-        ] {
-            assert_eq!(classify_options_navigation(origin, url, user_gesture), None);
-        }
-        assert_eq!(
-            classify_options_navigation(
-                origin,
-                &"https://example.com/".repeat(
-                    MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES / "https://example.com/".len() + 1
-                ),
-                true,
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn options_renderer_termination_is_deferred_and_identity_exact() {
-        let source = include_str!("action_popup.rs");
-        let callback = source
-            .find("fn web_content_process_did_terminate")
-            .expect("options navigation delegate termination callback");
-        let deferred = source
-            .find("fn schedule_options_process_termination")
-            .expect("deferred options teardown");
-        let exact = source
-            .find("fn finish_options_process_termination")
-            .expect("exact options teardown");
-        assert!(callback < deferred && deferred < exact);
-        let body = &source[exact
-            ..source
-                .get(exact..)
-                .and_then(|tail| tail.find("fn close_options"))
-                .map(|end| exact + end)
-                .expect("options teardown end")];
-        assert!(body.contains("std::ptr::eq(&*options.context, context)"));
-        assert!(body.contains("std::ptr::eq(&*options.webview, webview)"));
-        assert!(body.contains("retire_options_native_surface(&options)"));
     }
 }

@@ -714,6 +714,27 @@ mod tests {
     }
 
     #[test]
+    fn unicode_aliases_and_ancestor_shapes_fail_in_canonical_indexes() {
+        for (first, second) in [
+            ("src/js/сlickable.js", "src/js/СLICKABLE.JS"),
+            ("Café", "café/a.js"),
+            ("Kelvin.js", "Kelvin.js"),
+        ] {
+            let mut files = vec![
+                file(first, 1, 1),
+                file(second, 1, 2),
+                file("manifest.json", 1, 3),
+            ];
+            files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+            assert_eq!(
+                CanonicalExtensionTreeIndex::parse_canonical(&index(files)),
+                Err(ExtensionTreeIndexError::PortablePathCollision),
+                "unexpectedly admitted {first:?} and {second:?}"
+            );
+        }
+    }
+
+    #[test]
     fn manifest_length_uses_the_manifest_parser_ceiling() {
         for length in [0, MAX_EXTENSION_MANIFEST_BYTES as u64 + 1] {
             let bytes = index(vec![file("manifest.json", length, 1)]);

@@ -224,6 +224,11 @@ measurements appear in `frame/dist/bootstrap-report.json`. Complete static graph
 sizes may include already-loaded shared/browser chunks, so they are not incremental
 activation download sizes.
 
+The 2026-09-25 extension store UI integration adds 147 bytes to shared lazy
+graphs: NotesPage measures 290,005 versus 289,858 bytes and the notes domain
+149,522 versus 149,375. Their JS caps were reviewed at 290,500 and 150,000;
+browser startup remains at the 24-request cap without a new eager feature.
+
 Native chrome/page separation, synchronous tab-presentation sentinels, fixed-raster
 favicons, scoped event transport and production CSP remain in place. Appearance,
 keyboard access, reduced motion and visual tokens use the existing interface system

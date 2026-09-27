@@ -603,6 +603,14 @@ impl ExtensionPackageAccess {
         Ok(downcast_known_provider(provider))
     }
 
+    /// Borrows a provider of the exact concrete type for a same-owner identity
+    /// check. This grants no mutable I/O or native-root transfer authority and
+    /// preserves the access object's consumed/terminal flags during recovery.
+    pub fn delegated_provider<T: ExtensionPackageAccessPort>(&self) -> Option<&T> {
+        let provider: &dyn Any = self.provider.as_ref();
+        provider.downcast_ref::<T>()
+    }
+
     /// Visits the package manifest through the same authenticated resource path
     /// used for every other package file.
     pub fn visit_manifest(

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use zephium_core::extensions::ExtensionNativeOwnershipKey;
+use zephium_core::extensions::{ExtensionNativeOwnershipKey, ExtensionRuntimeInstance};
 use zephium_core::extensions::{ExtensionProfilePolicyMutation, ExtensionProfilePolicyRevision};
 use zephium_core::ids::ProfileId;
 #[cfg(feature = "acquired-packages")]
@@ -32,8 +32,10 @@ use zephium_core::ports::extensions::{
     ExtensionRepositoryMaintenanceOutcome, ExtensionRuntimeGrantCallback,
     ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequest, ExtensionSetEnabledCallback,
     ExtensionSetEnabledOutcome, ExtensionUninstallCallback, ExtensionUninstallOutcome,
-    ExtensionUpdateCallback, ExtensionUpdateOutcome,
-    MAX_EXTENSION_RUNTIME_GRANT_REQUEST_RETAINED_BYTES,
+    ExtensionUpdateCallback, ExtensionUpdateOutcome, IsolatedExtensionResourceCallback,
+    IsolatedExtensionResourceCancel,
+    IsolatedExtensionResourceOutcome, MAX_EXTENSION_RUNTIME_GRANT_REQUEST_RETAINED_BYTES,
+    MAX_ISOLATED_EXTENSION_RESOURCE_PATH_BYTES,
 };
 use zephium_extension_repository::{
     BundledPackageGarbageCollectionOutcome, ExtensionRepositoryError,
@@ -58,7 +60,8 @@ use crate::profile_retirement::{
 };
 use crate::repository::ServiceRepository;
 use crate::runtime_coordinator::{
-    RuntimeCoordinator, RuntimeCoordinatorResources, RuntimeDrainOutcome,
+    IsolatedResourceBudget, IsolatedResourceFailure, IsolatedResourcePermit, RuntimeCoordinator,
+    RuntimeCoordinatorResources, RuntimeDrainOutcome,
 };
 use crate::startup::{
     CurrentStartupObservation, ExtensionServiceLaunchInput, ExtensionServiceStartupFailure,
@@ -78,6 +81,10 @@ use crate::{
     ExtensionServiceCleanupEvidence, ExtensionServiceReadyEvidence, ExtensionServiceWorkerIdentity,
 };
 
+#[cfg(feature = "external-extensions")]
+mod external_management;
+#[cfg(feature = "external-extensions")]
+mod external_updates;
 mod installation;
 mod management;
 mod management_catalog;
@@ -266,6 +273,33 @@ impl Drop for AcquiredProvisioningPermit {
 }
 
 enum WorkerCommand {
+    ReadIsolatedResource {
+        runtime: ExtensionRuntimeInstance,
+        path: Box<str>,
+        deadline: Instant,
+        cancel: IsolatedExtensionResourceCancel,
+        permit: IsolatedResourcePermit,
+        settlement: IsolatedResourceSettlementSink,
+    },
+    #[cfg(feature = "external-extensions")]
+    DismissStoreCandidate {
+        selector: zephium_core::ports::extensions::ExtensionInstallCandidateSelector,
+    },
+    #[cfg(feature = "external-extensions")]
+    DismissStoreUpdate {
+        selector: zephium_core::ports::extensions::ExtensionInstallUpdateSelector,
+    },
+    #[cfg(feature = "external-extensions")]
+    PrepareStorePackage {
+        profile: ProfileId,
+        request: Box<zephium_core::ports::extensions::ExtensionStorePackageRequest>,
+        deadline: Instant,
+        _permit: AcquiredProvisioningPermit,
+        settlement: ProvisioningSettlementSink<
+            zephium_core::ports::extensions::ExtensionStorePackagePreparationOutcome,
+        >,
+    },
+
     RetryStartup {
         attempt: StartupAttempt,
         deadline: Instant,
@@ -363,6 +397,30 @@ enum WorkerCommand {
     RetainDropProbe(TestDropProbe),
     #[cfg(test)]
     Block(Receiver<()>),
+}
+
+struct IsolatedResourceSettlementSink(Option<IsolatedExtensionResourceCallback>);
+
+impl IsolatedResourceSettlementSink {
+    fn settle(mut self, outcome: IsolatedExtensionResourceOutcome) {
+        if let Some(done) = self.0.take() {
+            let _ = panic::catch_unwind(AssertUnwindSafe(|| done(outcome)));
+        }
+    }
+
+    fn cancel_unadmitted(mut self) {
+        drop(self.0.take());
+    }
+}
+
+impl Drop for IsolatedResourceSettlementSink {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.take() {
+            let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+                done(IsolatedExtensionResourceOutcome::WorkerUnavailable)
+            }));
+        }
+    }
 }
 
 enum ManagementSettlementSink<T> {
@@ -577,6 +635,12 @@ fn profile_policy_edit_worker_lost(
     ExtensionManagementSettlement::new(ExtensionProfilePolicyEditOutcome::FailedClosed, None)
 }
 
+#[cfg(feature = "external-extensions")]
+fn store_package_worker_lost(
+) -> zephium_core::ports::extensions::ExtensionStorePackagePreparationOutcome {
+    zephium_core::ports::extensions::ExtensionStorePackagePreparationOutcome::FailedClosed
+}
+
 #[cfg(feature = "acquired-packages")]
 fn acquired_package_worker_lost() -> ExtensionAcquiredPackageProvisioningOutcome {
     ExtensionAcquiredPackageProvisioningOutcome::FailedClosed
@@ -590,6 +654,8 @@ fn acquired_catalog_worker_lost() -> ExtensionAcquiredCatalogActivationOutcome {
 #[cfg(feature = "acquired-packages")]
 fn cancel_unadmitted_provisioning(command: WorkerCommand) {
     match command {
+        #[cfg(feature = "external-extensions")]
+        WorkerCommand::PrepareStorePackage { settlement, .. } => settlement.cancel(),
         WorkerCommand::ProvisionAcquiredPackage { settlement, .. } => settlement.cancel(),
         WorkerCommand::ActivateAcquiredCatalog { settlement, .. } => settlement.cancel(),
         _ => debug_assert!(false, "provisioning admission returned a different command"),
@@ -608,6 +674,17 @@ fn cancel_unadmitted_management(command: WorkerCommand) {
         WorkerCommand::LoadManagementCatalog { settlement, .. } => settlement.cancel(),
         WorkerCommand::MaintainRepository { settlement, .. } => settlement.cancel(),
         _ => debug_assert!(false, "management admission returned a different command"),
+    }
+}
+
+fn cancel_unadmitted_isolated_resource(command: WorkerCommand) {
+    if let WorkerCommand::ReadIsolatedResource { settlement, .. } = command {
+        settlement.cancel_unadmitted();
+    } else {
+        debug_assert!(
+            false,
+            "isolated resource admission returned a different command"
+        );
     }
 }
 
@@ -741,6 +818,7 @@ pub struct ExtensionServiceOwner {
     startup: Arc<SharedStartupOutcome>,
     cancellation: Arc<WorkerCancellation>,
     runtime_grant_admission: Arc<Mutex<RuntimeGrantRequestAdmission>>,
+    isolated_resource_budget: IsolatedResourceBudget,
     repository_maintenance_pending: Arc<AtomicBool>,
     #[cfg(feature = "acquired-packages")]
     acquired_provisioning_admission: Arc<Mutex<AcquiredProvisioningAdmission>>,
@@ -861,6 +939,7 @@ impl ExtensionServiceOwner {
         let startup = Arc::new(SharedStartupOutcome::new(initial_attempt));
         let cancellation = Arc::new(WorkerCancellation::new());
         let runtime_grant_admission = Arc::new(Mutex::new(RuntimeGrantRequestAdmission::default()));
+        let isolated_resource_budget = IsolatedResourceBudget::default();
         let repository_maintenance_pending = Arc::new(AtomicBool::new(false));
         #[cfg(feature = "acquired-packages")]
         let acquired_provisioning_admission =
@@ -989,6 +1068,7 @@ impl ExtensionServiceOwner {
             startup,
             cancellation,
             runtime_grant_admission,
+            isolated_resource_budget,
             repository_maintenance_pending,
             #[cfg(feature = "acquired-packages")]
             acquired_provisioning_admission,
@@ -1080,6 +1160,78 @@ impl ExtensionServiceOwner {
             deadline,
             _permit: permit,
             settlement: ProvisioningSettlementSink::callback(done, acquired_package_worker_lost),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => ExtensionManagementAdmission::Accepted,
+            NormalAdmission::Full(command) => {
+                cancel_unadmitted_provisioning(command);
+                ExtensionManagementAdmission::Busy
+            }
+            NormalAdmission::Sealed(command) | NormalAdmission::Closed(command) => {
+                cancel_unadmitted_provisioning(command);
+                ExtensionManagementAdmission::Unavailable
+            }
+            NormalAdmission::CounterExhausted(command) => {
+                cancel_unadmitted_provisioning(command);
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementAdmission::Unavailable
+            }
+        }
+    }
+
+    /// Queues removal of an exact uncommitted update review, leaving installs untouched.
+    #[cfg(feature = "external-extensions")]
+    pub fn dismiss_store_candidate(
+        &mut self,
+        selector: zephium_core::ports::extensions::ExtensionInstallCandidateSelector,
+    ) -> bool {
+        matches!(
+            self.mailbox
+                .try_push_normal(WorkerCommand::DismissStoreCandidate { selector }),
+            NormalAdmission::Accepted
+        )
+    }
+
+    /// Queues removal of an exact uncommitted update review, leaving installs untouched.
+    #[cfg(feature = "external-extensions")]
+    pub fn dismiss_store_update(
+        &mut self,
+        selector: zephium_core::ports::extensions::ExtensionInstallUpdateSelector,
+    ) -> bool {
+        matches!(
+            self.mailbox
+                .try_push_normal(WorkerCommand::DismissStoreUpdate { selector }),
+            NormalAdmission::Accepted
+        )
+    }
+
+    /// Non-blocking preparation of one explicitly selected store package.
+    #[cfg(feature = "external-extensions")]
+    #[must_use = "provisioning admission determines callback ownership"]
+    pub fn begin_prepare_store_package(
+        &mut self,
+        profile: ProfileId,
+        request: zephium_core::ports::extensions::ExtensionStorePackageRequest,
+        deadline: Instant,
+        done: zephium_core::ports::extensions::ExtensionStorePackagePreparationCallback,
+    ) -> ExtensionManagementAdmission {
+        if Instant::now() >= deadline {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        }
+        let Some(permit) = AcquiredProvisioningPermit::try_acquire(
+            &self.acquired_provisioning_admission,
+            request.retained_bytes(),
+        ) else {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        };
+        let command = WorkerCommand::PrepareStorePackage {
+            profile,
+            request: Box::new(request),
+            deadline,
+            _permit: permit,
+            settlement: ProvisioningSettlementSink::callback(done, store_package_worker_lost),
         };
         match self.mailbox.try_push_normal(command) {
             NormalAdmission::Accepted => ExtensionManagementAdmission::Accepted,
@@ -1762,6 +1914,54 @@ impl ExtensionServiceOwner {
         }
     }
 
+    /// Admits one bounded package-resource read on the existing service actor.
+    #[must_use = "resource admission determines callback ownership"]
+    pub fn begin_read_isolated_resource(
+        &mut self,
+        runtime: ExtensionRuntimeInstance,
+        path: Box<str>,
+        deadline: Instant,
+        cancel: IsolatedExtensionResourceCancel,
+        done: IsolatedExtensionResourceCallback,
+    ) -> ExtensionManagementAdmission {
+        if Instant::now() >= deadline
+            || path.is_empty()
+            || path.len() > MAX_ISOLATED_EXTENSION_RESOURCE_PATH_BYTES
+            || path.chars().any(char::is_control)
+        {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        }
+        let Some(permit) = self.isolated_resource_budget.reserve_request() else {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        };
+        let command = WorkerCommand::ReadIsolatedResource {
+            runtime,
+            path,
+            deadline,
+            cancel,
+            permit,
+            settlement: IsolatedResourceSettlementSink(Some(done)),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => ExtensionManagementAdmission::Accepted,
+            NormalAdmission::Full(command) => {
+                cancel_unadmitted_isolated_resource(command);
+                ExtensionManagementAdmission::Busy
+            }
+            NormalAdmission::Sealed(command) | NormalAdmission::Closed(command) => {
+                cancel_unadmitted_isolated_resource(command);
+                ExtensionManagementAdmission::Unavailable
+            }
+            NormalAdmission::CounterExhausted(command) => {
+                cancel_unadmitted_isolated_resource(command);
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementAdmission::Unavailable
+            }
+        }
+    }
+
     /// Admits a non-blocking live-runtime optional-grant transaction.
     #[must_use = "management admission determines callback ownership"]
     pub fn begin_request_runtime_grants(
@@ -2022,6 +2222,10 @@ impl ExtensionServiceOwner {
                 ExtensionServiceStartupWait::AdmissionFailedClosed(self.status.snapshot())
             }
         }
+    }
+
+    pub(crate) fn watch_startup(&self, wake: Box<dyn FnOnce() + Send>) -> bool {
+        self.startup.watch(wake)
     }
 
     /// Retries a definitely unavailable startup attempt under one absolute
@@ -2393,6 +2597,16 @@ enum ManagementWriteState {
     FailedClosed,
 }
 
+impl ManagementWriteState {
+    fn observe_update(&mut self, outcome: &ExtensionUpdateOutcome) {
+        match outcome {
+            ExtensionUpdateOutcome::OutcomeUnknown => *self = Self::OutcomeUnknown,
+            ExtensionUpdateOutcome::FailedClosed | ExtensionUpdateOutcome::Updated { runtime: zephium_core::ports::extensions::ExtensionUpdateRuntimeState::PendingActivation(zephium_core::ports::extensions::ExtensionActivationPendingReason::FailedClosed) } => *self = Self::FailedClosed,
+            _ => {},
+        }
+    }
+}
+
 fn runtime_ingress_readiness(
     worker: ExtensionServiceWorkerIdentity,
     startup: &SharedStartupOutcome,
@@ -2642,6 +2856,43 @@ impl WorkerState {
         cancellation: &WorkerCancellation,
     ) -> bool {
         match command {
+            WorkerCommand::ReadIsolatedResource {
+                runtime,
+                path,
+                deadline,
+                cancel,
+                permit,
+                settlement,
+            } => {
+                let outcome = match self
+                    .runtime
+                    .read_published_isolated_resource(runtime, &path, permit, deadline, &cancel)
+                {
+                    Ok(resource) => resource
+                        .into_core()
+                        .map(IsolatedExtensionResourceOutcome::Verified)
+                        .unwrap_or(IsolatedExtensionResourceOutcome::Capacity),
+                    Err(IsolatedResourceFailure::RuntimeUnavailable) => {
+                        IsolatedExtensionResourceOutcome::RuntimeUnavailable
+                    }
+                    Err(IsolatedResourceFailure::NotDeclared) => {
+                        IsolatedExtensionResourceOutcome::NotDeclared
+                    }
+                    Err(IsolatedResourceFailure::Capacity) => {
+                        IsolatedExtensionResourceOutcome::Capacity
+                    }
+                    Err(IsolatedResourceFailure::ReadFailed) => {
+                        IsolatedExtensionResourceOutcome::ReadFailed
+                    }
+                    Err(IsolatedResourceFailure::Expired) => {
+                        IsolatedExtensionResourceOutcome::Expired
+                    }
+                    Err(IsolatedResourceFailure::Cancelled) => {
+                        IsolatedExtensionResourceOutcome::Cancelled
+                    }
+                };
+                settlement.settle(outcome);
+            }
             WorkerCommand::RetryStartup { attempt, deadline } => {
                 if !self.attempt_startup(
                     worker,
@@ -2653,6 +2904,80 @@ impl WorkerState {
                 ) {
                     return false;
                 }
+            }
+            #[cfg(feature = "external-extensions")]
+            WorkerCommand::DismissStoreCandidate { selector } => {
+                if let Some(startup) = self.startup.as_mut() {
+                    startup
+                        .repository
+                        .clear_completed_external_candidate(&selector);
+                }
+            }
+            #[cfg(feature = "external-extensions")]
+            WorkerCommand::DismissStoreUpdate { selector } => {
+                if let Some(startup) = self.startup.as_mut() {
+                    startup.repository.dismiss_external_update(&selector);
+                }
+            }
+            #[cfg(feature = "external-extensions")]
+            WorkerCommand::PrepareStorePackage {
+                profile,
+                request,
+                deadline,
+                _permit: permit,
+                settlement,
+            } => {
+                use zephium_core::ports::extensions::ExtensionStorePackagePreparationOutcome as Outcome;
+                let outcome = if Instant::now() >= deadline
+                    || self
+                        .management_ingress_readiness(
+                            worker,
+                            startup_outcome,
+                            cancellation,
+                            profile,
+                        )
+                        .is_err()
+                {
+                    Outcome::Unavailable
+                } else if let Some(startup) = self.startup.as_mut() {
+                    let background = request.is_background_update();
+                    let outcome = startup.repository.prepare_store_package(
+                        &startup.store,
+                        profile,
+                        *request,
+                        deadline,
+                    );
+                    if matches!(outcome, Outcome::UpdateAvailable) {
+                        let result = external_updates::prepared(
+                            startup,
+                            &mut self.runtime,
+                            profile,
+                            deadline,
+                        );
+                        if background
+                            && matches!(&result, Outcome::UpdateSettled(settlement)
+                            if matches!(settlement.outcome(), zephium_core::ports::extensions::ExtensionUpdateOutcome::Unavailable
+                                | zephium_core::ports::extensions::ExtensionUpdateOutcome::Conflict
+                                | zephium_core::ports::extensions::ExtensionUpdateOutcome::Rejected))
+                        {
+                            // A deferred automatic attempt owns no consent. Do
+                            // not leave its slot blocking later scheduled work.
+                            startup.repository.external_update = None;
+                        }
+                        result
+                    } else {
+                        outcome
+                    }
+                } else {
+                    Outcome::Unavailable
+                };
+                if let Outcome::UpdateSettled(update) = &outcome {
+                    self.management_write_state.observe_update(update.outcome());
+                    if self.management_write_state == ManagementWriteState::FailedClosed {
+                        status.publish(ExtensionServicePhase::Failed);
+                    }
+                }
+                settle_admitted_provisioning(permit, settlement, outcome);
             }
             #[cfg(feature = "acquired-packages")]
             WorkerCommand::ProvisionAcquiredPackage {
@@ -3236,21 +3561,10 @@ impl WorkerState {
             selector,
             deadline,
         );
-        match outcome.outcome() {
-            ExtensionUpdateOutcome::OutcomeUnknown => {
-                self.management_write_state = ManagementWriteState::OutcomeUnknown;
-            }
-            ExtensionUpdateOutcome::FailedClosed
-            | ExtensionUpdateOutcome::Updated {
-                runtime:
-                    zephium_core::ports::extensions::ExtensionUpdateRuntimeState::PendingActivation(
-                        zephium_core::ports::extensions::ExtensionActivationPendingReason::FailedClosed,
-                    ),
-            } => {
-                self.management_write_state = ManagementWriteState::FailedClosed;
-                status.publish(ExtensionServicePhase::Failed);
-            }
-            _ => {}
+        self.management_write_state
+            .observe_update(outcome.outcome());
+        if self.management_write_state == ManagementWriteState::FailedClosed {
+            status.publish(ExtensionServicePhase::Failed);
         }
         (outcome, true)
     }
@@ -3569,9 +3883,36 @@ impl WorkerState {
             status.publish(ExtensionServicePhase::Failed);
             return (ExtensionRepositoryMaintenanceOutcome::FailedClosed, false);
         };
+        if self.management_write_state != ManagementWriteState::Healthy
+            || self.runtime.is_fail_stopped()
+        {
+            return (ExtensionRepositoryMaintenanceOutcome::Unavailable, true);
+        }
+        #[cfg(feature = "external-extensions")]
+        let external = match startup.repository.collect_external_package_garbage(&startup.store, deadline) {
+            Ok(report) => report,
+            Err(zephium_core::ports::extensions::ExtensionStorePackagePreparationOutcome::Unavailable) => return (ExtensionRepositoryMaintenanceOutcome::Unavailable, true),
+            Err(_) => return (ExtensionRepositoryMaintenanceOutcome::FailedClosed, true),
+        };
         let outcome = project_repository_maintenance_result(
             startup.repository.collect_bundled_package_garbage(),
         );
+        #[cfg(feature = "external-extensions")]
+        let outcome = match outcome {
+            ExtensionRepositoryMaintenanceOutcome::NoGarbage
+                if external.removed() != 0 || external.has_more() =>
+            {
+                ExtensionRepositoryMaintenanceOutcome::Collected {
+                    more_garbage: external.has_more(),
+                }
+            }
+            ExtensionRepositoryMaintenanceOutcome::Collected { more_garbage } => {
+                ExtensionRepositoryMaintenanceOutcome::Collected {
+                    more_garbage: more_garbage || external.has_more(),
+                }
+            }
+            outcome => outcome,
+        };
         if matches!(outcome, ExtensionRepositoryMaintenanceOutcome::FailedClosed) {
             status.publish(ExtensionServicePhase::Failed);
         }
@@ -3911,6 +4252,9 @@ fn publish_startup_settlement(
 ) -> bool {
     if !startup.settle(attempt, outcome) {
         return false;
+    }
+    if let ExtensionServiceStartupOutcome::FailedClosed(failure) = outcome {
+        crate::diagnostic!("extensions: startup stopped: {:?}", failure.reason());
     }
     #[cfg(feature = "local-extension-lab")]
     match outcome {
@@ -4634,6 +4978,7 @@ mod tests {
             startup,
             cancellation: Arc::new(WorkerCancellation::new()),
             runtime_grant_admission: Arc::new(Mutex::new(RuntimeGrantRequestAdmission::default())),
+            isolated_resource_budget: IsolatedResourceBudget::default(),
             repository_maintenance_pending: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "acquired-packages")]
             acquired_provisioning_admission: Arc::new(Mutex::new(
@@ -5787,6 +6132,81 @@ mod tests {
             evidence.completed_commands(),
             EXTENSION_SERVICE_MAILBOX_CAPACITY as u64
         );
+    }
+
+    #[test]
+    fn isolated_resource_ingress_counts_queued_requests_and_settles_once() {
+        let mut owner = ExtensionServiceOwner::spawn_empty_for_test().unwrap();
+        let mailbox = Arc::clone(&owner.mailbox);
+        let (release_tx, release) = mpsc::sync_channel(0);
+        assert!(matches!(
+            owner.try_block_for_test(release),
+            NormalAdmission::Accepted
+        ));
+        let wait_until = Instant::now() + Duration::from_secs(1);
+        while mailbox.len() != 0 {
+            assert!(Instant::now() < wait_until);
+            thread::yield_now();
+        }
+        let runtime = ExtensionRuntimeInstance::new(
+            ProfileId::from(1),
+            zephium_core::ids::ExtensionInstallId::from(1),
+            zephium_core::extensions::ExtensionRuntimeGeneration::INITIAL,
+        );
+        let (tx, rx) = mpsc::sync_channel(8);
+        let cancelled = IsolatedExtensionResourceCancel::new();
+        for index in 0..crate::runtime_coordinator::MAX_PENDING_ISOLATED_RESOURCE_REQUESTS {
+            let tx = tx.clone();
+            assert_eq!(
+                owner.begin_read_isolated_resource(
+                    runtime,
+                    "manifest.json".into(),
+                    Instant::now() + Duration::from_secs(3),
+                    if index == 0 {
+                        cancelled.clone()
+                    } else {
+                        IsolatedExtensionResourceCancel::new()
+                    },
+                    Box::new(move |outcome| {
+                        let _ = tx.try_send(outcome);
+                    }),
+                ),
+                ExtensionManagementAdmission::Accepted,
+            );
+        }
+        assert_eq!(owner.isolated_resource_budget.used(), Some((8, 0)));
+        let refused_callback_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let refused_count = refused_callback_count.clone();
+        assert_eq!(
+            owner.begin_read_isolated_resource(
+                runtime,
+                "manifest.json".into(),
+                Instant::now() + Duration::from_secs(3),
+                IsolatedExtensionResourceCancel::new(),
+                Box::new(move |_| {
+                    refused_count.fetch_add(1, Ordering::Relaxed);
+                }),
+            ),
+            ExtensionManagementAdmission::Busy,
+        );
+        assert_eq!(refused_callback_count.load(Ordering::Relaxed), 0);
+        cancelled.cancel();
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            IsolatedExtensionResourceOutcome::Cancelled
+        ));
+        for _ in 1..8 {
+            assert!(matches!(
+                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                IsolatedExtensionResourceOutcome::RuntimeUnavailable
+            ));
+        }
+        assert_eq!(owner.isolated_resource_budget.used(), Some((0, 0)));
+        assert!(matches!(
+            owner.shutdown(),
+            ExtensionServiceShutdownOutcome::Complete(_)
+        ));
     }
 
     #[test]

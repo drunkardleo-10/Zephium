@@ -345,6 +345,13 @@ pub fn run_macos_web_extension_probe() -> Result<bool, String> {
     platform::macos::run_web_extension_probe()
 }
 
+/// Runs an isolated native redirect-interception fixture without installing
+/// an extension, creating a profile, or contacting an identity provider.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+pub fn run_macos_identity_redirect_probe(attach_window: bool) -> Result<bool, String> {
+    platform::macos::run_identity_redirect_probe(attach_window)
+}
+
 /// Runs the opt-in long-duration MV3 alarm delivery gate.
 ///
 /// The probe arms a standards-minimum alarm, unloads and reloads the exact
@@ -398,6 +405,14 @@ pub fn run_macos_web_extension_permission_replacement_settlement_probe() -> Resu
 #[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
 pub fn run_macos_web_extension_resource_probe() -> Result<bool, String> {
     platform::macos::run_web_extension_resource_probe()
+}
+
+/// Tests whether a controller-free view can share the extension's custom
+/// origin DOM storage without gaining extension APIs. Probe only.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_shared_extension_origin_probe(custom_origin: bool) -> Result<bool, String> {
+    platform::macos::run_shared_extension_origin_probe(custom_origin)
 }
 
 /// Loads one finalized, explicitly non-product Bitwarden Core probe artifact
@@ -1041,14 +1056,36 @@ impl RetirementGate {
             event @ EngineEvent::ExtensionActionShortcutRequested { runtime, .. } => {
                 self.profile_is_active(runtime.profile()).then_some(event)
             }
+            event @ EngineEvent::ExtensionCreatedTabReplied { profile, .. } => {
+                self.profile_is_active(profile).then_some(event)
+            }
             // This is an untrusted request, not a native-state fact. Deliver
             // it after profile retirement so Shell can explicitly reject the
             // retained native completion instead of waiting for its timeout.
             event @ EngineEvent::ExtensionBrowserRequested { .. }
+            | event @ EngineEvent::IsolatedExtensionResourceRequested { .. }
+            | event @ EngineEvent::ExtensionPageClosed { .. }
             | event @ EngineEvent::ExtensionCompatibilityBrokerRequested { .. }
             | event @ EngineEvent::ExtensionRuntimeGrantRequested { .. }
             | event @ EngineEvent::ExtensionRuntimeGrantCancelled { .. }
             | event @ EngineEvent::PermissionRequested { .. } => Some(event),
+            EngineEvent::ExtensionPageChanged {
+                profile,
+                id,
+                title,
+                loading,
+                can_go_back,
+                can_go_forward,
+            } => self
+                .profile_is_active(profile)
+                .then(|| EngineEvent::ExtensionPageChanged {
+                    profile,
+                    id,
+                    title: zephium_core::item::sanitize_page_title(&title),
+                    loading,
+                    can_go_back,
+                    can_go_forward,
+                }),
             event @ EngineEvent::TitleChanged { id, .. }
             | event @ EngineEvent::UrlChanged { id, .. }
             | event @ EngineEvent::PresentationPending { id, .. }
@@ -2014,13 +2051,42 @@ impl Engine for WebviewEngine {
                 }
                 let application_sink = sink.clone();
                 let admitted = host::try_with(move |host| {
-                    let settlement = host.open_extension_options(runtime);
-                    application_sink(EngineEventIngress::global(
-                        EngineEvent::ExtensionOptionsPageSettled {
-                            runtime,
-                            settlement,
+                    let terminal_sink = application_sink.clone();
+                    let completion: block2::RcBlock<
+                        dyn Fn(
+                            *mut objc2::runtime::ProtocolObject<
+                                dyn objc2_web_kit::WKWebExtensionTab,
+                            >,
+                            *mut objc2_foundation::NSError,
+                        ),
+                    > = block2::RcBlock::new(
+                        move |tab: *mut objc2::runtime::ProtocolObject<
+                            dyn objc2_web_kit::WKWebExtensionTab,
+                        >,
+                              error: *mut objc2_foundation::NSError| {
+                            let settlement = if error.is_null() && !tab.is_null() {
+                                zephium_core::extensions::ExtensionOptionsPageSettlement::Opened
+                            } else {
+                                zephium_core::extensions::ExtensionOptionsPageSettlement::Rejected(
+                                    ExtensionActionRejection::NativeAdmissionFailed,
+                                )
+                            };
+                            terminal_sink(EngineEventIngress::global(
+                                EngineEvent::ExtensionOptionsPageSettled {
+                                    runtime,
+                                    settlement,
+                                },
+                            ));
                         },
-                    ));
+                    );
+                    if let Some(settlement) = host.open_extension_options(runtime, &completion) {
+                        application_sink(EngineEventIngress::global(
+                            EngineEvent::ExtensionOptionsPageSettled {
+                                runtime,
+                                settlement,
+                            },
+                        ));
+                    }
                 });
                 if !admitted && lock_retirement_gate(&queued_retirement).profile_is_active(profile)
                 {
@@ -2048,21 +2114,89 @@ impl Engine for WebviewEngine {
         profile: ProfileId,
         request: ExtensionBrowserRequestId,
         settlement: ExtensionBrowserRequestSettlement,
+        first_url_after_reply: Option<(
+            std::sync::Arc<str>,
+            zephium_core::ports::engine::NavigationRequestId,
+        )>,
     ) -> NativeDispatch {
         #[cfg(target_os = "macos")]
         {
-            // Settlement is cleanup of an already-authorized native callback,
-            // so it must remain admissible after retirement. The registry
-            // treats a cleared/timed-out correlation as an inert stale reply.
+            let page = match settlement {
+                ExtensionBrowserRequestSettlement::Applied(zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized { tab, .. }) => Some(tab),
+                _ => None,
+            };
+            let token = page
+                .and_then(|id| lock_retirement_gate(&self.retirement).reserve_item(id, profile));
+            if page.is_some() && token.is_none() {
+                self.run(move || {
+                    let _ = host::with_extension_browser_request_terminal(move |host| {
+                        let _ = host.settle_extension_browser_request(profile, request, ExtensionBrowserRequestSettlement::Rejected(zephium_core::extensions::ExtensionBrowserRequestRejection::NativeAdmissionFailed), None, None);
+                    });
+                });
+                return NativeDispatch::Rejected;
+            }
+            let queued_token = token.clone();
+            let retirement = self.retirement.clone();
+            let sink = self.sink.clone();
+            let scheduled = self.run(move || {
+                let settlement = if page.zip(queued_token.as_ref()).is_some_and(|(id, token)| {
+                    !lock_retirement_gate(&retirement).allows_reserved_item(id, profile, token)
+                }) {
+                    ExtensionBrowserRequestSettlement::Rejected(
+                        zephium_core::extensions::ExtensionBrowserRequestRejection::InvalidContext,
+                    )
+                } else {
+                    settlement
+                };
+                let admitted = host::with_extension_browser_request_terminal(move |host| {
+                    let _ = host.settle_extension_browser_request(
+                        profile,
+                        request,
+                        settlement,
+                        queued_token,
+                        first_url_after_reply,
+                    );
+                });
+                if !admitted {
+                    if let Some(id) = page {
+                        sink(EngineEventIngress::global(
+                            EngineEvent::ExtensionPageClosed { profile, id },
+                        ));
+                    }
+                }
+            });
+            if !scheduled {
+                if let Some((id, token)) = page.zip(token) {
+                    lock_retirement_gate(&self.retirement).forget_item_if_token(id, &token);
+                }
+            }
+            NativeDispatch::from_scheduled(scheduled)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (profile, request, settlement, first_url_after_reply);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn settle_isolated_extension_resource(
+        &self,
+        runtime: ExtensionRuntimeInstance,
+        kind: zephium_core::ports::extensions::IsolatedExtensionDocumentKind,
+        request: u64,
+        outcome: zephium_core::ports::extensions::IsolatedExtensionResourceOutcome,
+    ) -> NativeDispatch {
+        #[cfg(target_os = "macos")]
+        {
             NativeDispatch::from_scheduled(self.run(move || {
                 let _ = host::with_extension_browser_request_terminal(move |host| {
-                    let _ = host.settle_extension_browser_request(profile, request, settlement);
+                    let _ = host.settle_isolated_extension_resource(runtime, kind, request, outcome);
                 });
             }))
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (profile, request, settlement);
+            let _ = (runtime, kind, request, outcome);
             NativeDispatch::Unsupported
         }
     }
@@ -2681,6 +2815,45 @@ mod tests {
 
     fn test_layout_updates() -> Arc<layout_queue::LatestLayouts<PendingLayout>> {
         Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS))
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn extension_guest_admission_reserves_layout_identity_and_rolls_back_rejected_dispatch() {
+        let mut engine = engine_with_extension_runtime_factory();
+        let profile = ProfileId::from(900);
+        let id = ItemId::from(901);
+        let request = ExtensionBrowserRequestId::new(1).unwrap();
+        let settlement = ExtensionBrowserRequestSettlement::Applied(
+            zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized {
+                tab: id,
+                window: 1,
+            },
+        );
+        assert_eq!(
+            engine.settle_extension_browser_request(profile, request, settlement, None),
+            NativeDispatch::Rejected
+        );
+        assert!(!lock_retirement_gate(&engine.retirement).allows_item(id));
+        engine.dispatch = Arc::new(|_| true);
+        assert_eq!(
+            engine.settle_extension_browser_request(profile, request, settlement, None),
+            NativeDispatch::Scheduled
+        );
+        assert_eq!(
+            lock_retirement_gate(&engine.retirement).active_profile(id),
+            Some(profile)
+        );
+        assert_eq!(
+            engine.set_content(1, Some(Pane::leaf(id)), Some(Rect::new(0., 0., 800., 600.))),
+            NativeDispatch::Scheduled
+        );
+        assert_eq!(
+            engine.settle_extension_browser_request(profile, request, settlement, None),
+            NativeDispatch::Rejected
+        );
+        assert_eq!(engine.close(id), NativeDispatch::Scheduled);
+        assert!(!lock_retirement_gate(&engine.retirement).allows_item(id));
     }
 
     fn engine_with_extension_runtime_factory() -> WebviewEngine {
@@ -4074,4 +4247,135 @@ mod tests {
             zephium_core::session::MAX_SESSION_PROFILES
         );
     }
+}
+
+/// Qualifies native offscreen APIs against an isolated synthetic package only.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_web_extension_offscreen_probe() -> Result<bool, String> {
+    platform::macos::run_web_extension_offscreen_probe()
+}
+
+/// Proves the extension-free offscreen host resource and message boundaries.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_isolated_offscreen_host_probe() -> Result<bool, String> {
+    platform::macos::run_offscreen_host_probe().map(|()| true)
+}
+
+/// Runs the original authenticated Google Translate offscreen document in the
+/// isolated host. This probe has no product installation authority.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_original_google_translate_offscreen_probe(
+    path: &std::path::Path,
+) -> Result<bool, String> {
+    platform::macos::run_original_google_translate_offscreen_probe(path).map(|()| true)
+}
+
+/// Runs the original authenticated Bitwarden offscreen storage document in an
+/// isolated same-origin host. This probe has no product installation authority.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_original_bitwarden_offscreen_probe(path: &std::path::Path) -> Result<bool, String> {
+    platform::macos::run_original_bitwarden_offscreen_probe(path).map(|()| true)
+}
+
+/// Compares unchanged prepared Bitwarden worker startup under two native
+/// extension base schemes in disposable nonpersistent stores.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_prepared_bitwarden_worker_startup_probe(
+    path: &std::path::Path,
+    scheme: &str,
+    user_agent_mode: &str,
+) -> Result<bool, String> {
+    platform::macos::run_prepared_bitwarden_worker_startup_probe(path, scheme, user_agent_mode)
+}
+
+/// Checks full-uninstall data erasure against original Bitwarden DOM storage
+/// in one disposable persistent WebKit profile.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_original_bitwarden_offscreen_erasure_probe(
+    path: &std::path::Path,
+) -> Result<bool, String> {
+    platform::macos::run_original_bitwarden_offscreen_erasure_probe(path).map(|()| true)
+}
+
+/// Qualifies sandboxed DOM isolation for a possible offscreen fallback.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_web_extension_offscreen_sandbox_probe() -> Result<bool, String> {
+    platform::macos::run_web_extension_offscreen_sandbox_probe()
+}
+
+/// Qualifies native content-script glob enforcement without product authority.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_web_extension_content_script_globs_probe() -> Result<bool, String> {
+    platform::macos::run_web_extension_content_script_globs_probe()
+}
+
+/// Verifies privileged-worker sidePanel API withholding before context load.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_web_extension_side_panel_unavailable_probe() -> Result<bool, String> {
+    platform::macos::run_web_extension_side_panel_unavailable_probe()
+}
+
+/// Verifies that a worker can target the exact content-script document.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_web_extension_document_id_probe() -> Result<bool, String> {
+    platform::macos::run_web_extension_document_id_probe()
+}
+
+/// Proves exact native tab URL observation before a local OAuth callback fails.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_oauth_redirect_observation_probe() -> Result<bool, String> {
+    platform::macos::run_oauth_redirect_observation_probe()
+}
+
+/// Proves a fixed synthetic callback URL is delivered after immediate failure.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_oauth_redirect_immediate_failure_probe() -> Result<bool, String> {
+    platform::macos::run_oauth_redirect_immediate_failure_probe()
+}
+
+/// Tests whether WebKit snapshots the URL during native tab notification.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_oauth_redirect_synchronous_clear_probe() -> Result<bool, String> {
+    platform::macos::run_oauth_redirect_synchronous_clear_probe()
+}
+
+/// Proves an in-flight URL survives same-turn native view retirement.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_oauth_redirect_same_turn_nonresident_probe() -> Result<bool, String> {
+    platform::macos::run_oauth_redirect_same_turn_nonresident_probe()
+}
+
+/// Verifies the real native tabs.create completion and post-await URL listener.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_oauth_redirect_broker_order_probe(settle_first: bool) -> Result<bool, String> {
+    platform::macos::run_oauth_redirect_broker_order_probe(settle_first)
+}
+
+/// Tests a local cross-origin JSON POST from an MV3 worker with granted host access.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_worker_json_post_probe() -> Result<bool, String> {
+    platform::macos::run_worker_json_post_probe()
+}
+
+/// Runs an externally prepared glob-relay artifact in an isolated native editor.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_original_main_document_glob_probe(path: &std::path::Path) -> Result<bool, String> {
+    platform::macos::run_original_main_document_glob_probe(path)
 }

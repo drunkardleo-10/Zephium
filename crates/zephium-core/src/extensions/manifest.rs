@@ -877,6 +877,9 @@ pub enum ExtensionBackgroundWorkerType {
 pub enum ExtensionBackgroundEnvironment {
     ServiceWorker,
     Document,
+    /// Same single script declared for Chromium workers and Firefox documents.
+    /// Local preparation must select one environment before native admission.
+    CrossBrowser,
 }
 
 /// Path-free background declaration. Package identity binds the actual worker
@@ -2492,6 +2495,8 @@ fn update_compatibility_semantics(
                 // Preserve the existing service-worker digest stream while
                 // assigning document execution a distinct, non-colliding tag.
                 digest.update([3]);
+            } else if background.environment() == ExtensionBackgroundEnvironment::CrossBrowser {
+                digest.update([4]);
             }
         }
     }
@@ -3480,6 +3485,10 @@ mod tests {
             },
             CompatibilitySemanticFixture {
                 background_environment: ExtensionBackgroundEnvironment::Document,
+                ..baseline
+            },
+            CompatibilitySemanticFixture {
+                background_environment: ExtensionBackgroundEnvironment::CrossBrowser,
                 ..baseline
             },
             CompatibilitySemanticFixture {

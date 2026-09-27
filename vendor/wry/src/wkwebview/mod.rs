@@ -692,6 +692,8 @@ impl InnerWebView {
         #[cfg(target_os = "macos")]
         new_window_req_handler.clone(),
         attributes.navigation_handler,
+        #[cfg(target_os = "macos")]
+        attributes.main_frame_navigation_attempt_handler,
         download_delegate.clone(),
         attributes.on_page_load_handler,
         attributes.navigation_event_handler,

@@ -2,6 +2,9 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::ops::Bound::{Included, Unbounded};
+use zephium_core::extension_resource_path::{
+    extension_resource_collision_key, ExtensionResourceCollisionKeyError,
+};
 
 use crate::{
     MAX_EXTENSION_PATH_COMPONENT_BYTES, MAX_EXTENSION_RELATIVE_PATH_BYTES,
@@ -11,11 +14,12 @@ use crate::{
 /// Canonical cross-platform package-relative resource path.
 ///
 /// The grammar is intentionally narrower than any one host filesystem. Paths
-/// are ASCII, use `/` separators, reject URL delimiters/escapes and Windows
-/// device names and characters, and have no normalization aliases. Package
-/// collections must additionally reject duplicate
-/// [`PortableRelativePath::collision_key`] values so the same package has one
-/// inventory on case-sensitive and case-insensitive hosts.
+/// use `/` separators, reject URL delimiters/escapes and Windows device names
+/// and characters, and preserve exact UTF-8 publisher spelling. Non-ASCII
+/// characters are limited to Unicode letters and numbers excluding combining
+/// marks. Package collections must additionally reject duplicate
+/// [`PortableRelativePath::collision_key`] values before materialization;
+/// native exact-name checks guard against further host-specific aliases.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PortableRelativePath(Box<str>);
 
@@ -30,9 +34,6 @@ impl PortableRelativePath {
                 bytes: value.len(),
                 max: MAX_EXTENSION_RELATIVE_PATH_BYTES,
             });
-        }
-        if !value.is_ascii() {
-            return Err(PortableRelativePathError::NonAscii);
         }
         if value.starts_with('/') || value.ends_with('/') {
             return Err(PortableRelativePathError::AbsoluteOrEmptyComponent);
@@ -54,6 +55,18 @@ impl PortableRelativePath {
                 max: MAX_EXTENSION_RELATIVE_PATH_DEPTH,
             });
         }
+        if !value.is_ascii() {
+            extension_resource_collision_key(value, MAX_EXTENSION_RELATIVE_PATH_BYTES).map_err(
+                |error| match error {
+                    ExtensionResourceCollisionKeyError::UnsupportedUnicode => {
+                        PortableRelativePathError::UnsupportedUnicode
+                    }
+                    ExtensionResourceCollisionKeyError::TooLong => {
+                        PortableRelativePathError::CollisionKeyTooLong
+                    }
+                },
+            )?;
+        }
         Ok(Self(value.into()))
     }
 
@@ -72,20 +85,21 @@ impl PortableRelativePath {
         self.0.rsplit('/').next().unwrap_or(&self.0)
     }
 
-    /// Returns the ASCII case-folded collision key.
+    /// Returns the bounded cross-platform collision key.
     ///
     /// Package collections must reject repeated keys before materialization;
     /// otherwise a signed package could name different resources on different
     /// supported filesystems.
     pub fn collision_key(&self) -> Box<str> {
-        self.0.to_ascii_lowercase().into_boxed_str()
+        extension_resource_collision_key(&self.0, MAX_EXTENSION_RELATIVE_PATH_BYTES)
+            .expect("parsed extension path has a bounded collision key")
     }
 }
 
 /// Returns whether `candidate` aliases an existing file or would make one
 /// portable path both a file and a directory.
 ///
-/// Callers pass ASCII case-folded [`PortableRelativePath::collision_key`]
+/// Callers pass [`PortableRelativePath::collision_key`]
 /// values. The bounded ancestor walk and ordered descendant lookup avoid a
 /// quadratic comparison of complete inventories.
 pub(crate) fn portable_path_shape_conflicts(paths: &BTreeSet<Box<str>>, candidate: &str) -> bool {
@@ -165,7 +179,7 @@ fn validate_component(component: &str) -> Result<(), PortableRelativePathError> 
         .map_or(component, |(stem, _)| stem)
         .to_ascii_uppercase();
     let reserved_numbered = device_stem.len() == 4
-        && matches!(&device_stem[..3], "COM" | "LPT")
+        && (device_stem.as_bytes()[..3] == *b"COM" || device_stem.as_bytes()[..3] == *b"LPT")
         && matches!(device_stem.as_bytes()[3], b'1'..=b'9');
     if matches!(
         device_stem.as_str(),
@@ -196,8 +210,11 @@ pub enum PortableRelativePathError {
         /// Maximum bytes.
         max: usize,
     },
-    /// The path contains non-ASCII text.
-    NonAscii,
+    /// The path contains a non-ASCII scalar outside the admitted subset or
+    /// one whose folded spelling is unsafe as a path component.
+    UnsupportedUnicode,
+    /// The collision key would exceed the existing path byte ceiling.
+    CollisionKeyTooLong,
     /// The path is absolute, has an empty component, or contains `.`/`..`.
     AbsoluteOrEmptyComponent,
     /// The path has too many components.
@@ -230,7 +247,12 @@ impl fmt::Display for PortableRelativePathError {
                 formatter,
                 "extension resource path component uses {bytes} bytes; maximum is {max}"
             ),
-            Self::NonAscii => formatter.write_str("extension resource path is not ASCII"),
+            Self::UnsupportedUnicode => {
+                formatter.write_str("extension resource path contains unsupported Unicode")
+            }
+            Self::CollisionKeyTooLong => {
+                formatter.write_str("extension resource path collision key exceeds its byte bound")
+            }
             Self::AbsoluteOrEmptyComponent => formatter
                 .write_str("extension resource path is absolute or has an empty/dot component"),
             Self::TooDeep { depth, max } => write!(
@@ -265,6 +287,9 @@ mod tests {
             "js/background-a1B2_3.js",
             "images/icon@2x.png",
             "wasm/argon2.wasm",
+            "src/js/сlickableCard.common.chunk.js",
+            "icons/café.png",
+            "資源/説明.txt",
         ] {
             let parsed = PortableRelativePath::parse(path).expect(path);
             assert_eq!(parsed.as_str(), path);
@@ -324,6 +349,38 @@ mod tests {
         let second = PortableRelativePath::parse("scripts/main.js").unwrap();
         assert_ne!(first, second);
         assert_eq!(first.collision_key(), second.collision_key());
+        let punctuation = PortableRelativePath::parse("Foo + @2x/Bar (v1)~.JS").unwrap();
+        assert_eq!(
+            punctuation.collision_key().as_ref(),
+            "foo + @2x/bar (v1)~.js"
+        );
+    }
+
+    #[test]
+    fn unicode_collision_keys_keep_distinct_publishers_spelling_but_reject_aliases() {
+        let original = PortableRelativePath::parse("src/js/сlickableCard.common.chunk.js").unwrap();
+        let cased = PortableRelativePath::parse("SRC/JS/СLICKABLECARD.COMMON.CHUNK.JS").unwrap();
+        assert_ne!(original, cased);
+        assert_eq!(original.collision_key(), cased.collision_key());
+        assert_eq!(original.as_str(), "src/js/сlickableCard.common.chunk.js");
+        assert_ne!(
+            original.collision_key().as_ref(),
+            "src/js/clickablecard.common.chunk.js"
+        );
+        assert_eq!(
+            PortableRelativePath::parse("cafe\u{301}.js"),
+            Err(PortableRelativePathError::UnsupportedUnicode)
+        );
+        assert_eq!(
+            PortableRelativePath::parse("ＣＯＮ.txt"),
+            Err(PortableRelativePathError::UnsupportedUnicode)
+        );
+        for path in ["COM¹.txt", "name\u{0345}.js"] {
+            assert_eq!(
+                PortableRelativePath::parse(path),
+                Err(PortableRelativePathError::UnsupportedUnicode)
+            );
+        }
     }
 
     proptest! {
@@ -331,9 +388,9 @@ mod tests {
         fn parsing_arbitrary_text_never_changes_an_accepted_path(value in any::<String>()) {
             if let Ok(path) = PortableRelativePath::parse(&value) {
                 prop_assert_eq!(path.as_str(), value.as_str());
-                prop_assert!(path.as_str().is_ascii());
                 prop_assert!(path.as_str().len() <= MAX_EXTENSION_RELATIVE_PATH_BYTES);
                 prop_assert!(path.depth() <= MAX_EXTENSION_RELATIVE_PATH_DEPTH);
+                prop_assert!(path.collision_key().len() <= MAX_EXTENSION_RELATIVE_PATH_BYTES);
             }
         }
     }

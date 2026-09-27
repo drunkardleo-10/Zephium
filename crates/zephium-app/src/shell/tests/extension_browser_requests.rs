@@ -50,10 +50,42 @@ fn authenticated_browser_mutations_follow_shell_scope_and_settle_exactly_once() 
     };
     assert_ne!(created, original);
     assert_eq!(shell.windows.focused().unwrap().active, Some(created));
+    let (first_url, first_intent) = engine.extension_browser_first_urls()[0].clone().unwrap();
+    assert_eq!(first_url.as_ref(), "https://created.example/");
+    assert!(
+        !engine
+            .calls()
+            .iter()
+            .any(|call| call.starts_with(&format!("create {created} "))),
+        "the requested URL must wait for the native tabs.create reply"
+    );
+    shell.handle(Command::Engine(EngineEvent::ExtensionCreatedTabReplied {
+        profile,
+        request: ExtensionBrowserRequestId::new(1).unwrap(),
+        tab: created,
+        url: Arc::from("https://created.example/"),
+        intent: first_intent,
+    }));
     assert!(engine
         .calls()
         .iter()
         .any(|call| { call == &format!("create {created} https://created.example/ [default]") }));
+    shell.handle(Command::Engine(EngineEvent::ExtensionCreatedTabReplied {
+        profile,
+        request: ExtensionBrowserRequestId::new(1).unwrap(),
+        tab: created,
+        url: Arc::from("https://created.example/"),
+        intent: first_intent,
+    }));
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .filter(|call| call == &&format!("create {created} https://created.example/ [default]"))
+            .count(),
+        1,
+        "duplicate native settlement cannot start the first load twice"
+    );
 
     shell.handle(Command::Engine(request(
         profile,
@@ -103,6 +135,95 @@ fn authenticated_browser_mutations_follow_shell_scope_and_settle_exactly_once() 
 }
 
 #[test]
+fn delayed_create_reply_cannot_override_a_newer_failed_navigation_or_closed_tab() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let window = shell.windows.focused().unwrap().id;
+    let profile = shell.windows.focused().unwrap().profile;
+    activate_extensions(&mut shell, profile);
+
+    shell.handle(Command::Engine(request(
+        profile,
+        41,
+        ExtensionBrowserRequestAction::CreateTab {
+            window: Some(window),
+            url: Some(Arc::from("https://first.example/")),
+            active: true,
+        },
+    )));
+    let (
+        _,
+        _,
+        ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::CreatedTab(tab)),
+    ) = engine.extension_browser_settlements()[0]
+    else {
+        panic!("first logical tab was not created");
+    };
+    let intent = engine.extension_browser_first_urls()[0].as_ref().unwrap().1;
+    shell.handle(Command::Engine(EngineEvent::ExtensionCreatedTabReplied {
+        profile: ProfileId::from(999),
+        request: ExtensionBrowserRequestId::new(41).unwrap(),
+        tab,
+        url: Arc::from("https://first.example/"),
+        intent,
+    }));
+    assert_eq!(shell.items.pending_navigation_request(tab), Some(intent));
+
+    shell.handle(Command::Navigate {
+        id: tab,
+        input: "https://newer.example/".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::ViewCreationFailed { id: tab }));
+    assert!(shell.items.pending_navigation_request(tab).is_none());
+    shell.handle(Command::Engine(EngineEvent::ExtensionCreatedTabReplied {
+        profile,
+        request: ExtensionBrowserRequestId::new(41).unwrap(),
+        tab,
+        url: Arc::from("https://first.example/"),
+        intent,
+    }));
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("create {tab} https://first.example/ [default]")));
+
+    shell.handle(Command::Engine(request(
+        profile,
+        42,
+        ExtensionBrowserRequestAction::CreateTab {
+            window: Some(window),
+            url: Some(Arc::from("https://closed.example/")),
+            active: true,
+        },
+    )));
+    let (
+        _,
+        _,
+        ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::CreatedTab(
+            closed,
+        )),
+    ) = engine.extension_browser_settlements()[1]
+    else {
+        panic!("second logical tab was not created");
+    };
+    let closed_intent = engine.extension_browser_first_urls()[1].as_ref().unwrap().1;
+    shell.handle(Command::Close(closed));
+    shell.handle(Command::Engine(EngineEvent::ExtensionCreatedTabReplied {
+        profile,
+        request: ExtensionBrowserRequestId::new(42).unwrap(),
+        tab: closed,
+        url: Arc::from("https://closed.example/"),
+        intent: closed_intent,
+    }));
+    assert!(shell.items.tab(closed).is_none());
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("create {closed} https://closed.example/ [default]")));
+    let _ = screen;
+}
+
+#[test]
 fn prebootstrap_browser_request_is_explicitly_rejected() {
     let (mut shell, engine, _) = setup();
     shell.handle(Command::Engine(request(
@@ -146,12 +267,20 @@ fn extension_page_authority_is_limited_to_the_active_profile() {
     )));
 
     let settlements = engine.extension_browser_settlements();
+    let ExtensionBrowserRequestSettlement::Applied(
+        ExtensionBrowserRequestResult::ExtensionPageAuthorized { tab, window },
+    ) = settlements[0].2
+    else {
+        panic!("extension page was not admitted")
+    };
+    assert_eq!(window, shell.windows.focused().unwrap().id);
+    let state = shell.items.tab(tab).unwrap();
     assert_eq!(
-        settlements[0].2,
-        ExtensionBrowserRequestSettlement::Applied(
-            ExtensionBrowserRequestResult::ExtensionPageAuthorized,
-        )
+        state.content,
+        zephium_core::item::TabContent::ExtensionOwned
     );
+    assert!(state.url.is_none());
+    assert!(state.has_view());
     assert_eq!(
         settlements[1].2,
         ExtensionBrowserRequestSettlement::Rejected(

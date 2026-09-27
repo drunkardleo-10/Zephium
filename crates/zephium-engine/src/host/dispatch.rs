@@ -286,6 +286,8 @@ enum HostTaskKey {
     NavigationCommit(ItemId),
     #[cfg(target_os = "macos")]
     ExtensionBackgroundWake(ItemId),
+    #[cfg(target_os = "macos")]
+    ProvisionalTabUrl(ItemId),
     ExtensionPermitInvalidation(ItemId),
     NavigationSettlement(ItemId),
     Discard(ItemId),
@@ -493,6 +495,8 @@ pub(crate) fn install(
             native_resources: NativeResourceLedger::default(),
             extension_runtime_registry:
                 super::extension_runtime::ExtensionRuntimeRegistry::new(extension_runtime_gate),
+            #[cfg(target_os = "macos")]
+            publisher_native_messaging_denials: [0; 6],
             extension_document_authority: super::extensions::ExtensionDocumentAuthority::default(),
             extension_browser_surfaces: HashMap::new(),
             #[cfg(target_os = "macos")]
@@ -1362,6 +1366,21 @@ where
     with_priority(
         HostTaskPriority::Lifecycle,
         Some(HostTaskKey::ExtensionBackgroundWake(id)),
+        f,
+    )
+}
+
+/// Latest accepted main-frame URL attempt for one physical tab. It precedes
+/// the terminal navigation settlement in the same lifecycle band, so an
+/// extension can observe an OAuth callback even when no page commits there.
+#[cfg(target_os = "macos")]
+pub(super) fn with_provisional_tab_url<F>(id: ItemId, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::ProvisionalTabUrl(id)),
         f,
     )
 }

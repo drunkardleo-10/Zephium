@@ -16,22 +16,28 @@ use zephium_extension_repository::{
     ActiveBundledRuntimePackageAccess, ActiveBundledRuntimePackageAccessBuildRefusal,
     ActiveBundledRuntimePackageRecoveryError, ActiveBundledRuntimePackageRecoveryRefusal,
     ActiveBundledRuntimePackageRecoveryToken, ActiveBundledRuntimePackageRejoinRefusal,
-    BundledCurrentCatalogSet, BundledCurrentManifestBindings, BundledManifestBindingsError,
-    BundledPackageLease, BundledPackageLeaseError, BundledPackageLeaseReleaseError,
-    BundledPackageLeaseReleaseOutcome, BundledRuntimeAcquisitionError,
-    BundledRuntimeAcquisitionPlan, BundledRuntimeAcquisitionPlanRefusalReason,
-    BundledRuntimeHostActivationBindingError, BundledRuntimePackageAccessBuildError,
-    ExtensionRepositoryError, RollbackBundledPackageLease, RollbackBundledPackageReleaseRequest,
-    RollbackBundledRuntimeHostActivation, RollbackBundledRuntimeHostActivationBindingRefusal,
-    RollbackBundledRuntimePackageAccess, RollbackBundledRuntimePackageAccessBuildRefusal,
-    RollbackBundledRuntimePackageRecoveryError, RollbackBundledRuntimePackageRecoveryRefusal,
-    RollbackBundledRuntimePackageRecoveryToken, RollbackBundledRuntimePackageRejoinRefusal,
+    BundledCurrentCatalogSet, BundledManifestBindingsError, BundledPackageLease,
+    BundledPackageLeaseError, BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome,
+    BundledRuntimeAcquisitionError, BundledRuntimeAcquisitionPlan,
+    BundledRuntimeAcquisitionPlanRefusalReason, BundledRuntimeHostActivationBindingError,
+    BundledRuntimePackageAccessBuildError, ExtensionRepositoryError, RollbackBundledPackageLease,
+    RollbackBundledPackageReleaseRequest, RollbackBundledRuntimeHostActivation,
+    RollbackBundledRuntimeHostActivationBindingRefusal, RollbackBundledRuntimePackageAccess,
+    RollbackBundledRuntimePackageAccessBuildRefusal, RollbackBundledRuntimePackageRecoveryError,
+    RollbackBundledRuntimePackageRecoveryRefusal, RollbackBundledRuntimePackageRecoveryToken,
+    RollbackBundledRuntimePackageRejoinRefusal,
 };
 use zephium_extension_runtime_api::{
     ExtensionPackageAccess, ExtensionRuntimeHostActivation, ExtensionRuntimeHostFactory,
 };
 
 use super::{ServiceRepository, ServiceRepositoryOpenEpoch};
+#[cfg(feature = "external-extensions")]
+use zephium_extension_repository::beta::{
+    BetaNativeAdmissionError, BetaNativePackagePin, BetaRuntimeBuildRefusal,
+    BetaRuntimeHostActivation, BetaRuntimeHostRefusal, BetaRuntimePackageAccess,
+    BetaRuntimeRecoveryRefusal, BetaRuntimeRecoveryToken,
+};
 
 const RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES: usize = 2 * size_of::<usize>();
 
@@ -39,6 +45,8 @@ const RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES: usize = 2 * size_of::<usize>();
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum ServiceRuntimeCatalogRole {
+    #[cfg(feature = "external-extensions")]
+    External,
     Active,
     Rollback,
 }
@@ -50,36 +58,66 @@ pub(crate) enum ServiceRuntimeCatalogRole {
 /// from persistence fields would discard the repository-authenticated owner.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct ServiceManifestBindings {
-    inner: BundledCurrentManifestBindings,
+    current: Option<BundledCurrentCatalogSet>,
+    bindings: ExtensionGrantManifestBindings,
+    #[cfg(feature = "external-extensions")]
+    external: Option<
+        Box<(
+            ExtensionInstallId,
+            zephium_extension_repository::beta::StoredBetaPackage,
+        )>,
+    >,
+}
+
+pub(crate) enum ServiceRuntimeSelection {
+    Bundled(BundledCurrentCatalogSet),
+    #[cfg(feature = "external-extensions")]
+    External(Box<zephium_extension_repository::beta::StoredBetaPackage>),
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 impl ServiceManifestBindings {
-    pub(crate) const fn current_catalog_set(&self) -> BundledCurrentCatalogSet {
-        self.inner.current_catalog_set()
+    pub(crate) const fn current_catalog_set(&self) -> Option<BundledCurrentCatalogSet> {
+        self.current
     }
-
     pub(crate) fn into_store_bindings_and_manifest(
         self,
         install_id: ExtensionInstallId,
     ) -> Result<
         (
-            BundledCurrentCatalogSet,
+            ServiceRuntimeSelection,
             ExtensionGrantManifestBindings,
             Arc<ExtensionManifestDescriptor>,
         ),
         ServiceManifestSelectionRefusal,
     > {
-        let manifest = self
-            .inner
-            .bindings()
+        let Some(manifest) = self
+            .bindings
             .iter()
             .find(|binding| binding.install_id() == install_id)
-            .map(|binding| Arc::clone(binding.manifest_arc()));
-        match manifest {
-            Some(manifest) => Ok((
-                self.inner.current_catalog_set(),
-                self.inner.into_bindings(),
+            .map(|binding| Arc::clone(binding.manifest_arc()))
+        else {
+            return Err(ServiceManifestSelectionRefusal { bindings: self });
+        };
+        #[cfg(feature = "external-extensions")]
+        if self
+            .external
+            .as_ref()
+            .is_some_and(|selected| selected.0 == install_id)
+        {
+            let Some(selected) = self.external else {
+                unreachable!("selection checked above");
+            };
+            return Ok((
+                ServiceRuntimeSelection::External(Box::new(selected.1)),
+                self.bindings,
+                manifest,
+            ));
+        }
+        match self.current {
+            Some(current) => Ok((
+                ServiceRuntimeSelection::Bundled(current),
+                self.bindings,
                 manifest,
             )),
             None => Err(ServiceManifestSelectionRefusal { bindings: self }),
@@ -113,9 +151,31 @@ impl std::fmt::Debug for ServiceManifestSelectionRefusal {
 #[must_use = "an acquisition plan must settle against its exact Store Begin result"]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct ServiceRuntimeAcquisitionPlan {
-    inner: BundledRuntimeAcquisitionPlan,
+    inner: ServiceRuntimePlanInner,
     manifest: Arc<ExtensionManifestDescriptor>,
     open_epoch: Arc<ServiceRepositoryOpenEpoch>,
+}
+
+enum ServiceRuntimePlanInner {
+    Bundled(Box<BundledRuntimeAcquisitionPlan>),
+    #[cfg(feature = "external-extensions")]
+    External(Box<zephium_extension_repository::beta::BetaNativeOwnershipAdmission>),
+}
+impl ServiceRuntimePlanInner {
+    fn ownership_begin_mutation(&self) -> ExtensionNativeOwnershipJournalMutation {
+        match self {
+            Self::Bundled(plan) => plan.ownership_begin_mutation(),
+            #[cfg(feature = "external-extensions")]
+            Self::External(plan) => plan.ownership_begin_mutation(),
+        }
+    }
+    fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Bundled(plan) => plan.retained_bytes(),
+            #[cfg(feature = "external-extensions")]
+            Self::External(plan) => plan.retained_bytes(),
+        }
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -135,8 +195,8 @@ impl ServiceRuntimeAcquisitionPlan {
     pub(crate) fn retained_bytes(&self) -> usize {
         retained_bytes_with_wrapper(
             self.inner.retained_bytes(),
-            size_of::<Self>(),
-            size_of::<BundledRuntimeAcquisitionPlan>(),
+            size_of::<Self>() + RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES,
+            size_of::<Box<BundledRuntimeAcquisitionPlan>>(),
         )
     }
 }
@@ -178,8 +238,8 @@ const fn max2(first: usize, second: usize) -> usize {
 /// refusal, or release authority.
 const MAX_SERVICE_AUTHORITY_WRAPPER_ADDITIONAL_RETAINED_BYTES: usize = max2(
     wrapper_additional_retained_bytes(
-        size_of::<ServiceRuntimeAcquisitionPlan>(),
-        size_of::<BundledRuntimeAcquisitionPlan>(),
+        size_of::<ServiceRuntimeAcquisitionPlan>() + RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES,
+        size_of::<Box<BundledRuntimeAcquisitionPlan>>(),
     ),
     max2(
         max2(
@@ -278,8 +338,8 @@ const SERVICE_ACQUISITION_PLAN_REFUSAL_ADDITIONAL_RETAINED_BYTES: usize =
     size_of::<ServiceRuntimeAcquisitionError>()
         .saturating_add(RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
         .saturating_add(wrapper_additional_retained_bytes(
-            size_of::<ServiceRuntimeAcquisitionPlan>(),
-            size_of::<BundledRuntimeAcquisitionPlan>(),
+            size_of::<ServiceRuntimeAcquisitionPlan>() + RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES,
+            size_of::<Box<BundledRuntimeAcquisitionPlan>>(),
         ));
 // A post-acquisition manifest mismatch quarantines the exact service lease in
 // a Box. Derive both role deltas rather than relying on an unrelated wrapper
@@ -396,6 +456,12 @@ pub(crate) struct ServiceRuntimeLease {
 }
 
 enum ServiceRuntimeLeaseRole {
+    #[cfg(feature = "external-extensions")]
+    External {
+        lease: Box<BetaNativePackagePin>,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        open_epoch: Arc<ServiceRepositoryOpenEpoch>,
+    },
     Active {
         lease: ActiveBundledPackageLease,
         manifest: Arc<ExtensionManifestDescriptor>,
@@ -412,6 +478,9 @@ enum ServiceRuntimeLeaseRole {
 impl ServiceRuntimeLease {
     pub(crate) const fn role(&self) -> ServiceRuntimeCatalogRole {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeLeaseRole::External { .. } => ServiceRuntimeCatalogRole::External,
+
             ServiceRuntimeLeaseRole::Active { .. } => ServiceRuntimeCatalogRole::Active,
             ServiceRuntimeLeaseRole::Rollback { .. } => ServiceRuntimeCatalogRole::Rollback,
         }
@@ -419,6 +488,9 @@ impl ServiceRuntimeLease {
 
     pub(crate) fn manifest(&self) -> &Arc<ExtensionManifestDescriptor> {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeLeaseRole::External { manifest, .. } => manifest,
+
             ServiceRuntimeLeaseRole::Active { manifest, .. }
             | ServiceRuntimeLeaseRole::Rollback { manifest, .. } => manifest,
         }
@@ -428,6 +500,11 @@ impl ServiceRuntimeLease {
     /// and same-open epoch handles.
     pub(crate) fn retained_bytes(&self) -> usize {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeLeaseRole::External { lease, .. } => {
+                lease.retained_bytes().saturating_add(size_of::<Self>())
+            }
+
             ServiceRuntimeLeaseRole::Active { lease, .. } => retained_bytes_with_wrapper(
                 lease.retained_bytes(),
                 size_of::<Self>(),
@@ -458,6 +535,29 @@ impl ServiceRuntimeLease {
                 coordinator_companion_retained_bytes,
             );
         match self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeLeaseRole::External {
+                lease,
+                manifest,
+                open_epoch,
+            } => match lease.into_runtime_access() {
+                Ok(access) => Ok(ServiceRuntimePackageAccess {
+                    role: ServiceRuntimePackageAccessRole::External {
+                        access,
+                        manifest,
+                        open_epoch,
+                        generation,
+                    },
+                }),
+                Err(refusal) => Err(ServiceRuntimePackageAccessBuildRefusal {
+                    role: ServiceRuntimePackageAccessBuildRefusalRole::External {
+                        refusal,
+                        manifest,
+                        open_epoch,
+                    },
+                }),
+            },
+
             ServiceRuntimeLeaseRole::Active {
                 lease,
                 manifest,
@@ -511,6 +611,16 @@ impl ServiceRuntimeLease {
     /// native absence durable. No repository or native operation is performed.
     pub(crate) fn into_release(self) -> ServiceRuntimeRelease {
         match self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeLeaseRole::External {
+                lease, open_epoch, ..
+            } => ServiceRuntimeRelease {
+                role: ServiceRuntimeReleaseRole::External {
+                    request: Some(lease),
+                    open_epoch,
+                },
+            },
+
             ServiceRuntimeLeaseRole::Active {
                 lease,
                 manifest: _,
@@ -543,6 +653,12 @@ pub(crate) struct ServiceRuntimePackageAccessBuildRefusal {
 }
 
 enum ServiceRuntimePackageAccessBuildRefusalRole {
+    #[cfg(feature = "external-extensions")]
+    External {
+        refusal: BetaRuntimeBuildRefusal,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        open_epoch: Arc<ServiceRepositoryOpenEpoch>,
+    },
     Active {
         refusal: ActiveBundledRuntimePackageAccessBuildRefusal,
         manifest: Arc<ExtensionManifestDescriptor>,
@@ -559,6 +675,11 @@ enum ServiceRuntimePackageAccessBuildRefusalRole {
 impl ServiceRuntimePackageAccessBuildRefusal {
     pub(crate) const fn role(&self) -> ServiceRuntimeCatalogRole {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimePackageAccessBuildRefusalRole::External { .. } => {
+                ServiceRuntimeCatalogRole::External
+            }
+
             ServiceRuntimePackageAccessBuildRefusalRole::Active { .. } => {
                 ServiceRuntimeCatalogRole::Active
             }
@@ -570,6 +691,11 @@ impl ServiceRuntimePackageAccessBuildRefusal {
 
     pub(crate) const fn reason(&self) -> BundledRuntimePackageAccessBuildError {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimePackageAccessBuildRefusalRole::External { refusal, .. } => {
+                external_build_error(refusal.reason())
+            }
+
             ServiceRuntimePackageAccessBuildRefusalRole::Active { refusal, .. } => refusal.reason(),
             ServiceRuntimePackageAccessBuildRefusalRole::Rollback { refusal, .. } => {
                 refusal.reason()
@@ -579,6 +705,19 @@ impl ServiceRuntimePackageAccessBuildRefusal {
 
     pub(crate) fn try_into_lease(self) -> Result<ServiceRuntimeLease, Self> {
         match self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimePackageAccessBuildRefusalRole::External {
+                refusal,
+                manifest,
+                open_epoch,
+            } => Ok(ServiceRuntimeLease {
+                role: ServiceRuntimeLeaseRole::External {
+                    lease: Box::new(refusal.into_pin()),
+                    manifest,
+                    open_epoch,
+                },
+            }),
+
             ServiceRuntimePackageAccessBuildRefusalRole::Active {
                 refusal,
                 manifest,
@@ -641,6 +780,13 @@ pub(crate) struct ServiceRuntimePackageAccess {
 }
 
 enum ServiceRuntimePackageAccessRole {
+    #[cfg(feature = "external-extensions")]
+    External {
+        access: BetaRuntimePackageAccess,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        open_epoch: Arc<ServiceRepositoryOpenEpoch>,
+        generation: ExtensionRuntimeGeneration,
+    },
     Active {
         access: ActiveBundledRuntimePackageAccess,
         manifest: Arc<ExtensionManifestDescriptor>,
@@ -657,6 +803,9 @@ enum ServiceRuntimePackageAccessRole {
 impl ServiceRuntimePackageAccess {
     pub(crate) const fn role(&self) -> ServiceRuntimeCatalogRole {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimePackageAccessRole::External { .. } => ServiceRuntimeCatalogRole::External,
+
             ServiceRuntimePackageAccessRole::Active { .. } => ServiceRuntimeCatalogRole::Active,
             ServiceRuntimePackageAccessRole::Rollback { .. } => ServiceRuntimeCatalogRole::Rollback,
         }
@@ -664,6 +813,9 @@ impl ServiceRuntimePackageAccess {
 
     pub(crate) fn manifest(&self) -> &Arc<ExtensionManifestDescriptor> {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimePackageAccessRole::External { manifest, .. } => manifest,
+
             ServiceRuntimePackageAccessRole::Active { manifest, .. }
             | ServiceRuntimePackageAccessRole::Rollback { manifest, .. } => manifest,
         }
@@ -674,6 +826,11 @@ impl ServiceRuntimePackageAccess {
     /// charged exactly once by the upstream capability.
     pub(crate) fn retained_bytes(&self) -> usize {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimePackageAccessRole::External { access, .. } => {
+                access.retained_bytes().saturating_add(size_of::<Self>())
+            }
+
             ServiceRuntimePackageAccessRole::Active { access, .. } => retained_bytes_with_wrapper(
                 access.retained_bytes(),
                 size_of::<Self>(),
@@ -696,6 +853,11 @@ impl ServiceRuntimePackageAccess {
         BundledRuntimePackageAccessBuildError,
     > {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimePackageAccessRole::External { access, .. } => {
+                Ok(Some(access.expected_native_identity()))
+            }
+
             ServiceRuntimePackageAccessRole::Active { access, .. } => {
                 access.expected_native_identity()
             }
@@ -712,6 +874,11 @@ impl ServiceRuntimePackageAccess {
         preparing: &ExtensionNativeOwnershipEntry,
     ) -> bool {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimePackageAccessRole::External { access, .. } => {
+                access.matches_preparing_ownership_entry(preparing)
+            }
+
             ServiceRuntimePackageAccessRole::Active { access, .. } => {
                 access.matches_preparing_ownership_entry(preparing)
             }
@@ -729,6 +896,16 @@ impl ServiceRuntimePackageAccess {
         self,
     ) -> Result<ServiceRuntimeRelease, ServiceRuntimePackageAccessReleaseRefusal> {
         match self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimePackageAccessRole::External {
+                access, open_epoch, ..
+            } => Ok(ServiceRuntimeRelease {
+                role: ServiceRuntimeReleaseRole::External {
+                    request: Some(Box::new(access.into_pin())),
+                    open_epoch,
+                },
+            }),
+
             ServiceRuntimePackageAccessRole::Active {
                 access,
                 manifest,
@@ -797,6 +974,36 @@ impl ServiceRuntimePackageAccess {
         coordinator_companion_retained_bytes: usize,
     ) -> Result<ServiceRuntimeHostActivation, ServiceRuntimeHostActivationBindingRefusal> {
         match self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimePackageAccessRole::External {
+                access,
+                manifest,
+                open_epoch,
+                generation,
+            } => match access.try_into_host_activation(
+                entry,
+                generation,
+                factory,
+                coordinator_companion_retained_bytes
+                    .saturating_add(size_of::<ServiceRuntimeRecovery>()),
+                service_manifest_bind_transient_retained_bytes(),
+            ) {
+                Ok(activation) => Ok(ServiceRuntimeHostActivation {
+                    role: ServiceRuntimeHostActivationRole::External {
+                        activation: Box::new(activation),
+                        open_epoch,
+                    },
+                }),
+                Err(refusal) => Err(ServiceRuntimeHostActivationBindingRefusal {
+                    role: ServiceRuntimeHostActivationBindingRefusalRole::External {
+                        refusal,
+                        manifest,
+                        open_epoch,
+                        generation,
+                    },
+                }),
+            },
+
             ServiceRuntimePackageAccessRole::Active {
                 access,
                 manifest,
@@ -1049,6 +1256,19 @@ pub(crate) struct ServiceRuntimeHostActivationBindingRefusal {
 }
 
 enum ServiceRuntimeHostActivationBindingRefusalRole {
+    #[cfg(feature = "external-extensions")]
+    ExternalQuarantine {
+        _refusal: BetaRuntimeRecoveryRefusal,
+        _manifest: Arc<ExtensionManifestDescriptor>,
+        _open_epoch: Arc<ServiceRepositoryOpenEpoch>,
+    },
+    #[cfg(feature = "external-extensions")]
+    External {
+        refusal: BetaRuntimeHostRefusal,
+        manifest: Arc<ExtensionManifestDescriptor>,
+        open_epoch: Arc<ServiceRepositoryOpenEpoch>,
+        generation: ExtensionRuntimeGeneration,
+    },
     Active {
         refusal: ActiveBundledRuntimeHostActivationBindingRefusal,
         manifest: Arc<ExtensionManifestDescriptor>,
@@ -1065,6 +1285,16 @@ enum ServiceRuntimeHostActivationBindingRefusalRole {
 impl ServiceRuntimeHostActivationBindingRefusal {
     pub(crate) const fn role(&self) -> ServiceRuntimeCatalogRole {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeHostActivationBindingRefusalRole::ExternalQuarantine { .. } => {
+                ServiceRuntimeCatalogRole::External
+            }
+
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeHostActivationBindingRefusalRole::External { .. } => {
+                ServiceRuntimeCatalogRole::External
+            }
+
             ServiceRuntimeHostActivationBindingRefusalRole::Active { .. } => {
                 ServiceRuntimeCatalogRole::Active
             }
@@ -1076,6 +1306,16 @@ impl ServiceRuntimeHostActivationBindingRefusal {
 
     pub(crate) const fn reason(&self) -> BundledRuntimeHostActivationBindingError {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeHostActivationBindingRefusalRole::ExternalQuarantine { .. } => {
+                BundledRuntimeHostActivationBindingError::RepositoryBindingMismatch
+            }
+
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeHostActivationBindingRefusalRole::External { refusal, .. } => {
+                external_host_error(refusal)
+            }
+
             ServiceRuntimeHostActivationBindingRefusalRole::Active { refusal, .. } => {
                 refusal.reason()
             }
@@ -1089,6 +1329,38 @@ impl ServiceRuntimeHostActivationBindingRefusal {
         self,
     ) -> Result<(ServiceRuntimePackageAccess, ExtensionNativeOwnershipEntry), Self> {
         match self.role {
+            #[cfg(feature = "external-extensions")]
+            role @ ServiceRuntimeHostActivationBindingRefusalRole::ExternalQuarantine { .. } => {
+                Err(Self { role })
+            }
+
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeHostActivationBindingRefusalRole::External {
+                refusal,
+                manifest,
+                open_epoch,
+                generation,
+            } => match refusal.try_into_access() {
+                Ok((access, entry)) => Ok((
+                    ServiceRuntimePackageAccess {
+                        role: ServiceRuntimePackageAccessRole::External {
+                            access,
+                            manifest,
+                            open_epoch,
+                            generation,
+                        },
+                    },
+                    entry,
+                )),
+                Err(refusal) => Err(Self {
+                    role: ServiceRuntimeHostActivationBindingRefusalRole::ExternalQuarantine {
+                        _refusal: refusal,
+                        _manifest: manifest,
+                        _open_epoch: open_epoch,
+                    },
+                }),
+            },
+
             ServiceRuntimeHostActivationBindingRefusalRole::Active {
                 refusal,
                 manifest,
@@ -1157,6 +1429,11 @@ pub(crate) struct ServiceRuntimeHostActivation {
 }
 
 enum ServiceRuntimeHostActivationRole {
+    #[cfg(feature = "external-extensions")]
+    External {
+        activation: Box<BetaRuntimeHostActivation>,
+        open_epoch: Arc<ServiceRepositoryOpenEpoch>,
+    },
     Active {
         activation: ActiveBundledRuntimeHostActivation,
         open_epoch: Arc<ServiceRepositoryOpenEpoch>,
@@ -1171,6 +1448,11 @@ enum ServiceRuntimeHostActivationRole {
 impl ServiceRuntimeHostActivation {
     pub(crate) const fn role(&self) -> ServiceRuntimeCatalogRole {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeHostActivationRole::External { .. } => {
+                ServiceRuntimeCatalogRole::External
+            }
+
             ServiceRuntimeHostActivationRole::Active { .. } => ServiceRuntimeCatalogRole::Active,
             ServiceRuntimeHostActivationRole::Rollback { .. } => {
                 ServiceRuntimeCatalogRole::Rollback
@@ -1180,6 +1462,11 @@ impl ServiceRuntimeHostActivation {
 
     pub(crate) fn retained_bytes(&self) -> usize {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeHostActivationRole::External { activation, .. } => activation
+                .retained_bytes()
+                .saturating_add(size_of::<ServiceRuntimeRecovery>()),
+
             ServiceRuntimeHostActivationRole::Active { activation, .. } => activation
                 .retained_bytes()
                 .saturating_add(active_recovery_wrapper_additional_retained_bytes()),
@@ -1191,6 +1478,11 @@ impl ServiceRuntimeHostActivation {
 
     pub(crate) fn maximum_future_retained_bytes(&self) -> usize {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeHostActivationRole::External { activation, .. } => activation
+                .maximum_future_retained_bytes()
+                .saturating_add(size_of::<ServiceRuntimeRecovery>()),
+
             ServiceRuntimeHostActivationRole::Active { activation, .. } => activation
                 .maximum_future_retained_bytes()
                 .saturating_add(active_recovery_wrapper_additional_retained_bytes()),
@@ -1202,6 +1494,23 @@ impl ServiceRuntimeHostActivation {
 
     pub(crate) fn into_parts(self) -> (ExtensionRuntimeHostActivation, ServiceRuntimeRecovery) {
         match self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeHostActivationRole::External {
+                activation,
+                open_epoch,
+            } => {
+                let (activation, recovery) = activation.into_parts();
+                (
+                    activation,
+                    ServiceRuntimeRecovery {
+                        role: ServiceRuntimeRecoveryRole::External {
+                            recovery: Box::new(recovery),
+                            open_epoch,
+                        },
+                    },
+                )
+            }
+
             ServiceRuntimeHostActivationRole::Active {
                 activation,
                 open_epoch,
@@ -1244,6 +1553,11 @@ pub(crate) struct ServiceRuntimeRecovery {
 }
 
 enum ServiceRuntimeRecoveryRole {
+    #[cfg(feature = "external-extensions")]
+    External {
+        recovery: Box<BetaRuntimeRecoveryToken>,
+        open_epoch: Arc<ServiceRepositoryOpenEpoch>,
+    },
     Active {
         recovery: ActiveBundledRuntimePackageRecoveryToken,
         open_epoch: Arc<ServiceRepositoryOpenEpoch>,
@@ -1266,6 +1580,9 @@ const fn rollback_recovery_wrapper_additional_retained_bytes() -> usize {
 impl ServiceRuntimeRecovery {
     pub(crate) const fn role(&self) -> ServiceRuntimeCatalogRole {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeRecoveryRole::External { .. } => ServiceRuntimeCatalogRole::External,
+
             ServiceRuntimeRecoveryRole::Active { .. } => ServiceRuntimeCatalogRole::Active,
             ServiceRuntimeRecoveryRole::Rollback { .. } => ServiceRuntimeCatalogRole::Rollback,
         }
@@ -1273,6 +1590,11 @@ impl ServiceRuntimeRecovery {
 
     pub(crate) fn retained_bytes(&self) -> usize {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeRecoveryRole::External { recovery, .. } => {
+                recovery.retained_bytes().saturating_add(size_of::<Self>())
+            }
+
             ServiceRuntimeRecoveryRole::Active { recovery, .. } => recovery
                 .retained_bytes()
                 .saturating_add(active_recovery_wrapper_additional_retained_bytes()),
@@ -1288,6 +1610,25 @@ impl ServiceRuntimeRecovery {
         operation_authority: ExtensionRuntimeOperationAuthority,
     ) -> Result<ServiceRuntimeRelease, ServiceRuntimeRejoinRefusal> {
         match self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeRecoveryRole::External {
+                recovery,
+                open_epoch,
+            } => match recovery.rejoin(access, operation_authority) {
+                Ok(request) => Ok(ServiceRuntimeRelease {
+                    role: ServiceRuntimeReleaseRole::External {
+                        request: Some(Box::new(request)),
+                        open_epoch,
+                    },
+                }),
+                Err(refusal) => Err(ServiceRuntimeRejoinRefusal {
+                    role: ServiceRuntimeRejoinRefusalRole::External {
+                        refusal,
+                        open_epoch,
+                    },
+                }),
+            },
+
             ServiceRuntimeRecoveryRole::Active {
                 recovery,
                 open_epoch,
@@ -1334,6 +1675,11 @@ pub(crate) struct ServiceRuntimeRejoinRefusal {
 }
 
 enum ServiceRuntimeRejoinRefusalRole {
+    #[cfg(feature = "external-extensions")]
+    External {
+        refusal: BetaRuntimeRecoveryRefusal,
+        open_epoch: Arc<ServiceRepositoryOpenEpoch>,
+    },
     Active {
         refusal: ActiveBundledRuntimePackageRejoinRefusal,
         open_epoch: Arc<ServiceRepositoryOpenEpoch>,
@@ -1357,6 +1703,9 @@ pub(crate) enum ServiceRuntimeRejoinRefusalReason {
 impl ServiceRuntimeRejoinRefusal {
     pub(crate) const fn role(&self) -> ServiceRuntimeCatalogRole {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeRejoinRefusalRole::External { .. } => ServiceRuntimeCatalogRole::External,
+
             ServiceRuntimeRejoinRefusalRole::Active { .. } => ServiceRuntimeCatalogRole::Active,
             ServiceRuntimeRejoinRefusalRole::Rollback { .. } => ServiceRuntimeCatalogRole::Rollback,
         }
@@ -1364,6 +1713,19 @@ impl ServiceRuntimeRejoinRefusal {
 
     pub(crate) fn reason(&self) -> ServiceRuntimeRejoinRefusalReason {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeRejoinRefusalRole::External { refusal, .. } => {
+                if refusal.requires_fail_stop() {
+                    ServiceRuntimeRejoinRefusalReason::InternalBindingMismatch(
+                        ServiceRuntimeCatalogRole::External,
+                    )
+                } else {
+                    ServiceRuntimeRejoinRefusalReason::WrongProviderRole(
+                        ServiceRuntimeCatalogRole::External,
+                    )
+                }
+            }
+
             ServiceRuntimeRejoinRefusalRole::Active { refusal, .. } => {
                 active_rejoin_reason(refusal.reason())
             }
@@ -1378,6 +1740,11 @@ impl ServiceRuntimeRejoinRefusal {
         // is not retry policy: authority rejoin is a pure structural check and
         // every refusal is deterministic for these unchanged inputs.
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeRejoinRefusalRole::External { refusal, .. } => {
+                refusal.requires_fail_stop()
+            }
+
             ServiceRuntimeRejoinRefusalRole::Active { refusal, .. } => refusal.requires_fail_stop(),
             ServiceRuntimeRejoinRefusalRole::Rollback { refusal, .. } => {
                 refusal.requires_fail_stop()
@@ -1396,6 +1763,29 @@ impl ServiceRuntimeRejoinRefusal {
         Self,
     > {
         match self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeRejoinRefusalRole::External {
+                refusal,
+                open_epoch,
+            } => match refusal.try_into_parts() {
+                Ok((recovery, access, authority)) => Ok((
+                    ServiceRuntimeRecovery {
+                        role: ServiceRuntimeRecoveryRole::External {
+                            recovery: Box::new(recovery),
+                            open_epoch,
+                        },
+                    },
+                    access,
+                    authority,
+                )),
+                Err(refusal) => Err(Self {
+                    role: ServiceRuntimeRejoinRefusalRole::External {
+                        refusal,
+                        open_epoch,
+                    },
+                }),
+            },
+
             ServiceRuntimeRejoinRefusalRole::Active {
                 refusal,
                 open_epoch,
@@ -1494,6 +1884,11 @@ pub(crate) struct ServiceRuntimeRelease {
 }
 
 enum ServiceRuntimeReleaseRole {
+    #[cfg(feature = "external-extensions")]
+    External {
+        request: Option<Box<BetaNativePackagePin>>,
+        open_epoch: Arc<ServiceRepositoryOpenEpoch>,
+    },
     Active {
         request: ActiveBundledPackageReleaseRequest,
         open_epoch: Arc<ServiceRepositoryOpenEpoch>,
@@ -1508,6 +1903,9 @@ enum ServiceRuntimeReleaseRole {
 impl ServiceRuntimeRelease {
     pub(crate) const fn role(&self) -> ServiceRuntimeCatalogRole {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeReleaseRole::External { .. } => ServiceRuntimeCatalogRole::External,
+
             ServiceRuntimeReleaseRole::Active { .. } => ServiceRuntimeCatalogRole::Active,
             ServiceRuntimeReleaseRole::Rollback { .. } => ServiceRuntimeCatalogRole::Rollback,
         }
@@ -1517,6 +1915,12 @@ impl ServiceRuntimeRelease {
     /// the service's distinct same-open epoch handle.
     pub(crate) fn retained_bytes(&self) -> usize {
         match &self.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeReleaseRole::External { request, .. } => request
+                .as_ref()
+                .map_or(0, |pin| pin.retained_bytes())
+                .saturating_add(size_of::<Self>()),
+
             ServiceRuntimeReleaseRole::Active { request, .. } => retained_bytes_with_wrapper(
                 request.retained_bytes(),
                 size_of::<Self>(),
@@ -1671,7 +2075,161 @@ impl ServiceRepository {
         };
         repository
             .authenticate_current_bundled_manifest_bindings(installs)
-            .map(|inner| ServiceManifestBindings { inner })
+            .map(|inner| ServiceManifestBindings {
+                current: Some(inner.current_catalog_set()),
+                bindings: inner.into_bindings(),
+                #[cfg(feature = "external-extensions")]
+                external: None,
+            })
+    }
+
+    /// Reauthenticates one complete mixed installation cohort. Historical
+    /// source bytes are read only by the worker and never become authority on
+    /// their own; external entries are rebuilt from original authenticated CRX.
+    pub(crate) fn authenticate_runtime_manifest_bindings_for_profile(
+        &mut self,
+        installs: &ExtensionInstallCatalog,
+        store: &zephium_store::ExtensionServiceStoreAuthority,
+        key: zephium_core::extensions::ExtensionNativeOwnershipKey,
+        deadline: std::time::Instant,
+    ) -> Result<ServiceManifestBindings, BundledManifestBindingsError> {
+        #[cfg(feature = "external-extensions")]
+        if installs.installs().iter().any(|entry| {
+            zephium_core::extensions::is_beta_extension_authority(entry.package().authority())
+        }) {
+            use zephium_core::ports::store::{
+                ExtensionInstallProvenanceLoadOutcome as Provenance,
+                ExtensionUpstreamCheckpointLoadOutcome as History,
+            };
+            use zephium_extension_distribution::beta::BetaRuntimeTarget;
+            use zephium_store::ExtensionServiceStoreCallOutcome as Call;
+            let legacy = ExtensionInstallCatalog::from_persisted(
+                installs.revision(),
+                installs.install_id_high_water(),
+                installs
+                    .installs()
+                    .iter()
+                    .filter(|entry| {
+                        !zephium_core::extensions::is_beta_extension_authority(
+                            entry.package().authority(),
+                        )
+                    })
+                    .cloned()
+                    .collect(),
+            )
+            .map_err(|_| BundledManifestBindingsError::NoCurrentSelection)?;
+            let mut bindings = Vec::new();
+            let mut current = None;
+            if !legacy.installs().is_empty() {
+                let legacy = self.authenticate_runtime_manifest_bindings(&legacy)?;
+                current = legacy.current;
+                bindings.extend(legacy.bindings.iter().cloned());
+            }
+            let repository = self
+                .external
+                .as_mut()
+                .ok_or(BundledManifestBindingsError::NoCurrentSelection)?;
+            let mut selected = None;
+            for install in installs.installs().iter().filter(|entry| {
+                zephium_core::extensions::is_beta_extension_authority(entry.package().authority())
+            }) {
+                let Call::Completed(Provenance::Loaded(Some(provenance))) =
+                    store.load_install_provenance_until(key.profile(), install.id(), deadline)
+                else {
+                    return Err(BundledManifestBindingsError::NoCurrentSelection);
+                };
+                if provenance.package() != install.package() {
+                    return Err(BundledManifestBindingsError::NoCurrentSelection);
+                }
+                let Call::Completed(History::Loaded(Some(high_water))) = store
+                    .load_upstream_checkpoint_until(
+                        key.profile(),
+                        provenance.upstream().publisher(),
+                        deadline,
+                    )
+                else {
+                    return Err(BundledManifestBindingsError::NoCurrentSelection);
+                };
+                let runtime = BetaRuntimeTarget::from_local_compatibility_target(
+                    provenance.runtime_target().as_str(),
+                )
+                .ok_or(BundledManifestBindingsError::NoCurrentSelection)?;
+                let object = zephium_core::extensions::ExtensionBetaObjectDigest::from_provenance(
+                    &provenance,
+                );
+                let cached = (install.id() != key.install_id())
+                    .then(|| {
+                        self.startup_manifest_cache
+                            .as_ref()
+                            .and_then(|cache| cache.get(object, high_water))
+                    })
+                    .flatten();
+                let (manifest, package) = if let Some(manifest) = cached {
+                    (manifest, None)
+                } else {
+                    let retained = self
+                        .startup_manifest_cache
+                        .as_mut()
+                        .and_then(|cache| cache.take_package(object, high_water));
+                    let package = if let Some(package) = retained {
+                        // Only authenticated in-memory receipts are reusable.
+                        // Recheck original archive, output tree, policy and
+                        // workspace before consuming this later selection.
+                        package
+                            .verify()
+                            .map_err(|_| BundledManifestBindingsError::NoCurrentSelection)?;
+                        package
+                    } else {
+                        repository
+                            .reopen_external_bound(&provenance, high_water, runtime)
+                            .map_err(|_| BundledManifestBindingsError::NoCurrentSelection)?
+                    };
+                    let manifest = Arc::new(
+                        package
+                            .manifest()
+                            .map_err(|_| BundledManifestBindingsError::NoCurrentSelection)?
+                            .descriptor()
+                            .clone(),
+                    );
+                    if let Some(cache) = self.startup_manifest_cache.as_mut() {
+                        cache.insert(object, high_water, Arc::clone(&manifest));
+                    }
+                    if install.id() != key.install_id() {
+                        if let Some(cache) = self.startup_manifest_cache.as_mut() {
+                            cache.retain_package(object, high_water, package);
+                            (manifest, None)
+                        } else {
+                            (manifest, Some(package))
+                        }
+                    } else {
+                        (manifest, Some(package))
+                    }
+                };
+                bindings.push(
+                    zephium_core::extensions::ExtensionGrantManifestBinding::with_provenance(
+                        install.id(),
+                        manifest,
+                        Arc::from(provenance),
+                    )
+                    .ok_or(BundledManifestBindingsError::NoCurrentSelection)?,
+                );
+                if install.id() == key.install_id() {
+                    selected = Some(Box::new((
+                        install.id(),
+                        package.ok_or(BundledManifestBindingsError::NoCurrentSelection)?,
+                    )));
+                }
+            }
+            let bindings = ExtensionGrantManifestBindings::new(bindings)
+                .map_err(|_| BundledManifestBindingsError::NoCurrentSelection)?;
+            return Ok(ServiceManifestBindings {
+                current,
+                bindings,
+                external: selected,
+            });
+        }
+        let _ = (store, key, deadline);
+        self.authenticate_runtime_manifest_bindings(installs)
     }
 
     /// Builds a same-open acquisition plan from exact repository and Store owners.
@@ -1684,7 +2242,7 @@ impl ServiceRepository {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn plan_runtime_acquisition(
         &mut self,
-        current: BundledCurrentCatalogSet,
+        current: ServiceRuntimeSelection,
         eligibility: ExtensionRuntimeEligibility,
         manifest: Arc<ExtensionManifestDescriptor>,
     ) -> Result<ServiceRuntimeAcquisitionPlan, ServiceRuntimePlanningRefusal> {
@@ -1698,7 +2256,7 @@ impl ServiceRepository {
 
     pub(crate) fn plan_runtime_acquisition_with_additional_companion_retained_bytes(
         &mut self,
-        current: BundledCurrentCatalogSet,
+        current: ServiceRuntimeSelection,
         eligibility: ExtensionRuntimeEligibility,
         manifest: Arc<ExtensionManifestDescriptor>,
         coordinator_companion_retained_bytes: usize,
@@ -1720,6 +2278,44 @@ impl ServiceRepository {
                 manifest,
             });
         };
+        #[cfg(feature = "external-extensions")]
+        if let ServiceRuntimeSelection::External(package) = current {
+            let Some(repository) = self.external.as_mut() else {
+                return Err(ServiceRuntimePlanningRefusal {
+                    reason: BundledPackageLeaseError::PackageNotMaterialized,
+                    eligibility: Box::new(eligibility),
+                    manifest,
+                });
+            };
+            let backend = match zephium_core::extensions::ExtensionBetaRuntimeTarget::from_local_compatibility_target(eligibility.manifest().compatibility_target().as_str()) {
+                Some(zephium_core::extensions::ExtensionBetaRuntimeTarget::MacosNative) => zephium_core::extensions::ExtensionRuntimeBackendTarget::MacosNative,
+                Some(zephium_core::extensions::ExtensionBetaRuntimeTarget::WindowsNative) => zephium_core::extensions::ExtensionRuntimeBackendTarget::WindowsNative,
+                None => return Err(ServiceRuntimePlanningRefusal { reason: BundledPackageLeaseError::RuntimeBackendMismatch, eligibility: Box::new(eligibility), manifest }),
+            };
+            return match repository.prepare_native_eligibility(*package, eligibility, backend) {
+                Ok(inner) => Ok(ServiceRuntimeAcquisitionPlan {
+                    inner: ServiceRuntimePlanInner::External(Box::new(inner)),
+                    manifest,
+                    open_epoch,
+                }),
+                Err(refusal) => {
+                    let (_, eligibility) = refusal.into_parts();
+                    Err(ServiceRuntimePlanningRefusal {
+                        reason: BundledPackageLeaseError::EligibilityMismatch,
+                        eligibility: Box::new(eligibility),
+                        manifest,
+                    })
+                }
+            };
+        }
+        #[cfg(not(feature = "external-extensions"))]
+        let ServiceRuntimeSelection::Bundled(current) = current;
+        #[cfg(feature = "external-extensions")]
+        let current = match current {
+            ServiceRuntimeSelection::Bundled(current) => current,
+            #[cfg(feature = "external-extensions")]
+            _ => unreachable!("external selection returned above"),
+        };
         let Some(repository) = self.repository.as_mut() else {
             return Err(ServiceRuntimePlanningRefusal {
                 reason: BundledPackageLeaseError::Repository(ExtensionRepositoryError::Sealed),
@@ -1737,7 +2333,7 @@ impl ServiceRepository {
             additional_companion_retained_bytes,
         ) {
             Ok(inner) => Ok(ServiceRuntimeAcquisitionPlan {
-                inner,
+                inner: ServiceRuntimePlanInner::Bundled(Box::new(inner)),
                 manifest,
                 open_epoch,
             }),
@@ -1779,7 +2375,32 @@ impl ServiceRepository {
                 },
             });
         };
-        let lease = match repository.acquire_bundled_runtime_lease(inner, preparing) {
+        #[cfg(feature = "external-extensions")]
+        if let ServiceRuntimePlanInner::External(plan) = inner {
+            return match plan.bind_preparing(preparing) {
+                Ok(lease) => Ok(ServiceRuntimeLease {
+                    role: ServiceRuntimeLeaseRole::External {
+                        lease: Box::new(lease),
+                        manifest,
+                        open_epoch,
+                    },
+                }),
+                Err(_) => Err(ServiceRuntimeAcquisitionError {
+                    kind: ServiceRuntimeAcquisitionErrorKind::DurableRecoveryRequired(
+                        BundledPackageLeaseError::EligibilityMismatch,
+                    ),
+                }),
+            };
+        }
+        #[cfg(not(feature = "external-extensions"))]
+        let ServiceRuntimePlanInner::Bundled(inner) = inner;
+        #[cfg(feature = "external-extensions")]
+        let inner = match inner {
+            ServiceRuntimePlanInner::Bundled(inner) => inner,
+            #[cfg(feature = "external-extensions")]
+            _ => unreachable!("external plan returned above"),
+        };
+        let lease = match repository.acquire_bundled_runtime_lease(*inner, preparing) {
             Ok(lease) => lease,
             Err(BundledRuntimeAcquisitionError::PlanRefused(refusal)) => {
                 let reason = refusal.reason();
@@ -1787,7 +2408,7 @@ impl ServiceRepository {
                     kind: ServiceRuntimeAcquisitionErrorKind::PlanRefused {
                         reason,
                         plan: Box::new(ServiceRuntimeAcquisitionPlan {
-                            inner: refusal.into_plan(),
+                            inner: ServiceRuntimePlanInner::Bundled(Box::new(refusal.into_plan())),
                             manifest,
                             open_epoch,
                         }),
@@ -1847,7 +2468,38 @@ impl ServiceRepository {
         release: &mut ServiceRuntimeRelease,
         binding: &ExtensionPackagePinReleaseBinding,
     ) -> Result<BundledPackageLeaseReleaseOutcome, BundledPackageLeaseReleaseError> {
+        #[cfg(feature = "external-extensions")]
+        if let ServiceRuntimeReleaseRole::External {
+            request,
+            open_epoch,
+        } = &mut release.role
+        {
+            if !self
+                .open_epoch
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, open_epoch))
+            {
+                return Err(BundledPackageLeaseReleaseError::WrongRepository);
+            }
+            let Some(repository) = self.external.as_mut() else {
+                return Err(BundledPackageLeaseReleaseError::WrongRepository);
+            };
+            let Some(pin) = request.take() else {
+                return Ok(BundledPackageLeaseReleaseOutcome::AlreadyReleased);
+            };
+            return match repository.release_native_pin(*pin, binding) {
+                Ok(()) => Ok(BundledPackageLeaseReleaseOutcome::Released),
+                Err(pin) => {
+                    *request = Some(pin);
+                    Err(BundledPackageLeaseReleaseError::WrongRepository)
+                }
+            };
+        }
         let epoch_matches = match &release.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeReleaseRole::External { .. } => {
+                unreachable!("external release returned above")
+            }
             ServiceRuntimeReleaseRole::Active { open_epoch, .. }
             | ServiceRuntimeReleaseRole::Rollback { open_epoch, .. } => self
                 .open_epoch
@@ -1858,6 +2510,10 @@ impl ServiceRepository {
             return Err(BundledPackageLeaseReleaseError::WrongRepository);
         };
         match &mut release.role {
+            #[cfg(feature = "external-extensions")]
+            ServiceRuntimeReleaseRole::External { .. } => {
+                unreachable!("external release returned above")
+            }
             ServiceRuntimeReleaseRole::Active { request, .. } => {
                 repository.release_active_bundled_package_lease(request, binding)
             }
@@ -1867,6 +2523,35 @@ impl ServiceRepository {
         }
     }
 }
+#[cfg(feature = "external-extensions")]
+const fn external_build_error(
+    reason: BetaNativeAdmissionError,
+) -> BundledRuntimePackageAccessBuildError {
+    match reason {
+        BetaNativeAdmissionError::Capacity => {
+            BundledRuntimePackageAccessBuildError::RetainedBytesExceeded
+        }
+        BetaNativeAdmissionError::Backend => {
+            BundledRuntimePackageAccessBuildError::UnsupportedRuntimeTarget
+        }
+        _ => BundledRuntimePackageAccessBuildError::InternalBindingMismatch,
+    }
+}
+#[cfg(feature = "external-extensions")]
+const fn external_host_error(
+    refusal: &BetaRuntimeHostRefusal,
+) -> BundledRuntimeHostActivationBindingError {
+    if let Some(reason) = refusal.host_reason() {
+        return BundledRuntimeHostActivationBindingError::RuntimeHostFactory(reason);
+    }
+    match refusal.reason() {
+        BetaNativeAdmissionError::Capacity => {
+            BundledRuntimeHostActivationBindingError::RetainedBytesExceeded
+        }
+        _ => BundledRuntimeHostActivationBindingError::RepositoryBindingMismatch,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::ServiceRepositoryOpenError;
@@ -2062,8 +2747,9 @@ mod tests {
 
         for (wrapper_size, authority_size) in [
             (
-                size_of::<ServiceRuntimeAcquisitionPlan>(),
-                size_of::<BundledRuntimeAcquisitionPlan>(),
+                size_of::<ServiceRuntimeAcquisitionPlan>()
+                    + RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES,
+                size_of::<Box<BundledRuntimeAcquisitionPlan>>(),
             ),
             (
                 size_of::<ServiceRuntimePackageAccess>(),

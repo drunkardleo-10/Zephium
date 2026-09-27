@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn closed_session_restore_rejects_failed_native_admission() {
+    let admitted = NativeWork::default();
+    assert!(super::super::extension_compatibility_broker::native_closed_session_restored(admitted));
+
+    let mut scheduled = NativeWork::default();
+    scheduled.record(NativeDispatch::Scheduled);
+    assert!(
+        super::super::extension_compatibility_broker::native_closed_session_restored(scheduled)
+    );
+
+    let mut rejected = NativeWork::default();
+    rejected.record(NativeDispatch::Rejected);
+    assert!(
+        !super::super::extension_compatibility_broker::native_closed_session_restored(rejected)
+    );
+
+    let mut unsupported = NativeWork::default();
+    unsupported.record(NativeDispatch::Unsupported);
+    assert!(
+        !super::super::extension_compatibility_broker::native_closed_session_restored(unsupported)
+    );
+}
+
+#[test]
 fn recent_history_result_settles_the_exact_runtime_and_request() {
     let (mut shell, engine, _) = setup();
     let runtime = ExtensionRuntimeInstance::new(

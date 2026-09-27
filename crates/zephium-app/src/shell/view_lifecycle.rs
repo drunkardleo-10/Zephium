@@ -73,6 +73,7 @@ pub(super) struct CrashState {
 
 impl Shell {
     pub(super) fn on_view_creation_failed(&mut self, id: ItemId) {
+        crate::diagnostic!("view-create: native failure or presentation retirement");
         self.zoom.pending.remove(&id);
         self.cancel_pending_presentation(id);
         self.cancel_discard_probe(id);

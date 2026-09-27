@@ -1,0 +1,26 @@
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import {readFile} from 'node:fs/promises';
+const source = await readFile(new URL('../../crates/zephium-extension-package/assets/macos/webkit-history-v2.js', import.meta.url),'utf8');
+const requests = [];
+const runtime = {id:'fixture',sendNativeMessage(app, wire, callback) {
+  requests.push({app,wire});
+  callback(JSON.stringify({v:1,items:[{url:'https://example.test/old',title:'An older matching page',lastVisit:2000}]}));
+}};
+const namespace = {runtime};
+const context = vm.createContext({chrome:namespace,browser:namespace,TextEncoder,btoa:value=>Buffer.from(value,'binary').toString('base64')});
+vm.runInContext(source,context,{timeout:1000});
+const result = await namespace.history.search({text:'café older',startTime:0,endTime:3000,maxResults:5});
+assert.equal(result.length,1);
+assert.equal(result[0].lastVisitTime,2000);
+assert.equal(requests[0].wire,'v2/history.search/5/0/3000/'+Buffer.from('café older').toString('base64url'));
+assert.equal(requests[0].app,'app.zephium.extension-broker.v1');
+await namespace.history.search({text:'',startTime:1.1,endTime:3000.9,maxResults:1});
+assert.equal(requests[1].wire,'v2/history.search/1/2/3000/');
+assert.equal((await namespace.history.search({text:'',maxResults:0})).length,0);
+assert.equal(requests.length,2,'empty requests must not reach the native broker');
+assert.equal((await namespace.history.search({text:'',startTime:3000,endTime:1000})).length,0);
+await assert.rejects(namespace.history.search({text:'é'.repeat(700),startTime:0}),/byte limit/);
+vm.runInContext(source,context,{timeout:1000});
+assert.equal(typeof namespace.history.search,'function');
+console.log('History v2 wire and query behavior passed');

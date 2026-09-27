@@ -51,10 +51,21 @@ fn pre_entry_restart_requirement_remains_retryable_through_real_coordinator_auth
 
 #[test]
 fn real_authority_activation_reloads_unknown_projection_and_retires_exact_runtime() {
+    use super::isolated_resources::{IsolatedResourceBudget, IsolatedResourceFailure};
+    use zephium_core::extensions::ExtensionRuntimeInstance;
+    use zephium_core::ports::extensions::IsolatedExtensionResourceCancel;
+
     let mut harness = RealAuthorityHarness::new(1, PublicationMode::RefuseFirst);
     let key = harness.keys[0];
     let profile = harness.profiles[0];
     let mut coordinator = RuntimeCoordinator::new();
+    let runtime = ExtensionRuntimeInstance::new(
+        key.profile(),
+        key.install_id(),
+        ExtensionRuntimeGeneration::INITIAL,
+    );
+    let resource_budget = IsolatedResourceBudget::default();
+    let resource_cancel = IsolatedExtensionResourceCancel::new();
 
     assert!(harness.projection.known().is_none());
     assert_eq!(
@@ -68,6 +79,16 @@ fn real_authority_activation_reloads_unknown_projection_and_retires_exact_runtim
     assert!(harness.projection.known().is_some());
     harness.assert_owned(key);
     assert_eq!(harness.probe.publication_calls(), 1);
+    assert!(matches!(
+        coordinator.read_published_isolated_resource(
+            runtime,
+            "manifest.json",
+            resource_budget.reserve_request().unwrap(),
+            deadline(),
+            &resource_cancel,
+        ),
+        Err(IsolatedResourceFailure::RuntimeUnavailable)
+    ));
 
     harness.projection.invalidate();
     assert!(harness.projection.known().is_none());
@@ -86,11 +107,63 @@ fn real_authority_activation_reloads_unknown_projection_and_retires_exact_runtim
     assert_eq!(harness.probe.publication_calls(), 2);
     harness.assert_repository_has_one_obligation(profile);
 
+    let manifest = coordinator
+        .read_published_isolated_resource(
+            runtime,
+            "manifest.json",
+            resource_budget.reserve_request().unwrap(),
+            deadline(),
+            &resource_cancel,
+        )
+        .expect("published owner authenticated manifest resource");
+    assert_eq!(manifest.runtime(), runtime);
+    assert_eq!(manifest.path(), "manifest.json");
+    assert_eq!(resource_budget.used(), Some((1, manifest.bytes().len())));
+    let manifest_text = std::str::from_utf8(manifest.bytes()).unwrap();
+    assert!(manifest_text.contains("\"manifest_version\""));
+    assert!(matches!(
+        coordinator.read_published_isolated_resource(
+            runtime,
+            "missing.js",
+            resource_budget.reserve_request().unwrap(),
+            deadline(),
+            &resource_cancel,
+        ),
+        Err(IsolatedResourceFailure::NotDeclared)
+    ));
+    let stale = ExtensionRuntimeInstance::new(
+        key.profile(),
+        key.install_id(),
+        ExtensionRuntimeGeneration::new(2).unwrap(),
+    );
+    assert!(matches!(
+        coordinator.read_published_isolated_resource(
+            stale,
+            "manifest.json",
+            resource_budget.reserve_request().unwrap(),
+            deadline(),
+            &resource_cancel,
+        ),
+        Err(IsolatedResourceFailure::RuntimeUnavailable)
+    ));
+
     harness.projection.invalidate();
     assert_eq!(
         coordinator.retire_key_until(harness.resources(), key, deadline()),
         RuntimeRetirementOutcome::Retired
     );
+    assert!(matches!(
+        coordinator.read_published_isolated_resource(
+            runtime,
+            "manifest.json",
+            resource_budget.reserve_request().unwrap(),
+            deadline(),
+            &resource_cancel,
+        ),
+        Err(IsolatedResourceFailure::RuntimeUnavailable)
+    ));
+    drop(manifest);
+    assert_eq!(resource_budget.used(), Some((0, 0)));
     assert!(!coordinator.has_obligation());
     assert!(!coordinator.has_attached_obligation());
     assert_eq!(harness.probe.retirement_calls(), 1);

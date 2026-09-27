@@ -22,7 +22,7 @@ permissions:
   contents: read
 
 env:
-  ZEPHIUM_MIN_WEBKITGTK_VERSION: "2.52.5"
+  ZEPHIUM_MIN_WEBKITGTK_VERSION: "2.52.6"
 
 jobs:
   workflow-policy:
@@ -455,6 +455,15 @@ jobs:
           cargo check --locked -p zephium-engine --lib --features windows-cdp-spike
           cargo clippy --locked -p zephium-engine --lib --features windows-cdp-spike -- -D warnings
 
+      - name: Compile the Windows filesystem and Beta custody validation suites
+        if: runner.os == 'Windows'
+        # Compilation preserves the candidate adapter without treating hosted
+        # runner permissions or missing crash tests as production qualification.
+        # Live commands and activation gates: docs/extension-windows-validation.md.
+        run: |
+          cargo clippy --locked -p zephium-private-fs --all-targets --features windows-namespace-validation -- -D warnings
+          cargo clippy --locked -p zephium-extension-distribution --all-targets --features windows-namespace-validation -- -D warnings
+
       - name: Check vendored Wry security adapter directly
         run: cargo check --manifest-path vendor/wry/Cargo.toml --locked --all-targets
 
@@ -667,11 +676,10 @@ jobs:
     # refuses any checkout_ref that differs from the main event commit.
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: workflow-policy
-    # Ubuntu's currently published WebKitGTK is below WSA-2026-0004's fixed
-    # boundary. Fedora 44 updates-testing currently carries Fedora's signed
-    # 2.52.5 build while stable promotion is pending, so this non-artifact job
-    # opts in only for the exact WebKitGTK/JSC package family. Release builds
-    # remain stable-repository-only and fail closed until promotion. The
+    # This non-artifact job permits Fedora 44's signed updates-testing packages
+    # only for the exact WebKitGTK/JSC family when needed to meet the security
+    # floor. Package eligibility is checked at execution time. Release builds
+    # remain stable-repository-only and fail closed without an eligible package. The
     # ordinary Ubuntu job still verifies the oldest supported build ABI and
     # every platform-independent test.
     runs-on: ubuntu-24.04

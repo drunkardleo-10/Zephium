@@ -36,14 +36,25 @@ pub(crate) use extensions::{
     ControllerBrowserRequestSettlement, ControllerCommandDispatch,
     ControllerCompatibilityBrokerSettlement, ControllerErasureSettlement, ControllerErasureTicket,
     ControllerNamespaceRecoveryAudit, ControllerPreparation, ControllerRegistryError,
-    ControllerRuntimeGrantSettlement, MacosNativeActionFailure, MacosNativeRuntimeActivation,
-    MacosNativeRuntimeFailure, MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity,
-    MacosNativeRuntimeReconciliation, MacosNativeRuntimeRetirement, NativeHostWorkerEvent,
-    PersistentControllerRegistry, ProfileControllerErasure, PublisherNativeMessagingAuthorization,
-    PublisherNativeMessagingRequestId,
+    ControllerRuntimeGrantSettlement, IdentityRequestId, OffscreenSessionId,
+    MacosNativeActionFailure,
+    MacosNativeRuntimeActivation, MacosNativeRuntimeFailure, MacosNativeRuntimeOwner,
+    MacosNativeRuntimeOwnerIdentity, MacosNativeRuntimeReconciliation,
+    MacosNativeRuntimeRetirement, NativeHostWorkerEvent, PersistentControllerRegistry,
+    ProfileControllerErasure, PublisherNativeMessagingAuthorization,
+    PublisherNativeMessagingRequestId, has_pending_offscreen_authorization,
+    trace_action_qa_stage,
 };
 #[cfg(feature = "native-web-extension-probes")]
+pub(crate) use extensions::run_original_bitwarden_offscreen_erasure_probe;
+#[cfg(feature = "native-web-extension-probes")]
 pub(crate) use extensions::{ControllerSurfaceApplication, ProbeControllerPreparation};
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use extensions::run_identity_redirect_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use extensions::probe_new_window_callbacks;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use extensions::probe_new_window_policy;
 
 pub(crate) use content_filter::{
     compile as compile_content_policy, content_policy_digest, enumerate_content_policy_cache,
@@ -104,6 +115,12 @@ pub use agentic_semantic_probe::{
 
 use dispatch2::DispatchObject as _;
 
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use extensions::run_offscreen_host_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use extensions::run_original_bitwarden_offscreen_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use extensions::run_original_google_translate_offscreen_probe;
 #[cfg(feature = "native-page-permission-probes")]
 pub(crate) use native::run_page_permission_probe;
 #[cfg(feature = "native-isolation-probes")]
@@ -133,6 +150,8 @@ pub(crate) use web_extensions::run_representative_stock_extension_probe;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_resource_transport_probe as run_web_extension_resource_probe;
 #[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_shared_extension_origin_probe;
+#[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_stock_password_manager_compatibility_artifact_probe;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_stock_password_manager_probe;
@@ -148,6 +167,10 @@ pub(crate) use web_extensions::run_web_extension_permission_probe;
 pub(crate) use web_extensions::run_web_extension_permission_replacement_settlement_probe;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_web_extension_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::{
+    run_web_extension_offscreen_probe, run_web_extension_offscreen_sandbox_probe,
+};
 pub type InstalledNavigationObserver = objc2::rc::Retained<NavigationObserver>;
 
 pub(crate) struct ContentPolicyTimeout {
@@ -775,3 +798,26 @@ mod tests {
         assert!(failed.load(Ordering::Acquire));
     }
 }
+
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_web_extension_content_script_globs_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_web_extension_side_panel_unavailable_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_web_extension_document_id_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_oauth_redirect_observation_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_oauth_redirect_immediate_failure_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_oauth_redirect_synchronous_clear_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_oauth_redirect_same_turn_nonresident_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_oauth_redirect_broker_order_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_worker_json_post_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_original_main_document_glob_probe;
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_prepared_bitwarden_worker_startup_probe;

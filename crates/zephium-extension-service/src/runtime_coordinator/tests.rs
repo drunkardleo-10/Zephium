@@ -87,7 +87,10 @@ fn every_pending_slot_consumes_capacity_without_eviction() {
         coordinator.admit_planning_slot(key(1, 99)),
         Err(RuntimeActivationOutcome::CapacityExceeded)
     );
-    assert_eq!(coordinator.slot_count(), 3);
+    assert_eq!(
+        coordinator.slot_count(),
+        MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
+    );
     for install in 1..=MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES {
         assert!(coordinator.slot(key(1, install as u128)).is_some());
     }
@@ -100,6 +103,27 @@ fn duplicate_key_reuses_its_exact_slot_without_spending_capacity() {
     coordinator.admit_planning_slot(key).unwrap();
     coordinator.admit_planning_slot(key).unwrap();
     assert_eq!(coordinator.slot_count(), 1);
+}
+
+#[test]
+fn profile_capacity_is_separate_from_extension_capacity_and_counts_pending_owners() {
+    let mut coordinator = RuntimeCoordinator::new();
+    let profile_limit = zephium_core::ports::extensions::MAX_EXTENSION_ACTIVE_PROFILES;
+    for profile in 1..=profile_limit {
+        coordinator
+            .admit_planning_slot(key(profile as u128, 1))
+            .unwrap();
+    }
+    assert_eq!(
+        coordinator.admit_planning_slot(key(profile_limit as u128 + 1, 1)),
+        Err(RuntimeActivationOutcome::CapacityExceeded)
+    );
+    // Existing profiles can still add extensions beyond the old three-slot cap.
+    coordinator.admit_planning_slot(key(1, 2)).unwrap();
+    assert_eq!(coordinator.slot_count(), profile_limit + 1);
+    assert!(coordinator
+        .slot(key(profile_limit as u128 + 1, 1))
+        .is_none());
 }
 
 #[test]
@@ -180,12 +204,20 @@ fn profile_and_global_drains_prioritize_the_barrier_owner() {
     coordinator.admit_planning_slot(barrier).unwrap();
 
     assert_eq!(
-        coordinator.keys_matching_after_barrier(Some(ProfileId::from(7)), Some(barrier)),
-        [Some(barrier), Some(first), Some(second)]
+        coordinator
+            .keys_matching_after_barrier(Some(ProfileId::from(7)), Some(barrier))
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>(),
+        [barrier, first, second]
     );
     assert_eq!(
-        coordinator.keys_matching_after_barrier(None, Some(barrier)),
-        [Some(barrier), Some(first), Some(second)]
+        coordinator
+            .keys_matching_after_barrier(None, Some(barrier))
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>(),
+        [barrier, first, second]
     );
 }
 

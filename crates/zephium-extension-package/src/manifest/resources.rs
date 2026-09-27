@@ -235,7 +235,6 @@ impl ExtensionDeclaredResourcePattern {
     pub(crate) fn parse(value: &str) -> Option<Self> {
         if value.is_empty()
             || value.len() > MAX_EXTENSION_RESOURCE_PATTERN_BYTES
-            || !value.is_ascii()
             || value.bytes().any(|byte| byte.is_ascii_control())
         {
             return None;

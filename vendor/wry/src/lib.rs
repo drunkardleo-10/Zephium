@@ -750,6 +750,11 @@ struct WebViewAttributes<'a> {
   /// `true` allows to navigate and `false` does not.
   pub navigation_handler: Option<Box<dyn Fn(String) -> bool>>,
 
+  /// Accepted main-frame navigation attempts, before a document commits.
+  /// The callback is observational and must not grant page authority.
+  #[cfg(target_os = "macos")]
+  pub main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
+
   /// A download started handler to manage incoming downloads.
   ///
   /// The closure takes two parameters, the first is a `String` representing the url being downloaded from and the
@@ -988,6 +993,8 @@ impl Default for WebViewAttributes<'_> {
       ipc_handler: None,
       drag_drop_handler: None,
       navigation_handler: None,
+      #[cfg(target_os = "macos")]
+      main_frame_navigation_attempt_handler: None,
       download_started_handler: Some(Box::new(|_, _| true)),
       download_completed_handler: None,
       download_policy: DownloadPolicy::UseHandlers,
@@ -1480,6 +1487,17 @@ impl<'a> WebViewBuilder<'a> {
   /// `true` allows to navigate and `false` does not.
   pub fn with_navigation_handler(mut self, callback: impl Fn(String) -> bool + 'static) -> Self {
     self.attrs.navigation_handler = Some(Box::new(callback));
+    self
+  }
+
+  /// Observe an admitted macOS main-frame request before its document commits.
+  /// This does not change navigation policy or report a committed page URL.
+  #[cfg(target_os = "macos")]
+  pub fn with_main_frame_navigation_attempt_handler(
+    mut self,
+    callback: impl Fn(String) + 'static,
+  ) -> Self {
+    self.attrs.main_frame_navigation_attempt_handler = Some(Box::new(callback));
     self
   }
 

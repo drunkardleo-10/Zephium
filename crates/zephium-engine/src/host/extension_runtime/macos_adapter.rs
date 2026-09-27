@@ -202,6 +202,14 @@ pub(super) fn begin_native_retirement(
             ticket.owner().key.profile(),
             owner.runtime_grant_context_identity(),
         );
+    host.macos_extension_controllers.cancel_identity_context(
+        ticket.owner().key.profile(),
+        owner.runtime_grant_context_identity(),
+    );
+    host.macos_extension_controllers.cancel_offscreen_context(
+        ticket.owner().key.profile(),
+        owner.runtime_grant_context_identity(),
+    );
     host.macos_extension_controllers
         .cancel_native_messaging_context(
             ticket.owner().key.profile(),

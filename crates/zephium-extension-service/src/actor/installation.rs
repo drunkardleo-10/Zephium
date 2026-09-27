@@ -31,23 +31,39 @@ pub(super) fn install_until(
     if Instant::now() >= deadline {
         return settle(runtime, ExtensionInstallOutcome::Unavailable);
     }
-    let available = match startup.repository.authenticate_install_candidates() {
-        Ok(available) => available,
-        Err(error) => return settle(runtime, classify_repository_error(error)),
+    let external =
+        zephium_core::extensions::is_beta_extension_authority(selector.package().authority());
+    let (manifest, provenance) = if external {
+        #[cfg(feature = "external-extensions")]
+        {
+            match startup.repository.external_install_manifest(&selector) {
+                Some((manifest, provenance)) => (manifest, Some(provenance)),
+                None => return settle(runtime, ExtensionInstallOutcome::Conflict),
+            }
+        }
+        #[cfg(not(feature = "external-extensions"))]
+        {
+            return settle(runtime, ExtensionInstallOutcome::Rejected);
+        }
+    } else {
+        let available = match startup.repository.authenticate_install_candidates() {
+            Ok(available) => available,
+            Err(error) => return settle(runtime, classify_repository_error(error)),
+        };
+        if ExtensionCatalogSetDigest::from_bytes(available.current_catalog_set().identity().bytes())
+            != selector.catalog_set()
+        {
+            return settle(runtime, ExtensionInstallOutcome::Conflict);
+        }
+        let Some(candidate) = available
+            .candidates()
+            .iter()
+            .find(|candidate| candidate.package() == selector.package())
+        else {
+            return settle(runtime, ExtensionInstallOutcome::Conflict);
+        };
+        (Arc::clone(candidate.manifest_arc()), None)
     };
-    if ExtensionCatalogSetDigest::from_bytes(available.current_catalog_set().identity().bytes())
-        != selector.catalog_set()
-    {
-        return settle(runtime, ExtensionInstallOutcome::Conflict);
-    }
-    let Some(candidate) = available
-        .candidates()
-        .iter()
-        .find(|candidate| candidate.package() == selector.package())
-    else {
-        return settle(runtime, ExtensionInstallOutcome::Conflict);
-    };
-    let manifest = Arc::clone(candidate.manifest_arc());
 
     let catalog = match startup
         .store
@@ -135,12 +151,13 @@ pub(super) fn install_until(
         Ok(grants) => grants,
         Err(_) => return settle(runtime, ExtensionInstallOutcome::FailedClosed),
     };
-    let provisioned = startup.store.provision_install_until(
+    let provisioned = startup.store.provision_install_with_provenance_until(
         selector.profile(),
         selector.expected_catalog_revision(),
         install_id,
         manifest,
         Box::new(grants),
+        provenance,
         deadline,
     );
     let applied = match provisioned {
@@ -179,6 +196,10 @@ pub(super) fn install_until(
     {
         return settle(runtime, ExtensionInstallOutcome::FailedClosed);
     }
+    #[cfg(feature = "external-extensions")]
+    startup
+        .repository
+        .clear_completed_external_candidate(&selector);
     let installed_selector = ExtensionInstallSelector::new(
         selector.profile(),
         install_id,

@@ -19,7 +19,7 @@ use crate::api::{AcquiredExtensionCatalogSubmission, AcquiredExtensionPackageSub
 
 type SettlementCallback<T> = Box<dyn FnOnce(T) + Send>;
 
-struct SharedSettlement<T> {
+pub(super) struct SharedSettlement<T> {
     done: Arc<Mutex<Option<SettlementCallback<T>>>>,
 }
 
@@ -32,20 +32,20 @@ impl<T> Clone for SharedSettlement<T> {
 }
 
 impl<T: Send + 'static> SharedSettlement<T> {
-    fn new(done: SettlementCallback<T>) -> Self {
+    pub(super) fn new(done: SettlementCallback<T>) -> Self {
         Self {
             done: Arc::new(Mutex::new(Some(done))),
         }
     }
 
-    fn callback(&self) -> SettlementCallback<T> {
+    pub(super) fn callback(&self) -> SettlementCallback<T> {
         let settlement = self.clone();
         Box::new(move |outcome| {
             settlement.settle(outcome);
         })
     }
 
-    fn settle(&self, outcome: T) -> bool {
+    pub(super) fn settle(&self, outcome: T) -> bool {
         let done = self
             .done
             .lock()
@@ -219,7 +219,7 @@ impl Shell {
         }
     }
 
-    fn fail_extension_distribution(&mut self, failure: ShellTerminalFailure) {
+    pub(super) fn fail_extension_distribution(&mut self, failure: ShellTerminalFailure) {
         self.extension_lifecycle_terminal = true;
         crate::diagnostic!("extensions: acquired distribution lifecycle failed closed");
         self.report_terminal_failure(failure);

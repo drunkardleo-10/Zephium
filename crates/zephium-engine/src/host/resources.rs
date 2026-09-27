@@ -9,6 +9,10 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES;
 
@@ -18,9 +22,11 @@ use zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES;
 /// The remaining slots are reserved now, before extension runtimes can exist,
 /// so future features cannot silently consume tab or teardown capacity.
 #[cfg(feature = "agentic-browser")]
-pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize = 56;
+pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize =
+    57 + MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES;
 #[cfg(not(feature = "agentic-browser"))]
-pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize = 48;
+pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize =
+    49 + MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES;
 pub(super) const MAX_NATIVE_TEARDOWN_DEBTS: usize = 8;
 #[cfg(feature = "agentic-browser")]
 pub(super) const MAX_AGENT_CONTEXT_RESOURCES: usize = 8;
@@ -38,13 +44,15 @@ pub(super) enum NativeResourceClass {
     #[cfg(feature = "agentic-browser")]
     AgentContext,
     TransientConstruction,
+    /// On-demand extension auth/offscreen documents; never preallocated.
+    ExtensionAuxiliary,
 }
 
 impl NativeResourceClass {
     #[cfg(feature = "agentic-browser")]
-    const COUNT: usize = 8;
+    const COUNT: usize = 9;
     #[cfg(not(feature = "agentic-browser"))]
-    const COUNT: usize = 7;
+    const COUNT: usize = 8;
     #[cfg(feature = "agentic-browser")]
     const ALL: [Self; Self::COUNT] = [
         Self::Tab,
@@ -55,6 +63,7 @@ impl NativeResourceClass {
         Self::ReconciliationController,
         Self::AgentContext,
         Self::TransientConstruction,
+        Self::ExtensionAuxiliary,
     ];
     #[cfg(not(feature = "agentic-browser"))]
     const ALL: [Self; Self::COUNT] = [
@@ -65,6 +74,7 @@ impl NativeResourceClass {
         Self::ExtensionPopup,
         Self::ReconciliationController,
         Self::TransientConstruction,
+        Self::ExtensionAuxiliary,
     ];
 
     const fn index(self) -> usize {
@@ -77,6 +87,7 @@ impl NativeResourceClass {
             Self::ReconciliationController => 5,
             #[cfg(feature = "agentic-browser")]
             Self::AgentContext => 6,
+            Self::ExtensionAuxiliary => Self::COUNT - 1,
             Self::TransientConstruction => {
                 #[cfg(feature = "agentic-browser")]
                 {
@@ -101,6 +112,7 @@ impl NativeResourceClass {
             #[cfg(feature = "agentic-browser")]
             Self::AgentContext => MAX_AGENT_CONTEXT_RESOURCES,
             Self::TransientConstruction => 2,
+            Self::ExtensionAuxiliary => 4,
         }
     }
 }
@@ -125,6 +137,9 @@ pub(super) enum NativeResourceAdmissionError {
 struct NativeResourceState {
     counts: [usize; NativeResourceClass::COUNT],
     total: usize,
+    /// Tab-class views owned by an extension document. Ordinary tabs do not
+    /// participate in the extension update exclusion.
+    extension_guest_tabs: usize,
 }
 
 impl Default for NativeResourceState {
@@ -132,6 +147,7 @@ impl Default for NativeResourceState {
         Self {
             counts: [0; NativeResourceClass::COUNT],
             total: 0,
+            extension_guest_tabs: 0,
         }
     }
 }
@@ -140,6 +156,7 @@ impl Default for NativeResourceState {
 struct SharedNativeResourceState {
     state: RefCell<NativeResourceState>,
     invariant_failed: Cell<bool>,
+    extension_update: Arc<AtomicBool>,
 }
 
 impl SharedNativeResourceState {
@@ -147,7 +164,7 @@ impl SharedNativeResourceState {
         self.invariant_failed.set(true);
     }
 
-    fn try_release(&self, class: NativeResourceClass) -> Result<(), ()> {
+    fn try_release(&self, class: NativeResourceClass, extension_guest: bool) -> Result<(), ()> {
         let Ok(mut state) = self.state.try_borrow_mut() else {
             self.fail();
             return Err(());
@@ -161,8 +178,18 @@ impl SharedNativeResourceState {
             self.fail();
             return Err(());
         };
+        let extension_guest_tabs = if extension_guest {
+            let Some(remaining) = state.extension_guest_tabs.checked_sub(1) else {
+                self.fail();
+                return Err(());
+            };
+            remaining
+        } else {
+            state.extension_guest_tabs
+        };
         state.counts[index] = class_count;
         state.total = total;
+        state.extension_guest_tabs = extension_guest_tabs;
         Ok(())
     }
 }
@@ -177,12 +204,57 @@ pub(super) struct NativeResourceLedger {
 }
 
 impl NativeResourceLedger {
+    /// Check the native view count and reserve admission on the same UI turn.
+    /// The service may drop the resulting lease on its worker thread.
+    pub(super) fn try_begin_extension_update(&self) -> Option<NativeExtensionUpdateLease> {
+        if !self.is_healthy() {
+            return None;
+        }
+        let state = self.shared.state.try_borrow().ok()?;
+        if state.counts[NativeResourceClass::ExtensionPopup.index()] != 0
+            || state.extension_guest_tabs != 0
+        {
+            return None;
+        }
+        self.shared
+            .extension_update
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        Some(NativeExtensionUpdateLease(Arc::clone(
+            &self.shared.extension_update,
+        )))
+    }
+
     pub(super) fn try_acquire(
         &self,
         class: NativeResourceClass,
     ) -> Result<NativeResourceLease, NativeResourceAdmissionError> {
+        self.try_acquire_with_update_exclusion(class, false)
+    }
+
+    /// Admits a full extension document against the ordinary Tab budget while
+    /// excluding automatic extension updates for its complete lease lifetime.
+    /// A normal browser tab never calls this path and stays usable during an
+    /// update. The update guard and this admission run on the same UI thread.
+    #[cfg(any(target_os = "macos", test, feature = "native-web-extension-probes"))]
+    pub(super) fn try_acquire_extension_guest(
+        &self,
+    ) -> Result<NativeResourceLease, NativeResourceAdmissionError> {
+        self.try_acquire_with_update_exclusion(NativeResourceClass::Tab, true)
+    }
+
+    fn try_acquire_with_update_exclusion(
+        &self,
+        class: NativeResourceClass,
+        extension_guest: bool,
+    ) -> Result<NativeResourceLease, NativeResourceAdmissionError> {
         if self.shared.invariant_failed.get() {
             return Err(NativeResourceAdmissionError::AccountingInvariant);
+        }
+        if (class == NativeResourceClass::ExtensionPopup || extension_guest)
+            && self.shared.extension_update.load(Ordering::Acquire)
+        {
+            return Err(NativeResourceAdmissionError::ClassExhausted(class));
         }
         let Ok(mut state) = self.shared.state.try_borrow_mut() else {
             self.shared.fail();
@@ -203,12 +275,23 @@ impl NativeResourceLedger {
             self.shared.fail();
             return Err(NativeResourceAdmissionError::AccountingInvariant);
         };
+        let extension_guest_tabs = if extension_guest {
+            let Some(next) = state.extension_guest_tabs.checked_add(1) else {
+                self.shared.fail();
+                return Err(NativeResourceAdmissionError::AccountingInvariant);
+            };
+            next
+        } else {
+            state.extension_guest_tabs
+        };
         state.counts[index] = class_count;
         state.total = total;
+        state.extension_guest_tabs = extension_guest_tabs;
         drop(state);
         Ok(NativeResourceLease {
             shared: self.shared.clone(),
             class: Some(class),
+            extension_guest,
         })
     }
 
@@ -220,7 +303,7 @@ impl NativeResourceLedger {
         self.shared
             .state
             .try_borrow()
-            .map(|state| state.total == 0)
+            .map(|state| state.total == 0 && state.extension_guest_tabs == 0)
             .unwrap_or_else(|_| {
                 self.shared.fail();
                 false
@@ -259,9 +342,23 @@ impl NativeResourceLedger {
 pub(crate) struct NativeResourceLease {
     shared: Rc<SharedNativeResourceState>,
     class: Option<NativeResourceClass>,
+    extension_guest: bool,
+}
+
+pub(super) struct NativeExtensionUpdateLease(Arc<AtomicBool>);
+impl Drop for NativeExtensionUpdateLease {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl NativeResourceLease {
+    #[cfg(feature = "native-web-extension-probes")]
+    pub(crate) fn for_extension_tab_probe() -> Result<Self, &'static str> {
+        NativeResourceLedger::default()
+            .try_acquire_extension_guest()
+            .map_err(|_| "native probe resource admission failed")
+    }
     #[cfg(test)]
     fn class(&self) -> Option<NativeResourceClass> {
         self.class
@@ -275,6 +372,11 @@ impl NativeResourceLease {
     ) -> Result<(), NativeResourceAdmissionError> {
         if self.shared.invariant_failed.get() {
             return Err(NativeResourceAdmissionError::AccountingInvariant);
+        }
+        if target == NativeResourceClass::ExtensionPopup
+            && self.shared.extension_update.load(Ordering::Acquire)
+        {
+            return Err(NativeResourceAdmissionError::ClassExhausted(target));
         }
         let Some(source) = self.class else {
             self.shared.fail();
@@ -329,7 +431,7 @@ impl NativeResourceLease {
             self.shared.fail();
             return Err(());
         };
-        self.shared.try_release(class)
+        self.shared.try_release(class, self.extension_guest)
     }
 }
 
@@ -346,6 +448,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn extension_update_excludes_popups_without_blocking_tabs_or_backgrounds() {
+        let ledger = NativeResourceLedger::default();
+        let popup = ledger
+            .try_acquire(NativeResourceClass::ExtensionPopup)
+            .unwrap();
+        assert!(ledger.try_begin_extension_update().is_none());
+        drop(popup);
+        let update = ledger.try_begin_extension_update().unwrap();
+        assert!(ledger.try_begin_extension_update().is_none());
+        assert!(ledger
+            .try_acquire(NativeResourceClass::ExtensionPopup)
+            .is_err());
+        let mut tab = ledger.try_acquire(NativeResourceClass::Tab).unwrap();
+        assert!(tab.reclassify(NativeResourceClass::ExtensionPopup).is_err());
+        let background = ledger
+            .try_acquire(NativeResourceClass::ExtensionBackground)
+            .unwrap();
+        // The service releases admission on its worker, without a UI callback.
+        std::thread::spawn(move || drop(update)).join().unwrap();
+        tab.reclassify(NativeResourceClass::ExtensionPopup).unwrap();
+        drop(tab);
+        drop(background);
+        assert!(ledger.is_quiescent());
+    }
+
+    #[test]
+    fn extension_update_and_full_guest_tabs_exclude_each_other_without_blocking_browser_tabs() {
+        let ledger = NativeResourceLedger::default();
+        let ordinary = ledger.try_acquire(NativeResourceClass::Tab).unwrap();
+        let update = ledger
+            .try_begin_extension_update()
+            .expect("ordinary tab is allowed");
+        assert_eq!(
+            ledger.try_acquire_extension_guest().err(),
+            Some(NativeResourceAdmissionError::ClassExhausted(
+                NativeResourceClass::Tab
+            ))
+        );
+        assert_eq!(ledger.count_for_audit(NativeResourceClass::Tab), Some(1));
+        let another_ordinary = ledger.try_acquire(NativeResourceClass::Tab).unwrap();
+        drop(update);
+
+        let mut guest = ledger.try_acquire_extension_guest().unwrap();
+        assert_eq!(ledger.count_for_audit(NativeResourceClass::Tab), Some(3));
+        assert!(ledger.try_begin_extension_update().is_none());
+        // A failed physical close can transfer the same lease to teardown
+        // debt; the document still excludes updates until its owner releases.
+        guest.reclassify(NativeResourceClass::TeardownDebt).unwrap();
+        assert!(ledger.try_begin_extension_update().is_none());
+        drop(guest);
+        let update = ledger.try_begin_extension_update().expect("guest retired");
+        drop(update);
+        drop(ordinary);
+        drop(another_ordinary);
+        assert!(ledger.is_quiescent());
+    }
+
+    #[test]
     fn class_budgets_are_disjoint_and_sum_to_the_hard_ceiling() {
         assert_eq!(NativeResourceClass::Tab.limit(), 32);
         assert_eq!(NativeResourceClass::WarmSpare.limit(), 1);
@@ -355,6 +515,7 @@ mod tests {
             MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
         );
         assert_eq!(NativeResourceClass::ExtensionPopup.limit(), 1);
+        assert_eq!(NativeResourceClass::ExtensionAuxiliary.limit(), 4);
         assert_eq!(NativeResourceClass::ReconciliationController.limit(), 1);
         #[cfg(feature = "agentic-browser")]
         assert_eq!(

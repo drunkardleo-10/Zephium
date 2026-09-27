@@ -153,6 +153,7 @@ impl RuntimeCoordinator {
         key: ExtensionNativeOwnershipKey,
         deadline: Instant,
     ) -> RuntimeRetirementOutcome {
+        self.activation_issues.clear(key);
         self.retire_key_with_resources(&mut resources, key, deadline)
     }
 
@@ -162,6 +163,7 @@ impl RuntimeCoordinator {
         profile: ProfileId,
         deadline: Instant,
     ) -> RuntimeRetirementOutcome {
+        self.activation_issues.clear_profile(profile);
         if let Some(outcome) = self.profile_retirement_preflight(profile) {
             return outcome;
         }
@@ -222,7 +224,8 @@ impl RuntimeCoordinator {
     fn keys_matching(
         &self,
         profile: Option<ProfileId>,
-    ) -> [Option<ExtensionNativeOwnershipKey>; 3] {
+    ) -> [Option<ExtensionNativeOwnershipKey>; crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES]
+    {
         self.keys_matching_after_barrier(profile, self.journal_settlement_barrier_owner())
     }
 
@@ -230,8 +233,9 @@ impl RuntimeCoordinator {
         &self,
         profile: Option<ProfileId>,
         barrier: Option<ExtensionNativeOwnershipKey>,
-    ) -> [Option<ExtensionNativeOwnershipKey>; 3] {
-        let mut keys = [None, None, None];
+    ) -> [Option<ExtensionNativeOwnershipKey>; crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES]
+    {
+        let mut keys = [None; crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES];
         let mut next = 0;
         if let Some(barrier) = barrier.filter(|key| {
             profile.is_none_or(|profile| key.profile() == profile) && self.slot(*key).is_some()

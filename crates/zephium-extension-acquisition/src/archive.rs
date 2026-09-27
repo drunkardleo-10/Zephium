@@ -198,9 +198,14 @@ pub struct AcquiredExtensionTreeReceipt {
     index: CanonicalExtensionTreeIndex,
     retained_bytes: usize,
     original_crx_sha256: [u8; 32],
+    original_crx_length: usize,
 }
 
 impl AcquiredExtensionTreeReceipt {
+    /// Exact length of the original authenticated CRX, for bounded rereads.
+    pub const fn original_crx_length(&self) -> usize {
+        self.original_crx_length
+    }
     /// Derives the upstream high-water candidate from the exact original
     /// manifest in this completely streamed tree. This does not classify the
     /// manifest's capabilities or authorize installation. The durable adapter
@@ -374,6 +379,8 @@ impl AcquiredExtensionArchiveFile {
 /// authority.
 pub struct AcquiredExtensionArchive<'archive> {
     archive: ZipArchive<Cursor<&'archive [u8]>>,
+    developer_public_key: &'archive [u8],
+    original_crx_length: usize,
     extension_id: ChromiumExtensionId,
     developer_key_sha256: ChromiumManifestKeyDigest,
     payload: ExtensionPackagePayloadIdentity,
@@ -472,6 +479,8 @@ impl<'archive> AcquiredExtensionArchive<'archive> {
         } = preflight_entries(archive, zip_bytes, envelope)?;
         Ok(Self {
             archive,
+            developer_public_key: crx.developer_public_key(),
+            original_crx_length: crx.package_length(),
             extension_id: crx.extension_id().clone(),
             developer_key_sha256: crx.developer_key_sha256(),
             payload: expected_payload,
@@ -486,6 +495,12 @@ impl<'archive> AcquiredExtensionArchive<'archive> {
     /// Returns SHA-256 of the complete original authenticated upstream CRX.
     pub const fn original_crx_sha256(&self) -> [u8; 32] {
         self.original_crx_sha256
+    }
+
+    /// Exact developer SPKI from the authenticated original CRX. This is
+    /// borrowed input, not a new signature over any on-device adaptation.
+    pub const fn developer_public_key(&self) -> &'archive [u8] {
+        self.developer_public_key
     }
 
     /// Returns the expected id proved by the signed developer key.
@@ -721,6 +736,7 @@ impl<'archive> AcquiredExtensionArchive<'archive> {
             index,
             retained_bytes,
             original_crx_sha256: self.original_crx_sha256,
+            original_crx_length: self.original_crx_length,
         })
     }
 }
@@ -1428,6 +1444,29 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_unicode_resource_keeps_its_exact_zip_and_tree_spelling() {
+        const NAME: &str = "src/js/сlickableCard.common.chunk.js";
+        const CONTENT: &[u8] = b"export const clickable = true;";
+        let archive = zip(&[
+            ("manifest.json", br#"{"manifest_version":3}"#),
+            (NAME, CONTENT),
+        ]);
+        let (crx, expected_id) = signed_crx(&archive);
+        let mut acquired =
+            AcquiredExtensionArchive::authenticate_crx3(&crx, &expected_id, payload(&archive))
+                .unwrap();
+        assert_eq!(acquired.files()[1].path().as_str(), NAME);
+        let (files, tree) = stream_tree(&mut acquired);
+        assert_eq!(files[1], CONTENT);
+        let indexed = tree
+            .index()
+            .file(&PortableRelativePath::parse(NAME).unwrap())
+            .unwrap();
+        assert_eq!(indexed.path().as_str(), NAME);
+        assert_eq!(indexed.sha256(), <[u8; 32]>::from(Sha256::digest(CONTENT)));
+    }
+
+    #[test]
     fn upstream_acquisition_preserves_original_crx_and_requires_update_key_continuity() {
         let archive = zip(&[("manifest.json", br#"{"manifest_version":3,"version":"1"}"#)]);
         let (crx, id) = signed_crx(&archive);
@@ -1439,6 +1478,10 @@ mod tests {
         );
         assert_eq!(acquired.payload_identity(), payload(&archive));
         let key = acquired.developer_key_sha256();
+        assert_eq!(
+            <[u8; 32]>::from(Sha256::digest(acquired.developer_public_key())),
+            key.bytes()
+        );
         let mut foreign_key = key.bytes();
         foreign_key[31] ^= 1; // Same Chromium id prefix, different complete key.
         assert!(AcquiredExtensionArchive::authenticate_upstream_crx3(&crx, &id, Some(key)).is_ok());
@@ -1453,6 +1496,7 @@ mod tests {
         let mut output = Vec::new();
         let receipt = acquired.copy_file(0, &mut output).unwrap();
         let tree = acquired.finish_tree(vec![receipt]).unwrap();
+        assert_eq!(tree.original_crx_length(), crx.len());
         assert_eq!(tree.original_crx_sha256(), acquired.original_crx_sha256());
         let checkpoint = tree.upstream_checkpoint(&output).unwrap();
         assert_eq!(
@@ -1835,6 +1879,21 @@ mod tests {
                 ("src", b"file"),
                 ("src/a.js", b"a"),
             ],
+            vec![
+                ("manifest.json", b"{}".as_slice()),
+                ("src/сlickable.js", b"a"),
+                ("src/СLICKABLE.JS", b"b"),
+            ],
+            vec![
+                ("manifest.json", b"{}".as_slice()),
+                ("Café", b"file"),
+                ("café/a.js", b"a"),
+            ],
+            vec![
+                ("manifest.json", b"{}".as_slice()),
+                ("Kelvin.js", b"a"),
+                ("Kelvin.js", b"b"),
+            ],
         ] {
             let archive = zip(&entries);
             let envelope = preflight_envelope(&archive).unwrap();
@@ -1850,6 +1909,59 @@ mod tests {
                 AcquiredExtensionArchiveError::PathCollision
             );
         }
+    }
+
+    #[test]
+    fn unicode_admission_still_rejects_traversal_and_decomposed_names() {
+        for path in ["src/../escape.js", "src/%2e%2e/escape.js", "cafe\u{301}.js"] {
+            let archive = zip(&[("manifest.json", b"{}"), (path, b"bad")]);
+            let envelope = preflight_envelope(&archive).unwrap();
+            let parsed = ZipArchive::with_config(
+                Config {
+                    archive_offset: ArchiveOffset::Known(0),
+                },
+                Cursor::new(archive.as_slice()),
+            )
+            .unwrap();
+            assert_eq!(
+                preflight_entries(parsed, &archive, envelope).unwrap_err(),
+                AcquiredExtensionArchiveError::InvalidPath,
+                "unexpectedly admitted {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_resource_name_does_not_admit_a_symlink_entry() {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            writer
+                .start_file("manifest.json", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"{}").unwrap();
+            writer
+                .add_symlink(
+                    "src/сlickable.js",
+                    "../../escape.js",
+                    SimpleFileOptions::default(),
+                )
+                .unwrap();
+            writer.finish().unwrap();
+        }
+        let archive = cursor.into_inner();
+        let envelope = preflight_envelope(&archive).unwrap();
+        let parsed = ZipArchive::with_config(
+            Config {
+                archive_offset: ArchiveOffset::Known(0),
+            },
+            Cursor::new(archive.as_slice()),
+        )
+        .unwrap();
+        assert_eq!(
+            preflight_entries(parsed, &archive, envelope).unwrap_err(),
+            AcquiredExtensionArchiveError::UnsupportedEntry
+        );
     }
 
     #[test]

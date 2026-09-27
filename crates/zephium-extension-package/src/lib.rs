@@ -28,13 +28,19 @@
 mod chromium;
 mod crx3;
 mod digest;
+/// Pure URL policy for an authenticated Chromium identity WebAuth flow.
+pub mod identity_compatibility;
 mod json;
 mod limits;
+/// Deterministic, non-authorizing native compatibility planning.
+pub mod macos_compatibility;
 mod manifest;
 mod native_messaging;
 mod public_policy;
 mod relative_path;
 mod release;
+/// Pure fail-closed withholding of unsupported extension sandbox documents.
+pub mod sandbox_withholding;
 mod store_listing;
 mod tree;
 
@@ -45,7 +51,7 @@ pub use crx3::{Crx3PackageError, Crx3SigningRequest, VerifiedCrx3Package};
 pub use json::{parse_bounded_json, BoundedJsonError, BoundedJsonLimits, BoundedJsonValue};
 pub use limits::*;
 pub use manifest::{
-    admit_extension_manifest, resolve_extension_default_locale,
+    admit_extension_manifest, assess_upstream_extension_manifest, resolve_extension_default_locale,
     resolve_extension_metadata_default_locale, AdmittedExtensionManifest,
     ExtensionContentScriptResources, ExtensionDeclaredResourcePattern,
     ExtensionDefaultLocaleResolutionError, ExtensionLocalizedMessageKey,

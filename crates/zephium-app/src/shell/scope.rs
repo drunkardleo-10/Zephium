@@ -46,9 +46,13 @@ impl Shell {
     pub(super) fn pane_in_scope(&self, tree: &Pane, profile: ProfileId, space: SpaceId) -> bool {
         let tabs = tree.tabs();
         tabs.len() <= MAX_VISIBLE_PANES
-            && tabs
-                .into_iter()
-                .all(|id| self.item_in_scope(id, profile, space))
+            && tabs.into_iter().all(|id| {
+                self.item_in_scope(id, profile, space)
+                    && self
+                        .items
+                        .tab(id)
+                        .is_some_and(|tab| tab.content == zephium_core::item::TabContent::Web)
+            })
     }
 
     pub(super) fn partition_of(&self, id: ItemId) -> Partition {

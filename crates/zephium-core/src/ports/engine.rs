@@ -17,7 +17,8 @@ use crate::permissions::{
 };
 use crate::ports::extensions::{
     ExtensionRuntimeGrantPrompt, ExtensionRuntimeGrantPromptSettlement,
-    ExtensionRuntimeGrantRequestId,
+    ExtensionRuntimeGrantRequestId, IsolatedExtensionDocumentKind,
+    IsolatedExtensionResourceOutcome, IsolatedExtensionResourceRequest,
 };
 use crate::runtime_security::RuntimeSecurityAdvisories;
 use crate::split::Pane;
@@ -664,6 +665,19 @@ pub trait Engine {
         _profile: ProfileId,
         _request: ExtensionBrowserRequestId,
         _settlement: ExtensionBrowserRequestSettlement,
+        _first_url_after_reply: Option<(Arc<str>, NavigationRequestId)>,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Settles one exact native isolated-document URL scheme task. Verified
+    /// bytes are data only; the native broker must rejoin the live context,
+    /// runtime generation, request id and WKURLSchemeTask before delivery.
+    fn settle_isolated_extension_resource(
+        &self,
+        _runtime: ExtensionRuntimeInstance,
+        _kind: IsolatedExtensionDocumentKind,
+        _request: u64,
+        _outcome: IsolatedExtensionResourceOutcome,
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
@@ -906,6 +920,40 @@ pub enum EngineEvent {
     /// [`Engine::settle_extension_browser_request`].
     ExtensionBrowserRequested {
         request: ExtensionBrowserRequest,
+    },
+    /// The exact native tabs.create completion has returned to its extension.
+    /// Shell may now dispatch this previously admitted first URL for the
+    /// still-owned logical tab. It grants no committed document or URL.
+    ExtensionCreatedTabReplied {
+        profile: ProfileId,
+        request: ExtensionBrowserRequestId,
+        tab: ItemId,
+        url: Arc<str>,
+        intent: NavigationRequestId,
+    },
+    /// Bounded request from a controller-free extension document. The engine
+    /// retains the exact scheme task; Shell forwards only routing data to the
+    /// existing service actor for authenticated package bytes.
+    IsolatedExtensionResourceRequested {
+        request: Box<IsolatedExtensionResourceRequest>,
+    },
+    /// A native extension document's browser-owned tab guest was closed or
+    /// failed admission. The Shell must rejoin both fields to its typed tab
+    /// marker before removing it; the event carries no page URL authority.
+    ExtensionPageClosed {
+        profile: ProfileId,
+        id: ItemId,
+    },
+    /// Trusted native page metadata for an already broker-bound extension
+    /// tab. The Shell must join profile and typed marker before projection;
+    /// extension URLs are deliberately absent from this browser-owned event.
+    ExtensionPageChanged {
+        profile: ProfileId,
+        id: ItemId,
+        title: String,
+        loading: bool,
+        can_go_back: bool,
+        can_go_forward: bool,
     },
     /// One exact published runtime invoked a product-sealed compatibility
     /// operation after native context binding and API authority were proven.

@@ -22,7 +22,7 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSDictionary, NSError, NSObjectProtocol, NSRunLoop, NSString,
+    MainThreadMarker, NSArray, NSDictionary, NSError, NSObjectProtocol, NSRunLoop, NSSet, NSString,
 };
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionContextPermissionStatus,
@@ -354,10 +354,18 @@ pub(super) struct RuntimeEvidence {
 }
 
 pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
-    let path = root.join("native-broker-contract");
+    write_fixture_with_side_panel(root, false)
+}
+
+fn write_fixture_with_side_panel(root: &Path, side_panel: bool) -> Result<PathBuf, String> {
+    let path = root.join(if side_panel {
+        "native-broker-side-panel-contract"
+    } else {
+        "native-broker-contract"
+    });
     std::fs::create_dir(&path)
         .map_err(|error| format!("cannot create native-broker contract fixture: {error}"))?;
-    let manifest = json!({
+    let mut manifest = json!({
         "manifest_version": 3,
         "name": "Zephium Native Broker Contract Probe",
         "version": "1.0.0",
@@ -374,17 +382,18 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
             "type": "module"
         }
     });
+    if side_panel {
+        manifest["permissions"] = json!(["history", "nativeMessaging", "sidePanel"]);
+        manifest["side_panel"] = json!({"default_path":"side-panel.html"});
+        write(
+            &path,
+            "side-panel.html",
+            "<!doctype html><title>Side panel fixture</title>",
+        )?;
+    }
     write(&path, "manifest.json", &manifest.to_string())?;
-    write(
-        &path,
-        super::compatibility_artifact::HISTORY_BRIDGE,
-        include_str!("../../../../../zephium-extension-package/assets/macos/webkit-history-v1.js"),
-    )?;
-    write(
-        &path,
-        "worker.js",
-        &format!(
-            r#"import "./{}";
+    let worker = format!(
+        r#"import "./{}";
 const historyEvidence = () => globalThis.chrome.history.search({{ text: "", maxResults: 2, startTime: 0 }})
   .then((items) => Array.isArray(items) && items.length === 2 &&
     items[0]?.id === "https://first.example/path" &&
@@ -419,22 +428,32 @@ globalThis.chrome.runtime.onMessage.addListener((message, sender, sendResponse) 
     setTimeout(() => settle("host-reply-unobserved"), 2000);
   }});
   Promise.all([historyEvidence(), portEvidence()]).then(([history, port]) => {{
-    sendResponse({{ history: senderValid ? history : "sender-invalid", port }});
+    sendResponse({{ history: senderValid ? history : "sender-invalid", port{side_panel_response} }});
   }});
   return true;
 }});
 "#,
-            super::compatibility_artifact::HISTORY_BRIDGE,
-            application_identifier = APPLICATION_IDENTIFIER,
-            port_request = PORT_REQUEST,
-            port_reply = PORT_REPLY,
-        ),
+        super::compatibility_artifact::HISTORY_BRIDGE,
+        application_identifier = APPLICATION_IDENTIFIER,
+        port_request = PORT_REQUEST,
+        port_reply = PORT_REPLY,
+        side_panel_response = if side_panel {
+            ", sidePanel: `${typeof globalThis.chrome.sidePanel}|${typeof globalThis.browser.sidePanel}`, windowsCreate: `${typeof globalThis.chrome.windows?.create}|${typeof globalThis.browser.windows?.create}`"
+        } else {
+            ""
+        },
+    );
+    write(
+        &path,
+        super::compatibility_artifact::HISTORY_BRIDGE,
+        include_str!("../../../../../zephium-extension-package/assets/macos/webkit-history-v1.js"),
     )?;
+    write(&path, "worker.js", &worker)?;
     let script = r#"(() => {
     'use strict';
     const runtime = globalThis.chrome?.runtime;
     const settle = (oneShot, port) => {
-        document.title = JSON.stringify({ history: "worker-bounded-recent-search", oneShot, port });
+        document.title = JSON.stringify({ history: "worker-bounded-recent-search", oneShot, port, ...(SIDE_PANEL_ENABLED ? {sidePanel: SIDE_PANEL, windowsCreate: WINDOWS_CREATE} : {}) });
     };
     if (!runtime?.sendMessage) {
         settle("absent", "absent");
@@ -444,11 +463,124 @@ globalThis.chrome.runtime.onMessage.addListener((message, sender, sendResponse) 
       Promise.resolve(runtime.sendMessage({
       kind: "zephium-native-broker-worker-evidence-v1",
       })).then((evidence) => {
+        if (SIDE_PANEL_ENABLED) SIDE_PANEL = evidence?.sidePanel ?? "side-panel-evidence-missing";
+        if (SIDE_PANEL_ENABLED) WINDOWS_CREATE = evidence?.windowsCreate ?? "windows-evidence-missing";
         settle(evidence?.history ?? "history-evidence-missing", evidence?.port ?? "port-evidence-missing");
       }, (error) => settle(`error:${String(error?.message ?? error)}`, "not-started"));
     }, 100);
 })()"#;
-    write(&path, "probe.js", script)?;
+    let script = script.replace(
+        "const runtime =",
+        &format!("const SIDE_PANEL_ENABLED = {side_panel};\n    let SIDE_PANEL = null;\n    let WINDOWS_CREATE = null;\n    const runtime ="),
+    );
+    write(&path, "probe.js", &script)?;
+    Ok(path)
+}
+
+fn write_document_fixture(root: &Path) -> Result<PathBuf, String> {
+    let path = write_fixture(root)?;
+    let manifest_path = path.join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    manifest["permissions"] = json!(["history", "nativeMessaging", "scripting"]);
+    manifest["content_scripts"][0]["js"] = json!(["probe.js", "document-probe.js"]);
+    write(&path, "manifest.json", &manifest.to_string())?;
+    let base_probe = std::fs::read_to_string(path.join("probe.js"))
+        .map_err(|error| format!("cannot read document fixture base probe: {error}"))?;
+    write(
+        &path,
+        "probe.js",
+        &base_probe.replace(
+            "const runtime =",
+            "if (new URL(location.href).searchParams.get('run') !== 'native-broker-contract') return;\n    const runtime =",
+        ),
+    )?;
+    write(
+        &path,
+        "document-target-prelude.js",
+        "globalThis.__zephiumDocumentFileOrder = 1;",
+    )?;
+    write(
+        &path,
+        "document-target.js",
+        "document.documentElement.setAttribute('data-exact-document-injected', globalThis.__zephiumDocumentWorld === 'bootstrap-world' && globalThis.__zephiumDocumentFileOrder === 1 ? 'same-world-ordered' : 'wrong-world-or-order'); 'exact-document-file-ran';",
+    )?;
+    write(
+        &path,
+        "document-probe.js",
+        r#"(() => {
+  const run = new URL(location.href).searchParams.get('run');
+  globalThis.__zephiumDocumentWorld = 'bootstrap-world';
+  if (run === 'native-broker-contract') {
+    chrome.runtime.sendMessage({kind:'zephium-exact-document-probe-v1',url:location.href}).then(
+      result => document.documentElement.setAttribute('data-document-proof', JSON.stringify(result)),
+      error => document.documentElement.setAttribute('data-document-proof', JSON.stringify({error:String(error)}))
+    );
+  } else if (run === 'document-race-start') {
+    chrome.runtime.sendMessage({kind:'zephium-document-race-prime-v1'}).then(
+      result => { document.title = result?.primed ? 'document-race-primed' : 'document-race-prime-failed'; },
+      () => { document.title = 'document-race-prime-failed'; }
+    );
+  } else if (run === 'document-race-end') {
+    chrome.runtime.sendMessage({kind:'zephium-document-race-check-v1'}).then(
+      result => document.documentElement.setAttribute('data-document-race-proof', JSON.stringify(result)),
+      error => document.documentElement.setAttribute('data-document-race-proof', JSON.stringify({error:String(error)}))
+    );
+  }
+})()"#,
+    )?;
+    let worker_path = path.join("worker.js");
+    let mut worker = std::fs::read_to_string(&worker_path)
+        .map_err(|error| format!("cannot read document fixture worker: {error}"))?;
+    worker.push_str(
+        r#"
+globalThis.chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.kind !== 'zephium-exact-document-probe-v1') return false;
+  const senderId = sender?.documentId;
+  const tabId = sender?.tab?.id;
+  const frameId = sender?.frameId;
+  if (typeof senderId !== 'string' || senderId.length < 16 ||
+      !Number.isInteger(tabId) || frameId !== 0) {
+    sendResponse({senderId:senderId ?? null, tabId:tabId ?? null, frameId:frameId ?? null, invalidSender:true});
+    return false;
+  }
+  globalThis.chrome.scripting.executeScript({
+    target:{tabId, documentIds:[senderId]}, files:['document-target-prelude.js','document-target.js']
+  }).then(results => sendResponse({senderId, urlMatches:sender?.url === message?.url,
+      originMatches:!sender?.origin || sender.origin === new URL(sender.url).origin,
+      resultIds:results?.map(result => result.documentId ?? null),
+      frameIds:results?.map(result => result.frameId ?? null),
+      count:results?.length ?? null}),
+    error => sendResponse({senderId, error:String(error?.message ?? error)}));
+  return true;
+});
+let staleDocumentTarget = null;
+globalThis.chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.kind === 'zephium-document-race-prime-v1') {
+    staleDocumentTarget = {documentId:sender?.documentId, tabId:sender?.tab?.id};
+    sendResponse({primed:typeof staleDocumentTarget.documentId === 'string' &&
+      staleDocumentTarget.documentId.length >= 16 && Number.isInteger(staleDocumentTarget.tabId) && sender?.frameId === 0});
+    return false;
+  }
+  if (message?.kind !== 'zephium-document-race-check-v1') return false;
+  const oldId = staleDocumentTarget?.documentId ?? null;
+  const newId = sender?.documentId ?? null;
+  const tabId = sender?.tab?.id;
+  if (!oldId || typeof newId !== 'string' || oldId === newId ||
+      !Number.isInteger(tabId) || tabId !== staleDocumentTarget.tabId || sender?.frameId !== 0) {
+    sendResponse({oldId,newId,invalidSender:true});
+    return false;
+  }
+  globalThis.chrome.scripting.executeScript({
+    target:{tabId, documentIds:[oldId]}, files:['document-target-prelude.js','document-target.js']
+  }).then(results => sendResponse({oldId,newId, resultIds:results.map(result => result.documentId ?? null), rejected:false}),
+    error => sendResponse({oldId,newId, resultIds:[], rejected:true, error:String(error?.message ?? error)}));
+  return true;
+});
+"#,
+    );
+    write(&path, "worker.js", &worker)?;
     Ok(path)
 }
 
@@ -457,7 +589,116 @@ pub(super) fn run(
     run_loop: &NSRunLoop,
     mtm: MainThreadMarker,
 ) -> Result<RuntimeEvidence, String> {
-    inspect_parse_contract(extension)?;
+    run_with_side_panel(extension, run_loop, mtm, None, false)
+}
+
+pub(super) fn run_document_id_probe() -> Result<bool, String> {
+    let Some(_) = super::supported_runtime()? else {
+        return Ok(false);
+    };
+    let watchdog = super::arm_process_watchdog();
+    let result = run_document_id_probe_inner();
+    watchdog.store(true, Ordering::Release);
+    result.map(|()| true)
+}
+
+fn run_document_id_probe_inner() -> Result<(), String> {
+    let mtm = MainThreadMarker::new().ok_or("document ID probe requires main thread")?;
+    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+    let _ = app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+    app.finishLaunching();
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let fixture = write_document_fixture(temp.path())?;
+    let run_loop = NSRunLoop::mainRunLoop();
+    let evidence = objc2::rc::autoreleasepool(|_| {
+        let extension = super::load_extension(&fixture, &run_loop, mtm)?;
+        run_with_side_panel(&extension, &run_loop, mtm, None, true)
+    })?;
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    while evidence.controller.load().is_some()
+        || evidence.context.load().is_some()
+        || evidence.view.load().is_some()
+        || evidence.store.load().is_some()
+        || evidence.port.load().is_some()
+    {
+        if Instant::now() >= deadline {
+            return Err("document ID native fixture did not release its objects".into());
+        }
+        super::drain_run_loop_once(&run_loop);
+    }
+    eprintln!("native-document-id: exact sender, target, result, and teardown passed");
+    Ok(())
+}
+
+pub(super) fn run_side_panel_probe() -> Result<bool, String> {
+    let Some(_) = super::supported_runtime()? else {
+        return Ok(false);
+    };
+    let watchdog = super::arm_process_watchdog();
+    let result = run_side_panel_probe_inner();
+    watchdog.store(true, Ordering::Release);
+    result.map(|()| true)
+}
+
+fn run_side_panel_probe_inner() -> Result<(), String> {
+    let mtm = MainThreadMarker::new().ok_or("sidePanel probe requires main thread")?;
+    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+    let _ = app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+    app.finishLaunching();
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let fixture = write_fixture_with_side_panel(temp.path(), true)?;
+    let run_loop = NSRunLoop::mainRunLoop();
+    for suppressed in [false, true] {
+        let evidence = objc2::rc::autoreleasepool(|_| {
+            let extension = super::load_extension(&fixture, &run_loop, mtm)?;
+            run_with_side_panel(&extension, &run_loop, mtm, Some(suppressed), false)
+        })?;
+        let deadline = Instant::now() + super::PROBE_TIMEOUT;
+        loop {
+            if evidence.controller.load().is_none()
+                && evidence.context.load().is_none()
+                && evidence.view.load().is_none()
+                && evidence.store.load().is_none()
+                && evidence.port.load().is_none()
+                && evidence.delegate_drops.load(Ordering::Acquire) == 1
+                && evidence.surface_drops.load(Ordering::Acquire) == 2
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "sidePanel probe teardown failed (suppressed={suppressed}): controller={}, context={}, view={}, store={}, port={}, delegate_drops={}, surface_drops={}",
+                    evidence.controller.load().is_none(),
+                    evidence.context.load().is_none(),
+                    evidence.view.load().is_none(),
+                    evidence.store.load().is_none(),
+                    evidence.port.load().is_none(),
+                    evidence.delegate_drops.load(Ordering::Acquire),
+                    evidence.surface_drops.load(Ordering::Acquire),
+                ));
+            }
+            super::drain_run_loop_once(&run_loop);
+        }
+        eprintln!(
+            "native-side-panel: privileged worker {} contract and teardown passed",
+            if suppressed {
+                "unavailable"
+            } else {
+                "baseline"
+            }
+        );
+    }
+    Ok(())
+}
+
+fn run_with_side_panel(
+    extension: &WKWebExtension,
+    run_loop: &NSRunLoop,
+    mtm: MainThreadMarker,
+    side_panel_suppressed: Option<bool>,
+    document_mode: bool,
+) -> Result<RuntimeEvidence, String> {
+    inspect_parse_contract(extension, document_mode)?;
     let server = super::FixtureServer::start(None)?;
     let bundle = super::new_nonpersistent_controller(mtm)?;
     // SAFETY: the controller and browsing configuration share the exact
@@ -470,11 +711,33 @@ pub(super) fn run(
     let controller = bundle.controller.clone();
     let store = bundle._data_store.clone();
     let context = super::new_context(extension, CONTRACT_PRINCIPAL)?;
+    if side_panel_suppressed == Some(true) {
+        let unavailable = NSSet::from_retained_slice(&[
+            NSString::from_str("browser.sidePanel"),
+            NSString::from_str("browser.windows.create"),
+        ]);
+        // SAFETY: the context is not loaded and no extension code has run yet.
+        unsafe { context.setUnsupportedAPIs(Some(&unavailable)) };
+        let readback = unsafe { context.unsupportedAPIs() };
+        if readback.count() != 2
+            || !readback.containsObject(&NSString::from_str("browser.sidePanel"))
+            || !readback.containsObject(&NSString::from_str("browser.windows.create"))
+        {
+            return Err("native sidePanel unavailable API readback drifted".into());
+        }
+    }
     let state = Rc::new(BrokerState::default());
     state.bind(&controller, &context)?;
     let grants = super::super::extensions::apply_probe_grants(
         &context,
-        &[super::super::extensions::MacosNativeApiPermission::NativeMessaging],
+        if document_mode {
+            &[
+                super::super::extensions::MacosNativeApiPermission::NativeMessaging,
+                super::super::extensions::MacosNativeApiPermission::Scripting,
+            ]
+        } else {
+            &[super::super::extensions::MacosNativeApiPermission::NativeMessaging]
+        },
         &[super::HOST_MATCH_PATTERN],
         true,
     )
@@ -482,7 +745,7 @@ pub(super) fn run(
     let permission = NSString::from_str("nativeMessaging");
     if unsafe { context.permissionStatusForPermission(&permission) }
         != WKWebExtensionContextPermissionStatus::GrantedExplicitly
-        || unsafe { context.grantedPermissions() }.count() != 1
+        || unsafe { context.grantedPermissions() }.count() != if document_mode { 2 } else { 1 }
     {
         grants
             .clear_and_verify(&context)
@@ -574,7 +837,20 @@ pub(super) fn run(
             &context,
             run_loop,
             &state,
-        )
+            side_panel_suppressed,
+        )?;
+        if document_mode {
+            wait_for_document_evidence(
+                view.as_ref().expect("native-broker view was stored"),
+                run_loop,
+            )?;
+            run_document_navigation_race(
+                view.as_ref().expect("native-broker view was stored"),
+                &server,
+                run_loop,
+            )?;
+        }
+        Ok(())
     })();
     let port_weak = delegate.as_ref().and_then(|delegate| delegate.port_weak());
 
@@ -621,9 +897,10 @@ pub(super) fn run(
     drop(context);
     drop(delegate.take());
     let webview_request_count = webview_requests.load(Ordering::Acquire);
-    if !(1..=16).contains(&webview_request_count) {
+    let max_webview_requests = if document_mode { 64 } else { 16 };
+    if !(1..=max_webview_requests).contains(&webview_request_count) {
         cleanup_failures.push(format!(
-            "native-broker surface requested its WebView {webview_request_count} times (expected 1..=16)"
+            "native-broker surface requested its WebView {webview_request_count} times (expected 1..={max_webview_requests})"
         ));
     }
     drop(controller);
@@ -653,17 +930,22 @@ pub(super) fn run(
     }
 }
 
-fn inspect_parse_contract(extension: &WKWebExtension) -> Result<(), String> {
+fn inspect_parse_contract(extension: &WKWebExtension, document_mode: bool) -> Result<(), String> {
     if unsafe { extension.manifestVersion() } != 3.0 {
         return Err("native-broker contract was not parsed as manifest v3".into());
     }
     let errors = unsafe { extension.errors() };
     let permissions = unsafe { extension.requestedPermissions() };
-    let exact_permission = permissions.count() == 1
-        && permissions
-            .allObjects()
-            .objectAtIndex(0)
-            .isEqualToString(&NSString::from_str("nativeMessaging"));
+    let names = (0..permissions.count())
+        .map(|index| permissions.allObjects().objectAtIndex(index).to_string())
+        .collect::<std::collections::HashSet<_>>();
+    // WebKit's requestedPermissions excludes sidePanel despite preserving its
+    // declaration in the manifest. The worker checks actual API visibility.
+    let mut expected = std::collections::HashSet::from(["nativeMessaging".to_string()]);
+    if document_mode {
+        expected.insert("scripting".to_string());
+    }
+    let exact_permission = names == expected;
     if errors.count() != 0 || !exact_permission {
         return Err(format!(
             "native-broker parse contract drifted: errors={}, permissions={:?}",
@@ -681,6 +963,7 @@ fn wait_for_evidence(
     context: &WKWebExtensionContext,
     run_loop: &NSRunLoop,
     state: &BrokerState,
+    side_panel_suppressed: Option<bool>,
 ) -> Result<(), String> {
     let deadline = Instant::now() + super::PROBE_TIMEOUT;
     let mut page_settled = false;
@@ -696,13 +979,20 @@ fn wait_for_evidence(
                 let evidence: Value = serde_json::from_str(title).map_err(|error| {
                     format!("native-broker probe returned invalid evidence {title:?}: {error}")
                 })?;
-                if evidence
-                    != json!({
-                        "history": "worker-bounded-recent-search",
-                        "oneShot": "history-search-passed",
-                        "port": PORT_REPLY
-                    })
-                {
+                let mut expected = json!({
+                    "history": "worker-bounded-recent-search",
+                    "oneShot": "history-search-passed",
+                    "port": PORT_REPLY
+                });
+                if let Some(suppressed) = side_panel_suppressed {
+                    expected["sidePanel"] = json!("undefined|undefined");
+                    expected["windowsCreate"] = json!(if suppressed {
+                        "undefined|undefined"
+                    } else {
+                        "function|function"
+                    });
+                }
+                if evidence != expected {
                     return Err(format!(
                         "native-broker page evidence drifted: {evidence}; callbacks={:?}",
                         state.snapshot()
@@ -721,6 +1011,133 @@ fn wait_for_evidence(
                 view.url().ok(),
                 state.snapshot()
             ));
+        }
+        super::drain_run_loop_once(run_loop);
+    }
+}
+
+fn wait_for_document_evidence(view: &wry::WebView, run_loop: &NSRunLoop) -> Result<(), String> {
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    loop {
+        let state = evaluate_document_state(view, run_loop, deadline,
+            "JSON.stringify({proof:document.documentElement?.getAttribute('data-document-proof'),injected:document.documentElement?.getAttribute('data-exact-document-injected'),mainWorld:typeof globalThis.__zephiumDocumentWorld})")?;
+        if let Some(proof) = state["proof"].as_str() {
+            let proof: Value = serde_json::from_str(proof)
+                .map_err(|error| format!("invalid document ID evidence: {error}"))?;
+            let sender = proof["senderId"].as_str().unwrap_or("");
+            if sender.len() < 16
+                || proof["resultIds"] != json!([sender, sender])
+                || proof["frameIds"] != json!([0, 0])
+                || proof["count"] != 2
+                || proof["urlMatches"] != true
+                || proof["originMatches"] != true
+                || state["injected"] != "same-world-ordered"
+                || state["mainWorld"] != "undefined"
+            {
+                return Err(format!(
+                    "document ID exact-target evidence failed: {proof}; state={state}"
+                ));
+            }
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("document ID native injection did not settle".into());
+        }
+    }
+}
+
+fn run_document_navigation_race(
+    view: &wry::WebView,
+    server: &super::FixtureServer,
+    run_loop: &NSRunLoop,
+) -> Result<(), String> {
+    view.load_url(&server.url("/keyboard", "document-race-start"))
+        .map_err(|error| format!("cannot start document race: {error}"))?;
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    loop {
+        if view
+            .document_title()
+            .map_err(|error| error.to_string())?
+            .as_deref()
+            == Some("document-race-primed")
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("document race source did not prime its worker".into());
+        }
+        super::drain_run_loop_once(run_loop);
+    }
+    view.load_url(&server.url("/keyboard", "document-race-end"))
+        .map_err(|error| format!("cannot navigate document race target: {error}"))?;
+    loop {
+        let state = evaluate_document_state(view, run_loop, deadline,
+            "JSON.stringify({proof:document.documentElement?.getAttribute('data-document-race-proof'),injected:document.documentElement?.getAttribute('data-exact-document-injected'),url:location.href})")?;
+        if let Some(proof) = state["proof"].as_str() {
+            let proof: Value = serde_json::from_str(proof)
+                .map_err(|error| format!("invalid document race evidence: {error}"))?;
+            let old_id = proof["oldId"].as_str().unwrap_or("");
+            let new_id = proof["newId"].as_str().unwrap_or("");
+            let result_ids = proof["resultIds"].as_array();
+            if old_id.len() < 16
+                || new_id.len() < 16
+                || old_id == new_id
+                || result_ids.is_none()
+                || result_ids.is_some_and(|ids| ids.iter().any(|id| id == new_id))
+                || state["injected"] != Value::Null
+                || !state["url"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("run=document-race-end")
+            {
+                return Err(format!(
+                    "stale document target reached new page: proof={proof}; state={state}"
+                ));
+            }
+            eprintln!(
+                "native-document-id: stale document target excluded new page; rejected={}; resultIds={}",
+                proof["rejected"], proof["resultIds"]
+            );
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("document race target did not settle".into());
+        }
+    }
+}
+
+fn evaluate_document_state(
+    view: &wry::WebView,
+    run_loop: &NSRunLoop,
+    deadline: Instant,
+    script: &str,
+) -> Result<Value, String> {
+    let native_view = super::super::native::webkit(view);
+    let response = Rc::new(RefCell::new(None));
+    let captured = response.clone();
+    let completion = block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+        let result = if let Some(error) = unsafe { error.as_ref() } {
+            Err(super::format_native_error("document ID evaluation", error))
+        } else {
+            unsafe { value.as_ref() }
+                .and_then(AnyObject::downcast_ref::<NSString>)
+                .map(ToString::to_string)
+                .ok_or_else(|| "document ID evaluation returned non-string".to_owned())
+        };
+        captured.replace(Some(result));
+    });
+    unsafe {
+        native_view
+            .evaluateJavaScript_completionHandler(&NSString::from_str(script), Some(&completion));
+    }
+    loop {
+        if let Some(result) = response.borrow_mut().take() {
+            let raw = result?;
+            return serde_json::from_str(&raw)
+                .map_err(|error| format!("invalid document ID state: {error}"));
+        }
+        if Instant::now() >= deadline {
+            return Err("document ID evaluation callback timed out".into());
         }
         super::drain_run_loop_once(run_loop);
     }
@@ -783,7 +1200,7 @@ mod tests {
         let worker = std::fs::read_to_string(fixture.join("worker.js")).expect("worker script");
         assert_eq!(script.matches(APPLICATION_IDENTIFIER).count(), 0);
         assert_eq!(worker.matches(APPLICATION_IDENTIFIER).count(), 1);
-        assert!(worker.contains("historyEvidence().then((history)"));
+        assert!(worker.contains("Promise.all([historyEvidence(), portEvidence()])"));
         assert!(!fixture.join("background-host.html").exists());
         assert!(worker.contains("history.search"));
         assert!(worker.contains("connectNative"));
@@ -800,5 +1217,29 @@ mod tests {
                 "../../../../../zephium-extension-package/assets/macos/webkit-history-v1.js"
             )
         );
+    }
+
+    #[test]
+    fn side_panel_fixture_preserves_required_declaration_and_worker_detection() {
+        let temp = tempfile::tempdir().expect("temporary contract root");
+        let fixture =
+            write_fixture_with_side_panel(temp.path(), true).expect("sidePanel contract fixture");
+        let manifest: Value = serde_json::from_slice(
+            &std::fs::read(fixture.join("manifest.json")).expect("manifest bytes"),
+        )
+        .expect("manifest JSON");
+        assert_eq!(
+            manifest["permissions"],
+            json!(["history", "nativeMessaging", "sidePanel"])
+        );
+        assert_eq!(
+            manifest["side_panel"]["default_path"],
+            json!("side-panel.html")
+        );
+        let worker = std::fs::read_to_string(fixture.join("worker.js")).expect("worker source");
+        assert!(worker.contains("typeof globalThis.chrome.sidePanel"));
+        assert!(worker.contains("typeof globalThis.browser.sidePanel"));
+        assert!(worker.contains("typeof globalThis.chrome.windows?.create"));
+        assert!(worker.contains("typeof globalThis.browser.windows?.create"));
     }
 }

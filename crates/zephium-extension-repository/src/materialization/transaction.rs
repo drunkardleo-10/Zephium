@@ -419,7 +419,7 @@ impl OwnerPackagePinIdentity {
             && self.0.install_id == binding.install_id()
             && self.0.browsing_context == StoredBrowsingContext::from(binding.browsing_context())
             && self.0.catalog_set_record_id.bytes() == binding.catalog_set_digest().bytes()
-            && self.0.catalog_role == HistoricalCatalogRole::from(binding.catalog_role())
+            && HistoricalCatalogRole::try_from(binding.catalog_role()) == Ok(self.0.catalog_role)
             && self.0.native_incarnation == binding.native_incarnation().get()
     }
 }

@@ -246,7 +246,7 @@ Any change that breaks one of these invariants must fail review and release:
    pass after the exact document reaches load completion. Rust accepts only an exact,
    canonical 32-by-32 RGBA raster for the current navigation epoch and origin; chrome
    paints that fixed raster without parsing a page-controlled image container.
-10. On Linux, browsing requires WebKitGTK 2.52.5 or newer. Older builds,
+10. On Linux, browsing requires WebKitGTK 2.52.6 or newer. Older builds,
     odd-minor development builds, and unrelated major lines fail closed. A
     newer stable even-minor WebKitGTK 2.x line is admitted with a visible
     unreviewed-runtime advisory rather than a numeric-version kill switch.
@@ -830,7 +830,7 @@ above it, hidden idle pages become discard candidates. Above the pressure waterm
 absolute application admission ceiling is 32, including the eight-slot visible
 split/recovery allowance: an additional create is rejected synchronously rather than
 growing without bound, and an unsafe page is never force-discarded to make room. The
-engine independently caps native resources at 48 while counting live views, a warm
+engine independently caps native resources at 57 (65 with agentic contexts) while counting live views, a warm
 spare, in-construction reservations, and WebView2 cleanup debt that may still own a
 controller. These are deterministic resource bounds, not evidence that the resulting
 RSS, CPU, wakeup, or battery budgets have passed.
@@ -1408,7 +1408,7 @@ These inherited properties must not be overstated:
 
 ### Linux / WebKitGTK
 
-- The loaded library must be WebKitGTK 2.52.5 or newer. Odd-minor
+- The loaded library must be WebKitGTK 2.52.6 or newer. Odd-minor
   development builds, older versions, and unrelated major lines are rejected.
   Newer stable even-minor WebKitGTK 2.x lines are admitted with an
   unreviewed-runtime advisory until the review catches up. The raw content WebContext sandbox
@@ -1416,11 +1416,11 @@ These inherited properties must not be overstated:
   context construction, before any WebView can launch a Web process. A rejected or
   disabled configuration therefore fails closed, but the public property is not an
   attestation of the confinement actually applied to a spawned process. The newest
-  stable release reviewed in this pass is 2.52.5; the enforced 2.52.5 boundary is the
-  first release fixed for WSA-2026-0004. The official advisory index and
-  release feed were re-reviewed on August 10, 2026; 2.53.90 remains an
-  odd-minor development release, so the stable boundary is unchanged.
-  CI/release review expires after September 9, 2026; runtime reports that
+  stable release reviewed in this pass is 2.52.6; the enforced 2.52.6 boundary is the
+  first release fixed for WSA-2026-0005. The official advisory index and
+  release feed were re-reviewed on September 10, 2026; 2.53.92 remains an
+  odd-minor development release. The advisory raises the stable security
+  boundary to 2.52.6. CI/release review expires after October 10, 2026; runtime reports that
   expiry without disabling an otherwise admitted engine.
 - Both privileged WebViews request non-persistent contexts. Their native permission and
   file-chooser denial handlers must install successfully, and the native context is
@@ -1438,14 +1438,15 @@ These inherited properties must not be overstated:
   callbacks are context-global and require explicit single-owner lifetime management.
 - The Linux release path emits a Fedora 43 RPM only; Windows has separate NSIS/MSI
   artifacts. Before and after Linux compilation, the workflow proves the DNF-installed
-  stable WebKitGTK package is on the reviewed 2.52 release line at patch 2.52.5 or
+  stable WebKitGTK package is on the reviewed 2.52 release line at patch 2.52.6 or
   newer, declares runtime dependencies on `bubblewrap` and `libseccomp.so.2`, and has
   Fedora vendor/signature metadata. Publication remains
-  fail-closed while Fedora's 2.52.5 package is only in updates-testing; native CI may
-  consume that signed testing package explicitly, but release artifacts may not.
+  fail-closed unless Fedora's stable repositories carry an eligible package; native CI may
+  consume signed updates-testing packages explicitly, but release artifacts may not.
+  Current Fedora package promotion has not been reverified by this source review.
   It explicitly installs and integrity-verifies those Fedora sandbox packages, embeds no WebKit/GStreamer
   runtime, and rewrites then verifies an install-time dependency of
-  `webkit2gtk4.1 >= 2.52.5`. RPM dependency syntax here cannot encode the reviewed-line
+  `webkit2gtk4.1 >= 2.52.6`. RPM dependency syntax here cannot encode the reviewed-line
   development-channel exclusion, so runtime admission remains the final
   fail-closed gate. AppImage and
   DEB artifacts are blocked because the supported Ubuntu/Debian build packages are below
@@ -1638,7 +1639,7 @@ existing Verified manifest witness. The new conditional metadata transport
 replays only content-derived ETags; an HTTP 304 does not authenticate cached
 bytes, advance trusted time, or extend signed policy expiry. Production Beta
 installation remains disabled until separate admission authority, signed
-policy verification, repository/transform reauthentication, and native
+policy receipt consumption, repository/transform reauthentication, and native
 recovery are composed and tested. Store now commits bounded source provenance
 and monotonic publisher history atomically with installation and grants;
 complete expected provenance is rechecked on cohort reads, and native grant
@@ -1646,6 +1647,58 @@ reads validate its output-manifest and high-water joins. Neither these rows nor
 their constructors authenticate package bytes or mint native ownership.
 Uninstall retains upstream history; profile erasure scrubs it. See `extension-metadata-service.md` for the
 backend contract and its remaining client integration gates.
+
+The opt-in public-policy client now verifies the complete TUF chain and exact
+shared target, then compares role/policy/time high-water marks and preserved
+publisher revocations. It only accesses fixed versioned metadata and the one
+content-addressed policy target. Every response has a hard byte ceiling before
+duplicate-key parsing; remote lengths cannot override it. Delegated roles and
+extra targets are rejected before following them. Root keys require 2-of-3,
+and decoded public keys cannot be shared across signing roles.
+
+Durable acceptance uses one private-file record for checkpoint and target,
+exact prior-state comparison, synced atomic replacement, and fail-closed
+recovery. An unsettled mutation returns no accepted receipt. Old receipts are
+invalidated on replacement or owner teardown; monotonic time also prevents a
+wall-clock change from extending their lifetime. Disk contents alone cannot
+recreate an accepted receipt: reopening recovers structural high-water state,
+then fresh signature verification is required. No production root is compiled,
+no desktop loop consumes these receipts, and Windows private-cache support is
+still absent. There is no remote revocation-reversal authority in this client;
+a reviewed reversal requires a separate explicit client contract.
+
+The separate Beta source authority now consumes complete authenticated CRX/tree
+receipts and fresh durably accepted policy. It requires an exact compiled
+target/version opt-in, rejects revoked publisher keys/original CRX digests,
+checks supplied upstream high-water state, and applies a closed declaration
+policy to required and optional authority and nested execution semantics.
+An absent upstream manifest key is permitted only on the structural source
+entry point; a supplied key must match the original CRX publisher. The existing
+Verified parser entry point still requires its exact reviewed manifest key.
+
+`ProductAdmittedBetaSource` cannot be cloned, deserialized, or passed to a
+Verified native plan. It owns the original tree receipt and rechecks policy
+expiry/supersession when read. Its local package revision and previous upstream
+checkpoint must still be rejoined with Store at commit. It grants no provider,
+transformation, output-tree, permission, filesystem, or native execution authority;
+those subsequent authorities must bind its exact source identity. In particular,
+copying authenticated input to a sink is sufficient to analyze source but never
+proves durable materialization. No public Beta installation is enabled by this
+new source witness. See `extension-beta-admission.md`.
+
+The separate prepared-artifact boundary now authenticates exact on-device
+output for the initial key-identity transformation. It rechecks original CRX
+identity and length, uses the authenticated developer SPKI (never a co-signer
+or metadata-supplied replacement), preserves other file bytes and the complete
+admitted permission/execution declarations, and seals/re-hashes the closed
+filesystem tree. Stored JSON is only evidence: reopening recomputes it from
+fresh admitted source and the original CRX. No path is exposed by the artifact
+type. Provider eligibility, user grants, installed-repository authority, and
+native ownership remain independent; structural provenance cannot supply them.
+Interrupted prepublication stages are removed only within a known bounded
+namespace. Published output survives reopening but must pass full verification.
+Mutations are single-flight and invalidate prior receipts before they begin;
+unknown settlement keeps the owner poisoned until recovery.
 
 The following are roadmap items or disabled backends, not current security guarantees:
 
@@ -1769,7 +1822,7 @@ updates mitigate some of these risks but do not remove them.
       pending/processed dispositions remain queryable until main chrome acknowledges them,
       and no process-local operation result is described as cross-restart durable.
 - [ ] View lifecycle changes preserve the 12/24/32 application watermarks, the separate
-      48-resource native ceiling, visible-leaf protection, exact discard probes, and the
+      57-resource native ceiling (65 with agentic contexts), visible-leaf protection, exact discard probes, and the
       rule that unsafe pages are not force-discarded to admit new work.
 - [ ] Reentrant native work keeps typed normal/maintenance/observation/lifecycle/close/
       shutdown priority, keyed displacement rules, and a reserved non-droppable shutdown

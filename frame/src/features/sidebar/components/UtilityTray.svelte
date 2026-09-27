@@ -5,7 +5,8 @@
   import Icon from "$shared/ui/Icon";
   import Disclosure from "$shared/ui/Disclosure";
 
-  let { children }: { children: Snippet } = $props();
+  let { children, openRequest = null }: { children: Snippet; openRequest?: string | null } =
+    $props();
 </script>
 
 <!--
@@ -14,7 +15,7 @@
   them, because none of them is worth a permanent seat in the chrome.
 -->
 <div class="utilities">
-  <Disclosure label={m.utilities()} triggerClass="utilities-trigger" align="end">
+  <Disclosure label={m.utilities()} triggerClass="utilities-trigger" align="end" {openRequest}>
     {#snippet trigger()}<Icon icon={Settings05Icon} size={15} />{/snippet}
     {@render children()}
   </Disclosure>

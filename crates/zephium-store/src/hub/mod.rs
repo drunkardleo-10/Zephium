@@ -167,6 +167,7 @@ impl Hub {
             ambiguous_extension_native_ownership_commit_once: false,
         };
         hub.load_registry()?;
+        let _ = hub.recover_qa_settings_tab_quarantine()?;
         // The snapshot and registry must agree before profile files are
         // migrated, purged, or reconciled. A corrupt authoritative row must
         // fail startup without destroying the only recoverable profile data.

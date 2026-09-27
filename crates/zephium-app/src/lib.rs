@@ -56,6 +56,10 @@ pub use api::{
     PresentationChrome, SharedBlocker, SharedChrome, SharedEngine, SharedStore,
     ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,
 };
+pub use api::{
+    StoreExtensionContext, StoreExtensionPackageSubmission, StoreExtensionPreparationCompletion,
+    StoreExtensionUpdateDispatch, StoreExtensionUpdateResult,
+};
 pub use shell::Shell;
 
 #[doc(hidden)]

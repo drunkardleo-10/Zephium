@@ -3,9 +3,9 @@
 //! This is intentionally not a general `chrome.i18n` implementation. It
 //! resolves only manifest UI identity from the exact admitted default locale.
 //! User-locale fallback, predefined `@@` messages, runtime `getMessage`, and
-//! dynamic substitutions remain unsupported. Message entries use a closed
-//! `message`/`description`/`placeholders` shape; unsupported syntax is rejected
-//! rather than approximated.
+//! dynamic substitutions remain unsupported. Only `message`, `description`,
+//! and `placeholders` affect display; extra bounded entry metadata is ignored.
+//! Unsupported substitution syntax is rejected rather than approximated.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -280,8 +280,8 @@ impl Error for ExtensionDefaultLocaleResolutionError {
 /// function performs no filesystem I/O. When the manifest binds a default
 /// locale, `locale_messages_bytes` must be `Some` and must match the admitted
 /// resource's exact length and SHA-256. When no locale is bound it must be
-/// `None`. Every entry in a supplied document is structurally validated, while
-/// only messages referenced by manifest UI fields are retained.
+/// `None`. Every entry's message and placeholders are structurally validated,
+/// while only messages referenced by manifest UI fields are retained.
 ///
 /// Named and positional message substitutions are validated structurally for
 /// compatibility with runtime messages, but a selected manifest display
@@ -337,8 +337,13 @@ pub fn resolve_extension_metadata_default_locale(
     let name = resolve_field(metadata.name(), "name", 75, true, &messages)?;
     let description =
         resolve_optional_field(metadata.description(), "description", 132, false, &messages)?;
-    let short_name =
-        resolve_optional_field(metadata.short_name(), "short_name", 12, true, &messages)?;
+    let short_name = resolve_optional_field(
+        metadata.short_name(),
+        "short_name",
+        super::metadata::MAX_SHORT_NAME_CHARS,
+        true,
+        &messages,
+    )?;
     let version_name = resolve_optional_literal_field(
         metadata.version_name(),
         "version_name",

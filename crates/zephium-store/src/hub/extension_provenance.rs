@@ -10,6 +10,43 @@ use zephium_core::ids::ExtensionInstallId;
 
 use super::invalid_data;
 
+impl super::Hub {
+    pub(crate) fn load_extension_install_provenance(
+        &mut self,
+        profile: zephium_core::ids::ProfileId,
+        install: ExtensionInstallId,
+    ) -> rusqlite::Result<zephium_core::ports::store::ExtensionInstallProvenanceLoadOutcome> {
+        use zephium_core::ports::store::ExtensionInstallProvenanceLoadOutcome as Outcome;
+        if !self.registry.contains(&profile) {
+            return Ok(Outcome::NotRegistered);
+        }
+        if self.degraded_profiles.contains(&profile) {
+            return Ok(Outcome::DegradedProfile);
+        }
+        let tx = self.profile_conn(profile)?.transaction()?;
+        let value = load(&tx, install)?;
+        tx.commit()?;
+        Ok(Outcome::Loaded(value.map(Box::new)))
+    }
+    pub(crate) fn load_extension_upstream_checkpoint(
+        &mut self,
+        profile: zephium_core::ids::ProfileId,
+        publisher: zephium_core::extensions::ExtensionPackageKey,
+    ) -> rusqlite::Result<zephium_core::ports::store::ExtensionUpstreamCheckpointLoadOutcome> {
+        use zephium_core::ports::store::ExtensionUpstreamCheckpointLoadOutcome as Outcome;
+        if !self.registry.contains(&profile) {
+            return Ok(Outcome::NotRegistered);
+        }
+        if self.degraded_profiles.contains(&profile) {
+            return Ok(Outcome::DegradedProfile);
+        }
+        let tx = self.profile_conn(profile)?.transaction()?;
+        let value = checkpoint(&tx, publisher.as_bytes())?;
+        tx.commit()?;
+        Ok(Outcome::Loaded(value))
+    }
+}
+
 pub(super) fn validate_integrity(conn: &Connection) -> rusqlite::Result<()> {
     let count: i64 = conn.query_row(
         "SELECT count(*) FROM (SELECT 1 FROM extension_install_provenance LIMIT 9)",
@@ -135,7 +172,11 @@ pub(super) fn validate_manifest(
     install: ExtensionInstallId,
     manifest: &ExtensionManifestDescriptor,
 ) -> rusqlite::Result<()> {
-    if load(conn, install)?.is_some_and(|value| !value.matches_manifest(manifest)) {
+    let provenance = load(conn, install)?;
+    if (zephium_core::extensions::is_beta_extension_authority(manifest.package().authority())
+        && provenance.is_none())
+        || provenance.is_some_and(|value| !value.matches_manifest(manifest))
+    {
         return Err(invalid_data(
             "extension provenance disagrees with runtime manifest",
         ));
@@ -214,8 +255,14 @@ mod tests {
         .unwrap();
     }
     fn manifest(revision: u64) -> Arc<ExtensionManifestDescriptor> {
+        manifest_in_domain(revision, ExtensionAuthorityId::from_bytes([1; 32]))
+    }
+    fn manifest_in_domain(
+        revision: u64,
+        authority: ExtensionAuthorityId,
+    ) -> Arc<ExtensionManifestDescriptor> {
         let package = ExtensionPackageIdentity::new(
-            ExtensionAuthorityId::from_bytes([1; 32]),
+            authority,
             ExtensionPackageKey::from_bytes([2; 32]),
             ExtensionPackageRevision::new(revision).unwrap(),
             ExtensionPackagePayloadIdentity::acquired_zip(
@@ -276,7 +323,13 @@ mod tests {
             ExtensionInstallProvenance::new(
                 ExtensionProvenanceSource::ChromeWebStore,
                 ExtensionUpstreamCheckpoint::from_parts(
-                    ExtensionPackageKey::from_bytes([3; 32]),
+                    if zephium_core::extensions::is_beta_extension_authority(
+                        manifest.package().authority(),
+                    ) {
+                        manifest.package().key()
+                    } else {
+                        ExtensionPackageKey::from_bytes([3; 32])
+                    },
                     ExtensionUpstreamVersion::parse(version).unwrap(),
                     [crx; 32],
                     [crx; 32],
@@ -703,6 +756,91 @@ mod tests {
         assert_eq!(
             checkpoint(reopened.profile_conn(profile()).unwrap(), &[3; 32]).unwrap(),
             Some(new.upstream())
+        );
+    }
+    #[test]
+    fn beta_install_cannot_omit_provenance_through_either_write_capability() {
+        let root = tempfile::tempdir().unwrap();
+        let mut hub = Hub::open(root.path().to_path_buf()).unwrap();
+        initialize(&mut hub);
+        let descriptor = manifest_in_domain(
+            1,
+            zephium_core::extensions::ExtensionBetaRuntimeTarget::MacosNative
+                .authority(zephium_core::extensions::ExtensionBetaChannel::Staging),
+        );
+        let id = ExtensionInstallId::from(42);
+        let catalog =
+            super::super::extensions::load_catalog(hub.profile_conn(profile()).unwrap()).unwrap();
+        assert!(matches!(
+            hub.provision_extension_install_with_provenance(
+                profile(),
+                catalog.revision(),
+                id,
+                descriptor.clone(),
+                grants(id, &descriptor),
+                None
+            )
+            .unwrap(),
+            ExtensionInstallProvisionOutcome::Invalid
+        ));
+        assert!(matches!(
+            hub.mutate_extension_install_catalog(
+                profile(),
+                catalog.revision(),
+                zephium_core::extensions::ExtensionInstallCatalogMutation::Install {
+                    id,
+                    package: descriptor.package().clone()
+                }
+            )
+            .unwrap(),
+            ExtensionInstallCatalogMutationOutcome::Invalid
+        ));
+        assert!(
+            super::super::extensions::load_catalog(hub.profile_conn(profile()).unwrap())
+                .unwrap()
+                .installs()
+                .is_empty()
+        );
+        let provenance = evidence(&descriptor, "1", 1);
+        assert!(matches!(
+            provision(&mut hub, id, &descriptor, &provenance),
+            ExtensionInstallProvisionOutcome::Applied(_)
+        ));
+        assert_cohort(&mut hub, id, &descriptor, &provenance);
+    }
+
+    #[test]
+    fn beta_provenance_deletion_cannot_masquerade_as_a_legacy_install_after_reload() {
+        let root = tempfile::tempdir().unwrap();
+        let mut hub = Hub::open(root.path().to_path_buf()).unwrap();
+        initialize(&mut hub);
+        let descriptor = manifest_in_domain(
+            1,
+            zephium_core::extensions::ExtensionBetaRuntimeTarget::MacosNative
+                .authority(zephium_core::extensions::ExtensionBetaChannel::Stable),
+        );
+        let id = ExtensionInstallId::from(43);
+        let provenance = evidence(&descriptor, "1", 1);
+        assert!(matches!(
+            provision(&mut hub, id, &descriptor, &provenance),
+            ExtensionInstallProvisionOutcome::Applied(_)
+        ));
+        let conn = hub.profile_conn(profile()).unwrap();
+        conn.execute(
+            "DELETE FROM extension_install_provenance WHERE install_id = ?1",
+            [&id.bytes()[..]],
+        )
+        .unwrap();
+        assert!(validate_manifest(conn, id, &descriptor).is_err());
+        assert!(super::super::extensions::load_catalog(conn).is_err());
+        assert!(
+            conn.query_row(
+                "SELECT count(*) FROM extension_upstream_history",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap()
+                > 0
         );
     }
 }

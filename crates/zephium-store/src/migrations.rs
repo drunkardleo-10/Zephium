@@ -450,6 +450,146 @@ fn preflight_macos_native_namespace_seeds(tx: &Transaction<'_>) -> rusqlite::Res
     Ok(())
 }
 
+// Rebuild from the immutable v18 *program-generated reference*, never SQL
+// supplied by the database being migrated. Preserve every column and every
+// related trigger, including cross-table history guards. Migration framework
+// verifies the exact v18 schema before this function and v19 afterwards.
+fn migrate_beta_native_source(tx: &Transaction) -> rusqlite::Result<()> {
+    const TABLE: &str = "extension_native_ownership_journal";
+    const NEXT: &str = "extension_native_ownership_journal_beta_v19";
+    const OLD_ROLE: &str = "check (catalog_role in ('active', 'rollback'))";
+    let reference = expected_manifest(META, 18)?;
+    let table = reference
+        .iter()
+        .find(|object| object.kind == "table" && object.name == TABLE)
+        .and_then(|object| object.sql.as_deref())
+        .ok_or_else(|| invalid_schema("missing v18 native journal template"))?;
+    if table.matches(OLD_ROLE).count() != 1 {
+        return Err(invalid_schema("native journal role template changed"));
+    }
+    let table = table.replacen(TABLE, NEXT, 1).replace(
+        OLD_ROLE,
+        "CHECK (catalog_role IN ('active', 'rollback', 'beta'))",
+    );
+    let end = table
+        .rfind(')')
+        .ok_or_else(|| invalid_schema("native journal template has no closing boundary"))?;
+    if table[end + 1..].trim() != "strict, without rowid" {
+        return Err(invalid_schema("native journal template suffix changed"));
+    }
+    // These are the immutable V1 domains. Future domains require a new
+    // migration; deriving SQL from a future mutable runtime policy is unsafe.
+    const MAC: &str = "X'e3da979db873ec00b4f1b8be4496b5428f961db187b5c4588f3d5b30d60426da',X'4e86c0e24ae61e3cc7078300975eaff4a296bcf1192df0285140e21715fc9239'";
+    const WIN: &str = "X'9378c48279f1efef79cd8fb2a8c0227214e13961084dd2c5f64585248c3d1368',X'b8d3da2d3adb78aaa3a4c44ae0402664bd6e9a2600de328b192bd7116076a71e'";
+    let checks = format!(
+        ", CHECK ((catalog_role = 'beta') = (authority IN ({MAC},{WIN}))),
+        CHECK (catalog_role != 'beta' OR (browsing_context = 'regular' AND payload_kind = 2 AND
+          ((authority IN ({MAC}) AND runtime_backend = 'macos_native') OR
+           (authority IN ({WIN}) AND runtime_backend = 'windows_native')))),
+        CHECK (catalog_role != 'beta' OR phase = 'native_absent_preparing'
+          OR (phase = 'native_absent_release_pending' AND revision = 2)
+          OR expected_native_identity IS NOT NULL),
+        CHECK (catalog_role != 'beta' OR phase != 'native_absent_release_pending'
+          OR revision != 2 OR expected_native_identity IS NULL)"
+    );
+    let create = format!("{}{}{};", &table[..end], checks, &table[end..]);
+    rebuild_native_source_table(tx, &reference, &create, NEXT)
+}
+
+fn rebuild_native_source_table(
+    tx: &Transaction,
+    reference: &[SchemaObject],
+    create: &str,
+    next: &str,
+) -> rusqlite::Result<()> {
+    const TABLE: &str = "extension_native_ownership_journal";
+    if !next
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(invalid_schema(
+            "native migration identifier is not canonical",
+        ));
+    }
+    let count: i64 = tx.query_row(
+        "SELECT count(*) FROM (SELECT 1 FROM extension_native_ownership_journal LIMIT 1025)",
+        [],
+        |row| row.get(0),
+    )?;
+    if count > 1024 {
+        return Err(invalid_schema("native journal exceeds migration capacity"));
+    }
+    let triggers = reference
+        .iter()
+        .filter(|object| {
+            object.kind == "trigger" && object.sql.as_ref().is_some_and(|sql| sql.contains(TABLE))
+        })
+        .collect::<Vec<_>>();
+    for trigger in &triggers {
+        if !trigger
+            .name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(invalid_schema("native trigger identifier is not canonical"));
+        }
+        tx.execute_batch(&format!(r#"DROP TRIGGER "{}";"#, trigger.name))?;
+    }
+    tx.execute_batch(create)?;
+    // Exact v18 schema and unchanged column order make this a complete copy;
+    // no native identity or source authority is synthesized from other fields.
+    tx.execute_batch(&format!(
+        "INSERT INTO {next} SELECT * FROM extension_native_ownership_journal;"
+    ))?;
+    let copied: i64 = tx.query_row(&format!("SELECT count(*) FROM {next}"), [], |row| {
+        row.get(0)
+    })?;
+    if copied != count {
+        return Err(invalid_schema("native journal migration lost rows"));
+    }
+    tx.execute_batch(&format!("DROP TABLE extension_native_ownership_journal; ALTER TABLE {next} RENAME TO extension_native_ownership_journal;"))?;
+    for trigger in triggers {
+        tx.execute_batch(
+            trigger
+                .sql
+                .as_deref()
+                .ok_or_else(|| invalid_schema("missing native trigger template"))?,
+        )?;
+    }
+    Ok(())
+}
+
+// Local external admission is a distinct namespace. Existing signed-policy
+// objects retain their historical identities and requirements.
+fn migrate_local_external_native_source(tx: &Transaction) -> rusqlite::Result<()> {
+    let reference = expected_manifest(META, 19)?;
+    let table = reference
+        .iter()
+        .find(|object| {
+            object.kind == "table" && object.name == "extension_native_ownership_journal"
+        })
+        .and_then(|object| object.sql.as_deref())
+        .ok_or_else(|| invalid_schema("missing v19 native journal template"))?;
+    let mut create = table.replacen(
+        "extension_native_ownership_journal",
+        "extension_native_ownership_journal_local_v20",
+        1,
+    );
+    for (existing, local) in [
+        ("x'e3da979db873ec00b4f1b8be4496b5428f961db187b5c4588f3d5b30d60426da',x'4e86c0e24ae61e3cc7078300975eaff4a296bcf1192df0285140e21715fc9239'", "56ffb419362f319ef825913f3727022f7c12c7e69890dc91324a2b7e8cd7b5aa"),
+        ("x'9378c48279f1efef79cd8fb2a8c0227214e13961084dd2c5f64585248c3d1368',x'b8d3da2d3adb78aaa3a4c44ae0402664bd6e9a2600de328b192bd7116076a71e'", "64340b026ee26f834b57ac14d459f241ce92ad2d60a86a6c887288ae98b9a750"),
+    ] {
+        if create.matches(existing).count() != 2 { return Err(invalid_schema("native v19 domain template changed")); }
+        create = create.replace(existing, &format!("{existing},x'{local}'"));
+    }
+    rebuild_native_source_table(
+        tx,
+        &reference,
+        &create,
+        "extension_native_ownership_journal_local_v20",
+    )
+}
+
 pub static META: &[Migration] = &[
     Migration {
         version: 1,
@@ -1486,6 +1626,14 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 19,
+        up: migrate_beta_native_source,
+    },
+    Migration {
+        version: 20,
+        up: migrate_local_external_native_source,
+    },
 ];
 
 // These statements are the exact extension-branch PROFILE v14 artifact. The
@@ -2211,6 +2359,8 @@ mod tests {
         (16, 0x2dc6_d332_0299_d29b),
         (17, 0xc06b_3cdd_2a6e_9fc6),
         (18, 0xf8c3_1606_d301_f467),
+        (19, 0xb30f_9566_ea44_65bf),
+        (20, 0xeb32_555e_6d72_1ded),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),
@@ -2236,6 +2386,155 @@ mod tests {
         (21, 0x3483_1796_92c9_33a6),
         (22, 0xd5d5_eec8_ddc1_ca18),
     ];
+
+    #[test]
+    fn meta_v19_preserves_native_rows_and_history_without_inventing_beta_authority() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..18]).unwrap();
+        insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
+            .unwrap();
+        let native_id = b"abcdefghijklmnopabcdefghijklmnop";
+        conn.execute(
+            "UPDATE extension_native_ownership_journal SET revision=3,phase='native_owned',
+             expected_native_identity_kind=1,expected_native_identity=?1,
+             native_identity_kind=1,native_identity=?1",
+            [&native_id[..]],
+        )
+        .unwrap();
+        conn.execute("UPDATE extension_native_ownership_journal_state SET revision=4,operation_high_water=1,native_incarnation_high_water=1 WHERE id=1",[]).unwrap();
+        let before: (i64,i64,i64,i64) = conn.query_row("SELECT revision,operation_high_water,native_incarnation_high_water,grant_rebind_count FROM extension_native_ownership_journal_state",[],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        apply(&mut conn, &META[..19]).unwrap();
+        apply(&mut conn, &META[..19]).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            19
+        );
+        assert_eq!(conn.query_row("SELECT revision,operation_high_water,native_incarnation_high_water,grant_rebind_count FROM extension_native_ownership_journal_state",[],|r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?))).unwrap(),before);
+        assert_eq!(conn.query_row("SELECT catalog_role,expected_native_identity,native_identity FROM extension_native_ownership_journal",[],|r| Ok((r.get::<_,String>(0)?,r.get::<_,Option<Vec<u8>>>(1)?,r.get::<_,Option<Vec<u8>>>(2)?))).unwrap(),("active".into(),Some(native_id.to_vec()),Some(native_id.to_vec())));
+        assert_eq!(conn.query_row("SELECT phase,revision,expected_native_identity_kind,native_identity_kind FROM extension_native_ownership_journal",[],|r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?))).unwrap(),("native_owned".into(),3,1,1));
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal_state SET revision=1 WHERE id=1",
+                []
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn meta_v19_rejects_beta_catalog_confusion_atomically_and_preserves_v18() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..18]).unwrap();
+        insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
+            .unwrap();
+        let authority = zephium_core::extensions::ExtensionBetaRuntimeTarget::MacosNative
+            .authority(zephium_core::extensions::ExtensionBetaChannel::Stable)
+            .bytes();
+        conn.execute(
+            "UPDATE extension_native_ownership_journal SET authority=?1",
+            [&authority[..]],
+        )
+        .unwrap();
+        let error = apply(&mut conn, &META[..19]).unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation)
+        );
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            18
+        );
+        validate_manifest(&conn, META, 18).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT catalog_role FROM extension_native_ownership_journal",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "active"
+        );
+    }
+
+    #[test]
+    fn meta_v19_beta_source_constraints_preserve_native_frontiers() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..19]).unwrap();
+        insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
+            .unwrap();
+        let authority = zephium_core::extensions::ExtensionBetaRuntimeTarget::MacosNative
+            .authority(zephium_core::extensions::ExtensionBetaChannel::Staging)
+            .bytes();
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal SET catalog_role='beta'",
+                []
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal SET authority=?1",
+                [&authority[..]]
+            )
+            .is_err());
+        conn.execute(
+            "UPDATE extension_native_ownership_journal SET authority=?1,catalog_role='beta',payload_kind=2,archive_length=17,archive_sha256=zeroblob(32)",
+            [&authority[..]],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal SET runtime_backend='windows_native'",
+                []
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal SET browsing_context='private'",
+                []
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE extension_native_ownership_journal SET phase='native_may_own',revision=2",
+                []
+            )
+            .is_err());
+        conn.execute("UPDATE extension_native_ownership_journal SET phase='native_may_own',revision=2,expected_native_identity_kind=1,expected_native_identity=?1",[&b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"[..]]).unwrap();
+        assert!(conn.execute("UPDATE extension_native_ownership_journal SET expected_native_identity=NULL,expected_native_identity_kind=NULL",[]).is_err());
+    }
+
+    #[test]
+    fn meta_v20_admits_local_sources_only_in_the_correct_native_namespace() {
+        use zephium_core::extensions::{ExtensionBetaChannel, ExtensionBetaRuntimeTarget};
+        for (runtime, backend) in [
+            (ExtensionBetaRuntimeTarget::MacosNative, "macos_native"),
+            (ExtensionBetaRuntimeTarget::WindowsNative, "windows_native"),
+        ] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            apply(&mut conn, &META[..19]).unwrap();
+            insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
+                .unwrap();
+            apply(&mut conn, META).unwrap();
+            let authority = runtime.authority(ExtensionBetaChannel::Local).bytes();
+            assert!(conn
+                .execute(
+                    "UPDATE extension_native_ownership_journal SET authority=?1",
+                    [&authority[..]]
+                )
+                .is_err());
+            conn.execute("UPDATE extension_native_ownership_journal SET authority=?1,catalog_role='beta',runtime_backend=?2,payload_kind=2,archive_length=17,archive_sha256=zeroblob(32)", rusqlite::params![&authority[..],backend]).unwrap();
+            assert!(conn
+                .execute(
+                    "UPDATE extension_native_ownership_journal SET catalog_role='active'",
+                    []
+                )
+                .is_err());
+            assert!(conn.execute("UPDATE extension_native_ownership_journal SET runtime_backend='linux_compatibility'", []).is_err());
+            apply(&mut conn, META).unwrap();
+        }
+    }
 
     fn extension_profile_v14_fixture() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();

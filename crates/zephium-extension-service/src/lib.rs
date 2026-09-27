@@ -63,6 +63,7 @@ mod cleanup;
 mod evidence;
 mod journal_store;
 mod mailbox;
+mod manifest_projection;
 mod native_recovery;
 mod ports;
 mod profile_retirement;

@@ -557,19 +557,18 @@ impl Shell {
             // stale token against whichever URL happens to be current.
             return;
         }
-        if self
-            .presentation
-            .presented_navigations
-            .get(&id)
-            .is_some_and(|(presented, presented_url)| {
-                *presented == navigation && presented_url == url.as_str()
-            })
-        {
-            // Native Finished re-emits the same exact fact so a coalesced-away
-            // Pending can still present. Once admission was already proven,
-            // the duplicate is an idempotent no-op rather than another native
-            // visibility/layout pass.
-            return;
+        if !self.presentation.pending_presentations.contains_key(&id) {
+            if let Some((presented, presented_url)) =
+                self.presentation.presented_navigations.get_mut(&id)
+            {
+                if *presented == navigation {
+                    // A native same-document URL observation retains this exact
+                    // already-presented epoch. Update the store-request binding
+                    // without hiding/revealing the view or trusting page DOM.
+                    *presented_url = url.as_str().to_owned();
+                    return;
+                }
+            }
         }
         if self
             .presentation

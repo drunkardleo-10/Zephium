@@ -1269,3 +1269,13 @@ assert.throws(
 );
 
 console.log("macOS extension compatibility asset contract passed");
+
+await import("./check-managed-storage-v2.mjs");
+
+await import("./check-history-v2.mjs");
+
+await import("./check-sessions-v2.mjs");
+
+await import("./check-identity-v1.mjs");
+await import("./check-main-document-globs-v1.mjs");
+await import("./check-runtime-messaging-v2.mjs");

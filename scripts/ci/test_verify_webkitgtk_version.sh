@@ -31,6 +31,8 @@ expect_reject() {
 }
 
 # Security-floor boundaries.
+expect_reject "2.52.5" "2.52.5" "2.52.6"
+expect_accept "2.52.6" "2.52.6" "2.52.6"
 expect_reject "2.52.4" "2.52.4" "2.52.5"
 expect_accept "2.52.5" "2.52.5" "2.52.5"
 expect_accept "2.52.6" "2.52.6" "2.52.5"

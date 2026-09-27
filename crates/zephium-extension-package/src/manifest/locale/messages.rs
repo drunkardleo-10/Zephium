@@ -75,7 +75,9 @@ fn parse_message_entry(
         .map(|value| parse_placeholders(key, value))
         .transpose()?
         .unwrap_or_default();
-    if !object.is_empty() || !valid_message_template(&message, &placeholders) {
+    // Chromium ignores other message-entry metadata. It remains bounded and
+    // duplicate-key checked by the JSON parser, but cannot affect display.
+    if !valid_message_template(&message, &placeholders) {
         return Err(invalid_entry(key));
     }
     Ok(ParsedMessage { message })

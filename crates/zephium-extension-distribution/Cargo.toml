@@ -4,11 +4,30 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[example]]
+name = "prepare_external"
+required-features = ["beta-admission"]
+
 [features]
+windows-namespace-validation = ["beta-admission", "zephium-private-fs/windows-namespace-validation"]
+beta-admission = ["public-policy", "dep:zephium-extension-acquisition", "dep:base64"]
+# Explicit non-release candidate for one authenticated Bitwarden CRX. The
+# ordinary external source path remains closed for capabilities.v2.
+capabilities-v2-qa = ["beta-admission"]
+public-policy = ["dep:async-trait", "dep:bytes", "dep:futures-util", "dep:serde", "dep:serde_json", "dep:tough", "dep:zephium-private-fs"]
 staging-extension-catalog = ["zephium-extension-authority/staging-extension-catalog"]
 local-extension-lab = ["zephium-extension-authority/local-extension-lab"]
 
 [dependencies]
+base64 = { workspace = true, optional = true }
+zephium-extension-acquisition = { path = "../zephium-extension-acquisition", version = "=0.1.0", optional = true }
+async-trait = { version = "=0.1.89", optional = true }
+bytes = { version = "1", optional = true }
+futures-util = { version = "0.3", optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+tough = { workspace = true, optional = true }
+zephium-private-fs = { workspace = true, optional = true }
 sha2 = "=0.10.9"
 thiserror.workspace = true
 url.workspace = true
@@ -16,7 +35,22 @@ zephium-core.workspace = true
 zephium-extension-authority.workspace = true
 zephium-extension-package = { path = "../zephium-extension-package", version = "=0.1.0" }
 zephium-update-transport.workspace = true
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
+
+# sha2 0.10 otherwise uses its portable SHA-256 loop on Apple Silicon.
+# This backend checks CPU support at runtime and retains the software fallback.
+# Other targets retain their existing backend and build-tool requirements.
+[target.'cfg(all(target_arch = "aarch64", target_os = "macos"))'.dependencies]
+sha2 = { version = "=0.10.9", features = ["asm"] }
 
 [dev-dependencies]
+zephium-extension-runtime-api.workspace = true
+zephium-store.workspace = true
+base64.workspace = true
+zip = { version = "=8.6.0", default-features = false }
+jiff = "0.2"
+tempfile.workspace = true
 ring.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(zephium_internal_repository_e2e)", "cfg(zephium_private_fs_operation_instrumentation)"] }

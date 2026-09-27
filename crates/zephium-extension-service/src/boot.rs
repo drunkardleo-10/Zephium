@@ -92,6 +92,7 @@ pub fn prepare_extension_service_boot(
         ProductExtensionManifestAuthority::product_status(),
     )?;
     if product == ProductAuthorityAvailability::Unprovisioned
+        && !cfg!(feature = "external-extensions")
         && repository_root_is_definitely_absent(&repository_root)
         && store_authority.startup_requirement()
             == ExtensionServiceStoreStartupRequirement::NoNativeOwnershipDebt
@@ -226,7 +227,10 @@ mod tests {
         }
     }
 
-    #[cfg(not(zephium_internal_repository_e2e))]
+    #[cfg(all(
+        not(zephium_internal_repository_e2e),
+        not(feature = "external-extensions")
+    ))]
     #[test]
     fn exact_empty_unprovisioned_launch_is_inert_and_never_creates_repository() {
         let temporary = tempdir().unwrap();
@@ -274,6 +278,28 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "external-extensions")]
+    #[test]
+    fn external_install_support_selects_worker_without_creating_repository() {
+        let temporary = tempdir().unwrap();
+        let repository_path = temporary
+            .path()
+            .join(crate::EXTENSION_REPOSITORY_DIRECTORY_NAME);
+        let store = Arc::new(SqliteStore::open(temporary.path()).unwrap());
+        let authority = store.claim_extension_service_store_authority().unwrap();
+        let root = ExtensionRepositoryRoot::from_app_data_directory(temporary.path()).unwrap();
+        let plan = prepare_extension_service_boot(authority, root).unwrap();
+        // New user-requested packages need the service even without a curated
+        // catalog. Selecting it must not yet open a repository or native host.
+        assert!(matches!(plan, ExtensionServiceBootPlan::Worker(_)));
+        assert!(!repository_path.exists());
+        drop(plan);
+        assert_eq!(
+            store.shutdown_until(Instant::now() + Duration::from_secs(1)),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
     #[test]
     fn any_existing_repository_node_selects_worker_without_opening_it() {
         let temporary = tempdir().unwrap();
@@ -294,7 +320,10 @@ mod tests {
         );
     }
 
-    #[cfg(not(zephium_internal_repository_e2e))]
+    #[cfg(all(
+        not(zephium_internal_repository_e2e),
+        not(feature = "external-extensions")
+    ))]
     #[test]
     fn expired_inert_retirement_never_invokes_its_continuation() {
         let temporary = tempdir().unwrap();

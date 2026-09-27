@@ -1,6 +1,10 @@
 #[cfg(target_os = "windows")]
 use super::dispatch::with_profile_exit;
+#[cfg(target_os = "macos")]
+use super::dispatch::with_provisional_tab_url;
 use super::dispatch::{with_renderer_exit, with_source_observation, with_title_observation};
+#[cfg(target_os = "macos")]
+use super::navigation::{extension_tab_origin_category, extension_tab_trace_enabled};
 #[cfg(target_os = "macos")]
 use super::permits::queue_extension_background_wake;
 use super::permits::{
@@ -137,6 +141,7 @@ impl EngineHost {
             return;
         }
         if self.views.contains_key(&id) {
+            eprintln!("view-create: duplicate live tab identity");
             self.sink
                 .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
             return;
@@ -244,6 +249,8 @@ impl EngineHost {
             self.partitions.insert(id, partition);
             self.views.insert(id, view);
             self.finish_new_view_insertion(id, &event_token);
+        } else {
+            eprintln!("view-create: native build returned no view");
         }
     }
 
@@ -338,6 +345,7 @@ impl EngineHost {
         {
             Ok(resource) => resource,
             Err(NativeResourceAdmissionError::AccountingInvariant) => {
+                eprintln!("view-create: native reservation accounting invariant");
                 self.native_resource_accounting_failed = true;
                 if report_failure {
                     event_permit.emit(
@@ -348,9 +356,10 @@ impl EngineHost {
                 return None;
             }
             Err(
-                NativeResourceAdmissionError::ClassExhausted(_)
-                | NativeResourceAdmissionError::GlobalExhausted,
+                error @ (NativeResourceAdmissionError::ClassExhausted(_)
+                | NativeResourceAdmissionError::GlobalExhausted),
             ) => {
+                eprintln!("view-create: native reservation refused: {error:?}");
                 if report_failure {
                     event_permit.emit(
                         &self.sink,
@@ -361,6 +370,7 @@ impl EngineHost {
             }
         };
         if self.native_resource_accounting_failed {
+            eprintln!("view-create: prior resource accounting failure");
             if report_failure {
                 event_permit.emit(
                     &self.sink,
@@ -611,6 +621,12 @@ impl EngineHost {
         let crash_permit = event_permit.clone();
         let crash_id = id.clone();
         let navigation_permit = event_permit.clone();
+        #[cfg(target_os = "macos")]
+        let attempted_url_permit = event_permit.clone();
+        #[cfg(target_os = "macos")]
+        let attempted_url_id = id.clone();
+        #[cfg(target_os = "macos")]
+        let attempted_url_sequence = Rc::new(Cell::new(0_u64));
         let policy_navigation = navigation.clone();
         let (title_id, load_id) = (id.clone(), id.clone());
         let scripts = self.scripts_for(partition);
@@ -1403,6 +1419,32 @@ impl EngineHost {
                         event.phase == wry::NavigationEventPhase::Cancelled,
                     );
                 }
+            }
+        });
+
+        #[cfg(target_os = "macos")]
+        let builder = builder.with_main_frame_navigation_attempt_handler(move |target| {
+            let Some(next) = attempted_url_sequence.get().checked_add(1) else {
+                return;
+            };
+            attempted_url_sequence.set(next);
+            let sequence = attempted_url_sequence.clone();
+            let permit = attempted_url_permit.clone();
+            let id = attempted_url_id.get();
+            let category = extension_tab_origin_category(&target);
+            let admitted = with_provisional_tab_url(id, move |host| {
+                if sequence.get() == next {
+                    host.observe_extension_tab_url_attempt(id, &permit, &target);
+                } else if extension_tab_trace_enabled() {
+                    eprintln!(
+                        "extension-tab-trace: host-observe origin={category} outcome=superseded"
+                    );
+                }
+            });
+            if extension_tab_trace_enabled() {
+                eprintln!(
+                    "extension-tab-trace: engine-dispatch origin={category} admitted={admitted}"
+                );
             }
         });
 

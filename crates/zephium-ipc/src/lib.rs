@@ -15,12 +15,27 @@ pub struct TabView {
     pub projection_revision: String,
     pub title: String,
     pub url: Option<String>,
+    /// Explicit content owner. Internal pages never carry a navigable URL.
+    #[serde(default)]
+    pub content: TabContentView,
     pub loading: bool,
     #[serde(default)]
     pub popup_blocked: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub icon: Option<IconRef>,
+}
+
+/// Browser chrome's bounded tab renderer choice. Future extension-owned
+/// documents can add a separate variant without treating them as page URLs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TabContentView {
+    #[default]
+    Web,
+    Settings,
+    Extensions,
+    ExtensionOwned,
 }
 
 /// Names a cached site icon without carrying its pixels. Chrome keeps rasters
@@ -186,6 +201,18 @@ pub enum ExtensionManagementRuntimeView {
     Active,
 }
 
+/// Last activation settlement, not permission or runtime authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionActivationIssueView {
+    Unavailable,
+    RestartRequired,
+    Rejected,
+    CapacityExceeded,
+    ProfileFenced,
+    FailedClosed,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct ExtensionProfilePolicyView {
     pub revision: String,
@@ -226,6 +253,9 @@ pub struct ExtensionManagementProvenanceView {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExtensionManagementLimitationView {
     ApiPermission { name: String },
+    OptionalApiUnavailable { name: String },
+    OptionalHostUnavailable { pattern: String },
+    ExternalMessagingUnavailable,
     HostAccess,
     Background,
     Action,
@@ -235,6 +265,13 @@ pub enum ExtensionManagementLimitationView {
     ExtensionPagesCsp,
     Sandbox,
     ContentScripts,
+    MainDocumentContentScriptsOnly,
+    FragmentUrlContentScriptsUnavailable,
+    ContentScriptFontsUnavailable,
+    SidePanelUnavailable,
+    OffscreenLocalStorageOnly,
+    SandboxedPagesUnavailable,
+    ClipboardReadUnavailable,
     WebAccessibleResources,
     MinimumBrowserVersion,
     Commands,
@@ -270,6 +307,8 @@ pub struct ExtensionManagementEntryView {
     pub verified_catalog_unix: Option<String>,
     pub provenance: Option<ExtensionManagementProvenanceView>,
     pub runtime: ExtensionManagementRuntimeView,
+    /// Present only for an enabled, inactive extension with a known failure.
+    pub activation_issue: Option<ExtensionActivationIssueView>,
     /// Present only when `runtime` is `active`.
     pub runtime_generation: Option<String>,
     pub grants: ExtensionManagementGrantView,

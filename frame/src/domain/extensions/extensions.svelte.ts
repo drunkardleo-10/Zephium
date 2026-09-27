@@ -33,6 +33,7 @@ import {
   initialExtensionManagementAvailability,
   managementForProfile,
 } from "./extensions-model";
+export { isChromeStoreListing } from "./store-listing";
 
 const NOTICE_LIFETIME_MS = 5_000;
 const ACTION_SHORTCUT_LIFETIME_MS = 1_000;
@@ -64,6 +65,11 @@ let managementMutation = $state.raw<ManagementMutation | null>(null);
 let managementNotice = $state<string | null>(null);
 let distributionRefreshPending = $state(false);
 let distributionRefreshNotice = $state<string | null>(null);
+let storePreparationBusy = $state(false);
+let storePreparationNotice = $state<string | null>(null);
+let requestedStoreReview = $state<string | null>(null);
+let storeUpdateSubject = $state<string | null>(null);
+let storeUpdateMessage = $state<{ profile: string; text: string; failed: boolean } | null>(null);
 let managementVisible = false;
 let runtimeGrantResponding = $state(false);
 let runtimeGrantNotice = $state<string | null>(null);
@@ -102,12 +108,74 @@ export const distributionNotice = () => extensionDistributionNotice(distribution
 export const distributionRefreshBusy = () =>
   distributionRefreshPending || distributionState?.state.phase === "synchronizing";
 export const distributionRefreshFailure = () => distributionRefreshNotice;
+export const storeInstallBusy = () => storePreparationBusy;
+export const storeInstallFailure = () => storePreparationNotice;
+export const storeReviewRequest = () => requestedStoreReview;
+export const consumeStoreReviewRequest = () => {
+  requestedStoreReview = null;
+};
+export const storeUpdateBusy = () => storeUpdateSubject;
+export const storeUpdateNotice = (profile: string | null) =>
+  storeUpdateMessage?.profile === profile ? storeUpdateMessage : null;
 export const activeManagementMutation = () => managementMutation;
 export const managementFailure = () => managementNotice;
 export const permissionPrompt = () => runtimeGrantState.prompt;
 export const permissionPromptBusy = () =>
   runtimeGrantResponding || runtimeGrantState.prompt?.processing === true;
 export const permissionPromptFailure = () => runtimeGrantNotice;
+
+export async function prepareStoreInstall(tabId: string): Promise<void> {
+  if (storePreparationBusy) return;
+  const owner = lifecycle;
+  storePreparationBusy = true;
+  storePreparationNotice = null;
+  try {
+    const result = await commands.extensionStorePrepare(tabId);
+    if (owner !== lifecycle) return;
+    if (result.status === "ok") requestedStoreReview = result.data;
+    else storePreparationNotice = result.error;
+  } catch {
+    if (owner === lifecycle)
+      storePreparationNotice = "Extension installation is temporarily unavailable.";
+  } finally {
+    if (owner === lifecycle) storePreparationBusy = false;
+  }
+}
+
+export async function checkStoreUpdate(
+  profile: string,
+  entry: ExtensionManagementEntryView,
+): Promise<void> {
+  if (storePreparationBusy || managementMutation !== null) return;
+  const owner = lifecycle;
+  storePreparationBusy = true;
+  storeUpdateSubject = entry.install_id;
+  storeUpdateMessage = null;
+  try {
+    const result = await commands.extensionStoreCheckUpdate(entry.install_id);
+    if (owner !== lifecycle) return;
+    const text = result.status === "ok" ? result.data : result.error;
+    if (managementVisible && management(profile) !== null) await setManagementVisible(true);
+    if (owner === lifecycle)
+      storeUpdateMessage = {
+        profile,
+        text: `${entry.name}: ${text}`,
+        failed: result.status !== "ok",
+      };
+  } catch {
+    if (owner === lifecycle)
+      storeUpdateMessage = {
+        profile,
+        text: `${entry.name}: update check is temporarily unavailable`,
+        failed: true,
+      };
+  } finally {
+    if (owner === lifecycle) {
+      storePreparationBusy = false;
+      storeUpdateSubject = null;
+    }
+  }
+}
 
 export function activeActions(profileId: string | null, tabId: string | null) {
   return profileId !== null &&
@@ -281,6 +349,11 @@ export function dispose() {
   managementNotice = null;
   distributionRefreshPending = false;
   distributionRefreshNotice = null;
+  storePreparationBusy = false;
+  storePreparationNotice = null;
+  requestedStoreReview = null;
+  storeUpdateSubject = null;
+  storeUpdateMessage = null;
   runtimeGrantResponding = false;
   runtimeGrantNotice = null;
   failure = null;

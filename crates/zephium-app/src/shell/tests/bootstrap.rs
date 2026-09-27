@@ -52,6 +52,53 @@ fn restart_preserves_ids_actives_and_splits() {
 }
 
 #[test]
+fn qa_settings_tab_is_dropped_and_first_bootstrap_opens_a_usable_new_tab() {
+    let profile = ProfileId::from(9200);
+    let space = SpaceId::from(9201);
+    let settings = ItemId::from(9202);
+    let store = Arc::new(FakeStore {
+        saved: Mutex::new(Some(SessionState {
+            profiles: vec![PersistedProfile {
+                id: profile,
+                name: "Personal".into(),
+                kind: ProfileKind::Default,
+            }],
+            spaces: vec![PersistedSpace {
+                id: space,
+                profile,
+                name: "Today".into(),
+            }],
+            items: vec![PersistedItem {
+                id: settings,
+                parent: None,
+                placement: Placement::Space {
+                    space,
+                    section: SpaceSection::Today,
+                },
+                kind: PersistedKind::BrowserTab {
+                    page: zephium_core::item::BrowserOwnedTab::Settings,
+                },
+            }],
+            active_space: Some(space),
+            active_item: Some(settings),
+            splits: None,
+            recently_closed: Vec::new(),
+        })),
+        ..Default::default()
+    });
+    let (mut shell, engine, screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+    assert_ne!(active_id(&screen), settings);
+    assert!(shell.items.tab(settings).is_none());
+    assert_eq!(shell.active_browser_page(), None);
+    assert_eq!(
+        shell.browser_page_projected,
+        Some((shell.windows.focused().unwrap().id, None)),
+    );
+    assert!(engine.last_layout().is_empty());
+}
+
+#[test]
 fn bootstrap_never_creates_views_for_foreign_focus_or_split_references() {
     let local_profile = ProfileId::from(9100);
     let foreign_profile = ProfileId::from(9101);
@@ -347,7 +394,7 @@ fn forged_degraded_profile_report_cannot_bootstrap_an_unrelated_session() {
 }
 
 #[test]
-fn retryable_extension_startup_has_zero_store_or_native_side_effects() {
+fn retryable_startup_allows_preview_reads_but_no_native_or_mutating_work() {
     use zephium_core::ports::extensions::ExtensionServiceStartupOutcome::{
         RetryableNotAdmitted, TimedOut, Unavailable,
     };
@@ -408,7 +455,7 @@ fn retryable_extension_startup_has_zero_store_or_native_side_effects() {
             store
                 .load_session_calls
                 .load(std::sync::atomic::Ordering::Acquire),
-            0,
+            1,
             "{outcome:?}"
         );
         assert!(store.events.lock().unwrap().is_empty(), "{outcome:?}");
@@ -501,7 +548,7 @@ fn transient_extension_startup_retries_then_bootstraps_once() {
         store
             .load_session_calls
             .load(std::sync::atomic::Ordering::Acquire),
-        1
+        2
     );
     assert!(engine
         .calls()
@@ -675,4 +722,42 @@ fn missing_extension_lifecycle_is_handed_off_as_a_terminal_invariant_failure() {
             .load(std::sync::atomic::Ordering::Acquire),
         1
     );
+}
+
+#[test]
+fn saved_session_is_visible_while_extensions_warm_without_native_or_mutation_authority() {
+    use zephium_core::ports::extensions::ExtensionServiceStartupOutcome::{Ready, Unavailable};
+    let store = Arc::new(FakeStore::default());
+    let (mut seed, _, screen) = setup_with(store.clone());
+    seed.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut seed, first, "example.com");
+    seed.handle(Command::Persist);
+    let before = last(&screen);
+    let (service, _) = extension_lifecycle_with_startup_outcomes([
+        Unavailable,
+        Ready(zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY),
+    ]);
+    let (mut shell, engine, screen) = setup_with_extension_lifecycle(store.clone(), service);
+    shell.handle(Command::Bootstrap);
+    assert!(!shell.bootstrapped);
+    assert!(shell.windows.focused().is_none());
+    assert!(engine.calls().is_empty());
+    assert_eq!(last(&screen).active, before.active);
+    assert_eq!(
+        last(&screen)
+            .tabs
+            .iter()
+            .map(|tab| &tab.id)
+            .collect::<Vec<_>>(),
+        before.tabs.iter().map(|tab| &tab.id).collect::<Vec<_>>()
+    );
+    shell.handle(Command::Close(first));
+    shell.handle(Command::Persist);
+    assert!(engine.calls().is_empty());
+    shell.handle(Command::ExtensionStartupChanged);
+    assert!(shell.bootstrapped);
+    assert_eq!(last(&screen).active, before.active);
+    assert_eq!(last(&screen).tabs.len(), before.tabs.len());
+    assert!(!engine.calls().is_empty());
 }

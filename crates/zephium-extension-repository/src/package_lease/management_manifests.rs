@@ -754,6 +754,7 @@ fn map_cohort_error(error: ExtensionGrantCohortError) -> BundledManagementManife
             BundledManifestBindingsError::CapacityExhausted
         }
         ExtensionGrantCohortError::DuplicateBinding(_)
+        | ExtensionGrantCohortError::MissingBetaProvenance(_)
         | ExtensionGrantCohortError::IncompleteBindings
         | ExtensionGrantCohortError::ManifestPackageMismatch(_)
         | ExtensionGrantCohortError::TooManyAuthorities { .. }

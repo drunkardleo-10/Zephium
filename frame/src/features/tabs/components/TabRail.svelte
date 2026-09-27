@@ -4,7 +4,7 @@
   import { tabs } from "$domain/tabs";
   import FavIcon from "$shared/ui/FavIcon";
   import { favicons } from "$domain/favicons";
-  import { Add01Icon, Globe02Icon } from "@hugeicons/core-free-icons";
+  import { Add01Icon, Globe02Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
   import { untrack } from "svelte";
@@ -96,7 +96,9 @@
             loading={tab.loading}
             lit={active}
             size={16}
-            fallback={Globe02Icon}
+            fallback={tab.content === "extensions" || tab.content === "extension_owned"
+              ? PuzzleIcon
+              : Globe02Icon}
           />
           <span data-zephium-tab-label class="sr-only">{tab.title}</span>
         </button>

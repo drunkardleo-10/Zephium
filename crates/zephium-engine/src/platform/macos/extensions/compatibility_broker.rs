@@ -16,6 +16,7 @@ use zephium_core::extensions::{
     ExtensionCompatibilityBrokerRequest, ExtensionCompatibilityBrokerRequestId,
     ExtensionCompatibilityBrokerResult, ExtensionCompatibilityBrokerSettlement,
     ExtensionCompatibilityBrokerWitness, MAX_EXTENSION_COMPATIBILITY_BROKER_RESPONSE_BYTES,
+    MAX_EXTENSION_COMPATIBILITY_SESSION_RESULTS,
     MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS,
     MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS_PER_PROFILE,
 };
@@ -324,7 +325,10 @@ impl CompatibilityBroker {
         runtime: zephium_core::extensions::ExtensionRuntimeInstance,
         id: ExtensionCompatibilityBrokerRequestId,
         settlement: ExtensionCompatibilityBrokerSettlement,
-        open_options_page: impl FnOnce(&WKWebExtensionContext) -> bool,
+        open_options_page: impl FnOnce(
+            &WKWebExtensionContext,
+            &DynBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
+        ) -> bool,
     ) -> CompatibilityBrokerSettlementOutcome {
         let Some(pending) = self.take(id) else {
             return CompatibilityBrokerSettlementOutcome::Stale;
@@ -337,23 +341,35 @@ impl CompatibilityBroker {
             );
             return CompatibilityBrokerSettlementOutcome::IntegrityFailed;
         }
-        let response = match settlement {
-            ExtensionCompatibilityBrokerSettlement::Applied(
-                ExtensionCompatibilityBrokerResult::OptionsPageOpenAuthorized,
-            ) if matches!(
-                &pending.operation,
+        if runtime.profile() != self.profile {
+            complete_rejected(
+                pending.reply,
+                ExtensionCompatibilityBrokerRejection::InvalidContext,
+            );
+            return CompatibilityBrokerSettlementOutcome::IntegrityFailed;
+        }
+        if matches!(
+            (&settlement, &pending.operation),
+            (
+                ExtensionCompatibilityBrokerSettlement::Applied(
+                    ExtensionCompatibilityBrokerResult::OptionsPageOpenAuthorized
+                ),
                 ExtensionCompatibilityBrokerOperation::OpenOptionsPage
-            ) =>
-            {
-                let opened = pending
-                    .context
-                    .load()
-                    .is_some_and(|context| open_options_page(&context));
-                Ok(format!(
-                    "{{\"v\":1,\"opened\":{}}}",
-                    if opened { "true" } else { "false" }
-                ))
+            )
+        ) {
+            let queued = pending
+                .context
+                .load()
+                .is_some_and(|context| open_options_page(&context, &pending.reply));
+            if !queued {
+                complete_rejected(
+                    pending.reply,
+                    ExtensionCompatibilityBrokerRejection::InvalidContext,
+                );
             }
+            return CompatibilityBrokerSettlementOutcome::Settled;
+        }
+        let response = match settlement {
             ExtensionCompatibilityBrokerSettlement::Applied(result) => encode_result(result),
             ExtensionCompatibilityBrokerSettlement::Rejected(reason) => Err(reason),
         };
@@ -456,6 +472,55 @@ fn encode_result(
     result: ExtensionCompatibilityBrokerResult,
 ) -> Result<String, ExtensionCompatibilityBrokerRejection> {
     let entries = match result {
+        ExtensionCompatibilityBrokerResult::ClosedSessions(entries) => {
+            if entries.len() > usize::from(MAX_EXTENSION_COMPATIBILITY_SESSION_RESULTS) {
+                return Err(ExtensionCompatibilityBrokerRejection::InvalidRequest);
+            }
+            let mut output = String::from("{\"v\":2,\"items\":[");
+            for (index, entry) in entries.iter().enumerate() {
+                if !valid_closed_tab(&entry.url, &entry.title, entry.closed_at_ms) {
+                    return Err(ExtensionCompatibilityBrokerRejection::InvalidRequest);
+                }
+                let id = serde_json::to_string(&entry.session_id.to_string())
+                    .map_err(|_| ExtensionCompatibilityBrokerRejection::BackendUnavailable)?;
+                let url = serde_json::to_string(&entry.url)
+                    .map_err(|_| ExtensionCompatibilityBrokerRejection::BackendUnavailable)?;
+                let title = serde_json::to_string(&entry.title)
+                    .map_err(|_| ExtensionCompatibilityBrokerRejection::BackendUnavailable)?;
+                let row = format!(
+                    "{{\"sessionId\":{id},\"url\":{url},\"title\":{title},\"lastModified\":{}}}",
+                    entry.closed_at_ms / 1_000
+                );
+                if output.len() + row.len() + usize::from(index != 0) + 2
+                    > MAX_EXTENSION_COMPATIBILITY_BROKER_RESPONSE_BYTES
+                {
+                    return Err(ExtensionCompatibilityBrokerRejection::ResponseTooLarge);
+                }
+                if index != 0 {
+                    output.push(',');
+                }
+                output.push_str(&row);
+            }
+            output.push_str("]}");
+            return Ok(output);
+        }
+        ExtensionCompatibilityBrokerResult::ClosedSessionRestore(restored) => {
+            if !valid_closed_tab(&restored.url, &restored.title, restored.closed_at_ms) {
+                return Err(ExtensionCompatibilityBrokerRejection::InvalidRequest);
+            }
+            let url = serde_json::to_string(&restored.url)
+                .map_err(|_| ExtensionCompatibilityBrokerRejection::BackendUnavailable)?;
+            let title = serde_json::to_string(&restored.title)
+                .map_err(|_| ExtensionCompatibilityBrokerRejection::BackendUnavailable)?;
+            let output = format!(
+                "{{\"v\":2,\"restored\":{{\"url\":{url},\"title\":{title},\"lastModified\":{}}}}}",
+                restored.closed_at_ms / 1_000
+            );
+            if output.len() > MAX_EXTENSION_COMPATIBILITY_BROKER_RESPONSE_BYTES {
+                return Err(ExtensionCompatibilityBrokerRejection::ResponseTooLarge);
+            }
+            return Ok(output);
+        }
         ExtensionCompatibilityBrokerResult::DefaultSearch { opened } => {
             return Ok(format!(
                 "{{\"v\":1,\"opened\":{}}}",
@@ -518,6 +583,12 @@ fn encode_result(
     Ok(output)
 }
 
+fn valid_closed_tab(url: &str, title: &str, closed_at_ms: u64) -> bool {
+    zephium_core::navigation::is_allowed_str(url)
+        && zephium_core::item::page_title_is_sanitized(title)
+        && (1_000..=9_007_199_254_740_991).contains(&closed_at_ms)
+}
+
 fn complete_rejected(reply: Reply, reason: ExtensionCompatibilityBrokerRejection) {
     let error = broker_error(reason);
     reply.call((std::ptr::null_mut(), Retained::as_ptr(&error).cast_mut()));
@@ -541,7 +612,72 @@ fn broker_error(reason: ExtensionCompatibilityBrokerRejection) -> Retained<NSErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zephium_core::extensions::ExtensionCompatibilityHistoryEntry;
+    use zephium_core::extensions::{
+        ExtensionCompatibilityClosedTab, ExtensionCompatibilityHistoryEntry,
+        ExtensionCompatibilityRestoredTab,
+    };
+
+    #[test]
+    fn closed_session_encoding_returns_only_real_tab_fields_and_seconds() {
+        let id = zephium_core::ids::ClosedSessionId::from(7);
+        let encoded = encode_result(ExtensionCompatibilityBrokerResult::ClosedSessions(
+            vec![ExtensionCompatibilityClosedTab {
+                session_id: id,
+                url: "https://example.test/closed".into(),
+                title: "Closed".into(),
+                closed_at_ms: 1_700_000_000_123,
+            }]
+            .into_boxed_slice(),
+        ))
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(parsed["v"], 2);
+        assert_eq!(parsed["items"][0]["sessionId"], id.to_string());
+        assert_eq!(parsed["items"][0]["lastModified"], 1_700_000_000);
+        assert!(parsed["items"][0].get("window").is_none());
+        assert!(parsed["items"][0].get("id").is_none());
+
+        let restored = encode_result(ExtensionCompatibilityBrokerResult::ClosedSessionRestore(
+            ExtensionCompatibilityRestoredTab {
+                url: "https://example.test/closed".into(),
+                title: "Closed".into(),
+                closed_at_ms: 1_700_000_000_123,
+            },
+        ))
+        .unwrap();
+        let restored: serde_json::Value = serde_json::from_str(&restored).unwrap();
+        assert!(restored["restored"].get("sessionId").is_none());
+        assert!(restored["restored"].get("windowId").is_none());
+        assert_eq!(restored["restored"]["lastModified"], 1_700_000_000);
+    }
+
+    #[test]
+    fn closed_session_encoding_enforces_response_and_row_limits() {
+        let row = |index| ExtensionCompatibilityClosedTab {
+            session_id: zephium_core::ids::ClosedSessionId::from(index),
+            url: format!("https://example.test/{}", "a".repeat(4_000)),
+            title: "Closed".into(),
+            closed_at_ms: 1_700_000_000_123,
+        };
+        let oversized = (1..=usize::from(MAX_EXTENSION_COMPATIBILITY_SESSION_RESULTS))
+            .map(|index| row(index as u128))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            encode_result(ExtensionCompatibilityBrokerResult::ClosedSessions(
+                oversized.into_boxed_slice()
+            )),
+            Err(ExtensionCompatibilityBrokerRejection::ResponseTooLarge)
+        );
+        let too_many = (1..=usize::from(MAX_EXTENSION_COMPATIBILITY_SESSION_RESULTS) + 1)
+            .map(|index| row(index as u128))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            encode_result(ExtensionCompatibilityBrokerResult::ClosedSessions(
+                too_many.into_boxed_slice()
+            )),
+            Err(ExtensionCompatibilityBrokerRejection::InvalidRequest)
+        );
+    }
 
     #[test]
     fn response_encoding_is_exact_and_escapes_untrusted_history_text() {

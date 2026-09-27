@@ -7,12 +7,17 @@
 
 mod artifact_tree;
 mod bitwarden_contract;
+mod bitwarden_worker_startup;
 mod bitwarden_core_artifact;
 mod compatibility_artifact;
 mod compatibility_fixture;
+mod content_script_globs;
 mod file_access;
 mod major_extension_contract;
 mod native_broker_contract;
+mod oauth_redirect_observation;
+mod original_glob_relay;
+mod offscreen;
 mod permission_requests;
 mod persistent_runtime;
 mod profile_isolation;
@@ -655,6 +660,8 @@ impl Fixture {
 struct FixtureServer {
     address: SocketAddr,
     stop: Arc<AtomicBool>,
+    oauth_callback_release: Arc<AtomicBool>,
+    oauth_callback_entered: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -670,13 +677,19 @@ impl FixtureServer {
             .map_err(|error| format!("cannot read fixture server address: {error}"))?;
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
+        let oauth_callback_release = Arc::new(AtomicBool::new(false));
+        let worker_oauth_callback_release = oauth_callback_release.clone();
+        let oauth_callback_entered = Arc::new(AtomicBool::new(false));
+        let worker_oauth_callback_entered = oauth_callback_entered.clone();
         let worker = thread::Builder::new()
             .name("zephium-wk-extension-probe-http".into())
-            .spawn(move || serve_fixture(listener, cross_origin, worker_stop))
+            .spawn(move || serve_fixture(listener, cross_origin, worker_stop, worker_oauth_callback_release, worker_oauth_callback_entered))
             .map_err(|error| format!("cannot start fixture server: {error}"))?;
         Ok(Self {
             address,
             stop,
+            oauth_callback_release,
+            oauth_callback_entered,
             worker: Some(worker),
         })
     }
@@ -684,6 +697,15 @@ impl FixtureServer {
     fn url(&self, path: &str, run: &str) -> String {
         format!("http://{}{}?run={run}", self.address, path)
     }
+
+    fn release_oauth_callback(&self) {
+        self.oauth_callback_release.store(true, Ordering::Release);
+    }
+
+    fn oauth_callback_entered(&self) -> bool {
+        self.oauth_callback_entered.load(Ordering::Acquire)
+    }
+
 }
 
 impl Drop for FixtureServer {
@@ -744,6 +766,14 @@ struct ProbeTeardown {
     operating_system: String,
 }
 
+pub(crate) fn run_web_extension_offscreen_sandbox_probe() -> Result<bool, String> {
+    offscreen::sandbox()
+}
+
+pub(crate) fn run_web_extension_offscreen_probe() -> Result<bool, String> {
+    offscreen::run()
+}
+
 pub(crate) fn run_web_extension_probe() -> Result<bool, String> {
     run_web_extension_probe_with_options(RuntimePermissionProbeMode::None, false)
 }
@@ -801,7 +831,7 @@ fn run_web_extension_probe_with_options(
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; exact_site_deny_override=passed; dynamic_file_access=unsupported; dynamic_file_grant_readback=accepted; dynamic_file_contexts=3; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; external_page_and_peer_messaging_default_deny=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; major_extension_native_permissions={}; major_extension_namespaces={}; native_broker_history_search=bounded-round-trip; native_broker_port=bidirectional-bounded-round-trip; native_broker_port_host_send=extension-observed; native_broker_principal_binding=passed; native_broker_port_released=1; native_broker_delegate_released={}; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_tabs_same_document_observation={}; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_event_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_merge_click=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_private_resource_denial=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; capability_views_released={}; capability_stores_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; exact_site_deny_override=passed; dynamic_file_access=unsupported; dynamic_file_grant_readback=accepted; dynamic_file_contexts=3; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; unicode_resource=passed; isolated_worlds=passed; external_page_and_peer_messaging_default_deny=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; major_extension_native_permissions={}; major_extension_namespaces={}; native_broker_history_search=bounded-round-trip; native_broker_port=bidirectional-bounded-round-trip; native_broker_port_host_send=extension-observed; native_broker_principal_binding=passed; native_broker_port_released=1; native_broker_delegate_released={}; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_tabs_same_document_observation={}; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_event_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_merge_click=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_private_resource_denial=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; capability_views_released={}; capability_stores_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
             teardown.runtime_permission_status,
             teardown.runtime_permission_readback,
@@ -899,6 +929,14 @@ pub(crate) fn run_resource_transport_probe() -> Result<bool, String> {
     };
     let watchdog_completed = arm_process_watchdog();
     let result = resource_transport::run(operating_system);
+    watchdog_completed.store(true, Ordering::Release);
+    result.map(|()| true)
+}
+
+pub(crate) fn run_shared_extension_origin_probe(custom_origin: bool) -> Result<bool, String> {
+    let Some(_) = supported_runtime()? else { return Ok(false); };
+    let watchdog_completed = arm_process_watchdog();
+    let result = resource_transport::run_shared_origin(custom_origin);
     watchdog_completed.store(true, Ordering::Release);
     result.map(|()| true)
 }
@@ -1821,6 +1859,13 @@ fn new_window(mtm: MainThreadMarker) -> Result<Retained<NSWindow>, String> {
 }
 
 fn new_nonpersistent_controller(mtm: MainThreadMarker) -> Result<ControllerBundle, String> {
+    new_nonpersistent_controller_with_product_extension_user_agent(mtm, false)
+}
+
+fn new_nonpersistent_controller_with_product_extension_user_agent(
+    mtm: MainThreadMarker,
+    use_product_extension_user_agent: bool,
+) -> Result<ControllerBundle, String> {
     let configuration =
         unsafe { WKWebExtensionControllerConfiguration::nonPersistentConfiguration(mtm) };
     if unsafe { configuration.isPersistent() } {
@@ -1831,6 +1876,12 @@ fn new_nonpersistent_controller(mtm: MainThreadMarker) -> Result<ControllerBundl
         return Err("WebKit returned a persistent website data store for the probe".into());
     }
     let webview_configuration = unsafe { WKWebViewConfiguration::new(mtm) };
+    if use_product_extension_user_agent {
+        super::extensions::configure_extension_user_agent(&webview_configuration);
+        if !super::extensions::install_extension_disposal_symbols(&webview_configuration, mtm) {
+            return Err("extension disposal symbols could not be installed for probe".into());
+        }
+    }
     // SAFETY: all objects are main-thread-only and retained for at least as
     // long as the copied controller configuration and constructed WebView.
     unsafe {
@@ -2505,7 +2556,7 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
     const EXPECTED_EXTENSION_PRODUCT_STORES: usize = 1;
     const EXPECTED_CAPABILITY_VIEWS: usize = 2;
     const EXPECTED_CAPABILITY_STORES: usize = 2;
-    const EXPECTED_PROFILE_VIEWS: usize = 7;
+    const EXPECTED_PROFILE_VIEWS: usize = 9;
     const EXPECTED_PROFILE_OWNERS: usize = 6;
     const EXPECTED_PROFILE_CONTEXTS: usize = 4;
     const EXPECTED_PROFILE_LIFECYCLE_GROUPS: usize =
@@ -2678,6 +2729,8 @@ fn describe_native_errors(errors: &NSArray<NSError>) -> String {
 }
 
 fn write_primary_extension(path: &Path) -> Result<(), String> {
+    // Cyrillic U+0441: the ordinary injection gate must load the exact UTF-8 resource.
+    const DIRECT_SCRIPT: &str = "сcript.js";
     let manifest = json!({
         "manifest_version": 3,
         "name": "Zephium WKWebExtension Primary Probe",
@@ -2692,7 +2745,7 @@ fn write_primary_extension(path: &Path) -> Result<(), String> {
             {
                 "matches": [HOST_MATCH_PATTERN],
                 "exclude_matches": [EXCLUDED_MATCH_PATTERN],
-                "js": ["direct.js"],
+                "js": [DIRECT_SCRIPT],
                 "run_at": "document_start",
                 "all_frames": true,
                 "match_about_blank": true
@@ -2708,6 +2761,26 @@ fn write_primary_extension(path: &Path) -> Result<(), String> {
         ]
     });
     write_fixture_file(path, "manifest.json", &manifest.to_string())?;
+    write_fixture_file(
+        path,
+        "guest-launch.html",
+        "<!doctype html><meta charset=\"utf-8\"><title>Guest launch</title><script src=\"guest-launch.js\"></script>",
+    )?;
+    write_fixture_file(
+        path,
+        "guest-launch.js",
+        "(globalThis.browser ?? globalThis.chrome).tabs.create({url:(globalThis.browser ?? globalThis.chrome).runtime.getURL('guest-proof.html'),active:true});",
+    )?;
+    write_fixture_file(
+        path,
+        "guest-proof.html",
+        "<!doctype html><meta charset=\"utf-8\"><title>Native guest proof</title><main id=\"guest-proof\">Native guest proof</main><a id=\"guest-new-window\" href=\"guest-child.html\" target=\"_blank\">All commands</a>",
+    )?;
+    write_fixture_file(
+        path,
+        "guest-child.html",
+        "<!doctype html><meta charset=\"utf-8\"><title>Child guest proof</title><main>Child guest proof</main>",
+    )?;
     write_fixture_file(
         path,
         "background.js",
@@ -2757,7 +2830,7 @@ if (window === top && new URLSearchParams(location.search).get("run") === "both-
 }
 "#,
     );
-    write_fixture_file(path, "direct.js", &direct)?;
+    write_fixture_file(path, DIRECT_SCRIPT, &direct)?;
     write_fixture_file(
         path,
         "fallback.js",
@@ -2856,13 +2929,13 @@ fn write_fixture_file(directory: &Path, name: &str, contents: &str) -> Result<()
         .map_err(|error| format!("cannot write extension fixture {name}: {error}"))
 }
 
-fn serve_fixture(listener: TcpListener, cross_origin: Option<SocketAddr>, stop: Arc<AtomicBool>) {
+fn serve_fixture(listener: TcpListener, cross_origin: Option<SocketAddr>, stop: Arc<AtomicBool>, oauth_callback_release: Arc<AtomicBool>, oauth_callback_entered: Arc<AtomicBool>) {
     let mut handled = 0_usize;
     while !stop.load(Ordering::Acquire) && handled < MAX_HTTP_REQUESTS {
         match listener.accept() {
             Ok((mut stream, _)) => {
                 handled += 1;
-                let _ = respond_to_fixture_request(&mut stream, cross_origin);
+                let _ = respond_to_fixture_request(&mut stream, cross_origin, &stop, &oauth_callback_release, &oauth_callback_entered);
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(5));
@@ -2875,6 +2948,9 @@ fn serve_fixture(listener: TcpListener, cross_origin: Option<SocketAddr>, stop: 
 fn respond_to_fixture_request(
     stream: &mut TcpStream,
     cross_origin: Option<SocketAddr>,
+    stop: &AtomicBool,
+    oauth_callback_release: &AtomicBool,
+    oauth_callback_entered: &AtomicBool,
 ) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -2891,6 +2967,62 @@ fn respond_to_fixture_request(
         .and_then(|line| line.split_whitespace().nth(1))
         .ok_or_else(|| "fixture request has no target".to_owned())?;
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if path == "/oauth-token-cors" || path == "/oauth-token-no-cors-header" {
+        let method = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().next())
+            .ok_or("fixture request has no method")?;
+        if method != "POST" && method != "OPTIONS" {
+            return Err("fixture token route received unexpected method".into());
+        }
+        let origin = request.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("origin").then(|| value.trim())
+        }).filter(|origin| origin.len() <= 256 && !origin.chars().any(char::is_control));
+        let allow_origin = if path == "/oauth-token-cors" {
+            origin.map(|origin| format!("Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Credentials: true\r\nVary: Origin\r\n")).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let body = if method == "POST" { "{\"fixed\":true}" } else { "" };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\n{allow_origin}Access-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: content-type\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        return stream.write_all(response.as_bytes())
+            .map_err(|error| format!("cannot write local JSON POST response: {error}"));
+    }
+    if path == "/oauth-start" {
+        let callback = format!(
+            "http://{}/oauth-callback?code=fixed-synthetic",
+            stream.local_addr().map_err(|error| format!("fixture address unavailable: {error}"))?
+        );
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {callback}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+        );
+        return stream.write_all(response.as_bytes())
+            .map_err(|error| format!("cannot write synthetic OAuth redirect: {error}"));
+    }
+    if path == "/oauth-dns-start" {
+        let response = "HTTP/1.1 302 Found\r\nLocation: https://synthetic-callback.invalid/oauth/cb?code=fixed&state=fixed\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+        return stream.write_all(response.as_bytes())
+            .map_err(|error| format!("cannot write synthetic DNS-failure redirect: {error}"));
+    }
+    if path == "/oauth-callback" {
+        oauth_callback_entered.store(true, Ordering::Release);
+        // The fixed local callback deliberately has no HTTP response. WebKit
+        // must fail provisionally without committing a page or contacting a
+        // real identity provider.
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !stop.load(Ordering::Acquire)
+            && !oauth_callback_release.load(Ordering::Acquire)
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        return Ok(());
+    }
     let run = query
         .split('&')
         .find_map(|pair| pair.strip_prefix("run="))
@@ -2905,6 +3037,9 @@ fn respond_to_fixture_request(
         "/keyboard" => keyboard_extension_page(run),
         "/activated" => keyboard_activated_page(run),
         "/login" => password_manager_login_page(run),
+        "/editor" => original_glob_editor_page(),
+        "/oauth-base" => "<!doctype html><title>OAuth origin base</title>".to_owned(),
+        "/oauth-frame" => "<!doctype html><title>frame probe</title><iframe src='/oauth-start'></iframe>".to_owned(),
         "/theme" => representative_theme_page(run),
         "/theme/frame" => representative_theme_frame(run),
         "/frame/same" => child_page("same", run),
@@ -2919,6 +3054,9 @@ fn respond_to_fixture_request(
         || path == "/keyboard"
         || path == "/activated"
         || path == "/login"
+        || path == "/editor"
+        || path == "/oauth-base"
+        || path == "/oauth-frame"
         || path == "/theme"
         || path == "/theme/frame"
         || path == "/frame/same"
@@ -3040,6 +3178,10 @@ fn password_manager_login_page(run: &str) -> String {
           }}
         }})();</script></body></html>"#
     )
+}
+
+fn original_glob_editor_page() -> String {
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>Ordinary editor fixture</title></head><body><main><label for=\"editor\">Draft</label><textarea id=\"editor\" rows=\"8\" cols=\"60\">This are teh first sentence.</textarea><div id=\"editable\" contenteditable=\"true\">This are teh second sentence.</div></main></body></html>".to_owned()
 }
 
 fn representative_theme_page(run: &str) -> String {
@@ -3233,4 +3375,52 @@ fn script_safe_json(value: &str) -> String {
     serde_json::to_string(value)
         .expect("fixture HTML is serializable")
         .replace("</script>", "<\\/script>")
+}
+
+pub(crate) fn run_web_extension_content_script_globs_probe() -> Result<bool, String> {
+    content_script_globs::run()
+}
+
+pub(crate) fn run_web_extension_side_panel_unavailable_probe() -> Result<bool, String> {
+    native_broker_contract::run_side_panel_probe()
+}
+
+pub(crate) fn run_web_extension_document_id_probe() -> Result<bool, String> {
+    native_broker_contract::run_document_id_probe()
+}
+
+pub(crate) fn run_oauth_redirect_observation_probe() -> Result<bool, String> {
+    oauth_redirect_observation::run()
+}
+
+pub(crate) fn run_oauth_redirect_immediate_failure_probe() -> Result<bool, String> {
+    oauth_redirect_observation::run_immediate()
+}
+
+pub(crate) fn run_oauth_redirect_synchronous_clear_probe() -> Result<bool, String> {
+    oauth_redirect_observation::run_clear_immediately()
+}
+
+pub(crate) fn run_oauth_redirect_same_turn_nonresident_probe() -> Result<bool, String> {
+    oauth_redirect_observation::run_same_turn_nonresident()
+}
+
+pub(crate) fn run_oauth_redirect_broker_order_probe(settle_first: bool) -> Result<bool, String> {
+    oauth_redirect_observation::run_broker_order(settle_first)
+}
+
+pub(crate) fn run_worker_json_post_probe() -> Result<bool, String> {
+    oauth_redirect_observation::run_worker_json_post()
+}
+
+pub(crate) fn run_original_main_document_glob_probe(path: &Path) -> Result<bool, String> {
+    original_glob_relay::run(path)
+}
+
+pub(crate) fn run_prepared_bitwarden_worker_startup_probe(
+    path: &Path,
+    scheme: &str,
+    user_agent_mode: &str,
+) -> Result<bool, String> {
+    bitwarden_worker_startup::run(path, scheme, user_agent_mode)
 }

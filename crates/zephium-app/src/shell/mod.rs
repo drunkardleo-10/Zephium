@@ -9,9 +9,12 @@ mod extension_browser_requests;
 mod extension_browser_surface;
 mod extension_compatibility_broker;
 mod extension_distribution;
+mod extension_isolated_resources;
 mod extension_management;
 mod extension_repository_maintenance;
 mod extension_runtime_grants;
+mod extension_store;
+mod extension_store_updates;
 mod favicons;
 mod history;
 mod operations;
@@ -208,14 +211,19 @@ pub struct Shell {
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     window_visible: bool,
     browser_page: Option<(WindowId, crate::BrowserPage)>,
+    browser_page_projected: Option<(WindowId, Option<crate::BrowserPage>)>,
     browser_return_revision: u64,
     browser_after_return: Option<Box<Command>>,
+    browser_return_ready: bool,
     browser_return: Option<browser_pages::PendingBrowserReturn>,
     runtime_restart_required: bool,
     user_content_status: user_content_status::UserContentStatus,
     crash: CrashState,
     bootstrapped: bool,
     native_openers: std::collections::HashMap<ItemId, NativeOpener>,
+    startup_preview_attempted: bool,
+    #[cfg(debug_assertions)]
+    bootstrap_started: Option<std::time::Instant>,
     persistence: PersistenceState,
     shutdown_result: Option<ShutdownOutcome>,
     self_queue: Option<CommandQueue>,
@@ -239,6 +247,7 @@ pub struct Shell {
     /// work until process restart; transient refusals retain the ordinary
     /// heartbeat retry path.
     extension_repository_maintenance_failed_closed: bool,
+    store_updates: extension_store_updates::StoreUpdateState,
     /// Any terminal extension lifecycle failure permanently closes bootstrap
     /// and profile-deletion progress for this process while the desktop
     /// composition root converges on orderly shutdown.
@@ -477,14 +486,19 @@ impl Shell {
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
             browser_page: None,
+            browser_page_projected: None,
             browser_return_revision: 0,
             browser_after_return: None,
+            browser_return_ready: false,
             browser_return: None,
             runtime_restart_required: false,
             user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
             bootstrapped: false,
             native_openers: std::collections::HashMap::new(),
+            startup_preview_attempted: false,
+            #[cfg(debug_assertions)]
+            bootstrap_started: None,
             persistence: PersistenceState::default(),
             shutdown_result: None,
             self_queue: None,
@@ -504,6 +518,7 @@ impl Shell {
             extension_distribution_status: None,
             page_permissions: PagePermissionPromptState::default(),
             extension_repository_maintenance_failed_closed: false,
+            store_updates: extension_store_updates::StoreUpdateState::default(),
             extension_lifecycle_terminal: false,
             extension_startup_retry_exponent: 0,
             extension_startup_not_before: None,
@@ -694,6 +709,10 @@ impl Shell {
                 (self.emit)(Projection::OperationProcessed(completion));
             }
             Command::Bootstrap => self.bootstrap(),
+            Command::ExtensionStartupChanged => {
+                self.extension_startup_not_before = None;
+                self.bootstrap();
+            }
             Command::Open => {
                 let _ = self.operation_open();
             }
@@ -955,8 +974,37 @@ impl Shell {
                 request,
                 settlement,
             } => self.settle_extension_runtime_grant(runtime, request, *settlement),
+            Command::IsolatedExtensionResourceSettled {
+                runtime,
+                kind,
+                request,
+                outcome,
+            } => self.settle_isolated_extension_resource(runtime, kind, request, outcome),
             Command::ExtensionRepositoryMaintenanceSettled(outcome) => {
                 self.settle_extension_repository_maintenance(outcome)
+            }
+            Command::ResolveStoreExtensionContext { tab, reply } => {
+                let _ = reply.try_send(self.resolve_store_extension_context(tab));
+            }
+            Command::ResolveStoreExtensionUpdateContext { install, reply } => {
+                let _ = reply.try_send(self.resolve_store_extension_update_context(install));
+            }
+            Command::PrepareStoreExtensionPackage(submission) => {
+                self.prepare_store_extension(submission)
+            }
+            Command::ConfigureStoreExtensionUpdates(dispatch) => {
+                self.configure_store_updates(dispatch)
+            }
+            Command::StoreExtensionUpdateCatalog {
+                token,
+                profile,
+                outcome,
+            } => self.store_update_catalog(token, profile, outcome),
+            Command::StoreExtensionUpdateFinished { token, result } => {
+                self.store_update_finished(token, result)
+            }
+            Command::StoreExtensionPreparationCompleted(completion) => {
+                self.complete_store_extension_preparation(completion)
             }
             Command::ProvisionAcquiredExtensionPackage(submission) => {
                 self.provision_acquired_extension_package(submission)
@@ -1080,6 +1128,7 @@ impl Shell {
                     crate::diagnostic!("extensions: maintenance could not refresh toolbar actions");
                 }
                 self.maintain_extension_repository();
+                self.maintain_store_updates();
                 if self.maintain_views() {
                     self.project_items();
                 }
@@ -1429,15 +1478,26 @@ impl Shell {
         // port. A transient outcome installs the next one; Ready and terminal
         // outcomes leave no stale retry authority behind.
         self.extension_startup_not_before = None;
+        let wake = self.self_queue.as_ref().map(|queue| CallbackHandle {
+            queue: std::sync::Arc::downgrade(&queue.inner),
+        });
         let Some(service) = self.extension_service.as_mut() else {
             crate::diagnostic!("bootstrap: extension-service lifecycle owner is missing");
             self.fail_extension_startup(ShellTerminalFailure::ExtensionStartupLifecycleMissing);
             return false;
         };
-        let deadline = now
-            .checked_add(EXTENSION_STARTUP_SETTLEMENT_TIMEOUT)
-            .unwrap_or(now);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let watching = wake.is_some_and(|callback| {
+                service.watch_startup(Box::new(move || {
+                    let _ = callback.dispatch(Command::ExtensionStartupChanged);
+                }))
+            });
+            let deadline = if watching {
+                now
+            } else {
+                now.checked_add(EXTENSION_STARTUP_SETTLEMENT_TIMEOUT)
+                    .unwrap_or(now)
+            };
             service.settle_startup_until(deadline)
         }));
         match outcome {

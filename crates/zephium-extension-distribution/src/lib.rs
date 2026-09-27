@@ -9,17 +9,40 @@
 //!
 //! Every result remains path-free and is reauthenticated by
 //! `zephium-extension-service` immediately before durable materialization.
-//! No endpoint, catalog, package, or legal byte is compiled into this crate.
+//! The default curated path compiles no endpoint, catalog, package, or legal
+//! bytes. Separate opt-in `public-policy` and `beta-admission` modules own
+//! fixed shared-policy endpoints and Beta source eligibility; they do not
+//! turn curated catalogs into public-install authority.
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
+// Exercise the actual repository implementation against private signed-policy
+// fixtures without exporting any test root or witness constructor to consumers.
+#[cfg(all(test, feature = "beta-admission"))]
+extern crate self as zephium_extension_distribution;
+
+// Shared repository I/O primitives used by the real signed Beta fixture. No
+// substitute runtime provider or test authority is exported from either crate.
+#[cfg(all(test, feature = "beta-admission"))]
+#[path = "../../zephium-extension-repository/src/operation.rs"]
+mod operation;
+#[cfg(all(test, feature = "beta-admission"))]
+#[path = "../../zephium-extension-repository/src/tree_reader.rs"]
+mod tree_reader;
+
 mod authentication;
+#[cfg(feature = "beta-admission")]
+pub mod beta;
+#[cfg(feature = "beta-admission")]
+pub mod chrome_store;
 mod client;
 mod coordinator;
 mod layout;
 #[cfg(feature = "local-extension-lab")]
 mod local_lab;
+#[cfg(feature = "public-policy")]
+pub mod public_policy;
 mod session;
 #[cfg(feature = "staging-extension-catalog")]
 mod staging;

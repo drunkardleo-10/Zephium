@@ -71,6 +71,18 @@ enum ActivationDrive {
 impl RuntimeCoordinator {
     pub(crate) fn activate_until(
         &mut self,
+        resources: RuntimeCoordinatorResources<'_>,
+        key: ExtensionNativeOwnershipKey,
+        profile_fenced: bool,
+        deadline: Instant,
+    ) -> RuntimeActivationOutcome {
+        let outcome = self.activate_inner_until(resources, key, profile_fenced, deadline);
+        self.activation_issues.record(key, outcome);
+        outcome
+    }
+
+    fn activate_inner_until(
+        &mut self,
         mut resources: RuntimeCoordinatorResources<'_>,
         key: ExtensionNativeOwnershipKey,
         profile_fenced: bool,
@@ -811,8 +823,12 @@ fn plan_activation(
 
     let bindings = match resources
         .repository
-        .authenticate_runtime_manifest_bindings(&catalog)
-    {
+        .authenticate_runtime_manifest_bindings_for_profile(
+            &catalog,
+            resources.store,
+            key,
+            deadline,
+        ) {
         Ok(bindings) => bindings,
         Err(error) => return manifest_binding_failure(error),
     };

@@ -18,7 +18,7 @@ use std::rc::Rc;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2_foundation::{MainThreadMarker, NSError, NSProcessInfo, NSString, NSURL};
+use objc2_foundation::{MainThreadMarker, NSError, NSProcessInfo, NSSet, NSString, NSURL};
 use objc2_web_kit::{WKWebExtension, WKWebExtensionContext, WKWebExtensionController};
 use zephium_core::extensions::{
     ExtensionBackgroundEnvironment, ExtensionNativeGrantSnapshot,
@@ -238,6 +238,7 @@ struct MacosNativeRuntimeMetadata {
     background_environment: Option<ExtensionBackgroundEnvironment>,
     publisher_native_host: Option<Box<ExtensionPublisherNativeHostRequirement>>,
     browser_surface_ready: bool,
+    side_panel_unavailable: bool,
 }
 
 /// Copy-only exact identity retained while the move-only owner is inside a
@@ -295,6 +296,9 @@ struct MacosNativeRuntimeOptionalState {
 struct ActionProjectionCache {
     next_revision: Option<u64>,
     last: Option<zephium_core::extensions::ExtensionActionState>,
+    // Default and tab-specific actions may look identical but open different
+    // popup documents. A target change must invalidate an in-flight click.
+    last_default_target: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -313,6 +317,7 @@ pub(crate) enum MacosNativeActionFailure {
 pub(crate) struct MacosNativeActionPopupOwner {
     context: Retained<WKWebExtensionContext>,
     controller: *const WKWebExtensionController,
+    background_environment: Option<ExtensionBackgroundEnvironment>,
 }
 
 impl MacosNativeActionPopupOwner {
@@ -326,6 +331,12 @@ impl MacosNativeActionPopupOwner {
 
     pub(super) fn into_context(self) -> Retained<WKWebExtensionContext> {
         self.context
+    }
+
+    pub(super) fn requires_popup_background_warmup(&self) -> bool {
+        // Document adapters need an explicit wake. Service workers retain
+        // WebKit's normal event-driven action/popup startup path.
+        background_environment_requires_navigation_wake(self.background_environment)
     }
 }
 
@@ -357,6 +368,7 @@ impl MacosNativeRuntimeOwner {
         Ok(MacosNativeActionPopupOwner {
             context: self.context.clone(),
             controller: Retained::as_ptr(&self.controller),
+            background_environment: self.background_environment,
         })
     }
 
@@ -478,7 +490,7 @@ impl MacosNativeRuntimeOwner {
         &mut self,
         runtime: zephium_core::extensions::ExtensionRuntimeInstance,
         tab_id: zephium_core::ids::ItemId,
-        tab: &objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>,
+        tab: Option<&objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>>,
     ) -> Result<zephium_core::extensions::ExtensionActionState, MacosNativeActionFailure> {
         use objc2_foundation::NSUTF8StringEncoding;
         use zephium_core::extensions::{
@@ -488,13 +500,17 @@ impl MacosNativeRuntimeOwner {
 
         validate_loaded_owner_membership(self)
             .map_err(|_| MacosNativeActionFailure::OwnerInvalid)?;
-        let action = unsafe { self.context.actionForTab(Some(tab)) }
+        let action = unsafe { self.context.actionForTab(tab) }
             .ok_or(MacosNativeActionFailure::ActionUnavailable)?;
         let action_context = unsafe { action.webExtensionContext() }
             .ok_or(MacosNativeActionFailure::ContextMismatch)?;
-        let associated_tab =
-            unsafe { action.associatedTab() }.ok_or(MacosNativeActionFailure::ContextMismatch)?;
-        if !std::ptr::eq(&*action_context, &*self.context) || &*associated_tab != tab {
+        let associated_tab = unsafe { action.associatedTab() };
+        let matching_tab = match (associated_tab.as_deref(), tab) {
+            (Some(actual), Some(expected)) => std::ptr::eq(actual, expected),
+            (None, None) => true,
+            _ => false,
+        };
+        if !std::ptr::eq(&*action_context, &*self.context) || !matching_tab {
             return Err(MacosNativeActionFailure::ContextMismatch);
         }
 
@@ -545,11 +561,9 @@ impl MacosNativeRuntimeOwner {
             )
         })
         .map_err(|_| MacosNativeActionFailure::InvalidProjection)?;
-        if let Some(cached) = projection
-            .last
-            .as_ref()
-            .filter(|cached| cached.same_presentation(&state))
-        {
+        if let Some(cached) = projection.last.as_ref().filter(|cached| {
+            projection.last_default_target == tab.is_none() && cached.same_presentation(&state)
+        }) {
             return Ok(cached.clone());
         }
         if revision_exhausted {
@@ -557,6 +571,7 @@ impl MacosNativeRuntimeOwner {
         }
         projection.next_revision = revision.get().checked_add(1);
         projection.last = Some(state.clone());
+        projection.last_default_target = tab.is_none();
         Ok(state)
     }
 
@@ -571,7 +586,7 @@ impl MacosNativeRuntimeOwner {
         tab: &objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>,
         expected_revision: zephium_core::extensions::ExtensionActionRevision,
     ) -> Result<(), MacosNativeActionFailure> {
-        let state = self.action_state_for_tab(runtime, tab_id, tab)?;
+        let state = self.action_state_for_tab(runtime, tab_id, Some(tab))?;
         if state.revision() != expected_revision {
             return Err(MacosNativeActionFailure::StaleAction);
         }
@@ -593,7 +608,7 @@ impl MacosNativeRuntimeOwner {
         &mut self,
         runtime: zephium_core::extensions::ExtensionRuntimeInstance,
         tab_id: zephium_core::ids::ItemId,
-        tab: &objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>,
+        tab: Option<&objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>>,
         expected_revision: zephium_core::extensions::ExtensionActionRevision,
     ) -> Result<(), MacosNativeActionFailure> {
         self.reconcile_document_background_surface_if_needed()
@@ -680,6 +695,7 @@ impl MacosNativeRuntimeOptionalState {
             action_projection: ActionProjectionCache {
                 next_revision: Some(1),
                 last: None,
+                last_default_target: false,
             },
         }
     }
@@ -699,6 +715,8 @@ pub(crate) fn prepare_native_runtime_activation(
     let mtm = admit_runtime()?;
     super::native_messaging::begin_lab_runtime_timing();
     let background_environment = grants.background_environment();
+    let side_panel_unavailable = grants.compatibility_target().as_str()
+        == zephium_core::extensions::LOCAL_MACOS_MAIN_DOCUMENT_GLOBS_V1_COMPATIBILITY_TARGET;
     let publisher_native_host = publisher_native_host.cloned().map(Box::new);
     #[cfg(feature = "native-extension-lab-diagnostics")]
     eprintln!(
@@ -717,6 +735,7 @@ pub(crate) fn prepare_native_runtime_activation(
             background_environment,
             publisher_native_host,
             browser_surface_ready,
+            side_panel_unavailable,
         },
         mtm,
     })
@@ -776,6 +795,7 @@ pub(crate) fn begin_probe_native_runtime_activation(
             background_environment: None,
             publisher_native_host: None,
             browser_surface_ready: false,
+            side_panel_unavailable: false,
         },
         completion,
         mtm,
@@ -923,6 +943,7 @@ fn construct_loaded_owner(
         background_environment,
         publisher_native_host,
         browser_surface_ready,
+        side_panel_unavailable,
     } = metadata;
     let optional_state = publisher_native_host
         .map(|requirement| Box::new(MacosNativeRuntimeOptionalState::new(Some(requirement))));
@@ -943,6 +964,28 @@ fn construct_loaded_owner(
 
     if let Err(failure) = set_and_verify_identity(&owner.context, expected_owner_id) {
         return Err((failure, Some(owner)));
+    }
+    if side_panel_unavailable {
+        let unavailable = NSSet::from_retained_slice(&[NSString::from_str("browser.sidePanel")]);
+        if catch_native(|| unsafe {
+            owner.context.setUnsupportedAPIs(Some(&unavailable));
+            let actual = owner.context.unsupportedAPIs();
+            if !owner.context.isLoaded()
+                && actual.count() == 1
+                && actual.containsObject(&NSString::from_str("browser.sidePanel"))
+            {
+                Ok(())
+            } else {
+                Err(MacosNativeRuntimeFailure::ContextConstructionFailed)
+            }
+        })
+        .is_err()
+        {
+            return Err((
+                MacosNativeRuntimeFailure::ContextConstructionFailed,
+                Some(owner),
+            ));
+        }
     }
     match grants.apply(&owner.context) {
         Ok(applied) => owner.applied_grants = Some(applied),
@@ -1089,7 +1132,14 @@ fn set_and_verify_identity(
     owner_id: ExtensionRuntimeNativeOwnerId,
 ) -> Result<(), MacosNativeRuntimeFailure> {
     let identity = native_context_identity(owner_id)?;
-    let inspectable = cfg!(feature = "native-extension-lab-diagnostics");
+    #[cfg(feature = "native-extension-qa-inspector")]
+    let qa_inspectable = {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var("ZEPHIUM_EXTENSION_TAB_TRACE").as_deref() == Ok("1"))
+    };
+    #[cfg(not(feature = "native-extension-qa-inspector"))]
+    let qa_inspectable = false;
+    let inspectable = cfg!(feature = "native-extension-lab-diagnostics") || qa_inspectable;
     catch_native(|| unsafe {
         context.setBaseURL(&identity.base_url);
         context.setUniqueIdentifier(&identity.identifier);

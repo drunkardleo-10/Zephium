@@ -152,6 +152,7 @@ fn crash_presentation_never_overwrites_the_durable_document_title() {
             .and_then(|kind| match kind {
                 PersistedKind::Tab { title, .. } => Some(title),
                 PersistedKind::Folder { .. } => None,
+                PersistedKind::BrowserTab { .. } => None,
             })
     });
     assert_eq!(durable_title.as_deref(), Some("Last real title"));

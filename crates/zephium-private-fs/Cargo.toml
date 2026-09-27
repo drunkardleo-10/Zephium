@@ -4,8 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Non-shipping gate for the live Windows adapter validation campaign.
+windows-namespace-validation = []
+
 [dependencies]
 thiserror.workspace = true
+unicode-normalization = "=0.1.25"
 
 [dev-dependencies]
 tempfile.workspace = true

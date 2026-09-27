@@ -50,9 +50,11 @@ use super::erasure::{
     ControllerErasureTicket, ControllerErasureWitness, PersistentControllerErasure,
     ProfileControllerErasure,
 };
+use super::identity_broker::IdentityRequestId;
 use super::native_messaging::{
     NativeHostProcessPool, PublisherNativeMessagingAuthorization, PublisherNativeMessagingRequestId,
 };
+use super::offscreen_broker::OffscreenSessionId;
 use super::runtime_grant_broker::{RuntimeGrantRequestPool, RuntimeGrantSettlementOutcome};
 
 const MAX_PERSISTENT_CONTROLLERS: usize = zephium_core::session::MAX_SESSION_PROFILES;
@@ -350,6 +352,8 @@ pub(super) struct PersistentControllerEntry {
     pub(super) store: Retained<WKWebsiteDataStore>,
     pub(super) controller: Retained<WKWebExtensionController>,
     browser_surface: MacosExtensionBrowserSurfaceHost,
+    #[cfg(feature = "native-extension-qa-inspector")]
+    _qa_popup_errors: Option<super::qa_popup_errors::QaPopupErrorObserver>,
 }
 
 enum PersistentControllerSlot {
@@ -875,7 +879,7 @@ impl PersistentControllerRegistry {
         profile: ProfileId,
         request: ExtensionActionRequest,
         owner: &super::native_runtime::MacosNativeActionPopupOwner,
-        tab: &super::browser_surface::NativeExtensionTab,
+        tab: Option<&super::browser_surface::NativeExtensionTab>,
     ) -> Result<
         Result<ControllerActionPopupPreparation, ExtensionActionRejection>,
         ControllerRegistryError,
@@ -905,7 +909,7 @@ impl PersistentControllerRegistry {
         profile: ProfileId,
         request: ExtensionActionRequest,
         owner: super::native_runtime::MacosNativeActionPopupOwner,
-        tab: super::browser_surface::NativeExtensionTab,
+        tab: Option<super::browser_surface::NativeExtensionTab>,
         parent: Retained<NSView>,
         lease: crate::host::NativeResourceLease,
     ) -> Result<Result<(), ExtensionActionRejection>, ControllerRegistryError> {
@@ -921,11 +925,10 @@ impl PersistentControllerRegistry {
         ) {
             return Ok(Err(ExtensionActionRejection::NativeAdmissionFailed));
         }
-        let context = owner.into_context();
         Ok(entry.browser_surface.begin_action_popup(
             request,
             entry.controller.clone(),
-            context,
+            owner,
             tab,
             parent,
             lease,
@@ -936,8 +939,12 @@ impl PersistentControllerRegistry {
         &mut self,
         profile: ProfileId,
         owner: super::native_runtime::MacosNativeActionPopupOwner,
-        parent: Retained<NSView>,
-        lease: crate::host::NativeResourceLease,
+        completion: &block2::DynBlock<
+            dyn Fn(
+                *mut objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>,
+                *mut objc2_foundation::NSError,
+            ),
+        >,
     ) -> Result<Result<(), ExtensionActionRejection>, ControllerRegistryError> {
         self.slots.admission(profile)?;
         let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
@@ -951,20 +958,7 @@ impl PersistentControllerRegistry {
         let context = owner.into_context();
         Ok(entry
             .browser_surface
-            .open_options_page_from_browser(context, parent, lease))
-    }
-
-    pub(crate) fn cancel_action_popup(
-        &mut self,
-        profile: ProfileId,
-        request: ExtensionActionRequestId,
-        reason: ExtensionActionRejection,
-    ) -> bool {
-        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
-        else {
-            return false;
-        };
-        entry.browser_surface.cancel_action_popup(request, reason)
+            .open_options_page_from_browser(context, completion))
     }
 
     pub(crate) fn timeout_action_popup(
@@ -1057,13 +1051,61 @@ impl PersistentControllerRegistry {
         let result = catch_native(|| {
             validate_entry_identity(entry)?;
             let was_ready = entry.browser_surface.is_ready_for_document_background();
-            entry.browser_surface.bind_webview(id, webview);
+            if entry.browser_surface.bind_webview(id, webview) {
+                // The effective action switches between WebKit's default and
+                // tab-specific target here, without a logical surface change.
+                // A button projected before this binding has an old revision.
+                entry.browser_surface.notify_actions_invalidated();
+            }
             Ok(!was_ready && entry.browser_surface.is_ready_for_document_background())
         });
         if result.is_err() {
             self.slots.poison();
         }
         result
+    }
+
+    /// Native-only in-flight main-frame URL observation for the exact bound
+    /// physical tab. It never mutates Shell's committed browser surface.
+    pub(crate) fn observe_browser_tab_url_attempt(
+        &mut self,
+        profile: ProfileId,
+        id: ItemId,
+        webview: &WKWebView,
+        target: &str,
+    ) -> Result<bool, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(false);
+        };
+        let result = catch_native(|| {
+            validate_entry_identity(entry)?;
+            entry
+                .browser_surface
+                .observe_browser_tab_url_attempt(&entry.controller, id, webview, target)
+                .map_err(map_browser_surface_error)
+        });
+        if result.is_err() {
+            self.slots.poison();
+        }
+        result
+    }
+
+    pub(crate) fn clear_browser_tab_url_attempt(
+        &mut self,
+        profile: ProfileId,
+        id: ItemId,
+        webview: &WKWebView,
+    ) {
+        if self.slots.admission(profile).is_err() {
+            return;
+        }
+        if let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile) {
+            entry
+                .browser_surface
+                .clear_browser_tab_url_attempt(id, webview);
+        }
     }
 
     pub(crate) fn browser_surface_ready_for_document_background(
@@ -1085,6 +1127,10 @@ impl PersistentControllerRegistry {
         request: zephium_core::extensions::ExtensionBrowserRequestId,
         settlement: zephium_core::extensions::ExtensionBrowserRequestSettlement,
         extension_page_lease: Option<crate::host::NativeResourceLease>,
+        extension_page_stage: Option<(
+            Retained<crate::platform::imp::ContentStage>,
+            std::sync::Arc<std::sync::atomic::AtomicBool>,
+        )>,
     ) -> Result<ControllerBrowserRequestSettlement, ControllerRegistryError> {
         self.slots.admission(profile)?;
         let Some(slot) = self.slots.entries.get(&profile) else {
@@ -1094,10 +1140,12 @@ impl PersistentControllerRegistry {
             return Ok(ControllerBrowserRequestSettlement::Stale);
         };
         validate_entry_identity(entry)?;
-        match entry
-            .browser_surface
-            .settle_request(request, settlement, extension_page_lease)
-        {
+        match entry.browser_surface.settle_request(
+            request,
+            settlement,
+            extension_page_lease,
+            extension_page_stage,
+        ) {
             BrowserRequestSettlementOutcome::Settled => {
                 Ok(ControllerBrowserRequestSettlement::Settled)
             }
@@ -1107,6 +1155,26 @@ impl PersistentControllerRegistry {
                 Err(ControllerRegistryError::BrowserSurfaceIntegrity)
             }
         }
+    }
+
+    pub(crate) fn has_extension_page(&self, profile: ProfileId, id: ItemId) -> bool {
+        matches!(self.slots.entries.get(&profile), Some(PersistentControllerSlot::Prepared(entry)) if entry.browser_surface.has_extension_page(id))
+    }
+    pub(crate) fn close_extension_page(&self, id: ItemId) -> bool {
+        self.slots.entries.values().any(|slot| match slot {
+            PersistentControllerSlot::Prepared(entry) => {
+                entry.browser_surface.close_extension_page(id)
+            }
+            _ => false,
+        })
+    }
+    pub(crate) fn navigate_extension_page(&self, id: ItemId, action: u8) -> bool {
+        self.slots.entries.values().any(|slot| match slot {
+            PersistentControllerSlot::Prepared(entry) => {
+                entry.browser_surface.navigate_extension_page(id, action)
+            }
+            _ => false,
+        })
     }
 
     pub(crate) fn timeout_browser_request(
@@ -1303,6 +1371,145 @@ impl PersistentControllerRegistry {
             entry
                 .browser_surface
                 .cancel_compatibility_broker_context(context);
+        }
+    }
+
+    pub(crate) fn identity_request_context(
+        &mut self,
+        profile: ProfileId,
+        request: IdentityRequestId,
+    ) -> Result<Option<*const WKWebExtensionContext>, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(None);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry.browser_surface.identity_request_context(request))
+    }
+
+    pub(crate) fn finalize_identity_request(
+        &mut self,
+        profile: ProfileId,
+        request: IdentityRequestId,
+        witness: Option<ExtensionCompatibilityBrokerWitness>,
+        lease: Option<crate::host::NativeResourceLease>,
+    ) -> Result<bool, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(false);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry
+            .browser_surface
+            .finalize_identity_request(request, witness, lease))
+    }
+
+    pub(crate) fn timeout_identity_request(
+        &mut self,
+        profile: ProfileId,
+        request: IdentityRequestId,
+    ) -> bool {
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return false;
+        };
+        entry.browser_surface.timeout_identity_request(request)
+    }
+
+    pub(crate) fn cancel_identity_context(
+        &mut self,
+        profile: ProfileId,
+        context: *const WKWebExtensionContext,
+    ) {
+        if let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile) {
+            entry.browser_surface.cancel_identity_context(context);
+        }
+    }
+
+    pub(crate) fn offscreen_subject(
+        &mut self,
+        profile: ProfileId,
+        request: OffscreenSessionId,
+    ) -> Result<Option<(*const WKWebExtensionContext, bool)>, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(None);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry.browser_surface.offscreen_subject(request))
+    }
+
+    pub(crate) fn pending_offscreen_authorization_ids(
+        &mut self,
+        profile: ProfileId,
+    ) -> Vec<OffscreenSessionId> {
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Vec::new();
+        };
+        entry.browser_surface.pending_offscreen_authorization_ids()
+    }
+
+    pub(crate) fn authorize_offscreen(
+        &mut self,
+        profile: ProfileId,
+        request: OffscreenSessionId,
+        witness: Option<ExtensionCompatibilityBrokerWitness>,
+        lease: Option<crate::host::NativeResourceLease>,
+    ) -> Result<bool, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(false);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry
+            .browser_surface
+            .authorize_offscreen(request, witness, lease))
+    }
+
+    pub(crate) fn settle_offscreen_resource(
+        &mut self,
+        runtime: ExtensionRuntimeInstance,
+        request: u64,
+        outcome: zephium_core::ports::extensions::IsolatedExtensionResourceOutcome,
+    ) -> Result<bool, ControllerRegistryError> {
+        self.slots.admission(runtime.profile())?;
+        let Some(PersistentControllerSlot::Prepared(entry)) =
+            self.slots.entries.get(&runtime.profile())
+        else {
+            return Ok(false);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry
+            .browser_surface
+            .settle_offscreen_resource(runtime, request, outcome))
+    }
+
+    pub(crate) fn offscreen_resource_context(
+        &mut self,
+        runtime: ExtensionRuntimeInstance,
+    ) -> Result<Option<*const WKWebExtensionContext>, ControllerRegistryError> {
+        self.slots.admission(runtime.profile())?;
+        let Some(PersistentControllerSlot::Prepared(entry)) =
+            self.slots.entries.get(&runtime.profile())
+        else {
+            return Ok(None);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry.browser_surface.offscreen_resource_context(runtime))
+    }
+
+    pub(crate) fn cancel_offscreen_context(
+        &mut self,
+        profile: ProfileId,
+        context: *const WKWebExtensionContext,
+    ) {
+        if let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile) {
+            entry.browser_surface.cancel_offscreen_context(context);
         }
     }
 
@@ -1850,7 +2057,34 @@ impl PersistentControllerRegistry {
                 return Err(error);
             }
         };
-        super::record_erasure::begin(controller, identity, deadline, completion);
+        let Some(store) = (unsafe { controller.configuration().defaultWebsiteDataStore() }) else {
+            self.slots.poison();
+            completion(ExtensionRuntimeHostDataErasureDisposition::FailedClosed);
+            return Err(ControllerRegistryError::IntegrityFailed);
+        };
+        let identity_text = String::from_utf8(identity.encoded_bytes().to_vec())
+            .expect("canonical extension identity is ASCII");
+        super::record_erasure::begin(
+            controller,
+            identity,
+            deadline,
+            Box::new(move |disposition| {
+                if !matches!(
+                    disposition,
+                    ExtensionRuntimeHostDataErasureDisposition::Erased
+                        | ExtensionRuntimeHostDataErasureDisposition::NotPresent
+                ) {
+                    completion(disposition);
+                    return;
+                }
+                super::offscreen_host::begin_origin_erasure(
+                    store,
+                    &identity_text,
+                    deadline,
+                    completion,
+                );
+            }),
+        );
         Ok(ControllerPreparation::Prepared)
     }
 
@@ -2063,7 +2297,13 @@ fn create_entry(
     validate_store(&store, profile)?;
 
     let basis = unsafe { WKWebViewConfiguration::new(mtm) };
+    super::configure_extension_user_agent(&basis);
+    if !super::install_extension_disposal_symbols(&basis, mtm) {
+        return Err(ControllerRegistryError::NativeException);
+    }
     unsafe { basis.setWebsiteDataStore(&store) };
+    #[cfg(feature = "native-extension-qa-inspector")]
+    let qa_popup_errors = super::qa_popup_errors::QaPopupErrorObserver::install(&basis, mtm);
     let controller_configuration = unsafe {
         WKWebExtensionControllerConfiguration::configurationWithIdentifier(&identifier, mtm)
     };
@@ -2092,6 +2332,8 @@ fn create_entry(
         store,
         controller,
         browser_surface,
+        #[cfg(feature = "native-extension-qa-inspector")]
+        _qa_popup_errors: qa_popup_errors,
     };
     validate_quiescent_entry(&entry)?;
     Ok(entry)

@@ -96,6 +96,51 @@ impl Hub {
     /// The Store actor serializes this scan with catalog mutations. Returned
     /// keys remain non-authorizing selectors and are revalidated by ordinary
     /// activation, so no package or grant snapshot crosses this boundary.
+    pub(crate) fn load_extension_package_storage_roots(
+        &mut self,
+    ) -> rusqlite::Result<Vec<zephium_core::extensions::ExtensionBetaObjectDigest>> {
+        use zephium_core::extensions::{
+            is_beta_extension_authority, ExtensionBetaObjectDigest, ExtensionNativePackageSource,
+        };
+        let profiles = self.registry.iter().copied().collect::<Vec<_>>();
+        let mut roots = std::collections::BTreeSet::new();
+        for profile in profiles {
+            if self.degraded_profiles.contains(&profile) {
+                return Err(invalid_data("package roots require every profile"));
+            }
+            let conn = self.profile_conn(profile)?;
+            let catalog = load_catalog(conn)?;
+            for install in catalog
+                .installs()
+                .iter()
+                .filter(|install| is_beta_extension_authority(install.package().authority()))
+            {
+                let provenance = super::extension_provenance::load(conn, install.id())?
+                    .ok_or_else(|| invalid_data("external install has no provenance"))?;
+                if provenance.package() != install.package() {
+                    return Err(invalid_data("external retention identity mismatch"));
+                }
+                roots.insert(ExtensionBetaObjectDigest::from_provenance(&provenance));
+            }
+        }
+        let zephium_core::ports::store::ExtensionNativeOwnershipJournalLoadOutcome::Loaded(journal) =
+            self.load_extension_native_ownership_journal()?
+        else {
+            return Err(invalid_data("native package roots unavailable"));
+        };
+        for entry in journal.entries() {
+            if let ExtensionNativePackageSource::BetaObject(id) = entry.source() {
+                roots.insert(id);
+            }
+        }
+        if roots.len() > 256 {
+            return Err(invalid_data(
+                "external package roots exceed repository bound",
+            ));
+        }
+        Ok(roots.into_iter().collect())
+    }
+
     pub(crate) fn load_extension_runtime_startup_inventory(
         &mut self,
     ) -> rusqlite::Result<ExtensionRuntimeStartupInventory> {
@@ -169,7 +214,9 @@ impl Hub {
         if matches!(
             &mutation,
             ExtensionInstallCatalogMutation::ReplacePackage { .. }
-        ) {
+        ) || matches!(&mutation, ExtensionInstallCatalogMutation::Install { package, .. }
+            if zephium_core::extensions::is_beta_extension_authority(package.authority()))
+        {
             // Package replacement must atomically rebind the grant root. The
             // generic install mutation capability is intentionally weaker.
             return Ok(ExtensionInstallCatalogMutationOutcome::Invalid);
@@ -373,6 +420,11 @@ impl Hub {
         authority: Box<ExtensionGrantAuthority>,
         provenance: Option<Box<zephium_core::extensions::ExtensionInstallProvenance>>,
     ) -> rusqlite::Result<ExtensionInstallProvisionOutcome> {
+        if zephium_core::extensions::is_beta_extension_authority(manifest.package().authority())
+            && provenance.is_none()
+        {
+            return Ok(ExtensionInstallProvisionOutcome::Invalid);
+        }
         if self.recovery_required.is_some() {
             return Err(invalid_data("session recovery mode is read-only"));
         }
@@ -581,6 +633,14 @@ impl Hub {
             .cloned()
             .ok_or_else(|| invalid_data("extension update install disappeared"))?;
         if install.package() != current_manifest.package() {
+            return Ok(ExtensionInstallUpdateOutcome::Invalid);
+        }
+        if (zephium_core::extensions::is_beta_extension_authority(
+            current_manifest.package().authority(),
+        ) || zephium_core::extensions::is_beta_extension_authority(
+            replacement_manifest.package().authority(),
+        )) && provenance.is_none()
+        {
             return Ok(ExtensionInstallUpdateOutcome::Invalid);
         }
         if !super::extension_provenance::matches(
@@ -1004,6 +1064,15 @@ pub(super) fn load_catalog(conn: &Connection) -> rusqlite::Result<ExtensionInsta
             manifest,
             tree,
         );
+        if zephium_core::extensions::is_beta_extension_authority(authority) {
+            let provenance = super::extension_provenance::load(conn, id)?
+                .ok_or_else(|| invalid_data("Beta install is missing its provenance"))?;
+            if provenance.package() != &package {
+                return Err(invalid_data(
+                    "Beta install provenance names a different package",
+                ));
+            }
+        }
         installs.push(ExtensionInstall::from_persisted(
             id,
             install_revision,

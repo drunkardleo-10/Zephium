@@ -1,8 +1,25 @@
 #[cfg(target_os = "macos")]
 fn main() {
-    let require_supported_runtime =
-        std::env::args().any(|argument| argument == "--require-supported-runtime");
-    match zephium_engine::run_macos_web_extension_resource_probe() {
+    let arguments = std::env::args().collect::<Vec<_>>();
+    let require_supported_runtime = arguments
+        .iter()
+        .any(|argument| argument == "--require-supported-runtime");
+    let shared_origin = arguments
+        .iter()
+        .any(|argument| argument == "--shared-origin");
+    let native_origin = arguments
+        .iter()
+        .any(|argument| argument == "--native-origin");
+    if shared_origin && native_origin {
+        eprintln!("choose only one extension-origin probe");
+        std::process::exit(2);
+    }
+    let result = if shared_origin || native_origin {
+        zephium_engine::run_macos_shared_extension_origin_probe(shared_origin)
+    } else {
+        zephium_engine::run_macos_web_extension_resource_probe()
+    };
+    match result {
         Ok(true) => {}
         Ok(false) if require_supported_runtime => {
             eprintln!(

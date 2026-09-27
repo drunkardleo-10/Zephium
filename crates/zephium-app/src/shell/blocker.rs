@@ -2488,6 +2488,15 @@ impl Shell {
             } else if self.blocker.hold_effect(profile, effect) {
                 native.scheduled = true;
             } else {
+                let reason = match self.blocker.profiles.get(&profile) {
+                    None => "profile-absent",
+                    Some(entry) if entry.state == BlockerProfileState::Retired => "profile-retired",
+                    Some(entry) if entry.held_effects.len() >= MAX_HELD_EFFECTS_PER_PROFILE => {
+                        "hold-capacity"
+                    }
+                    Some(_) => "hold-refused",
+                };
+                crate::diagnostic!("view-create: content policy hold refused reason={reason}");
                 self.rollback_blocker_rejected_effect(id);
                 native.rejected = true;
             }

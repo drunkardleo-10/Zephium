@@ -101,7 +101,7 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
             tab,
             generation,
         ),
-        Err(zephium_core::extensions::ExtensionActionRejection::TabDiscarded)
+        Ok(ExtensionActionRevision::INITIAL)
     );
     assert_eq!(
         shell.extension_actions.shortcut_action_revision(
@@ -228,6 +228,90 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
     ));
     assert_eq!(shell.retry_extension_actions(), NativeWork::default());
     assert_eq!(engine.extension_action_requests().len(), 3);
+
+    let click_only = ExtensionActionState::new(
+        runtime,
+        ExtensionActionScope::Tab(tab),
+        ExtensionActionRevision::INITIAL,
+        "Click only",
+        "",
+        None,
+        true,
+        false,
+        false,
+    )
+    .unwrap();
+    shell.handle(Command::Engine(
+        EngineEvent::ExtensionActionsSnapshotSettled {
+            profile,
+            tab,
+            surface_generation: generation,
+            settlement: ExtensionActionSnapshotSettlement::Applied(
+                ExtensionActionSnapshot::new(profile, tab, generation, vec![click_only]).unwrap(),
+            ),
+        },
+    ));
+    assert_eq!(
+        shell.extension_actions.shortcut_action_revision(
+            shell.extension_browser_surfaces.published_surface(profile),
+            runtime,
+            tab,
+            generation,
+        ),
+        Err(zephium_core::extensions::ExtensionActionRejection::TabDiscarded)
+    );
+
+    // A physical view can bind after the default action was projected. The
+    // native binding invalidates that projection; a fresh revision must make
+    // both the first click and a later reopen use the current target.
+    shell.handle(Command::Engine(EngineEvent::ExtensionActionsInvalidated {
+        profile,
+    }));
+    let rebound_revision = ExtensionActionRevision::INITIAL.next().unwrap();
+    let rebound_action = ExtensionActionState::new(
+        runtime,
+        ExtensionActionScope::Tab(tab),
+        rebound_revision,
+        "Bitwarden",
+        "",
+        None,
+        true,
+        true,
+        false,
+    )
+    .unwrap();
+    shell.handle(Command::Engine(
+        EngineEvent::ExtensionActionsSnapshotSettled {
+            profile,
+            tab,
+            surface_generation: generation,
+            settlement: ExtensionActionSnapshotSettlement::Applied(
+                ExtensionActionSnapshot::new(profile, tab, generation, vec![rebound_action])
+                    .unwrap(),
+            ),
+        },
+    ));
+    assert_eq!(
+        shell.invoke_extension_action(runtime, ExtensionActionRevision::INITIAL, anchor),
+        Err(zephium_core::extensions::ExtensionActionRejection::RuntimeSuperseded)
+    );
+    let opened = shell.invoke_extension_action(runtime, rebound_revision, anchor).unwrap();
+    shell.handle(Command::Engine(EngineEvent::ExtensionActionSettled {
+        profile,
+        request: opened,
+        settlement: zephium_core::extensions::ExtensionActionSettlement::PopupPresented(
+            Size::new(320.0, 400.0),
+        ),
+    }));
+    let reopened = shell.invoke_extension_action(runtime, rebound_revision, anchor).unwrap();
+    assert_eq!(
+        shell.extension_actions.settle_invocation(
+            profile,
+            reopened,
+            zephium_core::extensions::ExtensionActionSettlement::PopupDismissed,
+        ),
+        ExtensionActionInvocationObservation::PopupDismissed
+    );
 }
 
 #[test]

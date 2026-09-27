@@ -2,6 +2,13 @@
 
 use super::*;
 
+#[derive(Clone, Copy)]
+enum ClosedTabSelection {
+    AnyRecent,
+    IdentifiedRecent,
+    Exact(zephium_core::ids::ClosedSessionId),
+}
+
 impl Shell {
     pub(super) fn open_tab(&mut self) -> Vec<Effect> {
         self.open_tab_with_id()
@@ -67,6 +74,11 @@ impl Shell {
             return NativeWork::default();
         }
         self.native_openers.remove(&id);
+        let closed_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+            .filter(|ms| (1_000..=9_007_199_254_740_991).contains(ms));
         let closed = self.windows.focused().and_then(|window| {
             self.items.tab(id).and_then(|tab| {
                 tab.url
@@ -77,6 +89,9 @@ impl Shell {
                         url: url.to_string(),
                         title: tab.title.clone(),
                         zoom: tab.zoom,
+                        session_id: closed_at_ms
+                            .map(|_| zephium_core::ids::ClosedSessionId::generate()),
+                        closed_at_ms,
                     })
             })
         });
@@ -129,6 +144,56 @@ impl Shell {
         self.commit(fx)
     }
 
+    /// Folds a trusted native guest teardown back into the logical tab tree.
+    /// The profile join prevents a stale or cross-profile callback from
+    /// removing any ordinary tab or a replacement extension tab.
+    pub(super) fn close_extension_owned_marker(&mut self, profile: ProfileId, id: ItemId) {
+        if self.profile_of_item(id) != Some(profile)
+            || !self
+                .items
+                .tab(id)
+                .is_some_and(|tab| tab.content == zephium_core::item::TabContent::ExtensionOwned)
+        {
+            return;
+        }
+        if self.item_in_focused_scope(id) {
+            let _ = self.close(id);
+            return;
+        }
+        let affected = self
+            .windows
+            .iter()
+            .filter(|window| {
+                window.active == Some(id)
+                    || window.splits.as_ref().is_some_and(|tree| tree.contains(id))
+            })
+            .map(|window| (window.id, window.space, window.active == Some(id)))
+            .collect::<Vec<_>>();
+        self.native_openers.remove(&id);
+        self.cancel_page_permission_for_item(id);
+        self.cancel_pending_presentation(id);
+        self.cancel_favicon_attempt(id);
+        self.cancel_discard_probe(id);
+        let effects = self.items.remove(id);
+        for (window_id, space, was_active) in affected {
+            let replacement = was_active
+                .then(|| self.today_tabs(space).into_iter().next())
+                .flatten();
+            if let Some(window) = self.windows.get_mut(window_id) {
+                if let Some(tree) = window.splits.take() {
+                    window.splits = tree.remove(id);
+                }
+                if was_active {
+                    window.active = replacement;
+                }
+            }
+            if let Some(replacement) = replacement {
+                self.items.set_lifecycle(replacement, Lifecycle::Active);
+            }
+        }
+        let _ = self.commit(effects);
+    }
+
     /// Restores the newest closed tab owned by the focused profile and space.
     /// A fresh item/native identity is always allocated; the closed record is
     /// removed only after the logical item has been inserted successfully.
@@ -136,15 +201,89 @@ impl Shell {
         &mut self,
         profile: ProfileId,
     ) -> Option<(ItemId, NativeWork)> {
+        self.restore_closed_tab(profile, ClosedTabSelection::AnyRecent)
+            .map(|(_, id, work)| (id, work))
+    }
+
+    /// Returns only actual close records with durable identity and timestamp.
+    /// Legacy records remain available to the ordinary reopen-last-tab path.
+    pub(super) fn brokered_recently_closed_tabs(
+        &self,
+        profile: ProfileId,
+        limit: usize,
+    ) -> Option<Vec<zephium_core::session::PersistedClosedTab>> {
+        self.profiles
+            .get(profile)
+            .filter(|entry| entry.kind != ProfileKind::Incognito)?;
         let space = self
             .windows
             .focused()
             .filter(|window| window.profile == profile)
             .map(|window| window.space)?;
-        let position = self
-            .recently_closed
-            .iter()
-            .rposition(|entry| entry.profile == profile && entry.space == space)?;
+        Some(
+            self.recently_closed
+                .iter()
+                .rev()
+                .filter(|entry| {
+                    entry.profile == profile
+                        && entry.space == space
+                        && entry.session_id.is_some()
+                        && entry.closed_at_ms.is_some()
+                })
+                .take(limit)
+                .cloned()
+                .collect(),
+        )
+    }
+
+    pub(super) fn restore_brokered_closed_tab(
+        &mut self,
+        profile: ProfileId,
+        id: Option<zephium_core::ids::ClosedSessionId>,
+    ) -> Option<(
+        zephium_core::session::PersistedClosedTab,
+        ItemId,
+        NativeWork,
+    )> {
+        self.profiles
+            .get(profile)
+            .filter(|entry| entry.kind != ProfileKind::Incognito)?;
+        self.restore_closed_tab(
+            profile,
+            id.map_or(
+                ClosedTabSelection::IdentifiedRecent,
+                ClosedTabSelection::Exact,
+            ),
+        )
+    }
+
+    fn restore_closed_tab(
+        &mut self,
+        profile: ProfileId,
+        selection: ClosedTabSelection,
+    ) -> Option<(
+        zephium_core::session::PersistedClosedTab,
+        ItemId,
+        NativeWork,
+    )> {
+        let space = self
+            .windows
+            .focused()
+            .filter(|window| window.profile == profile)
+            .map(|window| window.space)?;
+        let position = self.recently_closed.iter().rposition(|entry| {
+            entry.profile == profile
+                && entry.space == space
+                && match selection {
+                    ClosedTabSelection::AnyRecent => true,
+                    ClosedTabSelection::IdentifiedRecent => {
+                        entry.session_id.is_some() && entry.closed_at_ms.is_some()
+                    }
+                    ClosedTabSelection::Exact(id) => {
+                        entry.session_id == Some(id) && entry.closed_at_ms.is_some()
+                    }
+                }
+        })?;
         let entry = self.recently_closed[position].clone();
         let id = (0..8).find_map(|_| {
             let candidate = ItemId::generate();
@@ -162,11 +301,11 @@ impl Shell {
             let _ = self.items.remove(id);
             return None;
         }
-        self.items.set_title(id, entry.title);
+        self.items.set_title(id, entry.title.clone());
         self.items.set_zoom(id, entry.zoom);
         self.recently_closed.remove(position);
         let effects = self.focus_tab(id);
-        Some((id, self.commit(effects)))
+        Some((entry, id, self.commit(effects)))
     }
 
     /// Removes a failed native leaf from the retained split immediately. A
@@ -226,6 +365,16 @@ impl Shell {
             || !self.item_in_scope(dropped, profile, space)
         {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        if [target, dropped].into_iter().any(|id| {
+            self.items
+                .tab(id)
+                .is_some_and(|tab| tab.content != zephium_core::item::TabContent::Web)
+        }) {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::LayoutUnavailable,
+            );
         }
         if target == dropped {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);

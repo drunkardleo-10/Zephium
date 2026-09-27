@@ -1,5 +1,71 @@
 use super::*;
 
+#[test]
+fn startup_preview_hides_qa_settings_tab_without_writing_the_session() {
+    let profile = ProfileId::from(91_001);
+    let space = SpaceId::from(91_002);
+    let web = ItemId::from(91_003);
+    let settings = ItemId::from(91_004);
+    let extensions = ItemId::from(91_005);
+    let placement = Placement::Space {
+        space,
+        section: SpaceSection::Today,
+    };
+    let saved = SessionState {
+        profiles: vec![PersistedProfile {
+            id: profile,
+            name: "QA".into(),
+            kind: ProfileKind::Default,
+        }],
+        spaces: vec![PersistedSpace {
+            id: space,
+            profile,
+            name: "Browse".into(),
+        }],
+        items: vec![
+            tab(web, None, placement, "example.test"),
+            PersistedItem {
+                id: settings,
+                parent: None,
+                placement,
+                kind: PersistedKind::BrowserTab {
+                    page: zephium_core::item::BrowserOwnedTab::Settings,
+                },
+            },
+            PersistedItem {
+                id: extensions,
+                parent: None,
+                placement,
+                kind: PersistedKind::BrowserTab {
+                    page: zephium_core::item::BrowserOwnedTab::Extensions,
+                },
+            },
+        ],
+        active_space: Some(space),
+        active_item: Some(settings),
+        splits: None,
+        recently_closed: Vec::new(),
+    };
+    let store = Arc::new(FakeStore {
+        saved: Mutex::new(Some(saved.clone())),
+        ..Default::default()
+    });
+    let (shell, _engine, screen) = setup_with(store.clone());
+    shell.project_startup_session_preview();
+    let projected = last(&screen);
+    assert_eq!(projected.active, None);
+    assert_eq!(
+        projected
+            .tabs
+            .iter()
+            .map(|tab| tab.id.clone())
+            .collect::<Vec<_>>(),
+        vec![web.to_string(), extensions.to_string()],
+    );
+    assert_eq!(*store.saved.lock().unwrap(), Some(saved));
+    assert!(shell.items.tab(settings).is_none());
+}
+
 fn folder(id: ItemId, parent: Option<ItemId>, placement: Placement, name: &str) -> PersistedItem {
     PersistedItem {
         id,

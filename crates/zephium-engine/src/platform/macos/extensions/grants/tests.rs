@@ -154,6 +154,48 @@ fn brokered_schema_keeps_compatibility_only_permissions_out_of_native_sets() {
 }
 
 #[test]
+fn capability_target_selects_brokered_schema_for_exact_session_grants() {
+    let target = zephium_core::extensions::LOCAL_MACOS_CAPABILITIES_V1_COMPATIBILITY_TARGET;
+    let schema = select_native_grant_schema(target, false).unwrap();
+    assert_eq!(schema, MacosNativeGrantSchema::WkWebExtensionBrokeredV1);
+    let grants = [
+        api("sessions", REQUIRED, GRANTED),
+        api("tabs", REQUIRED, GRANTED),
+        api("nativeMessaging", REQUIRED, GRANTED),
+    ];
+    let plan = compile_projection(CompilerInput {
+        identity: PlanIdentity {
+            schema,
+            ..identity(71)
+        },
+        browsing_context: ExtensionGrantBrowsingContext::Regular,
+        file_access_granted: false,
+        private_access_granted: false,
+        api_count: grants.len(),
+        api_grants: grants,
+        host_count: 0,
+        host_grants: std::iter::empty(),
+        denied_site_count: 0,
+        denied_sites: std::iter::empty(),
+    })
+    .expect("the new target's exact internal broker and tabs grants compile");
+    assert_eq!(
+        plan.schema(),
+        MacosNativeGrantSchema::WkWebExtensionBrokeredV1
+    );
+    assert_eq!(compiled_api_permissions(&plan), ["nativeMessaging", "tabs"]);
+    assert_eq!(
+        select_native_grant_schema(target, true).unwrap(),
+        MacosNativeGrantSchema::WkWebExtensionPublisherNativeMessagingV1,
+        "publisher-native selection retains its precedence"
+    );
+    assert_eq!(
+        select_native_grant_schema("macos.wkwebextension.v1", false).unwrap(),
+        MacosNativeGrantSchema::WkWebExtensionV1
+    );
+}
+
+#[test]
 fn supported_api_table_is_closed_canonical_and_complete() {
     let names = [
         "webRequest",
@@ -291,6 +333,79 @@ fn pinned_bitwarden_contract_is_refused_before_unbounded_storage_can_activate() 
 }
 
 #[test]
+fn capabilities_v2_offscreen_grants_compile_only_for_the_exact_target() {
+    let target = zephium_core::extensions::LOCAL_MACOS_CAPABILITIES_V2_COMPATIBILITY_TARGET;
+    let schema = select_native_grant_schema(target, false).unwrap();
+    assert_eq!(schema, MacosNativeGrantSchema::WkWebExtensionCapabilitiesV2);
+    assert_eq!(
+        select_native_grant_schema(target, true),
+        Err(MacosNativeGrantPlanError::ProhibitedApiPermission),
+        "the v2 offscreen broker cannot borrow publisher-native host authority"
+    );
+    let required = [
+        "activeTab",
+        "alarms",
+        "clipboardWrite",
+        "contextMenus",
+        "idle",
+        "offscreen",
+        "scripting",
+        "storage",
+        "tabs",
+        "webNavigation",
+        "webRequest",
+        "webRequestAuthProvider",
+        "notifications",
+        "nativeMessaging",
+    ];
+    let grants = required
+        .iter()
+        .map(|name| api(name, REQUIRED, GRANTED))
+        .chain([api("privacy", OPTIONAL, DENIED)])
+        .collect::<Vec<_>>();
+    let plan = compile_projection(CompilerInput {
+        identity: PlanIdentity {
+            schema,
+            ..identity(72)
+        },
+        browsing_context: ExtensionGrantBrowsingContext::Regular,
+        file_access_granted: false,
+        private_access_granted: false,
+        api_count: grants.len(),
+        api_grants: grants.iter().copied(),
+        host_count: 0,
+        host_grants: std::iter::empty(),
+        denied_site_count: 0,
+        denied_sites: std::iter::empty(),
+    })
+    .expect("prepared v2 native permission cohort");
+    assert_eq!(
+        compiled_api_permissions(&plan),
+        [
+            "activeTab",
+            "alarms",
+            "clipboardWrite",
+            "contextMenus",
+            "nativeMessaging",
+            "notifications",
+            "scripting",
+            "storage",
+            "tabs",
+            "webNavigation",
+            "webRequest",
+        ]
+    );
+    assert_eq!(
+        regular(&grants, &[]).expect_err("ordinary runtime cannot expose native messaging"),
+        MacosNativeGrantPlanError::ProhibitedApiPermission
+    );
+    assert_eq!(
+        schema.permission_disposition("history"),
+        Ok(MacosNativeApiPermissionDisposition::ProductProhibited)
+    );
+}
+
+#[test]
 fn never_requested_optional_api_is_omitted_without_native_prompt_suppression() {
     let plan = regular(&[api("storage", OPTIONAL, DENIED)], &[])
         .expect("supported optional absence is representable");
@@ -329,13 +444,7 @@ fn rendered_bytes_define_adversarial_sort_and_deduplication_order() {
         .collect();
 
     let plan = regular(&[], &grants).expect("representable web patterns");
-    let expected = [
-        "http://*.example.com/*",
-        "http://*/*",
-        "http://127.0.0.1/*",
-        "http://alpha.example/*",
-        "https://*.example.com/*",
-    ];
+    let expected = ["http://*/*", "https://*.example.com/*"];
     assert_eq!(compiled_host_patterns(&plan), expected);
     assert_eq!(
         plan.host_pattern_arena.len(),
@@ -397,6 +506,120 @@ fn all_urls_never_smuggles_file_access_into_the_native_plan() {
     let plan = regular(&[], &[host(&all_urls, REQUIRED, GRANTED)])
         .expect("web subset of all URLs is representable");
     assert_eq!(compiled_host_patterns(&plan), ["http://*/*", "https://*/*"]);
+}
+
+#[test]
+fn overlapping_effective_host_grants_compile_to_one_native_union() {
+    let patterns = [
+        "*://*.youtube.com/*",
+        "https://www.youtube.com/*",
+        "https://m.youtube.com/*",
+        "http://www.youtube.com/*",
+        "https://youtube.com/*",
+        "https://*.nested.youtube.com/*",
+    ]
+    .map(parse);
+    for reverse in [false, true] {
+        let mut grants = patterns
+            .iter()
+            .map(|pattern| host(pattern, REQUIRED, GRANTED))
+            .collect::<Vec<_>>();
+        if reverse {
+            grants.reverse();
+        }
+        let plan = regular(&[], &grants).unwrap();
+        assert_eq!(
+            compiled_host_patterns(&plan),
+            ["http://*.youtube.com/*", "https://*.youtube.com/*"]
+        );
+    }
+}
+
+#[test]
+fn native_host_compaction_preserves_url_access_across_grant_combinations() {
+    let inputs = [
+        "*://*.example.com/*",
+        "https://a.example.com/*",
+        "https://*.a.example.com/*",
+        "http://*/*",
+        "https://127.0.0.1/*",
+    ]
+    .map(parse);
+    let urls = [
+        "https://example.com/",
+        "http://example.com/",
+        "https://a.example.com/account?x=1",
+        "http://a.example.com/",
+        "https://b.a.example.com/",
+        "https://notexample.com/",
+        "https://example.com.other.test/",
+        "http://other.test/",
+        "https://other.test/",
+        "https://127.0.0.1/",
+        "http://127.0.0.1/",
+        "https://example.com:8443/",
+        "file:///tmp/example",
+    ]
+    .map(|url| url::Url::parse(url).unwrap());
+    for mask in 0..(1 << inputs.len()) {
+        let selected = inputs
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| mask & (1 << index) != 0)
+            .map(|(_, pattern)| pattern)
+            .collect::<Vec<_>>();
+        let grants = selected
+            .iter()
+            .map(|pattern| host(pattern, REQUIRED, GRANTED))
+            .collect::<Vec<_>>();
+        let plan = regular(&[], &grants).unwrap();
+        let native = plan.granted_host_patterns().map(parse).collect::<Vec<_>>();
+        for url in &urls {
+            assert_eq!(
+                selected.iter().any(|pattern| pattern.matches_url(url)),
+                native.iter().any(|pattern| pattern.matches_url(url)),
+                "access changed for mask {mask} at {url}"
+            );
+        }
+    }
+}
+
+#[test]
+fn native_host_compaction_preserves_scheme_domain_and_denial_boundaries() {
+    let broad = parse("https://*.example.com/*");
+    let narrow = parse("https://app.example.com/*");
+    let plain_http = parse("http://app.example.com/*");
+    let suffix_collision = parse("https://notexample.com/*");
+    let prefix_collision = parse("https://example.com.other.test/*");
+    let plan = regular(
+        &[],
+        &[
+            host(&broad, OPTIONAL, DENIED),
+            host(&narrow, REQUIRED, GRANTED),
+        ],
+    )
+    .unwrap();
+    assert_eq!(compiled_host_patterns(&plan), ["https://app.example.com/*"]);
+    let plan = regular(
+        &[],
+        &[
+            host(&broad, REQUIRED, GRANTED),
+            host(&narrow, REQUIRED, GRANTED),
+            host(&plain_http, REQUIRED, GRANTED),
+            host(&suffix_collision, REQUIRED, GRANTED),
+            host(&prefix_collision, REQUIRED, GRANTED),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        compiled_host_patterns(&plan),
+        [
+            "http://app.example.com/*",
+            "https://*.example.com/*",
+            "https://example.com.other.test/*",
+            "https://notexample.com/*",
+        ]
+    );
 }
 
 #[test]
@@ -808,4 +1031,84 @@ fn plan_retains_exact_generation_identity_and_redacts_debug_output() {
 fn plan_is_safe_to_transfer_to_the_native_ui_thread() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<MacosNativeGrantPlan>();
+}
+
+#[test]
+fn explicit_granted_origin_covers_its_static_route_without_silently_widening_access() {
+    let root = parse("https://example.com/*");
+    let route = parse("https://example.com/embed/*");
+    assert!(regular(
+        &[],
+        &[
+            host(&root, REQUIRED, GRANTED),
+            host(&route, REQUIRED, GRANTED)
+        ]
+    )
+    .is_ok());
+    assert!(regular(
+        &[],
+        &[
+            host(&root, OPTIONAL, DENIED),
+            host(&route, REQUIRED, GRANTED)
+        ]
+    )
+    .is_err());
+    for unrelated in ["http://example.com/*", "https://other.example/*"] {
+        let other = parse(unrelated);
+        assert!(regular(
+            &[],
+            &[
+                host(&other, REQUIRED, GRANTED),
+                host(&route, REQUIRED, GRANTED)
+            ]
+        )
+        .is_err());
+    }
+    assert!(regular(&[], &[host(&route, REQUIRED, GRANTED)]).is_err());
+}
+
+#[test]
+fn granted_subdomain_origin_covers_a_static_route_on_an_included_host() {
+    let root = parse("https://*.example.com/*");
+    for route in [
+        "https://app.example.com/add*",
+        "https://example.com/add*",
+        "https://*.nested.example.com/add*",
+    ] {
+        let route = parse(route);
+        let plan = regular(
+            &[],
+            &[
+                host(&root, REQUIRED, GRANTED),
+                host(&route, REQUIRED, GRANTED),
+            ],
+        )
+        .expect("an already granted parent domain covers the content route");
+        assert_eq!(compiled_host_patterns(&plan), ["https://*.example.com/*"]);
+        assert!(regular(
+            &[],
+            &[
+                host(&root, OPTIONAL, DENIED),
+                host(&route, REQUIRED, GRANTED)
+            ],
+        )
+        .is_err());
+    }
+    for route in [
+        "http://app.example.com/add*",
+        "https://notexample.com/add*",
+        "https://example.com.other.test/add*",
+        "https://*.com/add*",
+        "https://app.example.com:8443/add*",
+    ] {
+        let route = parse(route);
+        assert!(regular(
+            &[],
+            &[
+                host(&root, REQUIRED, GRANTED),
+                host(&route, REQUIRED, GRANTED)
+            ],
+        )
+        .is_err());
+    }
 }

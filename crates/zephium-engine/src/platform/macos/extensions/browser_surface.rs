@@ -14,21 +14,24 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "native-web-extension-probes")]
 use std::sync::Arc;
+use std::sync::OnceLock;
 
-use block2::RcBlock;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2_app_kit::NSView;
+#[cfg(feature = "native-extension-qa-inspector")]
+use objc2_foundation::NSLocalizedFailureReasonErrorKey;
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSDate, NSError, NSNotFound, NSObjectProtocol, NSSet, NSString,
-    NSUTF8StringEncoding, NSURL,
+    NSURLErrorFailingURLErrorKey, NSUTF8StringEncoding, NSUnderlyingErrorKey, NSURL,
 };
 use objc2_web_kit::{
-    WKWebExtensionAction, WKWebExtensionContext, WKWebExtensionController,
-    WKWebExtensionControllerDelegate, WKWebExtensionMatchPattern, WKWebExtensionMessagePort,
-    WKWebExtensionPermission, WKWebExtensionTab, WKWebExtensionTabConfiguration,
-    WKWebExtensionWindow, WKWebView,
+    WKWebExtensionAction, WKWebExtensionContext, WKWebExtensionContextErrorDomain,
+    WKWebExtensionController, WKWebExtensionControllerDelegate, WKWebExtensionMatchPattern,
+    WKWebExtensionMessagePort, WKWebExtensionPermission, WKWebExtensionTab,
+    WKWebExtensionTabChangedProperties, WKWebExtensionTabConfiguration, WKWebExtensionWindow,
+    WKWebView,
 };
 use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRequestId,
@@ -49,10 +52,12 @@ use super::compatibility_broker::{
     CompatibilityBroker, CompatibilityBrokerPool, CompatibilityBrokerSettlementOutcome,
 };
 use super::extension_page::ExtensionPageBroker;
+use super::identity_broker::{IdentityBroker, IdentityRequestId};
 use super::native_messaging::{
     NativeHostProcessPool, PublisherNativeMessagingAuthorization, PublisherNativeMessagingBroker,
     PublisherNativeMessagingRequestId,
 };
+use super::offscreen_broker::{OffscreenBroker, OffscreenSessionId};
 use super::runtime_grant_broker::{
     RuntimeGrantRequestBroker, RuntimeGrantRequestPool, RuntimeGrantSettlementOutcome,
 };
@@ -107,12 +112,19 @@ struct BrowserTabIvars {
     webview: RefCell<Option<Weak<WKWebView>>>,
     title: RefCell<Retained<NSString>>,
     url: RefCell<Option<Retained<NSURL>>>,
+    attempted_url: RefCell<Option<Retained<NSURL>>>,
     index: Cell<usize>,
     selected: Cell<bool>,
     resident: Cell<bool>,
     loading: Cell<bool>,
     pinned: Cell<bool>,
     broker: Rc<BrowserRequestBroker>,
+    guest: RefCell<
+        Option<(
+            Retained<WKWebExtensionContext>,
+            std::rc::Weak<ExtensionPageBroker>,
+        )>,
+    >,
     #[cfg(feature = "native-web-extension-probes")]
     lifecycle_drops: Arc<AtomicUsize>,
 }
@@ -143,11 +155,17 @@ define_class!(
         #[unsafe(method_id(webViewForWebExtensionContext:))]
         fn webview_for_context(
             &self,
-            _context: &WKWebExtensionContext,
+            context: &WKWebExtensionContext,
         ) -> Option<Retained<WKWebView>> {
-            resolve_resident_webview(self.ivars().resident.get(), &self.ivars().broker, || {
-                self.ivars().webview.borrow().as_ref().and_then(Weak::load)
-            })
+            if let Some((_, broker)) = self.ivars().guest.borrow().as_ref() {
+                broker
+                    .upgrade()
+                    .and_then(|broker| broker.view(self.id(), context))
+            } else {
+                resolve_resident_webview(self.ivars().resident.get(), &self.ivars().broker, || {
+                    self.ivars().webview.borrow().as_ref().and_then(Weak::load)
+                })
+            }
         }
 
         #[unsafe(method_id(titleForWebExtensionContext:))]
@@ -159,8 +177,20 @@ define_class!(
         }
 
         #[unsafe(method_id(urlForWebExtensionContext:))]
-        fn url_for_context(&self, _context: &WKWebExtensionContext) -> Option<Retained<NSURL>> {
-            self.ivars().url.borrow().clone()
+        fn url_for_context(&self, context: &WKWebExtensionContext) -> Option<Retained<NSURL>> {
+            if let Some((_, broker)) = self.ivars().guest.borrow().as_ref() {
+                broker
+                    .upgrade()
+                    .and_then(|broker| broker.view(self.id(), context))
+                    .and_then(|view| unsafe { view.URL() })
+            } else {
+                self.ivars()
+                    .attempted_url
+                    .borrow()
+                    .as_ref()
+                    .cloned()
+                    .or_else(|| self.ivars().url.borrow().clone())
+            }
         }
 
         #[unsafe(method(isLoadingCompleteForWebExtensionContext:))]
@@ -190,10 +220,20 @@ define_class!(
             context: &WKWebExtensionContext,
             completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
         ) {
-            if !self.ivars().broker.accepts(None, context) {
+            if !self.accepts(context) {
                 self.ivars()
                     .broker
                     .reject_unit(completion, ExtensionBrowserRequestRejection::InvalidContext);
+                return;
+            }
+            if let Some((_, broker)) = self.ivars().guest.borrow().as_ref() {
+                if let Some(broker) = broker.upgrade() {
+                    broker.load(self.id(), context, url, completion);
+                } else {
+                    self.ivars()
+                        .broker
+                        .reject_unit(completion, ExtensionBrowserRequestRejection::InvalidContext);
+                }
                 return;
             }
             let Ok(url) = request_url(url) else {
@@ -243,11 +283,17 @@ define_class!(
             context: &WKWebExtensionContext,
             completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
         ) {
-            if !self.ivars().broker.accepts(None, context) {
+            if !self.accepts(context) {
                 self.ivars()
                     .broker
                     .reject_unit(completion, ExtensionBrowserRequestRejection::InvalidContext);
                 return;
+            }
+            if extension_tab_trace_enabled() {
+                eprintln!(
+                    "extension-tab-trace: native-close-request tab={}",
+                    self.id()
+                );
             }
             self.ivars().broker.begin_unit(
                 ExtensionBrowserRequestAction::CloseTab { tab: self.id() },
@@ -367,13 +413,36 @@ define_class!(
 );
 
 impl BrowserTab {
+    fn accepts(&self, context: &WKWebExtensionContext) -> bool {
+        self.ivars().broker.accepts(None, context)
+            && self
+                .ivars()
+                .guest
+                .borrow()
+                .as_ref()
+                .is_none_or(|(owner, broker)| {
+                    std::ptr::eq(&**owner, context)
+                        && broker
+                            .upgrade()
+                            .is_some_and(|broker| broker.view(self.id(), context).is_some())
+                })
+    }
+    fn bind_guest(
+        &self,
+        context: Retained<WKWebExtensionContext>,
+        broker: &Rc<ExtensionPageBroker>,
+        view: &Retained<WKWebView>,
+    ) {
+        *self.ivars().guest.borrow_mut() = Some((context, Rc::downgrade(broker)));
+        *self.ivars().webview.borrow_mut() = Some(Weak::from_retained(view));
+    }
     fn begin_unit_action(
         &self,
         context: &WKWebExtensionContext,
         completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
         action: ExtensionBrowserRequestAction,
     ) {
-        if !self.ivars().broker.accepts(None, context) {
+        if !self.accepts(context) {
             self.ivars()
                 .broker
                 .reject_unit(completion, ExtensionBrowserRequestRejection::InvalidContext);
@@ -395,12 +464,14 @@ impl BrowserTab {
             webview: RefCell::new(None),
             title: RefCell::new(NSString::from_str(projected.title())),
             url: RefCell::new(url),
+            attempted_url: RefCell::new(None),
             index: Cell::new(0),
             selected: Cell::new(false),
             resident: Cell::new(projected.resident()),
             loading: Cell::new(projected.loading()),
             pinned: Cell::new(projected.pinned()),
             broker,
+            guest: RefCell::new(None),
             #[cfg(feature = "native-web-extension-probes")]
             lifecycle_drops,
         });
@@ -424,25 +495,86 @@ impl BrowserTab {
         selected: bool,
         projected: &zephium_core::extensions::ExtensionBrowserTab,
         webview: Option<&Retained<WKWebView>>,
-    ) -> Result<(), BrowserSurfaceError> {
+    ) -> Result<WKWebExtensionTabChangedProperties, BrowserSurfaceError> {
+        let title_changed = !native_string_matches(&self.ivars().title.borrow(), projected.title());
+        let url_changed =
+            !native_url_matches(self.ivars().url.borrow().as_deref(), projected.url());
+        let loading_changed = self.ivars().loading.get() != projected.loading();
+        let pinned_changed = self.ivars().pinned.get() != projected.pinned();
         *self.ivars().window.borrow_mut() = Some(Weak::from_retained(window));
-        *self.ivars().webview.borrow_mut() = webview.map(Weak::from_retained);
-        if !native_string_matches(&self.ivars().title.borrow(), projected.title()) {
+        if self.ivars().guest.borrow().is_none() {
+            *self.ivars().webview.borrow_mut() = webview.map(Weak::from_retained);
+        }
+        if title_changed {
             *self.ivars().title.borrow_mut() = NSString::from_str(projected.title());
         }
-        if !native_url_matches(self.ivars().url.borrow().as_deref(), projected.url()) {
+        if url_changed {
             *self.ivars().url.borrow_mut() = projected.url().map(native_url).transpose()?;
+        }
+        if url_changed {
+            self.ivars().attempted_url.borrow_mut().take();
         }
         self.ivars().index.set(index);
         self.ivars().selected.set(selected);
         self.ivars().resident.set(projected.resident());
         self.ivars().loading.set(projected.loading());
         self.ivars().pinned.set(projected.pinned());
-        Ok(())
+        Ok(tab_property_change_flags(
+            title_changed,
+            url_changed,
+            loading_changed,
+            pinned_changed,
+        ))
     }
 
     fn bind_webview(&self, webview: Option<&Retained<WKWebView>>) {
-        *self.ivars().webview.borrow_mut() = webview.map(Weak::from_retained);
+        if self.ivars().guest.borrow().is_none() {
+            *self.ivars().webview.borrow_mut() = webview.map(Weak::from_retained);
+        }
+    }
+
+    fn observe_url_attempt(
+        &self,
+        webview: &WKWebView,
+        target: &str,
+    ) -> Result<bool, BrowserSurfaceError> {
+        let reason = if !self.ivars().resident.get() {
+            Some("nonresident")
+        } else if self.ivars().guest.borrow().is_some() {
+            Some("extension-guest")
+        } else if !self
+            .ivars()
+            .webview
+            .borrow()
+            .as_ref()
+            .and_then(Weak::load)
+            .is_some_and(|bound| std::ptr::eq(&*bound, webview))
+        {
+            Some("physical-view-unbound-or-mismatched")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            if extension_tab_trace_enabled() {
+                eprintln!("extension-tab-trace: native-tab outcome={reason}");
+            }
+            return Ok(false);
+        }
+        *self.ivars().attempted_url.borrow_mut() = Some(native_url(target)?);
+        Ok(true)
+    }
+
+    fn clear_url_attempt(&self, webview: &WKWebView) {
+        if self
+            .ivars()
+            .webview
+            .borrow()
+            .as_ref()
+            .and_then(Weak::load)
+            .is_some_and(|bound| std::ptr::eq(&*bound, webview))
+        {
+            self.ivars().attempted_url.borrow_mut().take();
+        }
     }
 
     fn has_bound_resident_webview(&self) -> bool {
@@ -469,7 +601,7 @@ impl BrowserTab {
         context: &WKWebExtensionContext,
         completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
     ) {
-        if !self.ivars().broker.accepts(None, context) {
+        if !self.accepts(context) {
             self.ivars()
                 .broker
                 .reject_unit(completion, ExtensionBrowserRequestRejection::InvalidContext);
@@ -486,7 +618,7 @@ impl BrowserTab {
         context: &WKWebExtensionContext,
         completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
     ) {
-        let reason = if self.ivars().broker.accepts(None, context) {
+        let reason = if self.accepts(context) {
             ExtensionBrowserRequestRejection::Unsupported
         } else {
             ExtensionBrowserRequestRejection::InvalidContext
@@ -515,6 +647,186 @@ fn native_url_matches(native: Option<&NSURL>, expected: Option<&str>) -> bool {
             .is_some_and(|value| native_string_matches(&value, expected)),
         _ => false,
     }
+}
+
+fn extension_tab_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("ZEPHIUM_EXTENSION_TAB_TRACE").as_deref() == Ok("1"))
+}
+
+fn trace_error_domain(error: &NSError) -> &'static str {
+    match error.domain().to_string().as_str() {
+        "NSURLErrorDomain" => "nsurl",
+        "WKErrorDomain" => "webkit",
+        "NSPOSIXErrorDomain" => "posix",
+        "WKWebExtensionContextErrorDomain" => "web_extension_context",
+        _ => "other",
+    }
+}
+
+fn trace_error_resource(value: &str) -> &'static str {
+    if value.contains("__zephium_background_v1.js")
+        || value.contains("__zephium_background_v2.js")
+    {
+        "background_wrapper"
+    } else if value.contains("webkit-api-v1.js") {
+        "api_prelude"
+    } else if value.contains("webkit-runtime-messaging-v2.js") {
+        "runtime_messaging"
+    } else if value.contains("webkit-offscreen-background-v1.js") {
+        "offscreen_bridge"
+    } else if value.contains("webkit-notifications-v1.js") {
+        "notifications_bridge"
+    } else if value.contains("webkit-managed-storage-v1.js") {
+        "managed_storage_bridge"
+    } else if value.contains("webkit-web-navigation-v1.js") {
+        "web_navigation_bridge"
+    } else if value.contains("background.js") {
+        "publisher_background"
+    } else if value.contains("offscreen-document/") {
+        "offscreen_document"
+    } else {
+        "unknown"
+    }
+}
+
+fn trace_error_exception(value: &str) -> &'static str {
+    for (needle, class) in [
+        ("TypeError", "type"),
+        ("ReferenceError", "reference"),
+        ("SyntaxError", "syntax"),
+        ("SecurityError", "security"),
+        ("NotSupportedError", "unsupported"),
+        ("NetworkError", "network"),
+        ("AbortError", "abort"),
+    ] {
+        if value.contains(needle) {
+            return class;
+        }
+    }
+    "unknown"
+}
+
+#[cfg(feature = "native-extension-qa-inspector")]
+pub(super) fn redacted_background_error_text(value: &str) -> String {
+    let mut output = String::with_capacity(320);
+    for word in value.split_whitespace() {
+        let lower = word.to_ascii_lowercase();
+        let sensitive_assignment = [
+            "token=",
+            "code=",
+            "state=",
+            "password=",
+            "secret=",
+            "session=",
+            "cookie=",
+            "authorization=",
+            "email=",
+        ]
+        .iter()
+        .any(|key| lower.contains(key));
+        let redact = lower.contains("://")
+            || lower.starts_with("data:")
+            || lower.starts_with("blob:")
+            || lower.contains('@')
+            || sensitive_assignment
+            || word.len() > 96
+            || (word.len() > 32 && word.bytes().filter(u8::is_ascii_digit).count() >= 4);
+        let safe = if redact { "[redacted]" } else { word };
+        if output.len() + safe.len() + 1 > 320 {
+            output.push_str(" ...");
+            break;
+        }
+        if !output.is_empty() {
+            output.push(' ');
+        }
+        for byte in safe.bytes() {
+            output.push(if byte.is_ascii_graphic() {
+                char::from(byte)
+            } else {
+                '_'
+            });
+        }
+    }
+    if output.is_empty() {
+        output.push_str("<empty>");
+    }
+    output
+}
+
+#[cfg(feature = "native-extension-qa-inspector")]
+fn trace_background_error_text(error: &NSError) {
+    static REPORTED: OnceLock<()> = OnceLock::new();
+    if REPORTED.set(()).is_err() {
+        return;
+    }
+    let outer = redacted_background_error_text(&error.localizedDescription().to_string());
+    let user_info = error.userInfo();
+    let underlying_object = user_info.objectForKey(unsafe { NSUnderlyingErrorKey });
+    let underlying = underlying_object
+        .as_deref()
+        .and_then(|value| value.downcast_ref::<NSError>());
+    let nested = underlying.map_or_else(
+        || "<absent>".to_owned(),
+        |cause| redacted_background_error_text(&cause.localizedDescription().to_string()),
+    );
+    let failure = user_info
+        .objectForKey(unsafe { NSLocalizedFailureReasonErrorKey })
+        .as_deref()
+        .and_then(|value| value.downcast_ref::<NSString>())
+        .map_or_else(
+            || "<absent>".to_owned(),
+            |reason| redacted_background_error_text(&reason.to_string()),
+        );
+    eprintln!(
+        "extension-tab-trace: background-load-error description={outer} underlying={nested} reason={failure}"
+    );
+}
+
+fn trace_context_error_cause(error: &NSError) -> (&'static str, isize, &'static str, &'static str) {
+    let user_info = error.userInfo();
+    let underlying_object = user_info.objectForKey(unsafe { NSUnderlyingErrorKey });
+    let underlying = underlying_object
+        .as_deref()
+        .and_then(|value| value.downcast_ref::<NSError>());
+    let cause = underlying.unwrap_or(error);
+    let description = cause.localizedDescription().to_string();
+    let failing_path = cause
+        .userInfo()
+        .objectForKey(unsafe { NSURLErrorFailingURLErrorKey })
+        .as_deref()
+        .and_then(|value| value.downcast_ref::<NSURL>())
+        .and_then(NSURL::path)
+        .map(|path| path.to_string());
+    let resource = failing_path
+        .as_deref()
+        .map(trace_error_resource)
+        .filter(|class| *class != "unknown")
+        .unwrap_or_else(|| trace_error_resource(&description));
+    (
+        if underlying.is_some() {
+            trace_error_domain(cause)
+        } else {
+            "absent"
+        },
+        if underlying.is_some() {
+            cause.code()
+        } else {
+            0
+        },
+        resource,
+        trace_error_exception(&description),
+    )
+}
+
+fn callback_extension_id(target: &str) -> Option<String> {
+    let parsed = url::Url::parse(target).ok()?;
+    if parsed.scheme() != "https" {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    let id = host.strip_suffix(".chromiumapp.org")?;
+    (id.len() == 32 && id.bytes().all(|byte| matches!(byte, b'a'..=b'p'))).then(|| id.to_owned())
 }
 
 pub(super) fn request_url(url: &NSURL) -> Result<std::sync::Arc<str>, ()> {
@@ -689,6 +1001,10 @@ struct BrowserControllerDelegateIvars {
     extension_pages: Rc<ExtensionPageBroker>,
     runtime_grants: Rc<RuntimeGrantRequestBroker>,
     compatibility_broker: Rc<CompatibilityBroker>,
+    identity_broker: Rc<IdentityBroker>,
+    offscreen_profile: Box<ProfileId>,
+    offscreen_sink: Option<crate::EngineEventIngressSink>,
+    offscreen_broker: RefCell<Option<Rc<OffscreenBroker>>>,
     publisher_native_messaging: Rc<PublisherNativeMessagingBroker>,
     #[cfg(feature = "native-web-extension-probes")]
     lifecycle_drops: Arc<AtomicUsize>,
@@ -700,6 +1016,9 @@ struct BrowserControllerDelegateServices {
     extension_pages: Rc<ExtensionPageBroker>,
     runtime_grants: Rc<RuntimeGrantRequestBroker>,
     compatibility_broker: Rc<CompatibilityBroker>,
+    identity_broker: Rc<IdentityBroker>,
+    offscreen_profile: ProfileId,
+    offscreen_sink: Option<crate::EngineEventIngressSink>,
     publisher_native_messaging: Rc<PublisherNativeMessagingBroker>,
 }
 
@@ -719,7 +1038,7 @@ define_class!(
             _controller: &WKWebExtensionController,
             _context: &WKWebExtensionContext,
         ) -> Retained<NSArray<ProtocolObject<dyn WKWebExtensionWindow>>> {
-            let mut windows = self
+            let windows = self
                 .ivars()
                 .windows
                 .borrow()
@@ -727,9 +1046,6 @@ define_class!(
                 .cloned()
                 .map(ProtocolObject::from_retained)
                 .collect::<Vec<_>>();
-            if let Some(extension_page) = self.ivars().extension_pages.open_window() {
-                windows.push(extension_page);
-            }
             NSArray::from_retained_slice(&windows)
         }
 
@@ -739,14 +1055,12 @@ define_class!(
             _controller: &WKWebExtensionController,
             _context: &WKWebExtensionContext,
         ) -> Option<Retained<ProtocolObject<dyn WKWebExtensionWindow>>> {
-            self.ivars().extension_pages.focused_window().or_else(|| {
-                self.ivars()
-                    .focused
-                    .borrow()
-                    .as_ref()
-                    .cloned()
-                    .map(ProtocolObject::from_retained)
-            })
+            self.ivars()
+                .focused
+                .borrow()
+                .as_ref()
+                .cloned()
+                .map(ProtocolObject::from_retained)
         }
 
         #[unsafe(method(webExtensionController:openNewTabUsingConfiguration:forExtensionContext:completionHandler:))]
@@ -763,28 +1077,6 @@ define_class!(
             if !broker.accepts(Some(controller), context) {
                 product_probe_create_diagnostic("invalid-context", configuration);
                 broker.reject_tab(completion, ExtensionBrowserRequestRejection::InvalidContext);
-                return;
-            }
-            // A plain extension-page link to the exact manifest options URL
-            // arrives through the generic new-tab delegate rather than
-            // runtime.openOptionsPage(). Present it in the dedicated
-            // extension-only surface, while truthfully rejecting the tab
-            // creation because no Shell tab was minted.
-            let exact_options_request = unsafe { configuration.url() }.is_some_and(|requested| {
-                unsafe { context.optionsPageURL() }.is_some_and(|options| {
-                    requested.absoluteString().is_some_and(|requested| {
-                        options
-                            .absoluteString()
-                            .is_some_and(|options| requested.isEqualToString(&options))
-                    })
-                })
-            });
-            if exact_options_request {
-                let ignored: RcBlock<dyn Fn(*mut NSError)> = RcBlock::new(|_| {});
-                self.ivars()
-                    .action_popup
-                    .open_options_page(controller, context, &ignored);
-                broker.reject_tab(completion, ExtensionBrowserRequestRejection::Unsupported);
                 return;
             }
             if let Some(url) = unsafe { configuration.url() } {
@@ -809,25 +1101,15 @@ define_class!(
                         return;
                     }
                     let target_count = match unsafe { configuration.window() } {
-                        None => self.ivars().extension_pages.focused_window().map_or_else(
-                            || {
-                                self.ivars()
-                                    .focused
-                                    .borrow()
-                                    .as_ref()
-                                    .map(|window| window.tab_count())
-                            },
-                            |_| Some(1),
-                        ),
-                        Some(requested) => self
-                            .window_for(&requested)
-                            .map(|window| window.tab_count())
-                            .or_else(|| {
-                                self.ivars()
-                                    .extension_pages
-                                    .contains_window(&requested)
-                                    .then_some(1)
-                            }),
+                        None => self
+                            .ivars()
+                            .focused
+                            .borrow()
+                            .as_ref()
+                            .map(|window| window.tab_count()),
+                        Some(requested) => {
+                            self.window_for(&requested).map(|window| window.tab_count())
+                        }
                     };
                     let index = unsafe { configuration.index() };
                     if target_count.is_none()
@@ -1059,6 +1341,14 @@ define_class!(
                     .begin(controller, context, message, reply);
                 return;
             }
+            if application_identifier
+                .is_some_and(super::identity_broker::matches_application_identifier)
+            {
+                self.ivars()
+                    .identity_broker
+                    .begin(controller, context, message, reply);
+                return;
+            }
             self.ivars().publisher_native_messaging.begin_one_shot(
                 controller,
                 context,
@@ -1076,6 +1366,29 @@ define_class!(
             context: &WKWebExtensionContext,
             completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
         ) {
+            if unsafe { port.applicationIdentifier() }
+                .as_ref()
+                .is_some_and(|id| OffscreenBroker::matches_application_identifier(id))
+            {
+                let broker = {
+                    let mut slot = self.ivars().offscreen_broker.borrow_mut();
+                    slot.get_or_insert_with(|| {
+                        let broker = OffscreenBroker::new(
+                            *self.ivars().offscreen_profile,
+                            self.ivars().offscreen_sink.clone(),
+                        );
+                        if let Some(controller) = unsafe {
+                            Retained::retain(std::ptr::NonNull::from(controller).as_ptr())
+                        } {
+                            broker.bind_controller(&controller);
+                        }
+                        broker
+                    })
+                    .clone()
+                };
+                broker.begin_port(controller, context, port, completion);
+                return;
+            }
             self.ivars()
                 .publisher_native_messaging
                 .begin_port(controller, context, port, completion);
@@ -1095,6 +1408,9 @@ impl BrowserControllerDelegate {
             extension_pages,
             runtime_grants,
             compatibility_broker,
+            identity_broker,
+            offscreen_profile,
+            offscreen_sink,
             publisher_native_messaging,
         } = services;
         let object = Self::alloc(mtm).set_ivars(BrowserControllerDelegateIvars {
@@ -1105,6 +1421,10 @@ impl BrowserControllerDelegate {
             extension_pages,
             runtime_grants,
             compatibility_broker,
+            identity_broker,
+            offscreen_profile: Box::new(offscreen_profile),
+            offscreen_sink,
+            offscreen_broker: RefCell::new(None),
             publisher_native_messaging,
             #[cfg(feature = "native-web-extension-probes")]
             lifecycle_drops,
@@ -1149,6 +1469,7 @@ pub(super) struct MacosExtensionBrowserSurfaceHost {
     extension_pages: Rc<ExtensionPageBroker>,
     runtime_grants: Rc<RuntimeGrantRequestBroker>,
     compatibility_broker: Rc<CompatibilityBroker>,
+    identity_broker: Rc<IdentityBroker>,
     publisher_native_messaging: Rc<PublisherNativeMessagingBroker>,
     windows: HashMap<WindowId, Retained<BrowserWindow>>,
     tabs: HashMap<ItemId, Retained<BrowserTab>>,
@@ -1172,7 +1493,8 @@ impl MacosExtensionBrowserSurfaceHost {
         let runtime_grants =
             RuntimeGrantRequestBroker::new(profile, sink.clone(), runtime_grant_pool);
         let compatibility_broker =
-            CompatibilityBroker::new(profile, sink, compatibility_broker_pool);
+            CompatibilityBroker::new(profile, sink.clone(), compatibility_broker_pool);
+        let identity_broker = IdentityBroker::new(profile);
         let publisher_native_messaging =
             PublisherNativeMessagingBroker::new(profile, native_host_process_pool);
         #[cfg(feature = "native-web-extension-probes")]
@@ -1188,6 +1510,9 @@ impl MacosExtensionBrowserSurfaceHost {
                     extension_pages: extension_pages.clone(),
                     runtime_grants: runtime_grants.clone(),
                     compatibility_broker: compatibility_broker.clone(),
+                    identity_broker: identity_broker.clone(),
+                    offscreen_profile: profile,
+                    offscreen_sink: sink.clone(),
                     publisher_native_messaging: publisher_native_messaging.clone(),
                 },
                 #[cfg(feature = "native-web-extension-probes")]
@@ -1198,6 +1523,7 @@ impl MacosExtensionBrowserSurfaceHost {
             extension_pages,
             runtime_grants,
             compatibility_broker,
+            identity_broker,
             publisher_native_messaging,
             windows: HashMap::new(),
             tabs: HashMap::new(),
@@ -1211,6 +1537,7 @@ impl MacosExtensionBrowserSurfaceHost {
         self.extension_pages.bind_controller(controller);
         self.runtime_grants.bind_controller(controller);
         self.compatibility_broker.bind_controller(controller);
+        self.identity_broker.bind_controller(controller);
         self.publisher_native_messaging.bind_controller(controller);
         let delegate = ProtocolObject::from_ref(&*self.delegate);
         // SAFETY: the host retains the main-thread delegate for at least as
@@ -1234,14 +1561,19 @@ impl MacosExtensionBrowserSurfaceHost {
         self.broker.notify_actions_invalidated_after_activation();
     }
 
+    pub(super) fn notify_actions_invalidated(&self) {
+        self.broker.notify_actions_invalidated();
+    }
+
     pub(super) fn open_options_page_from_browser(
         &self,
         context: Retained<WKWebExtensionContext>,
-        parent: Retained<NSView>,
-        lease: crate::host::NativeResourceLease,
+        completion: &block2::DynBlock<
+            dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut objc2_foundation::NSError),
+        >,
     ) -> Result<(), ExtensionActionRejection> {
         self.action_popup
-            .open_options_page_from_browser(context, parent, lease)
+            .open_options_page_from_browser(context, completion)
     }
 
     pub(super) fn apply(
@@ -1278,6 +1610,7 @@ impl MacosExtensionBrowserSurfaceHost {
             .map(|(id, tab)| (*id, (tab.window().map(|window| window.id()), tab.index())))
             .collect::<HashMap<_, _>>();
 
+        let mut changed_tabs = HashMap::new();
         let mut windows = HashMap::with_capacity(surface.windows().len());
         let mut tabs = HashMap::with_capacity(surface.tabs().count());
         let mut ordered_windows = Vec::with_capacity(surface.windows().len());
@@ -1310,7 +1643,14 @@ impl MacosExtensionBrowserSurfaceHost {
                     .resident()
                     .then(|| webview_for(projected_tab.id()))
                     .flatten();
-                tab.update(&window, index, selected, projected_tab, webview.as_ref())?;
+                let changed =
+                    tab.update(&window, index, selected, projected_tab, webview.as_ref())?;
+                if old_tabs.contains_key(&projected_tab.id()) && !changed.is_empty() {
+                    changed_tabs.insert(projected_tab.id(), changed);
+                }
+                if let Some((context, view)) = self.extension_pages.binding(projected_tab.id()) {
+                    tab.bind_guest(context, &self.extension_pages, &view);
+                }
                 if tabs.insert(projected_tab.id(), tab.clone()).is_some() {
                     return Err(BrowserSurfaceError::IntegrityFailed);
                 }
@@ -1336,13 +1676,12 @@ impl MacosExtensionBrowserSurfaceHost {
         let current = focused
             .as_ref()
             .and_then(|window| window.active_id())
-            .filter(|id| {
+            .and_then(|id| {
                 self.tabs
-                    .get(id)
-                    .is_some_and(|tab| tab.ivars().resident.get())
+                    .get(&id)
+                    .map(|tab| (id, tab.has_bound_resident_webview()))
             });
-        self.action_popup
-            .reconcile_tab(|candidate| current == Some(candidate));
+        self.action_popup.reconcile_tab(current);
 
         for (id, tab) in &old_tabs {
             if !self.tabs.contains_key(id) {
@@ -1400,6 +1739,12 @@ impl MacosExtensionBrowserSurfaceHost {
                         controller.didMoveTab_fromIndex_inWindow(protocol, old_index, old_window)
                     };
                 }
+                if let Some(changed) = changed_tabs.get(&tab.id()).copied() {
+                    // The replacement graph is visible before WebKit can ask
+                    // for the updated URL or loading state. WebKit does not
+                    // infer tabs.onUpdated from a changed delegate getter.
+                    unsafe { controller.didChangeTabProperties_forTab(changed, protocol) };
+                }
             }
             let previous = old_active.get(&projected.id()).copied().flatten();
             if projected.active() != previous {
@@ -1433,9 +1778,149 @@ impl MacosExtensionBrowserSurfaceHost {
         Ok(())
     }
 
-    pub(super) fn bind_webview(&self, id: ItemId, webview: Option<&Retained<WKWebView>>) {
+    /// Reports when the effective action target changes between the default
+    /// action and this tab. Shell must refresh its revision after that change.
+    pub(super) fn bind_webview(&self, id: ItemId, webview: Option<&Retained<WKWebView>>) -> bool {
+        let Some(tab) = self.tabs.get(&id) else {
+            return false;
+        };
+        let was_bound = tab.has_bound_resident_webview();
+        tab.bind_webview(webview);
+        let changed = was_bound != tab.has_bound_resident_webview();
+        if changed {
+            let current = self
+                .delegate
+                .ivars()
+                .focused
+                .borrow()
+                .as_ref()
+                .and_then(|window| window.active_id())
+                .and_then(|active| {
+                    self.tabs
+                        .get(&active)
+                        .map(|tab| (active, tab.has_bound_resident_webview()))
+                });
+            self.action_popup.reconcile_tab(current);
+        }
+        changed
+    }
+
+    pub(super) fn observe_browser_tab_url_attempt(
+        &self,
+        controller: &WKWebExtensionController,
+        id: ItemId,
+        webview: &WKWebView,
+        target: &str,
+    ) -> Result<bool, BrowserSurfaceError> {
+        let Some(tab) = self.tabs.get(&id) else {
+            if extension_tab_trace_enabled() {
+                eprintln!("extension-tab-trace: native-tab outcome=logical-tab-absent");
+            }
+            return Ok(false);
+        };
+        if !tab.observe_url_attempt(webview, target)? {
+            return Ok(false);
+        }
+        if extension_tab_trace_enabled() {
+            let callback_id = callback_extension_id(target);
+            let native_target = native_url(target)?;
+            let protocol = ProtocolObject::from_ref(&**tab);
+            let mut matching_context = false;
+            let mut context_loaded = false;
+            let mut url_granted = false;
+            let mut context_errors = 0_usize;
+            let mut context_error_class = "none";
+            let mut context_error_code = 0_isize;
+            let mut underlying_class = "absent";
+            let mut underlying_code = 0_isize;
+            let mut error_resource = "unknown";
+            let mut exception_class = "unknown";
+            for context in unsafe { controller.extensionContexts() }.iter() {
+                let matches = callback_id
+                    .as_ref()
+                    .is_none_or(|id| unsafe { context.uniqueIdentifier() }.to_string() == *id);
+                if matches {
+                    matching_context = true;
+                    context_loaded |= unsafe { context.isLoaded() };
+                    url_granted |=
+                        unsafe { context.hasAccessToURL_inTab(&native_target, Some(protocol)) };
+                    let errors = unsafe { context.errors() };
+                    context_errors = context_errors.saturating_add(errors.count());
+                    if errors.count() > 0 {
+                        let error = errors.objectAtIndex(errors.count() - 1);
+                        context_error_class = if error
+                            .domain()
+                            .isEqualToString(unsafe { WKWebExtensionContextErrorDomain })
+                        {
+                            "web_extension_context"
+                        } else {
+                            "other"
+                        };
+                        context_error_code = error.code();
+                        #[cfg(feature = "native-extension-qa-inspector")]
+                        if context_error_class == "web_extension_context" && context_error_code == 6
+                        {
+                            trace_background_error_text(&error);
+                        }
+                        (
+                            underlying_class,
+                            underlying_code,
+                            error_resource,
+                            exception_class,
+                        ) = trace_context_error_cause(&error);
+                    }
+                }
+            }
+            let origin = match callback_id.as_ref() {
+                Some(_) if matching_context => "expected_callback",
+                Some(_) => "other_chromiumapp",
+                None if target.starts_with("https://") => "other_https",
+                None if target.starts_with("http://") => "other_http",
+                None => "other_scheme",
+            };
+            let callback_shape = callback_id.as_ref().and_then(|id| {
+                let parsed = url::Url::parse(target).ok()?;
+                let expected_prefix = format!("https://{id}.chromiumapp.org");
+                let prefix_match = target.starts_with(&expected_prefix);
+                let path = if parsed.path() == "/" {
+                    "root"
+                } else {
+                    "non_root"
+                };
+                let mut has_code = false;
+                let mut has_state = false;
+                let mut has_error = false;
+                for (key, _) in parsed.query_pairs() {
+                    match key.as_ref() {
+                        "code" => has_code = true,
+                        "state" => has_state = true,
+                        "error" => has_error = true,
+                        _ => {}
+                    }
+                }
+                Some((prefix_match, path, has_code, has_state, has_error))
+            });
+            let (prefix_match, callback_path, has_code, has_state, has_error) =
+                callback_shape.unwrap_or((false, "none", false, false, false));
+            eprintln!(
+                "extension-tab-trace: native-publish tab={id} origin={origin} context_match={matching_context} context_loaded={context_loaded} url_granted={url_granted} context_errors={context_errors} context_error_class={context_error_class} context_error_code={context_error_code} underlying_class={underlying_class} underlying_code={underlying_code} error_resource={error_resource} exception_class={exception_class} callback_prefix_match={prefix_match} callback_path={callback_path} has_code={has_code} has_state={has_state} has_error={has_error}"
+            );
+        }
+        // The tab delegate exposes this URL only as an in-flight native
+        // attempt. WebKit applies each context's own tabs/host permissions;
+        // Shell's committed browsing URL and document grants never move here.
+        unsafe {
+            controller.didChangeTabProperties_forTab(
+                WKWebExtensionTabChangedProperties::URL,
+                ProtocolObject::from_ref(&**tab),
+            )
+        };
+        Ok(true)
+    }
+
+    pub(super) fn clear_browser_tab_url_attempt(&self, id: ItemId, webview: &WKWebView) {
         if let Some(tab) = self.tabs.get(&id) {
-            tab.bind_webview(webview);
+            tab.clear_url_attempt(webview);
         }
     }
 
@@ -1449,9 +1934,8 @@ impl MacosExtensionBrowserSurfaceHost {
     }
 
     /// Resolves one logical tab inside the exact already-published generation.
-    /// This clones only the retained protocol wrapper and never consults the
-    /// tab's weak webview, so action enumeration cannot resurrect a discarded
-    /// renderer.
+    /// The native-action bit is true only while its already-bound renderer is
+    /// live; checking the weak view never creates or restores a renderer.
     pub(super) fn action_tab(
         &self,
         generation: ExtensionBrowserSurfaceGeneration,
@@ -1461,7 +1945,7 @@ impl MacosExtensionBrowserSurfaceHost {
             return Err(BrowserSurfaceError::StaleGeneration);
         }
         Ok(self.tabs.get(&id).cloned().map(|tab| {
-            let resident = tab.is_resident();
+            let resident = tab.has_bound_resident_webview();
             (ProtocolObject::from_retained(tab), resident)
         }))
     }
@@ -1471,7 +1955,17 @@ impl MacosExtensionBrowserSurfaceHost {
         request: zephium_core::extensions::ExtensionBrowserRequestId,
         settlement: zephium_core::extensions::ExtensionBrowserRequestSettlement,
         extension_page_lease: Option<crate::host::NativeResourceLease>,
+        extension_page_stage: Option<(
+            Retained<crate::platform::imp::ContentStage>,
+            std::sync::Arc<std::sync::atomic::AtomicBool>,
+        )>,
     ) -> BrowserRequestSettlementOutcome {
+        let created_id = match settlement {
+            zephium_core::extensions::ExtensionBrowserRequestSettlement::Applied(
+                zephium_core::extensions::ExtensionBrowserRequestResult::CreatedTab(id),
+            ) => Some(id),
+            _ => None,
+        };
         let created = match settlement {
             zephium_core::extensions::ExtensionBrowserRequestSettlement::Applied(
                 zephium_core::extensions::ExtensionBrowserRequestResult::CreatedTab(id),
@@ -1481,13 +1975,65 @@ impl MacosExtensionBrowserSurfaceHost {
                 .map(|tab| ProtocolObject::from_ref(&**tab)),
             _ => None,
         };
-        self.broker.settle(
+        let page_tab = match settlement {
+            zephium_core::extensions::ExtensionBrowserRequestSettlement::Applied(
+                zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized {
+                    tab,
+                    window,
+                },
+            ) => self
+                .tabs
+                .get(&tab)
+                .filter(|native| native.window().is_some_and(|actual| actual.id() == window))
+                .cloned(),
+            _ => None,
+        };
+        let outcome = self.broker.settle(
             request,
             settlement,
             created,
             extension_page_lease,
-            |context, url, lease| self.extension_pages.present(context, url, lease),
-        )
+            |context, url, lease| {
+                let tab = page_tab
+                    .as_ref()
+                    .ok_or(ExtensionBrowserRequestRejection::InvalidScope)?;
+                let (stage, permit) = extension_page_stage
+                    .ok_or(ExtensionBrowserRequestRejection::NativeAdmissionFailed)?;
+                let view = self.extension_pages.present(
+                    context.clone(),
+                    url,
+                    lease,
+                    tab.id(),
+                    stage,
+                    permit,
+                )?;
+                tab.bind_guest(context, &self.extension_pages, &view);
+                Ok(ProtocolObject::from_retained(tab.clone()))
+            },
+        );
+        if extension_tab_trace_enabled() {
+            if let Some(id) = created_id {
+                eprintln!(
+                    "extension-tab-trace: native-created-tab-reply tab={id} request={request:?} outcome={outcome:?}"
+                );
+            }
+        }
+        if let Some(tab) = page_tab {
+            if tab.ivars().guest.borrow().is_none() {
+                self.broker.extension_page_closed(tab.id());
+            }
+        }
+        outcome
+    }
+
+    pub(super) fn has_extension_page(&self, id: ItemId) -> bool {
+        self.extension_pages.contains(id)
+    }
+    pub(super) fn close_extension_page(&self, id: ItemId) -> bool {
+        self.extension_pages.close_item(id)
+    }
+    pub(super) fn navigate_extension_page(&self, id: ItemId, action: u8) -> bool {
+        self.extension_pages.navigation(id, action)
     }
 
     pub(super) fn timeout_request(
@@ -1565,8 +2111,9 @@ impl MacosExtensionBrowserSurfaceHost {
         settlement: ExtensionCompatibilityBrokerSettlement,
     ) -> CompatibilityBrokerSettlementOutcome {
         self.compatibility_broker
-            .settle(runtime, request, settlement, |context| {
-                self.action_popup.open_options_page_authorized(context)
+            .settle(runtime, request, settlement, |context, reply| {
+                self.action_popup
+                    .open_options_page_authorized(context, reply)
             })
     }
 
@@ -1582,6 +2129,97 @@ impl MacosExtensionBrowserSurfaceHost {
         context: *const WKWebExtensionContext,
     ) {
         self.compatibility_broker.cancel_context(context);
+    }
+
+    pub(super) fn identity_request_context(
+        &self,
+        request: IdentityRequestId,
+    ) -> Option<*const WKWebExtensionContext> {
+        self.identity_broker.pending_context(request)
+    }
+
+    pub(super) fn finalize_identity_request(
+        &self,
+        request: IdentityRequestId,
+        witness: Option<ExtensionCompatibilityBrokerWitness>,
+        lease: Option<crate::host::NativeResourceLease>,
+    ) -> bool {
+        self.identity_broker.finalize(request, witness, lease)
+    }
+
+    pub(super) fn timeout_identity_request(&self, request: IdentityRequestId) -> bool {
+        self.identity_broker.timeout(request)
+    }
+
+    pub(super) fn cancel_identity_context(&self, context: *const WKWebExtensionContext) {
+        self.identity_broker.cancel_context(context);
+    }
+
+    pub(super) fn offscreen_subject(
+        &self,
+        request: OffscreenSessionId,
+    ) -> Option<(*const WKWebExtensionContext, bool)> {
+        self.delegate
+            .ivars()
+            .offscreen_broker
+            .borrow()
+            .as_ref()?
+            .subject(request)
+    }
+
+    pub(super) fn pending_offscreen_authorization_ids(&self) -> Vec<OffscreenSessionId> {
+        self.delegate
+            .ivars()
+            .offscreen_broker
+            .borrow()
+            .as_ref()
+            .map_or_else(Vec::new, |broker| broker.pending_authorization_ids())
+    }
+
+    pub(super) fn authorize_offscreen(
+        &self,
+        request: OffscreenSessionId,
+        witness: Option<ExtensionCompatibilityBrokerWitness>,
+        lease: Option<crate::host::NativeResourceLease>,
+    ) -> bool {
+        self.delegate
+            .ivars()
+            .offscreen_broker
+            .borrow()
+            .as_ref()
+            .is_some_and(|broker| broker.authorize(request, witness, lease))
+    }
+
+    pub(super) fn settle_offscreen_resource(
+        &self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+        request: u64,
+        outcome: zephium_core::ports::extensions::IsolatedExtensionResourceOutcome,
+    ) -> bool {
+        self.delegate
+            .ivars()
+            .offscreen_broker
+            .borrow()
+            .as_ref()
+            .is_some_and(|broker| broker.settle_resource(runtime, request, outcome))
+    }
+
+    pub(super) fn offscreen_resource_context(
+        &self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+    ) -> Option<*const WKWebExtensionContext> {
+        self.delegate
+            .ivars()
+            .offscreen_broker
+            .borrow()
+            .as_ref()?
+            .resource_context(runtime)
+    }
+
+    pub(super) fn cancel_offscreen_context(&self, context: *const WKWebExtensionContext) {
+        if let Some(broker) = self.delegate.ivars().offscreen_broker.borrow().as_ref() {
+            broker.cancel_context(context);
+        }
     }
 
     pub(super) fn native_messaging_subject(
@@ -1632,30 +2270,22 @@ impl MacosExtensionBrowserSurfaceHost {
         &self,
         request: ExtensionActionRequest,
         controller: Retained<WKWebExtensionController>,
-        context: Retained<WKWebExtensionContext>,
-        tab: NativeExtensionTab,
+        owner: super::native_runtime::MacosNativeActionPopupOwner,
+        tab: Option<NativeExtensionTab>,
         parent: Retained<NSView>,
         lease: crate::host::NativeResourceLease,
     ) -> Result<(), ExtensionActionRejection> {
         self.action_popup
-            .begin(request, controller, context, tab, parent, lease)
+            .begin(request, controller, owner, tab, parent, lease)
     }
 
     pub(super) fn prepare_action_popup(
         &self,
         request: ExtensionActionRequest,
         context: &WKWebExtensionContext,
-        tab: &NativeExtensionTab,
+        tab: Option<&NativeExtensionTab>,
     ) -> Result<ActionPopupPreparation, ExtensionActionRejection> {
         self.action_popup.prepare_toggle(request, context, tab)
-    }
-
-    pub(super) fn cancel_action_popup(
-        &self,
-        request: ExtensionActionRequestId,
-        reason: ExtensionActionRejection,
-    ) -> bool {
-        self.action_popup.cancel_pending(request, reason)
     }
 
     pub(super) fn timeout_action_popup(&self, request: ExtensionActionRequestId) -> bool {
@@ -1705,6 +2335,10 @@ impl MacosExtensionBrowserSurfaceHost {
         self.broker.seal_and_reject();
         self.runtime_grants.seal_and_reject();
         self.compatibility_broker.seal_and_reject();
+        self.identity_broker.seal_and_reject();
+        if let Some(broker) = self.delegate.ivars().offscreen_broker.borrow_mut().take() {
+            broker.seal();
+        }
         self.publisher_native_messaging.seal_and_reject();
         let old_windows = std::mem::take(&mut self.windows);
         let old_tabs = std::mem::take(&mut self.tabs);
@@ -1739,13 +2373,33 @@ fn document_background_surface_ready(
     has_generation && tabs.into_iter().any(|(resident, bound)| resident && bound)
 }
 
+fn tab_property_change_flags(
+    title: bool,
+    url: bool,
+    loading: bool,
+    pinned: bool,
+) -> WKWebExtensionTabChangedProperties {
+    let mut changed = WKWebExtensionTabChangedProperties::None;
+    if title {
+        changed |= WKWebExtensionTabChangedProperties::Title;
+    }
+    if url {
+        changed |= WKWebExtensionTabChangedProperties::URL;
+    }
+    if loading {
+        changed |= WKWebExtensionTabChangedProperties::Loading;
+    }
+    if pinned {
+        changed |= WKWebExtensionTabChangedProperties::Pinned;
+    }
+    changed
+}
+
 /// Accepts the only extension-page shape Zephium can represent exactly.
 ///
-/// WebKit reports Chrome's ordinary `tabs.create({ url })` default as active
-/// without adding the tab to an existing multi-selection. A dedicated
-/// extension window contains exactly one tab, so either selection flag has the
-/// same truthful native result. Parent/opener, pinned, muted, reader-mode, and
-/// background-page requests still carry semantics this surface cannot honor.
+/// Zephium selects one active tab. Both active selection flags therefore
+/// select the created tab; background, parent, pinned, muted and reader-mode
+/// requests require semantics this surface does not yet represent.
 const fn extension_page_configuration_supported(
     has_parent: bool,
     pinned: bool,
@@ -1767,6 +2421,18 @@ mod tests {
         assert_main_thread_only::<BrowserTab>();
         assert_main_thread_only::<BrowserWindow>();
         assert_main_thread_only::<BrowserControllerDelegate>();
+    }
+
+    #[test]
+    fn navigation_changes_publish_the_url_and_loading_properties() {
+        let change = tab_property_change_flags(false, true, true, false);
+        assert!(change.contains(WKWebExtensionTabChangedProperties::URL));
+        assert!(change.contains(WKWebExtensionTabChangedProperties::Loading));
+        assert!(!change.contains(WKWebExtensionTabChangedProperties::Title));
+        assert_eq!(
+            tab_property_change_flags(false, false, false, false),
+            WKWebExtensionTabChangedProperties::None,
+        );
     }
 
     #[test]
@@ -1830,5 +2496,19 @@ mod tests {
                 rejected.0, rejected.1, rejected.2, rejected.3, rejected.4, rejected.5,
             ));
         }
+    }
+
+    #[cfg(feature = "native-extension-qa-inspector")]
+    #[test]
+    fn qa_background_error_keeps_exception_but_redacts_auth_values() {
+        let text = redacted_background_error_text(
+            "TypeError: Cannot read properties of undefined (reading 'storage') at https://auth.example/callback?code=private token=secret email=person@example.test",
+        );
+        assert!(text.contains("TypeError"));
+        assert!(text.contains("'storage'"));
+        assert!(!text.contains("auth.example"));
+        assert!(!text.contains("private"));
+        assert!(!text.contains("secret"));
+        assert!(!text.contains("person@example.test"));
     }
 }

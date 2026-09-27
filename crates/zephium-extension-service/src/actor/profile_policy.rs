@@ -231,7 +231,8 @@ fn activate_enabled_profile(
 fn restore_keys(
     startup: &mut WorkerStartupState,
     runtime: &mut RuntimeCoordinator,
-    keys: [Option<ExtensionNativeOwnershipKey>; 3],
+    keys: [Option<ExtensionNativeOwnershipKey>;
+        crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES],
     deadline: Instant,
 ) -> ActivationResult {
     let mut result = ActivationResult::Complete;
@@ -257,7 +258,8 @@ fn restore_keys(
 fn restored_refusal(
     startup: &mut WorkerStartupState,
     runtime: &mut RuntimeCoordinator,
-    keys: [Option<ExtensionNativeOwnershipKey>; 3],
+    keys: [Option<ExtensionNativeOwnershipKey>;
+        crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES],
     deadline: Instant,
     outcome: ExtensionProfilePolicyEditOutcome,
 ) -> ExtensionProfilePolicyEditOutcome {

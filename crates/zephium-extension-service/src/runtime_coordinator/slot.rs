@@ -514,6 +514,20 @@ impl RuntimeSlot {
         }
     }
 
+    /// Borrows package bytes only while this exact slot has a definitely
+    /// owned, fully published runtime. Pending rebind and retirement cannot
+    /// authorize a new offscreen resource response.
+    pub(super) fn published_owner_mut(&mut self) -> Option<&mut ExtensionRuntimeOwner> {
+        match self.state.as_mut()? {
+            RuntimeSlotState::Owned(state)
+                if matches!(state.operation, RuntimeOperationControl::Published(_)) =>
+            {
+                Some(&mut state.owner)
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn has_attached_obligation(&self) -> bool {
         self.state
             .as_ref()

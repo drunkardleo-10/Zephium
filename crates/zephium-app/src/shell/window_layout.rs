@@ -76,7 +76,8 @@ impl Shell {
                 tree.tabs().iter().any(|id| {
                     self.items.tab(*id).is_some_and(|tab| {
                         tab.has_view()
-                            && tab.url.is_some()
+                            && (tab.url.is_some()
+                                || tab.content == zephium_core::item::TabContent::ExtensionOwned)
                             && !self.presentation.deferred_first_content_layout.contains(id)
                     })
                 })

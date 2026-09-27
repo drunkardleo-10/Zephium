@@ -872,6 +872,7 @@ pub(crate) struct FakeEngine {
             ExtensionBrowserRequestSettlement,
         )>,
     >,
+    extension_browser_first_urls: Mutex<Vec<Option<(Arc<str>, NavigationRequestId)>>>,
     extension_compatibility_settlements: Mutex<
         Vec<(
             ExtensionRuntimeInstance,
@@ -1000,6 +1001,10 @@ impl FakeEngine {
         ExtensionBrowserRequestSettlement,
     )> {
         self.extension_browser_settlements.lock().unwrap().clone()
+    }
+
+    fn extension_browser_first_urls(&self) -> Vec<Option<(Arc<str>, NavigationRequestId)>> {
+        self.extension_browser_first_urls.lock().unwrap().clone()
     }
 
     fn extension_compatibility_settlements(
@@ -1135,11 +1140,19 @@ impl Engine for FakeEngine {
         profile: ProfileId,
         request: ExtensionBrowserRequestId,
         settlement: ExtensionBrowserRequestSettlement,
+        first_url_after_reply: Option<(
+            std::sync::Arc<str>,
+            zephium_core::ports::engine::NavigationRequestId,
+        )>,
     ) -> NativeDispatch {
         self.extension_browser_settlements
             .lock()
             .unwrap()
             .push((profile, request, settlement));
+        self.extension_browser_first_urls
+            .lock()
+            .unwrap()
+            .push(first_url_after_reply);
         self.native_admission()
     }
     fn settle_extension_compatibility_broker_request(
@@ -1401,7 +1414,7 @@ pub(crate) struct FakeStore {
     recorded_visits: Mutex<Vec<zephium_core::ports::store::HistoryVisit>>,
     icon_ages: Mutex<std::collections::HashMap<String, i64>>,
     icons: Mutex<Vec<(String, Vec<u8>)>>,
-    reject_settings: std::sync::atomic::AtomicBool,
+    pub(super) reject_settings: std::sync::atomic::AtomicBool,
     pending_deletions: Mutex<Vec<PendingProfileDeletion>>,
     pending_load_failures: std::sync::atomic::AtomicUsize,
     authorize_outcomes: Mutex<VecDeque<ProfileDeletionAuthorizeOutcome>>,
@@ -1916,6 +1929,7 @@ impl PresentationChrome for FakeChrome {
 #[derive(Default)]
 struct AsyncChrome {
     pending: Mutex<VecDeque<(ChromePresentation, ChromePresentationCallback)>>,
+    browser_returns: Mutex<VecDeque<(u64, ItemsState, ChromePresentationCallback)>>,
     reject_admission: std::sync::atomic::AtomicBool,
 }
 
@@ -1926,6 +1940,19 @@ impl GeometryChrome for AsyncChrome {
 }
 
 impl PresentationChrome for AsyncChrome {
+    fn restore_browser_chrome(
+        &self,
+        revision: u64,
+        items: ItemsState,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        self.browser_returns
+            .lock()
+            .unwrap()
+            .push_back((revision, items, done));
+        ChromePresentationDispatch::Scheduled
+    }
+
     fn apply_tab_for_presentation(
         &self,
         presentation: ChromePresentation,
@@ -1943,6 +1970,17 @@ impl PresentationChrome for AsyncChrome {
 }
 
 impl AsyncChrome {
+    fn complete_browser_return(&self, applied: bool) -> (u64, ItemsState) {
+        let (revision, items, done) = self
+            .browser_returns
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("an exact browser return must be pending");
+        done(applied);
+        (revision, items)
+    }
+
     fn presentations(&self) -> Vec<ChromePresentation> {
         self.pending
             .lock()
@@ -2000,7 +2038,7 @@ fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
     setup_with_extension_lifecycle(store, clean_extension_lifecycle())
 }
 
-fn setup_with_extension_lifecycle(
+pub(super) fn setup_with_extension_lifecycle(
     store: Arc<FakeStore>,
     extension_service: ExtensionLifecycle,
 ) -> (Shell, Arc<FakeEngine>, Screen) {

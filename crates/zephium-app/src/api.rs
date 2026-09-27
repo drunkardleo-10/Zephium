@@ -1,5 +1,13 @@
 //! Stable application-shell protocol exposed to the desktop composition root.
 
+#[path = "api_store_install.rs"]
+mod store_install;
+pub(crate) use store_install::StoreExtensionOrigin;
+pub use store_install::{
+    StoreExtensionContext, StoreExtensionPackageSubmission, StoreExtensionPreparationCompletion,
+    StoreExtensionUpdateDispatch, StoreExtensionUpdateResult,
+};
+
 use std::fmt;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
@@ -24,7 +32,7 @@ use zephium_core::ports::extensions::{
     ExtensionInstallOutcome, ExtensionManagementCatalogOutcome, ExtensionManagementSettlement,
     ExtensionProfilePolicyEditOutcome, ExtensionRepositoryMaintenanceOutcome,
     ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequestId, ExtensionSetEnabledOutcome,
-    ExtensionUninstallOutcome,
+    ExtensionUninstallOutcome, IsolatedExtensionDocumentKind, IsolatedExtensionResourceOutcome,
 };
 use zephium_core::ports::store::Store;
 use zephium_core::ports::store::{
@@ -350,6 +358,7 @@ pub enum ContentPolicyStatusQueryOutcome {
 pub enum BrowserPage {
     Work,
     Settings,
+    Extensions,
     History,
     Downloads,
     Tasks,
@@ -361,6 +370,7 @@ impl BrowserPage {
         match self {
             Self::Work => "browser.work",
             Self::Settings => "browser.settings",
+            Self::Extensions => "browser.extensions",
             Self::History => "browser.history",
             Self::Downloads => "browser.downloads",
             Self::Tasks => "browser.tasks",
@@ -409,6 +419,8 @@ pub enum Command {
         command: Box<Command>,
     },
     Bootstrap,
+    /// Wake hint only; Shell reobserves the extension service before admission.
+    ExtensionStartupChanged,
     Open,
     Activate(ItemId),
     Close(ItemId),
@@ -595,12 +607,46 @@ pub enum Command {
         request: ExtensionRuntimeGrantRequestId,
         settlement: Box<ExtensionManagementSettlement<ExtensionRuntimeGrantOutcome>>,
     },
+    /// Move-only authenticated bytes from the extension service. Clones of
+    /// this internal command share one take-once slot; no public operation can
+    /// construct an authoritative native URL-scheme response from it.
+    IsolatedExtensionResourceSettled {
+        runtime: ExtensionRuntimeInstance,
+        kind: IsolatedExtensionDocumentKind,
+        request: u64,
+        outcome: Arc<Mutex<Option<IsolatedExtensionResourceOutcome>>>,
+    },
     /// Internal exactly-once callback from one bounded repository-maintenance
     /// turn. It is never accepted through public operation dispatch.
     ExtensionRepositoryMaintenanceSettled(ExtensionRepositoryMaintenanceOutcome),
     /// Internal move-only package handoff from the product distribution
     /// worker. Public operation dispatch never admits this command.
     ProvisionAcquiredExtensionPackage(AcquiredExtensionPackageSubmission),
+    /// Native query for one foreground store listing; never public operation dispatch.
+    ResolveStoreExtensionContext {
+        tab: ItemId,
+        reply: SyncSender<Option<StoreExtensionContext>>,
+    },
+    /// Captures an installed extension selected from the active management catalog.
+    ResolveStoreExtensionUpdateContext {
+        install: zephium_core::ids::ExtensionInstallId,
+        reply: SyncSender<Option<StoreExtensionContext>>,
+    },
+    /// Bounded native downloader handoff, revalidated by Shell before preparation.
+    PrepareStoreExtensionPackage(StoreExtensionPackageSubmission),
+    /// Internal service callback; consent presentation still requires current context.
+    StoreExtensionPreparationCompleted(StoreExtensionPreparationCompletion),
+    /// In-process composition only; not exposed as renderer IPC.
+    ConfigureStoreExtensionUpdates(StoreExtensionUpdateDispatch),
+    StoreExtensionUpdateCatalog {
+        token: u64,
+        profile: ProfileId,
+        outcome: ExtensionManagementCatalogOutcome,
+    },
+    StoreExtensionUpdateFinished {
+        token: u64,
+        result: StoreExtensionUpdateResult,
+    },
     /// Internal source-free catalog activation handoff from the product
     /// distribution worker. Public operation dispatch never admits it.
     ActivateAcquiredExtensionCatalog(AcquiredExtensionCatalogSubmission),

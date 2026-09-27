@@ -9,16 +9,19 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use block2::RcBlock;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::MainThreadOnly;
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSError, NSHTTPCookie, NSHTTPCookieDomain, NSHTTPCookieMaximumAge,
     NSHTTPCookieName, NSHTTPCookiePath, NSHTTPCookiePropertyKey, NSHTTPCookieValue,
-    NSHTTPCookieVersion, NSMutableDictionary, NSRunLoop, NSString, NSURL,
+    NSHTTPCookieVersion, NSMutableDictionary, NSPoint, NSRect, NSRunLoop, NSSize, NSString,
+    NSURLRequest, NSURL,
 };
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionController, WKWebExtensionTab, WKWebView,
@@ -32,11 +35,12 @@ use zephium_core::extensions::{
 };
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::EngineEvent;
+use zephium_core::split::Pane;
 
 use super::persistent_runtime::{NamespaceLock, EXTENSION_PRINCIPAL};
 use super::{persistent_probe_profiles, ProbeHostView, PROBE_TIMEOUT, PROFILE_ROUTING_PRINCIPALS};
 use crate::platform::macos::{
-    ControllerBrowserRequestSettlement, ControllerNamespaceRecoveryAudit,
+    ContentStage, ControllerBrowserRequestSettlement, ControllerNamespaceRecoveryAudit,
     PersistentControllerRegistry, ProbeControllerPreparation,
 };
 
@@ -49,7 +53,37 @@ const COOKIE_VALUE_PRIVATE: &str = "private";
 const MUTATION_TARGET_URL: &str = "https://profile-a.invalid/updated";
 const EXPECTED_REGULAR_PROFILES: usize = 2;
 const EXPECTED_NATIVE_OWNERS_PER_GENERATION: usize = 3;
-pub(super) const EXPECTED_BROWSER_SURFACE_LIFECYCLE_DROPS: [usize; 4] = [1, 1, 3, 3];
+pub(super) const EXPECTED_BROWSER_SURFACE_LIFECYCLE_DROPS: [usize; 4] = [1, 1, 3, 4];
+
+fn evaluate_guest_script(
+    view: &WKWebView,
+    script: &str,
+    run_loop: &NSRunLoop,
+) -> Result<(), String> {
+    let settled = Rc::new(RefCell::new(None));
+    let slot = settled.clone();
+    let callback: RcBlock<dyn Fn(*mut AnyObject, *mut NSError)> =
+        RcBlock::new(move |_value: *mut AnyObject, error: *mut NSError| {
+            *slot.borrow_mut() = Some(error.is_null());
+        });
+    unsafe {
+        view.evaluateJavaScript_completionHandler(&NSString::from_str(script), Some(&callback));
+    }
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        if let Some(succeeded) = settled.borrow_mut().take() {
+            return if succeeded {
+                Ok(())
+            } else {
+                Err("guest fixture JavaScript evaluation failed".into())
+            };
+        }
+        if Instant::now() >= deadline {
+            return Err("guest fixture JavaScript evaluation timed out".into());
+        }
+        super::drain_run_loop_once(run_loop);
+    }
+}
 
 pub(super) struct ProfileIsolationEvidence {
     pub(super) views: Vec<Weak<WKWebView>>,
@@ -63,6 +97,7 @@ struct ProfileGeneration {
     registry: PersistentControllerRegistry,
     regular_views: Vec<wry::WebView>,
     regular_windows: Vec<Retained<objc2_app_kit::NSWindow>>,
+    guest_views: Vec<Weak<WKWebView>>,
     private_view: Option<wry::WebView>,
     private_window: Option<Retained<objc2_app_kit::NSWindow>>,
     retired_private_views: Vec<Weak<WKWebView>>,
@@ -72,6 +107,7 @@ struct ProfileGeneration {
     regular_controllers: [Retained<WKWebExtensionController>; EXPECTED_REGULAR_PROFILES],
     regular_stores: [Retained<WKWebsiteDataStore>; EXPECTED_REGULAR_PROFILES],
     browser_requests: Arc<Mutex<VecDeque<ExtensionBrowserRequest>>>,
+    guest_events: Arc<Mutex<Vec<EngineEvent>>>,
 }
 
 impl ProfileIsolationEvidence {
@@ -201,7 +237,7 @@ fn exercise_profile_isolation(
             run_loop,
             "private profile",
         )?;
-        initial.validate_regular_tab_routing(routing_extension, mtm)?;
+        initial.validate_regular_tab_routing(routing_extension, run_loop, mtm)?;
         initial.run_private_storage_sequence(
             writer,
             &[
@@ -260,13 +296,25 @@ impl ProfileGeneration {
         let [profile_a, profile_b] = persistent_probe_profiles();
         let browser_requests = Arc::new(Mutex::new(VecDeque::new()));
         let request_sink = browser_requests.clone();
-        let sink: crate::EngineEventIngressSink = Arc::new(move |ingress| {
-            if let EngineEvent::ExtensionBrowserRequested { request } = ingress.event {
+        let guest_events = Arc::new(Mutex::new(Vec::new()));
+        let guest_sink = guest_events.clone();
+        let sink: crate::EngineEventIngressSink = Arc::new(move |ingress| match ingress.event {
+            EngineEvent::ExtensionBrowserRequested { request } => {
                 request_sink
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push_back(request);
             }
+            event @ (EngineEvent::ExtensionPageChanged { .. }
+            | EngineEvent::ExtensionPageClosed { .. }) => {
+                let mut events = guest_sink
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if events.len() < 32 {
+                    events.push(event);
+                }
+            }
+            _ => {}
         });
         let mut registry = PersistentControllerRegistry::with_browser_request_sink(sink);
         for profile in [profile_a, profile_b] {
@@ -328,6 +376,7 @@ impl ProfileGeneration {
             registry,
             regular_views: vec![view_a, view_b],
             regular_windows: vec![window_a, window_b],
+            guest_views: Vec::new(),
             private_view: None,
             private_window: None,
             retired_private_views: Vec::new(),
@@ -337,12 +386,14 @@ impl ProfileGeneration {
             regular_controllers,
             regular_stores,
             browser_requests,
+            guest_events,
         })
     }
 
     fn validate_regular_tab_routing(
         &mut self,
         extension: &WKWebExtension,
+        run_loop: &NSRunLoop,
         _mtm: MainThreadMarker,
     ) -> Result<(), String> {
         const WINDOW_A: u64 = 1;
@@ -487,6 +538,17 @@ impl ProfileGeneration {
                 &context_b,
                 native_a.clone(),
             )?;
+            let updated_surface_a = self.validate_extension_guest(
+                profile_a,
+                WINDOW_A,
+                item_a,
+                &context_a,
+                &context_b,
+                &updated_surface_a,
+                native_a.clone(),
+                run_loop,
+                _mtm,
+            )?;
             let diagnostics_before = self
                 .registry
                 .probe_browser_surface_diagnostics(profile_a)
@@ -627,6 +689,366 @@ impl ProfileGeneration {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn validate_extension_guest(
+        &mut self,
+        profile: ProfileId,
+        window: u64,
+        ordinary: ItemId,
+        owner: &WKWebExtensionContext,
+        foreign: &WKWebExtensionContext,
+        prior: &ExtensionBrowserSurface,
+        ordinary_view: Retained<WKWebView>,
+        run_loop: &NSRunLoop,
+        mtm: MainThreadMarker,
+    ) -> Result<ExtensionBrowserSurface, String> {
+        let guest = ItemId::from(3);
+        let ordinary_url = url::Url::parse(MUTATION_TARGET_URL)
+            .map_err(|error| format!("guest probe ordinary URL: {error}"))?;
+        let generation = prior
+            .generation()
+            .next()
+            .ok_or("guest probe generation overflow")?;
+        let prior_tab = prior.tabs().find(|tab| tab.id() == ordinary);
+        let guest_surface = ExtensionBrowserSurface::new(
+            profile,
+            generation,
+            Some(window),
+            vec![ExtensionBrowserWindow::new(
+                window,
+                false,
+                Some(ordinary),
+                vec![
+                    ExtensionBrowserTab::from_snapshot(
+                        prior_tab,
+                        ordinary,
+                        true,
+                        "Profile A updated",
+                        Some(&ordinary_url),
+                        false,
+                        true,
+                    )
+                    .map_err(|error| format!("guest probe ordinary tab: {error:?}"))?,
+                    ExtensionBrowserTab::from_snapshot(
+                        None,
+                        guest,
+                        false,
+                        "Extension",
+                        None,
+                        false,
+                        false,
+                    )
+                    .map_err(|error| format!("guest probe guest tab: {error:?}"))?,
+                ],
+            )
+            .map_err(|error| format!("guest probe window: {error:?}"))?],
+        )
+        .map_err(|error| format!("guest probe surface: {error:?}"))?;
+        let (original_window, _) = self
+            .registry
+            .probe_browser_surface_identity(profile, window, ordinary)
+            .map_err(|error| format!("guest probe original identity: {error}"))?
+            .ok_or("guest probe original identity absent")?;
+        self.registry
+            .apply_browser_surface(&guest_surface, |id| {
+                (id == ordinary).then(|| ordinary_view.clone())
+            })
+            .map_err(|error| format!("guest probe projection: {error}"))?;
+        let (guest_window, guest_tab) = self
+            .registry
+            .probe_browser_surface_identity(profile, window, guest)
+            .map_err(|error| format!("guest probe native identity: {error}"))?
+            .ok_or("guest probe native tab absent")?;
+        if !std::ptr::eq(&*original_window, &*guest_window) {
+            return Err("guest tab changed its owning native window identity".into());
+        }
+        if unsafe { guest_tab.webViewForWebExtensionContext(owner) }.is_some() {
+            return Err("unadmitted guest tab exposed a native view".into());
+        }
+
+        let configuration = unsafe { owner.webViewConfiguration() }
+            .ok_or("guest launcher has no extension configuration")?;
+        let launch_window = super::new_window(mtm)?;
+        let launch_host = host_for_window(&launch_window, "guest launcher")?;
+        let launcher = unsafe {
+            WKWebView::initWithFrame_configuration(
+                WKWebView::alloc(mtm),
+                NSRect::new(NSPoint::new(0., 0.), NSSize::new(320., 200.)),
+                &configuration,
+            )
+        };
+        launch_host
+            .view
+            .addSubview(&Retained::into_super(launcher.clone()));
+        let launch_url = unsafe { owner.baseURL() }
+            .URLByAppendingPathComponent(&NSString::from_str("guest-launch.html"))
+            .ok_or("guest launcher URL absent")?;
+        unsafe { launcher.loadRequest(&NSURLRequest::requestWithURL(&launch_url)) }
+            .ok_or("guest launcher navigation refused")?;
+        let deadline = Instant::now() + PROBE_TIMEOUT;
+        let request = loop {
+            if let Some(request) = self
+                .browser_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+            {
+                break request;
+            }
+            if Instant::now() >= deadline {
+                return Err("extension guest launcher emitted no typed request".into());
+            }
+            super::drain_run_loop_once(run_loop);
+        };
+        if request.profile() != profile
+            || request.action() != &ExtensionBrowserRequestAction::OpenExtensionPage
+            || !self.browser_requests_is_empty()
+        {
+            return Err(format!("guest launcher emitted wrong request: {request:?}"));
+        }
+
+        let stage = ContentStage::new(mtm, 8.0, Box::new(|_| {}));
+        let host = host_for_window(&self.regular_windows[0], "guest stage")?;
+        stage.setFrame(NSRect::new(NSPoint::new(0., 0.), NSSize::new(600., 400.)));
+        host.view.addSubview(&stage);
+        let permit = Arc::new(AtomicBool::new(true));
+        let lease =
+            crate::host::NativeResourceLease::for_extension_tab_probe().map_err(str::to_owned)?;
+        let outcome = self
+            .registry
+            .settle_browser_request(
+                profile,
+                request.id(),
+                ExtensionBrowserRequestSettlement::Applied(
+                    ExtensionBrowserRequestResult::ExtensionPageAuthorized { tab: guest, window },
+                ),
+                Some(lease),
+                Some((stage.clone(), permit)),
+            )
+            .map_err(|error| format!("guest native settlement: {error}"))?;
+        if outcome != ControllerBrowserRequestSettlement::Settled {
+            return Err(format!("guest native settlement was {outcome:?}"));
+        }
+        let view = unsafe { guest_tab.webViewForWebExtensionContext(owner) }
+            .ok_or("owner context did not receive its guest view")?;
+        if unsafe { guest_tab.webViewForWebExtensionContext(foreign) }.is_some() {
+            return Err("foreign context received another extension's guest view".into());
+        }
+        if !view.isHidden() {
+            return Err("guest view became visible before stage acknowledgment".into());
+        }
+        self.guest_views.push(Weak::from_retained(&view));
+        self.guest_views.push(Weak::from_retained(&launcher));
+        if !stage.set_tree(Some(Pane::leaf(guest))) || !stage.set_visible(&[guest]) {
+            return Err("guest stage refused its exact tab tree".into());
+        }
+        let epoch = stage
+            .begin_content_update(true)
+            .ok_or("guest stage update refused")?;
+        if !stage.finish_content_update(epoch) {
+            return Err("guest stage failed to reveal admitted page".into());
+        }
+        let deadline = Instant::now() + PROBE_TIMEOUT;
+        loop {
+            if unsafe { view.title() }
+                .as_ref()
+                .is_some_and(|title| title.to_string() == "Native guest proof")
+                && !view.isHidden()
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    "guest page did not load and become visible after stage acknowledgment".into(),
+                );
+            }
+            super::drain_run_loop_once(run_loop);
+        }
+        let metadata_deadline = Instant::now() + PROBE_TIMEOUT;
+        loop {
+            let received = self.guest_events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(
+                |event| matches!(event, EngineEvent::ExtensionPageChanged { profile: actual, id, title, loading: false, .. } if *actual == profile && *id == guest && title == "Native guest proof"),
+            );
+            if received {
+                break;
+            }
+            if Instant::now() >= metadata_deadline {
+                let observed = self
+                    .guest_events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .filter_map(|event| match event {
+                        EngineEvent::ExtensionPageChanged {
+                            id, title, loading, ..
+                        } if *id == guest => Some((title.clone(), *loading)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                return Err(format!("loaded guest document title did not reach ExtensionPageChanged; observed={observed:?}"));
+            }
+            super::drain_run_loop_once(run_loop);
+        }
+        let new_window_before = crate::platform::macos::probe_new_window_callbacks();
+        let new_window_policy_before = crate::platform::macos::probe_new_window_policy();
+        evaluate_guest_script(
+            &view,
+            "document.getElementById('guest-new-window').click();",
+            run_loop,
+        )?;
+        let deadline = Instant::now() + PROBE_TIMEOUT;
+        let new_window_request = loop {
+            if let Some(request) = self
+                .browser_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+            {
+                break request;
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "guest target-blank emitted no typed request; WKUIDelegate callbacks={}",
+                    crate::platform::macos::probe_new_window_callbacks()
+                        .saturating_sub(new_window_before),
+                ));
+            }
+            super::drain_run_loop_once(run_loop);
+        };
+        if crate::platform::macos::probe_new_window_policy().1 <= new_window_policy_before.1
+            || new_window_request.profile() != profile
+            || new_window_request.action() != &ExtensionBrowserRequestAction::OpenExtensionPage
+            || !self.browser_requests_is_empty()
+        {
+            return Err(format!(
+                "guest target-blank used wrong native route: {new_window_request:?}; policy={:?}, ui_callbacks={}",
+                crate::platform::macos::probe_new_window_policy(),
+                crate::platform::macos::probe_new_window_callbacks().saturating_sub(new_window_before),
+            ));
+        }
+        self.registry
+            .settle_browser_request(
+                profile,
+                new_window_request.id(),
+                ExtensionBrowserRequestSettlement::Rejected(
+                    zephium_core::extensions::ExtensionBrowserRequestRejection::Unsupported,
+                ),
+                None,
+                None,
+            )
+            .map_err(|error| format!("guest target-blank refusal settlement: {error}"))?;
+        let foreign_url = unsafe { foreign.baseURL() }
+            .URLByAppendingPathComponent(&NSString::from_str("foreign.html"))
+            .and_then(|url| url.absoluteString())
+            .ok_or("foreign guest URL absent")?
+            .to_string();
+        let encoded_foreign = serde_json::to_string(&foreign_url)
+            .map_err(|error| format!("foreign guest URL encoding: {error}"))?;
+        evaluate_guest_script(
+            &view,
+            &format!("{{const link=document.createElement('a');link.href={encoded_foreign};link.target='_blank';document.body.append(link);link.click();}}"),
+            run_loop,
+        )?;
+        for _ in 0..10 {
+            super::drain_run_loop_once(run_loop);
+        }
+        if !self.browser_requests_is_empty() {
+            return Err("foreign extension target-blank reached a browser request".into());
+        }
+        let web_callbacks_before = crate::platform::macos::probe_new_window_callbacks();
+        let web_policy_before = crate::platform::macos::probe_new_window_policy();
+        evaluate_guest_script(
+            &view,
+            "{const link=document.createElement('a');link.href='https://example.test/help';link.target='_blank';document.body.append(link);link.click();}",
+            run_loop,
+        )?;
+        let deadline = Instant::now() + PROBE_TIMEOUT;
+        let web_request = loop {
+            if let Some(request) = self
+                .browser_requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+            {
+                break request;
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "guest HTTPS target-blank emitted no ordinary tab request; policy attempts={}, policy allowed={}, WKUIDelegate callbacks={}",
+                    crate::platform::macos::probe_new_window_policy().0.saturating_sub(web_policy_before.0),
+                    crate::platform::macos::probe_new_window_policy().1.saturating_sub(web_policy_before.1),
+                    crate::platform::macos::probe_new_window_callbacks().saturating_sub(web_callbacks_before),
+                ));
+            }
+            super::drain_run_loop_once(run_loop);
+        };
+        if !matches!(web_request.action(), ExtensionBrowserRequestAction::CreateTab { url: Some(url), active: true, .. } if url.as_ref() == "https://example.test/help")
+        {
+            return Err(format!(
+                "guest HTTPS target-blank used wrong browser route: {web_request:?}"
+            ));
+        }
+        self.registry
+            .settle_browser_request(
+                profile,
+                web_request.id(),
+                ExtensionBrowserRequestSettlement::Rejected(
+                    zephium_core::extensions::ExtensionBrowserRequestRejection::Unsupported,
+                ),
+                None,
+                None,
+            )
+            .map_err(|error| format!("guest HTTPS refusal settlement: {error}"))?;
+        if !self.registry.close_extension_page(guest) || stage.has_view(guest) {
+            return Err("guest close did not detach its stage view".into());
+        }
+        if unsafe { guest_tab.webViewForWebExtensionContext(owner) }.is_some() {
+            return Err("closed guest still exposed a native view".into());
+        }
+        if !self.guest_events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(
+            |event| matches!(event, EngineEvent::ExtensionPageClosed { profile: actual, id } if *actual == profile && *id == guest),
+        ) {
+            return Err("guest close emitted no trusted lifecycle event".into());
+        }
+        launcher.removeFromSuperview();
+        launch_window.close();
+        stage.removeFromSuperview();
+        drop(view);
+        drop(launcher);
+        drop(launch_window);
+        drop(stage);
+        drop(guest_tab);
+        drop(guest_window);
+        drop(original_window);
+
+        let after = ExtensionBrowserSurface::new(
+            profile,
+            generation.next().ok_or("guest close generation overflow")?,
+            Some(window),
+            vec![ExtensionBrowserWindow::new(
+                window,
+                false,
+                Some(ordinary),
+                vec![ExtensionBrowserTab::from_snapshot(
+                    guest_surface.tabs().find(|tab| tab.id() == ordinary),
+                    ordinary,
+                    true,
+                    "Profile A updated",
+                    Some(&ordinary_url),
+                    false,
+                    true,
+                )
+                .map_err(|error| format!("guest close ordinary tab: {error:?}"))?],
+            )
+            .map_err(|error| format!("guest close window: {error:?}"))?],
+        )
+        .map_err(|error| format!("guest close surface: {error:?}"))?;
+        self.registry
+            .apply_browser_surface(&after, |id| (id == ordinary).then(|| ordinary_view.clone()))
+            .map_err(|error| format!("guest close projection: {error}"))?;
+        Ok(after)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn validate_tab_mutation_broker(
         &mut self,
         profile: zephium_core::ids::ProfileId,
@@ -703,6 +1125,7 @@ impl ProfileGeneration {
                 profile,
                 request.id(),
                 ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete),
+                None,
                 None,
             )
             .map_err(|error| format!("cannot settle browser mutation: {error}"))?;
@@ -823,6 +1246,7 @@ impl ProfileGeneration {
                 profile,
                 request.id(),
                 ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete),
+                None,
                 None,
             )
             .map_err(|error| format!("cannot settle native browser mutation: {error}"))?;
@@ -1016,6 +1440,7 @@ impl ProfileGeneration {
         };
         evidence.contexts.append(&mut self.regular_contexts);
         evidence.views.append(&mut self.retired_private_views);
+        evidence.views.append(&mut self.guest_views);
         if let Some(view) = self.private_view.as_ref() {
             evidence
                 .views
@@ -1028,7 +1453,7 @@ impl ProfileGeneration {
             .stores
             .push(Weak::from_retained(&self.private_bundle._data_store));
         let expected_inventory = if had_regular_routing {
-            (EXPECTED_REGULAR_PROFILES + 2, EXPECTED_REGULAR_PROFILES + 1)
+            (EXPECTED_REGULAR_PROFILES + 4, EXPECTED_REGULAR_PROFILES + 1)
         } else {
             (EXPECTED_REGULAR_PROFILES + 1, 1)
         };

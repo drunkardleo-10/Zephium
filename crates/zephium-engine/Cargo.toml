@@ -18,6 +18,7 @@ native-web-extension-probes = [
     "dep:tempfile",
     "dep:sha2",
     "dep:serde",
+    "dep:zephium-extension-acquisition",
     "objc2-web-kit/WKWebExtension",
     "objc2-web-kit/WKWebExtensionAction",
     "objc2-web-kit/WKWebExtensionContext",
@@ -41,6 +42,9 @@ native-extension-product-probes = []
 # the explicit inspector-retention environment switch is set. Shipping
 # contexts and content remain non-inspectable and transient.
 native-extension-lab-diagnostics = []
+# Inspect native WebExtension workers in a trace-enabled, signed QA app only.
+# Unlike lab diagnostics, this does not forward publisher native-host stderr.
+native-extension-qa-inspector = []
 # Compiles the intentionally non-product Windows CDP feasibility harness. The
 # default product must not contain this path until Phase 0a's live gates pass.
 windows-cdp-spike = []
@@ -86,6 +90,11 @@ required-features = ["native-page-permission-probes"]
 [[bin]]
 name = "macos-web-extension-probe"
 path = "src/bin/macos_web_extension_probe.rs"
+required-features = ["native-web-extension-probes"]
+
+[[bin]]
+name = "macos-identity-redirect-probe"
+path = "src/bin/macos_identity_redirect_probe.rs"
 required-features = ["native-web-extension-probes"]
 
 [[bin]]
@@ -142,6 +151,7 @@ required-features = ["native-web-extension-probes"]
 zephium-agentic = { workspace = true, optional = true }
 zephium-core.workspace = true
 zephium-extension-runtime-api.workspace = true
+zephium-extension-acquisition = { path = "../zephium-extension-acquisition", version = "=0.1.0", optional = true }
 wry.workspace = true
 dirs = "6"
 serde_json.workspace = true
@@ -215,7 +225,10 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKContentRuleListStore",
     "WKError",
     "WKNavigationAction",
+    "WKNavigation",
     "WKNavigationDelegate",
+    "WKUIDelegate",
+    "WKWindowFeatures",
     "WKPreferences",
     "WKFrameInfo",
     "WKScriptMessage",
@@ -223,6 +236,8 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKSnapshotConfiguration",
     "WKUserContentController",
     "WKUserScript",
+    "WKURLSchemeHandler",
+    "WKURLSchemeTask",
     "WKWebExtension",
     "WKWebExtensionAction",
     "WKWebExtensionCommand",

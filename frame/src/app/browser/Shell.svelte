@@ -12,7 +12,8 @@
   import { Dock } from "$features/dock";
   import { DownloadStatus } from "$features/downloads";
   import { EssentialsRail } from "$features/essentials";
-  import { ExtensionActions } from "$features/extensions";
+  import { ExtensionActions, ExtensionManager } from "$features/extensions";
+  import { extensions } from "$domain/extensions";
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
@@ -145,6 +146,7 @@
     untrack(() => {
       if (command.id === "split.choose") splitting = true;
       if (command.id === "tab.copyLink") tabs.copyMenuTargetLink();
+      if (command.id === "extensions.manage") void browserPage.open("extensions");
     });
   });
   function selectTab(id: string) {
@@ -161,7 +163,7 @@
   class="shell flex h-screen w-screen"
   class:p-2={!IS_MAC}
   data-zephium-active-tab={tabs.activeId() ?? ""}
-  data-zephium-surface={browserPage.currentPage() === "settings" ? "settings" : "browse"}
+  data-zephium-surface={browserPage.currentPage() ?? "browse"}
 >
   <Sidebar
     >{#snippet browserBody(compact)}
@@ -178,7 +180,7 @@
         <div class="sidebar-head"><ModeTabs /></div>
         <AddressField {compact}>
           {#snippet trailing()}
-            <UtilityTray>
+            <UtilityTray openRequest={extensions.storeReviewRequest()}>
               <div class="utility-panel">
                 <BlockerShield />
                 <ExtensionActions />
@@ -262,7 +264,7 @@
   {#if browserPage.navigationFailed()}<div class="navigation-error" role="alert">
       {m.browser_nav_failed()}
     </div>{/if}
-  {#if !tabs.activeTab()?.url && browserPage.currentPage() === null}
+  {#if !tabs.activeTab()?.url && (tabs.activeTab()?.content ?? "web") === "web" && browserPage.currentPage() === null}
     <!--
       Occupies exactly the rect a content WebView would, so moving between a
       page and the new tab never changes the window's shape. The inline start
@@ -307,6 +309,8 @@
                 failureLabel={m.surface_render_failed()}
                 retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
               >
+            {:else if browserPage.currentPage() === "extensions"}
+              <ExtensionManager embedded />
             {:else if browserPage.currentPage() === "work"}
               {#key tabs.profile()?.id}<LazyView
                   loader={loadWorkWorkspace}

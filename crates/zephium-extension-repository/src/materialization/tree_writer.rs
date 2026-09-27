@@ -1360,6 +1360,95 @@ mod tests {
 
         #[cfg(feature = "acquired-packages")]
         #[test]
+        fn acquired_unicode_resource_round_trips_through_sealed_tree_and_runtime_plan() {
+            use crate::materialization::tree_reader::with_verified_tree_resource;
+            use zephium_extension_runtime_api::{
+                ExtensionRuntimeResourceBinding, ExtensionRuntimeResourcePlan,
+            };
+
+            const PATH: &str = "src/js/сlickableCard.common.chunk.js";
+            const SCRIPT_BYTES: &[u8] = b"globalThis.clickableCard = true;";
+            let (_parent, _namespace, trees) = private_trees();
+            let fixture =
+                FixtureTree::from_entries(&[("manifest.json", MANIFEST), (PATH, SCRIPT_BYTES)]);
+            let archive = acquired_zip(&[("manifest.json", MANIFEST), (PATH, SCRIPT_BYTES)]);
+            let (crx, key_digest) = signed_crx(&archive);
+            let catalog = acquired_catalog(
+                &archive,
+                &fixture.index,
+                key_digest,
+                fixture.index.total_bytes(),
+                fixture.index.tree_sha256().bytes(),
+            );
+            let package = catalog
+                .package(ExtensionPackageKey::from_bytes([4; 32]))
+                .unwrap();
+            let mut acquired =
+                AcquiredExtensionArchive::authenticate_release_package_crx3(&crx, package).unwrap();
+            let stage_name = PrivateComponent::new("unicode.stage").unwrap();
+            let object_name = PrivateComponent::new("unicode.object").unwrap();
+            let (stage, receipt, manifest) = build_authenticated_acquired_tree_stage(
+                &trees,
+                &stage_name,
+                package,
+                &mut acquired,
+            )
+            .unwrap()
+            .into_parts();
+            assert_eq!(manifest.as_ref(), MANIFEST);
+            assert_eq!(receipt.index(), &fixture.index);
+
+            let published = stage
+                .publish_same_parent_noreplace(&trees, &object_name)
+                .unwrap();
+            let path = PortableRelativePath::parse(PATH).unwrap();
+            let observed =
+                with_verified_tree_resource(&published, receipt.index(), &path, |reader| {
+                    let mut bytes = Vec::new();
+                    reader.read_to_end(&mut bytes).map(|_| bytes)
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(observed, SCRIPT_BYTES);
+            let src = published
+                .open_sealed_entry_child(&PrivateEntryName::new("src").unwrap())
+                .unwrap();
+            let js = src
+                .open_sealed_entry_child(&PrivateEntryName::new("js").unwrap())
+                .unwrap();
+            assert_eq!(
+                js.list_entry_names(1).unwrap(),
+                vec![PrivateEntryName::new("сlickableCard.common.chunk.js").unwrap()]
+            );
+
+            let bindings = receipt
+                .index()
+                .files()
+                .iter()
+                .map(|file| {
+                    ExtensionRuntimeResourceBinding::try_new(
+                        file.path().as_str(),
+                        file.length(),
+                        file.sha256(),
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let plan = ExtensionRuntimeResourcePlan::try_new(bindings).unwrap();
+            let entry = plan.entry(PATH).unwrap();
+            assert_eq!(entry.path(), PATH);
+            assert_eq!(entry.declared_bytes(), SCRIPT_BYTES.len() as u64);
+            assert_eq!(
+                entry.sha256(),
+                <[u8; 32]>::from(Sha256::digest(SCRIPT_BYTES))
+            );
+            drop(plan);
+            drop(published);
+            assert!(cleanup_tree_stage(&trees, &object_name).unwrap());
+        }
+
+        #[cfg(feature = "acquired-packages")]
+        #[test]
         fn existing_tree_evidence_authenticates_every_archive_file_without_staging() {
             let fixture = FixtureTree::standard();
             let archive = acquired_zip(&[

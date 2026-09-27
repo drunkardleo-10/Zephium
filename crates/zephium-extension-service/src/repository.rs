@@ -5,8 +5,7 @@ use std::sync::Arc;
 use zephium_core::extensions::{ExtensionInstallCatalog, ExtensionPackagePinReleaseBinding};
 use zephium_core::ids::ProfileId;
 use zephium_extension_repository::{
-    BundledCurrentInstallCandidates, BundledCurrentInstallUpdates, BundledCurrentManifestBindings,
-    BundledManagementManifestsError, BundledManifestBindingsError,
+    BundledCurrentInstallCandidates, BundledCurrentInstallUpdates, BundledManagementManifestsError,
     BundledPackageBuildSettlementError, BundledPackageBuildSettlementOutcome,
     BundledPackageGarbageCollectionOutcome, BundledPackageLeaseReleaseError,
     BundledPackageLeaseReleaseOutcome, ExtensionRepository, ExtensionRepositoryError,
@@ -17,9 +16,13 @@ use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
 
 use crate::startup::ExtensionRepositoryRoot;
 
+#[cfg(feature = "external-extensions")]
+mod external;
 #[cfg(feature = "acquired-packages")]
 mod provisioning;
 mod runtime_transactions;
+#[cfg(feature = "external-extensions")]
+mod startup_manifest_cache;
 
 #[allow(unused_imports)]
 pub(crate) use runtime_transactions::{
@@ -52,6 +55,14 @@ pub(crate) struct ServiceRepository {
     root: ExtensionRepositoryRoot,
     repository: Option<ExtensionRepository>,
     open_epoch: Option<Arc<ServiceRepositoryOpenEpoch>>,
+    #[cfg(feature = "external-extensions")]
+    external: Option<zephium_extension_repository::beta::BetaPackageRepository>,
+    #[cfg(feature = "external-extensions")]
+    external_candidate: Option<external::ExternalCandidate>,
+    #[cfg(feature = "external-extensions")]
+    pub(crate) external_update: Option<Box<external::ExternalUpdateCandidate>>,
+    #[cfg(feature = "external-extensions")]
+    startup_manifest_cache: Option<startup_manifest_cache::StartupManifestCache>,
 }
 
 /// Process-local marker shared by every unresolved same-open capability.
@@ -65,11 +76,33 @@ impl ServiceRepository {
             root,
             repository: None,
             open_epoch: None,
+            #[cfg(feature = "external-extensions")]
+            external: None,
+            #[cfg(feature = "external-extensions")]
+            external_candidate: None,
+            #[cfg(feature = "external-extensions")]
+            external_update: None,
+            #[cfg(feature = "external-extensions")]
+            startup_manifest_cache: None,
         }
     }
 
     pub(crate) fn is_open(&self) -> bool {
         self.repository.is_some()
+    }
+
+    pub(crate) fn begin_startup_manifest_cache(&mut self) {
+        #[cfg(feature = "external-extensions")]
+        {
+            self.startup_manifest_cache = Some(Default::default());
+        }
+    }
+
+    pub(crate) fn end_startup_manifest_cache(&mut self) {
+        #[cfg(feature = "external-extensions")]
+        {
+            self.startup_manifest_cache = None;
+        }
     }
 
     pub(crate) fn open(&mut self) -> Result<(), ServiceRepositoryOpenError> {
@@ -89,6 +122,18 @@ impl ServiceRepository {
             Ok(_) => return Err(ServiceRepositoryOpenError::UnexpectedBuildSettlementOutcome),
             Err(error) => return Err(ServiceRepositoryOpenError::BuildSettlement(error)),
         }
+        #[cfg(feature = "external-extensions")]
+        {
+            let root = self.root.path().with_file_name("extension-packages-v1");
+            let namespace = LockedPrivateNamespace::open_or_create(root)
+                .map_err(ServiceRepositoryOpenError::Namespace)?;
+            self.external = Some(
+                zephium_extension_repository::beta::BetaPackageRepository::open(namespace)
+                    .map_err(|_| {
+                        ServiceRepositoryOpenError::Repository(ExtensionRepositoryError::Sealed)
+                    })?,
+            );
+        }
         self.repository = Some(repository);
         self.open_epoch = Some(Arc::new(ServiceRepositoryOpenEpoch { _private: () }));
         Ok(())
@@ -107,6 +152,16 @@ impl ServiceRepository {
         // Drop the quarantined repository and its namespace lock before
         // attempting recovery through a fresh open.
         self.repository = None;
+        self.end_startup_manifest_cache();
+        #[cfg(feature = "external-extensions")]
+        {
+            self.external_candidate = None;
+            #[cfg(feature = "external-extensions")]
+            {
+                self.external_update = None;
+            }
+            self.external = None;
+        }
         self.open_epoch = None;
         self.open()
     }
@@ -115,6 +170,23 @@ impl ServiceRepository {
         &mut self,
         binding: &ExtensionPackagePinReleaseBinding,
     ) -> Result<BundledPackageLeaseReleaseOutcome, BundledPackageLeaseReleaseError> {
+        #[cfg(feature = "external-extensions")]
+        if binding.catalog_role() == zephium_core::extensions::ExtensionCatalogGenerationRole::Beta
+        {
+            let external = self
+                .external
+                .as_ref()
+                .ok_or(BundledPackageLeaseReleaseError::WrongRepository)?;
+            external
+                .reconcile_absent_native_pin(binding)
+                .map_err(|error| match error {
+                    zephium_extension_repository::beta::BetaNativeAdmissionError::InUse => {
+                        BundledPackageLeaseReleaseError::ConcurrentLease
+                    }
+                    _ => BundledPackageLeaseReleaseError::JournalPinMismatch,
+                })?;
+            return Ok(BundledPackageLeaseReleaseOutcome::AlreadyReleased);
+        }
         let Some(repository) = self.repository.as_mut() else {
             return Err(BundledPackageLeaseReleaseError::Repository(
                 ExtensionRepositoryError::Sealed,
@@ -146,18 +218,6 @@ impl ServiceRepository {
         repository.authenticate_current_bundled_install_updates(catalog)
     }
 
-    /// Authenticates one complete installed-manifest cohort without acquiring
-    /// package pins or locale/UI metadata.
-    pub(crate) fn authenticate_manifest_bindings(
-        &mut self,
-        catalog: &ExtensionInstallCatalog,
-    ) -> Result<BundledCurrentManifestBindings, BundledManifestBindingsError> {
-        let Some(repository) = self.repository.as_mut() else {
-            return Err(ExtensionRepositoryError::Sealed.into());
-        };
-        repository.authenticate_current_bundled_manifest_bindings(catalog)
-    }
-
     /// Collects one bounded, fresh pin-rooted package-garbage cohort.
     ///
     /// The repository owns crash settlement and integrity sealing. This
@@ -176,6 +236,20 @@ impl ServiceRepository {
         &mut self,
         profile: ProfileId,
     ) -> Result<ProfilePackageObligation, ExtensionRepositoryError> {
+        #[cfg(feature = "external-extensions")]
+        if let Some(external) = &self.external {
+            let count = external
+                .active_native_pins(profile)
+                .map_err(|_| ExtensionRepositoryError::Sealed)?;
+            if count != 0 {
+                return Ok(ProfilePackageObligation::Present(
+                    zephium_extension_repository::ProfilePackageObligationKind::SameOpenPresence {
+                        durable_pin_count: count,
+                        same_open_presence_count: count,
+                    },
+                ));
+            }
+        }
         let Some(repository) = self.repository.as_mut() else {
             return Err(ExtensionRepositoryError::Sealed);
         };
@@ -187,6 +261,20 @@ impl ServiceRepository {
         profile: ProfileId,
         evidence: ProfilePackageAbsenceEvidence,
     ) -> Result<(), ProfilePackageAbsenceRevalidationError> {
+        #[cfg(feature = "external-extensions")]
+        if let Some(external) = &self.external {
+            let count = external.active_native_pins(profile).map_err(|_| {
+                ProfilePackageAbsenceRevalidationError::Repository(ExtensionRepositoryError::Sealed)
+            })?;
+            if count != 0 {
+                return Err(ProfilePackageAbsenceRevalidationError::ObligationsRemain(
+                    zephium_extension_repository::ProfilePackageObligationKind::SameOpenPresence {
+                        durable_pin_count: count,
+                        same_open_presence_count: count,
+                    },
+                ));
+            }
+        }
         let Some(repository) = self.repository.as_mut() else {
             return Err(ProfilePackageAbsenceRevalidationError::Repository(
                 ExtensionRepositoryError::Sealed,

@@ -1,5 +1,6 @@
 //! Closed parsing for Manifest V3 execution and extension-page surfaces.
 
+use super::ManifestTreeBinding;
 use std::collections::BTreeSet;
 
 use serde_json::Value;
@@ -14,7 +15,7 @@ use zephium_core::extensions::{
     MAX_EXTENSION_HOST_PERMISSION_PATTERNS, MAX_EXTENSION_SANDBOX_RESOURCES,
     MAX_EXTENSION_WEB_ACCESSIBLE_DECLARATIONS, MAX_EXTENSION_WEB_ACCESSIBLE_RESOURCES,
 };
-use zephium_core::injection::{MatchOptions, MatchSet};
+use zephium_core::injection::{MatchOptions, MatchSet, MAX_MATCH_PATTERNS_PER_SET};
 
 use super::metadata::{parse_unresolved_display_text, ExtensionUnresolvedDisplayText};
 use super::resources::{digest_resources, digest_strings};
@@ -26,9 +27,7 @@ use super::{
     ExtensionManifestAdmissionError, ExtensionManifestIcon, ExtensionManifestResource,
     ExtensionOverrideResource, ExtensionWebAccessibleAudience, ExtensionWebAccessibleResourceGroup,
 };
-use crate::{
-    ChromiumExtensionId, ExtensionReleaseTreeBinding, MAX_EXTENSION_METADATA_STRING_BYTES,
-};
+use crate::{ChromiumExtensionId, MAX_EXTENSION_METADATA_STRING_BYTES};
 
 const WEB_RESOURCE_PATTERNS_DOMAIN: &[u8] = b"zephium:extension-web-resource-patterns:v1\0";
 const WEB_RESOURCE_EXTENSION_IDS_DOMAIN: &[u8] =
@@ -37,7 +36,7 @@ const CONTENT_SCRIPT_GLOBS_DOMAIN: &[u8] = b"zephium:extension-content-script-gl
 
 pub(super) fn parse_content_scripts(
     value: Option<Value>,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
 ) -> Result<
     (
         Vec<ExtensionContentScriptDeclaration>,
@@ -74,16 +73,12 @@ pub(super) fn parse_content_scripts(
             ],
             &field,
         )?;
-        let matches = required_string_array(
-            &mut object,
-            "matches",
-            &field,
-            MAX_EXTENSION_HOST_PERMISSION_PATTERNS,
-        )?;
+        let matches =
+            required_string_array(&mut object, "matches", &field, MAX_MATCH_PATTERNS_PER_SET)?;
         let excludes = optional_string_array(
             object.remove("exclude_matches"),
             &field,
-            MAX_EXTENSION_HOST_PERMISSION_PATTERNS,
+            MAX_MATCH_PATTERNS_PER_SET,
         )?;
         let include_globs = optional_globs(object.remove("include_globs"), &field)?;
         let exclude_globs = optional_globs(object.remove("exclude_globs"), &field)?;
@@ -167,7 +162,7 @@ pub(super) fn parse_content_scripts(
 
 pub(super) fn parse_background(
     value: Option<Value>,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
 ) -> Result<
     (
         Option<ExtensionBackgroundDeclaration>,
@@ -193,6 +188,7 @@ pub(super) fn parse_background(
     )?;
     let environment = match (scripts.as_slice(), preferred_environment.as_slice()) {
         ([], []) => ExtensionBackgroundEnvironment::ServiceWorker,
+        ([script], []) if script == &worker_path => ExtensionBackgroundEnvironment::CrossBrowser,
         ([script], [document, service_worker])
             if script == &worker_path
                 && document == "document"
@@ -231,7 +227,7 @@ pub(super) struct ParsedAction {
 
 pub(super) fn parse_action(
     value: Option<Value>,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
 ) -> Result<ParsedAction, ExtensionManifestAdmissionError> {
     let Some(value) = value else {
         return Ok(ParsedAction {
@@ -244,9 +240,48 @@ pub(super) fn parse_action(
     let mut object = into_object(value, "action")?;
     reject_unknown_nested(
         &object,
-        &["default_popup", "default_icon", "default_title"],
+        &[
+            "default_popup",
+            "default_icon",
+            "default_title",
+            "theme_icons",
+        ],
         "action",
     )?;
+    if let Some(themes) = object.remove("theme_icons") {
+        let themes = into_array(themes, "action.theme_icons")?;
+        if themes.is_empty() || themes.len() > super::MAX_ICON_ENTRIES {
+            return Err(invalid("action.theme_icons"));
+        }
+        let mut sizes = BTreeSet::new();
+        for theme in themes {
+            let mut theme = into_object(theme, "action.theme_icons")?;
+            reject_unknown_nested(&theme, &["light", "dark", "size"], "action.theme_icons")?;
+            let size = theme
+                .remove("size")
+                .and_then(|size| size.as_u64())
+                .filter(|size| *size > 0 && *size <= u64::from(u16::MAX))
+                .ok_or_else(|| invalid("action.theme_icons.size"))?;
+            if !sizes.insert(size) {
+                return Err(invalid("action.theme_icons.size"));
+            }
+            for mode in ["light", "dark"] {
+                let resource = theme
+                    .remove(mode)
+                    .ok_or_else(|| missing("action.theme_icons"))?;
+                super::bind_icon_resource(
+                    binding,
+                    resource
+                        .as_str()
+                        .ok_or_else(|| invalid("action.theme_icons"))?,
+                    "action.theme_icons",
+                )?;
+            }
+        }
+        // Optional cosmetic metadata is preserved in the exact manifest. The
+        // native backend may use it; browser-owned fallback icons still use
+        // default_icon. It does not introduce a new execution surface.
+    }
     let popup = object
         .remove("default_popup")
         .map(|value| {
@@ -288,7 +323,7 @@ pub(super) fn parse_action(
 
 pub(super) fn parse_overrides(
     value: Option<Value>,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
 ) -> Result<
     (Vec<ExtensionOverrideTarget>, Vec<ExtensionOverrideResource>),
     ExtensionManifestAdmissionError,
@@ -326,7 +361,7 @@ pub(super) fn parse_overrides(
 
 pub(super) fn parse_sandbox(
     value: Option<Value>,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
 ) -> Result<Vec<ExtensionManifestResource>, ExtensionManifestAdmissionError> {
     let Some(value) = value else {
         return Ok(Vec::new());
@@ -359,7 +394,7 @@ pub(super) fn parse_sandbox(
 
 pub(super) fn parse_web_accessible(
     value: Option<Value>,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    _binding: ManifestTreeBinding<'_>,
 ) -> Result<
     (
         Vec<ExtensionWebAccessibleResourceDeclaration>,
@@ -409,9 +444,10 @@ pub(super) fn parse_web_accessible(
             if !canonical_patterns.insert(Box::<str>::from(pattern.canonical_pattern())) {
                 return Err(invalid(&field));
             }
-            if !pattern.contains_wildcard() {
-                bind_resource(binding, pattern.canonical_pattern(), &field)?;
-            }
+            // These are exposure patterns, not executable entry points. Like
+            // wildcard patterns, literal names may match no packaged file.
+            // Only actual indexed resources can be served; background scripts,
+            // content scripts and extension pages remain strictly file-bound.
             patterns.push(pattern);
         }
         let matches = parse_web_accessible_matches(object.remove("matches"))?;

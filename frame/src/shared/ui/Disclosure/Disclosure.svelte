@@ -10,6 +10,7 @@
     align = "start",
     triggerClass = "",
     panelClass = "",
+    openRequest = null,
   }: {
     label: string;
     trigger: Snippet;
@@ -19,6 +20,8 @@
     align?: "start" | "end";
     triggerClass?: string;
     panelClass?: string;
+    /** An arriving request opens the existing panel; later null does not dismiss it. */
+    openRequest?: string | null;
   } = $props();
 
   let open = $state(false);
@@ -35,6 +38,10 @@
     // by pointer it should not steal the cursor's place in the list.
     queueMicrotask(() => items()[0]?.focus());
   }
+
+  $effect(() => {
+    if (openRequest !== null) show();
+  });
 
   function dismiss(restore: boolean) {
     if (!open) return;

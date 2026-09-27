@@ -17,7 +17,7 @@ use objc2_app_kit::NSView;
 use raw_window_handle::RawWindowHandle;
 
 use super::resources::{NativeResourceAdmissionError, NativeResourceClass};
-use super::{extensions::ToolbarActiveTabGrant, EngineHost};
+use super::EngineHost;
 
 pub(crate) enum ExtensionActionInvocationOutcome {
     Settled(ExtensionActionSettlement),
@@ -35,12 +35,12 @@ impl EngineHost {
         tab: ItemId,
         surface_generation: ExtensionBrowserSurfaceGeneration,
     ) -> ExtensionActionSnapshotSettlement {
-        let native_tab =
+        let (native_tab, resident) =
             match self
                 .macos_extension_controllers
                 .action_tab(profile, surface_generation, tab)
             {
-                Ok(Some(tab)) => tab.into_parts().0,
+                Ok(Some(tab)) => tab.into_parts(),
                 Ok(None) => {
                     return ExtensionActionSnapshotSettlement::Rejected(
                         ExtensionActionRejection::TabUnavailable,
@@ -60,25 +60,34 @@ impl EngineHost {
         };
         let mut actions = Vec::with_capacity(runtimes.len());
         for runtime in runtimes {
-            let state = match self
-                .extension_runtime_registry
-                .with_owned_macos_runtime(&runtime, |owner| {
-                    owner.action_state_for_tab(runtime.instance(), tab, &native_tab)
-                }) {
-                Ok(Some(Ok(state))) => state,
-                Ok(Some(Err(MacosNativeActionFailure::ActionUnavailable))) => continue,
-                Ok(Some(Err(error))) => {
-                    return ExtensionActionSnapshotSettlement::Rejected(map_native_error(error));
-                }
-                Ok(None) => {
-                    return ExtensionActionSnapshotSettlement::Rejected(
-                        ExtensionActionRejection::RuntimeUnavailable,
-                    );
-                }
-                Err(error) => {
-                    return ExtensionActionSnapshotSettlement::Rejected(map_runtime_error(error));
-                }
-            };
+            let state =
+                match self
+                    .extension_runtime_registry
+                    .with_owned_macos_runtime(&runtime, |owner| {
+                        owner.action_state_for_tab(
+                            runtime.instance(),
+                            tab,
+                            resident.then_some(&*native_tab),
+                        )
+                    }) {
+                    Ok(Some(Ok(state))) => state,
+                    Ok(Some(Err(MacosNativeActionFailure::ActionUnavailable))) => continue,
+                    Ok(Some(Err(error))) => {
+                        return ExtensionActionSnapshotSettlement::Rejected(map_native_error(
+                            error,
+                        ));
+                    }
+                    Ok(None) => {
+                        return ExtensionActionSnapshotSettlement::Rejected(
+                            ExtensionActionRejection::RuntimeUnavailable,
+                        );
+                    }
+                    Err(error) => {
+                        return ExtensionActionSnapshotSettlement::Rejected(map_runtime_error(
+                            error,
+                        ));
+                    }
+                };
             actions.push(state);
         }
         match ExtensionActionSnapshot::new(profile, tab, surface_generation, actions) {
@@ -112,9 +121,6 @@ impl EngineHost {
                 return settled(map_controller_error(error));
             }
         };
-        if !resident {
-            return settled(ExtensionActionRejection::TabDiscarded);
-        }
         let runtimes = match self.extension_runtime_registry.published_runtimes(profile) {
             Ok(runtimes) => runtimes,
             Err(error) => {
@@ -127,23 +133,29 @@ impl EngineHost {
         else {
             return settled(ExtensionActionRejection::RuntimeUnavailable);
         };
-        let state = match self
-            .extension_runtime_registry
-            .with_owned_macos_runtime(&runtime, |owner| {
-                owner.action_state_for_tab(runtime.instance(), request.tab(), &native_tab)
-            }) {
-            Ok(Some(Ok(state))) => state,
-            Ok(Some(Err(error))) => {
-                return settled(map_native_error(error));
-            }
-            Ok(None) => {
-                return settled(ExtensionActionRejection::RuntimeUnavailable);
-            }
-            Err(error) => {
-                return settled(map_runtime_error(error));
-            }
-        };
+        let state =
+            match self
+                .extension_runtime_registry
+                .with_owned_macos_runtime(&runtime, |owner| {
+                    owner.action_state_for_tab(
+                        runtime.instance(),
+                        request.tab(),
+                        resident.then_some(&*native_tab),
+                    )
+                }) {
+                Ok(Some(Ok(state))) => state,
+                Ok(Some(Err(error))) => {
+                    return settled(map_native_error(error));
+                }
+                Ok(None) => {
+                    return settled(ExtensionActionRejection::RuntimeUnavailable);
+                }
+                Err(error) => {
+                    return settled(map_runtime_error(error));
+                }
+            };
         if state.revision() != request.action_revision() {
+            crate::platform::imp::trace_action_qa_stage("initial-revision-mismatch");
             return settled(ExtensionActionRejection::RuntimeSuperseded);
         }
         if !state.is_enabled() {
@@ -157,13 +169,18 @@ impl EngineHost {
                         owner.validate_popup_action_for_tab(
                             runtime.instance(),
                             request.tab(),
-                            &native_tab,
+                            resident.then_some(&*native_tab),
                             request.action_revision(),
                         )
                     });
             match validated {
                 Ok(Some(Ok(()))) => {}
-                Ok(Some(Err(error))) => return settled(map_native_error(error)),
+                Ok(Some(Err(error))) => {
+                    if matches!(error, MacosNativeActionFailure::StaleAction) {
+                        crate::platform::imp::trace_action_qa_stage("popup-revalidation-stale");
+                    }
+                    return settled(map_native_error(error));
+                }
                 Ok(None) => return settled(ExtensionActionRejection::RuntimeUnavailable),
                 Err(error) => return settled(map_runtime_error(error)),
             }
@@ -180,7 +197,7 @@ impl EngineHost {
                 profile,
                 request,
                 &popup_owner,
-                &native_tab,
+                resident.then_some(&native_tab),
             ) {
                 Ok(Ok(ControllerActionPopupPreparation::Present)) => {}
                 Ok(Ok(ControllerActionPopupPreparation::Dismissed)) => {
@@ -188,7 +205,12 @@ impl EngineHost {
                         ExtensionActionSettlement::PopupDismissed,
                     );
                 }
-                Ok(Err(reason)) => return settled(reason),
+                Ok(Err(reason)) => {
+                    if matches!(reason, ExtensionActionRejection::RuntimeSuperseded) {
+                        crate::platform::imp::trace_action_qa_stage("popup-prepare-superseded");
+                    }
+                    return settled(reason);
+                }
                 Err(error) => return settled(map_controller_error(error)),
             }
             let Some(parent) = popup_parent_view(&self.parent) else {
@@ -205,7 +227,7 @@ impl EngineHost {
                 profile,
                 request,
                 popup_owner,
-                native_tab.clone(),
+                resident.then_some(native_tab.clone()),
                 parent,
                 lease,
             ) {
@@ -214,55 +236,18 @@ impl EngineHost {
                 Err(error) => return settled(map_controller_error(error)),
             }
         } else {
+            if !resident {
+                return settled(ExtensionActionRejection::TabDiscarded);
+            }
             false
         };
 
-        match self
-            .extension_runtime_registry
-            .optional_toolbar_active_tab_witness(&runtime)
-        {
-            Ok(Some(witness)) => match self.grant_toolbar_active_tab(request.tab(), witness) {
-                ToolbarActiveTabGrant::Granted | ToolbarActiveTabGrant::NotApplicable => {}
-                ToolbarActiveTabGrant::CapacityExceeded => {
-                    let reason = ExtensionActionRejection::CapacityExceeded;
-                    if popup_reserved {
-                        self.macos_extension_controllers.cancel_action_popup(
-                            profile,
-                            request.id(),
-                            reason,
-                        );
-                        return ExtensionActionInvocationOutcome::Pending;
-                    }
-                    return settled(reason);
-                }
-                ToolbarActiveTabGrant::Invalid => {
-                    let reason = ExtensionActionRejection::NativeAdmissionFailed;
-                    if popup_reserved {
-                        self.macos_extension_controllers.cancel_action_popup(
-                            profile,
-                            request.id(),
-                            reason,
-                        );
-                        return ExtensionActionInvocationOutcome::Pending;
-                    }
-                    return settled(reason);
-                }
-            },
-            Ok(None) => {}
-            Err(error) => {
-                let reason = map_runtime_error(error);
-                if popup_reserved {
-                    self.macos_extension_controllers.cancel_action_popup(
-                        profile,
-                        request.id(),
-                        reason,
-                    );
-                    return ExtensionActionInvocationOutcome::Pending;
-                }
-                return settled(reason);
-            }
-        }
-
+        // A resident tab-specific action marks that exact native tab with a
+        // user gesture. The nonresident popup path passes nil to WebKit, which
+        // performs only the default action and cannot mint activeTab for a
+        // stale document.
+        // The separate host-document broker has no production runtime owners;
+        // it must not gate native WebKit actions or fabricate a second grant.
         if popup_reserved {
             return ExtensionActionInvocationOutcome::Pending;
         }
@@ -280,6 +265,9 @@ impl EngineHost {
                 }) {
                 Ok(Some(Ok(()))) => ExtensionActionSettlement::Dispatched,
                 Ok(Some(Err(error))) => {
+                    if matches!(error, MacosNativeActionFailure::StaleAction) {
+                        crate::platform::imp::trace_action_qa_stage("nonpopup-revalidation-stale");
+                    }
                     ExtensionActionSettlement::Rejected(map_native_error(error))
                 }
                 Ok(None) => ExtensionActionSettlement::Rejected(
@@ -290,27 +278,35 @@ impl EngineHost {
         ExtensionActionInvocationOutcome::Settled(settlement)
     }
 
-    /// Opens an installed extension's exact declared options page from trusted
-    /// browser chrome. Runtime, controller, context, parent view, and resource
-    /// lease are rejoined on the host thread before any native window exists.
+    /// Opens the exact declared options page as a browser-owned extension
+    /// tab. `None` means the native tab request is pending and the supplied
+    /// completion will report its actual admission or rejection.
     pub(crate) fn open_extension_options(
         &mut self,
         runtime: ExtensionRuntimeInstance,
-    ) -> ExtensionOptionsPageSettlement {
+        completion: &block2::DynBlock<
+            dyn Fn(
+                *mut objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>,
+                *mut objc2_foundation::NSError,
+            ),
+        >,
+    ) -> Option<ExtensionOptionsPageSettlement> {
         let profile = runtime.profile();
         let runtimes = match self.extension_runtime_registry.published_runtimes(profile) {
             Ok(runtimes) => runtimes,
             Err(error) => {
-                return ExtensionOptionsPageSettlement::Rejected(map_runtime_error(error))
+                return Some(ExtensionOptionsPageSettlement::Rejected(map_runtime_error(
+                    error,
+                )))
             }
         };
         let Some(runtime) = runtimes
             .into_iter()
             .find(|candidate| candidate.instance() == runtime)
         else {
-            return ExtensionOptionsPageSettlement::Rejected(
+            return Some(ExtensionOptionsPageSettlement::Rejected(
                 ExtensionActionRejection::RuntimeUnavailable,
-            );
+            ));
         };
         let owner = match self
             .extension_runtime_registry
@@ -318,38 +314,30 @@ impl EngineHost {
         {
             Ok(Some(Ok(owner))) => owner,
             Ok(Some(Err(error))) => {
-                return ExtensionOptionsPageSettlement::Rejected(map_native_error(error))
+                return Some(ExtensionOptionsPageSettlement::Rejected(map_native_error(
+                    error,
+                )))
             }
             Ok(None) => {
-                return ExtensionOptionsPageSettlement::Rejected(
+                return Some(ExtensionOptionsPageSettlement::Rejected(
                     ExtensionActionRejection::RuntimeUnavailable,
-                )
+                ))
             }
             Err(error) => {
-                return ExtensionOptionsPageSettlement::Rejected(map_runtime_error(error))
-            }
-        };
-        let Some(parent) = popup_parent_view(&self.parent) else {
-            return ExtensionOptionsPageSettlement::Rejected(
-                ExtensionActionRejection::NativeAdmissionFailed,
-            );
-        };
-        let lease = match self
-            .native_resources
-            .try_acquire(NativeResourceClass::ExtensionPopup)
-        {
-            Ok(lease) => lease,
-            Err(error) => {
-                return ExtensionOptionsPageSettlement::Rejected(map_popup_resource_error(error))
+                return Some(ExtensionOptionsPageSettlement::Rejected(map_runtime_error(
+                    error,
+                )))
             }
         };
         match self
             .macos_extension_controllers
-            .open_options_page(profile, owner, parent, lease)
+            .open_options_page(profile, owner, completion)
         {
-            Ok(Ok(())) => ExtensionOptionsPageSettlement::Opened,
-            Ok(Err(reason)) => ExtensionOptionsPageSettlement::Rejected(reason),
-            Err(error) => ExtensionOptionsPageSettlement::Rejected(map_controller_error(error)),
+            Ok(Ok(())) => None,
+            Ok(Err(reason)) => Some(ExtensionOptionsPageSettlement::Rejected(reason)),
+            Err(error) => Some(ExtensionOptionsPageSettlement::Rejected(
+                map_controller_error(error),
+            )),
         }
     }
 

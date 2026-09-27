@@ -663,6 +663,22 @@ pub struct CallbackHandle {
 }
 
 impl CallbackHandle {
+    /// Transfers original store bytes into the serialized service via Shell.
+    pub fn begin_prepare_store_extension(
+        &self,
+        context: crate::api::StoreExtensionContext,
+        request: zephium_core::ports::extensions::ExtensionStorePackageRequest,
+        done: zephium_core::ports::extensions::ExtensionStorePackagePreparationCallback,
+    ) -> ExtensionManagementAdmission {
+        let submission = crate::api::StoreExtensionPackageSubmission::new(context, request, done);
+        if self.dispatch(Command::PrepareStoreExtensionPackage(submission.clone())) {
+            ExtensionManagementAdmission::Accepted
+        } else {
+            submission.settle_unavailable();
+            ExtensionManagementAdmission::Unavailable
+        }
+    }
+
     pub fn dispatch(&self, command: Command) -> bool {
         let Some(inner) = self.queue.upgrade() else {
             return false;
@@ -755,6 +771,43 @@ impl Drop for Handle {
 }
 
 impl Handle {
+    /// Captures an update request from the actual active management catalog.
+    pub fn store_extension_update_context(
+        &self,
+        install: zephium_core::ids::ExtensionInstallId,
+    ) -> std::sync::mpsc::Receiver<Option<crate::api::StoreExtensionContext>> {
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self
+            .queue
+            .try_push(Command::ResolveStoreExtensionUpdateContext { install, reply })
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        result
+    }
+    /// Resolves an actor-owned foreground store context without blocking the UI.
+    pub fn store_extension_context(
+        &self,
+        tab: zephium_core::ids::ItemId,
+    ) -> std::sync::mpsc::Receiver<Option<crate::api::StoreExtensionContext>> {
+        let (reply, receiver) = sync_channel(1);
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self
+            .queue
+            .try_push(Command::ResolveStoreExtensionContext { tab, reply })
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
+
     #[cfg(test)]
     pub(super) fn new(queue: CommandQueue) -> Self {
         Self::with_workers(
@@ -930,6 +983,16 @@ fn finish_unprocessed_command(command: Command, outcome: ShutdownOutcome) {
         }
         Command::FocusedContentPolicyStatus { reply } => {
             let _ = reply.send(BlockerStatusView::unavailable());
+        }
+        Command::ResolveStoreExtensionContext { reply, .. }
+        | Command::ResolveStoreExtensionUpdateContext { reply, .. } => {
+            let _ = reply.try_send(None);
+        }
+        Command::PrepareStoreExtensionPackage(submission) => {
+            submission.settle_unavailable();
+        }
+        Command::StoreExtensionPreparationCompleted(completion) => {
+            completion.settle_unavailable();
         }
         Command::ProvisionAcquiredExtensionPackage(submission) => {
             submission.settle_unavailable();

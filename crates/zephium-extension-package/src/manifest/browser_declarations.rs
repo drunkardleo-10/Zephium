@@ -14,7 +14,7 @@ use zephium_core::extensions::{
     MAX_EXTENSION_DECLARATIVE_NET_REQUEST_RULESETS,
 };
 
-use crate::ExtensionReleaseTreeBinding;
+use super::ManifestTreeBinding;
 
 use super::{
     bind_resource, into_object, invalid, missing, ExtensionManifestAdmissionError,
@@ -38,7 +38,7 @@ const COMMAND_PLATFORMS: [&str; 5] = ["default", "chromeos", "linux", "mac", "wi
 
 pub(super) fn parse_browser_declarations(
     root: &mut Map<String, Value>,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
     auxiliary_resources: &mut Vec<ExtensionManifestResource>,
 ) -> Result<ExtensionManifestAdditionalDeclarations, ExtensionManifestAdmissionError> {
     let minimum_chromium_version = root
@@ -81,7 +81,7 @@ pub(super) fn parse_browser_declarations(
 
 fn parse_declarative_net_request(
     value: Option<Value>,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
     auxiliary_resources: &mut Vec<ExtensionManifestResource>,
 ) -> Result<Option<ExtensionDeclarativeNetRequestDeclaration>, ExtensionManifestAdmissionError> {
     let Some(value) = value else {
@@ -162,7 +162,7 @@ fn valid_ruleset_id(value: &str) -> bool {
 
 fn parse_options_page(
     root: &mut Map<String, Value>,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
     auxiliary_resources: &mut Vec<ExtensionManifestResource>,
 ) -> Result<Option<ExtensionManifestResourceDigest>, ExtensionManifestAdmissionError> {
     let legacy = root.remove("options_page");
@@ -390,7 +390,7 @@ fn parse_single_resource_object(
     field: &'static str,
     resource_key: &'static str,
     digest_domain: &[u8],
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
     auxiliary_resources: &mut Vec<ExtensionManifestResource>,
 ) -> Result<Option<ExtensionManifestResourceDigest>, ExtensionManifestAdmissionError> {
     let Some(value) = value else {

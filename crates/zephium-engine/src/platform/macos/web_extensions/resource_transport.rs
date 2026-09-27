@@ -17,8 +17,8 @@ use objc2::runtime::{NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use objc2_foundation::{
-    MainThreadMarker, NSError, NSHTTPURLResponse, NSMutableDictionary, NSObjectProtocol, NSRunLoop,
-    NSString, NSURL,
+    MainThreadMarker, NSError, NSHTTPURLResponse, NSMutableDictionary, NSObjectProtocol, NSPoint,
+    NSRect, NSRunLoop, NSSize, NSString, NSURL,
 };
 use objc2_web_kit::{
     WKURLSchemeHandler, WKURLSchemeTask, WKWebExtension, WKWebExtensionContext,
@@ -171,6 +171,7 @@ struct HandlerDiagnostics {
 
 struct ExactMimeHandlerIvars {
     diagnostics: Arc<HandlerDiagnostics>,
+    native_extension_base: Option<Box<str>>,
 }
 
 define_class!(
@@ -188,7 +189,10 @@ define_class!(
             let diagnostics = &self.ivars().diagnostics;
             let ordinal = diagnostics.requests.fetch_add(1, Ordering::Relaxed) + 1;
             let admitted = (ordinal <= MAX_SCHEME_REQUESTS)
-                .then(|| admitted_native_resource(task))
+                .then(|| match self.ivars().native_extension_base.as_deref() {
+                    Some(base) => admitted_extension_origin_resource(task, base),
+                    None => admitted_native_resource(task),
+                })
                 .flatten();
             let Some((url, resource)) = admitted else {
                 diagnostics.rejections.fetch_add(1, Ordering::Relaxed);
@@ -253,7 +257,22 @@ define_class!(
 
 impl ExactMimeHandler {
     fn new(mtm: MainThreadMarker, diagnostics: Arc<HandlerDiagnostics>) -> Retained<Self> {
-        let object = Self::alloc(mtm).set_ivars(ExactMimeHandlerIvars { diagnostics });
+        let object = Self::alloc(mtm).set_ivars(ExactMimeHandlerIvars {
+            diagnostics,
+            native_extension_base: None,
+        });
+        unsafe { msg_send![super(object), init] }
+    }
+
+    fn new_for_extension_origin(
+        mtm: MainThreadMarker,
+        diagnostics: Arc<HandlerDiagnostics>,
+        base: &str,
+    ) -> Retained<Self> {
+        let object = Self::alloc(mtm).set_ivars(ExactMimeHandlerIvars {
+            diagnostics,
+            native_extension_base: Some(base.into()),
+        });
         // SAFETY: NSObject is the declared superclass and all ivars are fully
         // initialized before invoking its initializer.
         unsafe { msg_send![super(object), init] }
@@ -274,6 +293,28 @@ fn admitted_native_resource(
     let url = request.URL()?;
     let absolute = url.absoluteString()?.to_string();
     Some((url, admitted_resource(method.as_ref(), &absolute)?))
+}
+
+fn admitted_extension_origin_resource(
+    task: &ProtocolObject<dyn WKURLSchemeTask>,
+    base: &str,
+) -> Option<(Retained<NSURL>, &'static Resource)> {
+    let request = unsafe { task.request() };
+    if request
+        .HTTPMethod()
+        .is_some_and(|method| method.to_string() != "GET")
+    {
+        return None;
+    }
+    let url = request.URL()?;
+    let absolute = url.absoluteString()?.to_string();
+    if absolute.len() > MAX_REQUEST_URL_BYTES || !absolute.is_ascii() {
+        return None;
+    }
+    let resource = RESOURCES
+        .iter()
+        .find(|resource| absolute == format!("{base}{}", resource.path.trim_start_matches('/')))?;
+    Some((url, resource))
 }
 
 fn fail_native_task(task: &ProtocolObject<dyn WKURLSchemeTask>) {
@@ -358,6 +399,231 @@ pub(super) fn run(operating_system: String) -> Result<(), String> {
         teardown.diagnostics.rejections.load(Ordering::Acquire),
     );
     Ok(())
+}
+
+/// Qualifies whether a plain, controller-free WebView can share DOM storage
+/// with an extension context when both use the same custom base URL and exact
+/// WKWebsiteDataStore. This is a probe only: changing product extension origins
+/// would require a separate versioned compatibility contract.
+pub(super) fn run_shared_origin(custom_origin: bool) -> Result<(), String> {
+    let mtm = MainThreadMarker::new()
+        .ok_or_else(|| "shared-origin probe requires the main thread".to_owned())?;
+    let app = NSApplication::sharedApplication(mtm);
+    let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    app.finishLaunching();
+    let run_loop = NSRunLoop::mainRunLoop();
+    let (extension_view, plain_view, handler, context, controller, store) =
+        objc2::rc::autoreleasepool(|_| {
+            if custom_origin {
+                unsafe {
+                    WKWebExtensionMatchPattern::registerCustomURLScheme(
+                        &NSString::from_str(SCHEME),
+                        mtm,
+                    );
+                }
+            }
+            let fixture = Fixture::create()?;
+            let extension = super::load_extension(&fixture.root, &run_loop, mtm)?;
+            validate_extension(&extension)?;
+            let bundle = new_controller(mtm)?;
+            let context = super::new_context(&extension, PRINCIPAL)?;
+            if custom_origin {
+                let base = NSURL::URLWithString(&NSString::from_str(BASE_URL))
+                    .ok_or("invalid shared-origin extension base URL")?;
+                unsafe { context.setBaseURL(&base) };
+            }
+            super::load_context(&bundle.controller, &context, "shared-origin")?;
+            let base_url = unsafe { context.baseURL() }
+                .absoluteString()
+                .ok_or("shared-origin context base URL unavailable")?
+                .to_string();
+            let extension_configuration = unsafe { context.webViewConfiguration() }
+                .ok_or("shared-origin extension configuration unavailable")?;
+            assert_configuration_controller(&extension_configuration, &bundle.controller)?;
+            let window = super::new_window(mtm)?;
+            window.setAlphaValue(0.0);
+            window.setIgnoresMouseEvents(true);
+            let host = super::profile_isolation::host_for_window(&window, "shared-origin")?;
+            let extension_view =
+                super::profile_isolation::build_profile_view(&host, extension_configuration)?;
+            window.orderFrontRegardless();
+            extension_view
+                .load_url(&format!("{base_url}transport.html"))
+                .map_err(|error| format!("shared-origin extension navigation failed: {error}"))?;
+            let diagnostics = HandlerDiagnostics::default();
+            let _ = wait_for_evidence(&extension_view, &context, &diagnostics, &run_loop)?;
+            let native = super::super::native::webkit(&extension_view);
+            let extension_result = evaluate_string(
+                &native,
+                "localStorage.setItem('__zephium_shared_origin_probe','extension');JSON.stringify({origin:location.origin,value:localStorage.getItem('__zephium_shared_origin_probe'),runtime:typeof chrome?.runtime})",
+                &run_loop,
+            ).map_err(|error| format!("extension-page storage evaluation failed: {error}"))?;
+
+            let plain_configuration = unsafe { WKWebViewConfiguration::new(mtm) };
+            unsafe { plain_configuration.setWebsiteDataStore(&bundle.data_store) };
+            if unsafe { plain_configuration.webExtensionController() }.is_some() {
+                return Err(
+                    "plain shared-origin view unexpectedly has an extension controller".into(),
+                );
+            }
+            let built_in_handler = unsafe {
+                plain_configuration
+                    .urlSchemeHandlerForURLScheme(&NSString::from_str("webkit-extension"))
+            }
+            .is_some();
+            let handler = if custom_origin {
+                ExactMimeHandler::new(mtm, Arc::new(HandlerDiagnostics::default()))
+            } else {
+                ExactMimeHandler::new_for_extension_origin(
+                    mtm,
+                    Arc::new(HandlerDiagnostics::default()),
+                    &base_url,
+                )
+            };
+            if custom_origin {
+                install_exact_handler(&plain_configuration, &handler)?;
+            } else {
+                let installed = objc2::exception::catch(std::panic::AssertUnwindSafe(|| unsafe {
+                    plain_configuration.setURLSchemeHandler_forURLScheme(
+                        Some(ProtocolObject::from_ref(&*handler)),
+                        &NSString::from_str("webkit-extension"),
+                    );
+                }));
+                if installed.is_err() {
+                    return Err(format!(
+                        "public WKURLSchemeHandler cannot be registered for webkit-extension; handled={}",
+                        unsafe { WKWebView::handlesURLScheme(&NSString::from_str("webkit-extension"), mtm) },
+                    ));
+                }
+            }
+            let plain = unsafe {
+                WKWebView::initWithFrame_configuration(
+                    WKWebView::alloc(mtm),
+                    NSRect::new(NSPoint::new(0., 0.), NSSize::new(32., 32.)),
+                    &plain_configuration,
+                )
+            };
+            let target =
+                NSURL::URLWithString(&NSString::from_str(&format!("{base_url}control.html")))
+                    .ok_or("invalid plain shared-origin URL")?;
+            unsafe { plain.loadRequest(&objc2_foundation::NSURLRequest::requestWithURL(&target)) };
+            let deadline = Instant::now() + super::PROBE_TIMEOUT;
+            while unsafe { plain.title() }
+                .as_ref()
+                .is_none_or(|title| title.length() == 0)
+                && Instant::now() < deadline
+            {
+                super::drain_run_loop_once(&run_loop);
+            }
+            let plain_result = evaluate_string(
+                &plain,
+                "JSON.stringify({origin:location.origin,value:localStorage.getItem('__zephium_shared_origin_probe'),runtime:typeof globalThis.chrome?.runtime})",
+                &run_loop,
+            ).map_err(|error| format!(
+                "controller-free storage evaluation failed: {error}; base={base_url}; url={:?}; title={:?}; webkit_extension_scheme_handled={}; plain_scheme_handler={built_in_handler}",
+                unsafe { plain.URL() }.and_then(|url| url.absoluteString()).map(|url| url.to_string()),
+                unsafe { plain.title() }.map(|title| title.to_string()),
+                unsafe { WKWebView::handlesURLScheme(&NSString::from_str("webkit-extension"), mtm) },
+            ))?;
+            let extension_value: serde_json::Value =
+                serde_json::from_str(&extension_result).map_err(|error| error.to_string())?;
+            let plain_value: serde_json::Value =
+                serde_json::from_str(&plain_result).map_err(|error| error.to_string())?;
+            println!(
+                "native-probe: shared extension origin custom={custom_origin}; base={base_url}; extension={extension_value}; plain={plain_value}; webkit_extension_scheme_handled={}; plain_scheme_handler={built_in_handler}; product_authority=false",
+                unsafe { WKWebView::handlesURLScheme(&NSString::from_str("webkit-extension"), mtm) },
+            );
+            if extension_value["origin"] != base_url.trim_end_matches('/')
+                || extension_value["value"] != "extension"
+                || extension_value["runtime"] != "object"
+                || plain_value["origin"] != extension_value["origin"]
+                || plain_value["value"] != "extension"
+                || plain_value["runtime"] != "undefined"
+            {
+                return Err(
+                    "controller-free shared extension-origin storage was not proven".into(),
+                );
+            }
+            let extension_weak = Weak::from_retained(&native);
+            let plain_weak = Weak::from_retained(&plain);
+            let handler_weak = Weak::from_retained(&handler);
+            let context_weak = Weak::from_retained(&context);
+            let controller_weak = Weak::from_retained(&bundle.controller);
+            let store_weak = Weak::from_retained(&bundle.data_store);
+            unsafe { plain.stopLoading() };
+            super::unload_context(&bundle.controller, &context, "shared-origin")?;
+            drop(native);
+            drop(plain);
+            drop(extension_view);
+            window.close();
+            drop(window);
+            drop(context);
+            drop(extension);
+            drop(handler);
+            drop(bundle);
+            drop(fixture);
+            Ok::<_, String>((
+                extension_weak,
+                plain_weak,
+                handler_weak,
+                context_weak,
+                controller_weak,
+                store_weak,
+            ))
+        })?;
+    let deadline = Instant::now() + super::TEARDOWN_TIMEOUT;
+    while (extension_view.load().is_some()
+        || plain_view.load().is_some()
+        || handler.load().is_some()
+        || context.load().is_some()
+        || controller.load().is_some()
+        || store.load().is_some())
+        && Instant::now() < deadline
+    {
+        super::drain_run_loop_once(&run_loop);
+    }
+    if extension_view.load().is_some()
+        || plain_view.load().is_some()
+        || handler.load().is_some()
+        || context.load().is_some()
+        || controller.load().is_some()
+        || store.load().is_some()
+    {
+        return Err("shared-origin native objects survived teardown".into());
+    }
+    Ok(())
+}
+
+fn evaluate_string(view: &WKWebView, script: &str, run_loop: &NSRunLoop) -> Result<String, String> {
+    let result = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = result.clone();
+    let callback: block2::RcBlock<dyn Fn(*mut objc2::runtime::AnyObject, *mut NSError)> =
+        block2::RcBlock::new(
+            move |value: *mut objc2::runtime::AnyObject, error: *mut NSError| {
+                *slot.borrow_mut() = Some(if !error.is_null() {
+                    Err(unsafe { &*error }.localizedDescription().to_string())
+                } else if value.is_null() {
+                    Err("JavaScript returned no value".to_owned())
+                } else {
+                    unsafe { &*value }
+                        .downcast_ref::<NSString>()
+                        .map(NSString::to_string)
+                        .ok_or_else(|| "JavaScript did not return a string".to_owned())
+                });
+            },
+        );
+    unsafe {
+        view.evaluateJavaScript_completionHandler(&NSString::from_str(script), Some(&callback))
+    };
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    while result.borrow().is_none() && Instant::now() < deadline {
+        super::drain_run_loop_once(run_loop);
+    }
+    let outcome = result
+        .borrow_mut()
+        .take()
+        .ok_or("shared-origin JavaScript did not settle".to_owned())?;
+    outcome
 }
 
 fn run_supported(

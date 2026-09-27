@@ -92,26 +92,25 @@ pub(super) fn request_until(
         install.revision(),
     );
 
-    let authenticated = match startup.repository.authenticate_manifest_bindings(&catalog) {
+    let authenticated = match startup
+        .repository
+        .authenticate_runtime_manifest_bindings_for_profile(&catalog, &startup.store, key, deadline)
+    {
         Ok(authenticated) => authenticated,
         Err(error) => return settle(runtime, classify_repository_error(error)),
     };
-    let manifest = authenticated
-        .bindings()
-        .iter()
-        .find(|binding| binding.install_id() == key.install_id())
-        .map(|binding| Arc::clone(binding.manifest_arc()));
-    let Some(manifest) = manifest else {
-        return settle(runtime, ExtensionRuntimeGrantOutcome::FailedClosed);
-    };
+    let (_, bindings, manifest) =
+        match authenticated.into_store_bindings_and_manifest(key.install_id()) {
+            Ok(parts) => parts,
+            Err(_) => return settle(runtime, ExtensionRuntimeGrantOutcome::FailedClosed),
+        };
     if manifest.package() != install.package() {
         return settle(runtime, ExtensionRuntimeGrantOutcome::FailedClosed);
     }
-    let cohort = match startup.store.load_grant_cohort_until(
-        key.profile(),
-        authenticated.into_bindings(),
-        deadline,
-    ) {
+    let cohort = match startup
+        .store
+        .load_grant_cohort_until(key.profile(), bindings, deadline)
+    {
         ExtensionServiceStoreCallOutcome::Completed(ExtensionGrantCohortLoadOutcome::Loaded(
             cohort,
         )) => cohort,

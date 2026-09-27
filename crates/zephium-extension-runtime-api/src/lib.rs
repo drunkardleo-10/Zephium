@@ -43,6 +43,7 @@ pub use host::{
     ExtensionRuntimeHostActivationPorts, ExtensionRuntimeHostBindError,
     ExtensionRuntimeHostDataErasureDisposition, ExtensionRuntimeHostFactory,
     ExtensionRuntimeHostFactoryPort, ExtensionRuntimeHostGrantRebindPortRefusal,
+    ExtensionRuntimeHostUpdateGuard,
     ExtensionRuntimeHostLifecyclePort, ExtensionRuntimeHostOwnershipPort,
     ExtensionRuntimeHostProfileAbsenceDisposition, ExtensionRuntimeHostProfileAbsenceEvidence,
     ExtensionRuntimeHostPublicationPort, ExtensionRuntimeHostPublicationPortRefusal,

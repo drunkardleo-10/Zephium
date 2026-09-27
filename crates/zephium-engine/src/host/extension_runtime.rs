@@ -2472,32 +2472,7 @@ impl ExtensionRuntimeRegistry {
         }
     }
 
-    /// Mints `activeTab` only when the exact published authority declares it.
-    /// Missing permission is a normal `None`: toolbar dispatch does not depend
-    /// on `activeTab`. A fingerprint contradiction is a registry invariant.
-    #[cfg(target_os = "macos")]
-    pub(super) fn optional_toolbar_active_tab_witness(
-        &mut self,
-        runtime: &ExtensionRuntimeFingerprint,
-    ) -> Result<Option<ExtensionActiveTabGrantWitness>, ExtensionRuntimeHostBindError> {
-        let index = self.published_runtime_index(runtime)?;
-        let reservation = Arc::clone(&self.entries[index].reservation);
-        match reservation.mint_active_tab_grant_witness(
-            reservation.owner(),
-            reservation.generation,
-            runtime,
-            ExtensionUserInvocationKind::ToolbarAction,
-        ) {
-            Ok(witness) => Ok(Some(witness)),
-            Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing) => Ok(None),
-            Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch) => {
-                self.fail_invariant();
-                Err(ExtensionRuntimeHostBindError::InternalInvariant)
-            }
-            Err(_) => Err(ExtensionRuntimeHostBindError::Unavailable),
-        }
-    }
-
+    /// Resolves an exact published owner; fingerprint contradictions fence the registry.
     #[cfg(target_os = "macos")]
     fn published_runtime_index(
         &mut self,
@@ -3317,6 +3292,21 @@ struct EngineFactoryPort {
 }
 
 impl ExtensionRuntimeHostFactoryPort for EngineFactoryPort {
+    fn begin_update_until(
+        &mut self,
+        deadline: Instant,
+    ) -> Option<zephium_extension_runtime_api::ExtensionRuntimeHostUpdateGuard> {
+        self.gate.preflight().ok()?;
+        dispatch_bounded_host_fence(&self.dispatch, deadline, move |host| {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            host.native_resources.try_begin_extension_update().map(|lease| {
+                zephium_extension_runtime_api::ExtensionRuntimeHostUpdateGuard::from_trusted_lease(Box::new(lease))
+            })
+        }).ok().flatten()
+    }
+
     fn bind_activation(
         &mut self,
         context: ExtensionRuntimeHostActivationContext<'_>,
@@ -4262,12 +4252,24 @@ impl ExtensionRuntimeHostPublicationPort for EnginePublicationPort {
         authority: ExtensionRuntimeOperationAuthority,
     ) -> Result<(), ExtensionRuntimeHostPublicationPortRefusal> {
         let owner = OwnerKey::from_address(owner);
-        self.reservation
+        let published = self.reservation
             .publish_authority(owner, generation, owned_entry, evidence, authority)
             .map_err(|refusal| {
                 let (reason, authority) = *refusal;
                 ExtensionRuntimeHostPublicationPortRefusal::new(reason, authority)
-            })
+            });
+        #[cfg(target_os = "macos")]
+        if published.is_ok() && crate::platform::imp::has_pending_offscreen_authorization() {
+            let profile = owned_entry.key().profile();
+            // Publication may run on the service actor. Wake only the main
+            // native owner, once per publication, with no polling or renderer.
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                let _ = crate::host::with_extension_browser_request_terminal(move |host| {
+                    host.retry_pending_extension_offscreen_authorization(profile);
+                });
+            });
+        }
+        published
     }
 
     fn rebind_operation_authority(

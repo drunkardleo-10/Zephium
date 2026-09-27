@@ -18,6 +18,8 @@ import {
   extensionDistributionNotice,
   extensionDistributionRefreshMessage,
   extensionManagementDispositionMessage,
+  extensionActivationMessage,
+  canRetryExtensionActivation,
   failureForContext,
   initialExtensionActions,
   initialExtensionManagement,
@@ -26,6 +28,22 @@ import {
   managementForProfile,
 } from "../extensions-model";
 import { ZERO_PROJECTION_REVISION } from "$domain/tabs";
+
+describe("activation recovery guidance", () => {
+  it("does not offer an ineffective retry when restart or retirement is required", () => {
+    expect(canRetryExtensionActivation("restart_required")).toBe(false);
+    expect(canRetryExtensionActivation("profile_fenced")).toBe(false);
+    expect(canRetryExtensionActivation("failed_closed")).toBe(false);
+    expect(extensionActivationMessage("restart_required")).toContain("Restart Zephium");
+  });
+  it("provides actionable guidance for recoverable inactive runtimes", () => {
+    for (const issue of [null, "unavailable", "capacity_exceeded", "rejected"] as const) {
+      expect(canRetryExtensionActivation(issue)).toBe(true);
+      expect(extensionActivationMessage(issue).toLowerCase()).toContain("retry");
+    }
+    expect(extensionActivationMessage("capacity_exceeded")).toContain("Disable another extension");
+  });
+});
 
 function revision(value: number): string {
   return value.toString(16).padStart(32, "0");
@@ -124,6 +142,7 @@ function management(value: number, profileId = "profile-a"): ExtensionManagement
           attribution: "Bitwarden contributors",
         },
         runtime: "active",
+        activation_issue: null,
         runtime_generation: "0000000000000001",
         grants: {
           initialized: true,
@@ -234,7 +253,7 @@ describe("extension management projection admission", () => {
         operation_id: "pending",
         reason: "extension_activation_pending",
       }),
-    ).toBe("The extension is enabled and will activate when its runtime becomes available.");
+    ).toBe("The extension is installed, but couldn't start. Open its entry for recovery details.");
   });
 
   it("keeps the product entry point hidden until a newer availability fact arrives", () => {

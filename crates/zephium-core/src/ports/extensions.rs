@@ -3,23 +3,38 @@ use std::time::Instant;
 use crate::extensions::{
     ExtensionCatalogSetDigest, ExtensionGrantRevision, ExtensionInstallCatalogRevision,
     ExtensionInstallRevision, ExtensionNativeOwnershipKey, ExtensionPackageIdentity,
-    ExtensionRuntimeGeneration, MAX_EXTENSION_API_PERMISSIONS,
+    ExtensionRuntimeGeneration, ExtensionRuntimeInstance, MAX_EXTENSION_API_PERMISSIONS,
     MAX_EXTENSION_HOST_PERMISSION_PATTERNS,
 };
 use crate::ids::{ExtensionInstallId, ProfileId};
 
 #[path = "extensions/distribution.rs"]
 mod distribution;
+#[path = "extensions/isolated_resource.rs"]
+mod isolated_resource;
 #[path = "extensions/management.rs"]
 mod management;
 #[path = "extensions/provisioning.rs"]
 mod provisioning;
 #[path = "extensions/runtime_grants.rs"]
 mod runtime_grants;
+#[path = "extensions/store_install.rs"]
+mod store_install;
+pub use store_install::{
+    ExtensionStorePackagePreparationCallback, ExtensionStorePackagePreparationOutcome,
+    ExtensionStorePackageRequest, ExtensionUnsupportedFeatures,
+};
 
 pub use distribution::{
     ExtensionDistributionCompletionStatus, ExtensionDistributionFailureReason,
     ExtensionDistributionFailureStage, ExtensionDistributionState, ExtensionDistributionStatus,
+};
+pub use isolated_resource::{
+    IsolatedExtensionDocumentKind, IsolatedExtensionResourceCallback,
+    IsolatedExtensionResourceCancel,
+    IsolatedExtensionResourceOutcome, IsolatedExtensionResourceRequest,
+    VerifiedIsolatedExtensionResource, MAX_ISOLATED_EXTENSION_RESOURCE_PATH_BYTES,
+    MAX_ISOLATED_EXTENSION_RESOURCE_REPLY_BYTES,
 };
 pub use management::{
     ExtensionInstallCandidateEntry, ExtensionManagementCatalog, ExtensionManagementCompatibility,
@@ -841,6 +856,51 @@ impl<T> ExtensionManagementSettlement<T> {
 /// application layer, while allowing the owner to move onto the application
 /// actor thread. No cloneable or borrowed shutdown operation exists.
 pub trait ExtensionServiceLifecycle: Send {
+    /// Schedules one resource read for an exact published regular runtime.
+    /// `Accepted` transfers the callback; the worker must settle it exactly
+    /// once after authenticating complete bytes or on failure. This starts no
+    /// new thread and performs no file I/O on the caller's UI turn.
+    fn begin_read_isolated_resource(
+        &mut self,
+        _runtime: ExtensionRuntimeInstance,
+        _path: Box<str>,
+        _deadline: Instant,
+        _cancel: IsolatedExtensionResourceCancel,
+        done: IsolatedExtensionResourceCallback,
+    ) -> ExtensionManagementAdmission {
+        drop(done);
+        ExtensionManagementAdmission::Unavailable
+    }
+
+    /// Registers one replaceable wakeup for a currently running startup
+    /// attempt. The wakeup is only a hint: consumers must reobserve readiness.
+    /// Returns false when unsupported or no attempt is running. No worker is
+    /// created; unavailable attempts retain the caller's ordinary retry policy.
+    fn watch_startup(&mut self, _wake: Box<dyn FnOnce() + Send>) -> bool {
+        false
+    }
+    /// Drops only an exact pending local update review; installed state is untouched.
+    fn dismiss_store_update(&mut self, _selector: ExtensionInstallUpdateSelector) -> bool {
+        false
+    }
+
+    /// Drops an exact uncommitted install review when its manager is dismissed.
+    fn dismiss_store_candidate(&mut self, _selector: ExtensionInstallCandidateSelector) -> bool {
+        false
+    }
+
+    /// Prepares a user-selected original store package for permission review.
+    /// No installation occurs until the normal `begin_install` call.
+    fn begin_prepare_store_package(
+        &mut self,
+        _profile: ProfileId,
+        _request: ExtensionStorePackageRequest,
+        _deadline: Instant,
+        done: ExtensionStorePackagePreparationCallback,
+    ) -> ExtensionManagementAdmission {
+        drop(done);
+        ExtensionManagementAdmission::Unavailable
+    }
     /// Observes the active startup attempt, or admits one bounded retry when
     /// the previous exact attempt settled unavailable.
     ///

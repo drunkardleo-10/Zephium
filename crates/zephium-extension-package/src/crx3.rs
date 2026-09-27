@@ -186,6 +186,8 @@ pub struct VerifiedCrx3Package<'a> {
     extension_id: ChromiumExtensionId,
     developer_key_sha256: ChromiumManifestKeyDigest,
     archive: &'a [u8],
+    developer_public_key: &'a [u8],
+    package_length: usize,
     signature_proofs: usize,
     package_sha256: [u8; 32],
     archive_sha256: [u8; 32],
@@ -266,11 +268,12 @@ impl<'a> VerifiedCrx3Package<'a> {
                 developer = Some((
                     digest,
                     ChromiumManifestKeyDigest::from_bytes(digest).derived_extension_id(),
+                    proof.public_key,
                 ));
             }
         }
 
-        let (developer_key_sha256, extension_id) =
+        let (developer_key_sha256, extension_id, developer_public_key) =
             developer.ok_or(Crx3PackageError::DeveloperProofMissing)?;
         if expected_id.is_some_and(|expected| *expected != extension_id) {
             return Err(Crx3PackageError::ExpectedIdMismatch);
@@ -280,6 +283,8 @@ impl<'a> VerifiedCrx3Package<'a> {
             extension_id,
             developer_key_sha256: ChromiumManifestKeyDigest::from_bytes(developer_key_sha256),
             archive,
+            developer_public_key,
+            package_length: bytes.len(),
             signature_proofs: parsed.proofs.len(),
             package_sha256: Sha256::digest(bytes).into(),
             archive_sha256: Sha256::digest(archive).into(),
@@ -294,6 +299,19 @@ impl<'a> VerifiedCrx3Package<'a> {
     /// Returns SHA-256 of the signed developer public-key bytes.
     pub const fn developer_key_sha256(&self) -> ChromiumManifestKeyDigest {
         self.developer_key_sha256
+    }
+
+    /// Exact authenticated developer SPKI bytes from the proof deriving the
+    /// declared extension ID. Store/co-signer keys can never substitute here.
+    /// This public key may bind a local manifest transformation; it does not
+    /// sign that transformed output or grant runtime authority.
+    pub const fn developer_public_key(&self) -> &'a [u8] {
+        self.developer_public_key
+    }
+
+    /// Exact authenticated CRX length, including envelope and ZIP payload.
+    pub const fn package_length(&self) -> usize {
+        self.package_length
     }
 
     /// Borrows the authenticated ZIP payload without extracting it.
@@ -897,8 +915,64 @@ mod tests {
             VerifiedCrx3Package::parse_and_verify(&package_bytes, Some(&expected_id)).unwrap();
         assert_eq!(package.extension_id(), &expected_id);
         assert_eq!(package.developer_key_sha256(), expected_key_digest);
+        assert_eq!(package.developer_public_key(), public_key);
+        assert_eq!(package.package_length(), package_bytes.len());
         assert_eq!(package.archive_bytes(), archive);
         assert_eq!(package.signature_proof_count(), 1);
+    }
+
+    #[test]
+    fn developer_spki_cannot_be_replaced_by_an_earlier_valid_cosigner() {
+        let (original, expected_id) = signed_fixture();
+        let verified =
+            VerifiedCrx3Package::parse_and_verify(&original, Some(&expected_id)).unwrap();
+        let header_end = CRX3_PREFIX_BYTES + read_u32(&original[8..12]) as usize;
+        let parsed = parse_header(&original[CRX3_PREFIX_BYTES..header_end]).unwrap();
+        let signed_header = parsed.signed_header.unwrap();
+        let random = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &random).unwrap();
+        let pair =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &random)
+                .unwrap();
+        let cosigner = p256_spki(pair.public_key().as_ref());
+        let signature = pair
+            .sign(
+                &random,
+                &signed_message(signed_header, verified.archive_bytes()).unwrap(),
+            )
+            .unwrap();
+        let mut header = Vec::new();
+        let mut proof = Vec::new();
+        push_bytes_field(&mut proof, 1, &cosigner);
+        push_bytes_field(&mut proof, 2, signature.as_ref());
+        push_bytes_field(&mut header, 3, &proof);
+        for original_proof in parsed.proofs {
+            let mut proof = Vec::new();
+            push_bytes_field(&mut proof, 1, original_proof.public_key);
+            push_bytes_field(&mut proof, 2, original_proof.signature);
+            push_bytes_field(
+                &mut header,
+                match original_proof.algorithm {
+                    ProofAlgorithm::Rsa => 2,
+                    ProofAlgorithm::EcdsaP256 => 3,
+                },
+                &proof,
+            );
+        }
+        push_bytes_field(&mut header, SIGNED_HEADER_FIELD, signed_header);
+        let mut bytes = CRX3_MAGIC.to_vec();
+        bytes.extend_from_slice(&CRX3_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&header);
+        bytes.extend_from_slice(verified.archive_bytes());
+        let package = VerifiedCrx3Package::parse_and_verify(&bytes, Some(&expected_id)).unwrap();
+        assert_eq!(package.signature_proof_count(), 2);
+        assert_eq!(
+            package.developer_public_key(),
+            verified.developer_public_key()
+        );
+        assert_ne!(package.developer_public_key(), cosigner);
+        assert_eq!(package.package_length(), bytes.len());
     }
 
     #[test]

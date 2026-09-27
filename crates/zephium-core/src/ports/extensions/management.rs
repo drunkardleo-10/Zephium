@@ -82,6 +82,9 @@ pub enum ExtensionManagementRuntimeState {
     Disabled,
     /// Durable user intent is enabled, but no regular runtime is currently live.
     PendingActivation,
+    /// Last completed activation attempt failed in this process. Informational
+    /// only; retry always revalidates the current install and grants.
+    ActivationFailed(super::ExtensionActivationPendingReason),
     /// Profile-wide safe mode pauses this otherwise enabled install.
     ProfilePaused,
     /// The regular runtime is live at this exact process generation.
@@ -222,6 +225,9 @@ impl ExtensionManagementCompatibility {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ExtensionManagementLimitation {
     ApiPermission(Box<str>),
+    OptionalApiUnavailable(Box<str>),
+    OptionalHostUnavailable(Box<str>),
+    ExternalMessagingUnavailable,
     HostAccess,
     Background,
     Action,
@@ -231,6 +237,13 @@ pub enum ExtensionManagementLimitation {
     ExtensionPagesCsp,
     Sandbox,
     ContentScripts,
+    MainDocumentContentScriptsOnly,
+    FragmentUrlContentScriptsUnavailable,
+    ContentScriptFontsUnavailable,
+    SidePanelUnavailable,
+    OffscreenLocalStorageOnly,
+    SandboxedPagesUnavailable,
+    ClipboardReadUnavailable,
     WebAccessibleResources,
     MinimumBrowserVersion,
     Commands,
@@ -256,14 +269,25 @@ impl ExtensionManagementLimitation {
 
     pub fn api_permission_name(&self) -> Option<&str> {
         match self {
-            Self::ApiPermission(name) => Some(name),
+            Self::ApiPermission(name) | Self::OptionalApiUnavailable(name) => Some(name),
             _ => None,
         }
     }
 
+    pub fn unavailable_optional_api(
+        name: impl Into<Box<str>>,
+    ) -> Result<Self, ExtensionManagementProjectionError> {
+        let Self::ApiPermission(name) = Self::api_permission(name)? else {
+            unreachable!()
+        };
+        Ok(Self::OptionalApiUnavailable(name))
+    }
+
     const fn retained_text_bytes(&self) -> usize {
         match self {
-            Self::ApiPermission(name) => name.len(),
+            Self::ApiPermission(name)
+            | Self::OptionalApiUnavailable(name)
+            | Self::OptionalHostUnavailable(name) => name.len(),
             _ => 0,
         }
     }

@@ -11,6 +11,8 @@ use std::fmt;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 
+use crate::ids::ClosedSessionId;
+
 use super::{ExtensionRuntimeFingerprint, ExtensionRuntimeInstance};
 
 /// The only application identifier accepted by Zephium's internal broker.
@@ -23,14 +25,64 @@ pub const MAX_EXTENSION_COMPATIBILITY_BROKER_REQUEST_BYTES: usize = 1536;
 pub const MAX_EXTENSION_COMPATIBILITY_BROKER_RESPONSE_BYTES: usize = 64 * 1024;
 /// Maximum recent-history rows returned by one broker request.
 pub const MAX_EXTENSION_COMPATIBILITY_HISTORY_RESULTS: u16 = 100;
+/// Chrome's local recently-closed list is bounded below the persisted tab ring.
+pub const MAX_EXTENSION_COMPATIBILITY_SESSION_RESULTS: u16 = 25;
 /// Complete process-wide and per-profile pending callback ceilings.
 pub const MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS: usize = 32;
 pub const MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS_PER_PROFILE: usize = 8;
 
 const RECENT_HISTORY_PREFIX: &str = "v1/history.recent/";
+const HISTORY_SEARCH_PREFIX: &str = "v2/history.search/";
+
+/// Bounded, read-only history query. It carries no profile or execution authority.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ExtensionHistorySearchQuery {
+    text: Box<str>,
+    start_ms: u64,
+    end_ms: u64,
+    limit: u16,
+}
+impl fmt::Debug for ExtensionHistorySearchQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExtensionHistorySearchQuery")
+            .field("text_bytes", &self.text.len())
+            .field("limit", &self.limit)
+            .finish_non_exhaustive()
+    }
+}
+impl ExtensionHistorySearchQuery {
+    pub fn new(text: String, start_ms: u64, end_ms: u64, limit: u16) -> Option<Self> {
+        (text.len() <= MAX_EXTENSION_COMPATIBILITY_SEARCH_QUERY_BYTES
+            && !text.chars().any(char::is_control)
+            && start_ms <= end_ms
+            && end_ms <= 9_007_199_254_740_991
+            && limit > 0
+            && limit <= MAX_EXTENSION_COMPATIBILITY_HISTORY_RESULTS)
+            .then(|| Self {
+                text: text.into_boxed_str(),
+                start_ms,
+                end_ms,
+                limit,
+            })
+    }
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    pub const fn start_ms(&self) -> u64 {
+        self.start_ms
+    }
+    pub const fn end_ms(&self) -> u64 {
+        self.end_ms
+    }
+    pub const fn limit(&self) -> u16 {
+        self.limit
+    }
+}
 const DEFAULT_SEARCH_CURRENT_PREFIX: &str = "v1/search.default/current/";
 const DEFAULT_SEARCH_NEW_PREFIX: &str = "v1/search.default/new/";
 const RESTORE_RECENT_SESSION: &str = "v1/sessions.restore/recent";
+const RECENT_SESSIONS_V2_PREFIX: &str = "v2/sessions.recent/";
+const RESTORE_SESSION_V2_PREFIX: &str = "v2/sessions.restore/";
 const OPEN_OPTIONS_PAGE: &str = "v1/options.open";
 
 /// Closed compatibility operation whose product grant must be proven.
@@ -39,7 +91,12 @@ pub enum ExtensionCompatibilityBrokerPurpose {
     RecentHistory,
     DefaultSearch,
     RestoreRecentSession,
+    ClosedSessionsV2,
     OpenOptionsPage,
+    /// A one-shot, profile-bound Chromium identity web authentication flow.
+    IdentityWebAuthFlow,
+    /// One regular-profile, published-runtime LOCAL_STORAGE document.
+    OffscreenLocalStorage,
 }
 
 /// Move-only proof that one exact published runtime holds the API authority
@@ -110,6 +167,7 @@ pub enum ExtensionCompatibilitySearchDisposition {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExtensionCompatibilityBrokerOperation {
+    SearchHistory(ExtensionHistorySearchQuery),
     RecentHistory {
         limit: u16,
     },
@@ -118,26 +176,95 @@ pub enum ExtensionCompatibilityBrokerOperation {
         query: Box<str>,
     },
     RestoreRecentSession,
+    RecentSessions {
+        limit: u16,
+    },
+    RestoreClosedSession {
+        id: Option<ClosedSessionId>,
+    },
     OpenOptionsPage,
 }
 
 impl ExtensionCompatibilityBrokerOperation {
     pub const fn purpose(&self) -> ExtensionCompatibilityBrokerPurpose {
         match self {
-            Self::RecentHistory { .. } => ExtensionCompatibilityBrokerPurpose::RecentHistory,
+            Self::RecentHistory { .. } | Self::SearchHistory(_) => {
+                ExtensionCompatibilityBrokerPurpose::RecentHistory
+            }
             Self::DefaultSearch { .. } => ExtensionCompatibilityBrokerPurpose::DefaultSearch,
             Self::RestoreRecentSession => ExtensionCompatibilityBrokerPurpose::RestoreRecentSession,
+            Self::RecentSessions { .. } | Self::RestoreClosedSession { .. } => {
+                ExtensionCompatibilityBrokerPurpose::ClosedSessionsV2
+            }
             Self::OpenOptionsPage => ExtensionCompatibilityBrokerPurpose::OpenOptionsPage,
         }
     }
 
-    /// Parses the allocation-free v1 request vocabulary.
+    /// Parses the bounded, versioned request vocabulary.
     pub fn parse_wire(value: &str) -> Result<Self, ExtensionCompatibilityBrokerRequestError> {
         if value.is_empty() || value.len() > MAX_EXTENSION_COMPATIBILITY_BROKER_REQUEST_BYTES {
             return Err(ExtensionCompatibilityBrokerRequestError::InvalidWireRequest);
         }
         if value == RESTORE_RECENT_SESSION {
             return Ok(Self::RestoreRecentSession);
+        }
+        if let Some(raw) = value.strip_prefix(RECENT_SESSIONS_V2_PREFIX) {
+            if raw.is_empty()
+                || (raw.len() > 1 && raw.starts_with('0'))
+                || !raw.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(ExtensionCompatibilityBrokerRequestError::InvalidWireRequest);
+            }
+            let limit = raw
+                .parse::<u16>()
+                .map_err(|_| ExtensionCompatibilityBrokerRequestError::InvalidLimit)?;
+            if limit == 0 || limit > MAX_EXTENSION_COMPATIBILITY_SESSION_RESULTS {
+                return Err(ExtensionCompatibilityBrokerRequestError::InvalidLimit);
+            }
+            return Ok(Self::RecentSessions { limit });
+        }
+        if let Some(raw) = value.strip_prefix(RESTORE_SESSION_V2_PREFIX) {
+            if raw == "recent" {
+                return Ok(Self::RestoreClosedSession { id: None });
+            }
+            let id = ClosedSessionId::parse(raw)
+                .filter(|id| id.to_string() == raw)
+                .ok_or(ExtensionCompatibilityBrokerRequestError::InvalidWireRequest)?;
+            return Ok(Self::RestoreClosedSession { id: Some(id) });
+        }
+        if let Some(encoded) = value.strip_prefix(HISTORY_SEARCH_PREFIX) {
+            let mut parts = encoded.splitn(4, '/');
+            let [Some(limit), Some(start), Some(end), Some(text)] =
+                [parts.next(), parts.next(), parts.next(), parts.next()]
+            else {
+                return Err(ExtensionCompatibilityBrokerRequestError::InvalidWireRequest);
+            };
+            let fields = [limit, start, end, text];
+            let number = |value: &str| -> Option<u64> {
+                if value.is_empty()
+                    || (value.len() > 1 && value.starts_with('0'))
+                    || !value.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return None;
+                }
+                value.parse().ok()
+            };
+            let parsed = (|| {
+                let limit = u16::try_from(number(fields[0])?).ok()?;
+                let bytes = URL_SAFE_NO_PAD.decode(fields[3]).ok()?;
+                if URL_SAFE_NO_PAD.encode(&bytes) != fields[3] {
+                    return None;
+                }
+                ExtensionHistorySearchQuery::new(
+                    String::from_utf8(bytes).ok()?,
+                    number(fields[1])?,
+                    number(fields[2])?,
+                    limit,
+                )
+            })();
+            return parsed
+                .map(Self::SearchHistory)
+                .ok_or(ExtensionCompatibilityBrokerRequestError::InvalidWireRequest);
         }
         if value == OPEN_OPTIONS_PAGE {
             return Ok(Self::OpenOptionsPage);
@@ -264,6 +391,24 @@ pub struct ExtensionCompatibilityHistoryEntry {
     pub last_visit: i64,
 }
 
+/// One actual closed regular tab; no window or synced-device record is implied.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionCompatibilityClosedTab {
+    pub session_id: ClosedSessionId,
+    pub url: String,
+    pub title: String,
+    pub closed_at_ms: u64,
+}
+
+/// Exact data retained from a tab that was reopened. Closed session identity
+/// is consumed and therefore not represented as a live tab identifier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionCompatibilityRestoredTab {
+    pub url: String,
+    pub title: String,
+    pub closed_at_ms: u64,
+}
+
 /// Successful result for one exact closed operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExtensionCompatibilityBrokerResult {
@@ -274,6 +419,8 @@ pub enum ExtensionCompatibilityBrokerResult {
     RecentSessionRestore {
         restored: bool,
     },
+    ClosedSessions(Box<[ExtensionCompatibilityClosedTab]>),
+    ClosedSessionRestore(ExtensionCompatibilityRestoredTab),
     /// Shell authorized the exact runtime/context request. Native settlement
     /// still determines whether the options surface was actually presented.
     OptionsPageOpenAuthorized,
@@ -300,6 +447,89 @@ pub enum ExtensionCompatibilityBrokerSettlement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_sessions_v2_wire_is_bounded_and_cannot_alias_v1_authority() {
+        let id = ClosedSessionId::from(7);
+        assert_eq!(
+            ExtensionCompatibilityBrokerOperation::parse_wire("v2/sessions.recent/25"),
+            Ok(ExtensionCompatibilityBrokerOperation::RecentSessions { limit: 25 })
+        );
+        let selected =
+            ExtensionCompatibilityBrokerOperation::parse_wire(&format!("v2/sessions.restore/{id}"))
+                .unwrap();
+        assert_eq!(
+            selected,
+            ExtensionCompatibilityBrokerOperation::RestoreClosedSession { id: Some(id) }
+        );
+        assert_eq!(
+            selected.purpose(),
+            ExtensionCompatibilityBrokerPurpose::ClosedSessionsV2
+        );
+        assert_eq!(
+            ExtensionCompatibilityBrokerOperation::parse_wire("v2/sessions.restore/recent"),
+            Ok(ExtensionCompatibilityBrokerOperation::RestoreClosedSession { id: None })
+        );
+        assert_eq!(
+            ExtensionCompatibilityBrokerOperation::parse_wire(RESTORE_RECENT_SESSION)
+                .unwrap()
+                .purpose(),
+            ExtensionCompatibilityBrokerPurpose::RestoreRecentSession
+        );
+        for wire in [
+            "v2/sessions.recent/0",
+            "v2/sessions.recent/26",
+            "v2/sessions.recent/01",
+            "v2/sessions.restore/",
+            "v2/sessions.restore/not-a-session",
+            "v2/sessions.restore/0000000000000000000000000a",
+        ] {
+            assert!(
+                ExtensionCompatibilityBrokerOperation::parse_wire(wire).is_err(),
+                "{wire}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_query_wire_binds_bounded_text_time_and_limit() {
+        let text = URL_SAFE_NO_PAD.encode("café project");
+        let operation = ExtensionCompatibilityBrokerOperation::parse_wire(&format!(
+            "v2/history.search/20/1001/999999/{text}"
+        ))
+        .unwrap();
+        let ExtensionCompatibilityBrokerOperation::SearchHistory(query) = operation else {
+            panic!("wrong operation");
+        };
+        assert_eq!(
+            (
+                query.text(),
+                query.start_ms(),
+                query.end_ms(),
+                query.limit()
+            ),
+            ("café project", 1001, 999999, 20)
+        );
+        for wire in [
+            "v2/history.search/0/0/1/",
+            "v2/history.search/101/0/1/",
+            "v2/history.search/01/0/1/",
+            "v2/history.search/1/2/1/",
+            "v2/history.search/1/0/1/YQ==",
+            "v2/history.search/1/0/9007199254740992/",
+            "v2/history.search/1/0/1/_w",
+            "v2/history.search/1/0/1/YQ/extra",
+        ] {
+            assert!(
+                ExtensionCompatibilityBrokerOperation::parse_wire(wire).is_err(),
+                "{wire}"
+            );
+        }
+        assert!(
+            ExtensionCompatibilityBrokerOperation::parse_wire("v2/history.search/1/0/1/").is_ok()
+        );
+        assert!(ExtensionHistorySearchQuery::new("x".repeat(1025), 0, 1, 1).is_none());
+    }
 
     #[test]
     fn wire_parser_accepts_only_canonical_bounded_requests() {

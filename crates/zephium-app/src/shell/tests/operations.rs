@@ -174,7 +174,7 @@ fn layout_and_zoom_report_rejection_and_roll_back_unapplied_zoom() {
 
 #[test]
 fn browser_page_hides_native_content_and_restores_exact_tab() {
-    for page in [crate::BrowserPage::Settings, crate::BrowserPage::Work] {
+    for page in [crate::BrowserPage::Work] {
         let (mut shell, engine, screen) = setup();
         shell.handle(Command::Bootstrap);
         let id = active_id(&screen);
@@ -207,6 +207,386 @@ fn browser_page_hides_native_content_and_restores_exact_tab() {
         );
         assert_eq!(active_id(&screen), id);
     }
+}
+
+#[test]
+fn settings_is_a_window_page_and_extensions_is_a_deduplicated_tab() {
+    use zephium_core::item::{BrowserOwnedTab, TabContent};
+
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let web = active_id(&screen);
+    navigate_and_commit(&mut shell, web, "browser-owned-return.example");
+    let window = shell.windows.focused().unwrap().id;
+
+    assert_eq!(
+        shell
+            .handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)))
+            .outcome,
+        OperationOutcome::Deferred
+    );
+    assert_eq!(active_id(&screen), web);
+    assert_eq!(shell.items_snapshot().unwrap().tabs.len(), 1);
+    assert_eq!(
+        shell.active_browser_page(),
+        Some(crate::BrowserPage::Settings)
+    );
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .rev()
+            .find(|call| call.starts_with("layout@")),
+        Some(&format!("layout@{window} "))
+    );
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    assert_eq!(active_id(&screen), web);
+    shell.handle_operation(Command::ShowBrowserPage(None));
+    assert_eq!(shell.active_browser_page(), None);
+
+    shell.handle_operation(Command::ShowBrowserPage(Some(
+        crate::BrowserPage::Extensions,
+    )));
+    let extensions = active_id(&screen);
+    assert_ne!(extensions, web);
+    assert_eq!(
+        shell.items.tab(extensions).unwrap().content,
+        TabContent::BrowserOwned(BrowserOwnedTab::Extensions)
+    );
+    assert!(shell.items.tab(extensions).unwrap().url.is_none());
+    shell.handle_operation(Command::ShowBrowserPage(Some(
+        crate::BrowserPage::Extensions,
+    )));
+    assert_eq!(active_id(&screen), extensions);
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    assert_eq!(active_id(&screen), extensions);
+    assert_eq!(
+        shell.active_browser_page(),
+        Some(crate::BrowserPage::Settings)
+    );
+    shell.handle_operation(Command::ShowBrowserPage(None));
+    assert_eq!(active_id(&screen), extensions);
+    assert_eq!(
+        shell.active_browser_page(),
+        Some(crate::BrowserPage::Extensions)
+    );
+    shell.handle_operation(Command::Activate(web));
+    assert_eq!(active_id(&screen), web);
+    assert_eq!(shell.active_browser_page(), None);
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .rev()
+            .find(|call| call.starts_with("layout@")),
+        Some(&format!("layout@{window} {web}"))
+    );
+}
+
+#[test]
+fn trusted_extension_page_closure_removes_only_matching_typed_marker() {
+    use zephium_core::item::TabContent;
+
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let web = active_id(&screen);
+    let (profile, space) = shell
+        .windows
+        .focused()
+        .map(|window| (window.profile, window.space))
+        .unwrap();
+    let guest = ItemId::from(91);
+    assert!(shell.items.insert_extension_tab(
+        guest,
+        Placement::Space {
+            space,
+            section: SpaceSection::Today
+        },
+    ));
+    assert!(shell.items.adopt_extension_view(guest));
+    let effects = shell.focus_tab(guest);
+    let _ = shell.commit(effects);
+    assert_eq!(active_id(&screen), guest);
+    assert_eq!(
+        shell.items.tab(guest).unwrap().content,
+        TabContent::ExtensionOwned
+    );
+    shell.handle(Command::Engine(EngineEvent::ExtensionPageChanged {
+        profile: ProfileId::from(900),
+        id: guest,
+        title: "Wrong profile".into(),
+        loading: true,
+        can_go_back: true,
+        can_go_forward: true,
+    }));
+    assert_eq!(shell.items.tab(guest).unwrap().title, "Extension");
+    shell.handle(Command::Engine(EngineEvent::ExtensionPageChanged {
+        profile,
+        id: guest,
+        title: "\u{202e}Options".into(),
+        loading: true,
+        can_go_back: true,
+        can_go_forward: false,
+    }));
+    let changed = shell.items.tab(guest).unwrap();
+    assert_eq!(changed.title, "Options");
+    assert!(changed.loading);
+    assert!(changed.can_go_back);
+    assert!(!changed.can_go_forward);
+    assert!(changed.url.is_none());
+    shell.handle(Command::Engine(EngineEvent::ExtensionPageClosed {
+        profile: ProfileId::from(900),
+        id: guest,
+    }));
+    assert!(shell.items.tab(guest).is_some());
+    shell.handle(Command::Engine(EngineEvent::ExtensionPageClosed {
+        profile,
+        id: web,
+    }));
+    assert!(shell.items.tab(web).is_some());
+    shell.handle(Command::Engine(EngineEvent::ExtensionPageClosed {
+        profile,
+        id: guest,
+    }));
+    assert!(shell.items.tab(guest).is_none());
+    assert_eq!(active_id(&screen), web);
+
+    let other_profile = ProfileId::from(901);
+    let other_space = SpaceId::from(902);
+    assert!(shell.profiles.insert(zephium_core::profiles::Profile {
+        id: other_profile,
+        name: "Other".into(),
+        kind: ProfileKind::Named,
+    }));
+    assert!(shell.spaces.insert(zephium_core::spaces::Space {
+        id: other_space,
+        profile: other_profile,
+        name: "Other".into(),
+    }));
+    let inactive_guest = ItemId::from(903);
+    assert!(shell.items.insert_extension_tab(
+        inactive_guest,
+        Placement::Space {
+            space: other_space,
+            section: SpaceSection::Today
+        },
+    ));
+    shell.handle(Command::Engine(EngineEvent::ExtensionPageClosed {
+        profile: other_profile,
+        id: inactive_guest,
+    }));
+    assert!(shell.items.tab(inactive_guest).is_none());
+    assert_eq!(active_id(&screen), web);
+}
+
+#[test]
+fn extension_guest_activation_from_extensions_waits_for_chrome_restore_barrier() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle_operation(Command::ShowBrowserPage(Some(
+        crate::BrowserPage::Extensions,
+    )));
+    let extensions = active_id(&screen);
+    let (space, window) = shell
+        .windows
+        .focused()
+        .map(|window| (window.space, window.id))
+        .unwrap();
+    let guest = ItemId::from(904);
+    assert!(shell.items.insert_extension_tab(
+        guest,
+        Placement::Space {
+            space,
+            section: SpaceSection::Today
+        },
+    ));
+    let _ = shell.commit(Vec::new());
+    assert_eq!(active_id(&screen), extensions);
+    assert_eq!(
+        shell.active_browser_page(),
+        Some(crate::BrowserPage::Extensions)
+    );
+    assert!(!shell.items.tab(guest).unwrap().has_view());
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .rev()
+            .find(|call| call.starts_with("layout@")),
+        Some(&format!("layout@{window} ")),
+    );
+    // Native settlement reserves the exact guest id before foregrounding it.
+    assert!(shell.items.adopt_extension_view(guest));
+    let before = shell.browser_return_revision;
+    let disposition = shell.operation_activate(guest);
+    assert_eq!(disposition.outcome, OperationOutcome::Deferred);
+    assert_eq!(shell.browser_return_revision, before + 1);
+    assert_ne!(guest, extensions);
+    assert_eq!(active_id(&screen), guest);
+    assert_eq!(shell.active_browser_page(), None);
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .rev()
+            .find(|call| call.starts_with("layout@")),
+        Some(&format!("layout@{window} {guest}")),
+    );
+}
+
+#[test]
+fn native_guest_title_arriving_during_chrome_restore_keeps_exact_activation() {
+    let (mut shell, engine, chrome, screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    shell.handle_operation(Command::ShowBrowserPage(Some(
+        crate::BrowserPage::Extensions,
+    )));
+    let extensions = active_id(&screen);
+    let (profile, space, window) = shell
+        .windows
+        .focused()
+        .map(|window| (window.profile, window.space, window.id))
+        .unwrap();
+    let guest = ItemId::from(906);
+    assert!(shell.items.insert_extension_tab(
+        guest,
+        Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        },
+    ));
+    let _ = shell.commit(Vec::new());
+    assert!(shell.items.adopt_extension_view(guest));
+    assert_eq!(
+        shell.operation_activate(guest).outcome,
+        OperationOutcome::Deferred
+    );
+    assert_eq!(active_id(&screen), extensions);
+    assert!(shell.browser_return.is_some());
+
+    shell.handle(Command::Engine(EngineEvent::ExtensionPageChanged {
+        profile,
+        id: guest,
+        title: "Vimium".into(),
+        loading: false,
+        can_go_back: false,
+        can_go_forward: false,
+    }));
+    assert_eq!(shell.items.tab(guest).unwrap().title, "Vimium");
+    let (revision, snapshot) = chrome.complete_browser_return(true);
+    assert_eq!(
+        snapshot.active.as_deref(),
+        Some(extensions.to_string().as_str())
+    );
+    assert!(snapshot.tabs.iter().any(|tab| {
+        tab.id == guest.to_string()
+            && tab.content == zephium_ipc::TabContentView::ExtensionOwned
+            && tab.title == "Extension"
+            && tab.url.is_none()
+    }));
+    shell.browser_chrome_restored(revision, true);
+    assert!(shell.browser_return.is_none());
+    assert_eq!(active_id(&screen), guest);
+    assert_eq!(shell.active_browser_page(), None);
+    assert_eq!(
+        engine
+            .calls()
+            .iter()
+            .rev()
+            .find(|call| call.starts_with("layout@")),
+        Some(&format!("layout@{window} {guest}")),
+    );
+}
+
+#[test]
+fn closed_guest_during_chrome_restore_cannot_activate_a_missing_marker() {
+    let (mut shell, _engine, chrome, screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    shell.handle_operation(Command::ShowBrowserPage(Some(
+        crate::BrowserPage::Extensions,
+    )));
+    let extensions = active_id(&screen);
+    let (profile, space) = shell
+        .windows
+        .focused()
+        .map(|window| (window.profile, window.space))
+        .unwrap();
+    let guest = ItemId::from(907);
+    assert!(shell.items.insert_extension_tab(
+        guest,
+        Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        },
+    ));
+    let _ = shell.commit(Vec::new());
+    assert!(shell.items.adopt_extension_view(guest));
+    assert_eq!(
+        shell.operation_activate(guest).outcome,
+        OperationOutcome::Deferred
+    );
+    shell.close_extension_owned_marker(profile, guest);
+    assert!(shell.items.tab(guest).is_none());
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+    assert_eq!(active_id(&screen), extensions);
+    assert!(shell.browser_after_return.is_none());
+    assert_eq!(
+        shell.active_browser_page(),
+        Some(crate::BrowserPage::Extensions)
+    );
+}
+
+#[test]
+fn address_submission_on_extension_guest_opens_an_ordinary_tab() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let space = shell.windows.focused().unwrap().space;
+    let guest = ItemId::from(905);
+    assert!(shell.items.insert_extension_tab(
+        guest,
+        Placement::Space {
+            space,
+            section: SpaceSection::Today
+        },
+    ));
+    assert!(shell.items.adopt_extension_view(guest));
+    let effects = shell.focus_tab(guest);
+    let _ = shell.commit(effects);
+    let disposition = shell.operation_navigate(guest, "https://example.test/".into());
+    assert_eq!(disposition.outcome, OperationOutcome::Deferred);
+    let ordinary = active_id(&screen);
+    assert_ne!(ordinary, guest);
+    assert_eq!(
+        shell.items.tab(ordinary).unwrap().content,
+        zephium_core::item::TabContent::Web
+    );
+    assert_eq!(
+        shell.items.tab(guest).unwrap().content,
+        zephium_core::item::TabContent::ExtensionOwned
+    );
+    assert!(shell.items.tab(guest).unwrap().url.is_none());
+}
+
+#[test]
+fn new_web_tab_from_settings_waits_for_chrome_restore_barrier() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    let prior_web = active_id(&screen);
+    assert_eq!(shell.items_snapshot().unwrap().tabs.len(), 1);
+    let before = shell.browser_return_revision;
+    let disposition = shell.operation_open_url("https://example.test/".into(), true);
+    assert_eq!(disposition.outcome, OperationOutcome::Deferred);
+    assert_eq!(shell.browser_return_revision, before + 1);
+    let web = active_id(&screen);
+    assert_ne!(web, prior_web);
+    assert_eq!(shell.active_browser_page(), None);
+    assert_eq!(
+        shell.items.tab(web).unwrap().content,
+        zephium_core::item::TabContent::Web
+    );
+    assert!(shell.items.tab(prior_web).is_some());
 }
 
 #[test]
@@ -495,4 +875,24 @@ fn returning_from_a_browser_page_brings_the_content_back_into_view() {
         .rposition(|call| call == &format!("layout@{window} {id}"))
         .unwrap();
     assert!(arrive < shown);
+}
+
+#[test]
+fn browser_settings_return_to_the_last_browsing_tab_after_chrome_ack() {
+    let (mut shell, _engine, chrome, screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    let oldest = active_id(&screen);
+    shell.handle(Command::Open);
+    let recent = active_id(&screen);
+    assert_ne!(recent, oldest);
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    shell.handle_operation(Command::ShowBrowserPage(Some(
+        crate::BrowserPage::Extensions,
+    )));
+    let manager = active_id(&screen);
+    shell.handle_operation(Command::ShowBrowserPage(None));
+    assert_eq!(active_id(&screen), manager);
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+    assert_eq!(active_id(&screen), recent);
 }

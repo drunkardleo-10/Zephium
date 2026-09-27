@@ -168,11 +168,11 @@
     "css": 16500
   },
   "lazy:features/notes/components/NotesPage.svelte": {
-    "js": 290000,
+    "js": 290500,
     "css": 24500
   },
   "lazy:domain/notes/index.ts": {
-    "js": 149500,
+    "js": 150000,
     "css": 4000
   },
   "lazy:features/notes/index.ts": {

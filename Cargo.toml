@@ -88,3 +88,16 @@ strip = "symbols"
 # Bounds checks remain enabled independently; retain integer overflow checks
 # as well so release builds do not silently wrap security/resource counters.
 overflow-checks = true
+
+# Real extension packages are authenticated, decompressed and revalidated at
+# custody boundaries. Keep these byte-processing dependencies optimized in
+# development too, so native QA exercises the production operation deadlines
+# instead of timing out in unoptimized cryptographic/compression loops.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+[profile.dev.package.flate2]
+opt-level = 3

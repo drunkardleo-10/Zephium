@@ -508,7 +508,7 @@ impl EngineHost {
     }
 
     #[cfg(target_os = "macos")]
-    fn ensure_stage(&mut self, window: WindowId) -> Option<Retained<ContentStage>> {
+    pub(super) fn ensure_stage(&mut self, window: WindowId) -> Option<Retained<ContentStage>> {
         if let Some(stage) = self.stages.get(&window) {
             return Some(stage.clone());
         }

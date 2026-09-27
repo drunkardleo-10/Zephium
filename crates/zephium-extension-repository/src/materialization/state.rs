@@ -460,11 +460,13 @@ pub(crate) enum HistoricalCatalogRole {
     Rollback,
 }
 
-impl From<ExtensionCatalogGenerationRole> for HistoricalCatalogRole {
-    fn from(value: ExtensionCatalogGenerationRole) -> Self {
+impl TryFrom<ExtensionCatalogGenerationRole> for HistoricalCatalogRole {
+    type Error = ();
+    fn try_from(value: ExtensionCatalogGenerationRole) -> Result<Self, Self::Error> {
         match value {
-            ExtensionCatalogGenerationRole::Active => Self::Active,
-            ExtensionCatalogGenerationRole::Rollback => Self::Rollback,
+            ExtensionCatalogGenerationRole::Active => Ok(Self::Active),
+            ExtensionCatalogGenerationRole::Rollback => Ok(Self::Rollback),
+            ExtensionCatalogGenerationRole::Beta => Err(()),
         }
     }
 }

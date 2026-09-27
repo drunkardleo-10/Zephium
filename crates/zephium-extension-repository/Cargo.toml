@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 acquired-packages = ["dep:zephium-extension-acquisition"]
+beta-packages = ["dep:zephium-extension-distribution"]
 local-extension-lab-diagnostics = []
 
 [dependencies]
@@ -19,6 +20,7 @@ zephium-extension-acquisition = { path = "../zephium-extension-acquisition", ver
 zephium-extension-package = { path = "../zephium-extension-package", version = "=0.1.0" }
 zephium-extension-runtime-api = { path = "../zephium-extension-runtime-api", version = "=0.1.0" }
 zephium-private-fs = { path = "../zephium-private-fs", version = "=0.1.0" }
+zephium-extension-distribution = { path = "../zephium-extension-distribution", version = "=0.1.0", optional = true, default-features = false, features = ["beta-admission"] }
 
 [dev-dependencies]
 base64.workspace = true

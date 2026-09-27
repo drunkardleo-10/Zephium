@@ -38,6 +38,14 @@ impl Shell {
                     self.on_extension_browser_request(request.clone());
                     return;
                 }
+                EngineEvent::IsolatedExtensionResourceRequested { request } => {
+                    self.on_isolated_extension_resource_request(request.as_ref().clone());
+                    return;
+                }
+                EngineEvent::ExtensionPageClosed { profile, id } => {
+                    self.close_extension_owned_marker(*profile, *id);
+                    return;
+                }
                 EngineEvent::ExtensionCompatibilityBrokerRequested { request } => {
                     self.on_extension_compatibility_broker_request(request.as_ref().clone());
                     return;
@@ -160,6 +168,39 @@ impl Shell {
             }
             EngineEvent::ExtensionBrowserRequested { request } => {
                 self.on_extension_browser_request(request)
+            }
+            EngineEvent::ExtensionCreatedTabReplied {
+                profile,
+                request: _,
+                tab,
+                url,
+                intent,
+            } => self.on_extension_created_tab_replied(profile, tab, url, intent),
+            EngineEvent::IsolatedExtensionResourceRequested { request } => {
+                self.on_isolated_extension_resource_request(*request)
+            }
+            EngineEvent::ExtensionPageClosed { profile, id } => {
+                self.close_extension_owned_marker(profile, id)
+            }
+            EngineEvent::ExtensionPageChanged {
+                profile,
+                id,
+                title,
+                loading,
+                can_go_back,
+                can_go_forward,
+            } => {
+                if self.profile_of_item(id) == Some(profile)
+                    && self.items.tab(id).is_some_and(|tab| {
+                        tab.content == zephium_core::item::TabContent::ExtensionOwned
+                    })
+                {
+                    self.items.set_title(id, title);
+                    self.items.set_loading(id, loading);
+                    self.items.set_nav_flags(id, can_go_back, can_go_forward);
+                    self.project_tab(id);
+                    self.sync_extension_browser_surface_metadata(id);
+                }
             }
             EngineEvent::ExtensionCompatibilityBrokerRequested { request } => {
                 self.on_extension_compatibility_broker_request(*request)
@@ -549,7 +590,12 @@ impl Shell {
             } => None,
             // Requests must reach their handler even during retirement so the
             // retained native completion receives an explicit rejection.
-            EngineEvent::ExtensionBrowserRequested { .. } => None,
+            EngineEvent::ExtensionBrowserRequested { .. }
+            | EngineEvent::IsolatedExtensionResourceRequested { .. } => None,
+            EngineEvent::ExtensionCreatedTabReplied { profile, .. } => Some(*profile),
+            // Teardown must still remove a typed marker during retirement.
+            EngineEvent::ExtensionPageClosed { .. } => None,
+            EngineEvent::ExtensionPageChanged { profile, .. } => Some(*profile),
             EngineEvent::ExtensionCompatibilityBrokerRequested { .. } => None,
             EngineEvent::ExtensionRuntimeGrantRequested { .. } => None,
             EngineEvent::ExtensionRuntimeGrantCancelled { .. } => None,

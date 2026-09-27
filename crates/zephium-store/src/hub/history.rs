@@ -365,6 +365,70 @@ impl Hub {
         }
     }
 
+    pub(crate) fn extension_history_search(
+        &mut self,
+        profile: ProfileId,
+        query: &zephium_core::extensions::ExtensionHistorySearchQuery,
+    ) -> Vec<HistoryHit> {
+        if !self.registry.contains(&profile)
+            || self.degraded_profiles.contains(&profile)
+            || self.recovery_required.is_some()
+        {
+            return Vec::new();
+        }
+        let fts = if query.text().trim().is_empty() {
+            None
+        } else {
+            let Some(fts) = fts_query(query.text()) else {
+                return Vec::new();
+            };
+            Some(fts)
+        };
+        let Ok(conn) = self.profile_conn(profile) else {
+            return Vec::new();
+        };
+        // Bound ranked candidates after applying the text and time filters.
+        // Unrelated recent visits cannot crowd an older matching URL out.
+        let source = if fts.is_some() {
+            "SELECT h.id, h.url, h.title, h.visited_at FROM history h JOIN history_fts f ON f.rowid=h.id WHERE history_fts MATCH ?6 AND h.visited_at BETWEEN ?1 AND ?2 ORDER BY h.visited_at DESC, h.id DESC LIMIT ?3"
+        } else {
+            "SELECT id, url, title, visited_at FROM history WHERE visited_at BETWEEN ?1 AND ?2 AND ?6 IS NULL ORDER BY visited_at DESC, id DESC LIMIT ?3"
+        };
+        let sql = format!("WITH candidates AS ({source}), ranked AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY url ORDER BY visited_at DESC,id DESC) AS rank FROM candidates) SELECT url,title,visited_at FROM ranked WHERE rank=1 AND length(CAST(url AS BLOB))<=?4 AND length(CAST(title AS BLOB))<=?5 ORDER BY visited_at DESC,id DESC LIMIT ?7");
+        let Ok(mut statement) = conn.prepare_cached(&sql) else {
+            return Vec::new();
+        };
+        statement
+            .query_map(
+                params![
+                    query.start_ms().div_ceil(1000) as i64,
+                    (query.end_ms() / 1000) as i64,
+                    MAX_HISTORY_SEARCH_ROWS,
+                    MAX_URL_BYTES as i64,
+                    MAX_TITLE_BYTES as i64,
+                    fts,
+                    i64::from(query.limit())
+                ],
+                |row| {
+                    Ok(HistoryHit {
+                        url: row.get(0)?,
+                        title: row.get(1)?,
+                        last_visit: row.get(2)?,
+                    })
+                },
+            )
+            .map(|rows| {
+                rows.filter_map(Result::ok)
+                    .filter(|hit| navigation::is_allowed_str(&hit.url))
+                    .map(|mut hit| {
+                        hit.title = sanitize_page_title(&hit.title);
+                        hit
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn recent_history(&mut self, profile: ProfileId, limit: u32) -> Vec<HistoryHit> {
         if !self.registry.contains(&profile)
             || self.degraded_profiles.contains(&profile)
@@ -622,6 +686,76 @@ impl Hub {
 #[cfg(test)]
 mod connection_hardening_tests {
     use super::*;
+
+    #[test]
+    fn extension_query_filters_before_bounds_and_keeps_time_and_profile_isolation() {
+        use zephium_core::{
+            extensions::ExtensionHistorySearchQuery as Query,
+            profiles::ProfileKind,
+            session::{PersistedProfile, SessionState},
+        };
+        let mut hub = Hub::in_memory().unwrap();
+        let profile = ProfileId::from(1);
+        let other = ProfileId::from(2);
+        hub.save(&SessionState {
+            profiles: vec![
+                PersistedProfile {
+                    id: profile,
+                    name: "Test".into(),
+                    kind: ProfileKind::Default,
+                },
+                PersistedProfile {
+                    id: other,
+                    name: "Other".into(),
+                    kind: ProfileKind::Named,
+                },
+            ],
+            ..SessionState::default()
+        })
+        .unwrap();
+        {
+            let conn = hub.profile_conn(profile).unwrap();
+            conn.execute("INSERT INTO history(url,title,visited_at) VALUES ('https://example.test/needle','Café older',1),('https://example.test/needle','Café latest in range',50)", []).unwrap();
+            let transaction = conn.transaction().unwrap();
+            for i in 0..5000 {
+                transaction
+                    .execute(
+                        "INSERT INTO history(url,title,visited_at) VALUES (?1,'Unrelated',?2)",
+                        params![format!("https://example.test/noise/{i}"), 2000 + i],
+                    )
+                    .unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+        hub.profile_conn(other).unwrap().execute("INSERT INTO history(url,title,visited_at) VALUES ('https://other.test/needle','Other profile',50)", []).unwrap();
+        let q = Query::new("needle".into(), 0, 10_000_000, 10).unwrap();
+        let hits = hub.extension_history_search(profile, &q);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Café latest in range");
+        assert_eq!(hits[0].last_visit, 50);
+        assert_eq!(
+            hub.extension_history_search(other, &q)[0].url,
+            "https://other.test/needle"
+        );
+        let ranged = Query::new("".into(), 0, 49_999, 10).unwrap();
+        assert_eq!(
+            hub.extension_history_search(profile, &ranged)[0].last_visit,
+            1
+        );
+        let fraction = Query::new("".into(), 50_001, 50_999, 10).unwrap();
+        assert!(hub.extension_history_search(profile, &fraction).is_empty());
+        assert!(hub
+            .extension_history_search(ProfileId::from(99), &q)
+            .is_empty());
+        assert_eq!(
+            hub.extension_history_search(
+                profile,
+                &Query::new("café".into(), 0, 100_000, 1).unwrap()
+            )
+            .len(),
+            1
+        );
+    }
 
     #[test]
     fn history_usage_triggers_and_byte_budget_prune_oldest_rows() {

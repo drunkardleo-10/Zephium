@@ -345,6 +345,7 @@ struct StartupState {
     settled_attempt: Option<StartupAttempt>,
     outcome: Option<ExtensionServiceStartupOutcome>,
     admission_failed_closed: bool,
+    wake: Option<Box<dyn FnOnce() + Send>>,
 }
 
 /// Worker-private, repeatable observation of startup settlement.
@@ -362,6 +363,7 @@ impl SharedStartupOutcome {
                 settled_attempt: None,
                 outcome: None,
                 admission_failed_closed: false,
+                wake: None,
             }),
             changed: Condvar::new(),
         }
@@ -378,6 +380,15 @@ impl SharedStartupOutcome {
         } else {
             CurrentStartupObservation::Idle
         }
+    }
+
+    pub(crate) fn watch(&self, wake: Box<dyn FnOnce() + Send>) -> bool {
+        let mut state = self.lock();
+        if state.active_attempt.is_none() || state.admission_failed_closed {
+            return false;
+        }
+        state.wake = Some(wake);
+        true
     }
 
     pub(crate) fn reserve_retry_until(&self, deadline: Instant) -> StartupRetryReservation {
@@ -411,6 +422,7 @@ impl SharedStartupOutcome {
             return false;
         }
         state.active_attempt = None;
+        state.wake = None;
         self.changed.notify_all();
         true
     }
@@ -428,7 +440,12 @@ impl SharedStartupOutcome {
             state.active_attempt = None;
         }
         state.admission_failed_closed = true;
+        let wake = state.wake.take();
         self.changed.notify_all();
+        drop(state);
+        if let Some(wake) = wake {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(wake));
+        }
     }
 
     pub(crate) fn is_active(&self, attempt: StartupAttempt) -> bool {
@@ -448,7 +465,16 @@ impl SharedStartupOutcome {
         state.active_attempt = None;
         state.settled_attempt = Some(attempt);
         state.outcome = Some(outcome);
+        let wake = state.wake.take();
         self.changed.notify_all();
+        drop(state);
+        // A failed retry must not bypass backoff. Successful or terminal
+        // settlement can wake the actor immediately, outside the state lock.
+        if !matches!(outcome, ExtensionServiceStartupOutcome::Unavailable(_)) {
+            if let Some(wake) = wake {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(wake));
+            }
+        }
         true
     }
 
@@ -509,6 +535,48 @@ impl SharedStartupOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_wake_is_replaceable_one_shot_and_runs_outside_the_state_lock() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let state = Arc::new(SharedStartupOutcome::new(Some(StartupAttempt::INITIAL)));
+        let calls = Arc::new(AtomicUsize::new(0));
+        assert!(state.watch(Box::new(|| panic!("superseded callback must not run"))));
+        let observed = Arc::clone(&state);
+        let called = Arc::clone(&calls);
+        assert!(state.watch(Box::new(move || {
+            assert!(matches!(
+                observed.current(),
+                CurrentStartupObservation::Settled(_)
+            ));
+            called.fetch_add(1, Ordering::Relaxed);
+        })));
+        let ready = ExtensionServiceStartupOutcome::Ready(ExtensionServiceReadyEvidence::new(
+            ExtensionServiceWorkerIdentity::mint().unwrap(),
+            zephium_core::extensions::ExtensionNativeOwnershipJournalRevision::INITIAL,
+        ));
+        assert!(state.settle(StartupAttempt::INITIAL, ready));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(!state.settle(StartupAttempt::INITIAL, ready));
+        assert!(!state.watch(Box::new(|| panic!("no active attempt"))));
+    }
+
+    #[test]
+    fn unavailable_startup_does_not_wake_a_retry_loop() {
+        let state = SharedStartupOutcome::new(Some(StartupAttempt::INITIAL));
+        assert!(state.watch(Box::new(|| panic!("unavailable must retain backoff"))));
+        assert!(state.settle(
+            StartupAttempt::INITIAL,
+            ExtensionServiceStartupOutcome::Unavailable(ExtensionServiceStartupUnavailable::new(
+                ExtensionServiceWorkerIdentity::mint().unwrap(),
+                ExtensionServiceStartupUnavailableReason::ReconciliationPending,
+            ))
+        ));
+        assert!(state.lock().wake.is_none());
+    }
 
     fn unavailable_state() -> SharedStartupOutcome {
         let worker = ExtensionServiceWorkerIdentity::mint().unwrap();

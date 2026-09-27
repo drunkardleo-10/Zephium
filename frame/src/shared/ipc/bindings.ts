@@ -32,6 +32,12 @@ export const commands = {
 	extensionDistributionRefresh: () => __TAURI_INVOKE<ExtensionDistributionRefreshAdmissionView>("extension_distribution_refresh"),
 	extensionManagementInstall: (candidateIndex: number, catalogRevision: string, selection: ExtensionInstallGrantSelectionInput) => __TAURI_INVOKE<OperationAdmission>("extension_management_install", { candidateIndex, catalogRevision, selection }),
 	/**
+	 *  Downloads only the extension selected by the actor-owned foreground store
+	 *  page. The renderer supplies a tab ID, never a package URL or package bytes.
+	 */
+	extensionStorePrepare: (tabId: string) => typedError<string, string>(__TAURI_INVOKE("extension_store_prepare", { tabId })),
+	extensionStoreCheckUpdate: (installId: string) => typedError<string, string>(__TAURI_INVOKE("extension_store_check_update", { installId })),
+	/**
 	 *  Approves only the exact changed-authority replacement retained by Shell's
 	 *  current focused-profile subscription. Package identity and permission names
 	 *  never cross this IPC boundary.
@@ -511,6 +517,9 @@ export type ExtensionActionsView = {
 	actions: ExtensionActionView[],
 };
 
+/**  Last activation settlement, not permission or runtime authority. */
+export type ExtensionActivationIssueView = "unavailable" | "restart_required" | "rejected" | "capacity_exceeded" | "profile_fenced" | "failed_closed";
+
 export type ExtensionDistributionChanged = ExtensionDistributionView;
 
 /**
@@ -616,6 +625,8 @@ export type ExtensionManagementEntryView = {
 	verified_catalog_unix: string | null,
 	provenance: ExtensionManagementProvenanceView | null,
 	runtime: ExtensionManagementRuntimeView,
+	/**  Present only for an enabled, inactive extension with a known failure. */
+	activation_issue: ExtensionActivationIssueView | null,
 	/**  Present only when `runtime` is `active`. */
 	runtime_generation: string | null,
 	grants: ExtensionManagementGrantView,
@@ -641,7 +652,7 @@ export type ExtensionManagementGrantView = {
 };
 
 /**  One browser-owned explanation for a reviewed platform degradation. */
-export type ExtensionManagementLimitationView = { type: "api_permission"; name: string } | { type: "host_access" } | { type: "background" } | { type: "action" } | { type: "offscreen" } | { type: "native_messaging" } | { type: "browser_override" } | { type: "extension_pages_csp" } | { type: "sandbox" } | { type: "content_scripts" } | { type: "web_accessible_resources" } | { type: "minimum_browser_version" } | { type: "commands" } | { type: "side_panel" } | { type: "managed_storage" } | { type: "options_page" } | { type: "declarative_net_request" };
+export type ExtensionManagementLimitationView = { type: "api_permission"; name: string } | { type: "optional_api_unavailable"; name: string } | { type: "optional_host_unavailable"; pattern: string } | { type: "external_messaging_unavailable" } | { type: "host_access" } | { type: "background" } | { type: "action" } | { type: "offscreen" } | { type: "native_messaging" } | { type: "browser_override" } | { type: "extension_pages_csp" } | { type: "sandbox" } | { type: "content_scripts" } | { type: "main_document_content_scripts_only" } | { type: "fragment_url_content_scripts_unavailable" } | { type: "content_script_fonts_unavailable" } | { type: "side_panel_unavailable" } | { type: "offscreen_local_storage_only" } | { type: "sandboxed_pages_unavailable" } | { type: "clipboard_read_unavailable" } | { type: "web_accessible_resources" } | { type: "minimum_browser_version" } | { type: "commands" } | { type: "side_panel" } | { type: "managed_storage" } | { type: "options_page" } | { type: "declarative_net_request" };
 
 /**  Settlement of the focused profile's lazy installed-extension projection. */
 export type ExtensionManagementPhase = "loading" | "ready" | "not_configured" | "catalog_not_synchronized" | "update_consent_required" | "unavailable" | "rejected" | "failed_closed";
@@ -1373,6 +1384,12 @@ export type SplitGroupView = {
 
 export type TabChanged = TabView;
 
+/**
+ *  Browser chrome's bounded tab renderer choice. Future extension-owned
+ *  documents can add a separate variant without treating them as page URLs.
+ */
+export type TabContentView = "web" | "settings" | "extensions" | "extension_owned";
+
 export type TabView = {
 	id: string,
 	/**
@@ -1384,6 +1401,8 @@ export type TabView = {
 	projection_revision: string,
 	title: string,
 	url: string | null,
+	/**  Explicit content owner. Internal pages never carry a navigable URL. */
+	content?: TabContentView,
 	loading: boolean,
 	popup_blocked?: boolean,
 	can_go_back: boolean,

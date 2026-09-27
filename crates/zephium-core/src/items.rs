@@ -6,7 +6,10 @@ use std::collections::{HashMap, HashSet};
 use url::Url;
 
 use crate::ids::ItemId;
-use crate::item::{sanitize_page_title, Item, ItemKind, Lifecycle, Placement, TabState};
+use crate::item::{
+    sanitize_page_title, BrowserOwnedTab, Item, ItemKind, Lifecycle, Placement, TabContent,
+    TabState,
+};
 use crate::navigation;
 use crate::ports::engine::NavigationRequestId;
 use crate::spaces::RemovedProfileSpaces;
@@ -51,6 +54,24 @@ impl Items {
 
     pub fn tab(&self, id: ItemId) -> Option<&TabState> {
         self.items.get(&id).and_then(Item::tab)
+    }
+
+    /// Legacy QA Settings tabs are decoded so durable snapshots remain
+    /// canonical, then retired by the Shell before its first projection.
+    pub fn retired_settings_tab_ids(&self) -> Vec<ItemId> {
+        let mut ids = self
+            .items
+            .iter()
+            .filter_map(|(id, item)| {
+                item.tab()
+                    .is_some_and(|tab| {
+                        tab.content == TabContent::BrowserOwned(BrowserOwnedTab::Settings)
+                    })
+                    .then_some(*id)
+            })
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
     }
 
     fn tab_mut(&mut self, id: ItemId) -> Option<&mut TabState> {
@@ -111,6 +132,38 @@ impl Items {
         })
     }
 
+    /// Inserts a browser-owned page as a real, URL-less tab item. It never
+    /// acquires an ordinary native content view.
+    pub fn insert_browser_tab(
+        &mut self,
+        id: ItemId,
+        placement: Placement,
+        page: BrowserOwnedTab,
+    ) -> bool {
+        // Settings is a window-scoped browser page. Keep the enum variant only
+        // to decode and discard snapshots produced by an earlier QA build.
+        if page == BrowserOwnedTab::Settings {
+            return false;
+        }
+        self.insert(Item {
+            id,
+            parent: None,
+            placement,
+            kind: ItemKind::Tab(TabState::browser_owned(page)),
+        })
+    }
+
+    /// Inserts a transient extension-owned tab marker. The extension broker
+    /// must bind a native guest separately; this does not create a webview.
+    pub fn insert_extension_tab(&mut self, id: ItemId, placement: Placement) -> bool {
+        self.insert(Item {
+            id,
+            parent: None,
+            placement,
+            kind: ItemKind::Tab(TabState::extension_owned()),
+        })
+    }
+
     /// Removes an item and its whole subtree. Returns `Close` effects for
     /// every removed tab that had a live view.
     /// Reparents one existing tab without recreating its native identity or
@@ -124,6 +177,22 @@ impl Items {
         let Some(item) = self.items.get(&id).filter(|item| item.tab().is_some()) else {
             return false;
         };
+        match item.tab().expect("tab filtered above").content {
+            TabContent::Web => {}
+            TabContent::BrowserOwned(_) => {
+                if !matches!(
+                    (item.placement, placement),
+                    (
+                        Placement::Space { space: current, .. },
+                        Placement::Space { space: destination, .. }
+                    ) if current == destination
+                ) {
+                    return false;
+                }
+            }
+            TabContent::ExtensionOwned if item.placement != placement => return false,
+            TabContent::ExtensionOwned => {}
+        }
         if before == Some(id) {
             return item.placement == placement && item.parent.is_none();
         }
@@ -265,14 +334,13 @@ impl Items {
         let Some(url) = navigation::classify(input) else {
             return Vec::new();
         };
-        if self.tab(id).is_none() {
+        if !self
+            .tab(id)
+            .is_some_and(|tab| tab.content == TabContent::Web)
+        {
             return Vec::new();
         }
-        self.next_navigation_request = self.next_navigation_request.wrapping_add(1);
-        if self.next_navigation_request == 0 {
-            self.next_navigation_request = 1;
-        }
-        let request = NavigationRequestId(self.next_navigation_request);
+        let request = self.mint_navigation_request();
         self.pending_navigations
             .insert(id, PendingNavigation { request });
         let Some(tab) = self.tab_mut(id) else {
@@ -292,13 +360,43 @@ impl Items {
         }
     }
 
+    /// Reserves one exact first-navigation intent while a native tabs.create
+    /// reply is pending. A later admitted navigation supersedes this marker
+    /// even if that later native load fails and removes its own request.
+    pub fn reserve_deferred_navigation(&mut self, id: ItemId) -> Option<NavigationRequestId> {
+        if !self
+            .tab(id)
+            .is_some_and(|tab| tab.content == TabContent::Web && !tab.view && tab.url.is_none())
+        {
+            return None;
+        }
+        let request = self.mint_navigation_request();
+        self.pending_navigations
+            .insert(id, PendingNavigation { request });
+        Some(request)
+    }
+
+    pub fn pending_navigation_request(&self, id: ItemId) -> Option<NavigationRequestId> {
+        self.pending_navigations
+            .get(&id)
+            .map(|pending| pending.request)
+    }
+
+    fn mint_navigation_request(&mut self) -> NavigationRequestId {
+        self.next_navigation_request = self.next_navigation_request.wrapping_add(1);
+        if self.next_navigation_request == 0 {
+            self.next_navigation_request = 1;
+        }
+        NavigationRequestId(self.next_navigation_request)
+    }
+
     /// Attach a preconfigured native popup without issuing Create/Navigate or
     /// claiming a URL commit. Only later native observations attribute content.
     pub fn adopt_native_view(&mut self, id: ItemId) -> bool {
         let Some(tab) = self.tab_mut(id) else {
             return false;
         };
-        if tab.view || tab.url.is_some() {
+        if tab.content != TabContent::Web || tab.view || tab.url.is_some() {
             return false;
         }
         tab.view = true;
@@ -306,9 +404,23 @@ impl Items {
         true
     }
 
+    /// Marks an already broker-authorized native extension guest ready for
+    /// presentation. This does not create an ordinary page WebView or URL.
+    pub fn adopt_extension_view(&mut self, id: ItemId) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        if tab.content != TabContent::ExtensionOwned || tab.view || tab.url.is_some() {
+            return false;
+        }
+        tab.view = true;
+        tab.loading = false;
+        true
+    }
+
     pub fn ensure_view(&mut self, id: ItemId) -> Vec<Effect> {
         if let Some(tab) = self.tab_mut(id) {
-            if !tab.view {
+            if tab.content == TabContent::Web && !tab.view {
                 if let Some(url) = tab.url.clone() {
                     tab.view = true;
                     return vec![Effect::CreateView {
@@ -324,13 +436,22 @@ impl Items {
     pub fn view_ids(&self) -> Vec<ItemId> {
         self.items
             .iter()
-            .filter(|(_, item)| item.tab().is_some_and(TabState::has_view))
+            .filter(|(_, item)| {
+                item.tab()
+                    .is_some_and(|tab| tab.content == TabContent::Web && tab.has_view())
+            })
             .map(|(id, _)| *id)
             .collect()
     }
 
     /// Drops the tab's webview but keeps the item; activation recreates it.
     pub fn hibernate(&mut self, id: ItemId) -> Vec<Effect> {
+        if !self
+            .tab(id)
+            .is_some_and(|tab| tab.content == TabContent::Web)
+        {
+            return Vec::new();
+        }
         if self.mark_view_discarded(id) {
             vec![Effect::Close { id }]
         } else {
@@ -393,6 +514,9 @@ impl Items {
     }
     pub fn set_committed_url(&mut self, id: ItemId, url: Url) -> bool {
         if let Some(tab) = self.tab_mut(id) {
+            if tab.content != TabContent::Web {
+                return false;
+            }
             tab.url = Some(url);
             tab.popup_blocked = false;
             self.pending_navigations.remove(&id);
@@ -417,9 +541,7 @@ impl Items {
 
     #[cfg(test)]
     fn pending_navigation(&self, id: ItemId) -> Option<NavigationRequestId> {
-        self.pending_navigations
-            .get(&id)
-            .map(|pending| pending.request)
+        self.pending_navigation_request(id)
     }
 
     pub fn set_committed_url_str(&mut self, id: ItemId, url: &str) -> bool {
@@ -463,6 +585,21 @@ mod tests {
             space: SpaceId::from(1),
             section: SpaceSection::Today,
         }
+    }
+
+    #[test]
+    fn extension_guest_requires_explicit_adoption_and_closes_without_lru_admission() {
+        let mut items = Items::default();
+        let id = ItemId::from(90);
+        assert!(items.insert_extension_tab(id, today()));
+        assert!(items.ensure_view(id).is_empty());
+        assert!(items.navigate(id, "https://example.test/").is_empty());
+        assert!(!items.adopt_native_view(id));
+        assert!(items.adopt_extension_view(id));
+        assert!(items.tab(id).unwrap().has_view());
+        assert!(items.view_ids().is_empty());
+        assert!(items.hibernate(id).is_empty());
+        assert_eq!(items.remove(id), vec![Effect::Close { id }]);
     }
 
     fn folder(items: &mut Items, fid: u128) -> ItemId {

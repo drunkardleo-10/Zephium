@@ -61,7 +61,7 @@ fn main() {
             CI_RESOURCE_PROFILE.store(true, Ordering::Release);
             ci();
         }
-        Some("check-frame-styles") => run("pnpm", &["--dir", "frame", "run", "check:styles"]),
+        Some("check-frame-styles") => run("node", &["frame/scripts/check-styles.mjs"]),
         Some("check-engine-floors") => check_engine_floors(),
         Some("check-release-engine-security") => check_release_engine_security(),
         Some("check-agentic-probe-boundary") => check_agentic_probe_boundary(),
@@ -375,6 +375,21 @@ fn main() {
                 exit(1);
             }
         }
+        Some("materialize-macos-extension-compatibility-identity")
+            if arguments.len() == 7
+                && arguments[1] == "--extension"
+                && arguments[3] == "--tree-index"
+                && arguments[5] == "--output" =>
+        {
+            if let Err(error) = macos_extension_compatibility::materialize_identity(
+                std::path::Path::new(&arguments[2]),
+                std::path::Path::new(&arguments[4]),
+                std::path::Path::new(&arguments[6]),
+            ) {
+                eprintln!("macOS identity extension compatibility materialization failed: {error}");
+                exit(1);
+            }
+        }
         Some("check-bitwarden-core-source")
             if arguments.len() == 3 && arguments[1] == "--source" =>
         {
@@ -445,7 +460,7 @@ fn main() {
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-frame-styles|check-engine-floors|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-macos-extension-compatibility-asset|measure-macos-extension-product|classify-macos-extension-alarms|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|check-extension-public-policy --policy PATH|check-crx3 --archive PATH --expected-id ID|materialize-crx3-probe --archive PATH --expected-id ID --output PATH|prepare-extension-crx3-signing-message --archive PATH --public-key PATH --output PATH|assemble-extension-crx3 --archive PATH --public-key PATH --signature PATH --output PATH|prepare-extension-crx3-release-archive --extension PATH --tree-index PATH --public-key PATH --output PATH|prepare-extension-compatibility-crx3-release-archive --compatibility-artifact PATH --public-key PATH --output PATH|publish-extension-catalog --review PATH --output PATH|finalize-extension-manifest-profiles --publication PATH --review PATH --output PATH|prepare-local-extension-lab-release --compatibility-artifact PATH --output PATH|prepare-local-extension-lab-generation --publication PATH --classified-profiles PATH --output PATH|stage-local-extension-lab --publication PATH --classified-profiles PATH --rollback-lab PATH --output PATH|index-extension-probe-tree --extension PATH --output PATH|materialize-macos-extension-compatibility --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-document-background --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-publisher-native --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-publisher-native-document-background --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-brokered --extension PATH --tree-index PATH --output PATH|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|finalize-bitwarden-core-macos-probe-artifact --build PATH --output PATH [--wasm-response-mime-adapter]|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
+                "usage: cargo xtask <ci|check-frame-styles|check-engine-floors|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-macos-extension-compatibility-asset|measure-macos-extension-product|classify-macos-extension-alarms|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|check-extension-public-policy --policy PATH|check-crx3 --archive PATH --expected-id ID|materialize-crx3-probe --archive PATH --expected-id ID --output PATH|prepare-extension-crx3-signing-message --archive PATH --public-key PATH --output PATH|assemble-extension-crx3 --archive PATH --public-key PATH --signature PATH --output PATH|prepare-extension-crx3-release-archive --extension PATH --tree-index PATH --public-key PATH --output PATH|prepare-extension-compatibility-crx3-release-archive --compatibility-artifact PATH --public-key PATH --output PATH|publish-extension-catalog --review PATH --output PATH|finalize-extension-manifest-profiles --publication PATH --review PATH --output PATH|prepare-local-extension-lab-release --compatibility-artifact PATH --output PATH|prepare-local-extension-lab-generation --publication PATH --classified-profiles PATH --output PATH|stage-local-extension-lab --publication PATH --classified-profiles PATH --rollback-lab PATH --output PATH|index-extension-probe-tree --extension PATH --output PATH|materialize-macos-extension-compatibility --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-document-background --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-publisher-native --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-publisher-native-document-background --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-brokered --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-identity --extension PATH --tree-index PATH --output PATH|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|finalize-bitwarden-core-macos-probe-artifact --build PATH --output PATH [--wasm-response-mime-adapter]|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
             );
             exit(2);
         }
@@ -1241,8 +1256,100 @@ fn run_acquired_extension_repository_gates() {
 }
 
 /// Keeps network acquisition absent from the ordinary desktop while testing
-/// the explicit product distribution graph without pulling the TUF adapter.
+/// the explicit product distribution graph and separately opted-in policy verifier.
 fn run_extension_distribution_gates() {
+    // The default graph cannot cover direct store installation, source updates,
+    // optional grants, or local artifact collection. Exercise that product path.
+    for package in ["zephium-extension-service", "zephium-desktop"] {
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "--locked",
+                "-p",
+                package,
+                "--features",
+                "external-extensions",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        );
+        run(
+            "cargo",
+            &[
+                "test",
+                "--locked",
+                "-p",
+                package,
+                "--features",
+                "external-extensions",
+                "--lib",
+            ],
+        );
+    }
+
+    for target in ["--all-targets", "--lib"] {
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "--locked",
+                "-p",
+                "zephium-extension-repository",
+                "--features",
+                "beta-packages",
+                target,
+                "--",
+                "-D",
+                "warnings",
+            ],
+        );
+    }
+    // Real signed-policy repository custody/recovery tests are path-included
+    // below by distribution's test-only authority owner; no fixture root or
+    // witness factory is exported into a shipping feature.
+    run(
+        "cargo",
+        &[
+            "test",
+            "--locked",
+            "-p",
+            "zephium-extension-repository",
+            "--features",
+            "beta-packages",
+            "--doc",
+        ],
+    );
+    for target in ["--all-targets", "--lib"] {
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "--locked",
+                "-p",
+                "zephium-extension-distribution",
+                "--features",
+                "beta-admission",
+                target,
+                "--",
+                "-D",
+                "warnings",
+            ],
+        );
+    }
+    run(
+        "cargo",
+        &[
+            "test",
+            "--locked",
+            "-p",
+            "zephium-extension-distribution",
+            "--features",
+            "beta-admission",
+        ],
+    );
     for target in ["--all-targets", "--lib"] {
         run(
             "cargo",
@@ -1346,6 +1453,7 @@ fn check_extension_runtime_host_assembler_call_sites() {
     const NEEDLE: &str = "try_from_authenticated_repository(";
     const REPOSITORY_BRIDGE: &str =
         "crates/zephium-extension-repository/src/package_lease/runtime_access.rs";
+    const BETA_REPOSITORY_BRIDGE: &str = "crates/zephium-extension-repository/src/beta/runtime.rs";
     const ENGINE_TEST_SUPPORT: &str =
         "crates/zephium-engine/src/host/extension_runtime/activation_issuer_test_support.rs";
     const ENGINE_MODULE: &str = "crates/zephium-engine/src/host/extension_runtime.rs";
@@ -1358,6 +1466,7 @@ fn check_extension_runtime_host_assembler_call_sites() {
     sources.sort();
 
     let mut repository_calls = 0;
+    let mut beta_repository_calls = 0;
     let mut engine_test_support_calls = 0;
     let mut forbidden = Vec::new();
     for path in sources {
@@ -1375,6 +1484,8 @@ fn check_extension_runtime_host_assembler_call_sites() {
             .to_string_lossy();
         if relative == REPOSITORY_BRIDGE {
             repository_calls = calls;
+        } else if relative == BETA_REPOSITORY_BRIDGE {
+            beta_repository_calls = calls;
         } else if relative == ENGINE_TEST_SUPPORT {
             engine_test_support_calls = calls;
         } else if relative == "crates/zephium-extension-runtime-api/src/host.rs" && calls == 1 {
@@ -1392,6 +1503,7 @@ fn check_extension_runtime_host_assembler_call_sites() {
     let engine_test_support_is_cfg_only = engine_module.contains(TEST_ONLY_MODULE_DECLARATION);
 
     if repository_calls != EXPECTED_REPOSITORY_CALLS
+        || beta_repository_calls != 1
         || engine_test_support_calls != 1
         || !engine_test_support_is_cfg_only
         || !forbidden.is_empty()
@@ -1402,6 +1514,7 @@ fn check_extension_runtime_host_assembler_call_sites() {
         eprintln!(
             "{REPOSITORY_BRIDGE} contains {repository_calls} constructor calls, expected {EXPECTED_REPOSITORY_CALLS}"
         );
+        eprintln!("{BETA_REPOSITORY_BRIDGE} contains {beta_repository_calls} constructor calls, expected 1");
         eprintln!(
             "{ENGINE_TEST_SUPPORT} contains {engine_test_support_calls} constructor calls, expected 1 behind the exact cfg(test) module declaration: {engine_test_support_is_cfg_only}"
         );
@@ -1487,7 +1600,7 @@ fn run_internal_extension_authority_gates() {
     }
     #[cfg(target_os = "windows")]
     eprintln!(
-        "internal repository writer and service coordinator E2E are unavailable on Windows until the private namespace primitive is implemented; custom authority lint/tests remain mandatory"
+        "internal repository writer and service coordinator E2E remain gated on Windows until the private namespace adapter passes live validation and its production gate is reviewed; custom authority lint/tests remain mandatory"
     );
 }
 

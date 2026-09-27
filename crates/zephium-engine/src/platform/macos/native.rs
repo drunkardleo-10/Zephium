@@ -279,11 +279,20 @@ pub fn configure(
         }
     }
 
+    #[cfg(feature = "native-extension-qa-inspector")]
+    let qa_inspectable = {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var("ZEPHIUM_EXTENSION_TAB_TRACE").as_deref() == Ok("1"))
+    };
+    #[cfg(not(feature = "native-extension-qa-inspector"))]
+    let qa_inspectable = false;
     unsafe {
-        wk.setInspectable(cfg!(any(
-            debug_assertions,
-            feature = "native-extension-lab-diagnostics"
-        )))
+        wk.setInspectable(
+            cfg!(any(
+                debug_assertions,
+                feature = "native-extension-lab-diagnostics"
+            )) || qa_inspectable,
+        )
     };
     let view: &NSView = &wk;
     // Fill the assigned region and follow window resize in AppKit's layout pass.

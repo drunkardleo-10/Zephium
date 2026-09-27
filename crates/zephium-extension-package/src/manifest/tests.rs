@@ -19,6 +19,83 @@ struct Fixture {
     catalog: ExtensionReleaseCatalog,
 }
 
+#[test]
+fn upstream_entry_preserves_reviewed_key_rules_and_exact_tree_binding() {
+    use zephium_core::extensions::{
+        ExtensionArchiveDigest, ExtensionPackageIdentity, ExtensionPackagePayloadIdentity,
+        ExtensionTreeDigest,
+    };
+    let expected = crate::ExpectedChromiumIdentity::from_manifest_key_digest(
+        ChromiumManifestKey::parse_canonical("Xw==")
+            .unwrap()
+            .digest(),
+    );
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    for (key, succeeds) in [(None, true), (Some("Xw=="), true), (Some("WA=="), false)] {
+        let mut manifest = json!({"manifest_version":3,"name":"Source","version":"1"});
+        if let Some(key) = key {
+            manifest["key"] = json!(key);
+        }
+        let fixture = make_fixture(manifest, &[], true);
+        let reviewed = fixture.binding().package().identity();
+        let package = ExtensionPackageIdentity::new(
+            reviewed.authority(),
+            reviewed.key(),
+            reviewed.revision(),
+            ExtensionPackagePayloadIdentity::acquired_zip(
+                100,
+                ExtensionArchiveDigest::from_bytes([42; 32]),
+            )
+            .unwrap(),
+            reviewed.manifest_sha256(),
+            reviewed.tree_sha256(),
+        );
+        assert_eq!(
+            assess_upstream_extension_manifest(
+                &package,
+                &fixture.tree,
+                &expected,
+                &fixture.manifest,
+                &policy
+            )
+            .is_ok(),
+            succeeds
+        );
+        if key.is_none() {
+            assert_eq!(
+                admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy),
+                Err(ExtensionManifestAdmissionError::ChromiumKeyMissing)
+            );
+        }
+        // Neither an unrelated tree identity nor bundled-tree evidence may
+        // enter the new acquired-source entry point.
+        let mismatched = ExtensionPackageIdentity::new(
+            package.authority(),
+            package.key(),
+            package.revision(),
+            package.payload(),
+            package.manifest_sha256(),
+            ExtensionTreeDigest::from_bytes([99; 32]),
+        );
+        assert!(assess_upstream_extension_manifest(
+            &mismatched,
+            &fixture.tree,
+            &expected,
+            &fixture.manifest,
+            &policy
+        )
+        .is_err());
+        assert!(assess_upstream_extension_manifest(
+            reviewed,
+            &fixture.tree,
+            &expected,
+            &fixture.manifest,
+            &policy
+        )
+        .is_err());
+    }
+}
+
 impl Fixture {
     fn binding(&self) -> ExtensionReleaseTreeBinding<'_> {
         self.catalog.packages()[0]
@@ -434,6 +511,34 @@ fn admits_complete_mv3_authority_without_losing_runtime_paths() {
 }
 
 #[test]
+fn historical_author_object_is_bounded_display_metadata_only() {
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    let fixture = make_fixture(
+        json!({"manifest_version":3, "name":"Author fixture", "version":"1",
+        "author":{"email":"publisher@example.com"}}),
+        &[],
+        false,
+    );
+    let admitted = admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).unwrap();
+    assert_eq!(admitted.metadata().author(), Some("publisher@example.com"));
+    for author in [
+        json!({}),
+        json!({"email":12}),
+        json!({"email":"a", "permissions":["tabs"]}),
+        json!({"email":"unsafe\u{202e}text"}),
+        json!({"email":"__MSG_author__"}),
+        json!({"email":"x".repeat(10000)}),
+    ] {
+        let fixture = make_fixture(
+            json!({"manifest_version":3, "name":"Author fixture", "version":"1", "author":author}),
+            &[],
+            false,
+        );
+        assert!(admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).is_err());
+    }
+}
+
+#[test]
 fn document_background_is_typed_exact_and_fail_closed() {
     let manifest = json!({
         "manifest_version": 3,
@@ -478,7 +583,7 @@ fn document_background_is_typed_exact_and_fail_closed() {
         }),
         json!({
             "service_worker": "worker.js",
-            "scripts": ["worker.js"],
+            "scripts": ["worker.js", "other.js"],
             "type": "module"
         }),
     ] {
@@ -491,6 +596,49 @@ fn document_background_is_typed_exact_and_fail_closed() {
         );
         assert!(admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).is_err());
     }
+}
+
+#[test]
+fn cross_browser_background_retains_its_distinct_execution_semantics() {
+    use zephium_core::extensions::ExtensionBackgroundEnvironment as Environment;
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    for kind in ["classic", "module"] {
+        let manifest = json!({"manifest_version":3,"name":"Shared background","version":"1.0", "background":{"service_worker":"worker.js","scripts":["worker.js"],"type":kind}});
+        let fixture = make_fixture(manifest, &[("worker.js", b"void 0;")], false);
+        let admitted =
+            admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).unwrap();
+        assert_eq!(
+            admitted
+                .descriptor()
+                .declarations()
+                .background()
+                .unwrap()
+                .environment(),
+            Environment::CrossBrowser
+        );
+    }
+}
+
+#[test]
+fn editor_and_firefox_metadata_does_not_supply_chromium_authority() {
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    let mut manifest = json!({"manifest_version":3,"name":"Cross browser","version":"1.0","offline_enabled":false, "$schema":"https://json.schemastore.org/chrome-manifest", "browser_specific_settings":{"gecko":{"id":"another-publisher@example.test","strict_min_version":"128.0","data_collection_permissions":{"required":["none"]}},"gecko_android":{"strict_min_version":"128.0"}}});
+    let fixture = make_fixture(manifest.clone(), &[], false);
+    let admitted = admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).unwrap();
+    assert!(admitted.chromium_key().is_none());
+    assert!(admitted.descriptor().declarations().unmodeled().is_empty());
+    manifest["browser_specific_settings"]["safari"] = json!({"some_permission":true});
+    let fixture = make_fixture(manifest.clone(), &[], false);
+    let admitted = admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).unwrap();
+    assert!(admitted
+        .descriptor()
+        .declarations()
+        .unmodeled()
+        .iter()
+        .any(|name| name.as_str() == "browser_specific_settings"));
+    manifest["$schema"] = json!("file:///private/schema.json");
+    let fixture = make_fixture(manifest, &[], false);
+    assert!(admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).is_err());
 }
 
 #[test]
@@ -1536,7 +1684,7 @@ fn locale_message_and_placeholder_shapes_fail_closed() {
             .as_slice(),
         br#"{"name":{"message":"$value$","placeholders":{"value":{"content":"${1}"}}}}"#
             .as_slice(),
-        br#"{"name":{"message":"x","future":"authority"}}"#.as_slice(),
+        br#"{"name":{"message":"x","description":7}}"#.as_slice(),
     ] {
         let fixture = make_fixture(
             json!({
@@ -1570,6 +1718,29 @@ fn locale_message_and_placeholder_shapes_fail_closed() {
             "name".into()
         ))
     );
+}
+
+#[test]
+fn locale_extra_entry_metadata_is_inert_display_metadata() {
+    let messages = br#"{
+        "name":{"message":"Trusted name","example":"Translator note","future":{"nested":true}},
+        "unrelated":{"message":"Unused","example":"Not displayed"}
+    }"#;
+    let fixture = make_fixture(
+        json!({
+            "manifest_version":3,"name":"__MSG_name__","version":"1","default_locale":"en"
+        }),
+        &[("_locales/en/messages.json", messages)],
+        false,
+    );
+    let admitted = admit_extension_manifest(
+        fixture.binding(),
+        &fixture.manifest,
+        &CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported),
+    )
+    .unwrap();
+    let resolved = resolve_extension_default_locale(&admitted, Some(messages)).unwrap();
+    assert_eq!(resolved.name().as_str(), "Trusted name");
 }
 
 #[test]
@@ -1657,7 +1828,7 @@ fn every_resolved_metadata_field_uses_its_post_resolution_limit() {
     let boundary_messages = serde_json::to_vec(&json!({
         "name":{"message":"n".repeat(75)},
         "description":{"message":"d".repeat(132)},
-        "short":{"message":"s".repeat(12)},
+        "short":{"message":"s".repeat(75)},
         "action":{"message":"t".repeat(MAX_EXTENSION_METADATA_STRING_BYTES)}
     }))
     .unwrap();
@@ -1680,7 +1851,7 @@ fn every_resolved_metadata_field_uses_its_post_resolution_limit() {
         resolved.description().unwrap().as_str().chars().count(),
         132
     );
-    assert_eq!(resolved.short_name().unwrap().as_str().chars().count(), 12);
+    assert_eq!(resolved.short_name().unwrap().as_str().chars().count(), 75);
     assert_eq!(
         resolved.version_name().unwrap().as_str().chars().count(),
         MAX_EXTENSION_METADATA_STRING_BYTES
@@ -1706,7 +1877,7 @@ fn every_resolved_metadata_field_uses_its_post_resolution_limit() {
                 "short_name":"__MSG_target__","default_locale":"en"
             }),
             "target",
-            "s".repeat(13),
+            "s".repeat(76),
             "short_name",
         ),
     ] {
@@ -2077,5 +2248,184 @@ proptest! {
         prop_assert_eq!(first.name().as_str(), value.as_str());
         prop_assert_eq!(first.digest(), second.digest());
         prop_assert_eq!(first.retained_bytes(), second.retained_bytes());
+    }
+}
+
+#[test]
+fn explicit_relative_references_and_theme_icons_are_resource_bound() {
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    let base = json!({"manifest_version":3,"name":"Reference fixture","version":"1",
+        "background":{"service_worker":"./worker.js"},
+        "action":{"default_popup":"./popup.html", "theme_icons":[{"light":"./light.png","dark":"dark.png","size":32}]}});
+    let files = [
+        ("worker.js", b"void 0;".as_slice()),
+        ("popup.html", b"<p>Popup</p>"),
+        ("light.png", b"light"),
+        ("dark.png", b"dark"),
+    ];
+    let fixture = make_fixture(base.clone(), &files, false);
+    assert!(admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).is_ok());
+    for path in [
+        "./../worker.js",
+        "././worker.js",
+        "//worker.js",
+        "https://example.test/worker.js",
+        "./missing.js",
+    ] {
+        let mut value = base.clone();
+        value["background"]["service_worker"] = json!(path);
+        let fixture = make_fixture(value, &files, false);
+        assert!(
+            admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).is_err(),
+            "{path}"
+        );
+    }
+    for themes in [
+        json!([]),
+        json!([{"light":"missing.png","dark":"dark.png","size":32}]),
+        json!([{"light":"light.png","size":32}]),
+        json!([{"light":"light.png","dark":"dark.png","size":0}]),
+        json!([{"light":"light.png","dark":"dark.png","size":32,"script":"worker.js"}]),
+        json!([{"light":"light.png","dark":"dark.png","size":32},{"light":"light.png","dark":"dark.png","size":32}]),
+    ] {
+        let mut value = base.clone();
+        value["action"]["theme_icons"] = themes;
+        let fixture = make_fixture(value, &files, false);
+        assert!(admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).is_err());
+    }
+}
+
+#[test]
+fn only_exact_self_only_external_messaging_is_inert() {
+    let key = ChromiumManifestKey::parse_canonical("Xw==").unwrap();
+    let self_id = key.extension_id().as_str();
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Compatible);
+    let make = |external| {
+        make_fixture(
+            json!({"manifest_version":3,"name":"X","version":"1","key":"Xw==",
+        "externally_connectable":external}),
+            &[],
+            true,
+        )
+    };
+    let exact = make(json!({"ids":[self_id],"matches":[]}));
+    assert!(admit_extension_manifest(exact.binding(), &exact.manifest, &policy).is_ok());
+    for external in [
+        json!({"ids":["*"],"matches":[]}),
+        json!({"ids":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"matches":[]}),
+        json!({"ids":[self_id],"matches":["https://example.test/*"]}),
+        json!({"ids":[self_id],"matches":[],"extra":true}),
+    ] {
+        let fixture = make(external);
+        assert!(matches!(
+            admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy),
+            Err(ExtensionManifestAdmissionError::RunnableUnmodeledDeclaration(_))
+        ));
+    }
+}
+
+#[test]
+fn exposure_patterns_may_match_no_file_but_executable_entry_points_must_exist() {
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    let mut manifest = json!({"manifest_version":3,"name":"X","version":"1",
+        "web_accessible_resources":[{"resources":["stale.js","future/*.css"],"matches":["https://example.test/*"]}]});
+    let fixture = make_fixture(manifest.clone(), &[], false);
+    assert!(admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).is_ok());
+    manifest["background"] = json!({"service_worker":"stale.js"});
+    let fixture = make_fixture(manifest, &[], false);
+    assert!(matches!(
+        admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy),
+        Err(ExtensionManifestAdmissionError::InvalidResource(_))
+    ));
+}
+
+#[test]
+fn content_script_lists_use_the_existing_match_set_budget_not_host_grant_limit() {
+    let fixture = make_fixture(
+        json!({
+            "manifest_version":3,"name":"Pattern sets","version":"1",
+            "content_scripts":[
+                {"matches":["https://example.test/*"],
+                 "exclude_matches":(0..91).map(|n|format!("https://example.test/private-{n}/*")).collect::<Vec<_>>(),
+                 "js":["content.js"]},
+                {"matches":(0..86).map(|n|format!("https://site-{n}.example/*")).collect::<Vec<_>>(),
+                 "js":["content.js"]}
+            ]
+        }),
+        &[("content.js", b"void 0;")],
+        false,
+    );
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    let admitted = admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).unwrap();
+    let scripts = admitted
+        .descriptor()
+        .declarations()
+        .execution()
+        .content_scripts();
+    assert_eq!(scripts[0].matches().excludes().len(), 91);
+    assert_eq!(scripts[1].matches().includes().len(), 86);
+}
+
+#[test]
+fn larger_content_script_lists_keep_combined_and_manifest_wide_limits() {
+    let group = |count| {
+        json!({
+            "matches":(0..count).map(|n|format!("https://site-{n}.example/*")).collect::<Vec<_>>(),
+            "js":["content.js"]
+        })
+    };
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    for (scripts, accepted) in [
+        (json!([group(128)]), true),
+        (json!([group(129)]), false),
+        (
+            json!([{"matches":["https://example.test/*"],"exclude_matches":(0..128).map(|n|format!("https://example.test/{n}/*")).collect::<Vec<_>>(),"js":["content.js"]}]),
+            false,
+        ),
+        (json!([group(128), group(128)]), true),
+        (json!([group(128), group(128), group(1)]), false),
+    ] {
+        let fixture = make_fixture(
+            json!({"manifest_version":3,"name":"Pattern limit","version":"1","content_scripts":scripts}),
+            &[("content.js", b"void 0;")],
+            false,
+        );
+        assert_eq!(
+            admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).is_ok(),
+            accepted
+        );
+    }
+    for (count, accepted) in [(64, true), (65, false)] {
+        let fixture = make_fixture(
+            json!({"manifest_version":3,"name":"Host limit","version":"1","host_permissions":(0..count).map(|n|format!("https://host-{n}.example/*")).collect::<Vec<_>>()}),
+            &[],
+            false,
+        );
+        assert_eq!(
+            admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).is_ok(),
+            accepted
+        );
+    }
+}
+
+#[test]
+fn short_name_recommendation_does_not_reject_a_valid_bounded_package() {
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    for (name, accepted) in [
+        ("Superhuman Go".to_owned(), true),
+        ("s".repeat(75), true),
+        ("s".repeat(76), false),
+    ] {
+        let fixture = make_fixture(
+            json!({"manifest_version":3,"name":"Extension","version":"1","short_name":name}),
+            &[],
+            false,
+        );
+        let result = admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy);
+        assert_eq!(result.is_ok(), accepted);
+        if let Ok(admitted) = result {
+            let resolved = resolve_extension_default_locale(&admitted, None).unwrap();
+            assert_eq!(resolved.short_name().unwrap().as_str(), name);
+        }
     }
 }

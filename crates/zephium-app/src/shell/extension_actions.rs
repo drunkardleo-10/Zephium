@@ -112,9 +112,6 @@ impl ExtensionActionState {
             .first()
             .and_then(|window| window.tabs().iter().find(|candidate| candidate.id() == tab))
             .is_some_and(zephium_core::extensions::ExtensionBrowserTab::resident);
-        if !resident {
-            return Err(ExtensionActionRejection::TabDiscarded);
-        }
         let action = self
             .snapshots
             .get(&runtime.profile())
@@ -130,6 +127,9 @@ impl ExtensionActionState {
             .ok_or(ExtensionActionRejection::ActionUnavailable)?;
         if !action.is_enabled() {
             return Err(ExtensionActionRejection::ActionDisabled);
+        }
+        if !resident && !action.presents_popup() {
+            return Err(ExtensionActionRejection::TabDiscarded);
         }
         Ok(action.revision())
     }

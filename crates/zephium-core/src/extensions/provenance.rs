@@ -158,6 +158,7 @@ impl ExtensionInstallProvenance {
     fn is_valid(&self) -> bool {
         self.policy.revision.get() <= i64::MAX as u64
             && self.retained_bytes() <= MAX_EXTENSION_INSTALL_PROVENANCE_BYTES
+            && self.beta_fields_are_consistent()
             && (!matches!(self.transform, ExtensionTransformProvenance::Identity)
                 || (self.original.manifest == self.package.manifest_sha256().bytes()
                     && self.original.tree == self.package.tree_sha256().bytes()
@@ -167,9 +168,57 @@ impl ExtensionInstallProvenance {
                     )))
     }
 
+    fn beta_fields_are_consistent(&self) -> bool {
+        if !super::is_beta_extension_authority(self.package.authority()) {
+            return true;
+        }
+        self.upstream.publisher() == self.package.key()
+            && self
+                .package
+                .payload()
+                .acquired_zip_evidence()
+                .is_some_and(|(_, digest)| digest.bytes() == self.upstream.archive_sha256())
+            && [
+                super::ExtensionBetaRuntimeTarget::MacosNative,
+                super::ExtensionBetaRuntimeTarget::WindowsNative,
+            ]
+            .into_iter()
+            .any(|runtime| {
+                (runtime.target_id() == self.runtime_target.as_str()
+                    || (self.package.authority() == runtime.authority(super::ExtensionBetaChannel::Local)
+                        && self.runtime_target.as_str() == runtime.bounded_storage_target_id()
+                        && matches!(&self.transform, ExtensionTransformProvenance::Compiled { target, .. }
+                            if target.as_str() == "local.bounded-storage.v1"))
+                    || (runtime == super::ExtensionBetaRuntimeTarget::MacosNative
+                        && self.package.authority() == runtime.authority(super::ExtensionBetaChannel::Local)
+                        && matches!(&self.transform, ExtensionTransformProvenance::Compiled { target, .. }
+                            if (self.runtime_target.as_str() == super::LOCAL_MACOS_HISTORY_V3_COMPATIBILITY_TARGET && target.as_str() == "local.webkit-history.v3")
+                            || (self.runtime_target.as_str() == super::LOCAL_MACOS_CAPABILITIES_V1_COMPATIBILITY_TARGET && target.as_str() == "local.webkit-capabilities.v1")
+                            || (self.runtime_target.as_str() == super::LOCAL_MACOS_CAPABILITIES_V2_COMPATIBILITY_TARGET && target.as_str() == "local.webkit-capabilities.v2")
+                            || (self.runtime_target.as_str() == super::LOCAL_MACOS_IDENTITY_V1_COMPATIBILITY_TARGET && target.as_str() == "local.webkit-identity.v1")
+                            || (self.runtime_target.as_str() == super::LOCAL_MACOS_MAIN_DOCUMENT_GLOBS_V1_COMPATIBILITY_TARGET && target.as_str() == "local.webkit-main-document-globs.v1")
+                            || (self.runtime_target.as_str() == super::LOCAL_MACOS_HISTORY_V2_COMPATIBILITY_TARGET && target.as_str() == "local.webkit-history.v2")
+                            || (self.runtime_target.as_str() == super::MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET
+                                && target.as_str() == "local.webkit-brokered.v1")
+                            || (self.runtime_target.as_str() == super::LOCAL_MACOS_ADAPTED_COMPATIBILITY_TARGET
+                                && target.as_str() == "local.webkit-adapted.v1"))))
+                    && [
+                        super::ExtensionBetaChannel::Stable,
+                        super::ExtensionBetaChannel::Staging,
+                        super::ExtensionBetaChannel::Local,
+                    ]
+                    .into_iter()
+                    .any(|channel| runtime.authority(channel) == self.package.authority())
+            })
+    }
+
     /// Exact acquisition provider.
     pub const fn source(&self) -> &ExtensionProvenanceSource {
         &self.source
+    }
+    /// Compiled native compatibility target recorded for these exact bytes.
+    pub const fn runtime_target(&self) -> &ExtensionCompatibilityTargetId {
+        &self.runtime_target
     }
     /// Original authenticated upstream version and byte identities.
     pub const fn upstream(&self) -> ExtensionUpstreamCheckpoint {
@@ -190,6 +239,10 @@ impl ExtensionInstallProvenance {
     /// Exact output tree-index SHA-256.
     pub const fn output_index(&self) -> [u8; 32] {
         self.output_index
+    }
+    /// Exact output compatibility classification digest, not an admission witness.
+    pub const fn compatibility_digest(&self) -> [u8; 32] {
+        self.compatibility
     }
     /// Historical signed-policy identity.
     pub const fn policy(&self) -> ExtensionProvenancePolicy {

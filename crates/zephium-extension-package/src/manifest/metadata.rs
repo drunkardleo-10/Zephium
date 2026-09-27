@@ -1,3 +1,4 @@
+use super::ManifestTreeBinding;
 use std::mem::size_of;
 
 use serde_json::{Map, Value};
@@ -9,7 +10,7 @@ use super::{
     ExtensionManifestIcon, ExtensionManifestResource,
 };
 use crate::{
-    ChromiumManifestKey, ExtensionReleaseTreeBinding, MAX_EXTENSION_LOCALE_MESSAGE_KEY_BYTES,
+    ChromiumManifestKey, MAX_EXTENSION_LOCALE_MESSAGE_KEY_BYTES,
     MAX_EXTENSION_METADATA_STRING_BYTES,
 };
 
@@ -277,11 +278,14 @@ impl ExtensionManifestMetadata {
 
 pub(super) fn parse_chromium_key(
     root: &mut Map<String, Value>,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
 ) -> Result<Option<ChromiumManifestKey>, ExtensionManifestAdmissionError> {
-    match (root.remove("key"), binding.package().chromium()) {
+    match (root.remove("key"), binding.chromium) {
         (None, None) => Ok(None),
-        (None, Some(_)) => Err(ExtensionManifestAdmissionError::ChromiumKeyMissing),
+        (None, Some(_)) if binding.require_key => {
+            Err(ExtensionManifestAdmissionError::ChromiumKeyMissing)
+        }
+        (None, Some(_)) => Ok(None),
         (Some(_), None) => Err(ExtensionManifestAdmissionError::ChromiumKeyUnexpected),
         (Some(value), Some(expected)) => {
             let value = value.as_str().ok_or_else(|| invalid("key"))?;
@@ -307,20 +311,39 @@ pub(super) fn validate_required_metadata(
     Ok((name, version))
 }
 
+// Chrome recommends 12 characters for short_name; it is not a package limit.
+pub(super) const MAX_SHORT_NAME_CHARS: usize = 75;
+
 pub(super) fn parse_inert_metadata(
     root: &mut Map<String, Value>,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
     name: ExtensionUnresolvedDisplayText,
     version: String,
     action_title: Option<ExtensionUnresolvedDisplayText>,
 ) -> Result<ExtensionManifestMetadata, ExtensionManifestAdmissionError> {
+    parse_cross_browser_metadata(root)?;
     let description = take_optional_unresolved_display_text(root, "description", 132, false)?;
-    let short_name = take_optional_unresolved_display_text(root, "short_name", 12, true)?;
+    let short_name =
+        take_optional_unresolved_display_text(root, "short_name", MAX_SHORT_NAME_CHARS, true)?;
     let version_name = take_optional_literal_display_text(
         root,
         "version_name",
         MAX_EXTENSION_METADATA_STRING_BYTES,
     )?;
+    // Some Store packages retain Chrome's historical {"email": "..."}
+    // author metadata. It is display text, never publisher authentication.
+    // Preserve the original manifest bytes; normalize only this projection.
+    if let Some(Value::Object(object)) = root.get("author") {
+        if object.len() != 1 {
+            return Err(invalid("author"));
+        }
+        let email = object
+            .get("email")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("author"))?
+            .to_owned();
+        root.insert("author".to_owned(), Value::String(email));
+    }
     let author =
         take_optional_literal_display_text(root, "author", MAX_EXTENSION_METADATA_STRING_BYTES)?;
     let default_locale = root
@@ -406,6 +429,86 @@ pub(super) fn parse_inert_metadata(
         locale_messages,
     )
     .ok_or(ExtensionManifestAdmissionError::RetainedBytesExceeded)
+}
+
+// These fields carry editor/Firefox metadata, not authority for either native
+// backend. Preserve their exact package bytes; never fetch a schema or use a
+// Gecko ID as the authenticated Chromium publisher identity.
+fn parse_cross_browser_metadata(
+    root: &mut Map<String, Value>,
+) -> Result<(), ExtensionManifestAdmissionError> {
+    if let Some(offline) = root.remove("offline_enabled") {
+        if !offline.is_boolean() {
+            return Err(invalid("offline_enabled"));
+        }
+    }
+    if let Some(schema) = root.remove("$schema") {
+        let value = schema
+            .as_str()
+            .filter(|value| value.len() <= 2048)
+            .ok_or_else(|| invalid("$schema"))?;
+        let url = Url::parse(value).map_err(|_| invalid("$schema"))?;
+        if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+            return Err(invalid("$schema"));
+        }
+    }
+    let Some(settings) = root.get("browser_specific_settings") else {
+        return Ok(());
+    };
+    let settings = settings
+        .as_object()
+        .ok_or_else(|| invalid("browser_specific_settings"))?;
+    // An unknown browser namespace stays unmodeled and cannot become runnable.
+    if settings
+        .keys()
+        .any(|key| !matches!(key.as_str(), "gecko" | "gecko_android"))
+    {
+        return Ok(());
+    }
+    for value in settings.values() {
+        let fields = value
+            .as_object()
+            .ok_or_else(|| invalid("browser_specific_settings"))?;
+        if fields.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "id" | "strict_min_version" | "strict_max_version" | "data_collection_permissions"
+            )
+        }) {
+            return Ok(());
+        }
+        for (key, value) in fields {
+            if key == "data_collection_permissions" {
+                let permissions = value
+                    .as_object()
+                    .ok_or_else(|| invalid("browser_specific_settings"))?;
+                if permissions
+                    .keys()
+                    .any(|key| !matches!(key.as_str(), "required" | "optional"))
+                {
+                    return Ok(());
+                }
+                for values in permissions.values() {
+                    let values = values
+                        .as_array()
+                        .filter(|values| values.len() <= 32)
+                        .ok_or_else(|| invalid("browser_specific_settings"))?;
+                    if values.iter().any(|value| !inert_browser_string(value)) {
+                        return Err(invalid("browser_specific_settings"));
+                    }
+                }
+            } else if !inert_browser_string(value) {
+                return Err(invalid("browser_specific_settings"));
+            }
+        }
+    }
+    root.remove("browser_specific_settings");
+    Ok(())
+}
+fn inert_browser_string(value: &Value) -> bool {
+    value.as_str().is_some_and(|value| {
+        !value.is_empty() && value.len() <= 256 && !value.chars().any(is_unsafe_display_character)
+    })
 }
 
 fn valid_extension_version(value: &str) -> bool {

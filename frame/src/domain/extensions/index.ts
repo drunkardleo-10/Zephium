@@ -1,4 +1,5 @@
 export * as extensions from "./extensions.svelte";
+export { canRetryExtensionActivation, extensionActivationMessage } from "./extensions-model";
 export { adjacentExtensionCenterSection } from "./extension-presentation";
 export { apiPermissionLabel } from "./permission-labels";
 export { compatibilityLimitationLabel } from "./permission-labels";

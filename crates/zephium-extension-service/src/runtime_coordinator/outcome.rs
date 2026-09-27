@@ -17,6 +17,22 @@ pub(crate) enum RuntimeActivationUnavailableReason {
     RetirementInProgress,
 }
 
+impl RuntimeActivationUnavailableReason {
+    pub(crate) const fn pending_reason(
+        self,
+    ) -> zephium_core::ports::extensions::ExtensionActivationPendingReason {
+        use zephium_core::ports::extensions::ExtensionActivationPendingReason as Reason;
+        if matches!(
+            self,
+            Self::NativeRetryable(ExtensionRuntimeFailure::RestartRequired)
+        ) {
+            Reason::RestartRequired
+        } else {
+            Reason::Unavailable
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeActivationRejectionReason {
     ProfileUnavailable,

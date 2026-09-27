@@ -350,6 +350,34 @@ pub enum ExtensionInstallProvisionOutcome {
     Failed,
 }
 
+/// Bounded profile-local publisher high-water read. It never advances history
+/// and grants no package or runtime authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionUpstreamCheckpointLoadOutcome {
+    /// Exact durable maximum, or no prior observation of this publisher.
+    Loaded(Option<crate::extensions::ExtensionUpstreamCheckpoint>),
+    /// The selected profile is not registered.
+    NotRegistered,
+    /// Profile storage is quarantined and cannot provide authoritative data.
+    DegradedProfile,
+    /// The complete bounded read could not establish a valid checkpoint.
+    Failed,
+}
+
+/// Bounded persisted source evidence for local package reauthentication.
+/// Loading this data never grants package or runtime authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionInstallProvenanceLoadOutcome {
+    /// Complete historical evidence, or no evidence for this installation.
+    Loaded(Option<Box<crate::extensions::ExtensionInstallProvenance>>),
+    /// The selected profile is not registered.
+    NotRegistered,
+    /// The profile cannot currently provide authoritative storage.
+    DegradedProfile,
+    /// Source evidence failed bounded decoding or continuity validation.
+    Failed,
+}
+
 /// Atomic settlement for one authenticated package replacement and its
 /// package-bound grant root.
 ///
@@ -882,6 +910,10 @@ pub trait Store {
     /// as a reviewed extension compatibility adapter. Implementations must
     /// keep profile isolation and the same URL/title validation as search.
     fn recent_history(&self, profile: ProfileId, limit: u32) -> Vec<HistoryHit>;
+    /// Filters retained profile history before imposing the result bound.
+    fn extension_history_search(&self, _profile: ProfileId, _query: &crate::extensions::ExtensionHistorySearchQuery) -> Vec<HistoryHit> {
+        Vec::new()
+    }
     /// Age in seconds of the cached icon for a page origin, None when absent.
     fn favicon_age(&self, profile: ProfileId, origin: &str) -> Option<i64>;
     fn save_favicon(

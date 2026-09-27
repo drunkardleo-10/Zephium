@@ -4,11 +4,24 @@ use super::*;
 
 impl Shell {
     pub(super) fn bootstrap(&mut self) {
+        #[cfg(debug_assertions)]
+        let started = *self
+            .bootstrap_started
+            .get_or_insert_with(std::time::Instant::now);
         // Native-owner recovery can dispatch onto the platform event loop, so
         // this settlement runs on the shell actor rather than Tauri's setup
         // callback. Nothing below may inspect recovered deletion authority or
         // create a raw content view without explicit service readiness.
         if !self.extension_service_ready_for_bootstrap() {
+            if !self.extension_lifecycle_terminal && !self.startup_preview_attempted {
+                self.startup_preview_attempted = true;
+                self.project_startup_session_preview();
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "bootstrap: session preview attempted at {}ms",
+                    started.elapsed().as_millis()
+                );
+            }
             return;
         }
         // Product provisioning is immutable for the process. Project the
@@ -121,6 +134,25 @@ impl Shell {
                 // path also refuses to overwrite the recoverable snapshot.
                 crate::diagnostic!(
                     "bootstrap: session storage is unavailable; refusing initialization"
+                );
+                return;
+            }
+        }
+        // The authoritative Store must decode the earlier QA Settings-tab
+        // snapshot byte-exactly before any mutation. Settings is window-scoped
+        // again; retire only those inert typed rows before first projection.
+        let retired_settings = self.items.retired_settings_tab_ids();
+        for id in &retired_settings {
+            if active_item == Some(*id) {
+                active_item = None;
+            }
+            if splits.as_ref().is_some_and(|tree| tree.contains(*id)) {
+                splits = None;
+            }
+            let effects = self.items.remove(*id);
+            if !effects.is_empty() {
+                crate::diagnostic!(
+                    "bootstrap: retired Settings tab unexpectedly owned a native view"
                 );
                 return;
             }
@@ -264,7 +296,16 @@ impl Shell {
         self.apply(fx);
         let _ = self.relayout();
         self.project_items();
+        self.project_browser_page();
         self.bootstrapped = true;
+        if !retired_settings.is_empty() {
+            self.schedule_persist();
+        }
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "bootstrap: native session ready at {}ms",
+            started.elapsed().as_millis()
+        );
         if session_absent {
             // Register the first-run profile with Store immediately. Extension
             // management and other profile-scoped actors must never observe a

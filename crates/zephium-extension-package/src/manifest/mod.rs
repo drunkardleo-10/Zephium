@@ -4,8 +4,9 @@
 //! proves byte/tree identity, validates the closed typed subset, preserves all
 //! other top-level declarations as blocking unmodeled authority, and asks a
 //! caller-supplied structural policy to classify every resulting declaration.
-//! Product trust is established only by `zephium-extension-authority`; native
-//! activation additionally requires a sealed materialization receipt and lease.
+//! Verified product trust is established by `zephium-extension-authority`;
+//! upstream Beta source eligibility has a separate product admission boundary.
+//! Native activation additionally requires a sealed materialization receipt and lease.
 
 mod browser_declarations;
 mod csp;
@@ -65,6 +66,22 @@ pub use self::resources::{
 
 const ADMISSION_DIGEST_DOMAIN: &[u8] = b"zephium:extension-manifest-admission:v1\0";
 const MAX_ICON_ENTRIES: usize = 64;
+
+// Shared structural input, never a catalog or package-authentication witness.
+// The reviewed entry point below keeps its exact existing key requirements.
+#[derive(Clone, Copy)]
+struct ManifestTreeBinding<'a> {
+    package: &'a zephium_core::extensions::ExtensionPackageIdentity,
+    index: &'a crate::CanonicalExtensionTreeIndex,
+    chromium: Option<&'a crate::ExpectedChromiumIdentity>,
+    require_key: bool,
+}
+
+impl<'a> ManifestTreeBinding<'a> {
+    const fn index(self) -> &'a crate::CanonicalExtensionTreeIndex {
+        self.index
+    }
+}
 
 /// Structural compatibility decision source for one exact backend target.
 ///
@@ -301,6 +318,55 @@ pub fn admit_extension_manifest(
     manifest_bytes: &[u8],
     compatibility: &impl ExtensionManifestCompatibilityPolicy,
 ) -> Result<AdmittedExtensionManifest, ExtensionManifestAdmissionError> {
+    admit_manifest(
+        ManifestTreeBinding {
+            package: binding.package().identity(),
+            index: binding.index(),
+            chromium: binding.package().chromium(),
+            require_key: true,
+        },
+        manifest_bytes,
+        compatibility,
+    )
+}
+
+/// Structurally assesses an original acquired manifest without fabricating a
+/// reviewed catalog row. An absent manifest key is allowed because CRX3 owns
+/// publisher authentication; a supplied key must match `expected_chromium`.
+///
+/// The caller must independently authenticate the CRX and complete tree. This
+/// function grants no Verified, Beta, provider, installation, or native authority.
+/// Output transformation and native identity requirements are separate gates.
+pub fn assess_upstream_extension_manifest(
+    package: &zephium_core::extensions::ExtensionPackageIdentity,
+    index: &crate::CanonicalExtensionTreeIndex,
+    expected_chromium: &crate::ExpectedChromiumIdentity,
+    manifest_bytes: &[u8],
+    compatibility: &impl ExtensionManifestCompatibilityPolicy,
+) -> Result<AdmittedExtensionManifest, ExtensionManifestAdmissionError> {
+    if package.payload().acquired_zip_evidence().is_none()
+        || package.tree_sha256() != index.tree_sha256()
+        || package.manifest_sha256() != index.manifest_sha256()
+    {
+        return Err(ExtensionManifestAdmissionError::ManifestBindingMismatch);
+    }
+    admit_manifest(
+        ManifestTreeBinding {
+            package,
+            index,
+            chromium: Some(expected_chromium),
+            require_key: false,
+        },
+        manifest_bytes,
+        compatibility,
+    )
+}
+
+fn admit_manifest(
+    binding: ManifestTreeBinding<'_>,
+    manifest_bytes: &[u8],
+    compatibility: &impl ExtensionManifestCompatibilityPolicy,
+) -> Result<AdmittedExtensionManifest, ExtensionManifestAdmissionError> {
     verify_manifest_binding(binding, manifest_bytes)?;
     let bounded = parse_bounded_json(manifest_bytes, BoundedJsonLimits::extension_manifest())
         .map_err(ExtensionManifestAdmissionError::Json)?;
@@ -315,6 +381,16 @@ pub fn admit_extension_manifest(
     }
     let (name, version) = validate_required_metadata(&mut root)?;
     let chromium_key = parse_chromium_key(&mut root, binding)?;
+    if !binding.require_key {
+        // Store acquisition owns the update source. This exact upstream marker
+        // is inert metadata, never a manifest-provided fetch capability. It
+        // remains bound by the original manifest digest and unchanged on disk.
+        if let Some(update) = root.remove("update_url") {
+            if update.as_str() != Some("https://clients2.google.com/service/update2/crx") {
+                return Err(invalid("update_url"));
+            }
+        }
+    }
     let csp_value = root.remove("content_security_policy");
 
     let required_api = parse_api_permissions(root.remove("permissions"), "permissions")?;
@@ -381,7 +457,7 @@ pub fn admit_extension_manifest(
 
 #[allow(clippy::too_many_arguments)]
 fn finish_admission(
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
     manifest_bytes: &[u8],
     manifest_version: u32,
     chromium_key: Option<ChromiumManifestKey>,
@@ -452,7 +528,7 @@ fn finish_admission(
     .ok_or(ExtensionManifestAdmissionError::RetainedBytesExceeded)?;
     let classifications = classify_all(&declarations, &resources, compatibility)?;
     let descriptor = ExtensionManifestDescriptor::new(
-        binding.package().identity().clone(),
+        binding.package.clone(),
         manifest_version,
         declarations,
         compatibility.target().clone(),
@@ -492,7 +568,7 @@ fn finish_admission(
 }
 
 fn verify_manifest_binding(
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
     bytes: &[u8],
 ) -> Result<(), ExtensionManifestAdmissionError> {
     let path = PortableRelativePath::parse("manifest.json")
@@ -506,7 +582,7 @@ fn verify_manifest_binding(
     let digest: [u8; 32] = Sha256::digest(bytes).into();
     if file.length() != length
         || file.sha256() != digest
-        || binding.package().identity().manifest_sha256().bytes() != digest
+        || binding.package.manifest_sha256().bytes() != digest
     {
         return Err(ExtensionManifestAdmissionError::ManifestBindingMismatch);
     }
@@ -555,11 +631,22 @@ fn parse_host_permissions(
 
 fn preserve_unmodeled(
     root: Map<String, Value>,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
     resources: &mut Vec<ExtensionManifestResource>,
 ) -> Result<Vec<ExtensionUnmodeledDeclarationName>, ExtensionManifestAdmissionError> {
     let mut declarations = Vec::with_capacity(root.len());
     for (name, value) in root {
+        // An explicit self-only declaration with no webpage audience adds no
+        // external principal. Preserve its bytes but do not invent a runnable
+        // unmodeled authority. In particular, do not remove the manifest field:
+        // absence has different cross-extension defaults in Chromium.
+        if name == "externally_connectable"
+            && binding.chromium.is_some_and(|identity| {
+                value == serde_json::json!({"ids":[identity.extension_id().as_str()], "matches":[]})
+            })
+        {
+            continue;
+        }
         validate_known_unmodeled_resource(&name, &value, binding, resources)?;
         declarations.push(
             ExtensionUnmodeledDeclarationName::parse_exact(&name)
@@ -572,7 +659,7 @@ fn preserve_unmodeled(
 fn validate_known_unmodeled_resource(
     name: &str,
     value: &Value,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
     resources: &mut Vec<ExtensionManifestResource>,
 ) -> Result<(), ExtensionManifestAdmissionError> {
     match name {
@@ -627,14 +714,14 @@ fn classify_all(
 }
 
 fn digest_admission(
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
     manifest_bytes: &[u8],
     descriptor: &ExtensionManifestDescriptor,
     metadata: &ExtensionManifestMetadata,
     resources: &ExtensionManifestResourcePlan,
     chromium_key: Option<&ChromiumManifestKey>,
 ) -> ExtensionManifestAdmissionDigest {
-    let package = binding.package().identity();
+    let package = binding.package;
     let mut digest = Sha256::new();
     digest.update(ADMISSION_DIGEST_DOMAIN);
     digest.update(package.authority().as_bytes());
@@ -660,11 +747,17 @@ fn digest_admission(
 }
 
 fn bind_resource(
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
     source: &str,
     field: &str,
 ) -> Result<ExtensionManifestResource, ExtensionManifestAdmissionError> {
-    let canonical = source.strip_prefix('/').unwrap_or(source);
+    // Manifest resource references may be root-relative or explicitly relative.
+    // This is not the ZIP-entry grammar: archive paths remain canonical and
+    // parent traversal, repeated prefixes and aliases still fail below.
+    let canonical = source
+        .strip_prefix("./")
+        .or_else(|| source.strip_prefix('/'))
+        .unwrap_or(source);
     if canonical.starts_with('/') {
         return Err(ExtensionManifestAdmissionError::InvalidResource(
             field.into(),
@@ -687,7 +780,7 @@ fn parse_resource_array(
     value: Option<Value>,
     field: &str,
     max: usize,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
 ) -> Result<Vec<ExtensionManifestResource>, ExtensionManifestAdmissionError> {
     let Some(value) = value else {
         return Ok(Vec::new());
@@ -716,7 +809,7 @@ fn parse_resource_array(
 fn parse_icons(
     value: Value,
     field: &str,
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
     allow_shorthand: bool,
 ) -> Result<Vec<ExtensionManifestIcon>, ExtensionManifestAdmissionError> {
     if let Some(source) = value.as_str() {
@@ -749,7 +842,7 @@ fn parse_icons(
 }
 
 fn bind_icon_resource(
-    binding: ExtensionReleaseTreeBinding<'_>,
+    binding: ManifestTreeBinding<'_>,
     source: &str,
     field: &str,
 ) -> Result<ExtensionManifestResource, ExtensionManifestAdmissionError> {

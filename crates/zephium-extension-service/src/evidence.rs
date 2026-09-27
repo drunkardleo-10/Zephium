@@ -119,7 +119,7 @@ impl ExtensionServiceReadyEvidence {
         capacity_deferred_runtime_count: usize,
         degraded_profile_count: usize,
     ) -> Option<Self> {
-        if active_runtime_count > zephium_core::ports::extensions::MAX_EXTENSION_ACTIVE_PROFILES
+        if active_runtime_count > crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
             || active_profiles.len() > active_runtime_count
             || (active_runtime_count == 0) != active_profiles.is_empty()
         {
@@ -280,6 +280,26 @@ mod startup_tests {
         assert_eq!(hydrated.rejected_runtime_count(), 2);
         assert_eq!(hydrated.capacity_deferred_runtime_count(), 3);
         assert_eq!(hydrated.degraded_profile_count(), 4);
+        assert!(ExtensionServiceReadyEvidence::after_hydration(
+            worker,
+            revision,
+            active_profiles,
+            crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES,
+            0,
+            0,
+            0,
+        )
+        .is_some());
+        assert!(ExtensionServiceReadyEvidence::after_hydration(
+            worker,
+            revision,
+            active_profiles,
+            crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES + 1,
+            0,
+            0,
+            0,
+        )
+        .is_none());
         assert!(ExtensionServiceReadyEvidence::after_hydration(
             worker,
             revision,

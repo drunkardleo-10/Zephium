@@ -44,6 +44,10 @@ mod blocker_service;
 mod browser_credentials;
 #[cfg(feature = "curated-extension-distribution")]
 mod extension_distribution;
+#[cfg(feature = "external-extensions-qa")]
+mod extension_qa_data;
+#[cfg(feature = "external-extensions")]
+mod extension_source_updates;
 #[cfg(target_os = "linux")]
 mod linux_global_shortcuts;
 #[cfg(any(target_os = "linux", test))]
@@ -125,6 +129,8 @@ static AUTH_DENIAL_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(16);
 static NAVIGATION_DENIAL_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(16);
 static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
 static NATIVE_APPEARANCE: AtomicU8 = AtomicU8::new(APPEARANCE_SYSTEM);
+#[cfg(feature = "external-extensions")]
+static STORE_EXTENSION_INSTALL_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static BLOCKER_STATUS_QUERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 struct AtomicFlagReset(&'static AtomicBool);
@@ -1565,6 +1571,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             extension_management_set_visible,
             extension_distribution_refresh,
             extension_management_install,
+            extension_store_prepare,
+            extension_store_check_update,
             extension_management_approve_update,
             extension_management_set_enabled,
             extension_management_edit_optional_grant,
@@ -1936,7 +1944,7 @@ pub(crate) fn restore_browser_chrome(
         const host = active.url ? new URL(active.url).host : '';
         if (address.value !== host) {{ address.value = host; address.dispatchEvent(new Event('input', {{ bubbles: true }})); }}
         if (address.value !== host) return '';
-        if (!!document.querySelector('[data-zephium-new-tab]') !== !active.url) return '';
+        if (!!document.querySelector('[data-zephium-new-tab]') !== ((active.content ?? 'web') === 'web' && !active.url)) return '';
       }}
       void document.documentElement.getBoundingClientRect();
       return {expected};
@@ -2745,6 +2753,276 @@ struct ExtensionInstallGrantSelectionInput {
     private_access: bool,
 }
 
+/// Downloads only the extension selected by the actor-owned foreground store
+/// page. The renderer supplies a tab ID, never a package URL or package bytes.
+#[tauri::command]
+#[specta::specta]
+async fn extension_store_prepare(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    tab_id: String,
+) -> Result<String, String> {
+    if !authorize(&caller, CallerPolicy::Main, "extension_store_prepare")
+        || shutdown_started(caller.app_handle())
+    {
+        return Err("Extension installation is unavailable".into());
+    }
+    #[cfg(not(feature = "external-extensions"))]
+    {
+        let _ = (shell, tab_id);
+        Err("Store installation is not enabled in this build".into())
+    }
+    #[cfg(feature = "external-extensions")]
+    {
+        if STORE_EXTENSION_INSTALL_IN_FLIGHT
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err("Another extension installation is being prepared".into());
+        }
+        let _busy = AtomicFlagReset(&STORE_EXTENSION_INSTALL_IN_FLIGHT);
+        let tab = ItemId::parse(&tab_id)
+            .filter(|tab| tab.to_string() == tab_id)
+            .ok_or("Invalid tab")?;
+        let source = shell.store_extension_context(tab);
+        let context = tauri::async_runtime::spawn_blocking(move || source.recv_timeout(std::time::Duration::from_secs(2))).await.map_err(|_| "Browser is unavailable")?.map_err(|_| "Browser did not respond")?.ok_or("Installation is not ready yet. Keep this store tab active, let the page finish loading, and try again")?;
+        let StoreSelectionDownload::Prepared { id, outcome } = download_store_selection(
+            &caller.state::<ShutdownCoordinator>().terminal_started,
+            &shell.callback_handle(),
+            context,
+        )
+        .await?
+        else {
+            return Err("The store did not offer an installation package".into());
+        };
+        use zephium_core::ports::extensions::ExtensionStorePackagePreparationOutcome as Outcome;
+        match outcome {
+            Outcome::Prepared(_) => Ok(id),
+            Outcome::UpToDate | Outcome::UpdateAvailable | Outcome::UpdateSettled(_) => Err("Unexpected update response for installation".into()),
+            Outcome::StorageLimit => Err("Extension package storage is full. Remove unused extensions and try again".into()),
+            Outcome::AlreadyInstalled => Err("This extension is already installed in this profile".into()),
+            Outcome::Unsupported(features) => Err(store_unsupported_message(&features, false)),
+            Outcome::InvalidPackage => Err("The extension package could not be authenticated or safely prepared".into()),
+            Outcome::Unavailable => Err("Installation was canceled or is temporarily unavailable; keep the store tab active and retry".into()),
+            Outcome::FailedClosed => Err("Extension storage needs recovery before installation can continue".into()),
+        }
+    }
+}
+
+#[cfg(feature = "external-extensions")]
+enum StoreSelectionDownload {
+    Prepared {
+        id: String,
+        outcome: zephium_core::ports::extensions::ExtensionStorePackagePreparationOutcome,
+    },
+    NoNewerVersionOffered,
+}
+
+#[cfg(feature = "external-extensions")]
+async fn download_store_selection(
+    shutdown: &AtomicBool,
+    shell: &zephium_app::CallbackHandle,
+    context: zephium_app::StoreExtensionContext,
+) -> Result<StoreSelectionDownload, String> {
+    let listing = zephium_extension_distribution::chrome_store::ChromeStoreListing::parse(
+        context.listing_url(),
+    )
+    .ok_or("Unsupported extension store page")?;
+    let id = listing.extension_id().to_owned();
+    let client = zephium_extension_distribution::chrome_store::ChromeStoreClient::new()
+        .map_err(|_| "Extension download is unavailable")?;
+    #[cfg(feature = "external-capabilities-v2-qa")]
+    let qa_adapter_refresh = context.update_selector().is_some()
+        && !context.is_automatic_update()
+        && id.as_str() == "nngceckbapebfimnlniiiahkandclblb"
+        && std::env::var("ZEPHIUM_BITWARDEN_CAPABILITIES_V2_QA").as_deref() == Ok("1");
+    #[cfg(not(feature = "external-capabilities-v2-qa"))]
+    let qa_adapter_refresh = false;
+    let downloaded = match context.installed_version() {
+        Some(version) if !qa_adapter_refresh => client.download_update(listing, version).await,
+        None => client.download(listing).await.map(Some),
+        Some(_) => client.download(listing).await.map(Some),
+    }
+    .map_err(|error| error.to_string())?;
+    if shutdown.load(Ordering::Acquire) {
+        return Err("Extension installation was canceled".into());
+    }
+    let Some(downloaded) = downloaded else {
+        // This is only an offered-version observation. It does not mutate
+        // install state, authenticate metadata freshness, or advance rollback
+        // protection, and therefore does not enter the package service.
+        return Ok(StoreSelectionDownload::NoNewerVersionOffered);
+    };
+    let (requested_id, bytes) = downloaded.into_parts();
+    let request = match context.update_selector() {
+        Some(selector) if context.is_automatic_update() => {
+            zephium_core::ports::extensions::ExtensionStorePackageRequest::for_background_update(
+                requested_id,
+                bytes,
+                selector,
+            )
+        }
+        Some(selector) => {
+            zephium_core::ports::extensions::ExtensionStorePackageRequest::for_update(
+                requested_id,
+                bytes,
+                selector,
+            )
+        }
+        None => {
+            zephium_core::ports::extensions::ExtensionStorePackageRequest::new(requested_id, bytes)
+        }
+    }
+    .ok_or("Extension exceeds the installation limit")?;
+    let deadline = context.deadline();
+    let (reply, result) = std::sync::mpsc::sync_channel(1);
+    if shell.begin_prepare_store_extension(
+        context,
+        request,
+        Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        }),
+    ) != zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted
+    {
+        return Err("Extension service is busy; please retry".into());
+    }
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        result.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+    })
+    .await
+    .map_err(|_| "Extension preparation failed")?
+    .map_err(|_| "Extension preparation timed out")?;
+    Ok(StoreSelectionDownload::Prepared { id, outcome })
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn extension_store_check_update(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    install_id: String,
+) -> Result<String, String> {
+    if !authorize(&caller, CallerPolicy::Main, "extension_store_check_update")
+        || shutdown_started(caller.app_handle())
+    {
+        return Err("Extension updates are unavailable".into());
+    }
+    #[cfg(not(feature = "external-extensions"))]
+    {
+        let _ = (shell, install_id);
+        Err("Store updates are not enabled in this build".into())
+    }
+    #[cfg(feature = "external-extensions")]
+    {
+        if STORE_EXTENSION_INSTALL_IN_FLIGHT
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err("Another extension operation is being prepared".into());
+        }
+        let _busy = AtomicFlagReset(&STORE_EXTENSION_INSTALL_IN_FLIGHT);
+        let install = zephium_core::ids::ExtensionInstallId::parse(&install_id)
+            .filter(|id| id.to_string() == install_id)
+            .ok_or("Invalid installed extension")?;
+        let source = shell.store_extension_update_context(install);
+        let context = tauri::async_runtime::spawn_blocking(move || {
+            source.recv_timeout(std::time::Duration::from_secs(2))
+        })
+        .await
+        .map_err(|_| "Browser is unavailable")?
+        .map_err(|_| "Browser did not respond")?
+        .ok_or("Refresh the extension manager and try again")?;
+        let StoreSelectionDownload::Prepared { outcome, .. } = download_store_selection(
+            &caller.state::<ShutdownCoordinator>().terminal_started,
+            &shell.callback_handle(),
+            context,
+        )
+        .await?
+        else {
+            return Ok("No newer version offered by the store".into());
+        };
+        use zephium_core::ports::extensions::{
+            ExtensionStorePackagePreparationOutcome as Outcome, ExtensionUpdateOutcome as Update,
+            ExtensionUpdateRuntimeState as Runtime,
+        };
+        match outcome {
+            Outcome::StorageLimit => Err("There is not enough extension package storage for this update. Remove unused extensions and retry".into()),
+            Outcome::UpToDate => Ok("Up to date".into()),
+            Outcome::UpdateAvailable => Ok("Update ready for permission review".into()),
+            Outcome::UpdateSettled(settlement) => match settlement.into_outcome() {
+                Update::Updated { runtime: Runtime::Active(_) | Runtime::Disabled } => Ok("Updated".into()),
+                Update::Updated { runtime: Runtime::PendingActivation(_) } => Ok("Updated; activation is pending".into()),
+                Update::Conflict => Err("The extension changed during the update. Refresh and retry".into()),
+                Update::Rejected => Err("The replacement was rejected; the current version was kept".into()),
+                Update::Unavailable => Err("The update could not finish; refresh and retry".into()),
+                Update::OutcomeUnknown | Update::FailedClosed => Err("The update needs recovery; restart Zephium before retrying".into()),
+            },
+            Outcome::Unsupported(features) => Err(store_unsupported_message(&features, true)),
+            Outcome::InvalidPackage => Err("The replacement could not be authenticated or safely prepared; the current version was kept".into()),
+            Outcome::Unavailable => Err("Update check was canceled or is temporarily unavailable".into()),
+            Outcome::FailedClosed => Err("Extension storage needs recovery before updating".into()),
+            Outcome::Prepared(_) | Outcome::AlreadyInstalled => Err("Unexpected installation response for update".into()),
+        }
+    }
+}
+
+#[cfg(feature = "external-extensions")]
+fn store_unsupported_message(
+    features: &zephium_core::ports::extensions::ExtensionUnsupportedFeatures,
+    updating: bool,
+) -> String {
+    use zephium_core::extensions::ExtensionManifestDeclaration as D;
+    let mut labels = Vec::new();
+    for declaration in features.declarations() {
+        let label = match declaration {
+            D::RequiredApiPermission(name) | D::OptionalApiPermission(name) => {
+                match name.as_str() {
+                    "offscreen" => "offscreen documents".into(),
+                    "sidePanel" => "extension side panels".into(),
+                    "identity" => "extension sign-in".into(),
+                    "idle" => "idle detection".into(),
+                    "webRequest" | "webRequestBlocking" => "network request interception".into(),
+                    "declarativeNetRequest" | "declarativeNetRequestWithHostAccess" => {
+                        "extension network rules".into()
+                    }
+                    "unlimitedStorage" => "unlimited extension storage".into(),
+                    "webNavigation" => "navigation events for this extension".into(),
+                    _ => name.as_str().to_owned(),
+                }
+            }
+            D::Background => "this background-script format".into(),
+            D::Offscreen => "offscreen documents".into(),
+            D::NativeMessaging => "native application connections".into(),
+            D::Sandbox => "sandboxed extension pages".into(),
+            D::ContentScript { .. } => "this page-script configuration".into(),
+            D::SidePanel { .. } => "extension side panels".into(),
+            D::DeclarativeNetRequest(_) => "extension network rules".into(),
+            _ => "additional manifest features".into(),
+        };
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    if labels.is_empty() {
+        return "Zephium cannot yet adapt this extension's required features for this platform"
+            .into();
+    }
+    format!(
+        "Zephium does not yet support {}{}. {}",
+        labels.join(", "),
+        if features.has_more() {
+            " and other unsupported features"
+        } else {
+            ""
+        },
+        if updating {
+            "The current version was kept."
+        } else {
+            "This extension has not been installed."
+        }
+    )
+}
+
 #[tauri::command]
 #[specta::specta]
 fn extension_management_install(
@@ -3300,6 +3578,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
         let page = match destination {
             "work" => Some(zephium_app::BrowserPage::Work),
             "settings" => Some(zephium_app::BrowserPage::Settings),
+            "extensions" => Some(zephium_app::BrowserPage::Extensions),
             "history" => Some(zephium_app::BrowserPage::History),
             "downloads" => Some(zephium_app::BrowserPage::Downloads),
             "tasks" => Some(zephium_app::BrowserPage::Tasks),
@@ -3944,7 +4223,7 @@ fn setting_set(
     if shutdown_started(&app) {
         return rejected_operation();
     }
-    #[cfg(feature = "file-workflows-qa")]
+    #[cfg(any(feature = "file-workflows-qa", feature = "external-extensions-qa"))]
     if key == "__files_qa_diagnostic" && value.len() <= 4096 {
         eprintln!("files-qa: {value}");
         return rejected_operation();
@@ -4721,6 +5000,10 @@ pub fn run() {
                 shutdown.prepare_hard_exit_watchdog()?;
                 specta.mount_events(app);
                 let data_dir = app.path().app_data_dir()?;
+                #[cfg(feature = "external-extensions-qa")]
+                let data_dir = extension_qa_data::select(data_dir, std::env::var_os("ZEPHIUM_EXTERNAL_QA_ISOLATED").as_deref())?;
+                #[cfg(feature = "external-extensions-qa")]
+                eprintln!("external-qa: isolated={}", std::env::var_os("ZEPHIUM_EXTERNAL_QA_ISOLATED").is_some());
                 #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
                 foreground_rendering_probe::validate_data_root(&data_dir)?;
                 std::fs::create_dir_all(&data_dir)?;
@@ -4803,15 +5086,17 @@ pub fn run() {
                 .additional_browser_args(PRIVILEGED_WEBVIEW2_BROWSER_ARGS);
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             let main_builder = main_builder.on_download(|_, _| false);
-            #[cfg(feature = "file-workflows-qa")]
+            #[cfg(any(feature = "file-workflows-qa", feature = "external-extensions-qa"))]
             let main_builder = main_builder.initialization_script(r#"
               (() => {
                 const report = value => {
                   try { window.__TAURI_INTERNALS__.invoke('setting_set', {key:'__files_qa_diagnostic',value:String(value).slice(0,4096)}).catch(()=>{}); } catch {}
                 };
+                const originalError = console.error.bind(console);
+                console.error = (...args) => { report(args.map(value => value?.stack || String(value)).join(' ')); originalError(...args); };
                 window.addEventListener('error', event => report(`error: ${event.message || event.target?.src || event.target?.href || 'resource'} ${event.filename || ''}:${event.lineno || ''}`), true);
                 window.addEventListener('unhandledrejection', event => report(`rejection: ${event.reason?.stack || event.reason?.message || event.reason}`));
-                window.addEventListener('DOMContentLoaded', () => report('document ready'));
+                window.addEventListener('DOMContentLoaded', () => report(`document ready; root children=${document.getElementById('root')?.childElementCount}`));
               })();
             "#);
             let ui_startup_gate = UiStartupGate::new(app_url.clone());
@@ -5296,6 +5581,8 @@ pub fn run() {
                 return Err(error.into());
             }
             notes::install(app.handle(), &data_dir, store.clone(), &shell);
+            #[cfg(feature = "external-extensions")]
+            extension_source_updates::configure(&shell, &store, &shutdown);
             #[cfg(feature = "macos-work")]
             if !work::install(app.handle(), engine.clone(), store.clone()) {
                 let error = std::io::Error::other("Work composition owner is already installed");
@@ -5742,6 +6029,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod frame_sources;
+
+#[cfg(test)]
+#[path = "../external_qa_config.rs"]
+mod external_qa_config_tests;
 
 #[cfg(test)]
 mod tests {
@@ -6604,7 +6895,7 @@ mod tests {
         assert!(shell.contains(r#"data-zephium-active-tab={tabs.activeId() ?? ""}"#));
         assert_eq!(shell.matches("data-zephium-new-tab").count(), 1);
         assert!(
-            shell.contains("{#if !tabs.activeTab()?.url && browserPage.currentPage() === null}")
+            shell.contains("{#if !tabs.activeTab()?.url && (tabs.activeTab()?.content ?? \"web\") === \"web\" && browserPage.currentPage() === null}")
         );
         assert!(shell.contains("data-zephium-surface="));
         assert!(!shell.contains("transition:"));

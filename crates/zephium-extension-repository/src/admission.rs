@@ -80,7 +80,7 @@ impl ExtensionRepository {
     /// disagreement between state and checkpoint fail closed. The caller must
     /// create the namespace at its product-owned application-data location.
     pub fn open(namespace: LockedPrivateNamespace) -> Result<Self, ExtensionRepositoryError> {
-        reject_if_external_callback()?;
+        reject_if_external_callback().map_err(|error| error.repository_error())?;
         let opened = open_repository(namespace)?;
         let mut repository = Self {
             _namespace: opened.namespace,

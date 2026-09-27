@@ -10,7 +10,8 @@ mod pane;
 mod windows_file_identity;
 
 pub use actor::{
-    ExtensionRuntimeStartupInventory, ExtensionRuntimeStartupInventoryLoadOutcome,
-    ExtensionServiceStoreAuthority, ExtensionServiceStoreAuthorityClaimError,
-    ExtensionServiceStoreCallOutcome, ExtensionServiceStoreStartupRequirement, SqliteStore,
+    ExtensionPackageStorageRootsLoadOutcome, ExtensionRuntimeStartupInventory,
+    ExtensionRuntimeStartupInventoryLoadOutcome, ExtensionServiceStoreAuthority,
+    ExtensionServiceStoreAuthorityClaimError, ExtensionServiceStoreCallOutcome,
+    ExtensionServiceStoreStartupRequirement, SqliteStore,
 };

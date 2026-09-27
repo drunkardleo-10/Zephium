@@ -10,8 +10,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc::Sender, TryLockError};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::ExtensionRepositoryError;
-
 std::thread_local! {
     static EXTERNAL_CALLBACK_ACTIVE: Cell<bool> = const { Cell::new(false) };
 }
@@ -101,9 +99,9 @@ pub(crate) fn with_external_callback<T>(callback: impl FnOnce() -> T) -> T {
     callback()
 }
 
-pub(crate) fn reject_if_external_callback() -> Result<(), ExtensionRepositoryError> {
+pub(crate) fn reject_if_external_callback() -> Result<(), RepositoryOperationError> {
     if external_callback_is_active() {
-        Err(ExtensionRepositoryError::CallbackReentry)
+        Err(RepositoryOperationError::CallbackReentry)
     } else {
         Ok(())
     }
@@ -252,16 +250,6 @@ pub(crate) enum RepositoryOperationError {
     CallbackReentry,
     Unhealthy,
     Poisoned,
-}
-
-impl RepositoryOperationError {
-    pub(crate) const fn repository_error(self) -> ExtensionRepositoryError {
-        match self {
-            Self::CallbackReentry => ExtensionRepositoryError::CallbackReentry,
-            Self::Unhealthy => ExtensionRepositoryError::Sealed,
-            Self::Poisoned => ExtensionRepositoryError::SettlementAmbiguous,
-        }
-    }
 }
 
 #[cfg(test)]

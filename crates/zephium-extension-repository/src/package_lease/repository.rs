@@ -168,6 +168,7 @@ impl ExtensionRepository {
         let _operation = runtime.enter().map_err(map_lease_operation_error)?;
         self.writer_require_gc_idle()?;
         match binding.catalog_role() {
+            ExtensionCatalogGenerationRole::Beta => Err(BundledPackageLeaseError::WrongCatalogRole),
             ExtensionCatalogGenerationRole::Active => self
                 .acquire_active_bundled_package_lease(binding)
                 .map(BundledPackageLease::Active),

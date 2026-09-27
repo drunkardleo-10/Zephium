@@ -99,6 +99,29 @@ pub(crate) fn hydrate_startup_runtimes(
     cancellation: &impl CancellationCheck,
     deadline: Instant,
 ) -> StartupRuntimeHydrationOutcome {
+    repository.begin_startup_manifest_cache();
+    let outcome = hydrate_startup_runtimes_inner(
+        store,
+        projection,
+        repository,
+        native_recovery,
+        coordinator,
+        cancellation,
+        deadline,
+    );
+    repository.end_startup_manifest_cache();
+    outcome
+}
+
+fn hydrate_startup_runtimes_inner(
+    store: &ExtensionServiceStoreAuthority,
+    projection: &mut JournalProjection,
+    repository: &mut ServiceRepository,
+    native_recovery: &mut NativeRecoveryState,
+    coordinator: &mut RuntimeCoordinator,
+    cancellation: &impl CancellationCheck,
+    deadline: Instant,
+) -> StartupRuntimeHydrationOutcome {
     if cancellation.is_cancelled() {
         return StartupRuntimeHydrationOutcome::Unavailable(
             StartupRuntimeHydrationUnavailable::Cancelled,
@@ -148,11 +171,18 @@ pub(crate) fn hydrate_startup_runtimes(
                 StartupRuntimeHydrationUnavailable::DeadlineReached,
             );
         }
+        #[cfg(debug_assertions)]
+        let activation_started = Instant::now();
         let outcome = coordinator.activate_until(
             RuntimeCoordinatorResources::new(store, projection, repository, native_recovery),
             key,
             false,
             deadline,
+        );
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "extension startup: activation attempt completed in {}ms",
+            activation_started.elapsed().as_millis()
         );
         match outcome {
             RuntimeActivationOutcome::Activated(_) | RuntimeActivationOutcome::AlreadyActive(_) => {

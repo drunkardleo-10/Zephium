@@ -218,15 +218,10 @@ pub(super) fn compile_native_grant_plan(
     if backend != zephium_core::extensions::ExtensionRuntimeBackendTarget::MacosNative {
         return Err(MacosNativeGrantPlanError::UnsupportedApiPermission);
     }
-    let schema = if publisher_native_messaging {
-        MacosNativeGrantSchema::WkWebExtensionPublisherNativeMessagingV1
-    } else if snapshot.compatibility_target().as_str()
-        == zephium_core::extensions::MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET
-    {
-        MacosNativeGrantSchema::WkWebExtensionBrokeredV1
-    } else {
-        MacosNativeGrantSchema::WkWebExtensionV1
-    };
+    let schema = select_native_grant_schema(
+        snapshot.compatibility_target().as_str(),
+        publisher_native_messaging,
+    )?;
     compile_projection(CompilerInput {
         identity: PlanIdentity {
             schema,
@@ -253,6 +248,85 @@ pub(super) fn compile_native_grant_plan(
         }),
         denied_site_count: snapshot.denied_sites().len(),
         denied_sites: snapshot.denied_sites().map(|scope| scope.pattern()),
+    })
+}
+
+fn select_native_grant_schema(
+    compatibility_target: &str,
+    publisher_native_messaging: bool,
+) -> Result<MacosNativeGrantSchema, MacosNativeGrantPlanError> {
+    if compatibility_target
+        == zephium_core::extensions::LOCAL_MACOS_CAPABILITIES_V2_COMPATIBILITY_TARGET
+    {
+        if publisher_native_messaging {
+            Err(MacosNativeGrantPlanError::ProhibitedApiPermission)
+        } else {
+            Ok(MacosNativeGrantSchema::WkWebExtensionCapabilitiesV2)
+        }
+    } else if publisher_native_messaging {
+        Ok(MacosNativeGrantSchema::WkWebExtensionPublisherNativeMessagingV1)
+    } else if matches!(
+        compatibility_target,
+        zephium_core::extensions::MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET
+            | zephium_core::extensions::LOCAL_MACOS_HISTORY_V2_COMPATIBILITY_TARGET
+            | zephium_core::extensions::LOCAL_MACOS_HISTORY_V3_COMPATIBILITY_TARGET
+            | zephium_core::extensions::LOCAL_MACOS_CAPABILITIES_V1_COMPATIBILITY_TARGET
+            | zephium_core::extensions::LOCAL_MACOS_IDENTITY_V1_COMPATIBILITY_TARGET
+            | zephium_core::extensions::LOCAL_MACOS_MAIN_DOCUMENT_GLOBS_V1_COMPATIBILITY_TARGET
+    ) {
+        Ok(MacosNativeGrantSchema::WkWebExtensionBrokeredV1)
+    } else {
+        Ok(MacosNativeGrantSchema::WkWebExtensionV1)
+    }
+}
+
+#[cfg(feature = "native-web-extension-probes")]
+pub(super) fn compile_capabilities_v2_probe_plan(
+    api_names: &[String],
+    host_patterns: &[MatchPattern],
+) -> Result<MacosNativeGrantPlan, MacosNativeGrantPlanError> {
+    let api_grants = api_names
+        .iter()
+        .map(|name| ApiGrantInput {
+            name,
+            requirement: ExtensionNativeGrantRequirement::Required,
+            decision: ExtensionNativeGrantDecision::Granted,
+        })
+        .collect::<Vec<_>>();
+    let host_grants = host_patterns
+        .iter()
+        .map(|pattern| HostGrantInput {
+            pattern,
+            requirement: ExtensionNativeGrantRequirement::Required,
+            decision: ExtensionNativeGrantDecision::Granted,
+        })
+        .collect::<Vec<_>>();
+    compile_projection(CompilerInput {
+        identity: PlanIdentity {
+            schema: select_native_grant_schema(
+                zephium_core::extensions::LOCAL_MACOS_CAPABILITIES_V2_COMPATIBILITY_TARGET,
+                false,
+            )?,
+            apply_mode:
+                MacosNativeGrantApplyMode::ReplaceCompleteGrantedAndDeniedSetsVerifyReadback,
+            runtime: ExtensionRuntimeInstance::new(
+                zephium_core::ids::ProfileId::from(1),
+                zephium_core::ids::ExtensionInstallId::from(2),
+                zephium_core::extensions::ExtensionRuntimeGeneration::new(1)
+                    .expect("nonzero probe generation"),
+            ),
+            grant_revision: ExtensionGrantRevision::new(1).expect("nonzero probe revision"),
+            grant_digest: ExtensionGrantDigest::from_bytes([0; 32]),
+        },
+        browsing_context: ExtensionGrantBrowsingContext::Regular,
+        file_access_granted: false,
+        private_access_granted: false,
+        api_count: api_grants.len(),
+        api_grants,
+        host_count: host_grants.len(),
+        host_grants,
+        denied_site_count: 0,
+        denied_sites: std::iter::empty(),
     })
 }
 
@@ -390,7 +464,7 @@ where
     });
     let mut granted_host_patterns: Vec<WebPatternKey<'a>> =
         Vec::with_capacity(transient_host_capacity);
-    for grant in host_grants {
+    for grant in &host_grants {
         // Static content-script routes are independently retained as required
         // authorities. When an effective `<all_urls>` grant is present, every
         // narrower HTTP/HTTPS route is already covered by the exact native
@@ -399,6 +473,13 @@ where
         if grants_all_web
             && grant.decision.is_granted()
             && !matches!(grant.pattern.components(), MatchPatternComponents::AllUrls)
+        {
+            continue;
+        }
+        if grant.decision.is_granted()
+            && host_grants.iter().any(|cover| {
+                cover.decision.is_granted() && granted_root_covers(cover.pattern, grant.pattern)
+            })
         {
             continue;
         }
@@ -416,8 +497,10 @@ where
             return Err(MacosNativeGrantPlanError::HostEntryLimitExceeded);
         }
     }
+    drop(host_grants);
     granted_host_patterns.sort_unstable();
     granted_host_patterns.dedup();
+    remove_redundant_granted_patterns(&mut granted_host_patterns);
 
     if input.denied_site_count > MAX_MACOS_NATIVE_DENIED_SITE_PATTERNS {
         return Err(MacosNativeGrantPlanError::HostEntryLimitExceeded);
@@ -509,6 +592,7 @@ pub(super) enum MacosNativeGrantSchema {
     WkWebExtensionV1 = 1,
     WkWebExtensionBrokeredV1 = 2,
     WkWebExtensionPublisherNativeMessagingV1 = 3,
+    WkWebExtensionCapabilitiesV2 = 4,
 }
 
 /// Mandatory semantics for applying one complete compiled plan.
@@ -533,6 +617,23 @@ impl MacosNativeGrantSchema {
             Self::WkWebExtensionPublisherNativeMessagingV1 => {
                 Self::wk_web_extension_publisher_native_messaging_v1_permission(name)
             }
+            Self::WkWebExtensionCapabilitiesV2 => {
+                Self::wk_web_extension_capabilities_v2_permission(name)
+            }
+        }
+    }
+
+    fn wk_web_extension_capabilities_v2_permission(
+        name: &str,
+    ) -> Result<MacosNativeApiPermissionDisposition, MacosNativeGrantPlanError> {
+        match name {
+            // This exact target's required grant enables only the fixed
+            // controller-free offscreen port. Other application identifiers
+            // still fail the separate native broker authorization.
+            "nativeMessaging" => Ok(MacosNativeApiPermissionDisposition::Native(
+                MacosNativeApiPermission::NativeMessaging,
+            )),
+            _ => Self::wk_web_extension_v1_permission(name),
         }
     }
 
@@ -551,7 +652,7 @@ impl MacosNativeGrantSchema {
         name: &str,
     ) -> Result<MacosNativeApiPermissionDisposition, MacosNativeGrantPlanError> {
         match name {
-            "bookmarks" | "favicon" | "history" | "search" | "sessions" => {
+            "bookmarks" | "favicon" | "history" | "search" | "sessions" | "identity" => {
                 Ok(MacosNativeApiPermissionDisposition::NotInNativePermissionSet)
             }
             "nativeMessaging" => Ok(MacosNativeApiPermissionDisposition::Native(
@@ -702,6 +803,37 @@ impl MacosNativeApiPermission {
     }
 }
 
+fn granted_root_covers(cover: &MatchPattern, requested: &MatchPattern) -> bool {
+    match (cover.components(), requested.components()) {
+        (
+            MatchPatternComponents::Standard {
+                scheme: a,
+                host: ah,
+                port: ap,
+                path: ax,
+            },
+            MatchPatternComponents::Standard {
+                scheme: b,
+                host: bh,
+                port: bp,
+                path: bx,
+            },
+        ) => {
+            // Omit only a redundant path grant. Its effective parent grant is
+            // still translated and validated independently; script matching
+            // continues to use the original, narrower manifest route.
+            let host_covered = ah == bh
+                || matches!((ah, bh), (
+                    Some(MatchPatternHost::DomainAndSubdomains(parent)),
+                    Some(MatchPatternHost::ExactDomain(child)
+                        | MatchPatternHost::DomainAndSubdomains(child)),
+                ) if child == parent || child.strip_suffix(parent).is_some_and(|prefix| prefix.ends_with('.')));
+            ax.as_str() == "/*" && bx.as_str() != "/*" && a == b && host_covered && ap == bp
+        }
+        _ => false,
+    }
+}
+
 fn translate_host_pattern<'a>(
     pattern: &'a MatchPattern,
     is_granted: bool,
@@ -837,7 +969,47 @@ struct WebPatternKey<'a> {
     host: WebHost<'a>,
 }
 
+/// WebKit materializes injected content per native permission pattern. Keep
+/// only a minimal representation of the already granted union, so a wildcard
+/// domain and its explicit subdomains do not duplicate large script buffers.
+/// This runs after every declaration has been validated; it cannot hide an
+/// unsupported shape or a denied required grant. Denied-site rules are separate.
+fn remove_redundant_granted_patterns(patterns: &mut Vec<WebPatternKey<'_>>) {
+    let mut index = 0;
+    while index < patterns.len() {
+        let requested = patterns[index];
+        let covered = patterns
+            .iter()
+            .enumerate()
+            .any(|(other, cover)| other != index && cover.covers(requested));
+        if covered {
+            patterns.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
 impl<'a> WebPatternKey<'a> {
+    fn covers(self, other: Self) -> bool {
+        if self.scheme != other.scheme {
+            return false;
+        }
+        match (self.host, other.host) {
+            (WebHost::Any, _) => true,
+            (
+                WebHost::DomainAndSubdomains(parent),
+                WebHost::ExactDomain(child) | WebHost::DomainAndSubdomains(child),
+            ) => {
+                child == parent
+                    || child
+                        .strip_suffix(parent)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            }
+            (left, right) => left == right,
+        }
+    }
+
     fn rendered_len(self) -> Result<usize, MacosNativeGrantPlanError> {
         let host_bytes = self.host.rendered_len()?;
         let bytes = self

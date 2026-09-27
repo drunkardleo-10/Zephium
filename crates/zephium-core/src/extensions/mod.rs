@@ -8,6 +8,7 @@
 //! establish that proof and bind backend-native identifiers before activation.
 
 mod action;
+mod beta;
 mod browser_surface;
 mod cohort;
 mod compatibility_broker;
@@ -27,6 +28,14 @@ mod transient;
 mod upstream_checkpoint;
 mod upstream_version;
 
+pub use beta::{
+    is_beta_extension_authority, ExtensionBetaChannel, ExtensionBetaObjectDigest,
+    ExtensionBetaRuntimeTarget, LOCAL_MACOS_ADAPTED_COMPATIBILITY_TARGET,
+    LOCAL_MACOS_CAPABILITIES_V1_COMPATIBILITY_TARGET,
+    LOCAL_MACOS_CAPABILITIES_V2_COMPATIBILITY_TARGET, LOCAL_MACOS_HISTORY_V2_COMPATIBILITY_TARGET,
+    LOCAL_MACOS_HISTORY_V3_COMPATIBILITY_TARGET, LOCAL_MACOS_IDENTITY_V1_COMPATIBILITY_TARGET,
+    LOCAL_MACOS_MAIN_DOCUMENT_GLOBS_V1_COMPATIBILITY_TARGET,
+};
 pub use provenance::{
     ExtensionInstallProvenance, ExtensionProvenancePolicy, ExtensionProvenanceSource,
     ExtensionProvenanceUpdate, ExtensionSourceTreeIdentity, ExtensionTransformProvenance,
@@ -67,11 +76,13 @@ pub use compatibility_broker::{
     ExtensionCompatibilityBrokerRejection, ExtensionCompatibilityBrokerRequest,
     ExtensionCompatibilityBrokerRequestError, ExtensionCompatibilityBrokerRequestId,
     ExtensionCompatibilityBrokerResult, ExtensionCompatibilityBrokerSettlement,
-    ExtensionCompatibilityBrokerWitness, ExtensionCompatibilityHistoryEntry,
-    ExtensionCompatibilitySearchDisposition, EXTENSION_COMPATIBILITY_BROKER_APPLICATION_ID,
+    ExtensionCompatibilityBrokerWitness, ExtensionCompatibilityClosedTab,
+    ExtensionCompatibilityHistoryEntry, ExtensionCompatibilityRestoredTab,
+    ExtensionCompatibilitySearchDisposition, ExtensionHistorySearchQuery,
+    EXTENSION_COMPATIBILITY_BROKER_APPLICATION_ID,
     MAX_EXTENSION_COMPATIBILITY_BROKER_REQUEST_BYTES,
     MAX_EXTENSION_COMPATIBILITY_BROKER_RESPONSE_BYTES, MAX_EXTENSION_COMPATIBILITY_HISTORY_RESULTS,
-    MAX_EXTENSION_COMPATIBILITY_SEARCH_QUERY_BYTES,
+    MAX_EXTENSION_COMPATIBILITY_SEARCH_QUERY_BYTES, MAX_EXTENSION_COMPATIBILITY_SESSION_RESULTS,
     MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS,
     MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS_PER_PROFILE,
 };
@@ -141,8 +152,8 @@ pub use native_ownership::{
     ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
     ExtensionNativeOwnershipMutationKind, ExtensionNativeOwnershipOperation,
     ExtensionNativeOwnershipPhase, ExtensionNativeOwnershipPreparation,
-    ExtensionRuntimeBackendTarget, EXTENSION_NATIVE_OWNERSHIP_ID_BYTES,
-    MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES,
+    ExtensionNativePackageSource, ExtensionRuntimeBackendTarget,
+    EXTENSION_NATIVE_OWNERSHIP_ID_BYTES, MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES,
     MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_RETAINED_BYTES,
     MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
 };

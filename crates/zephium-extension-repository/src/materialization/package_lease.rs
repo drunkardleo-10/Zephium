@@ -1312,6 +1312,7 @@ fn finish_manifest_bindings(
             SnapshotLoadError::AccountingOverflow
         }
         ExtensionGrantCohortError::DuplicateBinding(_)
+        | ExtensionGrantCohortError::MissingBetaProvenance(_)
         | ExtensionGrantCohortError::IncompleteBindings
         | ExtensionGrantCohortError::ManifestPackageMismatch(_)
         | ExtensionGrantCohortError::TooManyAuthorities { .. }

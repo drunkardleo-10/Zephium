@@ -47,6 +47,8 @@ enum CoalescedKey {
     Zoom(ItemId),
     NativeAction(ItemId),
     ExtensionActions(ProfileId),
+    ExtensionPageClosed(ItemId),
+    ExtensionPageChanged(ItemId),
     ExtensionDistributionStatus,
     Split(zephium_core::ids::WindowId),
     WindowSize,
@@ -76,6 +78,8 @@ impl CoalescedKey {
             EngineEvent::ExtensionActionsInvalidated { profile } => {
                 Self::ExtensionActions(*profile)
             }
+            EngineEvent::ExtensionPageClosed { id, .. } => Self::ExtensionPageClosed(*id),
+            EngineEvent::ExtensionPageChanged { id, .. } => Self::ExtensionPageChanged(*id),
             EngineEvent::SplitChanged { window, .. } => Self::Split(*window),
             EngineEvent::ContentRulesSettled {
                 profile, requested, ..
@@ -100,7 +104,7 @@ const NORMAL_COMMAND_CAPACITY: usize = 960;
 // single-window shell can have one native split fact, and the process can have
 // one sticky runtime-update fact. Reserve all of those independently of the
 // already-accepted user FIFO.
-const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 7
+const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 9
     + zephium_core::session::MAX_SESSION_PROFILES * 7
     + zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
     + zephium_core::ports::extensions::MAX_PENDING_EXTENSION_RUNTIME_GRANT_REQUESTS
@@ -1105,6 +1109,7 @@ fn command_is_critical(command: &Command) -> bool {
             | Command::ProfileDeletionReady(_)
             | Command::ExtensionManagementSettled { .. }
             | Command::ExtensionRuntimeGrantSettled { .. }
+            | Command::IsolatedExtensionResourceSettled { .. }
             | Command::PagePermissionCatalogLoaded { .. }
             | Command::PagePermissionCatalogMutated { .. }
             | Command::PagePermissionTimeout { .. }
@@ -1121,6 +1126,10 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::ContentRulesSettled { .. }
                     | EngineEvent::UserContentSettled { .. }
                     | EngineEvent::ExtensionBrowserRequested { .. }
+                    | EngineEvent::ExtensionCreatedTabReplied { .. }
+                    | EngineEvent::IsolatedExtensionResourceRequested { .. }
+                    | EngineEvent::ExtensionPageClosed { .. }
+                    | EngineEvent::ExtensionPageChanged { .. }
                     | EngineEvent::ExtensionRuntimeGrantRequested { .. }
                     | EngineEvent::ExtensionRuntimeGrantCancelled { .. }
                     | EngineEvent::PermissionRequested { .. }

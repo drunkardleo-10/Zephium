@@ -119,6 +119,7 @@ const LOAD_JOURNAL_ROWS_SQL: &str =
 struct ActivationCohortFacts<'a> {
     key: ExtensionNativeOwnershipKey,
     package: &'a ExtensionPackageIdentity,
+    source: zephium_core::extensions::ExtensionNativePackageSource,
     catalog_revision: ExtensionInstallCatalogRevision,
     install_revision: ExtensionInstallRevision,
     grant_revision: ExtensionGrantRevision,
@@ -130,6 +131,7 @@ impl<'a> From<&'a ExtensionNativeOwnershipPreparation> for ActivationCohortFacts
         Self {
             key: preparation.key(),
             package: preparation.package(),
+            source: preparation.source(),
             catalog_revision: preparation.store_catalog_revision(),
             install_revision: preparation.store_install_revision(),
             grant_revision: preparation.store_grant_revision(),
@@ -143,6 +145,7 @@ impl<'a> From<&'a ExtensionNativeOwnershipEntry> for ActivationCohortFacts<'a> {
         Self {
             key: entry.key(),
             package: entry.package(),
+            source: entry.source(),
             catalog_revision: entry.store_catalog_revision(),
             install_revision: entry.store_install_revision(),
             grant_revision: entry.store_grant_revision(),
@@ -177,6 +180,25 @@ fn validate_activation_cohort(
 ) -> rusqlite::Result<Result<(), ActivationValidationRefusal>> {
     if manifest.package() != facts.package {
         return Ok(Err(ActivationValidationRefusal::Invalid));
+    }
+    let beta = zephium_core::extensions::is_beta_extension_authority(facts.package.authority());
+    match facts.source {
+        zephium_core::extensions::ExtensionNativePackageSource::BetaObject(object) if beta => {
+            let Some(provenance) = super::extension_provenance::load(conn, facts.key.install_id())?
+            else {
+                return Ok(Err(ActivationValidationRefusal::Invalid));
+            };
+            if !provenance.matches_manifest(manifest)
+                || zephium_core::extensions::ExtensionBetaObjectDigest::from_provenance(&provenance)
+                    != object
+            {
+                return Ok(Err(ActivationValidationRefusal::Invalid));
+            }
+        }
+        zephium_core::extensions::ExtensionNativePackageSource::ActiveCatalog(_)
+        | zephium_core::extensions::ExtensionNativePackageSource::RollbackCatalog(_)
+            if !beta => {}
+        _ => return Ok(Err(ActivationValidationRefusal::Invalid)),
     }
 
     let catalog = super::extensions::load_catalog(conn)?;
@@ -460,6 +482,7 @@ impl Hub {
                 ActivationCohortFacts {
                     key: entry.key(),
                     package: entry.package(),
+                    source: entry.source(),
                     catalog_revision: entry.store_catalog_revision(),
                     install_revision: entry.store_install_revision(),
                     grant_revision: store_grant_revision,

@@ -196,6 +196,9 @@ impl Shell {
                     ExtensionManagementRuntimeState::PendingActivation => {
                         (ExtensionManagementRuntimeView::PendingActivation, None)
                     }
+                    ExtensionManagementRuntimeState::ActivationFailed(_) => {
+                        (ExtensionManagementRuntimeView::PendingActivation, None)
+                    }
                     ExtensionManagementRuntimeState::ProfilePaused => {
                         (ExtensionManagementRuntimeView::ProfilePaused, None)
                     }
@@ -247,6 +250,21 @@ impl Shell {
                     provenance: entry.provenance().map(extension_management_provenance_view),
                     runtime,
                     runtime_generation,
+                    activation_issue: match entry.runtime() {
+                        ExtensionManagementRuntimeState::ActivationFailed(reason) => {
+                            use zephium_core::ports::extensions::ExtensionActivationPendingReason as R;
+                            use zephium_ipc::ExtensionActivationIssueView as V;
+                            Some(match reason {
+                                R::Unavailable => V::Unavailable,
+                                R::RestartRequired => V::RestartRequired,
+                                R::Rejected => V::Rejected,
+                                R::CapacityExceeded => V::CapacityExceeded,
+                                R::ProfileFenced => V::ProfileFenced,
+                                R::FailedClosed => V::FailedClosed,
+                            })
+                        }
+                        _ => None,
+                    },
                     grants,
                     optional_api: entry
                         .optional_api()
@@ -496,10 +514,83 @@ impl Shell {
 
     pub(super) fn items_snapshot(&self) -> Option<ItemsState> {
         let win = self.windows.focused()?;
-        let profile = self.profiles.get(win.profile)?;
-        let active_space = self
-            .spaces
-            .get(win.space)
+        self.items_snapshot_from(
+            &self.profiles,
+            &self.spaces,
+            &self.items,
+            win.profile,
+            win.space,
+            win.active,
+            win.splits.as_ref(),
+        )
+    }
+
+    // The preview shares the ordinary bounded sidebar projection but creates
+    // no Shell window, native view, persistence state or operation authority.
+    pub(super) fn project_startup_session_preview(&self) {
+        let SessionLoad::Loaded { state, .. } = self.store.load_session() else {
+            return;
+        };
+        let ProfileDeletionLoad::Loaded(pending) = self.store.pending_profile_deletions() else {
+            return;
+        };
+        if !pending.is_empty() {
+            return;
+        }
+        let mut restored = session::restore(state);
+        for id in restored.items.retired_settings_tab_ids() {
+            if restored.active_item == Some(id) {
+                restored.active_item = None;
+            }
+            if restored
+                .splits
+                .as_ref()
+                .is_some_and(|tree| tree.contains(id))
+            {
+                restored.splits = None;
+            }
+            let _ = restored.items.remove(id);
+        }
+        let space_id = restored.active_space.or_else(|| {
+            restored
+                .profiles
+                .default_profile()
+                .and_then(|profile| restored.spaces.first_for(profile))
+        });
+        let Some(space_id) = space_id else {
+            return;
+        };
+        let Some(space) = restored.spaces.get(space_id) else {
+            return;
+        };
+        if let Some(snapshot) = self.items_snapshot_from(
+            &restored.profiles,
+            &restored.spaces,
+            &restored.items,
+            space.profile,
+            space_id,
+            restored.active_item,
+            restored.splits.as_ref(),
+        ) {
+            self.publish_icons();
+            (self.emit)(Projection::Items(snapshot));
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // One projection of a single session scope.
+    fn items_snapshot_from(
+        &self,
+        profiles: &Profiles,
+        spaces: &Spaces,
+        items: &Items,
+        profile_id: ProfileId,
+        space_id: SpaceId,
+        active: Option<ItemId>,
+        splits: Option<&Pane>,
+    ) -> Option<ItemsState> {
+        let profile = profiles.get(profile_id)?;
+        let active_space = spaces
+            .get(space_id)
             .filter(|space| space.profile == profile.id)?;
 
         let profile_view = ProfileView {
@@ -511,8 +602,7 @@ impl Shell {
                 ProfileKind::Incognito => ProfileKindView::Incognito,
             },
         };
-        let spaces = self
-            .spaces
+        let spaces = spaces
             .iter()
             .filter(|space| space.profile == profile.id)
             .map(|space| SpaceView {
@@ -544,16 +634,20 @@ impl Shell {
                 SidebarSectionView::Today,
             ),
         ] {
-            for id in self.items.roots(placement) {
-                self.project_sidebar_node(*id, None, placement, section, profile.id, &mut sidebar);
+            for id in items.roots(placement) {
+                self.project_sidebar_node(
+                    items,
+                    *id,
+                    None,
+                    placement,
+                    section,
+                    profile.id,
+                    &mut sidebar,
+                );
             }
         }
 
-        let split_group = win.splits.as_ref().and_then(|tree| {
-            if !self.pane_in_scope(tree, win.profile, win.space) {
-                return None;
-            }
-
+        let split_group = splits.and_then(|tree| {
             let members = tree.tabs();
             let mut unique = HashSet::with_capacity(members.len());
             let valid = (2..=MAX_VISIBLE_PANES).contains(&members.len())
@@ -572,16 +666,17 @@ impl Shell {
             active_space_id: Some(active_space.id.to_string()),
             nodes: sidebar.nodes,
             tabs: sidebar.tabs,
-            active: win
-                .active
+            active: active
                 .filter(|id| sidebar.tab_ids.contains(id))
                 .map(|id| id.to_string()),
             split_group,
         })
     }
 
+    #[allow(clippy::too_many_arguments)] // Bounded recursive projection retains its exact scope.
     fn project_sidebar_node(
         &self,
+        items: &Items,
         id: ItemId,
         parent: Option<ItemId>,
         placement: Placement,
@@ -589,8 +684,7 @@ impl Shell {
         profile: ProfileId,
         projection: &mut SidebarProjection,
     ) {
-        let Some(item) = self
-            .items
+        let Some(item) = items
             .get(id)
             .filter(|item| item.parent == parent && item.placement == placement)
         else {
@@ -621,8 +715,9 @@ impl Shell {
         });
 
         if matches!(item.kind, ItemKind::Folder { .. }) {
-            for child in self.items.children(id) {
+            for child in items.children(id) {
                 self.project_sidebar_node(
+                    items,
                     *child,
                     Some(id),
                     placement,
@@ -789,6 +884,19 @@ fn extension_management_limitation_view(
     limitation: &ExtensionManagementLimitation,
 ) -> ExtensionManagementLimitationView {
     match limitation {
+        ExtensionManagementLimitation::OptionalHostUnavailable(pattern) => {
+            ExtensionManagementLimitationView::OptionalHostUnavailable {
+                pattern: pattern.to_string(),
+            }
+        }
+        ExtensionManagementLimitation::OptionalApiUnavailable(name) => {
+            ExtensionManagementLimitationView::OptionalApiUnavailable {
+                name: name.to_string(),
+            }
+        }
+        ExtensionManagementLimitation::ExternalMessagingUnavailable => {
+            ExtensionManagementLimitationView::ExternalMessagingUnavailable
+        }
         ExtensionManagementLimitation::ApiPermission(name) => {
             ExtensionManagementLimitationView::ApiPermission {
                 name: name.to_string(),
@@ -810,6 +918,27 @@ fn extension_management_limitation_view(
         ExtensionManagementLimitation::Sandbox => ExtensionManagementLimitationView::Sandbox,
         ExtensionManagementLimitation::ContentScripts => {
             ExtensionManagementLimitationView::ContentScripts
+        }
+        ExtensionManagementLimitation::MainDocumentContentScriptsOnly => {
+            ExtensionManagementLimitationView::MainDocumentContentScriptsOnly
+        }
+        ExtensionManagementLimitation::FragmentUrlContentScriptsUnavailable => {
+            ExtensionManagementLimitationView::FragmentUrlContentScriptsUnavailable
+        }
+        ExtensionManagementLimitation::ContentScriptFontsUnavailable => {
+            ExtensionManagementLimitationView::ContentScriptFontsUnavailable
+        }
+        ExtensionManagementLimitation::SidePanelUnavailable => {
+            ExtensionManagementLimitationView::SidePanelUnavailable
+        }
+        ExtensionManagementLimitation::OffscreenLocalStorageOnly => {
+            ExtensionManagementLimitationView::OffscreenLocalStorageOnly
+        }
+        ExtensionManagementLimitation::SandboxedPagesUnavailable => {
+            ExtensionManagementLimitationView::SandboxedPagesUnavailable
+        }
+        ExtensionManagementLimitation::ClipboardReadUnavailable => {
+            ExtensionManagementLimitationView::ClipboardReadUnavailable
         }
         ExtensionManagementLimitation::WebAccessibleResources => {
             ExtensionManagementLimitationView::WebAccessibleResources
@@ -892,6 +1021,18 @@ fn tab_view(
         projection_revision: format!("{revision:032x}"),
         title: tab.title.clone(),
         url: tab.url.as_ref().map(ToString::to_string),
+        content: match tab.content {
+            zephium_core::item::TabContent::Web => zephium_ipc::TabContentView::Web,
+            zephium_core::item::TabContent::BrowserOwned(
+                zephium_core::item::BrowserOwnedTab::Settings,
+            ) => zephium_ipc::TabContentView::Settings,
+            zephium_core::item::TabContent::BrowserOwned(
+                zephium_core::item::BrowserOwnedTab::Extensions,
+            ) => zephium_ipc::TabContentView::Extensions,
+            zephium_core::item::TabContent::ExtensionOwned => {
+                zephium_ipc::TabContentView::ExtensionOwned
+            }
+        },
         loading: tab.loading,
         popup_blocked: tab.popup_blocked,
         can_go_back: tab.can_go_back,

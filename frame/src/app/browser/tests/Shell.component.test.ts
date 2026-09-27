@@ -14,7 +14,7 @@ afterEach(() => {
   surface.dispose();
   tabs.dispose();
 });
-test("Settings return restores the active browser identity synchronously", async () => {
+test("Settings uses its sidebar navigation and returns to the same web tab", async () => {
   await surface.init();
   await tabs.init();
   const tab = tabFixture();
@@ -32,7 +32,9 @@ test("Settings return restores the active browser identity synchronously", async
   const screen = await render(Shell);
   emitNativeEvent("uiCommand", "browser.settings");
   expect(screen.container.querySelector('[data-zephium-surface="settings"]')).not.toBeNull();
-  emitNativeEvent("browserReturn", items);
+  expect(screen.container.querySelector(".settings-sidebar-navigation")).not.toBeNull();
+  expect(screen.container.querySelector(`[data-zephium-tab-id="${tab.id}"]`)).toBeNull();
+  emitNativeEvent("browserReturn", { ...items, projection_revision: revision(11) });
   expect(screen.container.querySelector('[data-zephium-surface="browse"]')).not.toBeNull();
   const rows = screen.container.querySelectorAll(`[data-zephium-tab-id="${tab.id}"]`);
   expect(rows).toHaveLength(1);

@@ -4,8 +4,9 @@ use super::*;
 use zephium_core::extensions::{
     ExtensionCompatibilityBrokerOperation, ExtensionCompatibilityBrokerRejection,
     ExtensionCompatibilityBrokerRequest, ExtensionCompatibilityBrokerResult,
-    ExtensionCompatibilityBrokerSettlement, ExtensionCompatibilityHistoryEntry,
-    ExtensionCompatibilitySearchDisposition,
+    ExtensionCompatibilityBrokerSettlement, ExtensionCompatibilityClosedTab,
+    ExtensionCompatibilityHistoryEntry, ExtensionCompatibilityRestoredTab,
+    ExtensionCompatibilitySearchDisposition, MAX_EXTENSION_COMPATIBILITY_SESSION_RESULTS,
 };
 
 impl Shell {
@@ -33,6 +34,10 @@ impl Shell {
         }
         let operation = request.operation().clone();
         let admitted = match operation {
+            ExtensionCompatibilityBrokerOperation::SearchHistory(query) => self
+                .store_reads
+                .as_ref()
+                .is_some_and(|reads| reads.request_extension_history_search(runtime, id, query)),
             ExtensionCompatibilityBrokerOperation::RecentHistory { limit } => self
                 .store_reads
                 .as_ref()
@@ -58,6 +63,96 @@ impl Shell {
                     id,
                     ExtensionCompatibilityBrokerSettlement::Applied(
                         ExtensionCompatibilityBrokerResult::RecentSessionRestore { restored },
+                    ),
+                );
+                return;
+            }
+            ExtensionCompatibilityBrokerOperation::RecentSessions { limit } => {
+                if limit == 0 || limit > MAX_EXTENSION_COMPATIBILITY_SESSION_RESULTS {
+                    self.settle_extension_compatibility_broker(
+                        runtime,
+                        id,
+                        ExtensionCompatibilityBrokerSettlement::Rejected(
+                            ExtensionCompatibilityBrokerRejection::InvalidRequest,
+                        ),
+                    );
+                    return;
+                }
+                let Some(entries) =
+                    self.brokered_recently_closed_tabs(runtime.profile(), usize::from(limit))
+                else {
+                    self.settle_extension_compatibility_broker(
+                        runtime,
+                        id,
+                        ExtensionCompatibilityBrokerSettlement::Rejected(
+                            ExtensionCompatibilityBrokerRejection::InvalidContext,
+                        ),
+                    );
+                    return;
+                };
+                let entries = entries
+                    .into_iter()
+                    .filter_map(|entry| {
+                        Some(ExtensionCompatibilityClosedTab {
+                            session_id: entry.session_id?,
+                            url: entry.url,
+                            title: entry.title,
+                            closed_at_ms: entry.closed_at_ms?,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                self.settle_extension_compatibility_broker(
+                    runtime,
+                    id,
+                    ExtensionCompatibilityBrokerSettlement::Applied(
+                        ExtensionCompatibilityBrokerResult::ClosedSessions(entries),
+                    ),
+                );
+                return;
+            }
+            ExtensionCompatibilityBrokerOperation::RestoreClosedSession { id: closed_id } => {
+                let restored = self.restore_brokered_closed_tab(runtime.profile(), closed_id);
+                let Some((entry, _, native)) = restored else {
+                    self.settle_extension_compatibility_broker(
+                        runtime,
+                        id,
+                        ExtensionCompatibilityBrokerSettlement::Rejected(
+                            ExtensionCompatibilityBrokerRejection::InvalidRequest,
+                        ),
+                    );
+                    return;
+                };
+                if !native_closed_session_restored(native) {
+                    self.settle_extension_compatibility_broker(
+                        runtime,
+                        id,
+                        ExtensionCompatibilityBrokerSettlement::Rejected(
+                            ExtensionCompatibilityBrokerRejection::BackendUnavailable,
+                        ),
+                    );
+                    return;
+                }
+                let Some(closed_at_ms) = entry.closed_at_ms else {
+                    self.settle_extension_compatibility_broker(
+                        runtime,
+                        id,
+                        ExtensionCompatibilityBrokerSettlement::Rejected(
+                            ExtensionCompatibilityBrokerRejection::InvalidRequest,
+                        ),
+                    );
+                    return;
+                };
+                let restored = ExtensionCompatibilityRestoredTab {
+                    url: entry.url,
+                    title: entry.title,
+                    closed_at_ms,
+                };
+                self.settle_extension_compatibility_broker(
+                    runtime,
+                    id,
+                    ExtensionCompatibilityBrokerSettlement::Applied(
+                        ExtensionCompatibilityBrokerResult::ClosedSessionRestore(restored),
                     ),
                 );
                 return;
@@ -162,4 +257,11 @@ impl Shell {
             crate::diagnostic!("extensions: compatibility-broker settlement was not admitted");
         }
     }
+}
+
+pub(super) fn native_closed_session_restored(native: NativeWork) -> bool {
+    matches!(
+        mutation_result(native).outcome,
+        OperationOutcome::Applied | OperationOutcome::Deferred
+    )
 }

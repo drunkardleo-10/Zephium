@@ -3,8 +3,8 @@
 use std::time::Instant;
 
 use zephium_core::extensions::{
-    ExtensionGrantBrowsingContext, ExtensionNativeNamespaceScope, ExtensionNativeOwnershipKey,
-    ExtensionPackageIdentity,
+    ExtensionGrantBrowsingContext, ExtensionInstall, ExtensionNativeNamespaceScope,
+    ExtensionNativeOwnershipKey,
 };
 use zephium_core::ports::extensions::{
     ExtensionActivationPendingReason, ExtensionInstallSelector, ExtensionManagementSettlement,
@@ -15,8 +15,7 @@ use zephium_core::ports::store::{
     ExtensionNativeNamespaceLoadOutcome,
 };
 use zephium_extension_runtime_api::{
-    ExtensionRuntimeFailure, ExtensionRuntimeHostDataErasureDisposition,
-    ExtensionRuntimeNativeOwnerId,
+    ExtensionRuntimeHostDataErasureDisposition, ExtensionRuntimeNativeOwnerId,
 };
 use zephium_store::ExtensionServiceStoreCallOutcome;
 
@@ -29,16 +28,7 @@ use crate::runtime_coordinator::{
 pub(super) const fn activation_unavailable_pending_reason(
     reason: RuntimeActivationUnavailableReason,
 ) -> ExtensionActivationPendingReason {
-    if matches!(
-        reason,
-        RuntimeActivationUnavailableReason::NativeRetryable(
-            ExtensionRuntimeFailure::RestartRequired
-        )
-    ) {
-        ExtensionActivationPendingReason::RestartRequired
-    } else {
-        ExtensionActivationPendingReason::Unavailable
-    }
+    reason.pending_reason()
 }
 
 pub(super) fn set_enabled_until(
@@ -194,22 +184,9 @@ pub(super) fn uninstall_until(
         if namespace != ExtensionNativeNamespaceScope::MacosControllerV1 {
             return settle(runtime, ExtensionUninstallOutcome::FailedClosed);
         }
-        let candidates = match startup.repository.authenticate_install_candidates() {
-            Ok(candidates) => candidates,
-            Err(_) => return settle(runtime, ExtensionUninstallOutcome::Unavailable),
-        };
-        let Some(candidate) = candidates
-            .candidates()
-            .iter()
-            .find(|candidate| candidate.package() == &current.package)
-        else {
-            return settle(runtime, ExtensionUninstallOutcome::FailedClosed);
-        };
-        let Some(identity) = candidate
-            .chromium_extension_id()
-            .and_then(|identity| ExtensionRuntimeNativeOwnerId::parse_exact(identity).ok())
-        else {
-            return settle(runtime, ExtensionUninstallOutcome::FailedClosed);
+        let identity = match native_erasure_identity(startup, selector, &current, deadline) {
+            Ok(identity) => identity,
+            Err(outcome) => return settle(runtime, outcome),
         };
         Some(identity)
     } else {
@@ -320,15 +297,61 @@ pub(super) fn uninstall_until(
     settle(runtime, result)
 }
 
+/// Resolves cleanup identity from the same authenticated source as activation.
+/// An external package must never borrow a Verified catalog witness, including
+/// when no curated catalog has been provisioned in the product.
+fn native_erasure_identity(
+    startup: &mut WorkerStartupState,
+    selector: ExtensionInstallSelector,
+    current: &SelectedInstall,
+    deadline: Instant,
+) -> Result<ExtensionRuntimeNativeOwnerId, ExtensionUninstallOutcome> {
+    #[cfg(feature = "external-extensions")]
+    if zephium_core::extensions::is_beta_extension_authority(current.install.package().authority())
+    {
+        let candidate = startup
+            .repository
+            .external_installed_candidate(
+                &startup.store,
+                selector.profile(),
+                &current.install,
+                selector.catalog_revision(),
+                deadline,
+            )
+            .ok_or(ExtensionUninstallOutcome::Unavailable)?;
+        let manifest = candidate
+            .package
+            .manifest()
+            .map_err(|_| ExtensionUninstallOutcome::FailedClosed)?;
+        let identity = manifest
+            .chromium_key()
+            .ok_or(ExtensionUninstallOutcome::FailedClosed)?
+            .extension_id();
+        return ExtensionRuntimeNativeOwnerId::parse_exact(identity.as_str())
+            .map_err(|_| ExtensionUninstallOutcome::FailedClosed);
+    }
+    let _ = (selector, deadline);
+    let candidates = startup
+        .repository
+        .authenticate_install_candidates()
+        .map_err(|_| ExtensionUninstallOutcome::Unavailable)?;
+    candidates
+        .candidates()
+        .iter()
+        .find(|candidate| candidate.package() == current.install.package())
+        .and_then(|candidate| candidate.chromium_extension_id())
+        .and_then(|identity| ExtensionRuntimeNativeOwnerId::parse_exact(identity).ok())
+        .ok_or(ExtensionUninstallOutcome::FailedClosed)
+}
+
 #[derive(Clone)]
 struct SelectedInstall {
-    desired_enabled: bool,
-    package: ExtensionPackageIdentity,
+    install: ExtensionInstall,
 }
 
 impl SelectedInstall {
     const fn desired_enabled(&self) -> bool {
-        self.desired_enabled
+        self.install.desired_enabled()
     }
 }
 
@@ -354,8 +377,7 @@ fn load_selected_install(
                 return Err(ExtensionSetEnabledOutcome::Conflict);
             }
             Ok(SelectedInstall {
-                desired_enabled: install.desired_enabled(),
-                package: install.package().clone(),
+                install: install.clone(),
             })
         }
         ExtensionServiceStoreCallOutcome::Completed(
@@ -615,6 +637,7 @@ const fn map_set_enabled_to_uninstall(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zephium_extension_runtime_api::ExtensionRuntimeFailure;
 
     #[test]
     fn only_definite_pre_entry_mode_conflict_projects_restart_required() {

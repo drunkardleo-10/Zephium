@@ -1576,6 +1576,14 @@ impl fmt::Debug for ExtensionRuntimeHostProfileAbsenceEvidence<'_> {
 /// absence method is the sole exception: it may dispatch a read-only registry
 /// fence and must honor its exact deadline.
 pub trait ExtensionRuntimeHostFactoryPort: Send {
+    /// Reserves an update only when no extension popup/options view is in use.
+    /// The guard must prevent new such views until dropped. This is only a UX
+    /// exclusion: it confers no package, grant or native retirement authority.
+    /// Unsupported hosts refuse, so callers preserve the existing runtime.
+    fn begin_update_until(&mut self, _deadline: Instant) -> Option<ExtensionRuntimeHostUpdateGuard> {
+        None
+    }
+
     /// Binds one fresh provisional activation reservation and its exact proxy pair.
     ///
     /// Both proxies must share the reservation lifecycle specified by
@@ -1661,7 +1669,28 @@ pub struct ExtensionRuntimeHostFactory {
     next_profile_fence_generation: Option<NonZeroU64>,
 }
 
+/// Process-local exclusion held through an extension replacement. Dropping it
+/// releases the trusted host's admission gate without dispatching native work.
+pub struct ExtensionRuntimeHostUpdateGuard {
+    _lease: Box<dyn Send>,
+}
+impl ExtensionRuntimeHostUpdateGuard {
+    /// The host supplies a lease with non-blocking, thread-safe Drop behavior.
+    pub fn from_trusted_lease(lease: Box<dyn Send>) -> Self {
+        Self { _lease: lease }
+    }
+}
+
 impl ExtensionRuntimeHostFactory {
+    /// A reservation is not an update witness; all existing checks still apply.
+    pub fn begin_update_until(&mut self, deadline: Instant) -> Option<ExtensionRuntimeHostUpdateGuard> {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        let guard = self.port.begin_update_until(deadline)?;
+        (Instant::now() < deadline).then_some(guard)
+    }
+
     /// Creates a unique factory around a trusted engine implementation.
     pub fn from_trusted_port(port: Box<dyn ExtensionRuntimeHostFactoryPort>) -> Self {
         Self {

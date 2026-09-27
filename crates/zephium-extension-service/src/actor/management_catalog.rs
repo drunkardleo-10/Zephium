@@ -1,12 +1,13 @@
 //! Lazy authenticated installed-extension management projection.
+use crate::manifest_projection::compatibility;
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use zephium_core::extensions::{
     ExtensionCatalogSetDigest, ExtensionGrantBrowsingContext, ExtensionGrantManifestBinding,
-    ExtensionGrantManifestBindings, ExtensionInstallCatalog, ExtensionManifestDeclaration,
-    ExtensionNativeOwnershipKey, MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    ExtensionGrantManifestBindings, ExtensionInstallCatalog, ExtensionNativeOwnershipKey,
+    MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
@@ -62,6 +63,19 @@ pub(super) fn load(
             return ExtensionManagementCatalogOutcome::FailedClosed;
         }
     };
+    #[cfg(feature = "external-extensions")]
+    if zephium_extension_authority::BundledPackageAuthority::product_status()
+        == zephium_extension_authority::BundledProductAuthorityStatus::Unprovisioned
+        || catalog.installs().iter().any(|install| {
+            zephium_core::extensions::is_beta_extension_authority(install.package().authority())
+        })
+        || startup
+            .repository
+            .external_pending_review(profile)
+            .is_some()
+    {
+        return super::external_management::load(startup, runtime, profile, catalog, deadline);
+    }
     for _ in 0..MAX_EXTENSION_INSTALLS_PER_PROFILE {
         match reconcile_one_install_update(startup, runtime, profile, &catalog, deadline) {
             InstallUpdateReconciliation::Current => break,
@@ -161,7 +175,10 @@ pub(super) fn load(
         ) {
             (false, _, None) => ExtensionManagementRuntimeState::Disabled,
             (true, true, None) => ExtensionManagementRuntimeState::ProfilePaused,
-            (true, false, None) => ExtensionManagementRuntimeState::PendingActivation,
+            (true, false, None) => runtime.activation_issue(key).map_or(
+                ExtensionManagementRuntimeState::PendingActivation,
+                ExtensionManagementRuntimeState::ActivationFailed,
+            ),
             (true, false, Some(generation)) => ExtensionManagementRuntimeState::Active(generation),
             (false, _, Some(_)) | (true, true, Some(_)) => {
                 return ExtensionManagementCatalogOutcome::FailedClosed
@@ -249,62 +266,9 @@ pub(super) fn load(
         if catalog.by_package(authority, key).is_some() {
             continue;
         }
-        let Some((compatibility, limitations)) = compatibility(candidate.manifest_arc()) else {
+        let Some(entry) = project_candidate(profile, catalog.revision(), catalog_set, candidate)
+        else {
             return ExtensionManagementCatalogOutcome::FailedClosed;
-        };
-        let Some(provenance) = verified_provenance(candidate) else {
-            return ExtensionManagementCatalogOutcome::FailedClosed;
-        };
-        let declarations = candidate.manifest_arc().declarations();
-        let selector = ExtensionInstallCandidateSelector::new(
-            profile,
-            catalog.revision(),
-            catalog_set,
-            candidate.package().clone(),
-        );
-        let entry = match ExtensionInstallCandidateEntry::new(
-            selector,
-            candidate.name(),
-            candidate.description().map(Into::into),
-            candidate.author().map(Into::into),
-            candidate.version(),
-            acquired_management_source(),
-            acquired_verified_catalog_unix(candidate.catalog_created_unix()),
-            Some(provenance),
-            declarations
-                .required_api()
-                .names()
-                .iter()
-                .map(|name| Box::<str>::from(name.as_str()))
-                .collect(),
-            declarations
-                .required_host_authorities()
-                .into_iter()
-                .map(|pattern| Box::<str>::from(pattern.as_str()))
-                .collect(),
-            declarations
-                .optional_api()
-                .names()
-                .iter()
-                .map(|name| Box::<str>::from(name.as_str()))
-                .collect(),
-            declarations
-                .optional_hosts()
-                .into_iter()
-                .flat_map(|hosts| hosts.patterns())
-                .map(|pattern| Box::<str>::from(pattern.as_str()))
-                .collect(),
-            // No selected runtime target has yet passed the complete
-            // file-scheme grant plus execution gate.
-            false,
-            // Private browsing requires a separately isolated browser data
-            // context, which is not part of the current product runtime.
-            false,
-            compatibility,
-            limitations,
-        ) {
-            Ok(entry) => entry,
-            Err(_) => return ExtensionManagementCatalogOutcome::FailedClosed,
         };
         available_entries.push(entry);
     }
@@ -326,6 +290,68 @@ pub(super) fn load(
         Ok(catalog) => ExtensionManagementCatalogOutcome::Loaded(catalog),
         Err(_) => ExtensionManagementCatalogOutcome::FailedClosed,
     }
+}
+
+pub(super) fn project_candidate(
+    profile: ProfileId,
+    catalog_revision: zephium_core::extensions::ExtensionInstallCatalogRevision,
+    catalog_set: ExtensionCatalogSetDigest,
+    candidate: &BundledInstallCandidate,
+) -> Option<ExtensionInstallCandidateEntry> {
+    let (compatibility, limitations) = compatibility(candidate.manifest_arc())?;
+    let provenance = verified_provenance(candidate)?;
+    let declarations = candidate.manifest_arc().declarations();
+    let selector = ExtensionInstallCandidateSelector::new(
+        profile,
+        catalog_revision,
+        catalog_set,
+        candidate.package().clone(),
+    );
+    let entry = match ExtensionInstallCandidateEntry::new(
+        selector,
+        candidate.name(),
+        candidate.description().map(Into::into),
+        candidate.author().map(Into::into),
+        candidate.version(),
+        acquired_management_source(),
+        acquired_verified_catalog_unix(candidate.catalog_created_unix()),
+        Some(provenance),
+        declarations
+            .required_api()
+            .names()
+            .iter()
+            .map(|name| Box::<str>::from(name.as_str()))
+            .collect(),
+        declarations
+            .required_host_authorities()
+            .into_iter()
+            .map(|pattern| Box::<str>::from(pattern.as_str()))
+            .collect(),
+        declarations
+            .optional_api()
+            .names()
+            .iter()
+            .map(|name| Box::<str>::from(name.as_str()))
+            .collect(),
+        declarations
+            .optional_hosts()
+            .into_iter()
+            .flat_map(|hosts| hosts.patterns())
+            .map(|pattern| Box::<str>::from(pattern.as_str()))
+            .collect(),
+        // No selected runtime target has yet passed the complete
+        // file-scheme grant plus execution gate.
+        false,
+        // Private browsing requires a separately isolated browser data
+        // context, which is not part of the current product runtime.
+        false,
+        compatibility,
+        limitations,
+    ) {
+        Ok(entry) => entry,
+        Err(_) => return None,
+    };
+    Some(entry)
 }
 
 pub(super) fn approve_update_until(
@@ -369,6 +395,10 @@ pub(super) fn approve_update_until(
         return settle_update(runtime, ExtensionUpdateOutcome::Conflict);
     }
 
+    #[cfg(feature = "external-extensions")]
+    if zephium_core::extensions::is_beta_extension_authority(install.package().authority()) {
+        return super::external_updates::approve(startup, runtime, selector, deadline);
+    }
     let authenticated = match startup.repository.authenticate_install_updates(&catalog) {
         Ok(authenticated) => authenticated,
         Err(error) => {
@@ -458,6 +488,36 @@ pub(super) fn approve_update_until(
         return settle_update(runtime, ExtensionUpdateOutcome::Conflict);
     }
 
+    apply_authenticated_update(
+        startup,
+        runtime,
+        selector,
+        install,
+        catalog.revision(),
+        authority.revision(),
+        Arc::clone(update.current_manifest()),
+        Arc::clone(update.replacement_manifest()),
+        None,
+        ExtensionInstallUpdateGrantDecision::GrantReplacementRequired,
+        deadline,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_authenticated_update(
+    startup: &mut WorkerStartupState,
+    runtime: &mut RuntimeCoordinator,
+    selector: ExtensionInstallUpdateSelector,
+    install: zephium_core::extensions::ExtensionInstall,
+    expected_catalog: zephium_core::extensions::ExtensionInstallCatalogRevision,
+    expected_grant: zephium_core::extensions::ExtensionGrantRevision,
+    current_manifest: Arc<zephium_core::extensions::ExtensionManifestDescriptor>,
+    replacement_manifest: Arc<zephium_core::extensions::ExtensionManifestDescriptor>,
+    provenance: Option<Box<zephium_core::extensions::ExtensionProvenanceUpdate>>,
+    grant_decision: ExtensionInstallUpdateGrantDecision,
+    deadline: Instant,
+) -> ExtensionManagementSettlement<ExtensionUpdateOutcome> {
+    let install_selector = selector.install();
     let retired = match retire_all_contexts(startup, runtime, install_selector, deadline) {
         Ok(retired) => retired,
         Err(zephium_core::ports::extensions::ExtensionSetEnabledOutcome::FailedClosed) => {
@@ -468,30 +528,31 @@ pub(super) fn approve_update_until(
     if !install.desired_enabled() && !retired.is_empty() {
         return settle_update(runtime, ExtensionUpdateOutcome::FailedClosed);
     }
-    let store_outcome = startup.store.update_install_until(
+    let store_outcome = startup.store.update_install_with_provenance_until(
         install_selector.profile(),
         install_selector.catalog_revision(),
         install.id(),
         install.revision(),
-        authority.revision(),
-        ExtensionInstallUpdateGrantDecision::GrantReplacementRequired,
-        Arc::clone(update.current_manifest()),
-        Arc::clone(update.replacement_manifest()),
+        expected_grant,
+        grant_decision,
+        current_manifest,
+        Arc::clone(&replacement_manifest),
+        provenance,
         deadline,
     );
     let outcome = match store_outcome {
         ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallUpdateOutcome::Applied(
             applied,
-        )) if catalog.revision().next() == Some(applied.catalog_revision)
+        )) if expected_catalog.next() == Some(applied.catalog_revision)
             && install.revision().next() == Some(applied.install.revision())
-            && authority.revision().next() == Some(applied.authority.revision())
+            && expected_grant.next() == Some(applied.authority.revision())
             && applied.install.id() == install.id()
             && applied.install.package() == selector.replacement()
             && applied.authority.package() == selector.replacement()
             && applied.install.desired_enabled() == install.desired_enabled()
             && applied
                 .authority
-                .has_required_api_and_host_grants_for(update.replacement_manifest()) =>
+                .has_required_api_and_host_grants_for(&replacement_manifest) =>
         {
             approved_update_runtime_state(
                 startup,
@@ -832,7 +893,7 @@ fn reconcile_one_install_update(
     }
 }
 
-fn added_required_authority(
+pub(super) fn added_required_authority(
     authority: &zephium_core::extensions::ExtensionGrantAuthority,
     replacement: &zephium_core::extensions::ExtensionManifestDescriptor,
 ) -> (Vec<Box<str>>, Vec<Box<str>>) {
@@ -861,7 +922,7 @@ fn added_required_authority(
     (added_api, added_hosts)
 }
 
-fn new_compatibility_limitations(
+pub(super) fn new_compatibility_limitations(
     current: &zephium_core::extensions::ExtensionManifestDescriptor,
     replacement: &zephium_core::extensions::ExtensionManifestDescriptor,
 ) -> Option<Vec<ExtensionManagementLimitation>> {
@@ -1152,73 +1213,6 @@ const fn acquired_verified_catalog_unix(created_unix: u64) -> Option<u64> {
     } else {
         Some(created_unix)
     }
-}
-
-fn compatibility(
-    manifest: &zephium_core::extensions::ExtensionManifestDescriptor,
-) -> Option<(
-    ExtensionManagementCompatibility,
-    Vec<ExtensionManagementLimitation>,
-)> {
-    let compatibility = ExtensionManagementCompatibility::from_levels(
-        manifest
-            .compatibility()
-            .iter()
-            .map(|classification| classification.level()),
-    )?;
-    let mut limitations = Vec::new();
-    for classification in manifest.compatibility().iter().filter(|classification| {
-        classification.level() == zephium_core::extensions::ExtensionCompatibilityLevel::Degraded
-    }) {
-        let limitation = match classification.declaration() {
-            ExtensionManifestDeclaration::RequiredApiPermission(name)
-            | ExtensionManifestDeclaration::OptionalApiPermission(name) => {
-                ExtensionManagementLimitation::api_permission(name.as_str()).ok()?
-            }
-            ExtensionManifestDeclaration::RequiredHostPermission(_)
-            | ExtensionManifestDeclaration::OptionalHostPermission(_) => {
-                ExtensionManagementLimitation::HostAccess
-            }
-            ExtensionManifestDeclaration::Background => ExtensionManagementLimitation::Background,
-            ExtensionManifestDeclaration::Action => ExtensionManagementLimitation::Action,
-            ExtensionManifestDeclaration::Offscreen => ExtensionManagementLimitation::Offscreen,
-            ExtensionManifestDeclaration::NativeMessaging => {
-                ExtensionManagementLimitation::NativeMessaging
-            }
-            ExtensionManifestDeclaration::Override(_) => {
-                ExtensionManagementLimitation::BrowserOverride
-            }
-            ExtensionManifestDeclaration::ExtensionPagesCsp => {
-                ExtensionManagementLimitation::ExtensionPagesCsp
-            }
-            ExtensionManifestDeclaration::Sandbox => ExtensionManagementLimitation::Sandbox,
-            ExtensionManifestDeclaration::ContentScript { .. } => {
-                ExtensionManagementLimitation::ContentScripts
-            }
-            ExtensionManifestDeclaration::WebAccessibleResources { .. } => {
-                ExtensionManagementLimitation::WebAccessibleResources
-            }
-            ExtensionManifestDeclaration::MinimumChromiumVersion(_) => {
-                ExtensionManagementLimitation::MinimumBrowserVersion
-            }
-            ExtensionManifestDeclaration::Commands(_) => ExtensionManagementLimitation::Commands,
-            ExtensionManifestDeclaration::SidePanel { .. } => {
-                ExtensionManagementLimitation::SidePanel
-            }
-            ExtensionManifestDeclaration::ManagedStorageSchema { .. } => {
-                ExtensionManagementLimitation::ManagedStorage
-            }
-            ExtensionManifestDeclaration::OptionsPage { .. } => {
-                ExtensionManagementLimitation::OptionsPage
-            }
-            ExtensionManifestDeclaration::DeclarativeNetRequest(_) => {
-                ExtensionManagementLimitation::DeclarativeNetRequest
-            }
-            ExtensionManifestDeclaration::UnmodeledAuthority(_) => return None,
-        };
-        limitations.push(limitation);
-    }
-    Some((compatibility, limitations))
 }
 
 fn classify_repository_error(

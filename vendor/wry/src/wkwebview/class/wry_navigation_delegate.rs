@@ -47,6 +47,8 @@ pub struct WryNavigationDelegateIvars {
   pub new_window_req_handler:
     Option<std::rc::Rc<dyn Fn(String, crate::NewWindowFeatures) -> crate::NewWindowResponse>>,
   pub navigation_policy_function: Box<dyn Fn(String) -> bool>,
+  #[cfg(target_os = "macos")]
+  pub main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
   pub download_delegate: Option<Retained<WryDownloadDelegate>>,
   pub on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent)>>,
   pub navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
@@ -140,7 +142,7 @@ define_class!(
       error: &NSError,
     ) {
       if let Some(navigation) = navigation {
-        did_fail_navigation(self, webview, navigation, error);
+        did_fail_navigation(self, webview, navigation, error, "provisional");
       }
     }
 
@@ -162,7 +164,7 @@ define_class!(
       error: &NSError,
     ) {
       if let Some(navigation) = navigation {
-        did_fail_navigation(self, webview, navigation, error);
+        did_fail_navigation(self, webview, navigation, error, "committed");
       }
     }
 
@@ -243,6 +245,7 @@ impl WryNavigationDelegate {
       std::rc::Rc<dyn Fn(String, crate::NewWindowFeatures) -> crate::NewWindowResponse>,
     >,
     navigation_handler: Option<Box<dyn Fn(String) -> bool>>,
+    #[cfg(target_os = "macos")] main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
     download_delegate: Option<Retained<WryDownloadDelegate>>,
     on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent, String)>>,
     navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
@@ -280,6 +283,8 @@ impl WryNavigationDelegate {
       .set_ivars(WryNavigationDelegateIvars {
         pending_scripts,
         navigation_policy_function,
+        #[cfg(target_os = "macos")]
+        main_frame_navigation_attempt_handler,
         has_download_handler,
         #[cfg(target_os = "macos")]
         new_window_req_handler,

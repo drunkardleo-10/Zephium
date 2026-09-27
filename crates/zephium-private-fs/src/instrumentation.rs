@@ -162,10 +162,10 @@ enum OperationCounter {
     DirectorySync,
     RegularCreate,
     RegularUnlink,
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "windows"))]
     DirectoryUnlink,
     Rename,
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "windows"))]
     DirectoryModeChange,
     BytesRead,
     BytesWritten,
@@ -184,10 +184,10 @@ impl MeasurementState {
             OperationCounter::DirectorySync => &mut self.snapshot.directory_syncs,
             OperationCounter::RegularCreate => &mut self.snapshot.regular_creates,
             OperationCounter::RegularUnlink => &mut self.snapshot.regular_unlinks,
-            #[cfg(unix)]
+            #[cfg(any(unix, target_os = "windows"))]
             OperationCounter::DirectoryUnlink => &mut self.snapshot.directory_unlinks,
             OperationCounter::Rename => &mut self.snapshot.renames,
-            #[cfg(unix)]
+            #[cfg(any(unix, target_os = "windows"))]
             OperationCounter::DirectoryModeChange => &mut self.snapshot.directory_mode_changes,
             OperationCounter::BytesRead => &mut self.snapshot.bytes_read,
             OperationCounter::BytesWritten => &mut self.snapshot.bytes_written,
@@ -226,7 +226,7 @@ pub(crate) fn record_regular_unlink() {
     record(OperationCounter::RegularUnlink, 1);
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 pub(crate) fn record_directory_unlink() {
     record(OperationCounter::DirectoryUnlink, 1);
 }
@@ -235,7 +235,7 @@ pub(crate) fn record_rename() {
     record(OperationCounter::Rename, 1);
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 pub(crate) fn record_directory_mode_change() {
     record(OperationCounter::DirectoryModeChange, 1);
 }
@@ -298,7 +298,7 @@ mod tests {
         ] {
             state.record(counter, 1);
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, target_os = "windows"))]
         for counter in [
             OperationCounter::DirectoryUnlink,
             OperationCounter::DirectoryModeChange,
@@ -312,9 +312,9 @@ mod tests {
                 directory_syncs: 1,
                 regular_creates: 1,
                 regular_unlinks: 1,
-                directory_unlinks: usize::from(cfg!(unix)),
+                directory_unlinks: usize::from(cfg!(any(unix, target_os = "windows"))),
                 renames: 1,
-                directory_mode_changes: usize::from(cfg!(unix)),
+                directory_mode_changes: usize::from(cfg!(any(unix, target_os = "windows"))),
                 bytes_read: 1,
                 bytes_written: 1,
             }

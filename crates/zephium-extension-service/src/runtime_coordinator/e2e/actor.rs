@@ -208,7 +208,8 @@ fn actor_hydration_retry_resumes_without_reentering_cleanup() {
 
 #[test]
 fn actor_hydration_reports_capacity_without_evicting_or_overcommitting() {
-    let profile_count = crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES + 1;
+    let profile_limit = zephium_core::ports::extensions::MAX_EXTENSION_ACTIVE_PROFILES;
+    let profile_count = profile_limit + 1;
     let (harness, owner, startup) = ActorAuthorityHarness::launch_with_publication_mode(
         profile_count,
         PublicationMode::Immediate,
@@ -218,28 +219,16 @@ fn actor_hydration_reports_capacity_without_evicting_or_overcommitting() {
     else {
         panic!("capacity-bounded hydration did not publish readiness");
     };
-    assert_eq!(
-        usize::from(evidence.active_runtime_count()),
-        crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
-    );
+    assert_eq!(usize::from(evidence.active_runtime_count()), profile_limit);
     assert_eq!(evidence.capacity_deferred_runtime_count(), 1);
     assert_eq!(evidence.rejected_runtime_count(), 0);
     assert_eq!(
         evidence.active_profiles().iter().collect::<Vec<_>>(),
-        harness.profiles[..crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES]
+        harness.profiles[..profile_limit]
     );
-    assert_eq!(
-        harness.probe.bind_calls(),
-        crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
-    );
-    assert_eq!(
-        harness.probe.activation_calls(),
-        crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
-    );
-    assert_eq!(
-        harness.probe.publication_calls(),
-        crate::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
-    );
+    assert_eq!(harness.probe.bind_calls(), profile_limit);
+    assert_eq!(harness.probe.activation_calls(), profile_limit);
+    assert_eq!(harness.probe.publication_calls(), profile_limit);
 
     let ExtensionServiceShutdownOutcome::Complete(shutdown) = owner.shutdown_until(deadline())
     else {

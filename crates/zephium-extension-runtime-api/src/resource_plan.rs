@@ -7,6 +7,7 @@ use std::mem::size_of;
 use std::ops::Bound::{Included, Unbounded};
 
 use sha2::{Digest, Sha256};
+use zephium_core::extension_resource_path::extension_resource_collision_key;
 
 /// Maximum declared size of one runtime-readable package resource.
 ///
@@ -302,7 +303,11 @@ impl ExtensionRuntimeResourcePlan {
                 return Err(ExtensionRuntimeResourcePlanBuildError::NonCanonicalOrder);
             }
             previous_path = Some(binding.path());
-            let collision_key = binding.path().to_ascii_lowercase().into_boxed_str();
+            let collision_key = extension_resource_collision_key(
+                binding.path(),
+                MAX_EXTENSION_RUNTIME_RESOURCE_PATH_BYTES,
+            )
+            .expect("validated runtime path has a bounded collision key");
             if portable_path_shape_conflicts(&collision_keys, &collision_key) {
                 return Err(ExtensionRuntimeResourcePlanBuildError::PathCollision);
             }
@@ -512,7 +517,6 @@ fn update_binding(
 fn is_valid_resource_path(value: &str) -> bool {
     if value.is_empty()
         || value.len() > MAX_EXTENSION_RUNTIME_RESOURCE_PATH_BYTES
-        || !value.is_ascii()
         || value.starts_with('/')
         || value.ends_with('/')
     {
@@ -530,6 +534,9 @@ fn is_valid_resource_path(value: &str) -> bool {
         }
     }
     depth <= MAX_EXTENSION_RUNTIME_RESOURCE_PATH_DEPTH
+        && (value.is_ascii()
+            || extension_resource_collision_key(value, MAX_EXTENSION_RUNTIME_RESOURCE_PATH_BYTES)
+                .is_ok())
 }
 
 fn is_valid_resource_path_component(component: &str) -> bool {
@@ -557,8 +564,8 @@ fn is_valid_resource_path_component(component: &str) -> bool {
         .split_once('.')
         .map_or(component, |(stem, _)| stem);
     let reserved_numbered = device_stem.len() == 4
-        && (device_stem[..3].eq_ignore_ascii_case("COM")
-            || device_stem[..3].eq_ignore_ascii_case("LPT"))
+        && (device_stem.as_bytes()[..3].eq_ignore_ascii_case(b"COM")
+            || device_stem.as_bytes()[..3].eq_ignore_ascii_case(b"LPT"))
         && matches!(device_stem.as_bytes()[3], b'1'..=b'9');
     !device_stem.eq_ignore_ascii_case("CON")
         && !device_stem.eq_ignore_ascii_case("PRN")
@@ -703,8 +710,23 @@ mod tests {
     #[test]
     fn path_grammar_and_accounting_are_bounded_and_redacted() {
         for invalid in [
-            "", "/a", "a/", "a//b", ".", "..", "a/../b", "a\\b", "a%b", "CON", "lpt9.txt", "a.",
-            "é",
+            "",
+            "/a",
+            "a/",
+            "a//b",
+            ".",
+            "..",
+            "a/../b",
+            "a\\b",
+            "a%b",
+            "CON",
+            "lpt9.txt",
+            "a.",
+            "e\u{301}",
+            "emoji😀.js",
+            "ＣＯＮ.txt",
+            "COM¹.txt",
+            "name\u{0345}.js",
         ] {
             assert!(matches!(
                 ExtensionRuntimeResourceBinding::try_new(invalid, 1, [0; 32]),
@@ -722,6 +744,52 @@ mod tests {
         let debug = format!("{plan:?}");
         assert!(!debug.contains("manifest.json"));
         assert!(!format!("{:?}", plan.entries()[0]).contains("manifest.json"));
+    }
+
+    #[test]
+    fn unicode_paths_bind_exact_bytes_and_reject_case_and_shape_aliases() {
+        let path = "src/js/сlickableCard.common.chunk.js";
+        let plan = ExtensionRuntimeResourcePlan::try_new(vec![
+            binding("manifest.json", 1, 1),
+            binding(path, 2, 18_401),
+        ])
+        .unwrap();
+        let entry = plan.entry(path).unwrap();
+        assert_eq!(entry.path(), path);
+        assert!(entry.resource().authenticates(
+            plan.digest(),
+            1,
+            path,
+            entry.declared_bytes(),
+            entry.sha256()
+        ));
+        assert!(plan.entry("src/js/clickableCard.common.chunk.js").is_none());
+
+        for alias in [
+            "src/js/СLICKABLECARD.COMMON.CHUNK.JS",
+            "ｓrc/js/сlickableCard.common.chunk.js",
+        ] {
+            let mut entries = vec![
+                binding("manifest.json", 1, 1),
+                binding(path, 2, 1),
+                binding(alias, 3, 1),
+            ];
+            entries.sort_by(|left, right| left.path().cmp(right.path()));
+            assert_eq!(
+                ExtensionRuntimeResourcePlan::try_new(entries).unwrap_err(),
+                ExtensionRuntimeResourcePlanBuildError::PathCollision
+            );
+        }
+        let mut entries = vec![
+            binding("manifest.json", 1, 1),
+            binding("Café", 2, 1),
+            binding("café/a.js", 3, 1),
+        ];
+        entries.sort_by(|left, right| left.path().cmp(right.path()));
+        assert_eq!(
+            ExtensionRuntimeResourcePlan::try_new(entries).unwrap_err(),
+            ExtensionRuntimeResourcePlanBuildError::PathCollision
+        );
     }
 
     #[test]

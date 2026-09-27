@@ -1,7 +1,9 @@
 //! Worker-private, serialized extension-runtime lifecycle coordination.
 
 mod activation;
+mod activation_issues;
 mod grant_rebind;
+mod isolated_resources;
 mod outcome;
 mod reconciliation;
 mod retirement;
@@ -24,12 +26,16 @@ pub(crate) use outcome::{
     RuntimeGrantRebindUnavailableReason, RuntimeRetirementOutcome,
     RuntimeRetirementUnavailableReason,
 };
+pub(crate) use isolated_resources::{
+    IsolatedResourceBudget, IsolatedResourceFailure, IsolatedResourcePermit,
+};
+#[cfg(test)]
+pub(crate) use isolated_resources::MAX_PENDING_ISOLATED_RESOURCE_REQUESTS;
 use slot::RuntimeSlot;
 
-const _: () = assert!(MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES == 3);
 const _: () = assert!(
     MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
-        == zephium_core::ports::extensions::MAX_EXTENSION_ACTIVE_PROFILES
+        >= zephium_core::ports::extensions::MAX_EXTENSION_ACTIVE_PROFILES
 );
 
 pub(crate) struct RuntimeCoordinatorResources<'worker> {
@@ -59,14 +65,16 @@ pub(crate) struct RuntimeCoordinator {
     slots: [Option<RuntimeSlot>; MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES],
     next_generation: Option<ExtensionRuntimeGeneration>,
     fail_stop: Option<RuntimeCoordinatorFailureReason>,
+    activation_issues: activation_issues::ActivationIssues,
 }
 
 impl RuntimeCoordinator {
     pub(crate) const fn new() -> Self {
         Self {
-            slots: [None, None, None],
+            slots: [const { None }; MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES],
             next_generation: Some(ExtensionRuntimeGeneration::INITIAL),
             fail_stop: None,
+            activation_issues: activation_issues::ActivationIssues::new(),
         }
     }
 
@@ -76,6 +84,13 @@ impl RuntimeCoordinator {
 
     pub(crate) const fn is_fail_stopped(&self) -> bool {
         self.fail_stop.is_some()
+    }
+
+    pub(crate) fn activation_issue(
+        &self,
+        key: ExtensionNativeOwnershipKey,
+    ) -> Option<zephium_core::ports::extensions::ExtensionActivationPendingReason> {
+        self.activation_issues.get(key)
     }
 
     pub(crate) fn has_profile_obligation(&self, profile: ProfileId) -> bool {
@@ -161,6 +176,18 @@ impl RuntimeCoordinator {
         if self.slot(key).is_some() {
             return Ok(());
         }
+        // Reserve profile-routing capacity before native work, including
+        // planning and retiring owners. More extension slots must not allow a
+        // fourth profile to overflow the separately bounded published cohort.
+        let mut profiles = ExtensionActiveProfiles::EMPTY;
+        for slot in self.slots.iter().flatten() {
+            if !profiles.try_insert(slot.key().profile()) {
+                return Err(RuntimeActivationOutcome::CapacityExceeded);
+            }
+        }
+        if !profiles.try_insert(key.profile()) {
+            return Err(RuntimeActivationOutcome::CapacityExceeded);
+        }
         let Some(vacant) = self.slots.iter_mut().find(|slot| slot.is_none()) else {
             return Err(RuntimeActivationOutcome::CapacityExceeded);
         };
@@ -234,6 +261,9 @@ impl RuntimeCoordinator {
     }
 
     fn enter_fail_stop(&mut self, reason: RuntimeCoordinatorFailureReason) {
+        if self.fail_stop.is_none() {
+            crate::diagnostic!("extensions: runtime coordination stopped: {reason:?}");
+        }
         self.fail_stop.get_or_insert(reason);
     }
 

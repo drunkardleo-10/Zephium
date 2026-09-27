@@ -367,6 +367,22 @@ fn native_messaging_api_permission() -> &'static ApiPermissionName {
     })
 }
 
+fn identity_api_permission() -> &'static ApiPermissionName {
+    static IDENTITY: OnceLock<ApiPermissionName> = OnceLock::new();
+    IDENTITY.get_or_init(|| {
+        ApiPermissionName::parse_exact("identity")
+            .expect("the closed identity permission token must remain valid")
+    })
+}
+
+fn offscreen_api_permission() -> &'static ApiPermissionName {
+    static OFFSCREEN: OnceLock<ApiPermissionName> = OnceLock::new();
+    OFFSCREEN.get_or_init(|| {
+        ApiPermissionName::parse_exact("offscreen")
+            .expect("the closed offscreen permission token must remain valid")
+    })
+}
+
 fn compatibility_broker_api_permission(
     purpose: ExtensionCompatibilityBrokerPurpose,
 ) -> &'static ApiPermissionName {
@@ -374,7 +390,10 @@ fn compatibility_broker_api_permission(
         ExtensionCompatibilityBrokerPurpose::RecentHistory => history_api_permission(),
         ExtensionCompatibilityBrokerPurpose::DefaultSearch => search_api_permission(),
         ExtensionCompatibilityBrokerPurpose::RestoreRecentSession => sessions_api_permission(),
+        ExtensionCompatibilityBrokerPurpose::ClosedSessionsV2 => sessions_api_permission(),
         ExtensionCompatibilityBrokerPurpose::OpenOptionsPage => native_messaging_api_permission(),
+        ExtensionCompatibilityBrokerPurpose::IdentityWebAuthFlow => identity_api_permission(),
+        ExtensionCompatibilityBrokerPurpose::OffscreenLocalStorage => offscreen_api_permission(),
     }
 }
 
@@ -983,9 +1002,41 @@ impl ExtensionRuntimeOperationAuthority {
         if runtime != &self.fingerprint {
             return Err(ExtensionOperationAuthorityDenial::RuntimeFingerprintMismatch);
         }
-        if self.eligibility.manifest.compatibility_target().as_str()
-            != MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET
+        let target = self.eligibility.manifest.compatibility_target().as_str();
+        if purpose == ExtensionCompatibilityBrokerPurpose::OffscreenLocalStorage
+            && target != super::LOCAL_MACOS_CAPABILITIES_V2_COMPATIBILITY_TARGET
         {
+            return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
+        }
+        if purpose == ExtensionCompatibilityBrokerPurpose::ClosedSessionsV2
+            && target != super::LOCAL_MACOS_CAPABILITIES_V1_COMPATIBILITY_TARGET
+        {
+            return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
+        }
+        if purpose == ExtensionCompatibilityBrokerPurpose::IdentityWebAuthFlow
+            && target != super::LOCAL_MACOS_IDENTITY_V1_COMPATIBILITY_TARGET
+            && target != super::LOCAL_MACOS_MAIN_DOCUMENT_GLOBS_V1_COMPATIBILITY_TARGET
+        {
+            return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
+        }
+        if matches!(
+            target,
+            super::LOCAL_MACOS_IDENTITY_V1_COMPATIBILITY_TARGET
+                | super::LOCAL_MACOS_MAIN_DOCUMENT_GLOBS_V1_COMPATIBILITY_TARGET
+        ) && purpose != ExtensionCompatibilityBrokerPurpose::IdentityWebAuthFlow
+        {
+            return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
+        }
+        if !matches!(
+            target,
+            MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET
+                | super::LOCAL_MACOS_HISTORY_V2_COMPATIBILITY_TARGET
+                | super::LOCAL_MACOS_HISTORY_V3_COMPATIBILITY_TARGET
+                | super::LOCAL_MACOS_CAPABILITIES_V1_COMPATIBILITY_TARGET
+                | super::LOCAL_MACOS_CAPABILITIES_V2_COMPATIBILITY_TARGET
+                | super::LOCAL_MACOS_IDENTITY_V1_COMPATIBILITY_TARGET
+                | super::LOCAL_MACOS_MAIN_DOCUMENT_GLOBS_V1_COMPATIBILITY_TARGET
+        ) {
             return Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing);
         }
         if self
@@ -2017,63 +2068,149 @@ mod tests {
     fn compatibility_broker_search_and_session_witnesses_require_distinct_grants() {
         let profile = ProfileId::from(83);
         let install_id = ExtensionInstallId::from(89);
-        for (offset, permission, purpose) in [
+        for target in [
+            MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
+            super::super::LOCAL_MACOS_CAPABILITIES_V1_COMPATIBILITY_TARGET,
+        ] {
+            for (offset, permission, purpose) in [
+                (
+                    0,
+                    "search",
+                    ExtensionCompatibilityBrokerPurpose::DefaultSearch,
+                ),
+                (
+                    1,
+                    "sessions",
+                    ExtensionCompatibilityBrokerPurpose::RestoreRecentSession,
+                ),
+            ] {
+                let generation = ExtensionRuntimeGeneration::new(97 + offset).unwrap();
+                let manifest =
+                    projection_manifest_for_target(&[permission], &[], &[], &[], &[], target);
+                let (authority, runtime) = eligible_runtime_with_manifest(
+                    profile,
+                    install_id,
+                    generation,
+                    manifest,
+                    &[permission],
+                    &[],
+                    false,
+                    false,
+                );
+                let witness = authority
+                    .mint_compatibility_broker_witness(&runtime, purpose)
+                    .unwrap();
+                assert_eq!(witness.purpose(), purpose);
+
+                let (without, without_runtime) = eligible_runtime_with_manifest(
+                    profile,
+                    install_id,
+                    generation.next().unwrap(),
+                    projection_manifest_for_target(&[], &[permission], &[], &[], &[], target),
+                    &[],
+                    &[],
+                    false,
+                    false,
+                );
+                assert!(matches!(
+                    without.mint_compatibility_broker_witness(&without_runtime, purpose),
+                    Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn identity_web_auth_witness_requires_the_new_target_and_effective_grant() {
+        let purpose = ExtensionCompatibilityBrokerPurpose::IdentityWebAuthFlow;
+        for (index, target, granted) in [
             (
                 0,
-                "search",
-                ExtensionCompatibilityBrokerPurpose::DefaultSearch,
+                super::super::LOCAL_MACOS_IDENTITY_V1_COMPATIBILITY_TARGET,
+                true,
             ),
             (
                 1,
-                "sessions",
-                ExtensionCompatibilityBrokerPurpose::RestoreRecentSession,
+                super::super::LOCAL_MACOS_IDENTITY_V1_COMPATIBILITY_TARGET,
+                false,
+            ),
+            (
+                2,
+                super::super::LOCAL_MACOS_ADAPTED_COMPATIBILITY_TARGET,
+                true,
             ),
         ] {
-            let generation = ExtensionRuntimeGeneration::new(97 + offset).unwrap();
             let manifest = projection_manifest_for_target(
-                &[permission],
+                if granted { &["identity"] } else { &[] },
+                if granted { &[] } else { &["identity"] },
                 &[],
                 &[],
                 &[],
-                &[],
-                MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
+                target,
             );
             let (authority, runtime) = eligible_runtime_with_manifest(
-                profile,
-                install_id,
-                generation,
+                ProfileId::from(98),
+                ExtensionInstallId::from(99),
+                ExtensionRuntimeGeneration::new(130 + index).unwrap(),
                 manifest,
-                &[permission],
+                if granted { &["identity"] } else { &[] },
                 &[],
                 false,
                 false,
             );
-            let witness = authority
-                .mint_compatibility_broker_witness(&runtime, purpose)
-                .unwrap();
-            assert_eq!(witness.purpose(), purpose);
+            let result = authority.mint_compatibility_broker_witness(&runtime, purpose);
+            if index == 0 {
+                assert_eq!(result.unwrap().purpose(), purpose);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing)
+                ));
+            }
+        }
+    }
 
-            let (without, without_runtime) = eligible_runtime_with_manifest(
-                profile,
-                install_id,
-                generation.next().unwrap(),
-                projection_manifest_for_target(
+    #[test]
+    fn closed_sessions_v2_requires_the_new_target_and_a_sessions_grant() {
+        for (index, target) in [
+            MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
+            super::super::LOCAL_MACOS_HISTORY_V2_COMPATIBILITY_TARGET,
+            super::super::LOCAL_MACOS_HISTORY_V3_COMPATIBILITY_TARGET,
+            super::super::LOCAL_MACOS_CAPABILITIES_V1_COMPATIBILITY_TARGET,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for granted in [false, true] {
+                let manifest = projection_manifest_for_target(
+                    if granted { &["sessions"] } else { &[] },
+                    if granted { &[] } else { &["sessions"] },
                     &[],
-                    &[permission],
                     &[],
                     &[],
+                    target,
+                );
+                let (authority, runtime) = eligible_runtime_with_manifest(
+                    ProfileId::from(84),
+                    ExtensionInstallId::from(90),
+                    ExtensionRuntimeGeneration::new(120 + index as u64 * 2 + u64::from(granted))
+                        .unwrap(),
+                    manifest,
+                    if granted { &["sessions"] } else { &[] },
                     &[],
-                    MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
-                ),
-                &[],
-                &[],
-                false,
-                false,
-            );
-            assert!(matches!(
-                without.mint_compatibility_broker_witness(&without_runtime, purpose),
-                Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing)
-            ));
+                    false,
+                    false,
+                );
+                let result = authority.mint_compatibility_broker_witness(
+                    &runtime,
+                    ExtensionCompatibilityBrokerPurpose::ClosedSessionsV2,
+                );
+                assert_eq!(
+                    result.is_ok(),
+                    granted
+                        && target == super::super::LOCAL_MACOS_CAPABILITIES_V1_COMPATIBILITY_TARGET
+                );
+            }
         }
     }
 
@@ -2086,6 +2223,59 @@ mod tests {
             cohort.runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Private),
             Err(ExtensionRuntimeEligibilityDenial::PrivateBrowsingUnsupported)
         ));
+    }
+
+    #[test]
+    fn versioned_history_query_still_requires_the_exact_granted_history_authority() {
+        use crate::extensions::{
+            ExtensionCompatibilityBrokerOperation as Op,
+            ExtensionCompatibilityBrokerRequest as Request,
+            ExtensionCompatibilityBrokerRequestId as Id, ExtensionHistorySearchQuery,
+        };
+        for target in [
+            super::super::LOCAL_MACOS_HISTORY_V2_COMPATIBILITY_TARGET,
+            super::super::LOCAL_MACOS_HISTORY_V3_COMPATIBILITY_TARGET,
+        ] {
+            for granted in [false, true] {
+                let manifest =
+                    projection_manifest_for_target(&[], &["history"], &[], &[], &[], target);
+                let (authority, runtime) = eligible_runtime_with_manifest(
+                    ProfileId::from(63),
+                    ExtensionInstallId::from(65),
+                    ExtensionRuntimeGeneration::new(69).unwrap(),
+                    manifest,
+                    if granted { &["history"] } else { &[] },
+                    &[],
+                    false,
+                    false,
+                );
+                let witness = authority.mint_compatibility_broker_witness(
+                    &runtime,
+                    ExtensionCompatibilityBrokerPurpose::RecentHistory,
+                );
+                if !granted {
+                    assert!(matches!(
+                        witness,
+                        Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing)
+                    ));
+                    continue;
+                }
+                let query = ExtensionHistorySearchQuery::new("older".into(), 0, 1000, 10).unwrap();
+                let request = Request::authorize(
+                    Id::new(1).unwrap(),
+                    Op::SearchHistory(query),
+                    witness.unwrap(),
+                )
+                .unwrap();
+                assert_eq!(request.runtime(), runtime.instance());
+                assert!(authority
+                    .mint_compatibility_broker_witness(
+                        &runtime,
+                        ExtensionCompatibilityBrokerPurpose::DefaultSearch
+                    )
+                    .is_err());
+            }
+        }
     }
 
     #[test]

@@ -62,26 +62,30 @@ pub(super) fn edit_until(
         return settle(runtime, ExtensionGrantEditOutcome::Conflict);
     }
 
-    let authenticated = match startup.repository.authenticate_manifest_bindings(&catalog) {
+    let key = ExtensionNativeOwnershipKey::new(
+        selector.profile(),
+        selector.install(),
+        ExtensionGrantBrowsingContext::Regular,
+    );
+    let authenticated = match startup
+        .repository
+        .authenticate_runtime_manifest_bindings_for_profile(&catalog, &startup.store, key, deadline)
+    {
         Ok(authenticated) => authenticated,
         Err(error) => return settle(runtime, classify_repository_error(error)),
     };
-    let manifest = authenticated
-        .bindings()
-        .iter()
-        .find(|binding| binding.install_id() == selector.install())
-        .map(|binding| Arc::clone(binding.manifest_arc()));
-    let Some(manifest) = manifest else {
-        return settle(runtime, ExtensionGrantEditOutcome::FailedClosed);
-    };
+    let (_, bindings, manifest) =
+        match authenticated.into_store_bindings_and_manifest(key.install_id()) {
+            Ok(parts) => parts,
+            Err(_) => return settle(runtime, ExtensionGrantEditOutcome::FailedClosed),
+        };
     if manifest.package() != install.package() {
         return settle(runtime, ExtensionGrantEditOutcome::FailedClosed);
     }
-    let cohort = match startup.store.load_grant_cohort_until(
-        selector.profile(),
-        authenticated.into_bindings(),
-        deadline,
-    ) {
+    let cohort = match startup
+        .store
+        .load_grant_cohort_until(selector.profile(), bindings, deadline)
+    {
         ExtensionServiceStoreCallOutcome::Completed(ExtensionGrantCohortLoadOutcome::Loaded(
             cohort,
         )) => cohort,
@@ -169,6 +173,66 @@ pub(super) fn edit_until(
             },
         );
     }
+    #[cfg(all(feature = "external-extensions", target_os = "macos"))]
+    if request.granted()
+        && zephium_core::extensions::is_beta_extension_authority(install.package().authority())
+        && runtime
+            .live_generation(ExtensionNativeOwnershipKey::new(
+                selector.profile(),
+                selector.install(),
+                ExtensionGrantBrowsingContext::Private,
+            ))
+            .is_none()
+    {
+        if let Some(generation) = runtime.live_generation(key) {
+            use zephium_core::ports::extensions::{
+                ExtensionRuntimeGrantOutcome as Live, ExtensionRuntimeGrantRequest,
+                ExtensionRuntimeGrantRuntimeState,
+            };
+            let targets = match &mutation {
+                ExtensionGrantMutation::SetApi {
+                    name,
+                    granted: true,
+                } => ExtensionRuntimeGrantRequest::new(vec![name.clone()], vec![]),
+                ExtensionGrantMutation::SetHost {
+                    pattern,
+                    granted: true,
+                } => ExtensionRuntimeGrantRequest::new(vec![], vec![pattern.clone()]),
+                _ => return settle(runtime, ExtensionGrantEditOutcome::FailedClosed),
+            };
+            let Ok(targets) = targets else {
+                return settle(runtime, ExtensionGrantEditOutcome::FailedClosed);
+            };
+            // Only additions use the native in-place rebind. Revocations retain
+            // the full retirement path, which invalidates previously issued work.
+            let live = super::runtime_grants::request_until(
+                startup, runtime, key, generation, targets, deadline,
+            );
+            let outcome = match live.into_outcome() {
+                Live::Granted {
+                    revision,
+                    runtime: ExtensionRuntimeGrantRuntimeState::Active(generation),
+                } => ExtensionGrantEditOutcome::Applied {
+                    revision,
+                    runtime: ExtensionUpdateRuntimeState::Active(generation),
+                },
+                Live::AlreadyGranted {
+                    revision,
+                    generation,
+                } => ExtensionGrantEditOutcome::Unchanged {
+                    revision,
+                    runtime: ExtensionUpdateRuntimeState::Active(generation),
+                },
+                Live::Conflict => ExtensionGrantEditOutcome::Conflict,
+                Live::Rejected => ExtensionGrantEditOutcome::Rejected,
+                Live::Unavailable => ExtensionGrantEditOutcome::Unavailable,
+                Live::OutcomeUnknown => ExtensionGrantEditOutcome::OutcomeUnknown,
+                Live::FailedClosed => ExtensionGrantEditOutcome::FailedClosed,
+            };
+            return settle(runtime, outcome);
+        }
+    }
+
     let patch = match ExtensionGrantPatch::new(vec![mutation]) {
         Ok(patch) => patch,
         Err(_) => return settle(runtime, ExtensionGrantEditOutcome::FailedClosed),

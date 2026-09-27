@@ -32,7 +32,50 @@ use objc2_foundation::{NSString, NSURL};
 #[cfg(target_os = "macos")]
 use zephium_extension_runtime_api::ExtensionRuntimeHostBindError;
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum NativeMessagingDenial {
+    SubjectAbsent,
+    RuntimeAbsent,
+    RuntimeError,
+    OwnerAbsent,
+    RequirementAbsent,
+    OwnerError,
+}
+
+#[cfg(target_os = "macos")]
+impl NativeMessagingDenial {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::SubjectAbsent => "subject-absent",
+            Self::RuntimeAbsent => "runtime-absent",
+            Self::RuntimeError => "runtime-error",
+            Self::OwnerAbsent => "owner-absent",
+            Self::RequirementAbsent => "requirement-absent",
+            Self::OwnerError => "owner-error",
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_messaging_denial_due(count: &mut u64) -> bool {
+    *count = count.saturating_add(1);
+    count.is_power_of_two()
+}
+
 impl EngineHost {
+    #[cfg(target_os = "macos")]
+    fn report_native_messaging_denial(&mut self, reason: NativeMessagingDenial) {
+        let count = &mut self.publisher_native_messaging_denials[reason as usize];
+        if native_messaging_denial_due(count) {
+            crate::diagnostic!(
+                "extensions: publisher native messaging authorization was unavailable; reason={}; attempts={count}",
+                reason.label()
+            );
+        }
+    }
+
     #[cfg(target_os = "macos")]
     pub(super) fn wake_matching_document_backgrounds(
         &mut self,
@@ -168,23 +211,43 @@ impl EngineHost {
         profile: ProfileId,
         request: ExtensionBrowserRequestId,
         settlement: ExtensionBrowserRequestSettlement,
+        page_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        first_url_after_reply: Option<(
+            std::sync::Arc<str>,
+            zephium_core::ports::engine::NavigationRequestId,
+        )>,
     ) -> bool {
+        let created_tab = match settlement {
+            ExtensionBrowserRequestSettlement::Applied(
+                zephium_core::extensions::ExtensionBrowserRequestResult::CreatedTab(tab),
+            ) => Some(tab),
+            _ => None,
+        };
+        let page = match settlement {
+            ExtensionBrowserRequestSettlement::Applied(
+                zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized {
+                    tab,
+                    window,
+                },
+            ) => Some((tab, window)),
+            _ => None,
+        };
+        let stage = page
+            .and_then(|(_, window)| self.ensure_stage(window))
+            .zip(page_token);
         let mut settlement = settlement;
         let extension_page_lease = if matches!(
             settlement,
             ExtensionBrowserRequestSettlement::Applied(
-                zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized
+                zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized { .. }
             )
         ) {
-            match self
-                .native_resources
-                .try_acquire(NativeResourceClass::ExtensionPopup)
-            {
+            match self.native_resources.try_acquire_extension_guest() {
                 Ok(lease) => Some(lease),
                 Err(error) => {
                     let reason = match error {
                         NativeResourceAdmissionError::ClassExhausted(
-                            NativeResourceClass::ExtensionPopup,
+                            NativeResourceClass::Tab,
                         )
                         | NativeResourceAdmissionError::GlobalExhausted => {
                             zephium_core::extensions::ExtensionBrowserRequestRejection::CapacityExceeded
@@ -201,18 +264,49 @@ impl EngineHost {
         } else {
             None
         };
-        matches!(
-            self.macos_extension_controllers.settle_browser_request(
-                profile,
-                request,
-                settlement,
-                extension_page_lease,
-            ),
+        let outcome = self.macos_extension_controllers.settle_browser_request(
+            profile,
+            request,
+            settlement,
+            extension_page_lease,
+            stage,
+        );
+        if let (
+            Ok(crate::platform::imp::ControllerBrowserRequestSettlement::Settled),
+            Some(tab),
+            Some((url, intent)),
+        ) = (&outcome, created_tab, first_url_after_reply)
+        {
+            // The native tabs.create reply has been accepted for this exact
+            // logical tab. Its first network effect enters Shell only now.
+            self.sink.emit(
+                zephium_core::ports::engine::EngineEvent::ExtensionCreatedTabReplied {
+                    profile,
+                    request,
+                    tab,
+                    url,
+                    intent,
+                },
+            );
+        }
+        let settled = matches!(
+            outcome,
             Ok(
                 crate::platform::imp::ControllerBrowserRequestSettlement::Settled
                     | crate::platform::imp::ControllerBrowserRequestSettlement::Stale
             )
-        )
+        );
+        if let Some((id, _)) = page {
+            if !self
+                .macos_extension_controllers
+                .has_extension_page(profile, id)
+            {
+                self.sink.emit(
+                    zephium_core::ports::engine::EngineEvent::ExtensionPageClosed { profile, id },
+                );
+            }
+        }
+        settled
     }
 
     #[cfg(target_os = "macos")]
@@ -286,6 +380,128 @@ impl EngineHost {
     }
 
     #[cfg(target_os = "macos")]
+    pub(crate) fn finalize_extension_identity_request(
+        &mut self,
+        profile: ProfileId,
+        request: crate::platform::imp::IdentityRequestId,
+    ) {
+        let context = self
+            .macos_extension_controllers
+            .identity_request_context(profile, request)
+            .ok()
+            .flatten();
+        let witness = context.and_then(|context| {
+            self.extension_runtime_registry
+                .compatibility_broker_witness_for_macos_context(
+                    profile,
+                    context,
+                    zephium_core::extensions::ExtensionCompatibilityBrokerPurpose::IdentityWebAuthFlow,
+                )
+                .ok()
+                .flatten()
+        });
+        let lease = witness.as_ref().and_then(|_| {
+            self.native_resources
+                .try_acquire(NativeResourceClass::ExtensionAuxiliary)
+                .ok()
+        });
+        let _ = self
+            .macos_extension_controllers
+            .finalize_identity_request(profile, request, witness, lease);
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn timeout_extension_identity_request(
+        &mut self,
+        profile: ProfileId,
+        request: crate::platform::imp::IdentityRequestId,
+    ) {
+        let _ = self
+            .macos_extension_controllers
+            .timeout_identity_request(profile, request);
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn finalize_extension_offscreen_request(
+        &mut self,
+        profile: ProfileId,
+        request: crate::platform::imp::OffscreenSessionId,
+    ) {
+        let subject = self
+            .macos_extension_controllers
+            .offscreen_subject(profile, request)
+            .ok()
+            .flatten();
+        let Some((context, needs_lease)) = subject else { return; };
+        let witness = self.extension_runtime_registry
+            .compatibility_broker_witness_for_macos_context(
+                profile,
+                context,
+                zephium_core::extensions::ExtensionCompatibilityBrokerPurpose::OffscreenLocalStorage,
+            )
+            .ok()
+            .flatten();
+        let lease = if needs_lease && witness.is_some() {
+            self.native_resources
+                .try_acquire(NativeResourceClass::ExtensionAuxiliary)
+                .ok()
+        } else {
+            None
+        };
+        let _ = self.macos_extension_controllers
+            .authorize_offscreen(profile, request, witness, lease);
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn retry_pending_extension_offscreen_authorization(&mut self, profile: ProfileId) {
+        let pending = self.macos_extension_controllers.pending_offscreen_authorization_ids(profile);
+        for request in pending {
+            self.finalize_extension_offscreen_request(profile, request);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn settle_isolated_extension_resource(
+        &mut self,
+        runtime: ExtensionRuntimeInstance,
+        kind: zephium_core::ports::extensions::IsolatedExtensionDocumentKind,
+        request: u64,
+        outcome: zephium_core::ports::extensions::IsolatedExtensionResourceOutcome,
+    ) -> bool {
+        match kind {
+            zephium_core::ports::extensions::IsolatedExtensionDocumentKind::Offscreen => {
+                let context = self.macos_extension_controllers
+                    .offscreen_resource_context(runtime)
+                    .ok()
+                    .flatten();
+                let witness = context.and_then(|context| {
+                    self.extension_runtime_registry
+                        .compatibility_broker_witness_for_macos_context(
+                            runtime.profile(),
+                            context,
+                            zephium_core::extensions::ExtensionCompatibilityBrokerPurpose::OffscreenLocalStorage,
+                        )
+                        .ok()
+                        .flatten()
+                });
+                if !witness.as_ref().is_some_and(|witness| {
+                    witness.runtime_instance() == runtime
+                        && witness.purpose() == zephium_core::extensions::ExtensionCompatibilityBrokerPurpose::OffscreenLocalStorage
+                }) {
+                    if let Some(context) = context {
+                        self.macos_extension_controllers.cancel_offscreen_context(runtime.profile(), context);
+                    }
+                    return false;
+                }
+                self.macos_extension_controllers
+                    .settle_offscreen_resource(runtime, request, outcome)
+                    .unwrap_or(false)
+            }
+            zephium_core::ports::extensions::IsolatedExtensionDocumentKind::Sandbox => false,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     pub(crate) fn finalize_extension_native_messaging_request(
         &mut self,
         profile: ProfileId,
@@ -297,10 +513,7 @@ impl EngineHost {
             .ok()
             .flatten();
         let Some((context, requested_host)) = subject else {
-            publisher_native_messaging_lab_diagnostic("subject-absent");
-            crate::diagnostic!(
-                "extensions: publisher native messaging authorization was unavailable"
-            );
+            self.report_native_messaging_denial(NativeMessagingDenial::SubjectAbsent);
             let _ = self
                 .macos_extension_controllers
                 .authorize_native_messaging(profile, request, None);
@@ -314,24 +527,17 @@ impl EngineHost {
             Err(ExtensionRuntimeHostBindError::Unavailable)
                 if self.defer_extension_native_messaging_authorization(profile, request) =>
             {
-                publisher_native_messaging_lab_diagnostic("runtime-retry");
                 return;
             }
             Ok(None) => {
-                publisher_native_messaging_lab_diagnostic("runtime-absent");
-                crate::diagnostic!(
-                    "extensions: publisher native messaging authorization was unavailable"
-                );
+                self.report_native_messaging_denial(NativeMessagingDenial::RuntimeAbsent);
                 let _ = self
                     .macos_extension_controllers
                     .authorize_native_messaging(profile, request, None);
                 return;
             }
             Err(_) => {
-                publisher_native_messaging_lab_diagnostic("runtime-error");
-                crate::diagnostic!(
-                    "extensions: publisher native messaging authorization was unavailable"
-                );
+                self.report_native_messaging_denial(NativeMessagingDenial::RuntimeError);
                 let _ = self
                     .macos_extension_controllers
                     .authorize_native_messaging(profile, request, None);
@@ -351,35 +557,24 @@ impl EngineHost {
                 Err(ExtensionRuntimeHostBindError::Unavailable)
                     if self.defer_extension_native_messaging_authorization(profile, request) =>
                 {
-                    publisher_native_messaging_lab_diagnostic("owner-retry");
                     return;
                 }
                 Ok(None) => {
-                    publisher_native_messaging_lab_diagnostic("owner-absent");
-                    crate::diagnostic!(
-                        "extensions: publisher native messaging authorization was unavailable"
-                    );
+                    self.report_native_messaging_denial(NativeMessagingDenial::OwnerAbsent);
                     let _ = self
                         .macos_extension_controllers
                         .authorize_native_messaging(profile, request, None);
                     return;
                 }
                 Ok(Some(None)) => {
-                    publisher_native_messaging_lab_diagnostic("requirement-absent");
-                    publisher_native_messaging_host_lab_diagnostic(&requested_host);
-                    crate::diagnostic!(
-                        "extensions: publisher native messaging authorization was unavailable"
-                    );
+                    self.report_native_messaging_denial(NativeMessagingDenial::RequirementAbsent);
                     let _ = self
                         .macos_extension_controllers
                         .authorize_native_messaging(profile, request, None);
                     return;
                 }
                 Err(_) => {
-                    publisher_native_messaging_lab_diagnostic("owner-error");
-                    crate::diagnostic!(
-                        "extensions: publisher native messaging authorization was unavailable"
-                    );
+                    self.report_native_messaging_denial(NativeMessagingDenial::OwnerError);
                     let _ = self
                         .macos_extension_controllers
                         .authorize_native_messaging(profile, request, None);
@@ -547,6 +742,11 @@ impl EngineHost {
         }
 
         #[cfg(target_os = "macos")]
+        let was_ready = self
+            .macos_extension_controllers
+            .browser_surface_ready_for_document_background(profile)
+            .unwrap_or(false);
+        #[cfg(target_os = "macos")]
         {
             let views = &self.views;
             let partitions = &self.partitions;
@@ -566,6 +766,19 @@ impl EngineHost {
         }
 
         self.extension_browser_surfaces.insert(profile, surface);
+        // The first usable tab can arrive through logical publication after
+        // its native view was bound. Handle that ordering as well as the
+        // existing view-binding/reconciliation paths, before a popup needs its
+        // background. Ordinary title/tab metadata changes must not wake it.
+        #[cfg(target_os = "macos")]
+        if !was_ready
+            && self
+                .macos_extension_controllers
+                .browser_surface_ready_for_document_background(profile)
+                .unwrap_or(false)
+        {
+            let _ = self.wake_resident_document_backgrounds(profile);
+        }
         true
     }
 
@@ -646,20 +859,22 @@ impl EngineHost {
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "native-extension-lab-diagnostics"))]
-fn publisher_native_messaging_lab_diagnostic(phase: &'static str) {
-    crate::diagnostic!("extensions: publisher native messaging host phase={phase}");
+#[cfg(all(test, target_os = "macos"))]
+mod native_messaging_diagnostic_tests {
+    use super::native_messaging_denial_due;
+
+    #[test]
+    fn repeated_denials_emit_at_powers_of_two_and_never_wrap() {
+        let mut count = 0;
+        let emitted = (1..=1024)
+            .filter(|_| native_messaging_denial_due(&mut count))
+            .collect::<Vec<_>>();
+        assert_eq!(emitted, [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]);
+        assert_eq!(count, 1024);
+
+        count = u64::MAX - 1;
+        assert!(!native_messaging_denial_due(&mut count));
+        assert!(!native_messaging_denial_due(&mut count));
+        assert_eq!(count, u64::MAX);
+    }
 }
-
-#[cfg(all(target_os = "macos", not(feature = "native-extension-lab-diagnostics")))]
-fn publisher_native_messaging_lab_diagnostic(_phase: &'static str) {}
-
-#[cfg(all(target_os = "macos", feature = "native-extension-lab-diagnostics"))]
-fn publisher_native_messaging_host_lab_diagnostic(requested_host: &str) {
-    crate::diagnostic!(
-        "extensions: publisher native messaging requested unmatched host={requested_host}"
-    );
-}
-
-#[cfg(all(target_os = "macos", not(feature = "native-extension-lab-diagnostics")))]
-fn publisher_native_messaging_host_lab_diagnostic(_requested_host: &str) {}

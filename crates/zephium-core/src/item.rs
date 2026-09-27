@@ -61,6 +61,34 @@ pub enum Lifecycle {
     Hibernated,
 }
 
+/// A browser-owned page has no URL or native content WebView. The closed
+/// discriminator can later be extended for independently owned documents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserOwnedTab {
+    Settings,
+    Extensions,
+}
+
+impl BrowserOwnedTab {
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Settings => "Settings",
+            Self::Extensions => "Extensions",
+        }
+    }
+}
+
+/// Content ownership is separate from a committed network URL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabContent {
+    Web,
+    BrowserOwned(BrowserOwnedTab),
+    /// Native guest ownership is bound separately by the extension broker.
+    /// This marker carries no URL, install ID, or execution authority.
+    ExtensionOwned,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SpaceSection {
     Pinned,
@@ -82,6 +110,7 @@ pub enum Placement {
 
 #[derive(Clone, Debug)]
 pub struct TabState {
+    pub content: TabContent,
     pub title: String,
     pub url: Option<Url>,
     pub loading: bool,
@@ -97,6 +126,7 @@ pub struct TabState {
 impl TabState {
     pub(crate) fn new() -> Self {
         Self {
+            content: TabContent::Web,
             title: "New Tab".into(),
             url: None,
             loading: false,
@@ -106,6 +136,22 @@ impl TabState {
             zoom: 1.0,
             lifecycle: Lifecycle::Inactive,
             view: false,
+        }
+    }
+
+    pub(crate) fn browser_owned(page: BrowserOwnedTab) -> Self {
+        Self {
+            content: TabContent::BrowserOwned(page),
+            title: page.title().into(),
+            ..Self::new()
+        }
+    }
+
+    pub(crate) fn extension_owned() -> Self {
+        Self {
+            content: TabContent::ExtensionOwned,
+            title: "Extension".into(),
+            ..Self::new()
         }
     }
 

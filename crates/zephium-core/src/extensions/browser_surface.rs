@@ -147,7 +147,10 @@ pub enum ExtensionBrowserRequestResult {
     /// The Shell admitted presentation in the profile's extension-only trust
     /// zone. The native broker must still rejoin the exact context, URL and
     /// resource lease before completing WebKit's request.
-    ExtensionPageAuthorized,
+    ExtensionPageAuthorized {
+        tab: ItemId,
+        window: WindowId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -70,9 +70,10 @@ pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-09-04";
 pub const OUTSTANDING_VENDOR_FIX_SOURCE_URL: &str = SECURITY_FLOOR_SOURCE_URL;
 
 /// The last UTC date on which CI may accept this review without an update.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-09-10";
-/// 2026-09-11T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_789_084_800;
+// Rechecked against the vendor security releases on 2026-09-11.
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-09-18";
+/// 2026-09-19T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_789_776_000;
 
 /// Loader/debugger environment variables that can replace the selected
 /// runtime or UDF, change channel selection, append browser flags (including

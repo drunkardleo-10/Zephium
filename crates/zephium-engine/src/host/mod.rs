@@ -696,6 +696,10 @@ pub(crate) struct EngineHost {
     agent_cookie_quarantined_profiles: HashSet<ProfileId>,
     native_resources: NativeResourceLedger,
     extension_runtime_registry: extension_runtime::ExtensionRuntimeRegistry,
+    // One fixed counter per native-messaging denial class. Diagnostic output
+    // stays bounded even when a publisher retries a refused host in a loop.
+    #[cfg(target_os = "macos")]
+    publisher_native_messaging_denials: [u64; 6],
     extension_document_authority: ExtensionDocumentAuthority,
     // Allocates only after an explicit Shell publication. Ordinary inert
     // startup retains the empty map and creates no native delegate graph.

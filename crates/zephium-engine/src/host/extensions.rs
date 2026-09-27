@@ -138,12 +138,11 @@ impl ActiveTabAuthority {
     }
 }
 
-/// Actual native runtime ownership must be retained beside every toolbar
-/// invocation. There is deliberately no production constructor yet: the
-/// native extension adapters do not exist, so production cannot populate the
-/// owner map or mint `activeTab` authority. A platform adapter must add a
-/// concrete, payload-carrying RAII variant here before exposing ingress. The
-/// enum is intentionally uninhabited in production today.
+/// Ownership for the dormant host-mediated document-operation broker. Native
+/// WKWebExtension toolbar actions use the live runtime registry and WebKit's
+/// own user-gesture grants, independently of this broker. A future bridge must
+/// add a payload-carrying owner before exposing this separate authority path;
+/// the enum intentionally remains uninhabited in production.
 enum NativeExtensionRuntimeOwner {
     /// Full-fingerprint owner used by engine-only authority tests.
     #[cfg(test)]
@@ -342,15 +341,6 @@ enum ExtensionAuthorityDenial {
     NativeOperationFailed,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg(target_os = "macos")]
-pub(super) enum ToolbarActiveTabGrant {
-    Granted,
-    NotApplicable,
-    CapacityExceeded,
-    Invalid,
-}
-
 #[derive(Default)]
 pub(super) struct ExtensionDocumentAuthority {
     runtime_owners: BTreeMap<ExtensionRuntimeInstance, NativeExtensionRuntimeOwner>,
@@ -452,6 +442,7 @@ impl ExtensionDocumentAuthority {
     /// retained and the exact physical tab generation has a committed web
     /// origin.
     #[cfg(any(target_os = "macos", test))]
+    #[allow(dead_code)] // Dormant host-document broker, separate from native WK actions.
     fn grant_active_tab_from_witness_document(
         &mut self,
         witness: ExtensionActiveTabGrantWitness,
@@ -873,45 +864,6 @@ impl EngineHost {
             epoch,
             url,
         })
-    }
-
-    /// The only future production ingress for minting activeTab scope. All
-    /// document fields are derived from EngineHost-owned maps; the service can
-    /// supply only an opaque witness bound to the same runtime/invocation.
-    #[cfg(target_os = "macos")]
-    fn grant_active_tab_from_user_invocation(
-        &mut self,
-        item: ItemId,
-        witness: ExtensionActiveTabGrantWitness,
-    ) -> Result<(), ExtensionAuthorityDenial> {
-        let profile = witness.runtime_instance().profile();
-        let document = self.exact_presented_extension_document(item, profile)?;
-        self.extension_document_authority
-            .grant_active_tab_from_witness_document(witness, document.borrowed())
-    }
-
-    /// Joins an operation-authority witness with the exact currently
-    /// presented host document. A restricted or not-yet-presented page simply
-    /// receives no transient scope; it does not suppress the independent
-    /// action click event.
-    #[cfg(target_os = "macos")]
-    pub(super) fn grant_toolbar_active_tab(
-        &mut self,
-        item: ItemId,
-        witness: ExtensionActiveTabGrantWitness,
-    ) -> ToolbarActiveTabGrant {
-        match self.grant_active_tab_from_user_invocation(item, witness) {
-            Ok(()) => ToolbarActiveTabGrant::Granted,
-            Err(
-                ExtensionAuthorityDenial::DocumentNotPresented
-                | ExtensionAuthorityDenial::NativeDocumentMismatch
-                | ExtensionAuthorityDenial::UnsupportedDocumentOrigin,
-            ) => ToolbarActiveTabGrant::NotApplicable,
-            Err(ExtensionAuthorityDenial::ActiveTabCapacity) => {
-                ToolbarActiveTabGrant::CapacityExceeded
-            }
-            Err(_) => ToolbarActiveTabGrant::Invalid,
-        }
     }
 
     /// Issues a permit only after joining the purpose witness with the exact

@@ -69,3 +69,13 @@ pub enum ExtensionRepositoryError {
     #[error("simulated extension repository process loss")]
     InjectedCrash,
 }
+
+impl crate::operation::RepositoryOperationError {
+    pub(crate) const fn repository_error(self) -> ExtensionRepositoryError {
+        match self {
+            Self::CallbackReentry => ExtensionRepositoryError::CallbackReentry,
+            Self::Unhealthy => ExtensionRepositoryError::Sealed,
+            Self::Poisoned => ExtensionRepositoryError::SettlementAmbiguous,
+        }
+    }
+}

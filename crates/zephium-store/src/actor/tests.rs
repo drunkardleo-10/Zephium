@@ -3621,6 +3621,9 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         "pub fn transition_native_ownership_to_may_own_until(",
         "pub fn rebind_native_ownership_grants_until(",
         "pub fn load_install_catalog_until(",
+        "pub fn load_upstream_checkpoint_until(",
+        "pub fn load_install_provenance_until(",
+        "pub fn load_package_storage_roots_until(",
         "pub fn load_native_namespace_until(",
         "pub fn provision_install_until(",
         "pub fn provision_install_with_provenance_until(",
@@ -3648,7 +3651,7 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         })
         .count();
     assert_eq!(
-        public_items, 20,
+        public_items, 23,
         "the service Store authority gained an unreviewed public item"
     );
     assert!(!surface.contains("pub fn mutate_extension_install"));
@@ -6186,6 +6189,28 @@ fn roundtrip_tree_folders_focus_and_splits() {
 }
 
 #[test]
+fn browser_owned_tab_roundtrips_as_typed_page_without_a_url() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut session = sample();
+    let id = ItemId::from(72);
+    session.items.push(PersistedItem {
+        id,
+        parent: None,
+        placement: Placement::Space {
+            space: session.spaces[0].id,
+            section: SpaceSection::Today,
+        },
+        kind: PersistedKind::BrowserTab {
+            page: zephium_core::item::BrowserOwnedTab::Extensions,
+        },
+    });
+    session.active_item = Some(id);
+    session.splits = None;
+    store.save_session(session.clone());
+    assert_eq!(loaded(&store), session);
+}
+
+#[test]
 fn recently_closed_tabs_roundtrip_in_the_authoritative_bounded_snapshot() {
     let store = SqliteStore::in_memory().unwrap();
     let mut session = sample();
@@ -6195,6 +6220,8 @@ fn recently_closed_tabs_roundtrip_in_the_authoritative_bounded_snapshot() {
         url: "https://closed.example/path".into(),
         title: "Closed tab".into(),
         zoom: 1.25,
+        session_id: Some(zephium_core::ids::ClosedSessionId::from(42)),
+        closed_at_ms: Some(1_700_000_000_123),
     });
     store.save_session(session.clone());
     assert_eq!(loaded(&store), session);

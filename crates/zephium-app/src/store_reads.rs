@@ -75,6 +75,7 @@ enum Request {
         runtime: zephium_core::extensions::ExtensionRuntimeInstance,
         request: zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
         limit: u16,
+        query: Option<zephium_core::extensions::ExtensionHistorySearchQuery>,
     },
     Favicon {
         generation: u64,
@@ -219,6 +220,25 @@ impl StoreReadQueue {
         request: zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
         limit: u16,
     ) -> bool {
+        self.request_extension_history(runtime, request, limit, None)
+    }
+
+    pub(crate) fn request_extension_history_search(
+        &self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+        request: zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
+        query: zephium_core::extensions::ExtensionHistorySearchQuery,
+    ) -> bool {
+        self.request_extension_history(runtime, request, query.limit(), Some(query))
+    }
+
+    fn request_extension_history(
+        &self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+        request: zephium_core::extensions::ExtensionCompatibilityBrokerRequestId,
+        limit: u16,
+        query: Option<zephium_core::extensions::ExtensionHistorySearchQuery>,
+    ) -> bool {
         if limit == 0
             || limit > zephium_core::extensions::MAX_EXTENSION_COMPATIBILITY_HISTORY_RESULTS
         {
@@ -244,6 +264,7 @@ impl StoreReadQueue {
                 runtime,
                 request,
                 limit,
+                query,
             },
         );
         state.extension_history_order.push_back(key);
@@ -567,19 +588,22 @@ fn run_with(
                 runtime,
                 request,
                 limit,
+                query,
             } => StoreReadResult::ExtensionRecentHistory {
                 runtime,
                 request,
-                hits: store
-                    .recent_history(runtime.profile(), u32::from(limit))
-                    .into_iter()
-                    .take(usize::from(limit))
-                    .filter(|hit| navigation::is_allowed_str(&hit.url))
-                    .map(|mut hit| {
-                        hit.title = sanitize_page_title(&hit.title);
-                        hit
-                    })
-                    .collect(),
+                hits: match query {
+                    Some(query) => store.extension_history_search(runtime.profile(), &query),
+                    None => store.recent_history(runtime.profile(), u32::from(limit)),
+                }
+                .into_iter()
+                .take(usize::from(limit))
+                .filter(|hit| navigation::is_allowed_str(&hit.url))
+                .map(|mut hit| {
+                    hit.title = sanitize_page_title(&hit.title);
+                    hit
+                })
+                .collect(),
             },
             Request::HistorySurface {
                 token,

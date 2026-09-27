@@ -17,7 +17,7 @@ use zephium_core::extensions::{
     ExtensionBrowserRequestSettlement, MAX_PENDING_EXTENSION_BROWSER_REQUESTS,
     MAX_PENDING_EXTENSION_BROWSER_REQUESTS_PER_PROFILE,
 };
-use zephium_core::ids::ProfileId;
+use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::EngineEvent;
 
 use crate::{EngineEventIngress, EngineEventIngressSink};
@@ -70,6 +70,7 @@ enum PendingCompletion {
 struct PendingRequest {
     completion: PendingCompletion,
     extension_page: Option<PendingExtensionPage>,
+    trace_close_tab: Option<ItemId>,
     watchdog: crate::platform::imp::ContentPolicyTimeout,
 }
 
@@ -114,6 +115,39 @@ impl BrowserRequestBroker {
             sealed: Cell::new(false),
             discarded_tab_webview_refusals: Cell::new(0),
         })
+    }
+
+    pub(super) fn extension_page_changed(
+        &self,
+        id: ItemId,
+        title: String,
+        loading: bool,
+        can_go_back: bool,
+        can_go_forward: bool,
+    ) {
+        if let Some(sink) = &self.sink {
+            sink(EngineEventIngress::global(
+                EngineEvent::ExtensionPageChanged {
+                    profile: self.profile,
+                    id,
+                    title,
+                    loading,
+                    can_go_back,
+                    can_go_forward,
+                },
+            ));
+        }
+    }
+
+    pub(super) fn extension_page_closed(&self, id: ItemId) {
+        if let Some(sink) = &self.sink {
+            sink(EngineEventIngress::global(
+                EngineEvent::ExtensionPageClosed {
+                    profile: self.profile,
+                    id,
+                },
+            ));
+        }
     }
 
     pub(super) fn record_discarded_tab_webview_refusal(&self) {
@@ -255,6 +289,10 @@ impl BrowserRequestBroker {
                 return;
             }
         };
+        let trace_close_tab = match request.action() {
+            ExtensionBrowserRequestAction::CloseTab { tab } => Some(*tab),
+            _ => None,
+        };
         let profile = self.profile;
         let Some(watchdog) = crate::platform::imp::schedule_content_policy_timeout(
             BROWSER_REQUEST_TIMEOUT,
@@ -277,6 +315,7 @@ impl BrowserRequestBroker {
             PendingRequest {
                 completion,
                 extension_page,
+                trace_close_tab,
                 watchdog,
             },
         );
@@ -284,6 +323,11 @@ impl BrowserRequestBroker {
         if replaced.is_some() {
             self.pool.release();
             return;
+        }
+        if extension_tab_trace_enabled() {
+            if let Some(tab) = trace_close_tab {
+                eprintln!("extension-tab-trace: native-close-dispatched tab={tab} request={id:?}");
+            }
         }
 
         let delivered = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -331,6 +375,19 @@ impl BrowserRequestBroker {
             return BrowserRequestSettlementOutcome::Stale;
         };
         drop(pending.watchdog);
+        if extension_tab_trace_enabled() {
+            if let Some(tab) = pending.trace_close_tab {
+                let applied = matches!(
+                    settlement,
+                    ExtensionBrowserRequestSettlement::Applied(
+                        ExtensionBrowserRequestResult::Complete
+                    )
+                );
+                eprintln!(
+                    "extension-tab-trace: native-close-settlement tab={tab} request={id:?} applied={applied}"
+                );
+            }
+        }
         match (pending.completion, pending.extension_page, settlement) {
             (
                 PendingCompletion::Unit(completion),
@@ -364,7 +421,7 @@ impl BrowserRequestBroker {
                 PendingCompletion::Tab(completion),
                 Some(page),
                 ExtensionBrowserRequestSettlement::Applied(
-                    ExtensionBrowserRequestResult::ExtensionPageAuthorized,
+                    ExtensionBrowserRequestResult::ExtensionPageAuthorized { .. },
                 ),
             ) => {
                 let Some(lease) = extension_page_lease else {
@@ -403,6 +460,11 @@ impl BrowserRequestBroker {
         let Some(pending) = self.take(id) else {
             return false;
         };
+        if extension_tab_trace_enabled() {
+            if let Some(tab) = pending.trace_close_tab {
+                eprintln!("extension-tab-trace: native-close-timeout tab={tab} request={id:?}");
+            }
+        }
         // The dispatch source is executing now; dropping it still balances
         // ownership and cancellation before the external completion reenters.
         drop(pending.watchdog);
@@ -459,6 +521,11 @@ impl BrowserRequestBroker {
             );
         }
     }
+}
+
+fn extension_tab_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("ZEPHIUM_EXTENSION_TAB_TRACE").as_deref() == Ok("1"))
 }
 
 impl Drop for BrowserRequestBroker {

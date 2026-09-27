@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { PuzzleIcon } from "@hugeicons/core-free-icons";
   import { extensions } from "$domain/extensions";
+  import { surface as browserPage } from "$domain/surface";
   import { tabs } from "$domain/tabs";
+  import Icon from "$shared/ui/Icon";
   import ExtensionActionIcon from "./ExtensionActionIcon.svelte";
-  import ExtensionManager from "./ExtensionManager.svelte";
 
   let { compact = false }: { compact?: boolean } = $props();
 
@@ -11,6 +13,7 @@
   let actions = $derived(extensions.activeActions(profileId, tabId));
   let failure = $derived(extensions.failureReason(profileId, tabId));
   let shortcut = $derived(extensions.actionShortcut(profileId, tabId));
+  let managementAvailability = $derived(extensions.managementAvailability());
   let actionRoot = $state<HTMLDivElement>();
 
   const failureMessage = (reason: ReturnType<typeof extensions.failureReason>) => {
@@ -46,6 +49,10 @@
     if (profileId === null || tabId === null || !(target instanceof HTMLButtonElement)) return;
     void extensions.invoke(profileId, tabId, action, target.getBoundingClientRect());
   }
+
+  $effect(() => {
+    if (extensions.storeReviewRequest() !== null) void browserPage.open("extensions");
+  });
 
   $effect(() => {
     const request = shortcut;
@@ -104,7 +111,18 @@
     {/each}
   {/if}
 
-  <ExtensionManager {compact} />
+  {#if managementAvailability === "configured"}
+    <button
+      type="button"
+      aria-label="Open Extensions"
+      title="Extensions"
+      class="icon-button"
+      style:--icon-button-size="28px"
+      onclick={() => void browserPage.open("extensions")}
+    >
+      <Icon icon={PuzzleIcon} size={16} />
+    </button>
+  {/if}
 
   {#if failure !== null}
     {#if compact}

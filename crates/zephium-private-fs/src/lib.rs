@@ -9,7 +9,9 @@
 //! readable `/proc/self/fd` so exact spelling can be proven from live file
 //! descriptors even on case-folding filesystems. Missing or restricted procfs
 //! fails closed. Other Unix targets and Windows fail closed until their native
-//! adapters have passed dedicated live tests.
+//! adapters have passed dedicated live tests. Windows has an explicit
+//! `windows-namespace-validation` feature for debug validation on local NTFS;
+//! it is disabled by default and forbidden in optimized shipping builds.
 //!
 //! The boundary excludes unprivileged operating-system principals that have no
 //! delegated access and rejects untrusted package contents. Root/administrator,
@@ -20,6 +22,9 @@
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
+
+#[cfg(all(feature = "windows-namespace-validation", not(debug_assertions)))]
+compile_error!("Windows namespace validation must not enter an optimized shipping build");
 
 // Internal repository tests explicitly request these debug counters. The
 // release product probe instead retains only the sealed fixture authority, so

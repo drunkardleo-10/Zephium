@@ -162,13 +162,16 @@ impl fmt::Debug for ExtensionCatalogSetDigest {
     }
 }
 
-/// Product-authorized role of the exact catalog set used by this owner.
+/// Durable source discriminator for native ownership. Active/rollback remain
+/// exact reviewed catalog roles; Beta names an independently admitted object.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ExtensionCatalogGenerationRole {
     /// Ordinary active product generation.
     Active,
     /// Explicitly authorized rollback generation.
     Rollback,
+    /// Separate Beta object; its digest is not a Verified catalog witness.
+    Beta,
 }
 
 impl ExtensionCatalogGenerationRole {
@@ -177,6 +180,7 @@ impl ExtensionCatalogGenerationRole {
         match self {
             Self::Active => "active",
             Self::Rollback => "rollback",
+            Self::Beta => "beta",
         }
     }
 
@@ -185,9 +189,102 @@ impl ExtensionCatalogGenerationRole {
         match value {
             "active" => Some(Self::Active),
             "rollback" => Some(Self::Rollback),
+            "beta" => Some(Self::Beta),
             _ => None,
         }
     }
+}
+
+/// Typed native package reference. Digest possession alone is never authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionNativePackageSource {
+    /// Exact active Verified catalog set.
+    ActiveCatalog(ExtensionCatalogSetDigest),
+    /// Exact separately authorized rollback catalog set.
+    RollbackCatalog(ExtensionCatalogSetDigest),
+    /// Exact independently admitted Beta object.
+    BetaObject(super::ExtensionBetaObjectDigest),
+}
+
+fn package_source(
+    role: ExtensionCatalogGenerationRole,
+    digest: ExtensionCatalogSetDigest,
+) -> ExtensionNativePackageSource {
+    match role {
+        ExtensionCatalogGenerationRole::Active => {
+            ExtensionNativePackageSource::ActiveCatalog(digest)
+        }
+        ExtensionCatalogGenerationRole::Rollback => {
+            ExtensionNativePackageSource::RollbackCatalog(digest)
+        }
+        ExtensionCatalogGenerationRole::Beta => ExtensionNativePackageSource::BetaObject(
+            super::ExtensionBetaObjectDigest::from_bytes(digest.bytes()),
+        ),
+    }
+}
+
+fn valid_package_source(
+    package: &ExtensionPackageIdentity,
+    role: ExtensionCatalogGenerationRole,
+    backend: ExtensionRuntimeBackendTarget,
+    context: ExtensionGrantBrowsingContext,
+) -> bool {
+    if !super::is_beta_extension_authority(package.authority()) {
+        return role != ExtensionCatalogGenerationRole::Beta;
+    }
+    if role != ExtensionCatalogGenerationRole::Beta
+        || context != ExtensionGrantBrowsingContext::Regular
+        || package.payload().acquired_zip_evidence().is_none()
+    {
+        return false;
+    }
+    let runtime = match backend {
+        ExtensionRuntimeBackendTarget::MacosNative => {
+            super::ExtensionBetaRuntimeTarget::MacosNative
+        }
+        ExtensionRuntimeBackendTarget::WindowsNative => {
+            super::ExtensionBetaRuntimeTarget::WindowsNative
+        }
+        _ => return false,
+    };
+    [
+        super::ExtensionBetaChannel::Stable,
+        super::ExtensionBetaChannel::Staging,
+        super::ExtensionBetaChannel::Local,
+    ]
+    .into_iter()
+    .any(|channel| runtime.authority(channel) == package.authority())
+}
+
+fn valid_beta_expected_identity(
+    package: &ExtensionPackageIdentity,
+    role: ExtensionCatalogGenerationRole,
+    backend: ExtensionRuntimeBackendTarget,
+    phase: ExtensionNativeOwnershipPhase,
+    revision: ExtensionNativeOwnershipEntryRevision,
+    expected: Option<ExtensionExpectedNativeOwnershipIdentity>,
+) -> bool {
+    if role != ExtensionCatalogGenerationRole::Beta {
+        return true;
+    }
+    let Some(expected) = expected else {
+        return phase == ExtensionNativeOwnershipPhase::NativeAbsentPreparing
+            || (phase == ExtensionNativeOwnershipPhase::NativeAbsentReleasePending
+                && revision.get() == 2);
+    };
+    if phase == ExtensionNativeOwnershipPhase::NativeAbsentPreparing
+        || (phase == ExtensionNativeOwnershipPhase::NativeAbsentReleasePending
+            && revision.get() == 2)
+    {
+        return false;
+    }
+    let mut encoded = [0u8; 32];
+    for (index, byte) in package.key().bytes()[..16].iter().enumerate() {
+        encoded[index * 2] = b'a' + (byte >> 4);
+        encoded[index * 2 + 1] = b'a' + (byte & 15);
+    }
+    ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(backend, encoded)
+        .is_ok_and(|identity| identity == expected)
 }
 
 /// Exact reviewed runtime backend selected for one native owner.
@@ -562,6 +659,46 @@ pub struct ExtensionNativeOwnershipPreparation {
 }
 
 impl ExtensionNativeOwnershipPreparation {
+    /// Constructs a separately tagged Beta preparation from a structural object
+    /// identity. Store must rejoin this identity to persisted provenance before
+    /// beginning the journal operation; this constructor grants no admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn beta(
+        key: ExtensionNativeOwnershipKey,
+        package: ExtensionPackageIdentity,
+        object: super::ExtensionBetaObjectDigest,
+        store_catalog_revision: ExtensionInstallCatalogRevision,
+        store_install_revision: ExtensionInstallRevision,
+        store_grant_revision: ExtensionGrantRevision,
+        grant_digest: ExtensionGrantDigest,
+        runtime_backend: ExtensionRuntimeBackendTarget,
+    ) -> Result<Self, ExtensionNativeOwnershipJournalError> {
+        if !valid_package_source(
+            &package,
+            ExtensionCatalogGenerationRole::Beta,
+            runtime_backend,
+            key.browsing_context(),
+        ) {
+            return Err(ExtensionNativeOwnershipJournalError::InvalidPackageSource);
+        }
+        Ok(Self::new(
+            key,
+            package,
+            ExtensionCatalogSetDigest::from_bytes(object.bytes()),
+            ExtensionCatalogGenerationRole::Beta,
+            store_catalog_revision,
+            store_install_revision,
+            store_grant_revision,
+            grant_digest,
+            runtime_backend,
+        ))
+    }
+
+    /// Typed source identity; Beta never becomes an active/rollback catalog.
+    pub fn source(&self) -> ExtensionNativePackageSource {
+        package_source(self.catalog_role, self.catalog_set_digest)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
         key: ExtensionNativeOwnershipKey,
@@ -650,6 +787,10 @@ pub struct ExtensionNativeOwnershipEntry {
 }
 
 impl ExtensionNativeOwnershipEntry {
+    /// Typed source identity, preserving the Beta/catalog distinction on reload.
+    pub fn source(&self) -> ExtensionNativePackageSource {
+        package_source(self.catalog_role, self.catalog_set_digest)
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn from_persisted(
         key: ExtensionNativeOwnershipKey,
@@ -752,6 +893,24 @@ impl ExtensionNativeOwnershipEntry {
     ) -> Result<Self, ExtensionNativeOwnershipJournalError> {
         if operation.get() != native_incarnation.get() {
             return Err(ExtensionNativeOwnershipJournalError::OperationIncarnationMismatch);
+        }
+        if !valid_package_source(
+            &package,
+            catalog_role,
+            runtime_backend,
+            key.browsing_context(),
+        ) {
+            return Err(ExtensionNativeOwnershipJournalError::InvalidPackageSource);
+        }
+        if !valid_beta_expected_identity(
+            &package,
+            catalog_role,
+            runtime_backend,
+            phase,
+            revision,
+            expected_native_identity,
+        ) {
+            return Err(ExtensionNativeOwnershipJournalError::InvalidExpectedNativeIdentity);
         }
         if !valid_state(intent, phase) {
             return Err(ExtensionNativeOwnershipJournalError::InvalidState { intent, phase });
@@ -1239,6 +1398,14 @@ impl ExtensionNativeOwnershipJournal {
 
         let (kind, entry) = match mutation {
             ExtensionNativeOwnershipJournalMutation::Begin(preparation) => {
+                if !valid_package_source(
+                    &preparation.package,
+                    preparation.catalog_role,
+                    preparation.runtime_backend,
+                    preparation.key.browsing_context(),
+                ) {
+                    return Err(ExtensionNativeOwnershipApplyError::Invalid);
+                }
                 if self.entries.len() >= MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES {
                     return Err(ExtensionNativeOwnershipApplyError::LimitReached);
                 }
@@ -1339,6 +1506,14 @@ impl ExtensionNativeOwnershipJournal {
                     .or(attach_expected_native_identity);
                 let native_identity = current.native_identity.or(attach_native_identity);
                 if !valid_native_identity(current.runtime_backend, native_identity, intent, phase)
+                    || !valid_beta_expected_identity(
+                        &current.package,
+                        current.catalog_role,
+                        current.runtime_backend,
+                        phase,
+                        next_entry_revision,
+                        expected_native_identity,
+                    )
                     || !valid_expected_native_identity(
                         current.runtime_backend,
                         expected_native_identity,
@@ -1616,6 +1791,7 @@ impl ExtensionNativeOwnershipJournalApplication {
 /// Complete-cohort reconstruction failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExtensionNativeOwnershipJournalError {
+    InvalidPackageSource,
     TooManyEntries {
         count: usize,
         max: usize,
@@ -1836,6 +2012,148 @@ fn valid_transition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn beta_preparation(
+        runtime: super::super::ExtensionBetaRuntimeTarget,
+        backend: ExtensionRuntimeBackendTarget,
+    ) -> ExtensionNativeOwnershipPreparation {
+        let base = preparation(77);
+        let package = ExtensionPackageIdentity::new(
+            runtime.authority(super::super::ExtensionBetaChannel::Staging),
+            base.package.key(),
+            base.package.revision(),
+            ExtensionPackagePayloadIdentity::acquired_zip(
+                17,
+                super::super::ExtensionArchiveDigest::from_bytes([7; 32]),
+            )
+            .unwrap(),
+            base.package.manifest_sha256(),
+            base.package.tree_sha256(),
+        );
+        ExtensionNativeOwnershipPreparation::beta(
+            base.key,
+            package,
+            super::super::ExtensionBetaObjectDigest::from_bytes([9; 32]),
+            base.store_catalog_revision,
+            base.store_install_revision,
+            base.store_grant_revision,
+            base.grant_digest,
+            backend,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn beta_source_cannot_enter_catalog_private_or_compatibility_ownership() {
+        for (runtime, backend) in [
+            (
+                super::super::ExtensionBetaRuntimeTarget::MacosNative,
+                ExtensionRuntimeBackendTarget::MacosNative,
+            ),
+            (
+                super::super::ExtensionBetaRuntimeTarget::WindowsNative,
+                ExtensionRuntimeBackendTarget::WindowsNative,
+            ),
+        ] {
+            let beta = beta_preparation(runtime, backend);
+            for variant in 0..5 {
+                let mut wrong = beta.clone();
+                match variant {
+                    0 => wrong.catalog_role = ExtensionCatalogGenerationRole::Active,
+                    1 => wrong.catalog_role = ExtensionCatalogGenerationRole::Rollback,
+                    2 => wrong.runtime_backend = ExtensionRuntimeBackendTarget::MacosCompatibility,
+                    3 => {
+                        wrong.key = ExtensionNativeOwnershipKey::new(
+                            wrong.profile(),
+                            wrong.key.install_id(),
+                            ExtensionGrantBrowsingContext::Private,
+                        )
+                    }
+                    4 => wrong.package = preparation(77).package,
+                    _ => unreachable!(),
+                }
+                assert!(matches!(
+                    ExtensionNativeOwnershipJournal::empty().apply(
+                        ExtensionNativeOwnershipJournalRevision::INITIAL,
+                        ExtensionNativeOwnershipJournalMutation::begin(wrong)
+                    ),
+                    Err(ExtensionNativeOwnershipApplyError::Invalid)
+                ));
+            }
+            let state = ExtensionNativeOwnershipJournal::empty()
+                .apply(
+                    ExtensionNativeOwnershipJournalRevision::INITIAL,
+                    ExtensionNativeOwnershipJournalMutation::begin(beta),
+                )
+                .unwrap();
+            assert!(matches!(
+                state.entry().unwrap().source(),
+                ExtensionNativePackageSource::BetaObject(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn beta_native_expectation_must_match_the_complete_publisher_key_derivation() {
+        let prepared = beta_preparation(
+            super::super::ExtensionBetaRuntimeTarget::MacosNative,
+            ExtensionRuntimeBackendTarget::MacosNative,
+        );
+        let state = ExtensionNativeOwnershipJournal::empty()
+            .apply(
+                ExtensionNativeOwnershipJournalRevision::INITIAL,
+                ExtensionNativeOwnershipJournalMutation::begin(prepared),
+            )
+            .unwrap();
+        let entry = state.entry().unwrap().clone();
+        let journal = state.into_journal();
+        for expected in [
+            None,
+            Some(
+                ExtensionExpectedNativeOwnershipIdentity::parse(
+                    ExtensionRuntimeBackendTarget::MacosNative,
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .unwrap(),
+            ),
+        ] {
+            assert!(matches!(
+                journal.clone().apply(
+                    journal.revision(),
+                    ExtensionNativeOwnershipJournalMutation::Transition {
+                        expected: entry.cas(),
+                        intent: ExtensionNativeOwnershipIntent::Acquire,
+                        phase: ExtensionNativeOwnershipPhase::NativeMayOwn,
+                        attach_expected_native_identity: expected,
+                        attach_native_identity: None
+                    }
+                ),
+                Err(ExtensionNativeOwnershipApplyError::Invalid)
+            ));
+        }
+        let expected = ExtensionExpectedNativeOwnershipIdentity::parse(
+            ExtensionRuntimeBackendTarget::MacosNative,
+            "acacacacacacacacacacacacacacacac",
+        )
+        .unwrap();
+        let owned = journal
+            .clone()
+            .apply(
+                journal.revision(),
+                ExtensionNativeOwnershipJournalMutation::Transition {
+                    expected: entry.cas(),
+                    intent: ExtensionNativeOwnershipIntent::Acquire,
+                    phase: ExtensionNativeOwnershipPhase::NativeMayOwn,
+                    attach_expected_native_identity: Some(expected),
+                    attach_native_identity: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            owned.entry().unwrap().expected_native_identity(),
+            Some(expected)
+        );
+    }
     use crate::extensions::{
         ExtensionAuthorityId, ExtensionManifestDigest, ExtensionPackageKey,
         ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,

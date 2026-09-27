@@ -76,6 +76,44 @@ pub enum ExtensionServiceShutdownOutcome {
 }
 
 impl ExtensionServiceLifecycle for ExtensionServiceOwner {
+    fn begin_read_isolated_resource(
+        &mut self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+        path: Box<str>,
+        deadline: Instant,
+        cancel: zephium_core::ports::extensions::IsolatedExtensionResourceCancel,
+        done: zephium_core::ports::extensions::IsolatedExtensionResourceCallback,
+    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
+        ExtensionServiceOwner::begin_read_isolated_resource(self, runtime, path, deadline, cancel, done)
+    }
+
+    #[cfg(feature = "external-extensions")]
+    fn dismiss_store_update(
+        &mut self,
+        selector: zephium_core::ports::extensions::ExtensionInstallUpdateSelector,
+    ) -> bool {
+        ExtensionServiceOwner::dismiss_store_update(self, selector)
+    }
+
+    #[cfg(feature = "external-extensions")]
+    fn dismiss_store_candidate(
+        &mut self,
+        selector: zephium_core::ports::extensions::ExtensionInstallCandidateSelector,
+    ) -> bool {
+        ExtensionServiceOwner::dismiss_store_candidate(self, selector)
+    }
+
+    #[cfg(feature = "external-extensions")]
+    fn begin_prepare_store_package(
+        &mut self,
+        profile: zephium_core::ids::ProfileId,
+        request: zephium_core::ports::extensions::ExtensionStorePackageRequest,
+        deadline: std::time::Instant,
+        done: zephium_core::ports::extensions::ExtensionStorePackagePreparationCallback,
+    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
+        ExtensionServiceOwner::begin_prepare_store_package(self, profile, request, deadline, done)
+    }
+
     fn settle_startup_until(&mut self, deadline: Instant) -> CoreExtensionServiceStartupOutcome {
         let observed = ExtensionServiceOwner::wait_for_startup_until(self, deadline);
         let observed = if matches!(
@@ -99,6 +137,10 @@ impl ExtensionServiceLifecycle for ExtensionServiceOwner {
             observed
         };
         project_lifecycle_startup_outcome(observed)
+    }
+
+    fn watch_startup(&mut self, wake: Box<dyn FnOnce() + Send>) -> bool {
+        ExtensionServiceOwner::watch_startup(self, wake)
     }
 
     fn extension_management_availability(&self) -> ExtensionManagementAvailability {

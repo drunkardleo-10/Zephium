@@ -1,4 +1,5 @@
 import type {
+  ExtensionActivationIssueView,
   ExtensionActionFailedView,
   ExtensionActionShortcutView,
   ExtensionActionFailure,
@@ -11,6 +12,29 @@ import type {
   OperationDisposition,
 } from "$shared/ipc/bindings";
 import { ZERO_PROJECTION_REVISION } from "$domain/tabs";
+
+export function extensionActivationMessage(issue: ExtensionActivationIssueView | null): string {
+  switch (issue) {
+    case "restart_required":
+      return "Restart Zephium to activate this extension.";
+    case "capacity_exceeded":
+      return "Too many extensions are running. Disable another extension, then retry.";
+    case "rejected":
+      return "Zephium couldn't start this extension. Check for updates, or retry activation.";
+    case "unavailable":
+      return "Zephium couldn't finish activation. Retry to check again.";
+    case "profile_fenced":
+      return "Activation is unavailable while Zephium closes or removes this profile.";
+    case "failed_closed":
+      return "Zephium couldn't safely activate this extension. Restart before trying again.";
+    case null:
+      return "Installed, but not running. Retry activation to start it again.";
+  }
+}
+
+export function canRetryExtensionActivation(issue: ExtensionActivationIssueView | null): boolean {
+  return issue !== "restart_required" && issue !== "profile_fenced" && issue !== "failed_closed";
+}
 
 export function initialExtensionActions(): ExtensionActionsView {
   return {
@@ -50,7 +74,7 @@ export function extensionManagementDispositionMessage(
       return "Restart Zephium to activate this extension.";
     }
     if (disposition.reason === "extension_activation_pending") {
-      return "The extension is enabled and will activate when its runtime becomes available.";
+      return "The extension is installed, but couldn't start. Open its entry for recovery details.";
     }
     if (disposition.reason === "extension_enablement_pending") {
       return "The extension was installed, but enabling it is still pending.";

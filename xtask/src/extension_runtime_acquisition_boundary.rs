@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 
 const PLAN_OWNER: &str =
     "crates/zephium-extension-repository/src/package_lease/acquisition_plan.rs";
+// The separate Beta bridge may bind a pre-native Store row. It has no Verified
+// catalog preparation/Begin constructor or native host assembly authority.
+const BETA_PREPARATION_OWNER: &str = "crates/zephium-extension-repository/src/beta/native.rs";
 const RAW_ACQUISITION_OWNER: &str =
     "crates/zephium-extension-repository/src/package_lease/repository.rs";
 const SERVICE_RUNTIME_TRANSACTION_OWNER: &str =
@@ -45,6 +48,7 @@ const SERVICE_AUTHORITY_FACADES: [(&str, &str); 10] = [
 const PREPARATION_CONSTRUCTOR: &str = "ExtensionNativeOwnershipPreparation::new(";
 const BEGIN_CONSTRUCTOR: &str = "ExtensionNativeOwnershipJournalMutation::begin(";
 const PIN_BINDING_MINT: &str = "ExtensionPackagePinAcquisitionBinding::mint(";
+const BETA_PREPARATION_CONSTRUCTOR: &str = "ExtensionNativeOwnershipPreparation::beta(";
 const RAW_ACQUISITION: &str = "acquire_bundled_package_lease(";
 
 pub(crate) fn check(repository: &Path) -> Result<(), String> {
@@ -71,6 +75,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
 fn validate_sources(sources: Vec<(PathBuf, String)>) -> Result<(), String> {
     let test_only_modules = cfg_test_external_modules(&sources)?;
     let mut saw_plan_owner = false;
+    let mut saw_beta_owner = false;
     let mut saw_raw_owner = false;
     let mut saw_service_runtime_transaction_owner = false;
 
@@ -95,14 +100,21 @@ fn validate_sources(sources: Vec<(PathBuf, String)>) -> Result<(), String> {
             .map_err(|error| format!("{}: {error}", relative.display()))?;
         let expected_authority_counts = if relative == Path::new(PLAN_OWNER) {
             saw_plan_owner = true;
-            [1, 1, 1]
+            [1, 1, 1, 0]
+        } else if relative == Path::new(BETA_PREPARATION_OWNER) {
+            saw_beta_owner = true;
+            [0, 1, 1, 1]
         } else {
-            [0, 0, 0]
+            [0, 0, 0, 0]
         };
         for ((token, label), expected) in [
             (PREPARATION_CONSTRUCTOR, "ownership preparation constructor"),
             (BEGIN_CONSTRUCTOR, "ownership Begin constructor"),
             (PIN_BINDING_MINT, "package-pin acquisition mint"),
+            (
+                BETA_PREPARATION_CONSTRUCTOR,
+                "Beta ownership preparation constructor",
+            ),
         ]
         .into_iter()
         .zip(expected_authority_counts)
@@ -181,6 +193,11 @@ fn validate_sources(sources: Vec<(PathBuf, String)>) -> Result<(), String> {
 
     if !saw_plan_owner {
         return Err(format!("missing acquisition-plan authority {PLAN_OWNER}"));
+    }
+    if !saw_beta_owner {
+        return Err(format!(
+            "missing Beta preparation authority {BETA_PREPARATION_OWNER}"
+        ));
     }
     if !saw_raw_owner {
         return Err(format!(
@@ -663,6 +680,10 @@ mod tests {{
             PathBuf::from(SERVICE_RUNTIME_TRANSACTION_OWNER),
             service_owner,
         ));
+        sources.push((
+            PathBuf::from(BETA_PREPARATION_OWNER),
+            format!("fn prepare() {{ {BETA_PREPARATION_CONSTRUCTOR}input); {BEGIN_CONSTRUCTOR}input); }}\nfn bind() {{ {PIN_BINDING_MINT}input); }}"),
+        ));
         sources
     }
 
@@ -673,7 +694,12 @@ mod tests {{
 
     #[test]
     fn constructors_mints_and_raw_calls_are_rejected_outside_the_owner() {
-        for forbidden in [PREPARATION_CONSTRUCTOR, BEGIN_CONSTRUCTOR, PIN_BINDING_MINT] {
+        for forbidden in [
+            PREPARATION_CONSTRUCTOR,
+            BEGIN_CONSTRUCTOR,
+            PIN_BINDING_MINT,
+            BETA_PREPARATION_CONSTRUCTOR,
+        ] {
             let mut sources = valid_sources();
             sources.push((
                 PathBuf::from("crates/unowned/src/lib.rs"),
@@ -687,6 +713,26 @@ mod tests {{
             PathBuf::from("crates/unowned/src/lib.rs"),
             "repository.acquire_bundled_package_lease(binding);".to_owned(),
         ));
+        assert!(validate_sources(sources).is_err());
+    }
+
+    #[test]
+    fn beta_and_verified_preparation_sites_cannot_substitute_for_each_other() {
+        for forbidden in [PREPARATION_CONSTRUCTOR, BEGIN_CONSTRUCTOR, PIN_BINDING_MINT] {
+            let mut sources = valid_sources();
+            sources
+                .iter_mut()
+                .find(|(path, _)| path == Path::new(BETA_PREPARATION_OWNER))
+                .unwrap()
+                .1
+                .push_str(forbidden);
+            assert!(validate_sources(sources).is_err());
+        }
+        let mut sources = valid_sources();
+        sources[0].1.push_str(BETA_PREPARATION_CONSTRUCTOR);
+        assert!(validate_sources(sources).is_err());
+        let mut sources = valid_sources();
+        sources.retain(|(path, _)| path != Path::new(BETA_PREPARATION_OWNER));
         assert!(validate_sources(sources).is_err());
     }
 

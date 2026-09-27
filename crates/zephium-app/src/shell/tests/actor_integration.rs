@@ -1880,7 +1880,7 @@ fn real_timer_thread_retries_transient_extension_startup_once() {
             && store
                 .load_session_calls
                 .load(std::sync::atomic::Ordering::Acquire)
-                == 1
+                == 2
     ));
     assert_eq!(
         extension_state
@@ -1893,7 +1893,7 @@ fn real_timer_thread_retries_transient_extension_startup_once() {
         store
             .load_session_calls
             .load(std::sync::atomic::Ordering::Acquire),
-        1
+        2
     );
     assert_eq!(handle.shutdown().recv().unwrap(), ShutdownOutcome::Clean);
 }

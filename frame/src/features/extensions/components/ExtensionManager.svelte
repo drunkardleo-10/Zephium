@@ -6,7 +6,7 @@
     PuzzleIcon,
     Refresh01Icon,
   } from "@hugeicons/core-free-icons";
-  import { onDestroy, untrack } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import type {
     ExtensionInstallCandidateView,
     ExtensionManagementEntryView,
@@ -15,7 +15,11 @@
     ExtensionManagementSourceView,
   } from "$shared/ipc/bindings";
   import { browserPasskeyStatus } from "$domain/credentials";
-  import { extensions } from "$domain/extensions";
+  import {
+    canRetryExtensionActivation,
+    extensionActivationMessage,
+    extensions,
+  } from "$domain/extensions";
   import { browserCredentials } from "$domain/credentials";
   import {
     apiPermissionLabel,
@@ -31,15 +35,18 @@
   } from "$domain/extensions";
   import { uiCommands } from "$domain/ui-commands";
   import { tabs } from "$domain/tabs";
+  import { surface as browserPage } from "$domain/surface";
   import Icon from "$shared/ui/Icon";
   import Button from "$shared/ui/Button";
+  import { portal } from "../lib/portal";
 
-  let { compact = false }: { compact?: boolean } = $props();
+  let { compact = false, embedded = false }: { compact?: boolean; embedded?: boolean } = $props();
 
   let root = $state<HTMLDivElement>();
   let trigger = $state<HTMLButtonElement>();
   let panel = $state<HTMLDivElement>();
   let closeButton = $state<HTMLButtonElement>();
+  let returnFocusTarget: HTMLElement | null = null;
   let open = $state(false);
   let requestFailed = $state(false);
   let subscribedProfile = $state<string | null>(null);
@@ -70,6 +77,7 @@
   );
   let mutation = $derived(extensions.activeManagementMutation());
   let notice = $derived(extensions.managementFailure());
+  let updateNotice = $derived(extensions.storeUpdateNotice(profileId));
   let catalogRevision = $derived(
     management?.phase === "ready" ? management.catalog_revision : null,
   );
@@ -80,14 +88,23 @@
   let credentialCapability = $derived(browserCredentials.current());
   let passkeyRequestBusy = $derived(browserCredentials.busy());
 
-  onDestroy(() => browserCredentials.deactivate());
+  onDestroy(() => {
+    browserCredentials.deactivate();
+    if (embedded) void extensions.setManagementVisible(false);
+  });
+  onMount(() => {
+    if (embedded) {
+      open = true;
+      void browserCredentials.activate();
+    }
+  });
 
   async function load() {
     requestFailed = !(await extensions.setManagementVisible(true));
   }
 
   $effect(() => {
-    if (managementAvailability !== "configured" && open) {
+    if (!embedded && managementAvailability !== "configured" && open) {
       untrack(() => hide());
     }
   });
@@ -132,15 +149,36 @@
     if (!open || sectionChosen || management?.phase !== "ready") {
       return;
     }
-    section = initialExtensionCenterSection(
-      management.entries.length,
-      management.candidates.length,
-    );
+    section =
+      distribution === null
+        ? "installed"
+        : initialExtensionCenterSection(management.entries.length, management.candidates.length);
     sectionChosen = true;
+  });
+
+  $effect(() => {
+    const requested = extensions.storeReviewRequest();
+    if (requested === null) return;
+    if (!open) {
+      untrack(() => show());
+      return;
+    }
+    if (management?.phase !== "ready") return;
+    const candidate = management.candidates.find((entry) =>
+      entry.provenance?.source_url.endsWith(`/${requested}`),
+    );
+    if (candidate === undefined) return;
+    untrack(() => {
+      section = "verified";
+      sectionChosen = true;
+      reviewInstall(candidate);
+      extensions.consumeStoreReviewRequest();
+    });
   });
 
   let handledMenuCommand = 0;
   $effect(() => {
+    if (embedded) return;
     const command = uiCommands.uiCommand();
     if (command.seq !== handledMenuCommand && command.id === "extensions.manage") {
       handledMenuCommand = command.seq;
@@ -149,10 +187,19 @@
   });
 
   function show() {
+    if (embedded) {
+      void browserPage.open("extensions");
+      return;
+    }
     if (open) {
       hide(true);
       return;
     }
+    const active = document.activeElement;
+    returnFocusTarget =
+      (extensions.storeReviewRequest() !== null
+        ? document.querySelector<HTMLElement>("[data-extension-store-install]")
+        : null) ?? (active instanceof HTMLElement && active !== document.body ? active : null);
     requestFailed = false;
     subscribedProfile = null;
     catalogSyncAttemptedProfile = null;
@@ -164,8 +211,15 @@
   }
 
   function hide(returnFocus = false) {
+    if (embedded) {
+      const tab = tabs.activeId();
+      if (tab !== null) tabs.close(tab);
+      return;
+    }
     if (!open) return;
+    const focusTarget = returnFocusTarget;
     open = false;
+    extensions.consumeStoreReviewRequest();
     subscribedProfile = null;
     catalogSyncAttemptedProfile = null;
     confirming = null;
@@ -178,7 +232,24 @@
     sectionChosen = false;
     browserCredentials.deactivate();
     void extensions.setManagementVisible(false);
-    if (returnFocus) queueMicrotask(() => trigger?.focus());
+    if (returnFocus)
+      queueMicrotask(() => {
+        const target =
+          focusTarget?.isConnected && !focusTarget.closest("[inert]")
+            ? focusTarget
+            : trigger?.isConnected && !trigger.closest("[inert]")
+              ? trigger
+              : root?.closest(".utilities")?.querySelector<HTMLElement>(".utilities-trigger");
+        target?.focus();
+      });
+    returnFocusTarget = null;
+  }
+
+  function openDesktopConnectionGuide() {
+    const tab = tabs.activeId();
+    if (tab === null) return;
+    if (!embedded) hide();
+    tabs.navigate(tab, "https://support.1password.com/additional-browsers/");
   }
 
   function retry() {
@@ -217,11 +288,19 @@
   }
 
   function handleWindowPointerDown(event: PointerEvent) {
-    if (!open || !(event.target instanceof Node) || root?.contains(event.target) === true) return;
+    if (embedded) return;
+    if (
+      !open ||
+      !(event.target instanceof Node) ||
+      root?.contains(event.target) === true ||
+      panel?.contains(event.target) === true
+    )
+      return;
     hide();
   }
 
   function handleWindowKeydown(event: KeyboardEvent) {
+    if (embedded) return;
     if (!open) return;
     if (event.key === "Escape") {
       event.preventDefault();
@@ -250,6 +329,13 @@
   function toggle(entry: ExtensionManagementEntryView) {
     if (catalogRevision === null || mutation !== null) return;
     extensions.setEnabled(entry, catalogRevision, entry.runtime === "disabled");
+  }
+
+  function retryActivation(entry: ExtensionManagementEntryView) {
+    if (catalogRevision === null || mutation !== null || entry.runtime !== "pending_activation")
+      return;
+    if (!canRetryExtensionActivation(entry.activation_issue)) return;
+    extensions.setEnabled(entry, catalogRevision, true);
   }
 
   function remove(entry: ExtensionManagementEntryView) {
@@ -316,6 +402,7 @@
       allowPrivateAccess && candidate.private_access_available,
     );
     reviewingCandidate = null;
+    section = "installed";
   }
 
   function selectOptionalApi(index: number, selected: boolean) {
@@ -352,7 +439,7 @@
       case "active":
         return "Active";
       case "pending_activation":
-        return "Waiting to activate";
+        return "Not active";
       case "profile_paused":
         return "Paused by profile";
       case "disabled":
@@ -373,9 +460,11 @@
   };
 
   const limitationKey = (limitation: ExtensionManagementLimitationView) =>
-    limitation.type === "api_permission"
+    limitation.type === "api_permission" || limitation.type === "optional_api_unavailable"
       ? `${limitation.type}:${limitation.name}`
-      : limitation.type;
+      : limitation.type === "optional_host_unavailable"
+        ? `${limitation.type}:${limitation.pattern}`
+        : limitation.type;
 
   const candidateSectionIsVerified = () =>
     management !== null &&
@@ -387,49 +476,60 @@
 
 <div
   bind:this={root}
-  class="relative flex shrink-0"
-  class:hidden={managementAvailability !== "configured"}
+  class="relative flex"
+  class:shrink-0={!embedded}
+  class:h-full={embedded}
+  class:w-full={embedded}
+  class:hidden={managementAvailability !== "configured" && !embedded}
   data-compact={compact}
 >
-  <button
-    bind:this={trigger}
-    type="button"
-    aria-label="Open Extensions Center"
-    aria-haspopup="dialog"
-    aria-expanded={open}
-    aria-controls="extension-manager"
-    disabled={managementAvailability !== "configured"}
-    title="Extensions Center"
-    class="icon-button"
-    class:bg-fill={open}
-    class:text-text={open}
-    style:--icon-button-size="28px"
-    onclick={show}
-  >
-    <Icon icon={PuzzleIcon} size={16} />
-  </button>
+  {#if !embedded}
+    <button
+      bind:this={trigger}
+      type="button"
+      aria-label="Open Extensions"
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      aria-controls="extension-manager"
+      disabled={managementAvailability !== "configured"}
+      title="Extensions"
+      class="icon-button"
+      class:bg-fill={open}
+      class:text-text={open}
+      style:--icon-button-size="28px"
+      onclick={show}
+    >
+      <Icon icon={PuzzleIcon} size={16} />
+    </button>
+  {/if}
 
   {#if open}
-    <button
-      type="button"
-      tabindex="-1"
-      aria-label="Close Extensions Center"
-      class="fixed inset-0 z-40 cursor-default bg-canvas/80"
-      onclick={() => hide(true)}
-    ></button>
+    {#if !embedded}
+      <button
+        use:portal
+        type="button"
+        tabindex="-1"
+        aria-label="Close Extensions"
+        class="fixed inset-0 z-40 cursor-default bg-canvas/80"
+        onclick={() => hide(true)}
+      ></button>
+    {/if}
     <div
+      use:portal={!embedded}
       bind:this={panel}
       id="extension-manager"
-      role="dialog"
-      aria-modal="true"
+      role={embedded ? "region" : "dialog"}
+      aria-modal={embedded ? undefined : "true"}
       aria-labelledby="extension-manager-title"
-      class="fixed top-1/2 left-1/2 z-50 max-h-[min(680px,calc(100vh-24px))] w-[min(760px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-panel border border-border-strong bg-raised p-4 text-start shadow-[var(--shadow-overlay)]"
-      class:min-h-[min(520px,calc(100vh-24px))]={management?.phase === "ready"}
+      class={embedded
+        ? "h-full w-full overflow-y-auto rounded-panel border border-border-strong bg-raised p-5 text-start"
+        : "fixed top-1/2 left-1/2 z-50 max-h-[min(680px,calc(100vh-24px))] w-[min(760px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-panel border border-border-strong bg-raised p-4 text-start shadow-[var(--shadow-overlay)]"}
+      class:min-h-[min(520px,calc(100vh-24px))]={!embedded && management?.phase === "ready"}
     >
       <div class="mb-3 flex items-center justify-between gap-3 border-b border-border pb-3">
         <div class="min-w-0">
           <h2 id="extension-manager-title" class="text-[15px] leading-5 font-semibold text-text">
-            Extensions Center
+            Extensions
           </h2>
           <p class="mt-0.5 text-[11px] leading-4 text-faint">Extensions for the current profile</p>
         </div>
@@ -451,16 +551,16 @@
               {distributionRefreshBusy ? "Checking…" : "Check updates"}
             </button>
           {/if}
-          <button
-            bind:this={closeButton}
-            type="button"
-            aria-label="Close Extensions Center"
-            class="icon-button shrink-0"
-            style:--icon-button-size="28px"
-            onclick={() => hide(true)}
-          >
-            <Icon icon={Cancel01Icon} size={14} />
-          </button>
+          {#if !embedded}<button
+              bind:this={closeButton}
+              type="button"
+              aria-label="Close Extensions"
+              class="icon-button shrink-0"
+              style:--icon-button-size="28px"
+              onclick={() => hide(true)}
+            >
+              <Icon icon={Cancel01Icon} size={14} />
+            </button>{/if}
         </div>
       </div>
 
@@ -517,7 +617,7 @@
             onclick={() => selectSection("verified")}
             onkeydown={handleSectionKeydown}
           >
-            {candidateSectionIsVerified() ? "Verified" : "Available"} · {management.candidates
+            {candidateSectionIsVerified() ? "Verified" : "Review install"} · {management.candidates
               .length}
           </button>
         </div>
@@ -612,8 +712,10 @@
               </span>
               {#if pendingUpdate.provenance !== null}
                 <p class="mt-1 text-[10.5px] leading-4 text-muted">
-                  {pendingUpdate.provenance.attribution} ·
-                  {pendingUpdate.provenance.license_expression}
+                  {pendingUpdate.provenance.attribution}
+                  {#if pendingUpdate.provenance.license_expression !== "NOASSERTION"}
+                    · {pendingUpdate.provenance.license_expression}
+                  {/if}
                 </p>
               {/if}
             </div>
@@ -771,6 +873,11 @@
                             <p class="truncate text-[10.5px] leading-4 text-faint">
                               {entry.version} · {runtimeLabel(entry.runtime)}
                             </p>
+                            {#if entry.runtime === "pending_activation"}
+                              <p class="mt-1 text-[10.5px] leading-4 text-muted">
+                                {extensionActivationMessage(entry.activation_issue)}
+                              </p>
+                            {/if}
                             <span
                               class="mt-1 inline-flex rounded-full bg-raised px-1.5 py-0.5 text-[9.5px] leading-3 font-medium text-muted"
                               class:text-accent={entry.source === "zephium_verified"}
@@ -780,8 +887,10 @@
                             </span>
                             {#if entry.provenance !== null}
                               <p class="mt-1 text-[10.5px] leading-4 text-muted">
-                                {entry.provenance.attribution} ·
-                                {entry.provenance.license_expression}
+                                {entry.provenance.attribution}
+                                {#if entry.provenance.license_expression !== "NOASSERTION"}
+                                  · {entry.provenance.license_expression}
+                                {/if}
                               </p>
                               <p
                                 class="truncate text-[10px] leading-4 text-faint"
@@ -836,6 +945,31 @@
                           <p class="mt-1 text-[10.5px] leading-4 text-muted">
                             No permissions granted
                           </p>
+                        {/if}
+                        {#if entry.source === "external_compatibility"}
+                          <button
+                            type="button"
+                            class="h-7 rounded-control-compact px-2 text-[11px] font-medium text-muted hover:bg-fill-strong hover:text-text"
+                            disabled={mutation !== null || extensions.storeInstallBusy()}
+                            onclick={() => {
+                              if (profileId !== null)
+                                void extensions.checkStoreUpdate(profileId, entry);
+                            }}
+                          >
+                            {extensions.storeUpdateBusy() === entry.install_id
+                              ? "Checking…"
+                              : "Check for updates"}
+                          </button>
+                        {/if}
+                        {#if entry.runtime === "pending_activation" && canRetryExtensionActivation(entry.activation_issue)}
+                          <button
+                            type="button"
+                            class="h-7 rounded-control-compact px-2 text-[11px] font-medium text-muted hover:bg-fill-strong hover:text-text"
+                            disabled={mutation !== null}
+                            onclick={() => retryActivation(entry)}
+                          >
+                            Retry activation
+                          </button>
                         {/if}
                       </div>
                     </div>
@@ -1021,12 +1155,12 @@
               <div>
                 <div class="mb-3">
                   <h3 class="text-[13px] leading-4 font-medium text-text">
-                    {candidateSectionIsVerified() ? "Zephium Verified" : "Compatibility candidates"}
+                    {candidateSectionIsVerified() ? "Zephium Verified" : "Review installation"}
                   </h3>
                   <p class="mt-1 text-[10.5px] leading-4 text-muted">
                     {candidateSectionIsVerified()
                       ? "Exact packages reviewed for this platform and catalog release."
-                      : "Authenticated packages being evaluated for this platform."}
+                      : "Review what this extension can access before installing."}
                   </p>
                 </div>
                 <div class="space-y-1.5">
@@ -1057,8 +1191,10 @@
                           </span>
                           {#if candidate.provenance !== null}
                             <p class="mt-1 text-[10.5px] leading-4 text-muted">
-                              {candidate.provenance.attribution} ·
-                              {candidate.provenance.license_expression}
+                              {candidate.provenance.attribution}
+                              {#if candidate.provenance.license_expression !== "NOASSERTION"}
+                                · {candidate.provenance.license_expression}
+                              {/if}
                             </p>
                             <p
                               class="truncate text-[10px] leading-4 text-faint"
@@ -1083,6 +1219,22 @@
 
                       {#if reviewingCandidate === candidate.candidate_index}
                         <div class="mt-2 border-t border-border pt-2">
+                          {#if candidate.provenance?.source_url === "https://chromewebstore.google.com/detail/aeblfdkhhhdcdjpifhhbdiojplfjncoa"}
+                            <div
+                              class="mb-2 rounded-row bg-raised px-2 py-1.5 text-[11px] leading-4 text-muted"
+                            >
+                              <p>
+                                To connect with the 1Password desktop app, add Zephium in 1Password
+                                → Settings → Browser → Add Browser.
+                              </p>
+                              <button
+                                type="button"
+                                class="mt-1 text-text underline underline-offset-2 disabled:opacity-50"
+                                disabled={tabs.activeId() === null}
+                                onclick={openDesktopConnectionGuide}>Read the setup guide</button
+                              >
+                            </div>
+                          {/if}
                           {#if candidate.limitations.length > 0}
                             <div class="mb-2 rounded-row bg-warning/10 px-2 py-1.5">
                               <p class="text-[11px] leading-4 font-medium text-warning">
@@ -1244,6 +1396,16 @@
         </div>
       {/if}
 
+      {#if updateNotice !== null}
+        <p
+          class="mt-2 text-[10.5px] leading-4 text-muted"
+          class:text-warning={updateNotice.failed}
+          role="status"
+          aria-live="polite"
+        >
+          {updateNotice.text}
+        </p>
+      {/if}
       {#if mutation !== null}
         <p class="mt-2 text-[10.5px] leading-4 text-muted" role="status" aria-live="polite">
           {mutation.kind === "install"

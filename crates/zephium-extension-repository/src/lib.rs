@@ -29,6 +29,8 @@ compile_error!("the internal repository E2E authority is forbidden in optimized 
 compile_error!("the acquired repository E2E authority requires the base internal authority");
 
 mod admission;
+#[cfg(feature = "beta-packages")]
+pub mod beta;
 mod catalog_cache;
 mod catalog_selection;
 mod codec;
@@ -53,6 +55,7 @@ mod repository_e2e_fixture;
 mod settlement;
 mod state;
 mod storage;
+mod tree_reader;
 mod writer;
 
 pub use admission::{BundledCatalogRecordOutcome, ExtensionRepository};

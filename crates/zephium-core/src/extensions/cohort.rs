@@ -113,6 +113,15 @@ impl ExtensionGrantManifestBindings {
         // construction; logical accounting never depends on allocator shrink
         // behavior.
         let mut bindings = bindings.into_boxed_slice();
+        for binding in &bindings {
+            if super::is_beta_extension_authority(binding.manifest.package().authority())
+                && binding.provenance().is_none()
+            {
+                return Err(ExtensionGrantCohortError::MissingBetaProvenance(
+                    binding.install_id,
+                ));
+            }
+        }
         bindings.sort_unstable_by_key(ExtensionGrantManifestBinding::install_id);
         if let Some(duplicate) = bindings
             .windows(2)
@@ -504,6 +513,7 @@ impl ExtensionGrantCohort {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExtensionGrantCohortError {
+    MissingBetaProvenance(ExtensionInstallId),
     TooManyBindings { count: usize, max: usize },
     DuplicateBinding(ExtensionInstallId),
     IncompleteBindings,

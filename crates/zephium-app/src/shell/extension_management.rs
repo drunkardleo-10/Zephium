@@ -192,7 +192,7 @@ impl ExtensionManagementState {
         Some((pending, Ok(completion)))
     }
 
-    fn fail_until_restart(&mut self) {
+    pub(super) fn fail_until_restart(&mut self) {
         self.unavailable_until_restart = true;
     }
 
@@ -474,6 +474,20 @@ impl Shell {
     }
 
     pub(super) fn set_extension_management_visible(&mut self, visible: bool) {
+        if !visible {
+            if let (Some(catalog), Some(service)) = (
+                self.extension_management.catalog(),
+                self.extension_service.as_mut(),
+            ) {
+                for candidate in catalog.candidates().iter().filter(|candidate| candidate.source() == zephium_core::ports::extensions::ExtensionManagementSource::ExternalCompatibility) {
+                    let _ = service.dismiss_store_candidate(candidate.selector().clone());
+                }
+            }
+            if let Some((_, review)) = self.extension_management.pending_update.as_ref().filter(|(_, review)| review.source() == zephium_core::ports::extensions::ExtensionManagementSource::ExternalCompatibility) {
+                if let Some(service) = self.extension_service.as_mut() { let _ = service.dismiss_store_update(review.selector().clone()); }
+            }
+        }
+
         let was_visible = self.extension_management.visible_profile().is_some();
         let profile = if visible {
             self.windows.focused().map(|window| window.profile)
