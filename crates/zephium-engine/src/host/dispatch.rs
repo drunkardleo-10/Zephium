@@ -543,7 +543,7 @@ pub(crate) fn install(
                 crate::platform::imp::PersistentControllerRegistry::with_browser_request_sink(
                     sink.clone(),
                 ),
-            #[cfg(all(target_os = "macos", feature = "webext"))]
+            #[cfg(target_os = "macos")]
             webext: Default::default(),
             #[cfg(target_os = "windows")]
             hidden: std::collections::HashSet::new(),
@@ -671,26 +671,6 @@ pub(crate) fn try_dispatch_macos_extension_command(event: &objc2_app_kit::NSEven
                     .map(|host| host.dispatch_macos_extension_command(event))
             })
             .unwrap_or(false)
-    })
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn try_macos_extension_context_menu(
-    item: ItemId,
-    source_permit: &super::permits::EventPermit,
-    default_menu: Option<objc2::rc::Retained<objc2_app_kit::NSMenu>>,
-) -> Option<objc2::rc::Retained<objc2_app_kit::NSMenu>> {
-    if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
-        return default_menu;
-    }
-    HOST.with(|host| {
-        let Ok(mut host) = host.try_borrow_mut() else {
-            return default_menu;
-        };
-        let Some(host) = host.as_mut() else {
-            return default_menu;
-        };
-        host.macos_extension_context_menu(item, source_permit, default_menu)
     })
 }
 
@@ -1229,28 +1209,6 @@ fn drain_extension_runtime_grant_terminals_with_host(host: &mut EngineHost) -> b
         );
     }
     false
-}
-
-/// Admit the watchdog for the sole process-wide extension popup reservation.
-/// Its exact slot is independent from browser-mutation completions, so a full
-/// mutation cohort cannot strand a native popup lease.
-#[cfg(target_os = "macos")]
-pub(crate) fn with_extension_action_popup_terminal<F>(f: F) -> bool
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    let task: HostTask = Box::new(f);
-    let accepted = PENDING_EXTENSION_ACTION_POPUP_TERMINALS.with(|pending| {
-        let mut slots = pending.take();
-        let accepted = slots.push_back(task).is_ok();
-        pending.set(slots);
-        accepted
-    });
-    if !accepted {
-        EXTENSION_ACTION_POPUP_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(true));
-        HOST_SEALED.with(|sealed| sealed.set(true));
-    }
-    drain_extension_action_popup_terminals() && accepted
 }
 
 #[cfg(target_os = "macos")]

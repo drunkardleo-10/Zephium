@@ -1,15 +1,13 @@
 //! Same-principal extension documents embedded in browser-owned tab slots.
 use super::browser_request_broker::BrowserRequestBroker;
-use crate::host::NativeResourceLease;
 use crate::platform::imp::ContentStage;
 use block2::{DynBlock, RcBlock};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
-use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
+use objc2::{define_class, DefinedClass, MainThreadOnly};
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSDictionary, NSError, NSKeyValueChangeKey,
-    NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint,
-    NSRect, NSSize, NSString, NSURLRequest, NSUTF8StringEncoding, NSURL,
+    ns_string, NSDictionary, NSError, NSKeyValueChangeKey, NSObjectNSKeyValueObserverRegistration,
+    NSObjectProtocol, NSString, NSURLRequest, NSUTF8StringEncoding, NSURL,
 };
 use objc2_web_kit::{
     WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
@@ -19,7 +17,6 @@ use objc2_web_kit::{
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::ptr::null_mut;
 use std::rc::{Rc, Weak as RcWeak};
 #[cfg(feature = "native-web-extension-probes")]
 use std::sync::atomic::AtomicUsize;
@@ -52,19 +49,6 @@ pub(crate) fn probe_new_window_policy() -> (usize, usize) {
         PROBE_NEW_WINDOW_POLICY_ALLOWED.load(Ordering::Acquire),
     )
 }
-
-struct ExtensionPageViewIvars {
-    _lease: NativeResourceLease,
-}
-
-define_class!(
-    #[unsafe(super(WKWebView))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "ZephiumExtensionPageView"]
-    #[ivars = ExtensionPageViewIvars]
-    struct ExtensionPageView;
-    unsafe impl NSObjectProtocol for ExtensionPageView {}
-);
 
 struct ExtensionPageDelegateIvars {
     broker: RcWeak<ExtensionPageBroker>,
@@ -239,27 +223,6 @@ define_class!(
 );
 
 impl ExtensionPageDelegate {
-    fn new(
-        mtm: MainThreadMarker,
-        broker: RcWeak<ExtensionPageBroker>,
-        browser_requests: Rc<BrowserRequestBroker>,
-        context: Retained<WKWebExtensionContext>,
-        extension_origin: Box<str>,
-        item: ItemId,
-    ) -> Retained<Self> {
-        let object = Self::alloc(mtm).set_ivars(ExtensionPageDelegateIvars {
-            broker,
-            browser_requests,
-            context,
-            extension_origin,
-            item: Box::new(item),
-            last_new_window_action: RefCell::new(None),
-        });
-        // SAFETY: NSObject is the declared superclass and every ivar is
-        // initialized before its initializer runs.
-        unsafe { msg_send![super(object), init] }
-    }
-
     fn route_new_window(&self, webview: &WKWebView, action: &WKNavigationAction) -> bool {
         let Some(broker) = self.ivars().broker.upgrade() else {
             return false;
@@ -315,11 +278,9 @@ impl ExtensionPageDelegate {
             RcBlock::new(|_, _| {});
         match route {
             ExtensionPageNavigation::Internal => {
-                self.ivars().browser_requests.begin_extension_page(
-                    self.ivars().context.clone(),
-                    url,
-                    &completion,
-                );
+                self.ivars()
+                    .browser_requests
+                    .begin_extension_page(&completion);
             }
             ExtensionPageNavigation::External { .. } => {
                 let Ok(url) = super::browser_surface::request_url(&url) else {
@@ -408,41 +369,6 @@ fn metadata_keys() -> [&'static NSString; 4] {
 }
 
 impl ExtensionPageMetadataObserver {
-    fn new(
-        mtm: MainThreadMarker,
-        broker: RcWeak<ExtensionPageBroker>,
-        webview: &Retained<WKWebView>,
-        item: ItemId,
-    ) -> Retained<Self> {
-        let object = Self::alloc(mtm).set_ivars(ExtensionPageMetadataObserverIvars {
-            broker,
-            webview: Weak::from_retained(webview),
-            item: Box::new(item),
-            installed: Cell::new(false),
-        });
-        unsafe { msg_send![super(object), init] }
-    }
-
-    fn install(&self) -> bool {
-        let Some(view) = self.ivars().webview.load() else {
-            return false;
-        };
-        if self.ivars().installed.replace(true) {
-            return true;
-        }
-        unsafe {
-            for key in metadata_keys() {
-                view.addObserver_forKeyPath_options_context(
-                    self,
-                    key,
-                    NSKeyValueObservingOptions::New,
-                    null_mut(),
-                );
-            }
-        }
-        true
-    }
-
     fn remove(&self) {
         if !self.ivars().installed.replace(false) {
             return;
@@ -516,94 +442,6 @@ impl ExtensionPageBroker {
                             ) == Some(ExtensionPageNavigation::Internal)
                         })
                 })
-    }
-    pub(super) fn present(
-        self: &Rc<Self>,
-        context: Retained<WKWebExtensionContext>,
-        url: Retained<NSURL>,
-        lease: NativeResourceLease,
-        item: ItemId,
-        stage: Retained<ContentStage>,
-        permit: Arc<AtomicBool>,
-    ) -> Result<Retained<WKWebView>, ExtensionBrowserRequestRejection> {
-        if !permit.load(Ordering::Acquire)
-            || !self.accepts_url(&context, &url)
-            || self.active.borrow().contains_key(&item)
-        {
-            return Err(ExtensionBrowserRequestRejection::InvalidContext);
-        }
-        let origin =
-            extension_origin(&context).ok_or(ExtensionBrowserRequestRejection::InvalidContext)?;
-        let configuration = unsafe { context.webViewConfiguration() }
-            .ok_or(ExtensionBrowserRequestRejection::NativeAdmissionFailed)?;
-        let mtm = MainThreadMarker::new()
-            .ok_or(ExtensionBrowserRequestRejection::NativeAdmissionFailed)?;
-        // Tie accounting to the actual native object's deallocation, including
-        // WebKit's temporary retains after it leaves the tab stage.
-        let allocated =
-            ExtensionPageView::alloc(mtm).set_ivars(ExtensionPageViewIvars { _lease: lease });
-        let frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(960., 720.));
-        let native: Retained<ExtensionPageView> = unsafe {
-            msg_send![super(allocated), initWithFrame: frame, configuration: &*configuration]
-        };
-        let webview: Retained<WKWebView> = Retained::into_super(native);
-        let delegate = ExtensionPageDelegate::new(
-            mtm,
-            Rc::downgrade(self),
-            self.browser_requests.clone(),
-            context.clone(),
-            origin,
-            item,
-        );
-        let metadata_observer =
-            ExtensionPageMetadataObserver::new(mtm, Rc::downgrade(self), &webview, item);
-        unsafe {
-            webview.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-            webview.setUIDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-        }
-        if !permit.load(Ordering::Acquire) || !self.accepts_context(&context) {
-            unsafe {
-                webview.setNavigationDelegate(None);
-                webview.setUIDelegate(None);
-            }
-            return Err(ExtensionBrowserRequestRejection::InvalidContext);
-        }
-        self.active.borrow_mut().insert(
-            item,
-            ActiveExtensionPage {
-                context: context.clone(),
-                stage: stage.clone(),
-                webview: webview.clone(),
-                _delegate: delegate,
-                metadata_observer: metadata_observer.clone(),
-                permit: permit.clone(),
-                last_metadata: None,
-            },
-        );
-        let live = || {
-            permit.load(Ordering::Acquire)
-                && self
-                    .view(item, &context)
-                    .is_some_and(|owned| Retained::as_ptr(&owned) == Retained::as_ptr(&webview))
-        };
-        if !metadata_observer.install()
-            || !live()
-            || !stage.insert_view(item, Retained::into_super(webview.clone()), permit.clone())
-            || !live()
-            || unsafe { webview.loadRequest(&NSURLRequest::requestWithURL(&url)) }.is_none()
-            || !live()
-            || !stage.set_ready(item)
-            || !live()
-        {
-            self.close_item(item);
-            return Err(ExtensionBrowserRequestRejection::NativeAdmissionFailed);
-        }
-        self.changed(item, &webview);
-        if !live() {
-            self.close_item(item);
-            return Err(ExtensionBrowserRequestRejection::InvalidContext);
-        }
-        Ok(webview)
     }
     fn changed(&self, item: ItemId, webview: &WKWebView) {
         let Some(context) = self
@@ -716,34 +554,6 @@ impl ExtensionPageBroker {
             self.browser_requests
                 .reject_unit(completion, ExtensionBrowserRequestRejection::InvalidRequest);
         }
-    }
-    pub(super) fn navigation(&self, item: ItemId, action: u8) -> bool {
-        let view = self
-            .active
-            .borrow()
-            .get(&item)
-            .map(|page| page.webview.clone());
-        let Some(view) = view else {
-            return false;
-        };
-        unsafe {
-            match action {
-                0 => {
-                    view.reload();
-                }
-                1 => {
-                    view.goBack();
-                }
-                2 => {
-                    view.goForward();
-                }
-                _ => view.stopLoading(),
-            }
-        };
-        true
-    }
-    pub(super) fn contains(&self, item: ItemId) -> bool {
-        self.active.borrow().contains_key(&item)
     }
     pub(super) fn close_item(&self, item: ItemId) -> bool {
         let Some(page) = self.active.borrow_mut().remove(&item) else {

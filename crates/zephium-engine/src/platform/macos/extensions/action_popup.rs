@@ -42,7 +42,6 @@ use crate::{EngineEventIngress, EngineEventIngressSink};
 
 use super::browser_request_broker::BrowserRequestBroker;
 
-const POPUP_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 const POPUP_ERROR_DOMAIN: &str = "app.zephium.extension-action";
 
 fn same_native_target(
@@ -217,12 +216,6 @@ impl Drop for PopupSizeClampGuard<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ActionPopupPreparation {
-    Present,
-    Dismissed,
-}
-
 impl ActionPopupBroker {
     pub(super) fn new(
         profile: ProfileId,
@@ -240,217 +233,6 @@ impl ActionPopupBroker {
             size_clamp_active: Cell::new(false),
             sealed: Cell::new(false),
         })
-    }
-
-    /// Applies native toolbar-toggle semantics before a new popup lease is
-    /// acquired. The same authenticated target toggles closed; a different
-    /// target replaces it after releasing the old popup. A fresh toolbar
-    /// gesture also supersedes the post-close options-navigation grace period.
-    pub(super) fn prepare_toggle(
-        &self,
-        request: ExtensionActionRequest,
-        context: &WKWebExtensionContext,
-        tab: Option<&Retained<ProtocolObject<dyn WKWebExtensionTab>>>,
-    ) -> Result<ActionPopupPreparation, ExtensionActionRejection> {
-        if request.runtime().profile() != self.profile {
-            return Err(ExtensionActionRejection::InvalidRequest);
-        }
-        if self.sealed.get() {
-            return Err(ExtensionActionRejection::ShuttingDown);
-        }
-        let pending_target = self
-            .pending
-            .try_borrow()
-            .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?
-            .as_ref()
-            .map(|pending| {
-                (
-                    pending.request,
-                    std::ptr::eq(&*pending.context, context)
-                        && same_native_target(pending.tab.as_deref(), tab.map(|tab| &**tab)),
-                )
-            });
-        if let Some((pending, native_target_matches)) = pending_target {
-            let disposition = popup_switch_disposition(pending, request, native_target_matches)?;
-            if !self.settle_pending(pending.id(), ExtensionActionSettlement::PopupDismissed) {
-                return Err(ExtensionActionRejection::NativeAdmissionFailed);
-            }
-            return Ok(disposition);
-        }
-
-        let active_target = self
-            .active
-            .try_borrow()
-            .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?
-            .as_ref()
-            .map(|active| {
-                let associated_tab = unsafe { active.action.associatedTab() };
-                (
-                    active.request,
-                    std::ptr::eq(&*active.context, context)
-                        && same_native_target(associated_tab.as_deref(), tab.map(|tab| &**tab)),
-                )
-            });
-        if let Some((active, native_target_matches)) = active_target {
-            let disposition = popup_switch_disposition(active, request, native_target_matches)?;
-            self.close_active_for_replacement()?;
-            return Ok(disposition);
-        }
-
-        self.closing
-            .try_borrow_mut()
-            .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?
-            .take();
-
-        Ok(ActionPopupPreparation::Present)
-    }
-
-    /// Reserves the exact native callback expected from `performActionForTab:`.
-    /// The host acquires the global resource lease and revalidates the action
-    /// before this call. Document backgrounds receive a gesture-bound warm-up;
-    /// service-worker backgrounds use normal native action dispatch.
-    pub(super) fn begin(
-        self: &Rc<Self>,
-        request: ExtensionActionRequest,
-        controller: Retained<WKWebExtensionController>,
-        owner: super::native_runtime::MacosNativeActionPopupOwner,
-        tab: Option<Retained<ProtocolObject<dyn WKWebExtensionTab>>>,
-        parent: Retained<NSView>,
-        lease: NativeResourceLease,
-    ) -> Result<(), ExtensionActionRejection> {
-        if request.runtime().profile() != self.profile {
-            return Err(ExtensionActionRejection::InvalidRequest);
-        }
-        if self.sealed.get() {
-            return Err(ExtensionActionRejection::ShuttingDown);
-        }
-        if self.sink.is_none() {
-            return Err(ExtensionActionRejection::NativeAdmissionFailed);
-        }
-        if self.pending.borrow().is_some() || self.active.borrow().is_some() {
-            return Err(ExtensionActionRejection::PopupCapacityExceeded);
-        }
-        let valid_anchor = objc2::exception::catch(AssertUnwindSafe(|| {
-            parent.window().is_some() && popup_anchor_rect(request, &parent).is_some()
-        }))
-        .unwrap_or(false);
-        if !valid_anchor {
-            return Err(ExtensionActionRejection::InvalidRequest);
-        }
-
-        let profile = self.profile;
-        let request_id = request.id();
-        let Some(watchdog) =
-            crate::platform::imp::schedule_content_policy_timeout(POPUP_LOAD_TIMEOUT, move || {
-                #[cfg(feature = "native-extension-lab-diagnostics")]
-                eprintln!("extension lab: popup action timed out before native presentation");
-                let _ = crate::host::with_extension_action_popup_terminal(move |host| {
-                    host.timeout_extension_action_popup(profile, request_id);
-                });
-            })
-        else {
-            return Err(ExtensionActionRejection::NativeAdmissionFailed);
-        };
-        let warm_document = owner.requires_popup_background_warmup();
-        let context = owner.into_context();
-        *self.pending.borrow_mut() = Some(PendingPopup {
-            request,
-            controller,
-            context,
-            tab,
-            parent,
-            _lease: lease,
-            watchdog,
-        });
-        if warm_document {
-            self.warm_background_and_perform(request_id);
-        } else {
-            self.perform_pending_action(request_id);
-        }
-        Ok(())
-    }
-
-    fn warm_background_and_perform(self: &Rc<Self>, request: ExtensionActionRequestId) {
-        let context =
-            self.pending.borrow().as_ref().and_then(|pending| {
-                (pending.request.id() == request).then(|| pending.context.clone())
-            });
-        let Some(context) = context else {
-            self.cancel_pending(request, ExtensionActionRejection::NativeAdmissionFailed);
-            return;
-        };
-        let has_background = match objc2::exception::catch(AssertUnwindSafe(|| unsafe {
-            context.webExtension().hasBackgroundContent()
-        })) {
-            Ok(has_background) => has_background,
-            Err(_) => {
-                self.cancel_pending(request, ExtensionActionRejection::NativeAdmissionFailed);
-                return;
-            }
-        };
-        #[cfg(feature = "native-extension-lab-diagnostics")]
-        eprintln!(
-            "extension lab: popup background warm-up requested; has-background={has_background}; context-errors={}",
-            unsafe { context.errors() }.count()
-        );
-        if !has_background {
-            self.perform_pending_action(request);
-            return;
-        }
-
-        let broker = Rc::downgrade(self);
-        let completion: RcBlock<dyn Fn(*mut NSError)> = RcBlock::new(move |error: *mut NSError| {
-            let Some(broker) = broker.upgrade() else {
-                return;
-            };
-            if !error.is_null() {
-                #[cfg(feature = "native-extension-lab-diagnostics")]
-                {
-                    // SAFETY: WebKit guarantees a live NSError for the
-                    // duration of this completion callback.
-                    let error = unsafe { &*error };
-                    eprintln!(
-                        "extension lab: popup background warm-up failed: domain={}; code={}",
-                        error.domain(),
-                        error.code()
-                    );
-                }
-                crate::diagnostic!(
-                    "extensions: popup background warm-up failed before presentation"
-                );
-                super::trace_action_qa_stage("background-warmup-error");
-                broker.cancel_pending(request, ExtensionActionRejection::PopupUnavailable);
-                return;
-            }
-            #[cfg(feature = "native-extension-lab-diagnostics")]
-            eprintln!("extension lab: popup background warm-up completed");
-            broker.perform_pending_action(request);
-        });
-        if objc2::exception::catch(AssertUnwindSafe(|| unsafe {
-            context.loadBackgroundContentWithCompletionHandler(&completion);
-        }))
-        .is_err()
-        {
-            super::trace_action_qa_stage("background-warmup-exception");
-            self.cancel_pending(request, ExtensionActionRejection::PopupUnavailable);
-        }
-    }
-
-    fn perform_pending_action(&self, request: ExtensionActionRequestId) {
-        let target = self.pending.borrow().as_ref().and_then(|pending| {
-            (pending.request.id() == request)
-                .then(|| (pending.context.clone(), pending.tab.clone()))
-        });
-        let Some((context, tab)) = target else {
-            return;
-        };
-        if objc2::exception::catch(AssertUnwindSafe(|| unsafe {
-            context.performActionForTab(tab.as_deref());
-        }))
-        .is_err()
-        {
-            self.cancel_pending(request, ExtensionActionRejection::NativeAdmissionFailed);
-        }
     }
 
     /// Requests the exact options document as a browser-owned extension tab.
@@ -527,18 +309,6 @@ impl ActionPopupBroker {
         self.request_options_tab(context, &callback).is_ok()
     }
 
-    /// Trusted browser chrome requests the same browser-owned options tab.
-    /// Its old popup-view lease is released before the tab request; the tab
-    /// has its own exact browser resource admission.
-    pub(super) fn open_options_page_from_browser(
-        self: &Rc<Self>,
-        context: Retained<WKWebExtensionContext>,
-        completion: &DynBlock<dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut NSError)>,
-    ) -> Result<(), ExtensionActionRejection> {
-        self.close_popup_for_options(&context)?;
-        self.request_options_tab(context, completion)
-    }
-
     fn close_popup_for_options(
         &self,
         context: &WKWebExtensionContext,
@@ -570,10 +340,10 @@ impl ActionPopupBroker {
         if self.sealed.get() || !self.browser_requests.accepts(None, &context) {
             return Err(ExtensionActionRejection::InvalidRequest);
         }
-        let url = unsafe { context.optionsPageURL() }
-            .ok_or(ExtensionActionRejection::PopupUnavailable)?;
-        self.browser_requests
-            .begin_extension_page(context, url, completion);
+        if unsafe { context.optionsPageURL() }.is_none() {
+            return Err(ExtensionActionRejection::PopupUnavailable);
+        }
+        self.browser_requests.begin_extension_page(completion);
         Ok(())
     }
 
@@ -776,11 +546,6 @@ impl ActionPopupBroker {
         drop(pending.watchdog);
         self.emit(request, settlement);
         true
-    }
-
-    pub(super) fn timeout(&self, request: ExtensionActionRequestId) -> bool {
-        super::trace_action_qa_stage("popup-pending-timeout");
-        self.cancel_pending(request, ExtensionActionRejection::PopupUnavailable)
     }
 
     pub(super) fn cancel_context(
@@ -987,22 +752,6 @@ impl ActionPopupBroker {
     }
 }
 
-fn popup_switch_disposition(
-    previous: ExtensionActionRequest,
-    next: ExtensionActionRequest,
-    native_target_matches: bool,
-) -> Result<ActionPopupPreparation, ExtensionActionRejection> {
-    if previous.runtime().profile() != next.runtime().profile() {
-        return Err(ExtensionActionRejection::InvalidRequest);
-    }
-    if previous.runtime() == next.runtime() && previous.tab() == next.tab() && native_target_matches
-    {
-        Ok(ActionPopupPreparation::Dismissed)
-    } else {
-        Ok(ActionPopupPreparation::Present)
-    }
-}
-
 fn teardown_active(mut active: ActivePopup, close_popover: bool) {
     drop(active.frame_observation.take());
     let _keep_delegate_alive_through_close = active.delegate;
@@ -1198,31 +947,6 @@ mod tests {
             ExtensionActionRevision::INITIAL,
             ExtensionPopupAnchor::new(Rect::new(12.0, 12.0, 24.0, 24.0)).unwrap(),
         )
-    }
-
-    #[test]
-    fn toolbar_gestures_toggle_the_same_target_and_replace_different_targets() {
-        let previous = switch_request(1, 1, 1, 1);
-        assert_eq!(
-            popup_switch_disposition(previous, switch_request(1, 1, 1, 2), true),
-            Ok(ActionPopupPreparation::Dismissed)
-        );
-        assert_eq!(
-            popup_switch_disposition(previous, switch_request(1, 2, 1, 2), false),
-            Ok(ActionPopupPreparation::Present)
-        );
-        assert_eq!(
-            popup_switch_disposition(previous, switch_request(1, 1, 2, 2), false),
-            Ok(ActionPopupPreparation::Present)
-        );
-        assert_eq!(
-            popup_switch_disposition(previous, switch_request(1, 1, 1, 2), false),
-            Ok(ActionPopupPreparation::Present)
-        );
-        assert_eq!(
-            popup_switch_disposition(previous, switch_request(2, 2, 1, 2), false),
-            Err(ExtensionActionRejection::InvalidRequest)
-        );
     }
 
     #[test]

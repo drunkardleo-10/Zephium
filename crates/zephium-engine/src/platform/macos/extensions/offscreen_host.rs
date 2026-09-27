@@ -33,8 +33,7 @@ use zephium_core::extensions::ExtensionRuntimeInstance;
 use zephium_core::ports::extensions::IsolatedExtensionDocumentKind;
 use zephium_extension_runtime_api::ExtensionRuntimeHostDataErasureDisposition;
 use zephium_extension_runtime_api::{
-    ExtensionPackageAccess, ExtensionRuntimeTarget, ExtensionRuntimeVisitorError,
-    MAX_EXTENSION_RUNTIME_RESOURCE_BYTES,
+    ExtensionPackageAccess, ExtensionRuntimeVisitorError, MAX_EXTENSION_RUNTIME_RESOURCE_BYTES,
 };
 
 use super::isolated_resource_bridge::{IsolatedResourceBridge, IsolatedResourceTaskPool};
@@ -61,7 +60,6 @@ pub(crate) enum OffscreenHostError {
     MainThread,
     InvalidIdentity,
     InvalidDocument,
-    PackageUnavailable,
     Native,
     Closed,
     NotReady,
@@ -665,132 +663,6 @@ impl OffscreenHost {
                 id,
                 outcome,
             )
-        })
-    }
-
-    fn open_with_store(
-        mtm: MainThreadMarker,
-        store: Retained<WKWebsiteDataStore>,
-        extension_id: &str,
-        base_url: &str,
-        document_path: &str,
-        access: ExtensionPackageAccess,
-        background_send: OffscreenBackgroundSend,
-        audio_playback: bool,
-    ) -> Result<Self, OffscreenHostError> {
-        if extension_id.len() != 32 || !extension_id.bytes().all(|b| (b'a'..=b'p').contains(&b)) {
-            return Err(OffscreenHostError::InvalidIdentity);
-        }
-        let base = url::Url::parse(base_url).map_err(|_| OffscreenHostError::InvalidIdentity)?;
-        if base.scheme() != SCHEME
-            || base.path() != "/"
-            || base.query().is_some()
-            || base.fragment().is_some()
-            || base.port().is_some()
-            || !base.username().is_empty()
-            || base.password().is_some()
-            || base.host_str().is_none()
-            || base.as_str() != base_url
-        {
-            return Err(OffscreenHostError::InvalidIdentity);
-        }
-        if access.target() != ExtensionRuntimeTarget::NativeWebExtension {
-            return Err(OffscreenHostError::PackageUnavailable);
-        }
-        if access.resources().entry(document_path).is_none()
-            || !document_path.ends_with(".html")
-            || document_path.len() > 512
-        {
-            return Err(OffscreenHostError::InvalidDocument);
-        }
-        let document_url = format!("{base_url}{document_path}");
-        let core = Rc::new(Core {
-            base_url: base_url.into(),
-            document_url: document_url.clone().into_boxed_str(),
-            reader: Some(PackageReader {
-                access: RefCell::new(access),
-            }),
-            erasure: false,
-            background_send,
-            view: RefCell::new(None),
-            ready: Cell::new(false),
-            on_ready: RefCell::new(None),
-            on_failure: RefCell::new(None),
-            closed: Cell::new(false),
-            next_message: Cell::new(1),
-            pending: RefCell::new(HashMap::new()),
-            requests: Cell::new(0),
-            responses: Cell::new(0),
-            rejections: Cell::new(0),
-            audio_started: Cell::new(0),
-            audio_stopped: Cell::new(0),
-            audio_active: Cell::new(false),
-        });
-        let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
-        unsafe { configuration.setWebsiteDataStore(&store) };
-        if audio_playback {
-            unsafe {
-                configuration.setMediaTypesRequiringUserActionForPlayback(
-                    objc2_web_kit::WKAudiovisualMediaTypes::None,
-                );
-            }
-        }
-        if unsafe { configuration.webExtensionController() }.is_some() {
-            return Err(OffscreenHostError::Native);
-        }
-        let controller = unsafe { configuration.userContentController() };
-        let world = unsafe { WKContentWorld::pageWorld(mtm) };
-        let source = include_str!("offscreen_runtime_v1.js")
-            .replace("__ZEPHIUM_OFFSCREEN_EXTENSION_ID__", extension_id)
-            .replace("__ZEPHIUM_OFFSCREEN_BASE_URL__", base_url);
-        let script = unsafe {
-            WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
-                WKUserScript::alloc(mtm),
-                &NSString::from_str(&source),
-                WKUserScriptInjectionTime::AtDocumentStart,
-                true,
-                &world,
-            )
-        };
-        unsafe { controller.addUserScript(&script) };
-        let resource_handler = ResourceHandler::new(mtm, Rc::downgrade(&core));
-        unsafe {
-            configuration.setURLSchemeHandler_forURLScheme(
-                Some(ProtocolObject::from_ref(&*resource_handler)),
-                &NSString::from_str(SCHEME),
-            )
-        };
-        let message_handler =
-            MessageHandler::new(mtm, Rc::downgrade(&core), controller.clone(), world.clone());
-        unsafe {
-            controller.addScriptMessageHandlerWithReply_contentWorld_name(
-                ProtocolObject::from_ref(&*message_handler),
-                &world,
-                &NSString::from_str(HANDLER),
-            )
-        };
-        let navigation = Navigation::new(mtm, Rc::downgrade(&core));
-        let view = unsafe {
-            WKWebView::initWithFrame_configuration(
-                WKWebView::alloc(mtm),
-                NSRect::new(NSPoint::new(0., 0.), NSSize::new(1., 1.)),
-                &configuration,
-            )
-        };
-        *core.view.borrow_mut() = Some(Weak::from_retained(&view));
-        unsafe { view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*navigation))) };
-        let url = NSURL::URLWithString(&NSString::from_str(&document_url))
-            .ok_or(OffscreenHostError::Native)?;
-        unsafe { view.loadRequest(&NSURLRequest::requestWithURL(&url)) };
-        Ok(Self {
-            core,
-            view,
-            controller,
-            _configuration: configuration,
-            _resource_handler: Some(resource_handler),
-            resource_bridge: None,
-            _message_handler: Some(message_handler),
-            _navigation: navigation,
         })
     }
 

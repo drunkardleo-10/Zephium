@@ -236,7 +236,7 @@ impl NativeResourceLedger {
     /// excluding automatic extension updates for its complete lease lifetime.
     /// A normal browser tab never calls this path and stays usable during an
     /// update. The update guard and this admission run on the same UI thread.
-    #[cfg(any(target_os = "macos", test, feature = "native-web-extension-probes"))]
+    #[cfg(any(test, feature = "native-web-extension-probes"))]
     pub(super) fn try_acquire_extension_guest(
         &self,
     ) -> Result<NativeResourceLease, NativeResourceAdmissionError> {

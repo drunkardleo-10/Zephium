@@ -18,13 +18,13 @@ use zephium_core::ids::ProfileId;
 use crate::{authorize, shutdown_started, CallerPolicy};
 
 pub(crate) struct WebExtensions {
-    #[cfg_attr(not(all(target_os = "macos", feature = "webext")), allow(dead_code))]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     root: PathBuf,
-    #[cfg_attr(not(all(target_os = "macos", feature = "webext")), allow(dead_code))]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     state: Mutex<Option<Pending>>,
 }
 
-#[cfg_attr(not(all(target_os = "macos", feature = "webext")), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct Pending {
     profile: ProfileId,
     entry: Entry,
@@ -37,7 +37,7 @@ struct Registry {
     extensions: Vec<Entry>,
 }
 
-#[cfg_attr(not(all(target_os = "macos", feature = "webext")), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Entry {
     install: String,
@@ -94,9 +94,9 @@ impl WebExtensions {
 
     /// Restores every profile's extensions at launch.
     pub(crate) fn restore(&self, shell: &Handle) {
-        #[cfg(all(target_os = "macos", feature = "webext"))]
+        #[cfg(target_os = "macos")]
         imp::restore(self, shell);
-        #[cfg(not(all(target_os = "macos", feature = "webext")))]
+        #[cfg(not(target_os = "macos"))]
         let _ = shell;
     }
 }
@@ -118,9 +118,9 @@ pub(crate) async fn web_extension_prepare(
     {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(all(target_os = "macos", feature = "webext"))]
+    #[cfg(target_os = "macos")]
     return imp::prepare(&shell, &extensions, &tab_id).await;
-    #[cfg(not(all(target_os = "macos", feature = "webext")))]
+    #[cfg(not(target_os = "macos"))]
     {
         let _ = (shell, extensions, tab_id);
         Err(UNAVAILABLE.into())
@@ -140,9 +140,9 @@ pub(crate) async fn web_extension_confirm(
     {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(all(target_os = "macos", feature = "webext"))]
+    #[cfg(target_os = "macos")]
     return imp::confirm(&shell, &extensions, &id);
-    #[cfg(not(all(target_os = "macos", feature = "webext")))]
+    #[cfg(not(target_os = "macos"))]
     {
         let _ = (shell, extensions, id);
         Err(UNAVAILABLE.into())
@@ -172,9 +172,9 @@ pub(crate) async fn web_extension_list(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_list") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(all(target_os = "macos", feature = "webext"))]
+    #[cfg(target_os = "macos")]
     return imp::list(&shell, &extensions).await;
-    #[cfg(not(all(target_os = "macos", feature = "webext")))]
+    #[cfg(not(target_os = "macos"))]
     {
         let _ = (shell, extensions);
         Err(UNAVAILABLE.into())
@@ -193,9 +193,9 @@ pub(crate) async fn web_extension_set_enabled(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_set_enabled") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(all(target_os = "macos", feature = "webext"))]
+    #[cfg(target_os = "macos")]
     return imp::set_enabled(&shell, &extensions, &id, enabled).await;
-    #[cfg(not(all(target_os = "macos", feature = "webext")))]
+    #[cfg(not(target_os = "macos"))]
     {
         let _ = (shell, extensions, id, enabled);
         Err(UNAVAILABLE.into())
@@ -213,16 +213,16 @@ pub(crate) async fn web_extension_uninstall(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_uninstall") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(all(target_os = "macos", feature = "webext"))]
+    #[cfg(target_os = "macos")]
     return imp::uninstall(&shell, &extensions, &id).await;
-    #[cfg(not(all(target_os = "macos", feature = "webext")))]
+    #[cfg(not(target_os = "macos"))]
     {
         let _ = (shell, extensions, id);
         Err(UNAVAILABLE.into())
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "webext"))]
+#[cfg(target_os = "macos")]
 mod imp {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};

@@ -29,7 +29,6 @@ mod record_erasure;
 mod runtime_grant_broker;
 
 pub(crate) use controller_registry::{
-    ControllerActionPopupPreparation, ControllerBrowserRequestSettlement,
     ControllerCommandDispatch, ControllerCompatibilityBrokerSettlement,
     ControllerErasureSettlement, ControllerNamespaceRecoveryAudit, ControllerPreparation,
     ControllerRegistryError, ControllerRuntimeGrantSettlement, PersistentControllerRegistry,
@@ -47,7 +46,6 @@ pub(crate) use identity_broker::IdentityRequestId;
 pub(crate) use offscreen_broker::has_pending_authorization as has_pending_offscreen_authorization;
 pub(crate) use offscreen_broker::OffscreenSessionId;
 
-#[cfg(feature = "webext")]
 pub(crate) fn rasterize_webext_action_icon(
     action: &objc2_web_kit::WKWebExtensionAction,
 ) -> Option<zephium_core::extensions::ExtensionActionIcon> {
@@ -120,8 +118,8 @@ pub(crate) use native_messaging::{
 pub(crate) use native_runtime::begin_probe_native_runtime_activation;
 pub(crate) use native_runtime::{
     begin_prepared_native_runtime_activation, prepare_native_runtime_activation,
-    MacosNativeActionFailure, MacosNativeRuntimeActivation, MacosNativeRuntimeFailure,
-    MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity, MacosNativeRuntimeReconciliation,
+    MacosNativeRuntimeActivation, MacosNativeRuntimeFailure, MacosNativeRuntimeOwner,
+    MacosNativeRuntimeOwnerIdentity, MacosNativeRuntimeReconciliation,
     MacosNativeRuntimeRetirement,
 };
 #[cfg(feature = "native-web-extension-probes")]

@@ -18,7 +18,7 @@ use zephium_core::ports::extensions::{
 #[cfg(target_os = "macos")]
 use super::permits::{navigation_callback_matches, EventPermit};
 #[cfg(target_os = "macos")]
-use super::resources::{NativeResourceAdmissionError, NativeResourceClass};
+use super::resources::NativeResourceClass;
 use super::EngineHost;
 #[cfg(target_os = "macos")]
 use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker};
@@ -217,12 +217,11 @@ impl EngineHost {
             zephium_core::ports::engine::NavigationRequestId,
         )>,
     ) -> bool {
-        #[cfg(feature = "webext")]
         match self
             .webext
             .settle_browser_request(profile, request, settlement)
         {
-            super::webext::BrowserRequestOutcome::NotOurs => {}
+            super::webext::BrowserRequestOutcome::NotOurs => false,
             super::webext::BrowserRequestOutcome::Settled => {
                 if let (
                     ExtensionBrowserRequestSettlement::Applied(
@@ -241,7 +240,7 @@ impl EngineHost {
                         },
                     );
                 }
-                return true;
+                true
             }
             super::webext::BrowserRequestOutcome::Page {
                 extension_id,
@@ -289,99 +288,9 @@ impl EngineHost {
                         );
                     }
                 }
-                return true;
+                true
             }
         }
-        let created_tab = match settlement {
-            ExtensionBrowserRequestSettlement::Applied(
-                zephium_core::extensions::ExtensionBrowserRequestResult::CreatedTab(tab),
-            ) => Some(tab),
-            _ => None,
-        };
-        let page = match settlement {
-            ExtensionBrowserRequestSettlement::Applied(
-                zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized {
-                    tab,
-                    window,
-                },
-            ) => Some((tab, window)),
-            _ => None,
-        };
-        let stage = page
-            .and_then(|(_, window)| self.ensure_stage(window))
-            .zip(page_token);
-        let mut settlement = settlement;
-        let extension_page_lease = if matches!(
-            settlement,
-            ExtensionBrowserRequestSettlement::Applied(
-                zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized { .. }
-            )
-        ) {
-            match self.native_resources.try_acquire_extension_guest() {
-                Ok(lease) => Some(lease),
-                Err(error) => {
-                    let reason = match error {
-                        NativeResourceAdmissionError::ClassExhausted(
-                            NativeResourceClass::Tab,
-                        )
-                        | NativeResourceAdmissionError::GlobalExhausted => {
-                            zephium_core::extensions::ExtensionBrowserRequestRejection::CapacityExceeded
-                        }
-                        NativeResourceAdmissionError::ClassExhausted(_)
-                        | NativeResourceAdmissionError::AccountingInvariant => {
-                            zephium_core::extensions::ExtensionBrowserRequestRejection::NativeAdmissionFailed
-                        }
-                    };
-                    settlement = ExtensionBrowserRequestSettlement::Rejected(reason);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let outcome = self.macos_extension_controllers.settle_browser_request(
-            profile,
-            request,
-            settlement,
-            extension_page_lease,
-            stage,
-        );
-        if let (
-            Ok(crate::platform::imp::ControllerBrowserRequestSettlement::Settled),
-            Some(tab),
-            Some((url, intent)),
-        ) = (&outcome, created_tab, first_url_after_reply)
-        {
-            // The native tabs.create reply has been accepted for this exact
-            // logical tab. Its first network effect enters Shell only now.
-            self.sink.emit(
-                zephium_core::ports::engine::EngineEvent::ExtensionCreatedTabReplied {
-                    profile,
-                    request,
-                    tab,
-                    url,
-                    intent,
-                },
-            );
-        }
-        let settled = matches!(
-            outcome,
-            Ok(
-                crate::platform::imp::ControllerBrowserRequestSettlement::Settled
-                    | crate::platform::imp::ControllerBrowserRequestSettlement::Stale
-            )
-        );
-        if let Some((id, _)) = page {
-            if !self
-                .macos_extension_controllers
-                .has_extension_page(profile, id)
-            {
-                self.sink.emit(
-                    zephium_core::ports::engine::EngineEvent::ExtensionPageClosed { profile, id },
-                );
-            }
-        }
-        settled
     }
 
     #[cfg(target_os = "macos")]
@@ -822,7 +731,7 @@ impl EngineHost {
             return false;
         }
 
-        #[cfg(feature = "webext")]
+        #[cfg(target_os = "macos")]
         {
             let views = &self.views;
             let partitions = &self.partitions;
@@ -833,48 +742,8 @@ impl EngineHost {
                     .and_then(|_| views.get(&id))
                     .map(|view| crate::platform::imp::native_webview(&view.view))
             });
-            self.extension_browser_surfaces.insert(profile, surface);
-            return true;
         }
-        #[cfg(target_os = "macos")]
-        #[allow(unreachable_code)]
-        let was_ready = self
-            .macos_extension_controllers
-            .browser_surface_ready_for_document_background(profile)
-            .unwrap_or(false);
-        #[cfg(target_os = "macos")]
-        {
-            let views = &self.views;
-            let partitions = &self.partitions;
-            if self
-                .macos_extension_controllers
-                .apply_browser_surface(&surface, |id| {
-                    partitions
-                        .get(&id)
-                        .filter(|partition| partition.profile() == profile)
-                        .and_then(|_| views.get(&id))
-                        .map(|view| crate::platform::imp::native_webview(&view.view))
-                })
-                .is_err()
-            {
-                return false;
-            }
-        }
-
         self.extension_browser_surfaces.insert(profile, surface);
-        // The first usable tab can arrive through logical publication after
-        // its native view was bound. Handle that ordering as well as the
-        // existing view-binding/reconciliation paths, before a popup needs its
-        // background. Ordinary title/tab metadata changes must not wake it.
-        #[cfg(target_os = "macos")]
-        if !was_ready
-            && self
-                .macos_extension_controllers
-                .browser_surface_ready_for_document_background(profile)
-                .unwrap_or(false)
-        {
-            let _ = self.wake_resident_document_backgrounds(profile);
-        }
         true
     }
 
@@ -921,21 +790,8 @@ impl EngineHost {
             .views
             .get(&id)
             .map(|view| crate::platform::imp::native_webview(&view.view));
-        #[cfg(feature = "webext")]
-        {
-            self.webext.bind_view(profile, id, webview.as_deref());
-            return true;
-        }
-        #[allow(unreachable_code)]
-        let binding = self.macos_extension_controllers.bind_browser_surface_view(
-            profile,
-            id,
-            webview.as_ref(),
-        );
-        if matches!(binding, Ok(true)) {
-            let _ = self.wake_resident_document_backgrounds(profile);
-        }
-        binding.is_ok()
+        self.webext.bind_view(profile, id, webview.as_deref());
+        true
     }
 
     #[cfg(target_os = "macos")]
@@ -944,15 +800,8 @@ impl EngineHost {
         profile: ProfileId,
         id: ItemId,
     ) -> bool {
-        #[cfg(feature = "webext")]
-        {
-            self.webext.bind_view(profile, id, None);
-            return true;
-        }
-        #[allow(unreachable_code)]
-        self.macos_extension_controllers
-            .bind_browser_surface_view(profile, id, None)
-            .is_ok()
+        self.webext.bind_view(profile, id, None);
+        true
     }
 
     pub(super) fn retire_extension_browser_surface(&mut self, profile: ProfileId) {

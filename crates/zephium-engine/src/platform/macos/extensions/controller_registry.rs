@@ -17,7 +17,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, Sel};
 use objc2::sel;
 use objc2::MainThreadOnly;
-use objc2_app_kit::{NSEvent, NSMenu, NSMenuItem, NSView};
+use objc2_app_kit::NSEvent;
 use objc2_foundation::MainThreadMarker;
 use objc2_foundation::{NSClassFromString, NSProcessInfo, NSString, NSUTF8StringEncoding, NSUUID};
 use objc2_web_kit::WKWebExtensionControllerConfiguration;
@@ -26,8 +26,7 @@ use objc2_web_kit::{
     WKWebsiteDataStore,
 };
 use zephium_core::extensions::{
-    ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRequestId,
-    ExtensionBrowserSurface, ExtensionCompatibilityBrokerOperation,
+    ExtensionActionRejection, ExtensionBrowserSurface, ExtensionCompatibilityBrokerOperation,
     ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerSettlement,
     ExtensionCompatibilityBrokerWitness, ExtensionNativeNamespaceScope, ExtensionRuntimeInstance,
     MAX_EXTENSION_INSTALLS_PER_PROFILE,
@@ -38,8 +37,7 @@ use zephium_extension_runtime_api::{
     ExtensionRuntimeNativeOwnerId,
 };
 
-use super::action_popup::ActionPopupPreparation;
-use super::browser_request_broker::{BrowserRequestPool, BrowserRequestSettlementOutcome};
+use super::browser_request_broker::BrowserRequestPool;
 #[cfg(feature = "native-web-extension-probes")]
 use super::browser_surface::BrowserSurfaceDiagnostics;
 #[cfg(feature = "native-web-extension-probes")]
@@ -59,73 +57,6 @@ use super::runtime_grant_broker::{RuntimeGrantRequestPool, RuntimeGrantSettlemen
 
 const MAX_PERSISTENT_CONTROLLERS: usize = zephium_core::session::MAX_SESSION_PROFILES;
 const _: () = assert!(MAX_PERSISTENT_CONTROLLERS == 64);
-const MAX_CONTEXT_MENU_ITEMS_PER_EXTENSION: usize = 16;
-const MAX_EXTENSION_CONTEXT_MENU_ITEMS: usize = 2 * MAX_CONTEXT_MENU_ITEMS_PER_EXTENSION;
-const MAX_EXTENSION_CONTEXT_MENU_TREE_ITEMS: usize = 64;
-const MAX_EXTENSION_CONTEXT_MENU_TREE_MENUS: usize = 32;
-const MAX_EXTENSION_CONTEXT_MENU_DEPTH: usize = 4;
-const MAX_EXTENSION_CONTEXT_MENU_TITLE_BYTES: usize = 512;
-
-struct ContextMenuInventory {
-    item_pointers: [usize; MAX_EXTENSION_CONTEXT_MENU_TREE_ITEMS],
-    item_count: usize,
-    menu_pointers: [usize; MAX_EXTENSION_CONTEXT_MENU_TREE_MENUS],
-    menu_count: usize,
-}
-
-impl ContextMenuInventory {
-    const EMPTY: Self = Self {
-        item_pointers: [0; MAX_EXTENSION_CONTEXT_MENU_TREE_ITEMS],
-        item_count: 0,
-        menu_pointers: [0; MAX_EXTENSION_CONTEXT_MENU_TREE_MENUS],
-        menu_count: 0,
-    };
-
-    fn observe_item(&mut self, item: &Retained<NSMenuItem>) -> Result<(), ControllerRegistryError> {
-        let pointer = Retained::as_ptr(item) as usize;
-        if self.item_count == self.item_pointers.len()
-            || self.item_pointers[..self.item_count].contains(&pointer)
-            || item
-                .title()
-                .lengthOfBytesUsingEncoding(NSUTF8StringEncoding)
-                > MAX_EXTENSION_CONTEXT_MENU_TITLE_BYTES
-        {
-            return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-        }
-        self.item_pointers[self.item_count] = pointer;
-        self.item_count += 1;
-        Ok(())
-    }
-
-    fn observe_menu(&mut self, menu: &Retained<NSMenu>) -> Result<(), ControllerRegistryError> {
-        let pointer = Retained::as_ptr(menu) as usize;
-        if self.menu_count == self.menu_pointers.len()
-            || self.menu_pointers[..self.menu_count].contains(&pointer)
-        {
-            return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-        }
-        self.menu_pointers[self.menu_count] = pointer;
-        self.menu_count += 1;
-        Ok(())
-    }
-}
-
-pub(crate) struct ControllerActionTab {
-    tab: super::browser_surface::NativeExtensionTab,
-    resident: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ControllerActionPopupPreparation {
-    Present,
-    Dismissed,
-}
-
-impl ControllerActionTab {
-    pub(crate) fn into_parts(self) -> (super::browser_surface::NativeExtensionTab, bool) {
-        (self.tab, self.resident)
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ControllerRegistryError {
@@ -146,9 +77,6 @@ pub(crate) enum ControllerRegistryError {
     UnexpectedLoadedContext,
     UnexpectedLoadedExtension,
     EntryChanged,
-    ViewStoreMismatch,
-    ViewControllerMismatch,
-    UnexpectedViewController,
     BrowserSurfaceProfileMismatch,
     BrowserSurfaceStale,
     BrowserSurfacePrivacyChanged,
@@ -204,15 +132,6 @@ impl fmt::Display for ControllerRegistryError {
             }
             Self::EntryChanged => {
                 "the prepared extension-controller entry changed during view construction"
-            }
-            Self::ViewStoreMismatch => {
-                "WKWebView did not retain the prepared profile website data store"
-            }
-            Self::ViewControllerMismatch => {
-                "WKWebView did not retain the prepared profile extension controller"
-            }
-            Self::UnexpectedViewController => {
-                "a view without prepared extension authority received a controller"
             }
             Self::BrowserSurfaceProfileMismatch => {
                 "an extension browser surface crossed profile ownership"
@@ -362,32 +281,6 @@ enum PersistentControllerSlot {
     Erasing(Rc<ControllerErasureWitness>),
 }
 
-/// Proof retained across Wry construction and consumed by exact post-build
-/// readback. Its native fields are intentionally private and it is not Clone.
-pub(crate) struct PreparedControllerAttachment {
-    profile: ProfileId,
-    store: Retained<WKWebsiteDataStore>,
-    controller: Retained<WKWebExtensionController>,
-}
-
-/// A fresh per-view configuration plus the exact profile objects it must
-/// expose after Wry returns the constructed view.
-pub(crate) struct PreparedDurableViewConfiguration {
-    configuration: Retained<WKWebViewConfiguration>,
-    proof: PreparedControllerAttachment,
-}
-
-impl PreparedDurableViewConfiguration {
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        Retained<WKWebViewConfiguration>,
-        PreparedControllerAttachment,
-    ) {
-        (self.configuration, self.proof)
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ControllerPreparation {
     RuntimeUnavailable,
@@ -437,13 +330,6 @@ pub(crate) enum ControllerErasureSettlement {
 pub(crate) enum ControllerSurfaceApplication {
     ControllerUnprepared,
     Applied,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ControllerBrowserRequestSettlement {
-    ControllerUnprepared,
-    Settled,
-    Stale,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -625,168 +511,6 @@ impl PersistentControllerRegistry {
         result
     }
 
-    /// Appends only bounded native menu items for the exact resident tab.
-    /// WebKit's opaque default menu and native extension items never cross a
-    /// Rust string/URL boundary.
-    pub(crate) fn context_menu_for_tab(
-        &mut self,
-        profile: ProfileId,
-        generation: zephium_core::extensions::ExtensionBrowserSurfaceGeneration,
-        tab_id: ItemId,
-        default_menu: Option<Retained<NSMenu>>,
-        mut authorizes: impl FnMut(*const WKWebExtensionContext) -> bool,
-    ) -> Result<Option<Retained<NSMenu>>, ControllerRegistryError> {
-        if self.slots.sealed || self.slots.integrity_failed {
-            return Ok(default_menu);
-        }
-        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
-        else {
-            return Ok(default_menu);
-        };
-        let result = catch_native(|| {
-            validate_entry_identity(entry)?;
-            let Some((tab, resident)) = entry
-                .browser_surface
-                .action_tab(generation, tab_id)
-                .map_err(map_browser_surface_error)?
-            else {
-                return Ok(default_menu);
-            };
-            if !resident {
-                return Ok(default_menu);
-            }
-
-            let native_contexts = unsafe { entry.controller.extensionContexts() };
-            let context_count = native_contexts.count();
-            if context_count > MAX_EXTENSION_INSTALLS_PER_PROFILE {
-                return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-            }
-            let mut identities = [[0_u8; 32]; MAX_EXTENSION_INSTALLS_PER_PROFILE];
-            let mut identity_count = 0_usize;
-            let mut ordered: [Option<([u8; 32], Retained<WKWebExtensionContext>)>;
-                MAX_EXTENSION_INSTALLS_PER_PROFILE] = std::array::from_fn(|_| None);
-            let mut ordered_count = 0_usize;
-            for context in native_contexts.iter() {
-                if identity_count == MAX_EXTENSION_INSTALLS_PER_PROFILE {
-                    return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-                }
-                let identity = bounded_command_context_identity(&context)?;
-                if identities[..identity_count].contains(&identity) {
-                    return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-                }
-                identities[identity_count] = identity;
-                identity_count += 1;
-                if !authorizes(Retained::as_ptr(&context)) {
-                    continue;
-                }
-                let mut insertion = ordered_count;
-                while insertion > 0
-                    && ordered[insertion - 1]
-                        .as_ref()
-                        .is_some_and(|entry| entry.0 > identity)
-                {
-                    ordered[insertion] = ordered[insertion - 1].take();
-                    insertion -= 1;
-                }
-                ordered[insertion] = Some((identity, context));
-                ordered_count += 1;
-            }
-            if identity_count != context_count {
-                return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-            }
-
-            let mut items: [Option<Retained<NSMenuItem>>; MAX_EXTENSION_CONTEXT_MENU_ITEMS] =
-                std::array::from_fn(|_| None);
-            let mut item_count = 0_usize;
-            let mut inventory = ContextMenuInventory::EMPTY;
-            for slot in &mut ordered[..ordered_count] {
-                let Some((_, context)) = slot.take() else {
-                    return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-                };
-                let context_items = unsafe { context.menuItemsForTab(&tab) };
-                let expected_items = context_items.count();
-                if expected_items > MAX_CONTEXT_MENU_ITEMS_PER_EXTENSION {
-                    return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-                }
-                let before_context = item_count;
-                for item in context_items.iter() {
-                    if item_count == MAX_EXTENSION_CONTEXT_MENU_ITEMS {
-                        return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-                    }
-                    validate_context_menu_item(&item, 0, &mut inventory)?;
-                    items[item_count] = Some(item);
-                    item_count += 1;
-                }
-                if item_count - before_context != expected_items {
-                    return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-                }
-            }
-            if item_count == 0 {
-                return Ok(default_menu);
-            }
-            let mtm = MainThreadMarker::new().ok_or(ControllerRegistryError::MainThreadRequired)?;
-            let menu = default_menu.unwrap_or_else(|| NSMenu::new(mtm));
-            if menu.numberOfItems() < 0 {
-                return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-            }
-            if menu.numberOfItems() > 0 {
-                menu.addItem(&NSMenuItem::separatorItem(mtm));
-            }
-            for item in &mut items[..item_count] {
-                let Some(item) = item.take() else {
-                    return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-                };
-                menu.addItem(&item);
-            }
-            Ok(Some(menu))
-        });
-        if result.is_err() {
-            self.slots.poison();
-        }
-        result
-    }
-
-    /// Return a fresh custom configuration only for an exact entry previously
-    /// admitted by the native-runtime seam. A missing entry is deliberately
-    /// not a request to allocate one.
-    pub(crate) fn configuration_for_durable_profile(
-        &mut self,
-        profile: ProfileId,
-    ) -> Result<Option<PreparedDurableViewConfiguration>, ControllerRegistryError> {
-        self.slots.admission(profile)?;
-        let Some(slot) = self.slots.entries.get(&profile) else {
-            return Ok(None);
-        };
-        let PersistentControllerSlot::Prepared(entry) = slot else {
-            return Err(ControllerRegistryError::ErasureInFlight);
-        };
-        let prepared = catch_native(|| {
-            validate_entry_identity(entry)?;
-            let mtm = MainThreadMarker::new().ok_or(ControllerRegistryError::MainThreadRequired)?;
-            // Every Wry view gets a fresh configuration/user-content
-            // controller. Wry is allowed to install per-view scripts and
-            // handlers without mutating a sibling view's registrations.
-            let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
-            unsafe {
-                configuration.setWebsiteDataStore(&entry.store);
-                configuration.setWebExtensionController(Some(&entry.controller));
-            }
-            validate_view_configuration(&configuration, &entry.store, &entry.controller)?;
-            Ok(PreparedDurableViewConfiguration {
-                configuration,
-                proof: PreparedControllerAttachment {
-                    profile,
-                    store: entry.store.clone(),
-                    controller: entry.controller.clone(),
-                },
-            })
-        });
-        if prepared.is_err() {
-            self.slots.poison();
-        }
-        prepared.map(Some)
-    }
-
     /// Reconciles one newer Shell-owned logical surface with an already
     /// authorized controller. An absent controller is an inert no-op; this
     /// path never allocates a native namespace as a side effect.
@@ -825,35 +549,6 @@ impl PersistentControllerRegistry {
         Ok(ControllerSurfaceApplication::Applied)
     }
 
-    /// Resolves an existing logical tab for action projection without asking
-    /// for, retaining, or creating its content webview.
-    pub(crate) fn action_tab(
-        &mut self,
-        profile: ProfileId,
-        generation: zephium_core::extensions::ExtensionBrowserSurfaceGeneration,
-        tab: ItemId,
-    ) -> Result<Option<ControllerActionTab>, ControllerRegistryError> {
-        self.slots.admission(profile)?;
-        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
-        else {
-            return Ok(None);
-        };
-        let result = catch_native(|| {
-            validate_entry_identity(entry)?;
-            entry
-                .browser_surface
-                .action_tab(generation, tab)
-                .map_err(map_browser_surface_error)
-        });
-        if result
-            .as_ref()
-            .is_err_and(|error| *error != ControllerRegistryError::BrowserSurfaceStale)
-        {
-            self.slots.poison();
-        }
-        result.map(|tab| tab.map(|(tab, resident)| ControllerActionTab { tab, resident }))
-    }
-
     /// Publishes a metadata refresh after an exact runtime generation has
     /// entered the already-prepared profile controller.
     pub(crate) fn notify_actions_invalidated(
@@ -870,107 +565,6 @@ impl PersistentControllerRegistry {
             .browser_surface
             .notify_actions_invalidated_after_activation();
         Ok(())
-    }
-
-    /// Revalidates the popup owner and applies exact-target toggle semantics
-    /// before the host acquires another native resource lease.
-    pub(crate) fn prepare_action_popup(
-        &mut self,
-        profile: ProfileId,
-        request: ExtensionActionRequest,
-        owner: &super::native_runtime::MacosNativeActionPopupOwner,
-        tab: Option<&super::browser_surface::NativeExtensionTab>,
-    ) -> Result<
-        Result<ControllerActionPopupPreparation, ExtensionActionRejection>,
-        ControllerRegistryError,
-    > {
-        self.slots.admission(profile)?;
-        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
-        else {
-            return Ok(Err(ExtensionActionRejection::RuntimeUnavailable));
-        };
-        validate_entry_identity(entry)?;
-        if Retained::as_ptr(&entry.controller) != owner.controller_identity() {
-            return Ok(Err(ExtensionActionRejection::NativeAdmissionFailed));
-        }
-        Ok(entry
-            .browser_surface
-            .prepare_action_popup(request, owner.context(), tab)
-            .map(|preparation| match preparation {
-                ActionPopupPreparation::Present => ControllerActionPopupPreparation::Present,
-                ActionPopupPreparation::Dismissed => ControllerActionPopupPreparation::Dismissed,
-            }))
-    }
-
-    /// Installs the one exact popup callback expectation after the host has
-    /// joined runtime, surface, tab and resource authority.
-    pub(crate) fn begin_action_popup(
-        &mut self,
-        profile: ProfileId,
-        request: ExtensionActionRequest,
-        owner: super::native_runtime::MacosNativeActionPopupOwner,
-        tab: Option<super::browser_surface::NativeExtensionTab>,
-        parent: Retained<NSView>,
-        lease: crate::host::NativeResourceLease,
-    ) -> Result<Result<(), ExtensionActionRejection>, ControllerRegistryError> {
-        self.slots.admission(profile)?;
-        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
-        else {
-            return Ok(Err(ExtensionActionRejection::RuntimeUnavailable));
-        };
-        validate_entry_identity(entry)?;
-        if !std::ptr::eq(
-            Retained::as_ptr(&entry.controller),
-            owner.controller_identity(),
-        ) {
-            return Ok(Err(ExtensionActionRejection::NativeAdmissionFailed));
-        }
-        Ok(entry.browser_surface.begin_action_popup(
-            request,
-            entry.controller.clone(),
-            owner,
-            tab,
-            parent,
-            lease,
-        ))
-    }
-
-    pub(crate) fn open_options_page(
-        &mut self,
-        profile: ProfileId,
-        owner: super::native_runtime::MacosNativeActionPopupOwner,
-        completion: &block2::DynBlock<
-            dyn Fn(
-                *mut objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>,
-                *mut objc2_foundation::NSError,
-            ),
-        >,
-    ) -> Result<Result<(), ExtensionActionRejection>, ControllerRegistryError> {
-        self.slots.admission(profile)?;
-        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
-        else {
-            return Ok(Err(ExtensionActionRejection::RuntimeUnavailable));
-        };
-        validate_entry_identity(entry)?;
-        if Retained::as_ptr(&entry.controller) != owner.controller_identity() {
-            return Ok(Err(ExtensionActionRejection::NativeAdmissionFailed));
-        }
-        let context = owner.into_context();
-        Ok(entry
-            .browser_surface
-            .open_options_page_from_browser(context, completion))
-    }
-
-    pub(crate) fn timeout_action_popup(
-        &mut self,
-        profile: ProfileId,
-        request: ExtensionActionRequestId,
-    ) -> bool {
-        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
-        else {
-            return false;
-        };
-        entry.browser_surface.timeout_action_popup(request)
     }
 
     pub(crate) fn cancel_action_popup_context(
@@ -1032,39 +626,6 @@ impl PersistentControllerRegistry {
         Ok(Some(entry.browser_surface.diagnostics()))
     }
 
-    /// Updates only the physical-view binding of one already-projected tab.
-    /// A missing controller or tab is intentionally inert: surface and view
-    /// publication may arrive in either FIFO order on the native event loop.
-    pub(crate) fn bind_browser_surface_view(
-        &mut self,
-        profile: ProfileId,
-        id: ItemId,
-        webview: Option<&Retained<WKWebView>>,
-    ) -> Result<bool, ControllerRegistryError> {
-        self.slots.admission(profile)?;
-        let Some(slot) = self.slots.entries.get(&profile) else {
-            return Ok(false);
-        };
-        let PersistentControllerSlot::Prepared(entry) = slot else {
-            return Err(ControllerRegistryError::ErasureInFlight);
-        };
-        let result = catch_native(|| {
-            validate_entry_identity(entry)?;
-            let was_ready = entry.browser_surface.is_ready_for_document_background();
-            if entry.browser_surface.bind_webview(id, webview) {
-                // The effective action switches between WebKit's default and
-                // tab-specific target here, without a logical surface change.
-                // A button projected before this binding has an old revision.
-                entry.browser_surface.notify_actions_invalidated();
-            }
-            Ok(!was_ready && entry.browser_surface.is_ready_for_document_background())
-        });
-        if result.is_err() {
-            self.slots.poison();
-        }
-        result
-    }
-
     /// Native-only in-flight main-frame URL observation for the exact bound
     /// physical tab. It never mutates Shell's committed browser surface.
     pub(crate) fn observe_browser_tab_url_attempt(
@@ -1119,62 +680,6 @@ impl PersistentControllerRegistry {
         };
         validate_entry_identity(entry)?;
         Ok(entry.browser_surface.is_ready_for_document_background())
-    }
-
-    pub(crate) fn settle_browser_request(
-        &mut self,
-        profile: ProfileId,
-        request: zephium_core::extensions::ExtensionBrowserRequestId,
-        settlement: zephium_core::extensions::ExtensionBrowserRequestSettlement,
-        extension_page_lease: Option<crate::host::NativeResourceLease>,
-        extension_page_stage: Option<(
-            Retained<crate::platform::imp::ContentStage>,
-            std::sync::Arc<std::sync::atomic::AtomicBool>,
-        )>,
-    ) -> Result<ControllerBrowserRequestSettlement, ControllerRegistryError> {
-        self.slots.admission(profile)?;
-        let Some(slot) = self.slots.entries.get(&profile) else {
-            return Ok(ControllerBrowserRequestSettlement::ControllerUnprepared);
-        };
-        let PersistentControllerSlot::Prepared(entry) = slot else {
-            return Ok(ControllerBrowserRequestSettlement::Stale);
-        };
-        validate_entry_identity(entry)?;
-        match entry.browser_surface.settle_request(
-            request,
-            settlement,
-            extension_page_lease,
-            extension_page_stage,
-        ) {
-            BrowserRequestSettlementOutcome::Settled => {
-                Ok(ControllerBrowserRequestSettlement::Settled)
-            }
-            BrowserRequestSettlementOutcome::Stale => Ok(ControllerBrowserRequestSettlement::Stale),
-            BrowserRequestSettlementOutcome::IntegrityFailed => {
-                self.slots.poison();
-                Err(ControllerRegistryError::BrowserSurfaceIntegrity)
-            }
-        }
-    }
-
-    pub(crate) fn has_extension_page(&self, profile: ProfileId, id: ItemId) -> bool {
-        matches!(self.slots.entries.get(&profile), Some(PersistentControllerSlot::Prepared(entry)) if entry.browser_surface.has_extension_page(id))
-    }
-    pub(crate) fn close_extension_page(&self, id: ItemId) -> bool {
-        self.slots.entries.values().any(|slot| match slot {
-            PersistentControllerSlot::Prepared(entry) => {
-                entry.browser_surface.close_extension_page(id)
-            }
-            _ => false,
-        })
-    }
-    pub(crate) fn navigate_extension_page(&self, id: ItemId, action: u8) -> bool {
-        self.slots.entries.values().any(|slot| match slot {
-            PersistentControllerSlot::Prepared(entry) => {
-                entry.browser_surface.navigate_extension_page(id, action)
-            }
-            _ => false,
-        })
     }
 
     pub(crate) fn timeout_browser_request(
@@ -1624,60 +1129,6 @@ impl PersistentControllerRegistry {
             }
             entry.browser_surface.clear(&entry.controller);
             validate_entry_identity(entry)
-        });
-        if result.is_err() {
-            self.slots.poison();
-        }
-        result
-    }
-
-    /// Verify the configuration Wry actually used. On a supported runtime,
-    /// an unprepared durable or private view must expose no controller.
-    pub(crate) fn attest_built_view(
-        &mut self,
-        view: &wry::WebView,
-        proof: Option<PreparedControllerAttachment>,
-    ) -> Result<(), ControllerRegistryError> {
-        if self.slots.sealed {
-            return Err(ControllerRegistryError::Sealed);
-        }
-        if self.slots.integrity_failed {
-            return Err(ControllerRegistryError::IntegrityFailed);
-        }
-        if proof.is_none() && self.runtime != RuntimeAvailability::Supported {
-            // Calling a 15.4 selector is forbidden on the admitted 14.8.x
-            // product floor. No entry can exist until the supported-runtime
-            // probe has positively completed.
-            return Ok(());
-        }
-
-        let result = catch_native(|| {
-            let wk = super::super::native::webkit(view);
-            let configuration = unsafe { wk.configuration() };
-            match proof {
-                Some(proof) => {
-                    let Some(PersistentControllerSlot::Prepared(entry)) =
-                        self.slots.entries.get(&proof.profile)
-                    else {
-                        return Err(ControllerRegistryError::EntryChanged);
-                    };
-                    if Retained::as_ptr(&entry.store) != Retained::as_ptr(&proof.store)
-                        || Retained::as_ptr(&entry.controller)
-                            != Retained::as_ptr(&proof.controller)
-                    {
-                        return Err(ControllerRegistryError::EntryChanged);
-                    }
-                    validate_entry_identity(entry)?;
-                    validate_view_configuration(&configuration, &proof.store, &proof.controller)
-                }
-                None => {
-                    if unsafe { configuration.webExtensionController() }.is_some() {
-                        Err(ControllerRegistryError::UnexpectedViewController)
-                    } else {
-                        Ok(())
-                    }
-                }
-            }
         });
         if result.is_err() {
             self.slots.poison();
@@ -2187,41 +1638,6 @@ fn bounded_command_context_identity(
     })
 }
 
-fn validate_context_menu_item(
-    item: &Retained<NSMenuItem>,
-    depth: usize,
-    inventory: &mut ContextMenuInventory,
-) -> Result<(), ControllerRegistryError> {
-    inventory.observe_item(item)?;
-    let Some(submenu) = item.submenu() else {
-        return Ok(());
-    };
-    if depth == MAX_EXTENSION_CONTEXT_MENU_DEPTH {
-        return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-    }
-    inventory.observe_menu(&submenu)?;
-    let declared = usize::try_from(submenu.numberOfItems())
-        .map_err(|_| ControllerRegistryError::ContextMenuInventoryInvalid)?;
-    let children = submenu.itemArray();
-    if children.count() != declared {
-        return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-    }
-    let mut observed = 0_usize;
-    for child in children.iter() {
-        observed = observed
-            .checked_add(1)
-            .ok_or(ControllerRegistryError::ContextMenuInventoryInvalid)?;
-        if observed > declared {
-            return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-        }
-        validate_context_menu_item(&child, depth + 1, inventory)?;
-    }
-    if observed != declared {
-        return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
-    }
-    Ok(())
-}
-
 pub(super) fn validate_entry_identity(
     entry: &PersistentControllerEntry,
 ) -> Result<(), ControllerRegistryError> {
@@ -2262,23 +1678,6 @@ pub(super) fn validate_quiescent_entry(
     }
     if unsafe { entry.controller.extensions() }.count() != 0 {
         return Err(ControllerRegistryError::UnexpectedLoadedExtension);
-    }
-    Ok(())
-}
-
-fn validate_view_configuration(
-    configuration: &WKWebViewConfiguration,
-    store: &WKWebsiteDataStore,
-    controller: &WKWebExtensionController,
-) -> Result<(), ControllerRegistryError> {
-    let actual_store = unsafe { configuration.websiteDataStore() };
-    if !std::ptr::eq(Retained::as_ptr(&actual_store), store) {
-        return Err(ControllerRegistryError::ViewStoreMismatch);
-    }
-    let actual_controller = unsafe { configuration.webExtensionController() }
-        .ok_or(ControllerRegistryError::ViewControllerMismatch)?;
-    if !std::ptr::eq(Retained::as_ptr(&actual_controller), controller) {
-        return Err(ControllerRegistryError::ViewControllerMismatch);
     }
     Ok(())
 }

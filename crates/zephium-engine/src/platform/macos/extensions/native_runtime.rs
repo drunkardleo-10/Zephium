@@ -290,54 +290,6 @@ pub(crate) struct MacosNativeRuntimeOwner {
 /// block; no hidden renderer, worker, timer, or process is created here.
 struct MacosNativeRuntimeOptionalState {
     publisher_native_host: Option<Box<ExtensionPublisherNativeHostRequirement>>,
-    action_projection: ActionProjectionCache,
-}
-
-struct ActionProjectionCache {
-    next_revision: Option<u64>,
-    last: Option<zephium_core::extensions::ExtensionActionState>,
-    // Default and tab-specific actions may look identical but open different
-    // popup documents. A target change must invalidate an in-flight click.
-    last_default_target: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MacosNativeActionFailure {
-    OwnerInvalid,
-    ActionUnavailable,
-    ContextMismatch,
-    InvalidProjection,
-    RevisionExhausted,
-    StaleAction,
-    ActionDisabled,
-    PopupRequired,
-    NativeException,
-}
-
-pub(crate) struct MacosNativeActionPopupOwner {
-    context: Retained<WKWebExtensionContext>,
-    controller: *const WKWebExtensionController,
-    background_environment: Option<ExtensionBackgroundEnvironment>,
-}
-
-impl MacosNativeActionPopupOwner {
-    pub(super) fn controller_identity(&self) -> *const WKWebExtensionController {
-        self.controller
-    }
-
-    pub(super) fn context(&self) -> &WKWebExtensionContext {
-        &self.context
-    }
-
-    pub(super) fn into_context(self) -> Retained<WKWebExtensionContext> {
-        self.context
-    }
-
-    pub(super) fn requires_popup_background_warmup(&self) -> bool {
-        // Document adapters need an explicit wake. Service workers retain
-        // WebKit's normal event-driven action/popup startup path.
-        background_environment_requires_navigation_wake(self.background_environment)
-    }
 }
 
 impl MacosNativeRuntimeOwner {
@@ -355,21 +307,6 @@ impl MacosNativeRuntimeOwner {
             context: Retained::as_ptr(&self.context),
             controller: Retained::as_ptr(&self.controller),
         }
-    }
-
-    /// Retains the exact loaded context for a popup callback reservation. The
-    /// retained object is identity only; it grants neither controller nor tab
-    /// authority and is revalidated again by the delegate.
-    pub(crate) fn action_popup_owner(
-        &self,
-    ) -> Result<MacosNativeActionPopupOwner, MacosNativeActionFailure> {
-        validate_loaded_owner_membership(self)
-            .map_err(|_| MacosNativeActionFailure::OwnerInvalid)?;
-        Ok(MacosNativeActionPopupOwner {
-            context: self.context.clone(),
-            controller: Retained::as_ptr(&self.controller),
-            background_environment: self.background_environment,
-        })
     }
 
     pub(crate) fn action_popup_context_identity(&self) -> *const WKWebExtensionContext {
@@ -484,148 +421,6 @@ impl MacosNativeRuntimeOwner {
         }
     }
 
-    /// Reads the effective action for one exact already-published logical tab.
-    /// No popup webview or content renderer is requested by this path.
-    pub(crate) fn action_state_for_tab(
-        &mut self,
-        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
-        tab_id: zephium_core::ids::ItemId,
-        tab: Option<&objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>>,
-    ) -> Result<zephium_core::extensions::ExtensionActionState, MacosNativeActionFailure> {
-        use objc2_foundation::NSUTF8StringEncoding;
-        use zephium_core::extensions::{
-            ExtensionActionRevision, ExtensionActionScope, ExtensionActionState,
-            MAX_EXTENSION_ACTION_BADGE_BYTES, MAX_EXTENSION_ACTION_LABEL_BYTES,
-        };
-
-        validate_loaded_owner_membership(self)
-            .map_err(|_| MacosNativeActionFailure::OwnerInvalid)?;
-        let action = unsafe { self.context.actionForTab(tab) }
-            .ok_or(MacosNativeActionFailure::ActionUnavailable)?;
-        let action_context = unsafe { action.webExtensionContext() }
-            .ok_or(MacosNativeActionFailure::ContextMismatch)?;
-        let associated_tab = unsafe { action.associatedTab() };
-        let matching_tab = match (associated_tab.as_deref(), tab) {
-            (Some(actual), Some(expected)) => std::ptr::eq(actual, expected),
-            (None, None) => true,
-            _ => false,
-        };
-        if !std::ptr::eq(&*action_context, &*self.context) || !matching_tab {
-            return Err(MacosNativeActionFailure::ContextMismatch);
-        }
-
-        let label = unsafe { action.label() };
-        let badge = unsafe { action.badgeText() };
-        if label.lengthOfBytesUsingEncoding(NSUTF8StringEncoding) > MAX_EXTENSION_ACTION_LABEL_BYTES
-            || badge.lengthOfBytesUsingEncoding(NSUTF8StringEncoding)
-                > MAX_EXTENSION_ACTION_BADGE_BYTES
-        {
-            return Err(MacosNativeActionFailure::InvalidProjection);
-        }
-        let projection = &mut self
-            .optional_state
-            .get_or_insert_with(|| Box::new(MacosNativeRuntimeOptionalState::new(None)))
-            .action_projection;
-        // An exhausted counter must still permit an unchanged read. Use the
-        // cached revision as a comparison-only candidate, then reject only if
-        // WebKit actually presents a new value that cannot be numbered.
-        let (revision, revision_exhausted) = match projection.next_revision {
-            Some(next) => (
-                ExtensionActionRevision::new(next)
-                    .ok_or(MacosNativeActionFailure::RevisionExhausted)?,
-                false,
-            ),
-            None => (
-                projection
-                    .last
-                    .as_ref()
-                    .map(zephium_core::extensions::ExtensionActionState::revision)
-                    .ok_or(MacosNativeActionFailure::RevisionExhausted)?,
-                true,
-            ),
-        };
-        let icon = super::action_icon::rasterize_action_icon(&action);
-        let state = objc2::rc::autoreleasepool(|pool| {
-            let label = unsafe { label.to_str(pool) };
-            let badge = unsafe { badge.to_str(pool) };
-            ExtensionActionState::new(
-                runtime,
-                ExtensionActionScope::Tab(tab_id),
-                revision,
-                label,
-                badge,
-                icon,
-                unsafe { action.isEnabled() },
-                unsafe { action.presentsPopup() },
-                unsafe { action.hasUnreadBadgeText() },
-            )
-        })
-        .map_err(|_| MacosNativeActionFailure::InvalidProjection)?;
-        if let Some(cached) = projection.last.as_ref().filter(|cached| {
-            projection.last_default_target == tab.is_none() && cached.same_presentation(&state)
-        }) {
-            return Ok(cached.clone());
-        }
-        if revision_exhausted {
-            return Err(MacosNativeActionFailure::RevisionExhausted);
-        }
-        projection.next_revision = revision.get().checked_add(1);
-        projection.last = Some(state.clone());
-        projection.last_default_target = tab.is_none();
-        Ok(state)
-    }
-
-    /// Performs only an action that still exactly matches the Shell-visible
-    /// revision and does not require popup presentation. Popup actions are
-    /// deliberately refused until the separately-budgeted delegate broker has
-    /// retained its completion and resource lease.
-    pub(crate) fn perform_non_popup_action_for_tab(
-        &mut self,
-        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
-        tab_id: zephium_core::ids::ItemId,
-        tab: &objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>,
-        expected_revision: zephium_core::extensions::ExtensionActionRevision,
-    ) -> Result<(), MacosNativeActionFailure> {
-        let state = self.action_state_for_tab(runtime, tab_id, Some(tab))?;
-        if state.revision() != expected_revision {
-            return Err(MacosNativeActionFailure::StaleAction);
-        }
-        if !state.is_enabled() {
-            return Err(MacosNativeActionFailure::ActionDisabled);
-        }
-        if state.presents_popup() {
-            return Err(MacosNativeActionFailure::PopupRequired);
-        }
-        objc2::exception::catch(AssertUnwindSafe(|| unsafe {
-            self.context.performActionForTab(Some(tab));
-        }))
-        .map_err(|_| MacosNativeActionFailure::NativeException)
-    }
-
-    /// Enters WebKit only after the host has retained the popup resource lease
-    /// and installed the exact delegate callback expectation.
-    pub(crate) fn validate_popup_action_for_tab(
-        &mut self,
-        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
-        tab_id: zephium_core::ids::ItemId,
-        tab: Option<&objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>>,
-        expected_revision: zephium_core::extensions::ExtensionActionRevision,
-    ) -> Result<(), MacosNativeActionFailure> {
-        self.reconcile_document_background_surface_if_needed()
-            .map_err(|_| MacosNativeActionFailure::NativeException)?;
-        let state = self.action_state_for_tab(runtime, tab_id, tab)?;
-        if state.revision() != expected_revision {
-            return Err(MacosNativeActionFailure::StaleAction);
-        }
-        if !state.is_enabled() {
-            return Err(MacosNativeActionFailure::ActionDisabled);
-        }
-        if !state.presents_popup() {
-            return Err(MacosNativeActionFailure::StaleAction);
-        }
-        Ok(())
-    }
-
     fn prove_absence(
         &mut self,
     ) -> Result<ExtensionRuntimeMacosAbsenceAudit, MacosNativeRuntimeFailure> {
@@ -692,11 +487,6 @@ impl MacosNativeRuntimeOptionalState {
     fn new(publisher_native_host: Option<Box<ExtensionPublisherNativeHostRequirement>>) -> Self {
         Self {
             publisher_native_host,
-            action_projection: ActionProjectionCache {
-                next_revision: Some(1),
-                last: None,
-                last_default_target: false,
-            },
         }
     }
 }

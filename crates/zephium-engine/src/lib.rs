@@ -1946,7 +1946,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(all(target_os = "macos", feature = "webext"))]
+    #[cfg(target_os = "macos")]
     fn load_web_extension(
         &self,
         profile: ProfileId,
@@ -1960,7 +1960,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(all(target_os = "macos", feature = "webext"))]
+    #[cfg(target_os = "macos")]
     fn unload_web_extension(
         &self,
         profile: ProfileId,
@@ -2039,17 +2039,14 @@ impl Engine for WebviewEngine {
                 let request_id = request.id();
                 let application_sink = sink.clone();
                 let admitted = host::try_with(move |host| {
-                    if let host::ExtensionActionInvocationOutcome::Settled(settlement) =
-                        host.invoke_extension_action(request)
-                    {
-                        application_sink(EngineEventIngress::global(
-                            EngineEvent::ExtensionActionSettled {
-                                profile,
-                                request: request_id,
-                                settlement,
-                            },
-                        ));
-                    }
+                    let settlement = host.invoke_extension_action(request);
+                    application_sink(EngineEventIngress::global(
+                        EngineEvent::ExtensionActionSettled {
+                            profile,
+                            request: request_id,
+                            settlement,
+                        },
+                    ));
                 });
                 if !admitted && lock_retirement_gate(&queued_retirement).profile_is_active(profile)
                 {
@@ -2087,42 +2084,13 @@ impl Engine for WebviewEngine {
                 }
                 let application_sink = sink.clone();
                 let admitted = host::try_with(move |host| {
-                    let terminal_sink = application_sink.clone();
-                    let completion: block2::RcBlock<
-                        dyn Fn(
-                            *mut objc2::runtime::ProtocolObject<
-                                dyn objc2_web_kit::WKWebExtensionTab,
-                            >,
-                            *mut objc2_foundation::NSError,
-                        ),
-                    > = block2::RcBlock::new(
-                        move |tab: *mut objc2::runtime::ProtocolObject<
-                            dyn objc2_web_kit::WKWebExtensionTab,
-                        >,
-                              error: *mut objc2_foundation::NSError| {
-                            let settlement = if error.is_null() && !tab.is_null() {
-                                zephium_core::extensions::ExtensionOptionsPageSettlement::Opened
-                            } else {
-                                zephium_core::extensions::ExtensionOptionsPageSettlement::Rejected(
-                                    ExtensionActionRejection::NativeAdmissionFailed,
-                                )
-                            };
-                            terminal_sink(EngineEventIngress::global(
-                                EngineEvent::ExtensionOptionsPageSettled {
-                                    runtime,
-                                    settlement,
-                                },
-                            ));
+                    let settlement = host.open_extension_options(runtime);
+                    application_sink(EngineEventIngress::global(
+                        EngineEvent::ExtensionOptionsPageSettled {
+                            runtime,
+                            settlement,
                         },
-                    );
-                    if let Some(settlement) = host.open_extension_options(runtime, &completion) {
-                        application_sink(EngineEventIngress::global(
-                            EngineEvent::ExtensionOptionsPageSettled {
-                                runtime,
-                                settlement,
-                            },
-                        ));
-                    }
+                    ));
                 });
                 if !admitted && lock_retirement_gate(&queued_retirement).profile_is_active(profile)
                 {

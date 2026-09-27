@@ -19,7 +19,6 @@ use std::sync::OnceLock;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
-use objc2_app_kit::NSView;
 #[cfg(feature = "native-extension-qa-inspector")]
 use objc2_foundation::NSLocalizedFailureReasonErrorKey;
 use objc2_foundation::{
@@ -34,20 +33,16 @@ use objc2_web_kit::{
     WKWebView,
 };
 use zephium_core::extensions::{
-    ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRequestId,
-    ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection, ExtensionBrowserSurface,
-    ExtensionBrowserSurfaceGeneration, ExtensionCompatibilityBrokerRequestId,
-    ExtensionCompatibilityBrokerSettlement, ExtensionCompatibilityBrokerWitness,
-    EXTENSION_COMPATIBILITY_BROKER_APPLICATION_ID, MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES,
+    ExtensionActionRejection, ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection,
+    ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
+    ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerSettlement,
+    ExtensionCompatibilityBrokerWitness, EXTENSION_COMPATIBILITY_BROKER_APPLICATION_ID,
+    MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES,
 };
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 
-pub(super) type NativeExtensionTab = Retained<ProtocolObject<dyn WKWebExtensionTab>>;
-
-use super::action_popup::{ActionPopupBroker, ActionPopupPreparation};
-use super::browser_request_broker::{
-    BrowserRequestBroker, BrowserRequestPool, BrowserRequestSettlementOutcome,
-};
+use super::action_popup::ActionPopupBroker;
+use super::browser_request_broker::{BrowserRequestBroker, BrowserRequestPool};
 use super::compatibility_broker::{
     CompatibilityBroker, CompatibilityBrokerPool, CompatibilityBrokerSettlementOutcome,
 };
@@ -525,12 +520,6 @@ impl BrowserTab {
             loading_changed,
             pinned_changed,
         ))
-    }
-
-    fn bind_webview(&self, webview: Option<&Retained<WKWebView>>) {
-        if self.ivars().guest.borrow().is_none() {
-            *self.ivars().webview.borrow_mut() = webview.map(Weak::from_retained);
-        }
     }
 
     fn observe_url_attempt(
@@ -1123,16 +1112,7 @@ define_class!(
                         return;
                     }
                     product_probe_create_diagnostic("extension-page", configuration);
-                    let Some(context) = (unsafe {
-                        Retained::retain(context as *const _ as *mut WKWebExtensionContext)
-                    }) else {
-                        broker.reject_tab(
-                            completion,
-                            ExtensionBrowserRequestRejection::NativeAdmissionFailed,
-                        );
-                        return;
-                    };
-                    broker.begin_extension_page(context, url, completion);
+                    broker.begin_extension_page(completion);
                     return;
                 }
             }
@@ -1560,21 +1540,6 @@ impl MacosExtensionBrowserSurfaceHost {
         self.broker.notify_actions_invalidated_after_activation();
     }
 
-    pub(super) fn notify_actions_invalidated(&self) {
-        self.broker.notify_actions_invalidated();
-    }
-
-    pub(super) fn open_options_page_from_browser(
-        &self,
-        context: Retained<WKWebExtensionContext>,
-        completion: &block2::DynBlock<
-            dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut objc2_foundation::NSError),
-        >,
-    ) -> Result<(), ExtensionActionRejection> {
-        self.action_popup
-            .open_options_page_from_browser(context, completion)
-    }
-
     pub(super) fn apply(
         &mut self,
         controller: &WKWebExtensionController,
@@ -1777,33 +1742,6 @@ impl MacosExtensionBrowserSurfaceHost {
         Ok(())
     }
 
-    /// Reports when the effective action target changes between the default
-    /// action and this tab. Shell must refresh its revision after that change.
-    pub(super) fn bind_webview(&self, id: ItemId, webview: Option<&Retained<WKWebView>>) -> bool {
-        let Some(tab) = self.tabs.get(&id) else {
-            return false;
-        };
-        let was_bound = tab.has_bound_resident_webview();
-        tab.bind_webview(webview);
-        let changed = was_bound != tab.has_bound_resident_webview();
-        if changed {
-            let current = self
-                .delegate
-                .ivars()
-                .focused
-                .borrow()
-                .as_ref()
-                .and_then(|window| window.active_id())
-                .and_then(|active| {
-                    self.tabs
-                        .get(&active)
-                        .map(|tab| (active, tab.has_bound_resident_webview()))
-                });
-            self.action_popup.reconcile_tab(current);
-        }
-        changed
-    }
-
     pub(super) fn observe_browser_tab_url_attempt(
         &self,
         controller: &WKWebExtensionController,
@@ -1930,109 +1868,6 @@ impl MacosExtensionBrowserSurfaceHost {
                 .values()
                 .map(|tab| (tab.is_resident(), tab.has_bound_resident_webview())),
         )
-    }
-
-    /// Resolves one logical tab inside the exact already-published generation.
-    /// The native-action bit is true only while its already-bound renderer is
-    /// live; checking the weak view never creates or restores a renderer.
-    pub(super) fn action_tab(
-        &self,
-        generation: ExtensionBrowserSurfaceGeneration,
-        id: ItemId,
-    ) -> Result<Option<(NativeExtensionTab, bool)>, BrowserSurfaceError> {
-        if self.generation != Some(generation) {
-            return Err(BrowserSurfaceError::StaleGeneration);
-        }
-        Ok(self.tabs.get(&id).cloned().map(|tab| {
-            let resident = tab.has_bound_resident_webview();
-            (ProtocolObject::from_retained(tab), resident)
-        }))
-    }
-
-    pub(super) fn settle_request(
-        &self,
-        request: zephium_core::extensions::ExtensionBrowserRequestId,
-        settlement: zephium_core::extensions::ExtensionBrowserRequestSettlement,
-        extension_page_lease: Option<crate::host::NativeResourceLease>,
-        extension_page_stage: Option<(
-            Retained<crate::platform::imp::ContentStage>,
-            std::sync::Arc<std::sync::atomic::AtomicBool>,
-        )>,
-    ) -> BrowserRequestSettlementOutcome {
-        let created_id = match settlement {
-            zephium_core::extensions::ExtensionBrowserRequestSettlement::Applied(
-                zephium_core::extensions::ExtensionBrowserRequestResult::CreatedTab(id),
-            ) => Some(id),
-            _ => None,
-        };
-        let created = match settlement {
-            zephium_core::extensions::ExtensionBrowserRequestSettlement::Applied(
-                zephium_core::extensions::ExtensionBrowserRequestResult::CreatedTab(id),
-            ) => self
-                .tabs
-                .get(&id)
-                .map(|tab| ProtocolObject::from_ref(&**tab)),
-            _ => None,
-        };
-        let page_tab = match settlement {
-            zephium_core::extensions::ExtensionBrowserRequestSettlement::Applied(
-                zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized {
-                    tab,
-                    window,
-                },
-            ) => self
-                .tabs
-                .get(&tab)
-                .filter(|native| native.window().is_some_and(|actual| actual.id() == window))
-                .cloned(),
-            _ => None,
-        };
-        let outcome = self.broker.settle(
-            request,
-            settlement,
-            created,
-            extension_page_lease,
-            |context, url, lease| {
-                let tab = page_tab
-                    .as_ref()
-                    .ok_or(ExtensionBrowserRequestRejection::InvalidScope)?;
-                let (stage, permit) = extension_page_stage
-                    .ok_or(ExtensionBrowserRequestRejection::NativeAdmissionFailed)?;
-                let view = self.extension_pages.present(
-                    context.clone(),
-                    url,
-                    lease,
-                    tab.id(),
-                    stage,
-                    permit,
-                )?;
-                tab.bind_guest(context, &self.extension_pages, &view);
-                Ok(ProtocolObject::from_retained(tab.clone()))
-            },
-        );
-        if extension_tab_trace_enabled() {
-            if let Some(id) = created_id {
-                eprintln!(
-                    "extension-tab-trace: native-created-tab-reply tab={id} request={request:?} outcome={outcome:?}"
-                );
-            }
-        }
-        if let Some(tab) = page_tab {
-            if tab.ivars().guest.borrow().is_none() {
-                self.broker.extension_page_closed(tab.id());
-            }
-        }
-        outcome
-    }
-
-    pub(super) fn has_extension_page(&self, id: ItemId) -> bool {
-        self.extension_pages.contains(id)
-    }
-    pub(super) fn close_extension_page(&self, id: ItemId) -> bool {
-        self.extension_pages.close_item(id)
-    }
-    pub(super) fn navigate_extension_page(&self, id: ItemId, action: u8) -> bool {
-        self.extension_pages.navigation(id, action)
     }
 
     pub(super) fn timeout_request(
@@ -2263,32 +2098,6 @@ impl MacosExtensionBrowserSurfaceHost {
 
     pub(super) fn cancel_native_messaging_context(&self, context: *const WKWebExtensionContext) {
         self.publisher_native_messaging.cancel_context(context);
-    }
-
-    pub(super) fn begin_action_popup(
-        &self,
-        request: ExtensionActionRequest,
-        controller: Retained<WKWebExtensionController>,
-        owner: super::native_runtime::MacosNativeActionPopupOwner,
-        tab: Option<NativeExtensionTab>,
-        parent: Retained<NSView>,
-        lease: crate::host::NativeResourceLease,
-    ) -> Result<(), ExtensionActionRejection> {
-        self.action_popup
-            .begin(request, controller, owner, tab, parent, lease)
-    }
-
-    pub(super) fn prepare_action_popup(
-        &self,
-        request: ExtensionActionRequest,
-        context: &WKWebExtensionContext,
-        tab: Option<&NativeExtensionTab>,
-    ) -> Result<ActionPopupPreparation, ExtensionActionRejection> {
-        self.action_popup.prepare_toggle(request, context, tab)
-    }
-
-    pub(super) fn timeout_action_popup(&self, request: ExtensionActionRequestId) -> bool {
-        self.action_popup.timeout(request)
     }
 
     pub(super) fn cancel_action_popup_context(

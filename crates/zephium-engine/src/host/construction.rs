@@ -787,7 +787,7 @@ impl EngineHost {
             (builder, path)
         };
         #[cfg(target_os = "macos")]
-        let (builder, expected_ephemeral_data_store, prepared_extension_controller) = {
+        let (builder, expected_ephemeral_data_store) = {
             let builder = WebViewBuilder::new();
             match partition {
                 Partition::Ephemeral(profile) => {
@@ -860,48 +860,12 @@ impl EngineHost {
                     (
                         builder.with_webview_configuration(configuration),
                         Some(store),
-                        None,
                     )
                 }
-                #[cfg(feature = "webext")]
                 Partition::Default(profile) | Partition::Persistent(profile) => {
                     use wry::WebViewBuilderExtMacos;
                     let configuration = self.webext.configuration(profile, &self.sink);
-                    (
-                        builder.with_webview_configuration(configuration),
-                        None,
-                        None,
-                    )
-                }
-                #[cfg(not(feature = "webext"))]
-                Partition::Default(profile) | Partition::Persistent(profile) => {
-                    match self
-                        .macos_extension_controllers
-                        .configuration_for_durable_profile(profile)
-                    {
-                        Ok(Some(prepared)) => {
-                            use wry::WebViewBuilderExtMacos;
-                            let (configuration, proof) = prepared.into_parts();
-                            (
-                                builder.with_webview_configuration(configuration),
-                                None,
-                                Some(proof),
-                            )
-                        }
-                        Ok(None) => (builder, None, None),
-                        Err(error) => {
-                            eprintln!(
-                                "security: cannot attach macOS extension controller: {error}"
-                            );
-                            if report_failure {
-                                event_permit.emit(
-                                    &self.sink,
-                                    EngineEvent::ViewCreationFailed { id: id.get() },
-                                );
-                            }
-                            return None;
-                        }
-                    }
+                    (builder.with_webview_configuration(configuration), None)
                 }
             }
         };
@@ -958,7 +922,7 @@ impl EngineHost {
             // policy. Wry currently ignores this setting on WebKit platforms.
             .with_general_autofill_enabled(false)
             .with_navigation_handler(move |target| {
-                #[cfg(feature = "webext")]
+                #[cfg(target_os = "macos")]
                 if super::webext::intercept_auth_redirect(&target) {
                     return false;
                 }
@@ -1198,8 +1162,6 @@ impl EngineHost {
             let page_permission_permit = event_permit.clone();
             let page_permission_navigation = navigation.clone();
             let page_permission_presence = page_permission_pending.clone();
-            let context_menu_item = id.clone();
-            let context_menu_permit = event_permit.clone();
             let profile = partition.profile();
             builder = builder
                 // Link preview is a native WebKit UI/network surface outside
@@ -1300,32 +1262,14 @@ impl EngineHost {
                         }
                     });
             }
-            if prepared_extension_controller.is_some() {
-                builder = builder.with_context_menu_handler(move |_event, default_menu| {
-                    super::dispatch::try_macos_extension_context_menu(
-                        context_menu_item.get(),
-                        &context_menu_permit,
-                        default_menu,
-                    )
-                });
-            }
         }
 
         builder = match partition {
             Partition::Default(profile) | Partition::Persistent(profile) => {
                 #[cfg(target_os = "macos")]
                 {
-                    if prepared_extension_controller.is_some() {
-                        // Wry deliberately ignores `data_store_identifier`
-                        // when a custom configuration is supplied. The
-                        // registry already installed and pre-attested the
-                        // exact named store in that configuration.
-                        let _ = profile;
-                        builder
-                    } else {
-                        use wry::WebViewBuilderExtDarwin;
-                        builder.with_data_store_identifier(profile.bytes())
-                    }
+                    use wry::WebViewBuilderExtDarwin;
+                    builder.with_data_store_identifier(profile.bytes())
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -1583,20 +1527,9 @@ impl EngineHost {
         };
         // Lets Safari's Web Inspector reach tab pages and the content scripts
         // running in them while diagnosing extensions.
-        #[cfg(feature = "webext")]
+        #[cfg(target_os = "macos")]
         if zephium_webext_macos::tracing() {
             unsafe { crate::platform::imp::native_webview(&view).setInspectable(true) };
-        }
-        #[cfg(target_os = "macos")]
-        if let Err(error) = self
-            .macos_extension_controllers
-            .attest_built_view(&view, prepared_extension_controller)
-        {
-            eprintln!("security: macOS extension-controller readback failed: {error}");
-            if report_failure {
-                event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
-            }
-            return None;
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {

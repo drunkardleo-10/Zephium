@@ -9,20 +9,17 @@ use std::time::Duration;
 use block2::{DynBlock, RcBlock};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::{NSError, NSString, NSURL};
+use objc2_foundation::{NSError, NSString};
 use objc2_web_kit::{WKWebExtensionContext, WKWebExtensionController, WKWebExtensionTab};
 use zephium_core::extensions::{
     ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestId,
-    ExtensionBrowserRequestRejection, ExtensionBrowserRequestResult,
-    ExtensionBrowserRequestSettlement, MAX_PENDING_EXTENSION_BROWSER_REQUESTS,
+    ExtensionBrowserRequestRejection, MAX_PENDING_EXTENSION_BROWSER_REQUESTS,
     MAX_PENDING_EXTENSION_BROWSER_REQUESTS_PER_PROFILE,
 };
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::EngineEvent;
 
 use crate::{EngineEventIngress, EngineEventIngressSink};
-
-use crate::host::NativeResourceLease;
 
 const BROWSER_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const BROWSER_REQUEST_ERROR_DOMAIN: &str = "app.zephium.extension-browser";
@@ -69,21 +66,8 @@ enum PendingCompletion {
 
 struct PendingRequest {
     completion: PendingCompletion,
-    extension_page: Option<PendingExtensionPage>,
     trace_close_tab: Option<ItemId>,
     watchdog: crate::platform::imp::ContentPolicyTimeout,
-}
-
-struct PendingExtensionPage {
-    context: Retained<WKWebExtensionContext>,
-    url: Retained<NSURL>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum BrowserRequestSettlementOutcome {
-    Settled,
-    Stale,
-    IntegrityFailed,
 }
 
 /// One profile controller's request broker. It owns no browser state and can
@@ -225,19 +209,16 @@ impl BrowserRequestBroker {
         action: ExtensionBrowserRequestAction,
         completion: &DynBlock<dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut NSError)>,
     ) {
-        self.begin(action, PendingCompletion::Tab(completion.copy()), None);
+        self.begin(action, PendingCompletion::Tab(completion.copy()));
     }
 
     pub(super) fn begin_extension_page(
         &self,
-        context: Retained<WKWebExtensionContext>,
-        url: Retained<NSURL>,
         completion: &DynBlock<dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut NSError)>,
     ) {
         self.begin(
             ExtensionBrowserRequestAction::OpenExtensionPage,
             PendingCompletion::Tab(completion.copy()),
-            Some(PendingExtensionPage { context, url }),
         );
     }
 
@@ -246,15 +227,10 @@ impl BrowserRequestBroker {
         action: ExtensionBrowserRequestAction,
         completion: &DynBlock<dyn Fn(*mut NSError)>,
     ) {
-        self.begin(action, PendingCompletion::Unit(completion.copy()), None);
+        self.begin(action, PendingCompletion::Unit(completion.copy()));
     }
 
-    fn begin(
-        &self,
-        action: ExtensionBrowserRequestAction,
-        completion: PendingCompletion,
-        extension_page: Option<PendingExtensionPage>,
-    ) {
+    fn begin(&self, action: ExtensionBrowserRequestAction, completion: PendingCompletion) {
         let Some(sink) = self.sink.as_ref() else {
             complete_rejected(completion, ExtensionBrowserRequestRejection::Unsupported);
             return;
@@ -314,7 +290,6 @@ impl BrowserRequestBroker {
             id,
             PendingRequest {
                 completion,
-                extension_page,
                 trace_close_tab,
                 watchdog,
             },
@@ -354,106 +329,6 @@ impl BrowserRequestBroker {
             }
         }
         None
-    }
-
-    pub(super) fn settle(
-        &self,
-        id: ExtensionBrowserRequestId,
-        settlement: ExtensionBrowserRequestSettlement,
-        created_tab: Option<&ProtocolObject<dyn WKWebExtensionTab>>,
-        extension_page_lease: Option<NativeResourceLease>,
-        present_extension_page: impl FnOnce(
-            Retained<WKWebExtensionContext>,
-            Retained<NSURL>,
-            NativeResourceLease,
-        ) -> Result<
-            Retained<ProtocolObject<dyn WKWebExtensionTab>>,
-            ExtensionBrowserRequestRejection,
-        >,
-    ) -> BrowserRequestSettlementOutcome {
-        let Some(pending) = self.take(id) else {
-            return BrowserRequestSettlementOutcome::Stale;
-        };
-        drop(pending.watchdog);
-        if extension_tab_trace_enabled() {
-            if let Some(tab) = pending.trace_close_tab {
-                let applied = matches!(
-                    settlement,
-                    ExtensionBrowserRequestSettlement::Applied(
-                        ExtensionBrowserRequestResult::Complete
-                    )
-                );
-                eprintln!(
-                    "extension-tab-trace: native-close-settlement tab={tab} request={id:?} applied={applied}"
-                );
-            }
-        }
-        match (pending.completion, pending.extension_page, settlement) {
-            (
-                PendingCompletion::Unit(completion),
-                None,
-                ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete),
-            ) => {
-                completion.call((std::ptr::null_mut(),));
-                BrowserRequestSettlementOutcome::Settled
-            }
-            (
-                PendingCompletion::Tab(completion),
-                None,
-                ExtensionBrowserRequestSettlement::Applied(
-                    ExtensionBrowserRequestResult::CreatedTab(_),
-                ),
-            ) => {
-                let Some(tab) = created_tab else {
-                    complete_rejected(
-                        PendingCompletion::Tab(completion),
-                        ExtensionBrowserRequestRejection::NativeAdmissionFailed,
-                    );
-                    return BrowserRequestSettlementOutcome::IntegrityFailed;
-                };
-                completion.call((
-                    (tab as *const ProtocolObject<_>).cast_mut(),
-                    std::ptr::null_mut(),
-                ));
-                BrowserRequestSettlementOutcome::Settled
-            }
-            (
-                PendingCompletion::Tab(completion),
-                Some(page),
-                ExtensionBrowserRequestSettlement::Applied(
-                    ExtensionBrowserRequestResult::ExtensionPageAuthorized { .. },
-                ),
-            ) => {
-                let Some(lease) = extension_page_lease else {
-                    complete_rejected(
-                        PendingCompletion::Tab(completion),
-                        ExtensionBrowserRequestRejection::NativeAdmissionFailed,
-                    );
-                    return BrowserRequestSettlementOutcome::IntegrityFailed;
-                };
-                match present_extension_page(page.context, page.url, lease) {
-                    Ok(tab) => {
-                        completion.call((Retained::as_ptr(&tab).cast_mut(), std::ptr::null_mut()));
-                        BrowserRequestSettlementOutcome::Settled
-                    }
-                    Err(reason) => {
-                        complete_rejected(PendingCompletion::Tab(completion), reason);
-                        BrowserRequestSettlementOutcome::Settled
-                    }
-                }
-            }
-            (completion, _, ExtensionBrowserRequestSettlement::Rejected(reason)) => {
-                complete_rejected(completion, reason);
-                BrowserRequestSettlementOutcome::Settled
-            }
-            (completion, _, ExtensionBrowserRequestSettlement::Applied(_)) => {
-                complete_rejected(
-                    completion,
-                    ExtensionBrowserRequestRejection::NativeAdmissionFailed,
-                );
-                BrowserRequestSettlementOutcome::IntegrityFailed
-            }
-        }
     }
 
     pub(super) fn timeout(&self, id: ExtensionBrowserRequestId) -> bool {

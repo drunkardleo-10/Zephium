@@ -67,10 +67,8 @@ impl EngineHost {
     }
 
     pub(crate) fn close(&mut self, id: ItemId) {
-        #[cfg(feature = "webext")]
-        self.webext.close_page(id);
         #[cfg(target_os = "macos")]
-        self.macos_extension_controllers.close_extension_page(id);
+        self.webext.close_page(id);
         // Revoke browser-document authority before the native view can begin
         // teardown or its logical id can be reused by a replacement.
         self.extension_document_authority.revoke_item(id);

@@ -34,7 +34,6 @@ mod web_extensions;
 pub(crate) use extensions::probe_new_window_callbacks;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use extensions::probe_new_window_policy;
-#[cfg(feature = "webext")]
 pub(crate) use extensions::rasterize_webext_action_icon;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use extensions::run_identity_redirect_probe;
@@ -42,12 +41,10 @@ pub(crate) use extensions::run_identity_redirect_probe;
 pub(crate) use extensions::run_original_bitwarden_offscreen_erasure_probe;
 pub(crate) use extensions::{
     begin_prepared_native_runtime_activation, has_pending_offscreen_authorization,
-    prepare_native_runtime_activation, schedule_authorization_retry, trace_action_qa_stage,
-    ControllerActionPopupPreparation, ControllerBrowserRequestSettlement,
-    ControllerCommandDispatch, ControllerCompatibilityBrokerSettlement,
-    ControllerErasureSettlement, ControllerErasureTicket, ControllerNamespaceRecoveryAudit,
-    ControllerPreparation, ControllerRegistryError, ControllerRuntimeGrantSettlement,
-    IdentityRequestId, MacosNativeActionFailure, MacosNativeRuntimeActivation,
+    prepare_native_runtime_activation, schedule_authorization_retry, ControllerCommandDispatch,
+    ControllerCompatibilityBrokerSettlement, ControllerErasureSettlement, ControllerErasureTicket,
+    ControllerNamespaceRecoveryAudit, ControllerPreparation, ControllerRegistryError,
+    ControllerRuntimeGrantSettlement, IdentityRequestId, MacosNativeRuntimeActivation,
     MacosNativeRuntimeFailure, MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity,
     MacosNativeRuntimeReconciliation, MacosNativeRuntimeRetirement, NativeHostWorkerEvent,
     OffscreenSessionId, PersistentControllerRegistry, ProfileControllerErasure,
@@ -324,7 +321,6 @@ pub(crate) fn new_configuration_with_data_store(
     // SAFETY: `mtm` proves AppKit/WebKit main-thread affinity. `new` returns
     // an owned Objective-C object and has no additional preconditions.
     let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
-    #[cfg(feature = "webext")]
     unsafe {
         configuration.setApplicationNameForUserAgent(Some(&objc2_foundation::NSString::from_str(
             zephium_webext_macos::application_name(),

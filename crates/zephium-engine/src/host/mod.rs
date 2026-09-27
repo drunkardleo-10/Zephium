@@ -18,8 +18,6 @@ mod extension_action;
 mod extension_browser_surface;
 #[cfg(target_os = "macos")]
 mod extension_commands;
-#[cfg(target_os = "macos")]
-mod extension_context_menu;
 pub(crate) mod extension_runtime;
 mod extensions;
 #[cfg(target_os = "macos")]
@@ -36,7 +34,7 @@ mod profiles;
 mod resources;
 mod scripts;
 mod stages;
-#[cfg(all(target_os = "macos", feature = "webext"))]
+#[cfg(target_os = "macos")]
 mod webext;
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
 mod work_resource;
@@ -53,8 +51,6 @@ pub(crate) use dispatch::try_dispatch_macos_extension_command;
 ))]
 pub(crate) use dispatch::try_with_agent_context_terminal;
 #[cfg(target_os = "macos")]
-pub(crate) use dispatch::with_extension_action_popup_terminal;
-#[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_extension_browser_request_terminal;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_extension_runtime_grant_terminal;
@@ -65,8 +61,6 @@ pub(crate) use dispatch::{agent_context_terminal_depth_for_audit, try_with_agent
 pub(crate) use dispatch::{
     best_effort_with, install, shutdown, try_with, try_with_close, try_with_profile_erasure,
 };
-#[cfg(target_os = "macos")]
-pub(crate) use extension_action::ExtensionActionInvocationOutcome;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) use profiles::release_linux_erasure_obligations;
 #[cfg(target_os = "macos")]
@@ -775,7 +769,7 @@ pub(crate) struct EngineHost {
     // it here establishes exact construction, erasure, and shutdown ownership.
     #[cfg(target_os = "macos")]
     macos_extension_controllers: crate::platform::imp::PersistentControllerRegistry,
-    #[cfg(all(target_os = "macos", feature = "webext"))]
+    #[cfg(target_os = "macos")]
     webext: webext::WebextHost,
     // Off-screen views carrying the low-memory hint, and the subset the
     // shell's idle policy asked WebView2 to suspend.
