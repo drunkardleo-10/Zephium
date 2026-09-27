@@ -15,7 +15,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass, Message};
 use objc2_foundation::{
-    NSData, NSError, NSMutableURLRequest, NSObjectProtocol, NSOperationQueue, NSString,
+    NSData, NSError, NSMutableURLRequest, NSObjectProtocol, NSOperationQueue, NSString, NSTimer,
     NSURLSession, NSURLSessionConfiguration, NSURLSessionDelegate, NSURLSessionTask,
     NSURLSessionTaskDelegate, NSURLSessionWebSocketCloseCode, NSURLSessionWebSocketDelegate,
     NSURLSessionWebSocketMessage, NSURLSessionWebSocketMessageType, NSURLSessionWebSocketTask,
@@ -40,8 +40,15 @@ struct Socket {
     session: RefCell<Option<Retained<NSURLSession>>>,
     task: RefCell<Option<Retained<NSURLSessionWebSocketTask>>>,
     delegate: RefCell<Option<Retained<SessionDelegate>>>,
+    keepalive: RefCell<Option<Retained<NSTimer>>>,
     closed: Cell<bool>,
 }
+
+/// WebKit ends an extension worker that goes quiet, taking its connections
+/// with it; Chrome keeps a worker with a live WebSocket running. Traffic in
+/// both directions on the bridge port keeps the worker alive while the
+/// connection is open.
+const KEEPALIVE_SECONDS: f64 = 20.0;
 
 pub(crate) fn connect(
     shared: &Rc<Shared>,
@@ -55,6 +62,7 @@ pub(crate) fn connect(
         session: RefCell::new(None),
         task: RefCell::new(None),
         delegate: RefCell::new(None),
+        keepalive: RefCell::new(None),
         closed: Cell::new(false),
     });
     let weak = Rc::downgrade(&socket);
@@ -153,6 +161,16 @@ impl Socket {
         *self.task.borrow_mut() = Some(task.clone());
         task.resume();
         self.receive_next();
+        let weak = Rc::downgrade(self);
+        let beat = RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
+            if let Some(socket) = weak.upgrade() {
+                socket.post(json!({ "op": "alive" }));
+            }
+        });
+        let timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(KEEPALIVE_SECONDS, true, &beat)
+        };
+        *self.keepalive.borrow_mut() = Some(timer);
         if let Some(shared) = shared.upgrade() {
             shared.host().log(
                 &self.extension,
@@ -247,6 +265,9 @@ impl Socket {
     fn shut(&self, close: Option<(i64, &str)>) {
         if self.closed.replace(true) {
             return;
+        }
+        if let Some(timer) = self.keepalive.borrow_mut().take() {
+            timer.invalidate();
         }
         if let Some((code, reason)) = close {
             let object = json::to_object(&json!({ "op": "close", "code": code, "reason": reason }));

@@ -557,6 +557,9 @@
             this.#fire(new MessageEvent("message", { data, origin: new URL(this.url).origin }));
             break;
           }
+          case "alive":
+            this.#port.postMessage({ op: "beat" });
+            break;
           case "error":
             this.#fire(new Event("error"));
             break;
