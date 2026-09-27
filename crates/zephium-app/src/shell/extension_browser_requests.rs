@@ -6,6 +6,8 @@ impl Shell {
     pub(super) fn on_extension_browser_request(&mut self, request: ExtensionBrowserRequest) {
         let profile = request.profile();
         let id = request.id();
+        // Only macOS can revoke a created tab whose first navigation was lost.
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut settlement = if !self.bootstrapped
             || !self.extension_browser_surfaces.is_active(profile)
             || self.profile_deletion_quarantines(profile)
