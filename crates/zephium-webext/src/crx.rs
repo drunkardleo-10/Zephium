@@ -111,7 +111,7 @@ pub fn verify<'a>(
     for proof in &proofs {
         let key = subject_public_key(proof.public_key, proof.kind)?;
         let algorithm: &dyn VerificationAlgorithm = match proof.kind {
-            KeyKind::Rsa => &signature::RSA_PKCS1_2048_8192_SHA256,
+            KeyKind::Rsa => &signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
             KeyKind::Ecdsa => &signature::ECDSA_P256_SHA256_ASN1,
         };
         UnparsedPublicKey::new(algorithm, key)

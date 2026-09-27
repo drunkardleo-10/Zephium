@@ -45,3 +45,52 @@ fn verifies_extracts_and_prepares_bitwarden() {
     assert!(!manifest.name().unwrap_or_default().starts_with("__MSG_"));
     Manifest::load(&dir).unwrap();
 }
+
+/// Verifies, extracts and prepares every package in `ZEPHIUM_WEBEXT_CORPUS`.
+#[test]
+#[ignore = "needs Chrome Web Store downloads on disk"]
+fn prepares_a_corpus_of_real_packages() {
+    let Some(dir) = std::env::var_os("ZEPHIUM_WEBEXT_CORPUS") else {
+        eprintln!("skipping: ZEPHIUM_WEBEXT_CORPUS is not set");
+        return;
+    };
+    let mut failures = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "crx") {
+            continue;
+        }
+        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let result = (|| -> Result<String, String> {
+            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+            let verified = crx::verify(&bytes, None).map_err(|e| format!("verify: {e}"))?;
+            let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
+            let root = temp.path().join("package");
+            archive::extract(verified.zip, &root, &Limits::default())
+                .map_err(|e| format!("extract: {e}"))?;
+            let manifest = Manifest::load(&root).map_err(|e| format!("manifest: {e}"))?;
+            let report = prepare(
+                &root,
+                &CompatLayer::new("/* compat */").with_permissions(&["nativeMessaging"]),
+            )
+            .map_err(|e| format!("prepare: {e}"))?;
+            Ok(format!(
+                "{} {} MV{} worker={:?} html={} events={}",
+                manifest.name().unwrap_or_default(),
+                manifest.version().unwrap_or_default(),
+                manifest.manifest_version(),
+                report.worker,
+                report.html_injected,
+                report.events.len()
+            ))
+        })();
+        match result {
+            Ok(summary) => eprintln!("ok   {name}: {summary}"),
+            Err(error) => {
+                eprintln!("FAIL {name}: {error}");
+                failures.push(name);
+            }
+        }
+    }
+    assert!(failures.is_empty(), "failed: {failures:?}");
+}

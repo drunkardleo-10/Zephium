@@ -27,7 +27,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            total: 256 * 1024 * 1024,
+            total: 1024 * 1024 * 1024,
             file: 64 * 1024 * 1024,
             entries: 20_000,
         }
