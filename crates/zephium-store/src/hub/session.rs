@@ -502,9 +502,7 @@ impl Hub {
         Self::validate_blocker_cohort_before_session_commit(&tx, &self.registry)?;
         if let Some(profile) = authorize_deletion {
             // Establish the deletion anchor before removing the active-profile
-            // anchor. Native namespace obligations are allowed to belong to
-            // either set, but never to an unanchored intermediate durable
-            // state. The surrounding transaction keeps the temporary overlap
+            // anchor. The surrounding transaction keeps the temporary overlap
             // invisible and rolls both changes back together.
             let inserted = tx.execute(
                 "INSERT INTO profile_deletion_journal(profile_id, authorized_at)

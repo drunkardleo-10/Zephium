@@ -1621,6 +1621,23 @@ pub static META: &[Migration] = &[
         version: 20,
         up: migrate_local_external_native_source,
     },
+    Migration {
+        version: 21,
+        up: |tx| {
+            // The previous extension stack's native ownership records. Its
+            // anchors live on tables that stay, so they go explicitly.
+            tx.execute_batch(
+                "DROP TRIGGER extension_native_namespace_profile_anchor_delete;
+                 DROP TRIGGER extension_native_namespace_profile_anchor_update;
+                 DROP TRIGGER extension_native_namespace_deletion_anchor_delete;
+                 DROP TRIGGER extension_native_namespace_deletion_anchor_update;
+                 DROP TRIGGER extension_native_namespace_proof_requires_absence;
+                 DROP TABLE extension_native_namespace_obligations;
+                 DROP TABLE extension_native_ownership_journal;
+                 DROP TABLE extension_native_ownership_journal_state;",
+            )
+        },
+    },
 ];
 
 // These statements are the exact extension-branch PROFILE v14 artifact. The
@@ -2312,6 +2329,24 @@ pub static PROFILE: &[Migration] = &[
         version: 22,
         up: migrate_extension_profile_provenance,
     },
+    Migration {
+        version: 23,
+        up: |tx| {
+            // The previous extension stack's installs and grants; the current
+            // runtime keeps its registry outside the database.
+            tx.execute_batch(
+                "DROP TABLE extension_install_provenance;
+                 DROP TABLE extension_upstream_history;
+                 DROP TABLE extension_grant_api_permissions;
+                 DROP TABLE extension_grant_host_permissions;
+                 DROP TABLE extension_grants;
+                 DROP TABLE extension_profile_site_denials;
+                 DROP TABLE extension_profile_policy;
+                 DROP TABLE extension_installs;
+                 DROP TABLE extension_install_catalog;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -2360,6 +2395,7 @@ mod tests {
         (18, 0xf8c3_1606_d301_f467),
         (19, 0xb30f_9566_ea44_65bf),
         (20, 0xeb32_555e_6d72_1ded),
+        (21, 0xfe22_09ee_a55b_a3f5),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),
@@ -2384,7 +2420,55 @@ mod tests {
         (20, 0x4b37_b9cf_91e8_b507),
         (21, 0x3483_1796_92c9_33a6),
         (22, 0xd5d5_eec8_ddc1_ca18),
+        (23, 0xfa14_edb0_3a39_f586),
     ];
+
+    #[test]
+    fn upgrades_drop_every_previous_extension_object_and_keep_user_data() {
+        let extension_objects = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name LIKE '%extension%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+
+        let mut meta = Connection::open_in_memory().unwrap();
+        apply(&mut meta, &META[..20]).unwrap();
+        meta.execute(
+            "INSERT INTO profiles(id, name, kind, position)
+             VALUES ('01J00000000000000000000000', 'Profile', 'default', 0)",
+            [],
+        )
+        .unwrap();
+        insert_native_ownership_test_row(&meta, 1, 1, 1, "acquire", "native_absent_preparing")
+            .unwrap();
+        assert!(extension_objects(&meta) > 0);
+        apply(&mut meta, META).unwrap();
+        assert_eq!(extension_objects(&meta), 0);
+        let profiles: i64 = meta
+            .query_row("SELECT count(*) FROM profiles", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(profiles, 1);
+        meta.execute("DELETE FROM profiles", []).unwrap();
+
+        let mut profile = Connection::open_in_memory().unwrap();
+        apply(&mut profile, &PROFILE[..22]).unwrap();
+        profile
+            .execute(
+                "INSERT INTO history(url, title, visited_at) VALUES ('https://example.com/', 'Kept', 1)",
+                [],
+            )
+            .unwrap();
+        assert!(extension_objects(&profile) > 0);
+        apply(&mut profile, PROFILE).unwrap();
+        assert_eq!(extension_objects(&profile), 0);
+        let title: String = profile
+            .query_row("SELECT title FROM history", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(title, "Kept");
+    }
 
     #[test]
     fn meta_v19_preserves_native_rows_and_history_without_inventing_beta_authority() {
@@ -2500,36 +2584,6 @@ mod tests {
         assert!(conn.execute("UPDATE extension_native_ownership_journal SET expected_native_identity=NULL,expected_native_identity_kind=NULL",[]).is_err());
     }
 
-    #[test]
-    fn meta_v20_admits_local_sources_only_in_the_correct_native_namespace() {
-        for (target, backend) in [
-            ("macos.wkwebextension.v1", "macos_native"),
-            ("windows.webview2.v1", "windows_native"),
-        ] {
-            let mut conn = Connection::open_in_memory().unwrap();
-            apply(&mut conn, &META[..19]).unwrap();
-            insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
-                .unwrap();
-            apply(&mut conn, META).unwrap();
-            let authority = beta_authority("local", target);
-            assert!(conn
-                .execute(
-                    "UPDATE extension_native_ownership_journal SET authority=?1",
-                    [&authority[..]]
-                )
-                .is_err());
-            conn.execute("UPDATE extension_native_ownership_journal SET authority=?1,catalog_role='beta',runtime_backend=?2,payload_kind=2,archive_length=17,archive_sha256=zeroblob(32)", rusqlite::params![&authority[..],backend]).unwrap();
-            assert!(conn
-                .execute(
-                    "UPDATE extension_native_ownership_journal SET catalog_role='active'",
-                    []
-                )
-                .is_err());
-            assert!(conn.execute("UPDATE extension_native_ownership_journal SET runtime_backend='linux_compatibility'", []).is_err());
-            apply(&mut conn, META).unwrap();
-        }
-    }
-
     fn extension_profile_v14_fixture() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", true).unwrap();
@@ -2539,63 +2593,6 @@ mod tests {
         tx.pragma_update(None, "user_version", 14).unwrap();
         tx.commit().unwrap();
         conn
-    }
-
-    #[test]
-    fn extension_profile_v14_keeps_install_provenance_and_history_on_upgrade() {
-        let mut conn = extension_profile_v14_fixture();
-        let install_id = [1_u8; 16];
-        let publisher = [2_u8; 32];
-        let checkpoint = [3_u8; 105];
-        let provenance = [4_u8; 64];
-        conn.execute(
-            "INSERT INTO extension_installs(id,revision,authority,package_key,package_revision,payload_kind,manifest_sha256,tree_sha256,desired_enabled)
-             VALUES(?1,1,?2,?3,1,1,?4,?5,1)",
-            rusqlite::params![install_id, [5_u8; 32], [6_u8; 32], [7_u8; 32], [8_u8; 32]],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_install_provenance(install_id,provenance) VALUES(?1,?2)",
-            rusqlite::params![install_id, provenance],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_upstream_history(publisher,checkpoint) VALUES(?1,?2)",
-            rusqlite::params![publisher, checkpoint],
-        )
-        .unwrap();
-
-        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 14);
-        apply(&mut conn, PROFILE).unwrap();
-        apply(&mut conn, PROFILE).unwrap();
-        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 22);
-        assert_eq!(
-            conn.query_row(
-                "SELECT provenance FROM extension_install_provenance WHERE install_id=?1",
-                [install_id],
-                |row| row.get::<_, Vec<u8>>(0)
-            )
-            .unwrap(),
-            provenance
-        );
-        assert_eq!(
-            conn.query_row(
-                "SELECT checkpoint FROM extension_upstream_history WHERE publisher=?1",
-                [publisher],
-                |row| row.get::<_, Vec<u8>>(0)
-            )
-            .unwrap(),
-            checkpoint
-        );
-        assert_eq!(
-            conn.query_row(
-                "SELECT count(*) FROM sqlite_schema WHERE name IN ('user_resources','downloads','download_cleanup')",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-            3
-        );
     }
 
     #[test]
@@ -2621,33 +2618,6 @@ mod tests {
             )
             .unwrap(),
             0
-        );
-    }
-
-    #[test]
-    fn main_profile_v21_adds_extension_schema_without_changing_resources() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, &PROFILE[..21]).unwrap();
-        conn.execute(
-            "INSERT INTO user_resources(id,kind,revision,title,completed,pinned,trashed,created_at,updated_at,body,search_text)
-             VALUES('00000000000000000000000001','note',3,'Keep this note',NULL,0,0,10,20,'body','keep this note')",
-            [],
-        )
-        .unwrap();
-        apply(&mut conn, PROFILE).unwrap();
-        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 22);
-        assert_eq!(
-            conn.query_row(
-                "SELECT title,body,revision FROM user_resources",
-                [],
-                |row| Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?
-                ))
-            )
-            .unwrap(),
-            ("Keep this note".into(), "body".into(), 3)
         );
     }
 
@@ -2785,7 +2755,7 @@ mod tests {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            22
+            PROFILE.last().unwrap().version
         );
     }
 
@@ -3038,140 +3008,6 @@ mod tests {
                 [],
             )
             .is_err());
-    }
-
-    #[test]
-    fn profile_v12_invalidates_inexact_legacy_authority_and_preserves_nonreuse_floor() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.pragma_update(None, "foreign_keys", true).unwrap();
-        apply(&mut conn, &PROFILE[..11]).unwrap();
-        let legacy_id = 42_u128;
-        let id = legacy_id.to_be_bytes().to_vec();
-        conn.execute(
-            "UPDATE extension_install_catalog SET revision = 7 WHERE id = 1",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_installs(
-                 id, revision, authority, package_key, package_revision,
-                 archive_sha256, manifest_sha256, tree_sha256, desired_enabled
-             ) VALUES (?1, 3, ?2, ?3, 4, ?4, ?5, ?6, 1)",
-            rusqlite::params![
-                &id,
-                vec![2_u8; 32],
-                vec![3_u8; 32],
-                vec![4_u8; 32],
-                vec![5_u8; 32],
-                vec![6_u8; 32],
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_grants(
-                 install_id, revision, authority, package_key, package_revision,
-                 archive_sha256, manifest_sha256, tree_sha256, grant_sha256,
-                 file_access, private_access
-             ) VALUES (?1, 5, ?2, ?3, 4, ?4, ?5, ?6, ?7, 1, 1)",
-            rusqlite::params![
-                &id,
-                vec![2_u8; 32],
-                vec![3_u8; 32],
-                vec![4_u8; 32],
-                vec![5_u8; 32],
-                vec![6_u8; 32],
-                vec![7_u8; 32],
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_grant_api_permissions(install_id, name)
-             VALUES (?1, 'storage')",
-            [&id],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_grant_host_permissions(install_id, pattern)
-             VALUES (?1, 'https://example.com/*')",
-            [&id],
-        )
-        .unwrap();
-
-        apply(&mut conn, PROFILE).unwrap();
-
-        let (revision, high_water): (i64, Option<Vec<u8>>) = conn
-            .query_row(
-                "SELECT revision, install_id_high_water
-                 FROM extension_install_catalog WHERE id = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(revision, 7);
-        assert_eq!(high_water, Some(id.clone()));
-        for table in [
-            "extension_installs",
-            "extension_grants",
-            "extension_grant_api_permissions",
-            "extension_grant_host_permissions",
-        ] {
-            let count: i64 = conn
-                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
-                    row.get(0)
-                })
-                .unwrap();
-            assert_eq!(count, 0, "v12 retained legacy authority in {table}");
-        }
-    }
-
-    #[test]
-    fn profile_v12_requires_exact_payload_evidence_shape() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, PROFILE).unwrap();
-
-        let insert = |id: u8,
-                      payload_kind: i64,
-                      archive_length: Option<i64>,
-                      archive_sha256: Option<Vec<u8>>| {
-            conn.execute(
-                "INSERT INTO extension_installs(
-                     id, revision, authority, package_key, package_revision,
-                     payload_kind, archive_length, archive_sha256,
-                     manifest_sha256, tree_sha256, desired_enabled
-                 ) VALUES (?1, 1, ?2, ?3, 1, ?4, ?5, ?6, ?7, ?8, 0)",
-                rusqlite::params![
-                    vec![id; 16],
-                    vec![id; 32],
-                    vec![id.wrapping_add(1); 32],
-                    payload_kind,
-                    archive_length,
-                    archive_sha256,
-                    vec![id.wrapping_add(2); 32],
-                    vec![id.wrapping_add(3); 32],
-                ],
-            )
-        };
-
-        assert!(insert(1, 1, None, None).is_ok());
-        assert!(insert(2, 2, Some(1), Some(vec![2; 32])).is_ok());
-        assert!(insert(3, 2, Some(67_108_864), Some(vec![3; 32])).is_ok());
-        for (index, (kind, length, digest)) in [
-            (1, Some(1), None),
-            (1, None, Some(vec![3; 32])),
-            (2, None, Some(vec![4; 32])),
-            (2, Some(0), Some(vec![5; 32])),
-            (2, Some(67_108_865), Some(vec![6; 32])),
-            (2, Some(1), Some(vec![7; 31])),
-            (3, None, None),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            assert!(
-                insert(index as u8 + 10, kind, length, digest).is_err(),
-                "accepted malformed payload evidence case {index}"
-            );
-        }
     }
 
     #[test]
@@ -3754,157 +3590,6 @@ mod tests {
     }
 
     #[test]
-    fn meta_v13_enforces_expected_identity_shape_backend_and_owned_match() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, META).unwrap();
-        insert_native_ownership_test_row(&conn, 1, 2, 1, "acquire", "native_may_own").unwrap();
-        let expected = vec![b'a'; 32];
-        conn.execute(
-            "UPDATE extension_native_ownership_journal
-             SET expected_native_identity_kind = 1,
-                 expected_native_identity = ?1",
-            [&expected],
-        )
-        .unwrap();
-        assert!(conn
-            .execute(
-                "UPDATE extension_native_ownership_journal
-                 SET revision = 3, phase = 'native_owned'",
-                [],
-            )
-            .is_err());
-
-        for update in [
-            "expected_native_identity_kind = NULL",
-            "expected_native_identity_kind = 2",
-            "expected_native_identity = zeroblob(31)",
-            "expected_native_identity = zeroblob(33)",
-            "expected_native_identity = zeroblob(32)",
-            "expected_native_identity = NULL",
-        ] {
-            assert!(
-                conn.execute(
-                    &format!("UPDATE extension_native_ownership_journal SET {update}"),
-                    [],
-                )
-                .is_err(),
-                "accepted invalid expected identity update: {update}"
-            );
-        }
-
-        let observed_mismatch = vec![b'b'; 32];
-        conn.execute(
-            "UPDATE extension_native_ownership_journal
-             SET revision = 3,
-                 native_identity_kind = 1,
-                 native_identity = ?1",
-            [&observed_mismatch],
-        )
-        .unwrap();
-        assert!(conn
-            .execute(
-                "UPDATE extension_native_ownership_journal
-                 SET revision = 4, phase = 'native_owned'",
-                [],
-            )
-            .is_err());
-
-        conn.execute(
-            "UPDATE extension_native_ownership_journal
-             SET native_identity = ?1",
-            [&expected],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE extension_native_ownership_journal
-             SET revision = 4, phase = 'native_owned'",
-            [],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn meta_v14_seeds_only_exact_regular_macos_possible_owner_evidence() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, &META[..13]).unwrap();
-        let profiles: Vec<_> = (1_u128..=6)
-            .map(|value| zephium_core::ids::ProfileId::from(value).to_string())
-            .collect();
-        for (position, profile) in profiles.iter().enumerate() {
-            conn.execute(
-                "INSERT INTO profiles(id, name, kind, position)
-                 VALUES (?1, 'Fixture', 'named', ?2)",
-                rusqlite::params![profile, position as i64],
-            )
-            .unwrap();
-        }
-        for (operation, revision, intent, phase) in [
-            (1_i64, 2_i64, "acquire", "native_may_own"),
-            (2, 2, "release", "native_absent_release_pending"),
-            (3, 1, "acquire", "native_absent_preparing"),
-            (4, 5, "release", "native_absent_release_pending"),
-            (5, 2, "acquire", "native_may_own"),
-            (6, 2, "acquire", "native_may_own"),
-        ] {
-            insert_native_ownership_test_row(&conn, operation, revision, operation, intent, phase)
-                .unwrap();
-            conn.execute(
-                "UPDATE extension_native_ownership_journal
-                 SET profile_id = ?2
-                 WHERE operation = ?1",
-                rusqlite::params![operation, &profiles[(operation - 1) as usize]],
-            )
-            .unwrap();
-        }
-        conn.execute(
-            "UPDATE extension_native_ownership_journal
-             SET runtime_backend = 'macos_compatibility'
-             WHERE operation = 5",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE extension_native_ownership_journal
-             SET browsing_context = 'private'
-             WHERE operation = 6",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE extension_native_ownership_journal_state
-             SET revision = 15,
-                 operation_high_water = 6,
-                 native_incarnation_high_water = 6",
-            [],
-        )
-        .unwrap();
-
-        apply(&mut conn, &META[..14]).unwrap();
-
-        let seeded: Vec<String> = {
-            let mut statement = conn
-                .prepare(
-                    "SELECT profile_id
-                     FROM extension_native_namespace_obligations
-                     ORDER BY profile_id",
-                )
-                .unwrap();
-            statement
-                .query_map([], |row| row.get(0))
-                .unwrap()
-                .collect::<Result<_, _>>()
-                .unwrap()
-        };
-        assert_eq!(seeded, vec![profiles[0].clone(), profiles[3].clone()]);
-        assert_eq!(
-            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
-            14
-        );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(22));
-    }
-
-    #[test]
     fn meta_v15_separates_live_grant_rebinds_from_native_lifecycle_history() {
         let mut conn = Connection::open_in_memory().unwrap();
         apply(&mut conn, &META[..14]).unwrap();
@@ -4236,193 +3921,6 @@ mod tests {
     }
 
     #[test]
-    fn meta_v14_namespace_schema_enforces_canonical_capacity_and_atomic_erasure_join() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, META).unwrap();
-        let profile = zephium_core::ids::ProfileId::from(u128::MAX).to_string();
-        conn.execute(
-            "INSERT INTO profiles(id, name, kind, position)
-             VALUES (?1, 'Fixture', 'named', 0)",
-            [&profile],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_native_namespace_obligations(
-                 profile_id, namespace_version
-             ) VALUES (?1, 1)",
-            [&profile],
-        )
-        .unwrap();
-        let unanchored = zephium_core::ids::ProfileId::from(u128::MAX - 1).to_string();
-        assert!(conn
-            .execute(
-                "UPDATE extension_native_namespace_obligations
-                 SET profile_id = ?2 WHERE profile_id = ?1",
-                rusqlite::params![&profile, &unanchored],
-            )
-            .is_err());
-        assert!(conn
-            .execute(
-                "UPDATE extension_native_namespace_obligations
-                 SET namespace_version = 1 WHERE profile_id = ?1",
-                [&profile],
-            )
-            .is_err());
-        assert!(conn
-            .execute(
-                "UPDATE profiles SET id = ?2 WHERE id = ?1",
-                rusqlite::params![&profile, &unanchored],
-            )
-            .is_err());
-        assert!(conn
-            .execute(
-                "INSERT INTO extension_native_namespace_obligations(
-                     profile_id, namespace_version
-                 ) VALUES (?1, 2)",
-                [&profile],
-            )
-            .is_err());
-
-        let lowercase = profile.to_ascii_lowercase();
-        let invalid_alphabet = format!("{}I", &profile[..25]);
-        let invalid_first = format!("8{}", &profile[1..]);
-        for (position, invalid) in [
-            "short".to_owned(),
-            lowercase,
-            invalid_alphabet,
-            invalid_first,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            conn.execute(
-                "INSERT INTO profiles(id, name, kind, position)
-                 VALUES (?1, 'Invalid fixture', 'named', ?2)",
-                rusqlite::params![&invalid, position as i64 + 1],
-            )
-            .unwrap();
-            assert!(
-                conn.execute(
-                    "INSERT INTO extension_native_namespace_obligations(
-                         profile_id, namespace_version
-                     ) VALUES (?1, 1)",
-                    [&invalid],
-                )
-                .is_err(),
-                "accepted noncanonical namespace profile {invalid:?}"
-            );
-        }
-
-        assert!(conn
-            .execute("DELETE FROM profiles WHERE id = ?1", [&profile])
-            .is_err());
-        conn.execute(
-            "INSERT INTO profile_deletion_journal(profile_id, authorized_at)
-             VALUES (?1, 1)",
-            [&profile],
-        )
-        .unwrap();
-        conn.execute("DELETE FROM profiles WHERE id = ?1", [&profile])
-            .unwrap();
-        assert!(conn
-            .execute(
-                "UPDATE profile_deletion_journal
-                 SET profile_id = ?2 WHERE profile_id = ?1",
-                rusqlite::params![&profile, &unanchored],
-            )
-            .is_err());
-        assert!(conn
-            .execute(
-                "UPDATE profile_deletion_journal
-                 SET native_erasure_verified = 1 WHERE profile_id = ?1",
-                [&profile],
-            )
-            .is_err());
-        assert!(conn
-            .execute(
-                "DELETE FROM profile_deletion_journal WHERE profile_id = ?1",
-                [&profile],
-            )
-            .is_err());
-
-        {
-            let tx = conn.transaction().unwrap();
-            tx.execute(
-                "DELETE FROM extension_native_namespace_obligations
-                 WHERE profile_id = ?1 AND namespace_version = 1",
-                [&profile],
-            )
-            .unwrap();
-            assert_eq!(
-                tx.query_row(
-                    "SELECT native_erasure_verified
-                     FROM profile_deletion_journal WHERE profile_id = ?1",
-                    [&profile],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-                1
-            );
-            tx.rollback().unwrap();
-        }
-        assert_eq!(
-            conn.query_row(
-                "SELECT native_erasure_verified,
-                        (SELECT count(*)
-                         FROM extension_native_namespace_obligations
-                         WHERE profile_id = ?1)
-                 FROM profile_deletion_journal WHERE profile_id = ?1",
-                [&profile],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .unwrap(),
-            (0, 1)
-        );
-        conn.execute(
-            "DELETE FROM extension_native_namespace_obligations
-             WHERE profile_id = ?1 AND namespace_version = 1",
-            [&profile],
-        )
-        .unwrap();
-        assert_eq!(
-            conn.query_row(
-                "SELECT native_erasure_verified
-                 FROM profile_deletion_journal WHERE profile_id = ?1",
-                [&profile],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-            1
-        );
-        conn.execute(
-            "DELETE FROM profile_deletion_journal WHERE profile_id = ?1",
-            [&profile],
-        )
-        .unwrap();
-
-        for value in 1_u128..=129 {
-            let profile = zephium_core::ids::ProfileId::from(value).to_string();
-            conn.execute(
-                "INSERT OR IGNORE INTO profiles(id, name, kind, position)
-                 VALUES (?1, 'Capacity', 'named', ?2)",
-                rusqlite::params![&profile, value as i64 + 100],
-            )
-            .unwrap();
-            let inserted = conn.execute(
-                "INSERT INTO extension_native_namespace_obligations(
-                     profile_id, namespace_version
-                 ) VALUES (?1, 1)",
-                [&profile],
-            );
-            if value <= 128 {
-                assert!(inserted.is_ok(), "rejected exact capacity row {value}");
-            } else {
-                assert!(inserted.is_err(), "accepted row beyond exact capacity");
-            }
-        }
-    }
-
-    #[test]
     fn meta_v11_schema_rejects_invalid_native_ownership_state() {
         let mut conn = Connection::open_in_memory().unwrap();
         apply(&mut conn, META).unwrap();
@@ -4508,24 +4006,6 @@ mod tests {
             [],
         )
         .unwrap();
-    }
-
-    #[test]
-    fn meta_v11_exact_manifest_rejects_native_journal_schema_replacement() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        apply(&mut conn, META).unwrap();
-        conn.execute_batch(
-            "DROP TABLE extension_native_ownership_journal;
-             CREATE TABLE extension_native_ownership_journal (
-                 profile_id TEXT,
-                 install_id BLOB,
-                 browsing_context TEXT
-             ) STRICT;",
-        )
-        .unwrap();
-
-        let error = apply(&mut conn, META).unwrap_err().to_string();
-        assert!(error.contains("sqlite_schema"), "{error}");
     }
 
     #[test]

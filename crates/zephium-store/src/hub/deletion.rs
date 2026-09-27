@@ -517,15 +517,6 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     tx.execute_batch(
         "INSERT INTO history_fts(history_fts, rank) VALUES('secure-delete', 1);
-         DELETE FROM extension_profile_site_denials;
-         DELETE FROM extension_profile_policy;
-         DELETE FROM extension_grant_api_permissions;
-         DELETE FROM extension_grant_host_permissions;
-         DELETE FROM extension_grants;
-         DELETE FROM extension_install_provenance;
-         DELETE FROM extension_upstream_history;
-         DELETE FROM extension_installs;
-         DELETE FROM extension_install_catalog;
          DELETE FROM page_permission_grants;
          DELETE FROM page_permission_catalog;
          DELETE FROM task_list_receipts;
@@ -633,71 +624,6 @@ mod tests {
             ["00000000000000000000000002"],
         )
         .unwrap();
-        conn.execute(
-            "INSERT INTO extension_installs(
-                 id, revision, authority, package_key, package_revision,
-                 payload_kind, archive_length, archive_sha256,
-                 manifest_sha256, tree_sha256, desired_enabled
-             ) VALUES (?1, 1, ?2, ?3, 1, 2, 17, ?4, ?5, ?6, 1)",
-            params![
-                vec![1_u8; 16],
-                vec![2_u8; 32],
-                vec![3_u8; 32],
-                vec![4_u8; 32],
-                vec![5_u8; 32],
-                vec![6_u8; 32]
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "UPDATE extension_install_catalog
-             SET install_id_high_water = ?1 WHERE id = 1",
-            [vec![1_u8; 16]],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_grants(
-                 install_id, revision, authority, package_key, package_revision,
-                 payload_kind, archive_length, archive_sha256,
-                 manifest_sha256, tree_sha256, grant_sha256,
-                 file_access, private_access
-             ) VALUES (?1, 1, ?2, ?3, 1, 2, 17, ?4, ?5, ?6, ?7, 1, 1)",
-            params![
-                vec![1_u8; 16],
-                vec![2_u8; 32],
-                vec![3_u8; 32],
-                vec![4_u8; 32],
-                vec![5_u8; 32],
-                vec![6_u8; 32],
-                vec![7_u8; 32]
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_grant_api_permissions(install_id, name)
-             VALUES (?1, ?2)",
-            params![vec![1_u8; 16], PROFILE_SCRUB_MARKER],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_grant_host_permissions(install_id, pattern)
-             VALUES (?1, ?2)",
-            params![
-                vec![1_u8; 16],
-                format!("https://{PROFILE_SCRUB_MARKER}.example/*")
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_upstream_history(publisher, checkpoint) VALUES (?1, ?2)",
-            params![vec![71_u8; 32], vec![72_u8; 105]],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO extension_install_provenance(install_id, provenance) VALUES (?1, ?2)",
-            params![vec![1_u8; 16], PROFILE_SCRUB_MARKER.as_bytes()],
-        )
-        .unwrap();
         let body = serde_json::to_string(&zephium_core::resources::ResourceDraft {
             title: PROFILE_SCRUB_MARKER.into(),
             pinned: false,
@@ -742,15 +668,6 @@ mod tests {
             "download_cleanup",
             "download_preferences",
             "downloads",
-            "extension_grant_api_permissions",
-            "extension_grant_host_permissions",
-            "extension_grants",
-            "extension_install_catalog",
-            "extension_install_provenance",
-            "extension_installs",
-            "extension_profile_policy",
-            "extension_profile_site_denials",
-            "extension_upstream_history",
             "favicons",
             "focus",
             "history",
@@ -807,15 +724,6 @@ mod tests {
             "userscripts",
             "page_permission_catalog",
             "page_permission_grants",
-            "extension_install_catalog",
-            "extension_install_provenance",
-            "extension_installs",
-            "extension_grants",
-            "extension_grant_api_permissions",
-            "extension_grant_host_permissions",
-            "extension_profile_policy",
-            "extension_profile_site_denials",
-            "extension_upstream_history",
         ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
