@@ -23,6 +23,26 @@ use crate::ports::extensions::{
 use crate::runtime_security::RuntimeSecurityAdvisories;
 use crate::split::Pane;
 
+/// A prepared extension package the user has consented to run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebExtensionLoad {
+    pub install: ExtensionInstallId,
+    /// The Chrome Web Store ID, which is also the extension's origin.
+    pub extension_id: String,
+    pub root: std::path::PathBuf,
+    pub permissions: Vec<String>,
+    pub match_patterns: Vec<String>,
+    /// Set when the package changed since WebKit last ran it, so its
+    /// background runs once and WebKit relearns what it listens for.
+    pub start_background: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebExtensionLoaded {
+    pub name: String,
+    pub version: String,
+}
+
 /// Which engine data partition a view lives in. Every persistent profile gets
 /// its own engine store; incognito is ephemeral and never intentionally
 /// persists browsing data. Within one engine process a `ProfileId` is
@@ -631,6 +651,20 @@ pub trait Engine {
     fn set_extension_browser_surface(&self, _surface: ExtensionBrowserSurface) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Loads a prepared extension package into the profile's runtime, or
+    /// replaces the loaded one for the same install. The outcome arrives as
+    /// [`EngineEvent::WebExtensionSettled`].
+    fn load_web_extension(&self, _profile: ProfileId, _load: WebExtensionLoad) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Stops one installed extension; it keeps its stored data.
+    fn unload_web_extension(
+        &self,
+        _profile: ProfileId,
+        _install: ExtensionInstallId,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Requests one complete effective toolbar-action cohort for the exact
     /// published logical tab generation. The terminal result arrives as
     /// [`EngineEvent::ExtensionActionsSnapshotSettled`]. This query may read
@@ -998,6 +1032,11 @@ pub enum EngineEvent {
     /// Shell responds by requesting a fresh exact replacement cohort.
     ExtensionActionsInvalidated {
         profile: ProfileId,
+    },
+    WebExtensionSettled {
+        profile: ProfileId,
+        install: ExtensionInstallId,
+        result: Result<WebExtensionLoaded, String>,
     },
     /// A native command matched the reserved browser-action shortcut for one
     /// exact published runtime and resident tab. The event carries no popup
