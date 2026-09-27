@@ -31,9 +31,6 @@ mod work;
 #[cfg(feature = "macos-work")]
 pub use work::{admit_successor_trusted_work, admit_trusted_work, WorkAdmissionFailure};
 
-#[cfg(zephium_internal_repository_e2e)]
-compile_error!("the internal repository E2E authority may not link into the Zephium desktop");
-
 mod blocker_service;
 mod browser_credentials;
 #[cfg(target_os = "linux")]

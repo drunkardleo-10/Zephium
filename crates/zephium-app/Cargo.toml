@@ -30,8 +30,3 @@ url.workspace = true
 [dev-dependencies]
 zephium-store = { workspace = true, features = ["work-execution"] }
 tempfile.workspace = true
-
-[lints.rust]
-unexpected_cfgs = { level = "deny", check-cfg = [
-    "cfg(zephium_internal_repository_e2e)",
-] }

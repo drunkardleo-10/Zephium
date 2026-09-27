@@ -24,11 +24,7 @@ const LOCK_FILE_CONTENT: &[u8] = b"zephium-private-fs\nlock-format=1\n";
 
 #[inline]
 fn write_all_private_regular(file: &mut File, bytes: &[u8]) -> Result<(), PrivateFsError> {
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    let result = crate::instrumentation::MeasuredWriter::new(file).write_all(bytes);
-    #[cfg(not(zephium_private_fs_operation_instrumentation))]
-    let result = file.write_all(bytes);
-    result.map_err(|_| PrivateFsError::Io)
+    file.write_all(bytes).map_err(|_| PrivateFsError::Io)
 }
 
 #[inline]
@@ -37,18 +33,7 @@ fn copy_exact_to_private_regular(
     file: &mut File,
     expected: StreamingFileLength,
 ) -> Result<(), ExactCopyError> {
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    {
-        copy_exact(
-            source,
-            &mut crate::instrumentation::MeasuredWriter::new(file),
-            expected,
-        )
-    }
-    #[cfg(not(zephium_private_fs_operation_instrumentation))]
-    {
-        copy_exact(source, file, expected)
-    }
+    copy_exact(source, file, expected)
 }
 
 #[inline]
@@ -57,8 +42,6 @@ fn sync_private_regular(file: &File) -> Result<(), PrivateFsError> {
     platform::sync_regular(file)?;
     #[cfg(not(target_os = "windows"))]
     file.sync_all().map_err(|_| PrivateFsError::Io)?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_file_sync();
     Ok(())
 }
 
@@ -68,11 +51,6 @@ fn sync_private_directory(file: &File) -> Result<(), PrivateFsError> {
     platform::sync_directory(file)?;
     #[cfg(not(target_os = "windows"))]
     file.sync_all().map_err(|_| PrivateFsError::Io)?;
-    #[cfg(all(
-        zephium_private_fs_operation_instrumentation,
-        not(target_os = "windows")
-    ))]
-    crate::instrumentation::record_directory_sync();
     Ok(())
 }
 
@@ -1654,11 +1632,7 @@ impl PrivateDirectory {
         }
 
         let callback_result = {
-            let bounded = Read::by_ref(&mut verified.file).take(initial_length);
-            #[cfg(zephium_private_fs_operation_instrumentation)]
-            let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
-            #[cfg(not(zephium_private_fs_operation_instrumentation))]
-            let mut bounded = bounded;
+            let mut bounded = Read::by_ref(&mut verified.file).take(initial_length);
             callback(&mut bounded, initial_length)
         };
         let validation = (|| {
@@ -1702,15 +1676,11 @@ impl PrivateDirectory {
             return Err(PrivateFsError::BoundExceeded);
         }
         let mut bytes = Vec::with_capacity(length);
-        let bounded = Read::by_ref(&mut verified.file).take(
+        let mut bounded = Read::by_ref(&mut verified.file).take(
             u64::try_from(limit.get())
                 .unwrap_or(u64::MAX)
                 .saturating_add(1),
         );
-        #[cfg(zephium_private_fs_operation_instrumentation)]
-        let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
-        #[cfg(not(zephium_private_fs_operation_instrumentation))]
-        let mut bounded = bounded;
         bounded
             .read_to_end(&mut bytes)
             .map_err(|_| PrivateFsError::Io)?;
@@ -2847,15 +2817,11 @@ fn lock_staging_component() -> Result<PrivateComponent, PrivateFsError> {
 fn read_lock_content(file: &mut File) -> Result<Vec<u8>, PrivateFsError> {
     file.rewind().map_err(|_| PrivateFsError::Io)?;
     let mut bytes = Vec::with_capacity(LOCK_FILE_CONTENT.len().saturating_add(1));
-    let bounded = Read::by_ref(file).take(
+    let mut bounded = Read::by_ref(file).take(
         u64::try_from(LOCK_FILE_CONTENT.len())
             .unwrap_or(u64::MAX)
             .saturating_add(1),
     );
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
-    #[cfg(not(zephium_private_fs_operation_instrumentation))]
-    let mut bounded = bounded;
     bounded
         .read_to_end(&mut bytes)
         .map_err(|_| PrivateFsError::Io)?;
@@ -3067,11 +3033,7 @@ fn with_bounded_sealed_regular_reader_unlocked<T, E>(
     }
 
     let callback_result = {
-        let bounded = Read::by_ref(&mut file).take(initial_length);
-        #[cfg(zephium_private_fs_operation_instrumentation)]
-        let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
-        #[cfg(not(zephium_private_fs_operation_instrumentation))]
-        let mut bounded = bounded;
+        let mut bounded = Read::by_ref(&mut file).take(initial_length);
         callback(&mut bounded, initial_length)
     };
     lease.observe(validate_sealed_regular_after_read(

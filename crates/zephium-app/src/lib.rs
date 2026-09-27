@@ -2,9 +2,6 @@
 //! enter through a queue (UI intents and engine events alike), effects leave
 //! through ports, projections go to the UI.
 
-#[cfg(zephium_internal_repository_e2e)]
-compile_error!("the internal repository E2E authority may not link into Zephium application code");
-
 mod diagnostics;
 
 #[cfg(all(test, feature = "work-execution-probe"))]

@@ -152,8 +152,6 @@ pub(crate) fn create_new_regular(
         native::CREATE,
         Some(sd.0),
     )?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_regular_create();
     let verified = (|| {
         let id = identity(&file, Some(false))?.0;
         if security::mode(&file)? {
@@ -312,8 +310,6 @@ pub(crate) fn revalidate_child_directory(
 pub(crate) fn set_directory_mode(file: &File, mode: DirectoryMode) -> Result<(), PrivateFsError> {
     identity(file, Some(true))?;
     security::set_mode(file, mode == DirectoryMode::Sealed)?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_directory_mode_change();
     Ok(())
 }
 
@@ -362,8 +358,6 @@ pub(crate) fn relative_name_is_absent(parent: &File, name: &str) -> bool {
 pub(crate) fn remove_regular(parent: &File, path: &Path, name: &str) -> Result<(), PrivateFsError> {
     let (file, _) = open_regular(parent, path, name, OpenPurpose::Mutation)?;
     native::delete(&file)?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_regular_unlink();
     drop(file);
     if !relative_name_is_absent(parent, name) {
         return Err(PrivateFsError::IdentityAmbiguous);
@@ -377,8 +371,6 @@ pub(crate) fn remove_directory(
 ) -> Result<(), PrivateFsError> {
     let (file, _, _) = open_child_directory_any_mode(parent, path, name)?;
     native::delete(&file)?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_directory_unlink();
     drop(file);
     if !relative_name_is_absent(parent, name) {
         return Err(PrivateFsError::IdentityAmbiguous);
@@ -538,8 +530,6 @@ fn rename(
     security::mode(&file)?;
     native::exact_name(&file, source)?;
     native::rename(&file, destination_parent, destination, replace)?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_rename();
     Ok(())
 }
 pub(crate) fn atomic_replace(
@@ -571,8 +561,6 @@ pub(crate) fn atomic_publish_noreplace_between(
 pub(crate) fn sync_directory(file: &File) -> Result<(), PrivateFsError> {
     identity(file, Some(true))?;
     native::flush(file)?;
-    #[cfg(zephium_private_fs_operation_instrumentation)]
-    crate::instrumentation::record_directory_sync();
     Ok(())
 }
 pub(crate) fn sync_regular(file: &File) -> Result<(), PrivateFsError> {

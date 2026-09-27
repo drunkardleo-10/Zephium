@@ -26,29 +26,10 @@
 #[cfg(all(feature = "windows-namespace-validation", not(debug_assertions)))]
 compile_error!("Windows namespace validation must not enter an optimized shipping build");
 
-// Internal repository tests explicitly request these debug counters. The
-// release product probe instead retains only the sealed fixture authority, so
-// its filesystem path matches the optimized shipping implementation.
-#[cfg(all(
-    zephium_private_fs_operation_instrumentation,
-    not(zephium_internal_repository_e2e)
-))]
-compile_error!("private-filesystem instrumentation requires the internal repository authority");
-#[cfg(all(zephium_private_fs_operation_instrumentation, not(debug_assertions)))]
-compile_error!("private-filesystem operation instrumentation is forbidden in optimized builds");
-#[cfg(all(
-    zephium_internal_repository_e2e,
-    not(zephium_private_fs_operation_instrumentation),
-    not(zephium_extension_product_measurement)
-))]
-compile_error!("internal private-filesystem builds require an explicit execution mode");
-
 mod component;
 mod entry_name;
 mod error;
 mod identity;
-#[cfg(zephium_private_fs_operation_instrumentation)]
-mod instrumentation;
 mod lease;
 mod namespace;
 mod platform;
@@ -59,10 +40,6 @@ pub use component::{PrivateComponent, PrivateComponentError};
 pub use entry_name::{PrivateEntryName, PrivateEntryNameError, MAX_PRIVATE_ENTRY_NAME_BYTES};
 pub use error::PrivateFsError;
 pub use identity::{DirectoryIdentity, FileIdentity};
-#[cfg(zephium_private_fs_operation_instrumentation)]
-pub use instrumentation::{
-    PrivateFsOperationMeasurement, PrivateFsOperationMeasurementError, PrivateFsOperationSnapshot,
-};
 pub use namespace::{
     ByteLimit, LockedPrivateNamespace, OpenedPrivateDirectory, PrivateChildKind, PrivateDirectory,
     SealedPrivateDirectory, TreeRemovalLimits, TreeRemovalReport, MAX_TREE_REMOVAL_DEPTH,
