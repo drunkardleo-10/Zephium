@@ -142,7 +142,13 @@
     }
   };
   pin(g, "chrome", chromeApi);
-  if (g.browser && g.browser !== chromeApi) kept.push(g.browser);
+  // WebKit gives `browser` its own copy of the API; making it the same object
+  // lets every fix below reach extensions written against `browser.*`. Both
+  // accept callbacks and return promises.
+  if (g.browser && g.browser !== chromeApi) {
+    kept.push(g.browser);
+    pin(g, "browser", chromeApi);
+  }
   const namespace = (name) => {
     let value;
     try {
@@ -165,6 +171,27 @@
         callback(undefined);
       },
     );
+  };
+
+  const makeEvent = () => {
+    const listeners = new Set();
+    return {
+      addListener: (listener) => void listeners.add(listener),
+      removeListener: (listener) => void listeners.delete(listener),
+      hasListener: (listener) => listeners.has(listener),
+      hasListeners: () => listeners.size > 0,
+      dispatch: (...args) => {
+        for (const listener of listeners) {
+          try {
+            listener(...args);
+          } catch (error) {
+            setTimeout(() => {
+              throw error;
+            });
+          }
+        }
+      },
+    };
   };
 
   // Chrome answers "not granted" for permissions a browser doesn't know;
@@ -220,6 +247,56 @@
     guard("remove", (removed) => removed !== false);
   }
 
+  // OAuth sign-in: the browser opens the provider's page and returns the
+  // https://<id>.chromiumapp.org/ redirect, which never actually loads.
+  if (!isContent) {
+    const identity = namespace("identity");
+    const target = identity || {};
+    if (typeof target.launchWebAuthFlow !== "function") {
+      pin(target, "getRedirectURL", (path) =>
+        `https://${runtime.id}.chromiumapp.org/${String(path || "").replace(/^\//, "")}`,
+      );
+      pin(target, "launchWebAuthFlow", (details, callback) =>
+        withCallback(
+          native("identity.launch", {
+            url: String((details && details.url) || ""),
+            interactive: Boolean(details && details.interactive),
+          }).then((result) => {
+            if (!result || typeof result.url !== "string") throw new Error("The user did not approve access.");
+            return result.url;
+          }),
+          callback,
+        ),
+      );
+      if (typeof target.getAuthToken !== "function") {
+        pin(target, "getAuthToken", (_details, callback) =>
+          withCallback(Promise.reject(new Error("The user is not signed in to a Google account in this browser.")), callback),
+        );
+        pin(target, "removeCachedAuthToken", (_details, callback) => withCallback(Promise.resolve(), callback));
+        pin(target, "clearAllCachedAuthTokens", (callback) => withCallback(Promise.resolve(), callback));
+        pin(target, "getProfileUserInfo", (_details, callback) =>
+          withCallback(Promise.resolve({ email: "", id: "" }), typeof _details === "function" ? _details : callback),
+        );
+        if (!target.onSignInChanged) pin(target, "onSignInChanged", makeEvent());
+      }
+      if (!identity) pin(chromeApi, "identity", target);
+    }
+  }
+
+  // Chrome always has the enterprise-policy storage area, empty when no
+  // policy is set; 1Password and Grammarly read it at startup.
+  const storage = namespace("storage");
+  if (storage && !storage.managed) {
+    pin(storage, "managed", {
+      get: (keys, callback) => withCallback(Promise.resolve({}), typeof keys === "function" ? keys : callback),
+      getBytesInUse: (keys, callback) => withCallback(Promise.resolve(0), typeof keys === "function" ? keys : callback),
+      set: () => Promise.reject(new Error("storage.managed is read-only")),
+      remove: () => Promise.reject(new Error("storage.managed is read-only")),
+      clear: () => Promise.reject(new Error("storage.managed is read-only")),
+      onChanged: makeEvent(),
+    });
+  }
+
   const scripting = namespace("scripting");
   if (scripting && !scripting.ExecutionWorld) {
     pin(scripting, "ExecutionWorld", Object.freeze({ ISOLATED: "ISOLATED", MAIN: "MAIN" }));
@@ -236,27 +313,6 @@
       return withCallback(attempt, callback);
     });
   }
-
-  const makeEvent = () => {
-    const listeners = new Set();
-    return {
-      addListener: (listener) => void listeners.add(listener),
-      removeListener: (listener) => void listeners.delete(listener),
-      hasListener: (listener) => listeners.has(listener),
-      hasListeners: () => listeners.size > 0,
-      dispatch: (...args) => {
-        for (const listener of listeners) {
-          try {
-            listener(...args);
-          } catch (error) {
-            setTimeout(() => {
-              throw error;
-            });
-          }
-        }
-      },
-    };
-  };
 
   // WebKit implements webNavigation's load events but not these; code that
   // subscribes to them at startup would otherwise throw and kill the worker.
