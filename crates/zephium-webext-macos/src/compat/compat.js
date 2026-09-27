@@ -128,6 +128,147 @@
     define("userAgentData", agentData);
   }
 
+  // ---- API gaps ------------------------------------------------------------
+  // WebKit recreates its API wrapper objects after they are collected, which
+  // would drop anything defined on them: patched namespaces stay referenced
+  // and pinned as data properties.
+  const kept = [];
+  const pin = (target, key, value) => {
+    try {
+      Object.defineProperty(target, key, { value, configurable: true, enumerable: true, writable: true });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  pin(g, "chrome", chromeApi);
+  if (g.browser && g.browser !== chromeApi) kept.push(g.browser);
+  const namespace = (name) => {
+    let value;
+    try {
+      value = chromeApi[name];
+    } catch {
+      return undefined;
+    }
+    if (value) {
+      kept.push(value);
+      pin(chromeApi, name, value);
+    }
+    return value;
+  };
+  const withCallback = (promise, callback) => {
+    if (typeof callback !== "function") return promise;
+    promise.then(
+      (value) => callback(value),
+      (error) => {
+        if (Z.report) Z.report("warning", `callback API failed: ${error}`);
+        callback(undefined);
+      },
+    );
+  };
+
+  // Chrome answers "not granted" for permissions a browser doesn't know;
+  // WebKit throws, which takes down callers such as Bitwarden's popup.
+  const permissions = namespace("permissions");
+  if (permissions) {
+    const invalid = /'([^']+)' is not a valid permission/;
+    const guard = (method, withUnknown) => {
+      const original = permissions[method];
+      if (typeof original !== "function") return;
+      pin(permissions, method, function (request, callback) {
+        const run = async () => {
+          let current = Object.assign({}, request);
+          const unknown = [];
+          for (;;) {
+            try {
+              const result = await original.call(permissions, current);
+              return unknown.length > 0 ? withUnknown(result) : result;
+            } catch (error) {
+              const name = (invalid.exec(String(error && error.message)) || [])[1];
+              const listed = Array.isArray(current.permissions) ? current.permissions : [];
+              if (!name || !listed.includes(name)) throw error;
+              unknown.push(name);
+              current.permissions = listed.filter((permission) => permission !== name);
+            }
+          }
+        };
+        return withCallback(run(), callback);
+      });
+    };
+    guard("contains", () => false);
+    guard("request", () => false);
+    guard("remove", (result) => result);
+  }
+
+  const scripting = namespace("scripting");
+  if (scripting && !scripting.ExecutionWorld) {
+    pin(scripting, "ExecutionWorld", Object.freeze({ ISOLATED: "ISOLATED", MAIN: "MAIN" }));
+  }
+
+  if (!isContent && !chromeApi.notifications) {
+    const event = () => {
+      const listeners = new Set();
+      return {
+        addListener: (listener) => void listeners.add(listener),
+        removeListener: (listener) => void listeners.delete(listener),
+        hasListener: (listener) => listeners.has(listener),
+        hasListeners: () => listeners.size > 0,
+      };
+    };
+    let created = 0;
+    pin(chromeApi, "notifications", {
+      TemplateType: Object.freeze({ BASIC: "basic", IMAGE: "image", LIST: "list", PROGRESS: "progress" }),
+      PermissionLevel: Object.freeze({ GRANTED: "granted", DENIED: "denied" }),
+      create(id, options, callback) {
+        if (typeof id === "object" && id !== null) {
+          callback = options;
+          options = id;
+          id = undefined;
+        }
+        const name = typeof id === "string" && id ? id : `zephium-${++created}`;
+        const shown = native("notify", {
+          id: name,
+          title: String((options && options.title) || ""),
+          message: String((options && options.message) || ""),
+        })
+          .catch(() => {})
+          .then(() => name);
+        return withCallback(shown, callback);
+      },
+      update: (_id, _options, callback) => withCallback(Promise.resolve(false), callback),
+      clear: (_id, callback) => withCallback(Promise.resolve(true), callback),
+      getAll: (callback) => withCallback(Promise.resolve({}), callback),
+      getPermissionLevel: (callback) => withCallback(Promise.resolve("granted"), callback),
+      onClicked: event(),
+      onClosed: event(),
+      onButtonClicked: event(),
+      onPermissionLevelChanged: event(),
+      onShowSettings: event(),
+    });
+  }
+  Z.kept = kept;
+
+  // WebKit serves packaged .wasm without the application/wasm type that the
+  // streaming compilers require.
+  if (typeof WebAssembly === "object" && typeof WebAssembly.instantiateStreaming === "function") {
+    const packaged = (response) =>
+      response && typeof response.url === "string" && /^(chrome|webkit)-extension:/.test(response.url);
+    const instantiate = WebAssembly.instantiateStreaming;
+    const compile = WebAssembly.compileStreaming;
+    WebAssembly.instantiateStreaming = async function (source, imports) {
+      const response = await source;
+      return packaged(response)
+        ? WebAssembly.instantiate(await response.arrayBuffer(), imports)
+        : instantiate.call(this, response, imports);
+    };
+    WebAssembly.compileStreaming = async function (source) {
+      const response = await source;
+      return packaged(response)
+        ? WebAssembly.compile(await response.arrayBuffer())
+        : compile.call(this, response);
+    };
+  }
+
   // ---- Worker WebSockets ---------------------------------------------------
   // A WebSocket opened in an extension worker deadlocks it in WebKit; connect
   // through the browser instead.

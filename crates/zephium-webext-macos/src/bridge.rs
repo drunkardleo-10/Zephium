@@ -37,6 +37,14 @@ pub(crate) fn handle(
             shared.log(context, level, &text);
             Ok(Value::Null)
         }
+        Some("notify") => {
+            let title = message
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            shared.log(context, LogLevel::Info, &format!("notification: {title}"));
+            Ok(Value::Null)
+        }
         Some(api) => Err(format!("{api} is not supported")),
         None => Err("missing api".to_owned()),
     };
