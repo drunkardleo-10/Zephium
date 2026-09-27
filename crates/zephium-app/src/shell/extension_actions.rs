@@ -58,9 +58,15 @@ impl ExtensionActionState {
         tab: ItemId,
         surface_generation: ExtensionBrowserSurfaceGeneration,
     ) -> Vec<ExtensionActionView> {
-        let Some(snapshot) = self.snapshots.get(&profile).filter(|snapshot| {
-            snapshot.tab() == tab && snapshot.surface_generation() == surface_generation
-        }) else {
+        // A newer surface generation (a title or load-state change) does not
+        // change the tab's actions; keep them visible until the fresh
+        // snapshot replaces them rather than blanking the toolbar.
+        let _ = surface_generation;
+        let Some(snapshot) = self
+            .snapshots
+            .get(&profile)
+            .filter(|snapshot| snapshot.tab() == tab)
+        else {
             return Vec::new();
         };
         snapshot

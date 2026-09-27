@@ -127,10 +127,14 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
         projected[0].icon_rgba_base64.as_deref().map(str::len),
         Some(5_464)
     );
-    assert!(shell
-        .extension_actions
-        .projected_actions(profile, tab, generation.next().unwrap())
-        .is_empty());
+    // A newer generation for the same tab keeps the latest known actions.
+    assert_eq!(
+        shell
+            .extension_actions
+            .projected_actions(profile, tab, generation.next().unwrap())
+            .len(),
+        1
+    );
     assert_eq!(shell.retry_extension_actions(), NativeWork::default());
     assert_eq!(engine.extension_action_requests().len(), 1);
     let anchor = ExtensionPopupAnchor::new(Rect::new(1100.0, 8.0, 28.0, 28.0)).unwrap();
