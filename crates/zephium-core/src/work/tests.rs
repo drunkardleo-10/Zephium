@@ -2304,3 +2304,104 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
     assert_eq!(context["sites"][0]["session"], "yours");
     assert_eq!(context["tabs"][0]["url"], "https://docs.example.com/guide");
 }
+
+#[test]
+fn a_held_site_step_round_trips_and_its_decision_matches_its_status() {
+    use super::runtime::*;
+    let confirm = WorkConfirmV1 {
+        site: "slack.com".into(),
+        category: WorkConfirmCategoryV1::Communication,
+        headline: "Send to #design as you?".into(),
+        action: "press Send".into(),
+        text: Some("On my way".into()),
+        facts: vec![WorkConfirmFactV1 {
+            label: "Channel".into(),
+            value: "#design".into(),
+        }],
+        page: Some(7u128.into()),
+        provenance: vec!["notion.so".into()],
+        run_option: false,
+        decision: None,
+    };
+    let mut step = WorkStepFact {
+        id: 8u128.into(),
+        turn: 1,
+        kind: WorkStepKindV1::Confirm {
+            confirm: Box::new(confirm.clone()),
+        },
+        status: WorkStepStatus::Running,
+        usage: None,
+        artifacts: vec![],
+        evidence: None,
+        note: None,
+        measurements: None,
+        local: None,
+        account: None,
+    };
+    step.validate().unwrap();
+    let json = serde_json::to_value(&step.kind).unwrap();
+    assert_eq!(json["kind"], "confirm");
+    assert_eq!(json["confirm"]["headline"], "Send to #design as you?");
+    assert_eq!(
+        serde_json::from_value::<WorkStepKindV1>(json).unwrap(),
+        step.kind
+    );
+    step.status = WorkStepStatus::Succeeded;
+    assert!(step.validate().is_err());
+    for (decision, status, valid) in [
+        (
+            WorkConfirmDecisionV1::Approved,
+            WorkStepStatus::Succeeded,
+            true,
+        ),
+        (
+            WorkConfirmDecisionV1::Approved,
+            WorkStepStatus::Failed,
+            true,
+        ),
+        (
+            WorkConfirmDecisionV1::Declined,
+            WorkStepStatus::Cancelled,
+            true,
+        ),
+        (
+            WorkConfirmDecisionV1::Declined,
+            WorkStepStatus::Succeeded,
+            false,
+        ),
+        (
+            WorkConfirmDecisionV1::AllowedForRun,
+            WorkStepStatus::Succeeded,
+            false,
+        ),
+    ] {
+        let mut decided = confirm.clone();
+        decided.decision = Some(decision);
+        step.kind = WorkStepKindV1::Confirm {
+            confirm: Box::new(decided),
+        };
+        step.status = status;
+        assert_eq!(step.validate().is_ok(), valid, "{decision:?} {status:?}");
+    }
+    let mut edit = confirm;
+    edit.category = WorkConfirmCategoryV1::Edit;
+    edit.run_option = true;
+    edit.decision = Some(WorkConfirmDecisionV1::AllowedForRun);
+    step.kind = WorkStepKindV1::Confirm {
+        confirm: Box::new(edit),
+    };
+    step.validate().unwrap();
+    let approve = WorkRuntimeIntent::ApproveStep {
+        execution: WorkExecutionId::generate(),
+        step: 9u128.into(),
+        approve: true,
+        for_run: false,
+    };
+    let json = serde_json::to_value(&approve).unwrap();
+    assert!(json.get("for_run").is_none());
+    let approve: WorkRuntimeIntent = serde_json::from_value(json).unwrap();
+    assert!(matches!(
+        approve,
+        WorkRuntimeIntent::ApproveStep { for_run: false, .. }
+    ));
+}

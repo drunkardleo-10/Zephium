@@ -251,6 +251,16 @@ impl WorkAgentTurnDisclosure {
                     }
                     WorkStepKindV1::DeleteFile { path, .. } => ("delete_file", path.clone()),
                     WorkStepKindV1::Finish { .. } => ("finish", String::new()),
+                    WorkStepKindV1::Confirm { confirm } => (
+                        "confirm",
+                        match confirm.decision {
+                            Some(super::runtime::WorkConfirmDecisionV1::Declined) => {
+                                format!("{}\nDeclined by the person", confirm.headline)
+                            }
+                            Some(_) => format!("{}\nApproved by the person", confirm.headline),
+                            None => confirm.headline.clone(),
+                        },
+                    ),
                 };
                 WorkAgentStepView {
                     turn: step.turn,

@@ -1101,6 +1101,110 @@ pub enum WorkStepKindV1 {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         followups: Vec<String>,
     },
+    /// A step on a site that commits something for the person, held until
+    /// they decide. Every field is Rust's reading of the page, never the
+    /// model's words; the status is the receipt once it settles.
+    Confirm {
+        confirm: Box<WorkConfirmV1>,
+    },
+}
+
+/// What a held step would commit.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkConfirmCategoryV1 {
+    /// Send, post, reply, share or invite.
+    Communication,
+    /// Pay, buy, book or order.
+    Purchase,
+    /// Delete, remove or cancel.
+    Destructive,
+    /// Save or submit a change.
+    Save,
+    /// Type into a document that saves as it is typed.
+    Edit,
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkConfirmDecisionV1 {
+    Approved,
+    /// Approved, and later edits on this site in this run need no question.
+    AllowedForRun,
+    Declined,
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkConfirmFactV1 {
+    pub label: String,
+    pub value: String,
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkConfirmV1 {
+    pub site: String,
+    pub category: WorkConfirmCategoryV1,
+    /// "Send to #design as you?", from a fixed template and page text.
+    pub headline: String,
+    /// "press Send".
+    pub action: String,
+    /// The exact text the step would send or save, as the page holds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub facts: Vec<WorkConfirmFactV1>,
+    /// The page step whose captured frame shows the page as it stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<WorkStepId>,
+    /// Other sites whose page text appears in `text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<String>,
+    /// "Allow edits on <site> for this run" is offered.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub run_option: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<WorkConfirmDecisionV1>,
+}
+
+pub const MAX_WORK_CONFIRM_FACTS: usize = 12;
+const MAX_WORK_CONFIRM_LINE_BYTES: usize = 300;
+const MAX_WORK_CONFIRM_TEXT_BYTES: usize = 4096;
+const MAX_WORK_CONFIRM_SITES: usize = 8;
+
+impl WorkConfirmV1 {
+    fn validate(&self) -> Result<(), WorkError> {
+        super::sites::validate_site(&self.site)?;
+        for line in [&self.headline, &self.action] {
+            validate_text(line, MAX_WORK_CONFIRM_LINE_BYTES)?;
+            if line.trim().is_empty() {
+                return Err(WorkError::Invalid);
+            }
+        }
+        if let Some(text) = &self.text {
+            validate_text(text, MAX_WORK_CONFIRM_TEXT_BYTES)?;
+        }
+        if self.facts.len() > MAX_WORK_CONFIRM_FACTS
+            || self.provenance.len() > MAX_WORK_CONFIRM_SITES
+            || (self.run_option && self.category != WorkConfirmCategoryV1::Edit)
+            || (self.decision == Some(WorkConfirmDecisionV1::AllowedForRun) && !self.run_option)
+        {
+            return Err(WorkError::Invalid);
+        }
+        for fact in &self.facts {
+            validate_text(&fact.label, MAX_WORK_CONFIRM_LINE_BYTES)?;
+            validate_text(&fact.value, MAX_WORK_CONFIRM_LINE_BYTES)?;
+        }
+        for site in &self.provenance {
+            super::sites::validate_site(site)?;
+        }
+        Ok(())
+    }
 }
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -1263,6 +1367,7 @@ impl WorkStepKindV1 {
                 }
                 Ok(())
             }
+            Self::Confirm { confirm } => confirm.validate(),
             Self::Turn | Self::Publish => Ok(()),
         }
     }
@@ -1357,6 +1462,12 @@ impl WorkStepFact {
         }
         let consistent = match &self.kind {
             WorkStepKindV1::Ask { answer, .. } => answer.is_some() == succeeded,
+            // Committed only once approved; undecided only while it runs.
+            WorkStepKindV1::Confirm { confirm } => match confirm.decision {
+                None => running || self.status == WorkStepStatus::Cancelled,
+                Some(WorkConfirmDecisionV1::Declined) => !succeeded,
+                Some(_) => true,
+            },
             // A proposal may run undecided or decided (being applied); once
             // settled, the decision is on record.
             WorkStepKindV1::WriteFile { decision, .. }
@@ -1981,7 +2092,10 @@ impl WorkExecutionFact {
                 if !running {
                     return Err(WorkError::Invalid);
                 }
-                running_steps += 1;
+                // A held site step waits beside its page; it is no worker.
+                if !matches!(step.kind, WorkStepKindV1::Confirm { confirm: _ }) {
+                    running_steps += 1;
+                }
                 if matches!(step.kind, WorkStepKindV1::RunCommand { .. })
                     && (step.kind.file_decision() == Some(true)
                         || step
@@ -2192,11 +2306,14 @@ pub enum WorkRuntimeIntent {
         execution: WorkExecutionId,
         text: String,
     },
-    /// Decide a proposed file change the running agent is waiting on.
+    /// Decide a proposed file change or held site step the running agent
+    /// is waiting on. `for_run` accepts a site's offered run-wide allowance.
     ApproveStep {
         execution: WorkExecutionId,
         step: WorkStepId,
         approve: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        for_run: bool,
     },
 }
 

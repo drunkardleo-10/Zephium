@@ -1146,12 +1146,114 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
                     execution,
                     step: 7.into(),
                     approve: true,
+                    for_run: false,
                 },
             },
         )
     };
     approve(&mut hub, 220).unwrap();
     assert!(matches!(approve(&mut hub, 221), Err(WorkError::Conflict)));
+    // A held site step takes one decision; only an offered allowance may be
+    // accepted for the run.
+    let confirm = |category, run_option| WorkStepKindV1::Confirm {
+        confirm: Box::new(WorkConfirmV1 {
+            site: "notion.so".into(),
+            category,
+            headline: "Save changes on notion.so?".into(),
+            action: "type into Notes".into(),
+            text: Some("Agenda".into()),
+            facts: vec![],
+            page: None,
+            provenance: vec![],
+            run_option,
+            decision: None,
+        }),
+    };
+    for (id, kind) in [
+        (8, confirm(WorkConfirmCategoryV1::Edit, true)),
+        (9, confirm(WorkConfirmCategoryV1::Communication, false)),
+    ] {
+        update(
+            &mut hub,
+            WorkRuntimeUpdate::BeginStep {
+                execution,
+                attempt,
+                step: step(id, 2, kind, WorkStepStatus::Running),
+                artifacts: vec![],
+                evidence: None,
+                file: None,
+            },
+        )
+        .unwrap();
+    }
+    let decide = |hub: &mut Hub, command: u128, step: u128, approve: bool, for_run: bool| {
+        let state = read_runtime(hub, &initial);
+        hub.work_document(
+            initial.profile,
+            WorkRequest::RuntimeCommand {
+                id: initial.id,
+                expected: state.work.revision,
+                command: command.into(),
+                intent: WorkRuntimeIntent::ApproveStep {
+                    execution,
+                    step: step.into(),
+                    approve,
+                    for_run,
+                },
+            },
+        )
+    };
+    assert!(matches!(
+        decide(&mut hub, 222, 9, true, true),
+        Err(WorkError::Invalid)
+    ));
+    assert!(matches!(
+        decide(&mut hub, 223, 8, false, true),
+        Err(WorkError::Invalid)
+    ));
+    decide(&mut hub, 224, 8, true, true).unwrap();
+    assert!(matches!(
+        decide(&mut hub, 225, 8, true, false),
+        Err(WorkError::Conflict)
+    ));
+    decide(&mut hub, 226, 9, false, false).unwrap();
+    let state = read_runtime(&mut hub, &initial);
+    let decisions = state.executions[0]
+        .steps
+        .iter()
+        .filter_map(|step| match &step.kind {
+            WorkStepKindV1::Confirm { confirm } => confirm.decision,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        decisions,
+        [
+            WorkConfirmDecisionV1::AllowedForRun,
+            WorkConfirmDecisionV1::Declined
+        ]
+    );
+    for (id, status) in [
+        (8, WorkStepStatus::Succeeded),
+        (9, WorkStepStatus::Cancelled),
+    ] {
+        update(
+            &mut hub,
+            WorkRuntimeUpdate::SettleStep {
+                execution,
+                attempt,
+                step: id.into(),
+                status,
+                usage: None,
+                artifacts: vec![],
+                evidence: None,
+                note: None,
+                measurements: None,
+                file: None,
+            },
+        )
+        .unwrap();
+    }
     let written = WorkFileRecordV1 {
         id: 71.into(),
         node,
@@ -1318,7 +1420,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
     settle(&mut hub, WorkAttemptStatus::Succeeded).unwrap();
     let state = read_runtime(&mut hub, &initial);
     assert_eq!(state.executions[0].status, WorkExecutionStatus::NeedsReview);
-    assert_eq!(state.executions[0].steps.len(), 7);
+    assert_eq!(state.executions[0].steps.len(), 9);
     assert!(matches!(steer(&mut hub, 211), Err(WorkError::Conflict)));
 }
 

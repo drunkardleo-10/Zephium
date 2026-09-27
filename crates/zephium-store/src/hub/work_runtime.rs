@@ -418,7 +418,8 @@ pub(super) fn command(
             execution,
             step,
             approve,
-        } => {
+            for_run,
+        } => 'approve: {
             let mut row = all
                 .into_iter()
                 .find(|r| r.fact.id == execution)
@@ -432,6 +433,28 @@ pub(super) fn command(
                 .iter_mut()
                 .find(|s| s.id == step)
                 .ok_or(WorkError::NotFound)?;
+            if let WorkStepKindV1::Confirm { confirm } = &mut proposed.kind {
+                if proposed.status != WorkStepStatus::Running || confirm.decision.is_some() {
+                    return Err(WorkError::Conflict);
+                }
+                if for_run && !(approve && confirm.run_option) {
+                    return Err(WorkError::Invalid);
+                }
+                confirm.decision = Some(match (approve, for_run) {
+                    (false, _) => WorkConfirmDecisionV1::Declined,
+                    (true, false) => WorkConfirmDecisionV1::Approved,
+                    (true, true) => WorkConfirmDecisionV1::AllowedForRun,
+                });
+                row.fact.validate(
+                    &read_plan(tx, id, row.fact.spec.plan_revision)?,
+                    expected.next()?,
+                )?;
+                write(tx, id, &row.fact)?;
+                break 'approve execution;
+            }
+            if for_run {
+                return Err(WorkError::Invalid);
+            }
             let (WorkStepKindV1::WriteFile {
                 decision: pending, ..
             }
