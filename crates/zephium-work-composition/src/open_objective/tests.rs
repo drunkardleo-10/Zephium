@@ -296,6 +296,7 @@ fn ordinary_local_action_objective_keeps_discovery_account_and_result_contract()
             policy: Box::new(RefuseLocalActions),
             max_actions: 3,
             read_only: false,
+            commits: Vec::new(),
         }),
     )
     .unwrap();
@@ -326,6 +327,7 @@ fn ordinary_local_action_objective_keeps_discovery_account_and_result_contract()
                 policy: Box::new(RefuseLocalActions),
                 max_actions,
                 read_only: false,
+                commits: Vec::new(),
             })
         )
         .is_err());
@@ -349,6 +351,7 @@ fn public_interactions_preserve_anonymous_read_only_scope() {
             policy: Box::new(read_interactions::ReadingInteractionPolicy),
             max_actions: 8,
             read_only: true,
+            commits: Vec::new(),
         }),
     )
     .unwrap();
@@ -716,9 +719,7 @@ fn human_account_attestation_keeps_isolated_storage_and_single_page_scope() {
 fn a_recorded_consent_dialog_is_dismissed_by_its_refusing_control_only_by_recipe() {
     use serde_json::json;
     let policy = read_interactions::ReadingInteractionPolicy;
-    let button = |key: u32, name: &str, y: u32| {
-        json!({"k":key,"p":0,"r":"button","n":name,"ak":1,"o":9,"fc":true,"b":{"x":10,"y":y,"w":300,"h":40}})
-    };
+    let button = |key: u32, name: &str, y: u32| json!({"k":key,"p":0,"r":"button","n":name,"ak":1,"o":9,"fc":true,"b":{"x":10,"y":y,"w":300,"h":40}});
     // IKEA's Polish consent dialog as recorded on 2026-09-23: accept all,
     // accept only necessary, and a settings control.
     let consent = |title: &str, topic: &str| {

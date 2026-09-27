@@ -7332,6 +7332,7 @@ name = "zephium-work-composition"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "zephium-agent-controller",
  "zephium-agent-provider-transport",

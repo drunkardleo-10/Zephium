@@ -81,6 +81,7 @@ impl PublicReadWorkInvocation {
                 policy: Box::new(read_interactions::ReadingInteractionPolicy),
                 max_actions: 8,
                 read_only: true,
+                commits: Vec::new(),
             },
         }
     }
@@ -95,24 +96,33 @@ impl PublicReadWorkInvocation {
                 policy: Box::new(read_interactions::SessionReadingPolicy),
                 max_actions: 8,
                 read_only: true,
+                commits: Vec::new(),
             },
         }
     }
 
     /// A page task on one site: navigating, searching and drafting proceed;
-    /// a committing step is held back and recorded in `held`.
+    /// a committing step waits in `gate` for the person. The scope carries
+    /// only the commitments already allowed: the one approved step's class,
+    /// and edits once the person allowed them for the run.
     #[cfg(feature = "durable-runtime")]
     pub(crate) fn with_site_work(
         self,
-        held: Arc<std::sync::atomic::AtomicBool>,
+        gate: Arc<site_work::SiteGate>,
+        asks: bool,
         max_actions: u64,
     ) -> PublicLocalActionWorkInvocation {
+        let mut commits: Vec<SemanticEffectClass> = gate.approved_class().into_iter().collect();
+        if gate.allow_edits() && !commits.contains(&SemanticEffectClass::ExternalWrite) {
+            commits.push(SemanticEffectClass::ExternalWrite);
+        }
         PublicLocalActionWorkInvocation {
             read: self,
             actions: LocalActions {
-                policy: Box::new(site_work::SiteWorkPolicy { held }),
+                policy: Box::new(site_work::SiteWorkPolicy { gate, asks }),
                 max_actions,
                 read_only: false,
+                commits,
             },
         }
     }
@@ -194,6 +204,8 @@ struct LocalActions {
     policy: Box<dyn AgentWorkLocalActionPolicy>,
     max_actions: u64,
     read_only: bool,
+    /// Commitments in scope beyond local drafting.
+    commits: Vec<SemanticEffectClass>,
 }
 
 impl PublicLocalActionWorkInvocation {
@@ -217,6 +229,7 @@ impl PublicLocalActionWorkInvocation {
                 policy,
                 max_actions,
                 read_only: false,
+                commits: Vec::new(),
             },
         })
     }
@@ -333,14 +346,12 @@ fn assemble_with_actions(
     {
         return Err(AgentWorkFailure::Contract);
     }
-    let effects = AgentEffectScope::try_new(
-        if actions.as_ref().is_some_and(|actions| !actions.read_only) {
-            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite]
-        } else {
-            &[SemanticEffectClass::Read]
-        },
-    )
-    .map_err(fail)?;
+    let mut classes = vec![SemanticEffectClass::Read];
+    if let Some(actions) = actions.as_ref().filter(|actions| !actions.read_only) {
+        classes.push(SemanticEffectClass::LocalWrite);
+        classes.extend(actions.commits.iter().copied());
+    }
+    let effects = AgentEffectScope::try_new(&classes).map_err(fail)?;
     let mut origins = objective.navigation.origins().cloned().collect::<Vec<_>>();
     origins.sort();
     origins.dedup();
