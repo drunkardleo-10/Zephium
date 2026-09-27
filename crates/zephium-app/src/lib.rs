@@ -60,7 +60,7 @@ pub use api::{
     StoreExtensionContext, StoreExtensionPackageSubmission, StoreExtensionPreparationCompletion,
     StoreExtensionUpdateDispatch, StoreExtensionUpdateResult,
 };
-pub use shell::Shell;
+pub use shell::{Shell, WebExtensionStatus, WebExtensionTarget};
 
 #[doc(hidden)]
 pub use store_reads::StoreReadResult;

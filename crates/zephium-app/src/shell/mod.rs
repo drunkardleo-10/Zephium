@@ -28,6 +28,8 @@ mod search;
 mod tabs;
 mod user_content_status;
 mod view_lifecycle;
+mod webext;
+pub use webext::{WebExtensionStatus, WebExtensionTarget};
 mod window_layout;
 mod zoom;
 
@@ -238,6 +240,7 @@ pub struct Shell {
     extension_service: Option<ExtensionLifecycle>,
     extension_startup_ready: bool,
     extension_browser_surfaces: ExtensionBrowserSurfaceState,
+    web_extensions: webext::WebExtensionState,
     extension_actions: ExtensionActionState,
     extension_management: ExtensionManagementState,
     extension_runtime_grants: ExtensionRuntimeGrantPromptState,
@@ -512,6 +515,7 @@ impl Shell {
             extension_service: Some(extension_service),
             extension_startup_ready: false,
             extension_browser_surfaces: ExtensionBrowserSurfaceState::default(),
+            web_extensions: webext::WebExtensionState::default(),
             extension_actions: ExtensionActionState::default(),
             extension_management: ExtensionManagementState::default(),
             extension_runtime_grants: ExtensionRuntimeGrantPromptState::default(),
@@ -709,6 +713,16 @@ impl Shell {
                 (self.emit)(Projection::OperationProcessed(completion));
             }
             Command::Bootstrap => self.bootstrap(),
+            Command::SetWebExtensions {
+                profile,
+                extensions,
+            } => self.set_web_extensions(profile, extensions),
+            Command::ResolveWebExtensionTarget { tab, reply } => {
+                let _ = reply.try_send(self.web_extension_target(tab));
+            }
+            Command::WebExtensionStatus { profile, reply } => {
+                let _ = reply.try_send(self.web_extension_status(profile));
+            }
             Command::ExtensionStartupChanged => {
                 self.extension_startup_not_before = None;
                 self.bootstrap();

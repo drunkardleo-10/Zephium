@@ -622,6 +622,25 @@ pub enum Command {
     /// Internal move-only package handoff from the product distribution
     /// worker. Public operation dispatch never admits this command.
     ProvisionAcquiredExtensionPackage(AcquiredExtensionPackageSubmission),
+    /// Replaces the extensions a profile runs.
+    SetWebExtensions {
+        profile: ProfileId,
+        extensions: Vec<zephium_core::ports::engine::WebExtensionLoad>,
+    },
+    /// The profile an installation from `tab` would go to.
+    ResolveWebExtensionTarget {
+        tab: Option<ItemId>,
+        reply: SyncSender<Option<crate::shell::WebExtensionTarget>>,
+    },
+    WebExtensionStatus {
+        profile: ProfileId,
+        reply: SyncSender<
+            Vec<(
+                zephium_core::ids::ExtensionInstallId,
+                crate::shell::WebExtensionStatus,
+            )>,
+        >,
+    },
     /// Native query for one foreground store listing; never public operation dispatch.
     ResolveStoreExtensionContext {
         tab: ItemId,

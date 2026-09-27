@@ -295,15 +295,19 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
         shell.invoke_extension_action(runtime, ExtensionActionRevision::INITIAL, anchor),
         Err(zephium_core::extensions::ExtensionActionRejection::RuntimeSuperseded)
     );
-    let opened = shell.invoke_extension_action(runtime, rebound_revision, anchor).unwrap();
+    let opened = shell
+        .invoke_extension_action(runtime, rebound_revision, anchor)
+        .unwrap();
     shell.handle(Command::Engine(EngineEvent::ExtensionActionSettled {
         profile,
         request: opened,
-        settlement: zephium_core::extensions::ExtensionActionSettlement::PopupPresented(
-            Size::new(320.0, 400.0),
-        ),
+        settlement: zephium_core::extensions::ExtensionActionSettlement::PopupPresented(Size::new(
+            320.0, 400.0,
+        )),
     }));
-    let reopened = shell.invoke_extension_action(runtime, rebound_revision, anchor).unwrap();
+    let reopened = shell
+        .invoke_extension_action(runtime, rebound_revision, anchor)
+        .unwrap();
     assert_eq!(
         shell.extension_actions.settle_invocation(
             profile,

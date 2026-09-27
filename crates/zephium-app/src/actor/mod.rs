@@ -789,6 +789,47 @@ impl Handle {
         }
         result
     }
+    pub fn web_extension_target(
+        &self,
+        tab: Option<zephium_core::ids::ItemId>,
+    ) -> std::sync::mpsc::Receiver<Option<crate::shell::WebExtensionTarget>> {
+        let (reply, receiver) = sync_channel(1);
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self
+            .queue
+            .try_push(Command::ResolveWebExtensionTarget { tab, reply })
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
+
+    pub fn web_extension_status(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+    ) -> std::sync::mpsc::Receiver<
+        Vec<(
+            zephium_core::ids::ExtensionInstallId,
+            crate::shell::WebExtensionStatus,
+        )>,
+    > {
+        let (reply, receiver) = sync_channel(1);
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self
+            .queue
+            .try_push(Command::WebExtensionStatus { profile, reply })
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
+
     /// Resolves an actor-owned foreground store context without blocking the UI.
     pub fn store_extension_context(
         &self,
@@ -987,6 +1028,12 @@ fn finish_unprocessed_command(command: Command, outcome: ShutdownOutcome) {
         Command::ResolveStoreExtensionContext { reply, .. }
         | Command::ResolveStoreExtensionUpdateContext { reply, .. } => {
             let _ = reply.try_send(None);
+        }
+        Command::ResolveWebExtensionTarget { reply, .. } => {
+            let _ = reply.try_send(None);
+        }
+        Command::WebExtensionStatus { reply, .. } => {
+            let _ = reply.try_send(Vec::new());
         }
         Command::PrepareStoreExtensionPackage(submission) => {
             submission.settle_unavailable();

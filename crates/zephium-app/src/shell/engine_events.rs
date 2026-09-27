@@ -303,6 +303,11 @@ impl Shell {
                     self.project_extension_action_failure(runtime.profile(), None, reason);
                 }
             }
+            EngineEvent::WebExtensionSettled {
+                profile,
+                install,
+                result,
+            } => self.on_web_extension_settled(profile, install, result),
             EngineEvent::ExtensionActionsInvalidated { profile } => {
                 let refresh = self.refresh_extension_actions(profile);
                 if refresh.rejected {
@@ -603,6 +608,7 @@ impl Shell {
             EngineEvent::ExtensionActionSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionOptionsPageSettled { runtime, .. } => Some(runtime.profile()),
             EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),
+            EngineEvent::WebExtensionSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionShortcutRequested { runtime, .. } => {
                 Some(runtime.profile())
             }
