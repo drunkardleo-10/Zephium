@@ -607,7 +607,11 @@ mod imp {
         shell: &Handle,
         extensions: &WebExtensions,
     ) -> Result<Vec<WebExtensionView>, String> {
-        let profile = target(shell, None).await?.profile;
+        // Before the session exists there is nothing to list yet; the build
+        // still supports extensions.
+        let Ok(profile) = target(shell, None).await.map(|target| target.profile) else {
+            return Ok(Vec::new());
+        };
         let receiver = shell.web_extension_status(profile);
         let status: HashMap<String, WebExtensionStatus> =
             tauri::async_runtime::spawn_blocking(move || {
