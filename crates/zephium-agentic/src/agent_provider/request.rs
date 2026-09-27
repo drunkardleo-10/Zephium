@@ -5684,6 +5684,54 @@ static ANTHROPIC_NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<
         .collect()
 });
 
+static SITE_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> =
+    LazyLock::new(|| {
+        let mut tools = NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS.clone();
+        for tool in &mut tools {
+            if tool.kind != AgentBrowserToolKind::Act {
+                continue;
+            }
+            for variant in tool.parameters["properties"]["actions"]["items"]["anyOf"]
+                .as_array_mut()
+                .expect("fixed action schema")
+            {
+                let effects: &[&str] = match variant["properties"]["kind"]["enum"][0]
+                    .as_str()
+                    .expect("fixed action kind")
+                {
+                    "click" => &[
+                        "read",
+                        "local_write",
+                        "external_write",
+                        "communication",
+                        "purchase",
+                        "destructive",
+                    ],
+                    "fill" => &["local_write", "external_write"],
+                    "select" => &["local_write"],
+                    "scroll" => &["read"],
+                    _ => return Vec::new(),
+                };
+                variant["properties"]["effect"] = string_enum(effects);
+            }
+            tool.description = "Propose one current-ref Click, Fill, Select or Scroll on this site with verification of its intended outcome. Fill and Select use local_write for drafts and search fields; typing into a document that saves as you type is external_write. Click uses read for exploring, opening, searching and filtering: a search or filter button may load a results page, which then opens for you. local_write is for reversible local changes. A click that sends, posts, publishes, pays, books, deletes, shares or saves declares its true effect (communication, purchase, destructive or external_write) and must be the batch's only action; the app asks the person before it runs. Use immediate or mutation_quiet settlement with at least 2000 milliseconds. Verify an effect that lands elsewhere on the page with page_changed. Opening a page dialog requires page_dialog_opened; choosing an item that dismisses it requires page_dialog_closed. Scroll uses read and immediate settlement with scroll_position_changed verification; amount=into_view brings an observed disclosure into view. Keyboard effects are unavailable through act. Follow shown links with the navigate tool.";
+        }
+        tools
+    });
+
+static ANTHROPIC_SITE_ACTIONS_EXTRACTION_TOOL_DEFINITIONS: LazyLock<
+    Vec<AnthropicBrowserToolDefinition>,
+> = LazyLock::new(|| {
+    SITE_ACTIONS_EXTRACTION_TOOL_DEFINITIONS
+        .iter()
+        .map(|tool| AnthropicBrowserToolDefinition {
+            kind: tool.kind,
+            description: tool.description,
+            input_schema: project_anthropic_schema(&tool.parameters),
+        })
+        .collect()
+});
+
 pub(super) fn browser_tool_definitions() -> &'static [BrowserToolDefinition] {
     &BROWSER_TOOL_DEFINITIONS
 }
@@ -5694,6 +5742,9 @@ fn browser_tool_definitions_for(
     match config.tools {
         super::BrowserToolProfile::NavigationActionsExtraction => {
             &NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS
+        }
+        super::BrowserToolProfile::SiteActionsExtraction => {
+            &SITE_ACTIONS_EXTRACTION_TOOL_DEFINITIONS
         }
         super::BrowserToolProfile::NavigationExtraction => &NAVIGATION_EXTRACTION_TOOL_DEFINITIONS,
         super::BrowserToolProfile::Extraction => &EXTRACTION_TOOL_DEFINITIONS,
@@ -5828,6 +5879,9 @@ fn anthropic_browser_tool_definitions(
     match config.tools {
         super::BrowserToolProfile::NavigationActionsExtraction => {
             &ANTHROPIC_NAVIGATION_ACTIONS_EXTRACTION_TOOL_DEFINITIONS
+        }
+        super::BrowserToolProfile::SiteActionsExtraction => {
+            &ANTHROPIC_SITE_ACTIONS_EXTRACTION_TOOL_DEFINITIONS
         }
         super::BrowserToolProfile::NavigationExtraction => {
             &ANTHROPIC_NAVIGATION_EXTRACTION_TOOL_DEFINITIONS
@@ -6541,6 +6595,13 @@ fn verification_schema(action: SemanticActionKind, snapshot_only: bool) -> Value
         );
         schema
     };
+    let page_changed = || {
+        let mut schema = tagged_object("page_changed", Vec::new());
+        schema["description"] = json!(
+            "The effect lands elsewhere on the page (results, filters, panels); proves only that page content changed."
+        );
+        schema
+    };
     if snapshot_only {
         match action {
             SemanticActionKind::Click => {
@@ -6548,6 +6609,7 @@ fn verification_schema(action: SemanticActionKind, snapshot_only: bool) -> Value
                     target_state(),
                     page_dialog_opened(),
                     page_dialog_closed(),
+                    page_changed(),
                 ]);
             }
             SemanticActionKind::Press => {
@@ -6555,6 +6617,7 @@ fn verification_schema(action: SemanticActionKind, snapshot_only: bool) -> Value
                     target_state(),
                     tagged_object("target_value_changed", Vec::new()),
                     tagged_object("target_selection_changed", Vec::new()),
+                    page_changed(),
                 ]);
             }
             _ => {}
@@ -6565,6 +6628,7 @@ fn verification_schema(action: SemanticActionKind, snapshot_only: bool) -> Value
             target_state(),
             page_dialog_opened(),
             page_dialog_closed(),
+            page_changed(),
             tagged_object("navigation_committed", Vec::new()),
             tagged_object("dialog", vec![("state", dialog_schema())]),
         ]),
@@ -6574,6 +6638,7 @@ fn verification_schema(action: SemanticActionKind, snapshot_only: bool) -> Value
             target_state(),
             tagged_object("target_value_changed", Vec::new()),
             tagged_object("target_selection_changed", Vec::new()),
+            page_changed(),
             tagged_object("navigation_committed", Vec::new()),
             tagged_object("dialog", vec![("state", dialog_schema())]),
         ]),
@@ -7307,6 +7372,7 @@ mod tests {
                                 "target_state",
                                 "page_dialog_opened",
                                 "page_dialog_closed",
+                                "page_changed",
                             ])
                         );
                         let target_state = verifications
@@ -8639,7 +8705,7 @@ mod tests {
                 (AgentBrowserToolKind::Reload, 201),
                 (AgentBrowserToolKind::Snapshot, 1_682),
                 (AgentBrowserToolKind::Locate, 2_373),
-                (AgentBrowserToolKind::Act, 11_001),
+                (AgentBrowserToolKind::Act, 11_507),
                 (AgentBrowserToolKind::Wait, 2_152),
                 (AgentBrowserToolKind::Read, 1_510),
                 (AgentBrowserToolKind::Extract, 1_602),
@@ -8648,7 +8714,7 @@ mod tests {
                 (AgentBrowserToolKind::ResumeAfterHuman, 204),
             ]
         );
-        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 22_260);
+        assert_eq!(sizes.iter().map(|(_, bytes)| bytes).sum::<usize>(), 22_766);
     }
 
     #[test]

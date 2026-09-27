@@ -241,6 +241,12 @@ impl AgentProviderActionRefusal {
         self.error
     }
 
+    /// The pending Act continuation, for a site-session follow that retires
+    /// it instead of reporting the refusal.
+    pub fn into_continuation(self) -> AgentProviderContinuation {
+        self.continuation
+    }
+
     /// Exact content-free proposal identity when the rejected batch contained
     /// one resolvable target. Callers may use it only to stop repeated retries;
     /// it grants no replacement action or native authority.

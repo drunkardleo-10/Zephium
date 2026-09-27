@@ -723,7 +723,13 @@ impl AgentPlanNodeAuthority {
                     != AgentEffectScope::try_new(&[
                         SemanticEffectClass::Read,
                         SemanticEffectClass::LocalWrite,
-                    ])?)
+                    ])?
+                // A site session may also carry commitments the person
+                // already approved; never a capability boundary.
+                && !(discovery.is_site_session()
+                    && self.effects.contains(SemanticEffectClass::Read)
+                    && self.effects.contains(SemanticEffectClass::LocalWrite)
+                    && !self.effects.contains(SemanticEffectClass::CapabilityBoundary)))
         {
             return Err(AgentManifestContractError::NavigationRoute);
         }

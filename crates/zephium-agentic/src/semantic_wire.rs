@@ -404,6 +404,12 @@ pub fn decode_semantic_snapshot(
                     _ => Err(SemanticDecodeError::NodeContract),
                 })
                 .transpose()?,
+            form: raw_node
+                .form
+                .map(|bits| {
+                    crate::SemanticFormFacts::decode(bits).ok_or(SemanticDecodeError::NodeContract)
+                })
+                .transpose()?,
             fill_support,
             editable_structure,
             fields_complete: raw_node.fields_complete,
@@ -943,6 +949,8 @@ struct RawNode {
     operations: u8,
     #[serde(rename = "ak", default)]
     activation: Option<u8>,
+    #[serde(rename = "ff", default)]
+    form: Option<u8>,
     #[serde(rename = "fs", default)]
     fill_support: Option<u8>,
     #[serde(rename = "es", default)]
@@ -1711,6 +1719,50 @@ mod tests {
                 Err(SemanticDecodeError::NodeContract)
             );
         }
+    }
+
+    #[test]
+    fn form_facts_decode_closed_bits_only() {
+        let snapshot = decode_semantic_snapshot(
+            decode_context(),
+            &payload(json!([{"k": 1, "r": "button", "n": "Search", "o": 1, "ak": 2, "ff": 13}])),
+        )
+        .expect("snapshot");
+        let form = snapshot.nodes()[0].form().expect("form facts");
+        assert_eq!(form.method(), crate::SemanticFormMethod::Get);
+        assert!(form.same_origin() && form.search());
+        for bits in [0, 16, 64] {
+            assert_eq!(
+                decode_semantic_snapshot(
+                    decode_context(),
+                    &payload(json!([{"k": 1, "r": "button", "o": 1, "ak": 2, "ff": bits}])),
+                ),
+                Err(SemanticDecodeError::NodeContract)
+            );
+        }
+    }
+
+    #[test]
+    fn page_content_digest_ignores_keys_and_focus_but_not_text() {
+        let digest = |nodes| {
+            crate::semantic_action::page_digest(
+                &decode_semantic_snapshot(decode_context(), &payload(nodes)).expect("snapshot"),
+            )
+        };
+        let before = digest(json!([
+            {"k": 1, "r": "document"},
+            {"k": 2, "p": 0, "r": "paragraph", "t": "3 results"}
+        ]));
+        let rekeyed = digest(json!([
+            {"k": 7, "r": "document"},
+            {"k": 9, "p": 0, "r": "paragraph", "t": "3 results"}
+        ]));
+        let changed = digest(json!([
+            {"k": 1, "r": "document"},
+            {"k": 2, "p": 0, "r": "paragraph", "t": "12 results"}
+        ]));
+        assert_eq!(before, rekeyed);
+        assert_ne!(before, changed);
     }
 
     #[test]

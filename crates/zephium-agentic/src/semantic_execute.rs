@@ -321,10 +321,34 @@ impl fmt::Debug for SemanticActionExecutionPending {
     }
 }
 
+/// A same-site GET a page started during one action. The native adapter
+/// cancels it and records the target; the controller may then load it as
+/// its own navigation.
+#[derive(Clone, Debug, Default)]
+pub struct SemanticActionFollow(
+    std::sync::Arc<std::sync::Mutex<Option<crate::ContextNavigationTarget>>>,
+);
+
+impl SemanticActionFollow {
+    /// Records the latest diverted load; a later one replaces it.
+    pub fn record(&self, target: crate::ContextNavigationTarget) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(target);
+        }
+    }
+
+    /// Takes the diverted load, leaving the slot empty.
+    pub fn take(&self) -> Option<crate::ContextNavigationTarget> {
+        self.0.lock().ok().and_then(|mut slot| slot.take())
+    }
+}
+
 /// Non-cloneable closed recipe for one trusted native adapter.
 #[must_use]
 pub struct SemanticActionNativeRequest {
     page_dialog_opened: bool,
+    effect: crate::SemanticEffectClass,
+    follow: Option<SemanticActionFollow>,
     correlation: NativeCorrelation,
     role: SemanticRole,
     expected_geometry: SemanticRect,
@@ -339,6 +363,27 @@ impl SemanticActionNativeRequest {
     }
     pub(crate) fn correlation(&self) -> SemanticActionNativeCorrelation {
         SemanticActionNativeCorrelation(self.correlation.clone())
+    }
+
+    /// Lets the native adapter report one same-site load the page started
+    /// during this action, which the adapter cancels rather than follows.
+    pub fn with_follow(mut self, follow: SemanticActionFollow) -> Self {
+        self.follow = Some(follow);
+        self
+    }
+
+    /// The follow slot the controller attached, if any.
+    pub const fn follow(&self) -> Option<&SemanticActionFollow> {
+        self.follow.as_ref()
+    }
+
+    /// Policy-admitted effect class. A durable commit may carry a same-site
+    /// form POST; lower classes only ever follow GET loads.
+    pub const fn commits(&self) -> bool {
+        !matches!(
+            self.effect,
+            crate::SemanticEffectClass::Read | crate::SemanticEffectClass::LocalWrite
+        )
     }
 
     /// Exact policy-dispatched action attempt.
@@ -1088,6 +1133,7 @@ pub(crate) fn prepare_semantic_action_execution(
         requested_at,
         deadline,
     );
+    let effect = active.effect();
     let correlation = NativeCorrelation {
         effect: active.id(),
         attempt: active.attempt(),
@@ -1112,6 +1158,8 @@ pub(crate) fn prepare_semantic_action_execution(
                 crate::SemanticVerification::PageDialogOpened
                     | crate::SemanticVerification::PageDialogClosed
             ),
+            effect,
+            follow: None,
             correlation,
             role: action.bound_action().target_role(),
             expected_geometry,

@@ -444,6 +444,9 @@ pub enum SemanticVerification {
     Dialog(SemanticDialogState),
     /// Scroll position changed without claiming unrelated page effects.
     ScrollPositionChanged,
+    /// The action frame's content changed somewhere: a click whose effect
+    /// lands elsewhere on the page. Proves a change, not which one.
+    PageChanged,
 }
 
 /// Bounded per-action settle budget; execution converts it to one absolute deadline.
@@ -542,6 +545,7 @@ fn verification_matches(kind: SemanticActionKind, verification: SemanticVerifica
             verification,
             SemanticVerification::PageDialogOpened
                 | SemanticVerification::PageDialogClosed
+                | SemanticVerification::PageChanged
                 | SemanticVerification::TargetState { .. }
                 | SemanticVerification::NavigationCommitted
                 | SemanticVerification::Dialog(_)
@@ -556,6 +560,7 @@ fn verification_matches(kind: SemanticActionKind, verification: SemanticVerifica
                 | SemanticVerification::TargetValueChanged
                 | SemanticVerification::TargetSelectionChanged
                 | SemanticVerification::NavigationCommitted
+                | SemanticVerification::PageChanged
                 | SemanticVerification::Dialog(_)
         ),
         SemanticActionKind::Scroll => verification == SemanticVerification::ScrollPositionChanged,
@@ -570,6 +575,12 @@ fn wait_matches(wait: SemanticWaitCondition, verification: SemanticVerification)
                 SemanticWaitCondition::Immediate | SemanticWaitCondition::MutationQuiet(_)
             )
         }
+        SemanticVerification::PageChanged => matches!(
+            wait,
+            SemanticWaitCondition::Immediate
+                | SemanticWaitCondition::SemanticChange
+                | SemanticWaitCondition::MutationQuiet(_)
+        ),
         SemanticVerification::NavigationCommitted => matches!(
             wait,
             SemanticWaitCondition::NavigationCommitted
@@ -974,6 +985,7 @@ impl SemanticBoundAction {
             option_states,
             target_runtime_descriptor,
             option_runtime_descriptor,
+            page_digest: page_digest(current),
             guard,
         })
     }
@@ -1035,10 +1047,16 @@ pub struct SemanticPreparedAction {
     option_states: Option<SemanticStates>,
     target_runtime_descriptor: SemanticActionRuntimeDescriptor,
     option_runtime_descriptor: Option<SemanticActionRuntimeDescriptor>,
+    page_digest: [u8; 32],
     guard: [u8; 32],
 }
 
 impl SemanticPreparedAction {
+    /// Content digest of the frame this action was prepared on.
+    pub(crate) const fn page_digest(&self) -> [u8; 32] {
+        self.page_digest
+    }
+
     /// Original observation-bound action contract.
     pub const fn bound_action(&self) -> &SemanticBoundAction {
         &self.action
@@ -1485,6 +1503,7 @@ fn validate_verification_baseline(
         | SemanticVerification::TargetSelectionChanged
         | SemanticVerification::NavigationCommitted
         | SemanticVerification::Dialog(_)
+        | SemanticVerification::PageChanged
         | SemanticVerification::ScrollPositionChanged => false,
     };
     if already_satisfied {
@@ -1516,6 +1535,7 @@ fn validate_prepared_baseline(
         | SemanticVerification::TargetSelectionChanged
         | SemanticVerification::NavigationCommitted
         | SemanticVerification::Dialog(_)
+        | SemanticVerification::PageChanged
         | SemanticVerification::ScrollPositionChanged => false,
     };
     if already_satisfied {
@@ -2045,7 +2065,47 @@ fn hash_verification(hasher: &mut Sha256, verification: SemanticVerification) {
             hasher.update([7, dialog_state_code(state)]);
         }
         SemanticVerification::ScrollPositionChanged => hasher.update([8]),
+        SemanticVerification::PageChanged => hasher.update([11]),
     }
+}
+
+/// What a person would see change on the frame: roles, names, text, values,
+/// links and states. Keys, geometry and focus are left out, so a re-render
+/// with the same content is no change.
+pub(crate) fn page_digest(snapshot: &SemanticSnapshot) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ZEPHIUM-SEMANTIC-PAGE-CONTENT-1\0");
+    let text = |hasher: &mut Sha256, value: Option<&str>| match value {
+        Some(value) => {
+            hasher.update([1]);
+            hasher.update((value.len() as u64).to_be_bytes());
+            hasher.update(value.as_bytes());
+        }
+        None => hasher.update([0]),
+    };
+    for node in snapshot.nodes() {
+        hasher.update(format!("{:?}", node.role()).as_bytes());
+        hasher.update([node.depth()]);
+        text(&mut hasher, node.name().map(crate::SemanticText::as_str));
+        text(&mut hasher, node.text().map(crate::SemanticText::as_str));
+        text(
+            &mut hasher,
+            node.link_destination()
+                .map(|target| target.as_url().as_str()),
+        );
+        match node.value() {
+            Some(SemanticValueSummary::Text(value)) => text(&mut hasher, Some(value.as_str())),
+            Some(SemanticValueSummary::Boolean(value)) => hasher.update([2, u8::from(*value)]),
+            Some(SemanticValueSummary::Ordinal(value)) => {
+                hasher.update([3]);
+                hasher.update(value.to_be_bytes());
+            }
+            Some(SemanticValueSummary::Redacted) => hasher.update([4]),
+            None => hasher.update([5]),
+        }
+        hasher.update([node.states().bits() & !SemanticState::Focused.bit()]);
+    }
+    hasher.finalize().into()
 }
 
 const fn state_code(state: SemanticState) -> u8 {

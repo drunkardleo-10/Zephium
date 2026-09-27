@@ -434,15 +434,15 @@ pub use protocol::{
 };
 pub use semantic::{
     SemanticActivation, SemanticCompleteness, SemanticContractError, SemanticEditableStructure,
-    SemanticFillSupport, SemanticFrameJoin, SemanticFrameTrust, SemanticHeadingLevel,
-    SemanticInvocationId, SemanticLandmarkKind, SemanticNode, SemanticOperationClass,
-    SemanticOperations, SemanticOrigin, SemanticRect, SemanticReference, SemanticReferenceError,
-    SemanticReferenceId, SemanticRole, SemanticSensitivity, SemanticSnapshot,
-    SemanticSnapshotGeneration, SemanticState, SemanticStates, SemanticText, SemanticTruncation,
-    SemanticTrust, SemanticValuePreview, SemanticValueSummary, SemanticValueText,
-    MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES, MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES,
-    MAX_SEMANTIC_TEXT_BYTES, MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
-    MAX_SEMANTIC_VALUE_PREVIEW_BYTES,
+    SemanticFillSupport, SemanticFormFacts, SemanticFormMethod, SemanticFrameJoin,
+    SemanticFrameTrust, SemanticHeadingLevel, SemanticInvocationId, SemanticLandmarkKind,
+    SemanticNode, SemanticOperationClass, SemanticOperations, SemanticOrigin, SemanticRect,
+    SemanticReference, SemanticReferenceError, SemanticReferenceId, SemanticRole,
+    SemanticSensitivity, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
+    SemanticStates, SemanticText, SemanticTruncation, SemanticTrust, SemanticValuePreview,
+    SemanticValueSummary, SemanticValueText, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES,
+    MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES, MAX_SEMANTIC_TEXT_BYTES,
+    MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES, MAX_SEMANTIC_VALUE_PREVIEW_BYTES,
 };
 pub(crate) use semantic_action::SemanticActionRuntimeDescriptor;
 pub use semantic_action::{
@@ -484,7 +484,7 @@ pub use semantic_execute::{
     begin_semantic_action_settlement, SemanticActionExecutionApplied,
     SemanticActionExecutionBackend, SemanticActionExecutionContractError,
     SemanticActionExecutionDisposition, SemanticActionExecutionInstant,
-    SemanticActionExecutionOutcome, SemanticActionExecutionPreparationError,
+    SemanticActionExecutionOutcome, SemanticActionExecutionPreparationError, SemanticActionFollow,
     SemanticActionNativeFailure, SemanticActionNativeReadiness, SemanticActionNativeRequest,
     SemanticActionNativeSettlement, SemanticActionNativeTargetId, SemanticActionNativeViewport,
     SemanticActionNativeViewportError, SemanticActionSettlementRefusal,
@@ -639,18 +639,18 @@ pub use sign_in_handoff::{
     ContextSignInHandoffState,
 };
 
-#[cfg(feature = "provider-transport")]
-pub use provider_transport::agent::{OpenAiWorkAgent, WorkAgentWireFault};
 #[cfg(all(feature = "probe-harness", feature = "provider-transport"))]
 pub use provider_transport::agent::agent_turn_wire_faults;
 #[cfg(feature = "provider-transport")]
+pub use provider_transport::agent::{OpenAiWorkAgent, WorkAgentWireFault};
+#[cfg(feature = "provider-transport")]
 pub use provider_transport::decision::{
-    AdmittedDecisionOutput, DecisionActionSelection, DecisionBackendKind, DecisionCallAccounting,
-    DecisionCallDiagnostic, DecisionCallFailure, DecisionCallOutput, DecisionEnvelopeFacts,
-    DecisionEnvelopeFailure, DecisionLocatedRead, DecisionObservation, DecisionObservationAnswers,
-    DecisionObservationFallback, DecisionOperation, DecisionProjectionError, DecisionReadSelection,
-    DecisionRowDiscovery,
-    JevDecisionClient, OpenAiDecisionCall, OpenAiDecisionClient, untracked_document_address,
+    untracked_document_address, AdmittedDecisionOutput, DecisionActionSelection,
+    DecisionBackendKind, DecisionCallAccounting, DecisionCallDiagnostic, DecisionCallFailure,
+    DecisionCallOutput, DecisionEnvelopeFacts, DecisionEnvelopeFailure, DecisionLocatedRead,
+    DecisionObservation, DecisionObservationAnswers, DecisionObservationFallback,
+    DecisionOperation, DecisionProjectionError, DecisionReadSelection, DecisionRowDiscovery,
+    JevDecisionClient, OpenAiDecisionCall, OpenAiDecisionClient,
 };
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};

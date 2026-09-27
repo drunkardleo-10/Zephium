@@ -1023,6 +1023,36 @@ impl AgentProviderContinuation {
         })
     }
 
+    /// Consumes a settled Act proposal whose action led the page to start a
+    /// same-site load the engine cancelled. The controller follows it as its
+    /// own navigation; old replay retires exactly as for a load.
+    pub fn retire_for_follow(
+        self,
+        observation: &crate::SemanticObservation,
+        target: &crate::ContextNavigationTarget,
+        config: &AgentProviderCallConfig,
+    ) -> Result<AgentProviderNavigationCheckpoint, AgentProviderContinuationError> {
+        if config != &self.config {
+            return Err(AgentProviderContinuationError::Config);
+        }
+        if self.correlation.kind() != AgentBrowserToolKind::Act {
+            return Err(AgentProviderContinuationError::ToolKind);
+        }
+        if !self.baseline.matches(observation) {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        Ok(AgentProviderNavigationCheckpoint {
+            prior_call: self.prior_call,
+            config: self.config,
+            baseline: self.baseline,
+            target: target.clone(),
+            host_projected_actions: self
+                .transcript
+                .action_targets()
+                .is_some_and(AgentProviderActionTargets::is_host_projected),
+        })
+    }
+
     /// Consumes an argument-free Back proposal and binds it to the trusted
     /// policy/native predecessor target. The provider never receives or chooses
     /// that target, and all prior replay is retired exactly as for a load.

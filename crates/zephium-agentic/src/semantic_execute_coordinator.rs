@@ -615,6 +615,7 @@ impl SemanticModelActionQualificationExecution {
             }
             crate::SemanticVerification::NavigationCommitted
             | crate::SemanticVerification::Dialog(_)
+            | crate::SemanticVerification::PageChanged
             | crate::SemanticVerification::ScrollPositionChanged => {
                 return Err(SemanticActionQualificationError::Contract);
             }

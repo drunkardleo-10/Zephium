@@ -73,15 +73,14 @@ pub use request::{
     AgentCommittedProviderInput, AgentPreparedDiffRequest, AgentPreparedExtractionRequest,
     AgentPreparedLocateRequest, AgentPreparedObservationRequest,
     AgentPreparedReadContinuationRequest, AgentPreparedReadRequest, AgentPreparedScreenshotRequest,
-    AgentProviderDiffRequestDraft, AgentProviderEndpoint, AgentProviderExactInputCount,
-    AgentProviderExtractionRequestDraft, AgentProviderInputEvidence,
+    AgentProviderDecisionInputStats, AgentProviderDiffRequestDraft, AgentProviderEndpoint,
+    AgentProviderExactInputCount, AgentProviderExtractionRequestDraft, AgentProviderInputEvidence,
     AgentProviderInputMetricReceipt, AgentProviderInputMetrics, AgentProviderInputOutcome,
     AgentProviderInputTokenBinding, AgentProviderInputTokenCount, AgentProviderInputTokenRequest,
     AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft, AgentProviderObjective,
     AgentProviderObjectiveError, AgentProviderReadContinuationRequestDraft, AgentProviderRequest,
     AgentProviderRequestDigest, AgentProviderRequestError, AgentProviderRequestSettlement,
-    AgentProviderDecisionInputStats, AgentProviderScreenshotRequestDraft,
-    AgentProviderSemanticInputStats,
+    AgentProviderScreenshotRequestDraft, AgentProviderSemanticInputStats,
     AgentProviderTransportInput, MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES,
     MAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES, MAX_AGENT_PROVIDER_OBJECTIVE_BYTES,
     MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS, MAX_AGENT_PROVIDER_REQUEST_BYTES,
@@ -764,6 +763,7 @@ enum BrowserToolProfile {
     LocateActScopedExtraction,
     NavigationExtraction,
     NavigationActionsExtraction,
+    SiteActionsExtraction,
 }
 
 impl AgentProviderCallConfig {
@@ -932,6 +932,14 @@ impl AgentProviderCallConfig {
         self
     }
 
+    /// The same tools for work on one site in the person's session, where a
+    /// click may also declare a commitment. Declaring one grants nothing: the
+    /// trusted host classifies every step and holds commitments for the person.
+    pub fn restrict_to_site_actions_and_extraction(mut self) -> Self {
+        self.tools = BrowserToolProfile::SiteActionsExtraction;
+        self
+    }
+
     /// Freezes the host's total model-call allowance for one bounded workflow.
     /// Call identities advance once per attempt; the last call is reserved for
     /// terminal mapping. This only narrows decisions, never policy budgets or
@@ -1046,7 +1054,8 @@ impl AgentProviderCallConfig {
                     | AgentBrowserToolKind::Navigate
                     | AgentBrowserToolKind::Extract
             ),
-            BrowserToolProfile::NavigationActionsExtraction => matches!(
+            BrowserToolProfile::NavigationActionsExtraction
+            | BrowserToolProfile::SiteActionsExtraction => matches!(
                 kind,
                 AgentBrowserToolKind::Locate
                     | AgentBrowserToolKind::Navigate

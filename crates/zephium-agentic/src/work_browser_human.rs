@@ -64,7 +64,9 @@ impl WorkBrowserHumanRegion {
 
 #[derive(Clone, Debug)]
 pub(super) struct HumanWindow {
-    pub(super) region: WorkBrowserHumanRegion,
+    /// Absent when the page is handed over without being shown: the person
+    /// decides elsewhere and the page only needs a fresh actor lease.
+    pub(super) region: Option<WorkBrowserHumanRegion>,
     pub(super) deadline: AgentPolicyInstant,
     pub(super) source: Arc<ContextNavigationTarget>,
     pub(super) progress: WorkBrowserHumanProgress,
@@ -150,6 +152,26 @@ impl WorkBrowserResources {
         &mut self,
         resource: &WorkBrowserResourceJoin,
         region: WorkBrowserHumanRegion,
+        now: AgentPolicyInstant,
+        deadline: AgentPolicyInstant,
+        sign_in: bool,
+    ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
+        self.hand_over(resource, Some(region), now, deadline, sign_in)
+    }
+    /// Hands the page over without showing it, for a decision the person
+    /// makes elsewhere; continuing it re-admits the unchanged document.
+    pub fn hand_over_unpresented(
+        &mut self,
+        resource: &WorkBrowserResourceJoin,
+        now: AgentPolicyInstant,
+        deadline: AgentPolicyInstant,
+    ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
+        self.hand_over(resource, None, now, deadline, false)
+    }
+    fn hand_over(
+        &mut self,
+        resource: &WorkBrowserResourceJoin,
+        region: Option<WorkBrowserHumanRegion>,
         now: AgentPolicyInstant,
         deadline: AgentPolicyInstant,
         sign_in: bool,

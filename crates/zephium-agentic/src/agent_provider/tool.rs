@@ -1159,6 +1159,7 @@ fn decode_verification(
         VerificationWire::NavigationCommitted => SemanticVerification::NavigationCommitted,
         VerificationWire::Dialog { state } => SemanticVerification::Dialog(state.into()),
         VerificationWire::ScrollPositionChanged => SemanticVerification::ScrollPositionChanged,
+        VerificationWire::PageChanged => SemanticVerification::PageChanged,
     })
 }
 
@@ -1386,6 +1387,7 @@ enum VerificationWire {
     NavigationCommitted,
     Dialog { state: DialogWire },
     ScrollPositionChanged,
+    PageChanged,
 }
 
 #[derive(Clone, Copy, Deserialize)]

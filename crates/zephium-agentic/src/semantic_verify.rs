@@ -251,6 +251,7 @@ pub fn prepare_semantic_action_snapshot_evidence<'a>(
     match action.verification() {
         SemanticVerification::PageDialogOpened
         | SemanticVerification::PageDialogClosed
+        | SemanticVerification::PageChanged
         | SemanticVerification::ScrollPositionChanged => Ok(SemanticEffectEvidence::snapshot(
             attempt,
             observed_at,
@@ -306,6 +307,8 @@ pub enum SemanticEffectProofKind {
     Dialog,
     /// Scroll position moved in the declared direction.
     Scroll,
+    /// The action frame's content changed after the action.
+    PageChanged,
 }
 
 /// Opaque proof that one exact settled action met its declared postcondition.
@@ -830,6 +833,22 @@ pub(crate) fn verify_semantic_action(
                     return Err(SemanticVerificationError::OutcomeNotObserved);
                 }
                 (SemanticEffectProofKind::Dialog, context, None, None)
+            }
+            (SemanticVerification::PageChanged, SemanticEffectEvidenceKind::Snapshot(snapshot)) => {
+                if snapshot.frame() != action.frame()
+                    || snapshot.generation().get() <= action.checkpoint_snapshot().get()
+                {
+                    return Err(SemanticVerificationError::StaleEvidence);
+                }
+                if crate::semantic_action::page_digest(snapshot) == action.page_digest() {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (
+                    SemanticEffectProofKind::PageChanged,
+                    snapshot.frame().context(),
+                    Some(snapshot.invocation()),
+                    Some(snapshot.generation()),
+                )
             }
             (
                 SemanticVerification::ScrollPositionChanged,

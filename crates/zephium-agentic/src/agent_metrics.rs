@@ -227,7 +227,7 @@ pub struct AgentEffectAccountingMetrics {
     verified: u32,
     failed: u32,
     classes: [AgentEffectClassMetrics; 7],
-    proofs: [u32; 10],
+    proofs: [u32; 11],
     failures: [u32; 17],
 }
 
@@ -1012,6 +1012,7 @@ const fn proof_index(proof: SemanticEffectProofKind) -> usize {
         SemanticEffectProofKind::Navigation => 5,
         SemanticEffectProofKind::Dialog => 6,
         SemanticEffectProofKind::Scroll => 7,
+        SemanticEffectProofKind::PageChanged => 10,
     }
 }
 

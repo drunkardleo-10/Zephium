@@ -545,6 +545,28 @@ impl AgentRunPolicy {
             baseline,
             target,
             AgentNavigationKind::Load,
+            false,
+        )
+    }
+
+    /// Reserves a site-session load the page itself started after an
+    /// admitted action, which the engine cancelled and handed back. The
+    /// target need not be a shown link, but it must stay on the session's
+    /// site and within every other navigation limit.
+    pub fn authorize_follow(
+        &mut self,
+        request: AgentNavigationAuthorizationRequest,
+        observation: &SemanticObservation,
+        baseline: &SemanticObservationAcknowledgement,
+        target: &ContextNavigationTarget,
+    ) -> Result<AgentNavigationPermit, AgentPolicyError> {
+        self.authorize_navigation_kind(
+            request,
+            observation,
+            baseline,
+            target,
+            AgentNavigationKind::Load,
+            true,
         )
     }
 
@@ -569,6 +591,7 @@ impl AgentRunPolicy {
             baseline,
             &target,
             AgentNavigationKind::HistoryBack,
+            false,
         )
     }
 
@@ -579,6 +602,7 @@ impl AgentRunPolicy {
         baseline: &SemanticObservationAcknowledgement,
         target: &ContextNavigationTarget,
         kind: AgentNavigationKind,
+        follow: bool,
     ) -> Result<AgentNavigationPermit, AgentPolicyError> {
         if self.sealed {
             return Err(AgentPolicyError::Sealed);
@@ -608,6 +632,7 @@ impl AgentRunPolicy {
             |scope| scope.max_hops(),
         );
         if hop >= limit
+            || (follow && !discovery.is_some_and(|scope| scope.is_site_session()))
             || hop != self.navigation_receipts.iter().flatten().count()
             || (kind == AgentNavigationKind::Load
                 && route.is_some_and(|route| route.destinations().get(hop) != Some(target)))
@@ -625,15 +650,16 @@ impl AgentRunPolicy {
                     .filter(|destination| *destination == target)
                     .count()
                     >= scope.max_visits_per_destination()
-                || !observation
-                    .frames()
-                    .iter()
-                    .flat_map(|frame| frame.nodes())
-                    .any(|node| {
-                        node.role() == crate::SemanticRole::Link
-                            && node.sensitivity() == SemanticSensitivity::Public
-                            && node.link_destination() == Some(target)
-                    })
+                || !follow
+                    && !observation
+                        .frames()
+                        .iter()
+                        .flat_map(|frame| frame.nodes())
+                        .any(|node| {
+                            node.role() == crate::SemanticRole::Link
+                                && node.sensitivity() == SemanticSensitivity::Public
+                                && node.link_destination() == Some(target)
+                        })
             {
                 return Err(AgentPolicyError::Navigation);
             }

@@ -1067,6 +1067,7 @@ const fn proof_code(proof: SemanticEffectProofKind) -> u8 {
         SemanticEffectProofKind::Navigation => 6,
         SemanticEffectProofKind::Dialog => 7,
         SemanticEffectProofKind::Scroll => 8,
+        SemanticEffectProofKind::PageChanged => 11,
     }
 }
 

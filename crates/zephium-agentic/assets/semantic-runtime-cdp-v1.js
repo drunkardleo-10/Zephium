@@ -136,6 +136,19 @@ const buttonTypeGetter = typeof HTMLButtonElement === "function" ? getter(HTMLBu
 const buttonFormGetter = typeof HTMLButtonElement === "function" ? getter(HTMLButtonElement.prototype, "form") : null;
 const inputTypeGetter = getter(HTMLInputElement.prototype, "type");
 const inputFormGetter = getter(HTMLInputElement.prototype, "form");
+const textareaFormGetter = typeof HTMLTextAreaElement === "function" ? getter(HTMLTextAreaElement.prototype, "form") : null;
+const formProto = typeof HTMLFormElement === "function" ? HTMLFormElement.prototype : null;
+const formMethodGetter = getter(formProto, "method");
+const formActionGetter = getter(formProto, "action");
+const formElementsGetter = getter(formProto, "elements");
+const buttonProto = typeof HTMLButtonElement === "function" ? HTMLButtonElement.prototype : null;
+const formOverrides = [getter(buttonProto, "formMethod"), getter(buttonProto, "formAction"),
+getter(HTMLInputElement.prototype, "formMethod"), getter(HTMLInputElement.prototype, "formAction")];
+const collectionProto = typeof HTMLCollection === "function" ? HTMLCollection.prototype : null;
+const collectionLengthGetter = getter(collectionProto, "length");
+const collectionItem = collectionProto && collectionProto.item;
+const workLocation = globalThis.location;
+const locationOriginGetter = getter(workLocation, "origin");
 const inputCheckedGetter =
 typeof HTMLInputElement === "function" ? getter(HTMLInputElement.prototype, "checked") : null;
 const inputLabelsGetter =
@@ -1618,6 +1631,36 @@ current = nodeType(current) === 11 && shadowHostGetter !== null
 } catch (_) {}
 return null;
 }
+function formFacts(element, descriptor) {
+const tag = descriptor.tag;
+if (tag !== "button" && tag !== "input" && tag !== "textarea") return null;
+try {
+const form = read(tag === "button" ? buttonFormGetter : tag === "input" ? inputFormGetter : textareaFormGetter, element);
+if (form === null || form === undefined || formMethodGetter === null || formActionGetter === null) return null;
+const at = tag === "button" ? 0 : 2;
+let method = read(formMethodGetter, form);
+let action = read(formActionGetter, form);
+if (tag !== "textarea" && has(element, "formmethod")) method = read(formOverrides[at], element);
+if (tag !== "textarea" && has(element, "formaction")) action = read(formOverrides[at + 1], element);
+let facts = method === "post" ? 2 : method === "dialog" ? 3 : 1;
+const origin = read(locationOriginGetter, workLocation);
+if (typeof origin === "string" && origin !== "null" && typeof action === "string" &&
+(action === origin || apply(stringStartsWith, action, [origin + "/"]))) facts |= 4;
+let search = lower(attribute(form, "role", 16) || "") === "search";
+for (let node = read(nodeParentGetter, form), depth = 0; !search && node && node !== document && depth < MAX_TREE_DEPTH; depth += 1) {
+search = nodeType(node) === 1 && (tagName(node) === "search" || lower(attribute(node, "role", 16) || "") === "search");
+node = nodeType(node) === 11 ? read(shadowHostGetter, node) : read(nodeParentGetter, node);
+}
+const controls = search || !collectionItem ? null : read(formElementsGetter, form);
+for (let index = 0, count = controls ? mathMin(64, read(collectionLengthGetter, controls)) : 0; !search && index < count; index += 1) {
+const control = apply(collectionItem, controls, [index]);
+search = control !== null && tagName(control) === "input" && lower(attribute(control, "type", 16) || "") === "search";
+}
+return search ? facts | 8 : facts;
+} catch (_) {
+return null;
+}
+}
 function buildRecord(element, descriptor, parent, rect, disabled, focused, state) {
 const beforeFieldTruncations = state.fieldTruncations || 0;
 const wire = { k: keyFor(element, state.request.g), fc: true };
@@ -1650,6 +1693,8 @@ descriptor.editableStructure.length === 3) wire.es = descriptor.editableStructur
 }
 const activation = nativeActivation(element, descriptor);
 if (activation !== null) wire.ak = activation;
+const form = formFacts(element, descriptor);
+if (form !== null) wire.ff = form;
 if (states !== 0) wire.s = states;
 if (operations !== 0) wire.o = operations;
 if (rect !== null && state.request.b.geo) wire.b = wireRect(rect);

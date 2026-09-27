@@ -358,7 +358,7 @@ impl WorkBrowserResourceRequest {
     }
     /// Frozen native presentation operands; absent from ordinary actor operations.
     pub fn human_region(&self) -> Option<WorkBrowserHumanRegion> {
-        self.human.as_ref().map(|human| human.region)
+        self.human.as_ref().and_then(|human| human.region)
     }
     /// Native document-change reporting without page content or URL disclosure.
     pub fn human_progress(&self) -> Option<WorkBrowserHumanProgress> {

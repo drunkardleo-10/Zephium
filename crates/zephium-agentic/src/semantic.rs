@@ -307,7 +307,7 @@ pub enum SemanticOperationClass {
 }
 
 impl SemanticOperationClass {
-    const fn bit(self) -> u8 {
+    pub(crate) const fn bit(self) -> u8 {
         1 << (self as u8)
     }
 }
@@ -390,7 +390,7 @@ pub enum SemanticState {
 }
 
 impl SemanticState {
-    const fn bit(self) -> u8 {
+    pub(crate) const fn bit(self) -> u8 {
         1 << (self as u8)
     }
 }
@@ -1015,6 +1015,68 @@ pub enum SemanticActivation {
     Disclosure = 6,
 }
 
+/// Method of the form a control submits or belongs to.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SemanticFormMethod {
+    /// A GET submission.
+    Get,
+    /// A POST submission.
+    Post,
+    /// A dialog-closing submission, with no request.
+    Dialog,
+}
+
+/// Browser-derived facts about a control's form, read with pristine getters.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SemanticFormFacts {
+    method: SemanticFormMethod,
+    same_origin: bool,
+    search: bool,
+}
+
+impl SemanticFormFacts {
+    pub(crate) fn decode(bits: u8) -> Option<Self> {
+        if bits & !0b1111 != 0 {
+            return None;
+        }
+        let method = match bits & 0b11 {
+            1 => SemanticFormMethod::Get,
+            2 => SemanticFormMethod::Post,
+            3 => SemanticFormMethod::Dialog,
+            _ => return None,
+        };
+        Some(Self {
+            method,
+            same_origin: bits & 4 != 0,
+            search: bits & 8 != 0,
+        })
+    }
+
+    /// Facts for fixtures and trusted callers.
+    pub const fn new(method: SemanticFormMethod, same_origin: bool, search: bool) -> Self {
+        Self {
+            method,
+            same_origin,
+            search,
+        }
+    }
+
+    /// Effective submission method, including a control's override.
+    pub const fn method(self) -> SemanticFormMethod {
+        self.method
+    }
+
+    /// The submission target shares the document's origin.
+    pub const fn same_origin(self) -> bool {
+        self.same_origin
+    }
+
+    /// The form is a search form: role search, a search landmark, or a searchbox.
+    pub const fn search(self) -> bool {
+        self.search
+    }
+}
+
 /// One bounded allowlisted semantic node.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SemanticNode {
@@ -1033,6 +1095,7 @@ pub struct SemanticNode {
     operations: SemanticOperations,
     fill_support: Option<SemanticFillSupport>,
     activation: Option<SemanticActivation>,
+    form: Option<SemanticFormFacts>,
     editable_structure: Option<SemanticEditableStructure>,
     fields_complete: Option<bool>,
     sensitivity: SemanticSensitivity,
@@ -1106,6 +1169,11 @@ impl SemanticNode {
     /// Native activation boundary, revalidated immediately before dispatch.
     pub const fn activation(&self) -> Option<SemanticActivation> {
         self.activation
+    }
+
+    /// Browser-derived facts about the form this control submits or belongs to.
+    pub const fn form(&self) -> Option<SemanticFormFacts> {
+        self.form
     }
 
     /// Optional host-only closed Fill diagnostic, not provider context or authority.
@@ -1190,6 +1258,7 @@ pub(crate) struct SemanticNodeInput {
     pub(crate) operations: SemanticOperations,
     pub(crate) fill_support: Option<SemanticFillSupport>,
     pub(crate) activation: Option<SemanticActivation>,
+    pub(crate) form: Option<SemanticFormFacts>,
     pub(crate) editable_structure: Option<SemanticEditableStructure>,
     pub(crate) fields_complete: Option<bool>,
     pub(crate) sensitivity: SemanticSensitivity,
@@ -1417,6 +1486,7 @@ impl SemanticSnapshot {
                 operations: input.operations,
                 fill_support: input.fill_support,
                 activation: input.activation,
+                form: input.form,
                 editable_structure: input.editable_structure,
                 fields_complete: input.fields_complete,
                 sensitivity: input.sensitivity,
@@ -1570,6 +1640,7 @@ mod tests {
             operations,
             fill_support: None,
             activation: None,
+            form: None,
             editable_structure: None,
             fields_complete: None,
             sensitivity: SemanticSensitivity::Public,
