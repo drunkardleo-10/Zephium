@@ -183,13 +183,6 @@ impl Shell {
                     self.sync_extension_browser_surface_metadata(id);
                 }
             }
-            // Only the previous extension runtime raised these, and nothing
-            // in the shell requests them any more.
-            EngineEvent::IsolatedExtensionResourceRequested { .. }
-            | EngineEvent::ExtensionCompatibilityBrokerRequested { .. }
-            | EngineEvent::ExtensionRuntimeGrantRequested { .. }
-            | EngineEvent::ExtensionRuntimeGrantCancelled { .. }
-            | EngineEvent::ExtensionOptionsPageSettled { .. } => {}
             EngineEvent::ExtensionActionsSnapshotSettled {
                 profile,
                 tab,
@@ -546,18 +539,13 @@ impl Shell {
             } => None,
             // Requests must reach their handler even during retirement so the
             // retained native completion receives an explicit rejection.
-            EngineEvent::ExtensionBrowserRequested { .. }
-            | EngineEvent::IsolatedExtensionResourceRequested { .. } => None,
+            EngineEvent::ExtensionBrowserRequested { .. } => None,
             EngineEvent::ExtensionCreatedTabReplied { profile, .. } => Some(*profile),
             // Teardown must still remove a typed marker during retirement.
             EngineEvent::ExtensionPageClosed { .. } => None,
             EngineEvent::ExtensionPageChanged { profile, .. } => Some(*profile),
-            EngineEvent::ExtensionCompatibilityBrokerRequested { .. } => None,
-            EngineEvent::ExtensionRuntimeGrantRequested { .. } => None,
-            EngineEvent::ExtensionRuntimeGrantCancelled { .. } => None,
             EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionSettled { profile, .. } => Some(*profile),
-            EngineEvent::ExtensionOptionsPageSettled { runtime, .. } => Some(runtime.profile()),
             EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),
             EngineEvent::WebExtensionSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionShortcutRequested { runtime, .. } => {

@@ -4,9 +4,7 @@ use std::sync::Arc;
 use crate::blocker::{ContentPolicyGeneration, ContentRuleApplyFailure, ContentRules};
 use crate::extensions::{
     ExtensionBrowserRequest, ExtensionBrowserRequestId, ExtensionBrowserRequestSettlement,
-    ExtensionBrowserSurface, ExtensionCompatibilityBrokerRequest,
-    ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerSettlement,
-    ExtensionNativeNamespaceScope, ExtensionRuntimeInstance,
+    ExtensionBrowserSurface,
 };
 use crate::geometry::Rect;
 use crate::ids::{ExtensionInstallId, ItemId, ProfileId, ScriptId, UserscriptId, WindowId};
@@ -14,11 +12,6 @@ use crate::injection::MatchSet;
 pub use crate::permissions::PagePermissionKind as PermissionKind;
 use crate::permissions::{
     PagePermissionRequest, PagePermissionRequestId, PagePermissionRequestSettlement,
-};
-use crate::ports::extensions::{
-    ExtensionRuntimeGrantPrompt, ExtensionRuntimeGrantPromptSettlement,
-    ExtensionRuntimeGrantRequestId, IsolatedExtensionDocumentKind,
-    IsolatedExtensionResourceOutcome, IsolatedExtensionResourceRequest,
 };
 use crate::runtime_security::RuntimeSecurityAdvisories;
 use crate::split::Pane;
@@ -686,11 +679,6 @@ pub trait Engine {
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
-    /// Opens the exact declared options page for one currently published
-    /// runtime in a browser-owned, capability-limited native surface.
-    fn open_extension_options(&self, _runtime: ExtensionRuntimeInstance) -> NativeDispatch {
-        NativeDispatch::Unsupported
-    }
     /// Settles one exact native WebExtension browser mutation. The native
     /// adapter retains the platform completion handler behind the
     /// `(profile, request)` correlation pair and invokes it exactly once.
@@ -700,43 +688,6 @@ pub trait Engine {
         _request: ExtensionBrowserRequestId,
         _settlement: ExtensionBrowserRequestSettlement,
         _first_url_after_reply: Option<(Arc<str>, NavigationRequestId)>,
-    ) -> NativeDispatch {
-        NativeDispatch::Unsupported
-    }
-    /// Settles one exact native isolated-document URL scheme task. Verified
-    /// bytes are data only; the native broker must rejoin the live context,
-    /// runtime generation, request id and WKURLSchemeTask before delivery.
-    fn settle_isolated_extension_resource(
-        &self,
-        _runtime: ExtensionRuntimeInstance,
-        _kind: IsolatedExtensionDocumentKind,
-        _request: u64,
-        _outcome: IsolatedExtensionResourceOutcome,
-    ) -> NativeDispatch {
-        NativeDispatch::Unsupported
-    }
-    /// Settles one exact, authority-bound Zephium compatibility request. The
-    /// native adapter retains the one-shot reply and independently times it
-    /// out; this port exposes no arbitrary native application identifier.
-    fn settle_extension_compatibility_broker_request(
-        &self,
-        _runtime: ExtensionRuntimeInstance,
-        _request: ExtensionCompatibilityBrokerRequestId,
-        _settlement: ExtensionCompatibilityBrokerSettlement,
-    ) -> NativeDispatch {
-        NativeDispatch::Unsupported
-    }
-    /// Settles one exact native optional-grant callback cohort after Shell has
-    /// obtained a user decision and, for `Granted`, the serialized extension
-    /// service has durably committed and rebound that complete cohort.
-    ///
-    /// The native adapter matches both the process-local runtime generation
-    /// and request id before invoking retained WebKit completion handlers.
-    fn settle_extension_runtime_grant_prompt(
-        &self,
-        _runtime: ExtensionRuntimeInstance,
-        _request: ExtensionRuntimeGrantRequestId,
-        _settlement: ExtensionRuntimeGrantPromptSettlement,
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
@@ -801,14 +752,9 @@ pub trait Engine {
     /// `TimedOut` is only a one-shot report to the caller: retry remains denied
     /// while the old native work might still be running, and a late terminal
     /// callback releases admission without invoking `done` again.
-    /// `extension_native_namespace` is the exact durable Store obligation that
-    /// must be joined into the native absence proof. `None` is authoritative
-    /// only when Store reported no such obligation; adapters must never infer
-    /// absence from process-local controller maps.
     fn erase_profile_data(
         &self,
         _profile: ProfileId,
-        _extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
         done: Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>,
     );
     /// Close every native view/context on its owning thread. Completion runs
@@ -965,12 +911,6 @@ pub enum EngineEvent {
         url: Arc<str>,
         intent: NavigationRequestId,
     },
-    /// Bounded request from a controller-free extension document. The engine
-    /// retains the exact scheme task; Shell forwards only routing data to the
-    /// existing service actor for authenticated package bytes.
-    IsolatedExtensionResourceRequested {
-        request: Box<IsolatedExtensionResourceRequest>,
-    },
     /// A native extension document's browser-owned tab guest was closed or
     /// failed admission. The Shell must rejoin both fields to its typed tab
     /// marker before removing it; the event carries no page URL authority.
@@ -989,25 +929,6 @@ pub enum EngineEvent {
         can_go_back: bool,
         can_go_forward: bool,
     },
-    /// One exact published runtime invoked a product-sealed compatibility
-    /// operation after native context binding and API authority were proven.
-    ExtensionCompatibilityBrokerRequested {
-        request: Box<ExtensionCompatibilityBrokerRequest>,
-    },
-    /// A native WebExtension context requested one complete optional API/host
-    /// cohort. The engine retains and times out every platform completion;
-    /// Shell owns user consent and must answer through
-    /// [`Engine::settle_extension_runtime_grant_prompt`].
-    ExtensionRuntimeGrantRequested {
-        prompt: Box<ExtensionRuntimeGrantPrompt>,
-    },
-    /// The native completion cohort timed out or its exact runtime retired
-    /// before Shell settled it. Browser-owned consent UI must remove the
-    /// matching prompt and must not begin a durable grant transaction.
-    ExtensionRuntimeGrantCancelled {
-        runtime: ExtensionRuntimeInstance,
-        request: ExtensionRuntimeGrantRequestId,
-    },
     /// Terminal response to one exact effective action-cohort query.
     ExtensionActionsSnapshotSettled {
         profile: ProfileId,
@@ -1020,12 +941,6 @@ pub enum EngineEvent {
         profile: ProfileId,
         request: crate::extensions::ExtensionActionRequestId,
         settlement: crate::extensions::ExtensionActionSettlement,
-    },
-    /// Terminal response to one browser-owned installed-extension settings
-    /// request. The runtime identity is echoed only for stale-result rejection.
-    ExtensionOptionsPageSettled {
-        runtime: ExtensionRuntimeInstance,
-        settlement: crate::extensions::ExtensionOptionsPageSettlement,
     },
     /// Coalescible native notification that one or more effective actions for
     /// this profile changed. It carries no native or extension identity; the

@@ -349,7 +349,7 @@ use zephium_core::extensions::{
 };
 use zephium_core::extensions::{
     ExtensionActionRequest, ExtensionBrowserRequestId, ExtensionBrowserRequestSettlement,
-    ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration, ExtensionNativeNamespaceScope,
+    ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
 };
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
@@ -823,9 +823,6 @@ impl RetirementGate {
             event @ EngineEvent::ExtensionActionSettled { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
             }
-            event @ EngineEvent::ExtensionOptionsPageSettled { runtime, .. } => {
-                self.profile_is_active(runtime.profile()).then_some(event)
-            }
             event @ EngineEvent::ExtensionActionsInvalidated { profile } => {
                 self.profile_is_active(profile).then_some(event)
             }
@@ -839,11 +836,7 @@ impl RetirementGate {
             // it after profile retirement so Shell can explicitly reject the
             // retained native completion instead of waiting for its timeout.
             event @ EngineEvent::ExtensionBrowserRequested { .. }
-            | event @ EngineEvent::IsolatedExtensionResourceRequested { .. }
             | event @ EngineEvent::ExtensionPageClosed { .. }
-            | event @ EngineEvent::ExtensionCompatibilityBrokerRequested { .. }
-            | event @ EngineEvent::ExtensionRuntimeGrantRequested { .. }
-            | event @ EngineEvent::ExtensionRuntimeGrantCancelled { .. }
             | event @ EngineEvent::PermissionRequested { .. } => Some(event),
             EngineEvent::WebExtensionSettled {
                 profile,
@@ -2315,7 +2308,6 @@ impl Engine for WebviewEngine {
     fn erase_profile_data(
         &self,
         profile: ProfileId,
-        _extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
         done: Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>,
     ) {
         // This is the public retirement linearization point. It deliberately
@@ -2759,11 +2751,7 @@ mod tests {
         };
         let profile = ProfileId::from(88);
         let (tx, rx) = mpsc::channel();
-        engine.erase_profile_data(
-            profile,
-            None,
-            Box::new(move |outcome| tx.send(outcome).unwrap()),
-        );
+        engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
         assert_eq!(
             rx.recv_timeout(std::time::Duration::from_millis(100))
                 .unwrap(),
@@ -2800,7 +2788,6 @@ mod tests {
 
         engine.erase_profile_data(
             ProfileId::from(89),
-            None,
             Box::new(move |_| {
                 done_entered_tx.send(()).unwrap();
                 let (lock, changed) = &*blocked_release;
@@ -2895,11 +2882,7 @@ mod tests {
 
         reject.store(true, Ordering::Release);
         let (tx, rx) = mpsc::channel();
-        engine.erase_profile_data(
-            profile,
-            None,
-            Box::new(move |outcome| tx.send(outcome).unwrap()),
-        );
+        engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
         assert_eq!(
             rx.recv_timeout(std::time::Duration::from_millis(100))
                 .unwrap(),
@@ -3254,11 +3237,7 @@ mod tests {
             agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
         let (tx, rx) = mpsc::channel();
-        engine.erase_profile_data(
-            profile,
-            None,
-            Box::new(move |outcome| tx.send(outcome).unwrap()),
-        );
+        engine.erase_profile_data(profile, Box::new(move |outcome| tx.send(outcome).unwrap()));
         assert_eq!(
             rx.recv_timeout(std::time::Duration::from_millis(100))
                 .unwrap(),

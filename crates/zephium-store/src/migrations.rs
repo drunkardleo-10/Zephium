@@ -6,19 +6,6 @@ use std::sync::{Mutex, OnceLock};
 
 use rusqlite::{Connection, Transaction};
 
-// Keep the literal embedded in META v11's SQLite capacity trigger tied to the
-// Core authority bound. SQL migration text cannot interpolate a Rust const.
-const _: [(); 1024] =
-    [(); zephium_core::extensions::MAX_EXTENSION_NATIVE_OWNERSHIP_JOURNAL_ENTRIES];
-// Keep META v12/v13's fixed-width native identity checks tied to Core. A
-// changed native grammar must never leave SQLite accepting a different
-// authority.
-const _: [(); 32] = [(); zephium_core::extensions::EXTENSION_NATIVE_OWNERSHIP_ID_BYTES];
-// Keep META v14's durable obligation capacity tied to Core's complete
-// active-profile plus deletion-tombstone union.
-const _: [(); 128] = [(); zephium_core::extensions::MAX_EXTENSION_NATIVE_NAMESPACE_OBLIGATIONS];
-// Keep PROFILE v13's exact site-denial capacity trigger tied to Core.
-const _: [(); 128] = [(); zephium_core::extensions::MAX_EXTENSION_SITE_DENIALS_PER_PROFILE];
 // Keep META v16's fixed audit payload and append ceiling tied to the adapter.
 const _: [(); 128] = [(); zephium_agentic::AGENT_AUDIT_RECORD_V1_BYTES];
 const _: [(); 16] = [(); zephium_agentic::MAX_AGENT_AUDIT_DELIVERY_EVENTS];
@@ -2331,6 +2318,18 @@ pub static PROFILE: &[Migration] = &[
 mod tests {
     use super::*;
 
+    /// Beta authority bytes as the previous extension stack derived them, so
+    /// its shipped v19/v20 constraints stay exercised.
+    fn beta_authority(channel: &str, target: &str) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(b"zephium:beta-source-authority:v1\0");
+        hash.update(channel.as_bytes());
+        hash.update(b"\0");
+        hash.update(target.as_bytes());
+        hash.finalize().into()
+    }
+
     /// Fingerprint of the schema each shipped version produces.
     ///
     /// SQLite stores a CREATE statement verbatim, and `validate_current`
@@ -2427,9 +2426,7 @@ mod tests {
         apply(&mut conn, &META[..18]).unwrap();
         insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
             .unwrap();
-        let authority = zephium_core::extensions::ExtensionBetaRuntimeTarget::MacosNative
-            .authority(zephium_core::extensions::ExtensionBetaChannel::Stable)
-            .bytes();
+        let authority = beta_authority("stable", "macos.wkwebextension.v1");
         conn.execute(
             "UPDATE extension_native_ownership_journal SET authority=?1",
             [&authority[..]],
@@ -2463,9 +2460,7 @@ mod tests {
         apply(&mut conn, &META[..19]).unwrap();
         insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
             .unwrap();
-        let authority = zephium_core::extensions::ExtensionBetaRuntimeTarget::MacosNative
-            .authority(zephium_core::extensions::ExtensionBetaChannel::Staging)
-            .bytes();
+        let authority = beta_authority("staging", "macos.wkwebextension.v1");
         assert!(conn
             .execute(
                 "UPDATE extension_native_ownership_journal SET catalog_role='beta'",
@@ -2507,17 +2502,16 @@ mod tests {
 
     #[test]
     fn meta_v20_admits_local_sources_only_in_the_correct_native_namespace() {
-        use zephium_core::extensions::{ExtensionBetaChannel, ExtensionBetaRuntimeTarget};
-        for (runtime, backend) in [
-            (ExtensionBetaRuntimeTarget::MacosNative, "macos_native"),
-            (ExtensionBetaRuntimeTarget::WindowsNative, "windows_native"),
+        for (target, backend) in [
+            ("macos.wkwebextension.v1", "macos_native"),
+            ("windows.webview2.v1", "windows_native"),
         ] {
             let mut conn = Connection::open_in_memory().unwrap();
             apply(&mut conn, &META[..19]).unwrap();
             insert_native_ownership_test_row(&conn, 1, 1, 1, "acquire", "native_absent_preparing")
                 .unwrap();
             apply(&mut conn, META).unwrap();
-            let authority = runtime.authority(ExtensionBetaChannel::Local).bytes();
+            let authority = beta_authority("local", target);
             assert!(conn
                 .execute(
                     "UPDATE extension_native_ownership_journal SET authority=?1",
@@ -3048,14 +3042,6 @@ mod tests {
 
     #[test]
     fn profile_v12_invalidates_inexact_legacy_authority_and_preserves_nonreuse_floor() {
-        use zephium_core::extensions::{
-            ExtensionAuthorityId, ExtensionInstallCatalog, ExtensionInstallCatalogApplyError,
-            ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision,
-            ExtensionManifestDigest, ExtensionPackageIdentity, ExtensionPackageKey,
-            ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
-        };
-        use zephium_core::ids::ExtensionInstallId;
-
         let mut conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         apply(&mut conn, &PROFILE[..11]).unwrap();
@@ -3136,32 +3122,6 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 0, "v12 retained legacy authority in {table}");
         }
-
-        let revision = ExtensionInstallCatalogRevision::new(7).unwrap();
-        let catalog = ExtensionInstallCatalog::from_persisted(
-            revision,
-            Some(ExtensionInstallId::from(legacy_id)),
-            Vec::new(),
-        )
-        .unwrap();
-        let package = ExtensionPackageIdentity::new(
-            ExtensionAuthorityId::from_bytes([8; 32]),
-            ExtensionPackageKey::from_bytes([9; 32]),
-            ExtensionPackageRevision::INITIAL,
-            ExtensionPackagePayloadIdentity::BundledTree,
-            ExtensionManifestDigest::from_bytes([10; 32]),
-            ExtensionTreeDigest::from_bytes([11; 32]),
-        );
-        assert!(matches!(
-            catalog.apply(
-                revision,
-                ExtensionInstallCatalogMutation::Install {
-                    id: ExtensionInstallId::from(legacy_id),
-                    package,
-                },
-            ),
-            Err(ExtensionInstallCatalogApplyError::InstallIdNotAboveHighWater { .. })
-        ));
     }
 
     #[test]

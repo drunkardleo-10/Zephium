@@ -23,7 +23,7 @@ pub(super) struct ExtensionActionState {
     // Also acts as a bounded pending-settlement watchdog. A scheduled read
     // remains here until an exact applied result arrives, so the ordinary
     // maintenance tick repairs a dropped callback without a hot timer.
-    retry_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+    retry_profiles: zephium_core::extensions::ExtensionActiveProfiles,
     pending: HashMap<ExtensionActionRequestId, ExtensionActionRequest>,
     next_request_id: Option<u64>,
 }
@@ -32,7 +32,7 @@ impl Default for ExtensionActionState {
     fn default() -> Self {
         Self {
             snapshots: HashMap::new(),
-            retry_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY,
+            retry_profiles: zephium_core::extensions::ExtensionActiveProfiles::EMPTY,
             pending: HashMap::new(),
             next_request_id: Some(1),
         }
@@ -191,7 +191,7 @@ impl ExtensionActionState {
     }
 
     #[cfg(test)]
-    fn retry_profiles(&self) -> zephium_core::ports::extensions::ExtensionActiveProfiles {
+    fn retry_profiles(&self) -> zephium_core::extensions::ExtensionActiveProfiles {
         self.retry_profiles
     }
 

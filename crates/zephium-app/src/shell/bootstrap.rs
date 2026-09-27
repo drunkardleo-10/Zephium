@@ -140,17 +140,6 @@ impl Shell {
                 return;
             }
         }
-        if pending_deletions.iter().any(|deletion| {
-            deletion.native_erasure_verified && deletion.extension_native_namespace.is_some()
-        }) {
-            // Store removes the durable namespace obligation in the same
-            // transaction that records native-erasure proof. Accepting both
-            // facts would let the shell finalize an unproven namespace.
-            crate::diagnostic!(
-                "bootstrap: profile deletion carries contradictory native erasure state"
-            );
-            return;
-        }
         if (!pending_deletions.is_empty() && session_absent)
             || pending_deletions
                 .iter()
@@ -176,7 +165,6 @@ impl Shell {
         for PendingProfileDeletion {
             profile,
             native_erasure_verified,
-            extension_native_namespace,
         } in pending_deletions
         {
             let phase = if native_erasure_verified {
@@ -186,12 +174,7 @@ impl Shell {
             };
             self.profile_deletion.states.insert(
                 profile,
-                ProfileDeletionState::new(
-                    phase,
-                    None,
-                    self.persistence.session_revision,
-                    extension_native_namespace,
-                ),
+                ProfileDeletionState::new(phase, None, self.persistence.session_revision),
             );
             // Normally no aggregate row remains. This defensive cleanup also
             // cancels any runtime-only work restored by a future caller.

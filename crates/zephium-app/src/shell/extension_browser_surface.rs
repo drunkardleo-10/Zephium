@@ -6,16 +6,16 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct ExtensionBrowserSurfaceState {
-    active_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
-    retry_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
-    retiring_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+    active_profiles: zephium_core::extensions::ExtensionActiveProfiles,
+    retry_profiles: zephium_core::extensions::ExtensionActiveProfiles,
+    retiring_profiles: zephium_core::extensions::ExtensionActiveProfiles,
     published: HashMap<ProfileId, ExtensionBrowserSurface>,
 }
 
 #[derive(Default)]
 pub(super) struct ExtensionBrowserSurfaceSync {
     pub(super) native: NativeWork,
-    failed_profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+    failed_profiles: zephium_core::extensions::ExtensionActiveProfiles,
 }
 
 impl ExtensionBrowserSurfaceSync {
@@ -52,7 +52,7 @@ impl ExtensionBrowserSurfaceState {
     /// until an empty native browser surface is accepted.
     pub(super) fn replace_active_profiles(
         &mut self,
-        profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+        profiles: zephium_core::extensions::ExtensionActiveProfiles,
     ) -> bool {
         for profile in self.active_profiles.iter() {
             if !profiles.contains(profile) && !self.retiring_profiles.try_insert(profile) {
@@ -66,9 +66,7 @@ impl ExtensionBrowserSurfaceState {
         true
     }
 
-    pub(super) fn active_profiles(
-        &self,
-    ) -> zephium_core::ports::extensions::ExtensionActiveProfiles {
+    pub(super) fn active_profiles(&self) -> zephium_core::extensions::ExtensionActiveProfiles {
         self.active_profiles
     }
 
@@ -93,11 +91,11 @@ impl ExtensionBrowserSurfaceState {
         self.retry_profiles.try_insert(profile)
     }
 
-    fn retry_profiles(&self) -> zephium_core::ports::extensions::ExtensionActiveProfiles {
+    fn retry_profiles(&self) -> zephium_core::extensions::ExtensionActiveProfiles {
         self.retry_profiles
     }
 
-    fn retiring_profiles(&self) -> zephium_core::ports::extensions::ExtensionActiveProfiles {
+    fn retiring_profiles(&self) -> zephium_core::extensions::ExtensionActiveProfiles {
         self.retiring_profiles
     }
 }
@@ -182,7 +180,7 @@ impl Shell {
         &mut self,
         profile: ProfileId,
     ) -> ExtensionBrowserSurfaceSync {
-        let mut profiles = zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY;
+        let mut profiles = zephium_core::extensions::ExtensionActiveProfiles::EMPTY;
         if self
             .extension_browser_surfaces
             .active_profiles()
@@ -197,7 +195,7 @@ impl Shell {
 
     fn sync_extension_browser_surface_profiles(
         &mut self,
-        profiles: zephium_core::ports::extensions::ExtensionActiveProfiles,
+        profiles: zephium_core::extensions::ExtensionActiveProfiles,
     ) -> ExtensionBrowserSurfaceSync {
         if profiles.is_empty() {
             return ExtensionBrowserSurfaceSync::default();

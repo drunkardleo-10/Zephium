@@ -17,7 +17,7 @@ pub(super) fn install_profile(shell: &mut Shell, profile: ProfileId, spaces: &[S
 }
 
 pub(super) fn activate_profile(shell: &mut Shell, profile: ProfileId) {
-    let mut profiles = zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY;
+    let mut profiles = zephium_core::extensions::ExtensionActiveProfiles::EMPTY;
     assert!(profiles.try_insert(profile));
     assert!(shell
         .extension_browser_surfaces
@@ -190,7 +190,7 @@ fn final_runtime_retirement_publishes_an_empty_surface_and_releases_shell_state(
 
     assert!(shell
         .extension_browser_surfaces
-        .replace_active_profiles(zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY));
+        .replace_active_profiles(zephium_core::extensions::ExtensionActiveProfiles::EMPTY));
     let retired = shell.sync_extension_browser_surfaces();
 
     assert!(retired.native.scheduled);
@@ -233,7 +233,7 @@ fn rejected_final_runtime_surface_retirement_is_bounded_and_retryable() {
     assert!(shell.sync_extension_browser_surfaces().native.scheduled);
     assert!(shell
         .extension_browser_surfaces
-        .replace_active_profiles(zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY));
+        .replace_active_profiles(zephium_core::extensions::ExtensionActiveProfiles::EMPTY));
     engine
         .reject_native_dispatch
         .store(true, std::sync::atomic::Ordering::Release);
@@ -287,10 +287,10 @@ fn reactivation_advances_past_the_empty_retirement_generation() {
 
     assert!(shell
         .extension_browser_surfaces
-        .replace_active_profiles(zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY));
+        .replace_active_profiles(zephium_core::extensions::ExtensionActiveProfiles::EMPTY));
     assert!(shell.sync_extension_browser_surfaces().native.scheduled);
 
-    let mut active = zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY;
+    let mut active = zephium_core::extensions::ExtensionActiveProfiles::EMPTY;
     assert!(active.try_insert(profile));
     assert!(shell
         .extension_browser_surfaces

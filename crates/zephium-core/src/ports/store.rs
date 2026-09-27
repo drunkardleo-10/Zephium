@@ -1,5 +1,4 @@
 use crate::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
-use crate::extensions::ExtensionNativeNamespaceScope;
 use crate::ids::ProfileId;
 use crate::permissions::{
     PagePermissionCatalog, PagePermissionCatalogRevision, PagePermissionPatch,
@@ -47,10 +46,6 @@ pub const MAX_FAVICON_BATCH_ORIGINS: usize = 512;
 pub struct PendingProfileDeletion {
     pub profile: ProfileId,
     pub native_erasure_verified: bool,
-    /// Exact durable platform namespace whose absence must be included in the
-    /// engine proof. `None` means Store retains no native namespace erasure
-    /// obligation for this profile.
-    pub extension_native_namespace: Option<ExtensionNativeNamespaceScope>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,11 +67,6 @@ pub enum ProfileDeletionAuthorizeOutcome {
     NotRegistered,
     SessionConflict,
     InvalidSession,
-    /// One or more durable native-extension ownership rows still reference
-    /// this profile, or the complete cohort could not be safely proven empty.
-    /// The extension coordinator must reconcile native absence and durable
-    /// state before profile deletion can be authorized.
-    ExtensionNativeOwnershipPending,
     NotAdmitted,
     OutcomeUnknown,
     Failed,

@@ -83,7 +83,6 @@ use zephium_core::extensions::{
     ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection,
     ExtensionBrowserRequestResult, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
     ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab, ExtensionBrowserWindow,
-    ExtensionNativeNamespaceScope,
 };
 use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};

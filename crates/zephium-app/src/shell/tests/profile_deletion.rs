@@ -25,8 +25,6 @@ fn insert_inactive_profile_tab(
 #[test]
 fn profile_deletion_completes_once_only_after_native_and_store_phases() {
     let store = Arc::new(FakeStore::default());
-    *store.authorized_native_namespace.lock().unwrap() =
-        Some(ExtensionNativeNamespaceScope::MacosControllerV1);
     store
         .authorize_outcomes
         .lock()
@@ -71,13 +69,7 @@ fn profile_deletion_completes_once_only_after_native_and_store_phases() {
         store.events.lock().unwrap().as_slice(),
         ["authorize-delete", "finalize-delete"]
     );
-    assert_eq!(
-        engine.erasure_requests(),
-        vec![(
-            profile,
-            Some(ExtensionNativeNamespaceScope::MacosControllerV1)
-        )]
-    );
+    assert_eq!(engine.erasure_requests(), vec![profile]);
 }
 
 #[test]
@@ -113,7 +105,6 @@ fn impossible_store_authorization_outcomes_are_terminal_invariants() {
         ProfileDeletionAuthorizeOutcome::NotRegistered,
         ProfileDeletionAuthorizeOutcome::SessionConflict,
         ProfileDeletionAuthorizeOutcome::InvalidSession,
-        ProfileDeletionAuthorizeOutcome::ExtensionNativeOwnershipPending,
     ]
     .into_iter()
     .enumerate()
@@ -488,7 +479,6 @@ fn restart_with_native_proof_skips_engine_and_finishes_local_purge() {
         .push(PendingProfileDeletion {
             profile: removed,
             native_erasure_verified: true,
-            extension_native_namespace: None,
         });
     store
         .finalize_outcomes
@@ -533,7 +523,6 @@ fn recovered_finalize_not_authorized_is_a_terminal_invariant() {
         .push(PendingProfileDeletion {
             profile: removed,
             native_erasure_verified: true,
-            extension_native_namespace: None,
         });
     store
         .finalize_outcomes

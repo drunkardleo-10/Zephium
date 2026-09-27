@@ -22,7 +22,6 @@ impl ProfileDeletionJournalEntry {
         PendingProfileDeletion {
             profile: self.profile,
             native_erasure_verified: self.native_erasure_verified,
-            extension_native_namespace: None,
         }
     }
 }

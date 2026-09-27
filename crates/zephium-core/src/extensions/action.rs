@@ -11,9 +11,10 @@ use std::sync::Arc;
 use crate::geometry::{Rect, Size};
 use crate::ids::ItemId;
 
-use super::{
-    ExtensionBrowserSurfaceGeneration, ExtensionRuntimeInstance, MAX_EXTENSION_INSTALLS_PER_PROFILE,
-};
+use super::{ExtensionBrowserSurfaceGeneration, ExtensionRuntimeInstance};
+
+/// One snapshot carries at most one action per installed extension.
+pub const MAX_EXTENSION_INSTALLS_PER_PROFILE: usize = 8;
 
 /// Toolbar icons are rasterized once at the exact size consumed by privileged
 /// chrome. Fixed-size RGBA avoids retaining native image graphs or accepting
@@ -348,14 +349,6 @@ pub enum ExtensionActionSettlement {
     /// A second invocation dismissed the already-visible popup for the exact
     /// same runtime and tab without allocating another native surface.
     PopupDismissed,
-    Rejected(ExtensionActionRejection),
-}
-
-/// Terminal result for one browser-owned request to show an installed
-/// extension's declared options page.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExtensionOptionsPageSettlement {
-    Opened,
     Rejected(ExtensionActionRejection),
 }
 

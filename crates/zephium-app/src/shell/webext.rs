@@ -68,7 +68,7 @@ impl Shell {
             }
         }
 
-        let mut active = zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY;
+        let mut active = zephium_core::extensions::ExtensionActiveProfiles::EMPTY;
         for (profile, installs) in &self.web_extensions.loaded {
             if !installs.is_empty() && !active.try_insert(*profile) {
                 crate::diagnostic!("extensions: too many profiles run extensions");

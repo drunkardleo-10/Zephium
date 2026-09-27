@@ -3,8 +3,6 @@
 pub mod blocker;
 pub mod commands;
 pub mod downloads;
-/// Bounded collision keys for authenticated extension resource names.
-pub mod extension_resource_path;
 pub mod extensions;
 pub mod geometry;
 pub mod icon;

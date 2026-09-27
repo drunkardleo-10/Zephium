@@ -12,7 +12,7 @@ fn request(profile: ProfileId, id: u64, action: ExtensionBrowserRequestAction) -
 }
 
 fn activate_extensions(shell: &mut Shell, profile: ProfileId) {
-    let mut profiles = zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY;
+    let mut profiles = zephium_core::extensions::ExtensionActiveProfiles::EMPTY;
     assert!(profiles.try_insert(profile));
     assert!(shell
         .extension_browser_surfaces
