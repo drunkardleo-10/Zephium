@@ -38,6 +38,8 @@ pub(super) struct WorkAction {
     diagnostic_save_window: Option<save_window_probe::SaveWindow>,
     wake: Option<ObservationWake>,
     wakes: u8,
+    follow: Option<zephium_agentic::SemanticActionFollow>,
+    commits: bool,
 }
 
 impl WorkAction {
@@ -89,6 +91,9 @@ impl WorkNativeResource {
     }
     pub(super) fn cancel_action(&mut self) {
         if let Some(action) = &mut self.action {
+            if let Some(gate) = self.view.as_ref().and_then(|view| view.work_navigation()) {
+                gate.close_follow();
+            }
             action.cancelled = true;
             action.retirement_ready();
             if action.dispatched {
@@ -115,6 +120,8 @@ impl EngineHost {
         let native = request.action();
         let attempt = native.attempt();
         let context = native.frame().context();
+        let follow = native.follow().cloned();
+        let commits = native.commits();
         let presentation_busy = self.work_resources.iter().any(|(id, resource)| {
             *id != guard.resource().identity().context() && resource.presentation_in_flight()
         });
@@ -217,6 +224,8 @@ impl EngineHost {
             diagnostic_save_window: None,
             wake: ObservationWake::schedule(&guard),
             wakes: 1,
+            follow,
+            commits,
         });
         let action = resource.action.as_mut().unwrap();
         if action.wake.is_none() {
@@ -257,6 +266,13 @@ impl EngineHost {
             == Some(action.document);
         let current =
             lease_current && profile_current && resource_ready && human_current && document_current;
+        // A confirmed commit's POST is let through; its response lands before
+        // the replaced document closes this resource.
+        let posting = resource
+            .view
+            .as_ref()
+            .and_then(|view| view.work_navigation())
+            .is_some_and(|gate| gate.posting());
         // URL drift closes authority, but cannot erase a recipe already handed
         // to the page. Only its exact runtime receiver may opt into this drain;
         // ordinary health loss, document replacement and controls still stop it.
@@ -299,7 +315,7 @@ impl EngineHost {
                 semantic.timeout_action(action.attempt);
             }
         }
-        if expired || (!current && !drain) {
+        if expired || (!current && !drain && !posting) {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             guard.record_failure_cause(ResourceFailureCause::ActionProgressAuthority {
                 lease_current,
@@ -320,7 +336,7 @@ impl EngineHost {
                 );
             }
             resource.cancel_action();
-        } else if !current && drain {
+        } else if !current && drain && !posting {
             let action = resource.action.as_mut().unwrap();
             action.authority_revoked = true;
             // Keep the already-owned rendering surface so page-side work can
@@ -397,6 +413,9 @@ impl EngineHost {
                         let attempt = action.attempt;
                         let deadline = action.deadline;
                         let gate = view.work_navigation().cloned();
+                        if let Some((gate, slot)) = gate.as_ref().zip(action.follow.clone()) {
+                            gate.open_follow(action.commits, slot);
+                        }
                         let context = action.context;
                         let document = action.document;
                         view.dispatch_retained_semantic_action(
@@ -660,6 +679,8 @@ mod tests {
             diagnostic_save_window: None,
             wake: None,
             wakes: 1,
+            follow: None,
+            commits: false,
         };
         // Runtime completion happened, but finish_work_action is still queued.
         // A resource wake in this gap must preserve the existing presentation.

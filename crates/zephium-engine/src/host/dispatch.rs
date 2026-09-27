@@ -537,6 +537,8 @@ pub(crate) fn install(
             #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
             anonymous_work_stores: HashMap::new(),
             #[cfg(target_os = "macos")]
+            work_site_loads: HashMap::new(),
+            #[cfg(target_os = "macos")]
             macos_extension_controllers:
                 crate::platform::imp::PersistentControllerRegistry::with_browser_request_sink(
                     sink.clone(),

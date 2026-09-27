@@ -363,7 +363,7 @@ impl WorkResourceGuard {
                                 <= zephium_agentic::MAX_WORK_HUMAN_WAIT_MILLIS
                     })
                     .ok_or(ContextPortFailure::TimedOut)?;
-                if request.human_region().is_none() || request.human_source().is_none() {
+                if request.human_source().is_none() {
                     return Err(ContextPortFailure::Stale);
                 }
                 state.human_deadline = Some(deadline);

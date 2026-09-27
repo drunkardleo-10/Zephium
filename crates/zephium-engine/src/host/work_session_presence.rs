@@ -67,6 +67,42 @@ impl EngineHost {
     }
 }
 
+/// Hosts counted before the oldest is dropped.
+const MAX_COUNTED_HOSTS: usize = 256;
+
+impl EngineHost {
+    /// Counts one finished page load in an ordinary tab for its profile.
+    pub(crate) fn count_site_load(&mut self, id: crate::ItemId, url: &str) {
+        let Some(profile) = self
+            .partitions
+            .get(&id)
+            .map(|partition| partition.profile())
+        else {
+            return;
+        };
+        let Some(host) = url::Url::parse(url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        else {
+            return;
+        };
+        if self.work_site_loads.len() >= MAX_COUNTED_HOSTS
+            && !self.work_site_loads.contains_key(&(profile, host.clone()))
+        {
+            self.work_site_loads.clear();
+        }
+        *self.work_site_loads.entry((profile, host)).or_default() += 1;
+    }
+    /// Finished loads in the profile's tabs on hosts on `site`.
+    pub(crate) fn work_site_loads(&self, profile: ProfileId, site: &str) -> u64 {
+        self.work_site_loads
+            .iter()
+            .filter(|((owner, host), _)| *owner == profile && site_matches(host, site))
+            .map(|(_, count)| *count)
+            .sum()
+    }
+}
+
 /// A record names a site (usually its registrable domain); the host is on it
 /// when it is that site or a subdomain of it.
 pub(super) fn site_matches(host: &str, site: &str) -> bool {

@@ -79,7 +79,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "action.accepts_result_drain(semantic.draining_action(action.attempt),semantic.revoked_settling_action(action.attempt),)",
             "!self.cancelled&&self.dispatched&&(runtime_pending||runtime_settling)",
             "semantic.settling_action(action.attempt)",
-            "ifexpired||(!current&&!drain)",
+            // Only a confirmed commit's same-site POST may outlive its action.
+            "ifexpired||(!current&&!drain&&!posting)",
             "ifaction.cancelled||terminal_ready",
             "action.wakes>=MAX_WAKES",
             "task.complete(terminal)",

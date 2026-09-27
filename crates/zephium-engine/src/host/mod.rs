@@ -776,6 +776,10 @@ pub(crate) struct EngineHost {
     #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
     anonymous_work_stores:
         HashMap<zephium_agentic::ContextRunId, work_resource::AnonymousWorkStore>,
+    /// Finished page loads per profile and host in ordinary tabs: a count,
+    /// never a URL, path or page fact.
+    #[cfg(target_os = "macos")]
+    work_site_loads: HashMap<(ProfileId, String), u64>,
     // Native-extension controllers are independently bounded and
     // profile-scoped. Startup hydration is the only product path that may
     // populate this registry before Shell constructs profile views; retaining

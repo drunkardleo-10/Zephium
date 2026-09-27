@@ -190,6 +190,7 @@ impl WorkDocumentNavigation {
             revision: 0,
             deadline,
         });
+        state.follow = None;
         state.phase = Phase::Human;
         state.operation = None;
         Ok(())

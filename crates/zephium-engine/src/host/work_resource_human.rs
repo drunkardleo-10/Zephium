@@ -61,10 +61,17 @@ impl WorkNativeResource {
             match operation {
                 Operation::PresentHuman => {
                     if self.human_presentation.is_some()
+                        || self.human_unpresented
                         || !self.ready()
                         || self.observation_visible()
                     {
                         return Err(());
+                    }
+                    if request.human_region().is_none() {
+                        // The page stays hidden and unchanged; only the
+                        // actor lease ends until the person decides.
+                        self.human_unpresented = true;
+                        return Ok(None);
                     }
                     let remaining = request
                         .human_deadline()
@@ -98,6 +105,16 @@ impl WorkNativeResource {
                         return Err(());
                     }
                     Ok(None)
+                }
+                Operation::ContinueAfterHuman if self.human_unpresented => {
+                    self.human_unpresented = false;
+                    let view = self.view.as_ref().ok_or(())?;
+                    let current = crate::platform::imp::current_url(view.view()).ok_or(())?;
+                    let effective = view.work_navigation().ok_or(())?.hand_back(&current)?;
+                    if view.semantic_pending_for_audit() != Some(false) {
+                        return Err(());
+                    }
+                    Ok(Some(effective))
                 }
                 Operation::ContinueAfterHuman => {
                     if !self

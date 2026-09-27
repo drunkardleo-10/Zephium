@@ -47,6 +47,8 @@ struct State {
     site_loads: u8,
     /// A site-session load a script redirect replaced; its late events are noise.
     superseded: Option<wry::NavigationId>,
+    /// Open while an admitted action runs on a ready site-session page.
+    follow: Option<Follow>,
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     url_observation_failure: Option<crate::WorkUrlObservationFailure>,
     #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -178,6 +180,7 @@ impl Default for WorkDocumentNavigation {
             human: None,
             site_loads: 0,
             superseded: None,
+            follow: None,
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             url_observation_failure: None,
             #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -188,6 +191,16 @@ impl Default for WorkDocumentNavigation {
 
 /// Script redirects one site-session load may follow before it settles.
 const MAX_SITE_LOADS: u8 = 6;
+
+/// What one admitted action may lead the page to load. A same-site GET is
+/// cancelled and kept for the controller to follow as its own navigation; a
+/// same-site form POST passes once, and only for a confirmed commit.
+#[derive(Debug)]
+struct Follow {
+    post: bool,
+    posted: bool,
+    slot: zephium_agentic::SemanticActionFollow,
+}
 
 impl State {
     /// A site-session GET the gate follows: the tracked load's own server
@@ -226,7 +239,91 @@ impl State {
     }
 }
 
+impl State {
+    /// A main-frame load a page starts while an admitted action runs. Only
+    /// the confirmed commit's same-site POST passes, once, and the gate
+    /// follows it like a script redirect; a same-site GET is kept for the
+    /// controller and cancelled; anything else is cancelled.
+    fn follow_from_action(&mut self, raw: &str, get: bool) -> bool {
+        let same_site = self.target.as_ref().is_some_and(|requested| {
+            ContextNavigationTarget::parse(raw)
+                .is_ok_and(|target| zephium_agentic::same_work_site(requested, &target))
+        });
+        let Some(follow) = self.follow.as_mut() else {
+            return false;
+        };
+        if !same_site {
+            return false;
+        }
+        if get {
+            if let Ok(target) = ContextNavigationTarget::parse(raw) {
+                follow.slot.record(target);
+            }
+            return false;
+        }
+        if !follow.post || follow.posted {
+            return false;
+        }
+        let Some(generation) = self.finalization_generation.checked_add(1) else {
+            return false;
+        };
+        follow.posted = true;
+        self.superseded = self.native_id.take();
+        self.effective = None;
+        self.finalization_generation = generation;
+        self.location_revision = 0;
+        self.site_loads = 0;
+        self.requested = true;
+        self.phase = Phase::Armed;
+        true
+    }
+}
+
 impl WorkDocumentNavigation {
+    /// Opens the follow window for one dispatched action on a ready
+    /// site-session page; it lasts until the next action, document change
+    /// or cancellation, since a page's script often navigates only after
+    /// the click returns. `post` admits one same-site form POST.
+    pub(crate) fn open_follow(&self, post: bool, slot: zephium_agentic::SemanticActionFollow) {
+        if let Ok(mut state) = self.0.lock() {
+            state.follow = (state.policy
+                == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+                && state.phase == Phase::Ready)
+                .then_some(Follow {
+                    post,
+                    posted: false,
+                    slot,
+                });
+        }
+    }
+    /// Re-admits the unchanged ready document under the next epoch after an
+    /// unpresented handover; a moved or loading page is refused.
+    pub(crate) fn hand_back(&self, current: &str) -> Result<ContextNavigationTarget, ()> {
+        let mut state = self.0.lock().map_err(|_| ())?;
+        let effective = state.effective.clone().ok_or(())?;
+        if state.phase != Phase::Ready
+            || state.operation.is_some()
+            || state.native_id.is_none()
+            || effective.as_url().as_str() != current
+        {
+            return Err(());
+        }
+        state.navigation_epoch = state.navigation_epoch.checked_add(1).ok_or(())?;
+        state.follow = None;
+        Ok(effective)
+    }
+    pub(crate) fn close_follow(&self) {
+        if let Ok(mut state) = self.0.lock() {
+            state.follow = None;
+        }
+    }
+    /// The action's confirmed POST is still loading its response.
+    pub(crate) fn posting(&self) -> bool {
+        self.0.lock().is_ok_and(|state| {
+            state.follow.as_ref().is_some_and(|follow| follow.posted)
+                && !matches!(state.phase, Phase::Ready | Phase::Refused | Phase::Retired)
+        })
+    }
     pub(crate) fn ready_target(&self) -> Option<ContextNavigationTarget> {
         let state = self.0.lock().ok()?;
         (state.phase == Phase::Ready && state.operation.is_none())
@@ -294,6 +391,7 @@ impl WorkDocumentNavigation {
         {
             return Err(());
         }
+        state.follow = None;
         state.operation = Some(request.operation());
         state.target = Some(request.target().clone());
         state.effective = None;
@@ -333,6 +431,7 @@ impl WorkDocumentNavigation {
         {
             return Err(());
         }
+        state.follow = None;
         state.operation = Some(operation);
         state.target = Some(target);
         state.effective = None;
@@ -487,6 +586,13 @@ impl WorkDocumentNavigation {
             )
         {
             return true;
+        }
+        if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            && state.phase == Phase::Ready
+            && action.target_is_main_frame == Some(true)
+            && state.follow.is_some()
+        {
+            return state.follow_from_action(target, action.is_get);
         }
         if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
             && action.target_is_main_frame == Some(true)
@@ -1056,6 +1162,56 @@ mod tests {
         let mut popup = apple_action(T::LinkActivated, true);
         popup.target_is_main_frame = None;
         assert!(!gate.allows_apple_action("https://app.slack.com/x", popup));
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn an_action_diverts_same_site_gets_and_admits_one_post_only_for_a_commit() {
+        use wry::AppleNavigationType as T;
+        let start = "https://app.slack.com/client";
+        let ready = || {
+            let gate = site_gate(start);
+            for phase in [E::Started, E::Committed, E::Finished] {
+                gate.observe(event(1, phase, start)).unwrap();
+            }
+            settle(&gate, start);
+            gate
+        };
+        let gate = ready();
+        let slot = zephium_agentic::SemanticActionFollow::default();
+        let search = "https://app.slack.com/search?q=design";
+        // Without an action in flight nothing is kept.
+        assert!(!gate.allows_apple_action(search, apple_action(T::Other, true)));
+        gate.open_follow(false, slot.clone());
+        assert!(!gate.allows_apple_action(search, apple_action(T::FormSubmitted, true)));
+        assert!(!gate.allows_apple_action(search, apple_action(T::FormSubmitted, false)));
+        assert!(!gate.allows_apple_action("https://evil.test/", apple_action(T::Other, true)));
+        assert!(gate.ready(Some(start)));
+        assert_eq!(
+            slot.take().map(|t| t.as_url().to_string()),
+            Some(search.to_owned())
+        );
+        assert_eq!(slot.take(), None);
+        gate.close_follow();
+        assert!(!gate.allows_apple_action(search, apple_action(T::Other, true)));
+        assert_eq!(slot.take(), None);
+
+        let gate = ready();
+        gate.open_follow(true, slot.clone());
+        let book = "https://app.slack.com/book";
+        assert!(!gate.allows_apple_action(
+            "https://evil.test/pay",
+            apple_action(T::FormSubmitted, false)
+        ));
+        assert!(gate.allows_apple_action(book, apple_action(T::FormSubmitted, false)));
+        assert!(gate.posting());
+        assert!(!gate.allows_apple_action(book, apple_action(T::FormSubmitted, false)));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, book)).unwrap();
+        }
+        settle(&gate, book);
+        assert!(!gate.posting());
+        assert!(gate.ready(Some(book)));
+        assert!(!gate.failed());
     }
     #[test]
     fn successor_uses_same_gate_exact_lineage_and_one_terminal_without_bootstrap() {

@@ -1833,6 +1833,23 @@ impl WebviewEngine {
         answer
     }
 
+    /// Finished page loads in the profile's ordinary tabs on a site: a count
+    /// that grows when the person loads a page there, such as after signing in.
+    #[cfg(target_os = "macos")]
+    pub fn work_site_loads(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+        site: String,
+    ) -> std::sync::mpsc::Receiver<u64> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            host::try_with(move |engine| {
+                let _ = reply.send(engine.work_site_loads(profile, &site));
+            });
+        });
+        answer
+    }
+
     fn run(&self, f: impl FnOnce() + Send + 'static) -> bool {
         (self.dispatch)(Box::new(f))
     }
