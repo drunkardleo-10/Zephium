@@ -66,6 +66,7 @@ mod platform;
 mod privileged_runtime_windows;
 mod resource_close;
 mod search_providers;
+mod webext;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -1568,6 +1569,12 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_split,
             tabs_unsplit,
             extension_action_invoke,
+            webext::web_extension_prepare,
+            webext::web_extension_confirm,
+            webext::web_extension_cancel,
+            webext::web_extension_list,
+            webext::web_extension_set_enabled,
+            webext::web_extension_uninstall,
             extension_management_set_visible,
             extension_distribution_refresh,
             extension_management_install,
@@ -5581,6 +5588,9 @@ pub fn run() {
                 return Err(error.into());
             }
             notes::install(app.handle(), &data_dir, store.clone(), &shell);
+            let web_extensions = webext::WebExtensions::new(&data_dir);
+            web_extensions.restore(&shell);
+            app.manage(web_extensions);
             #[cfg(feature = "external-extensions")]
             extension_source_updates::configure(&shell, &store, &shutdown);
             #[cfg(feature = "macos-work")]

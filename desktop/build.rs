@@ -66,6 +66,17 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
     let rendering_probe = env::var_os("CARGO_FEATURE_MACOS_WORK_RENDERING_PROBE").is_some();
     let external_qa = env::var_os("CARGO_FEATURE_EXTERNAL_EXTENSIONS_QA").is_some();
     let file_workflows_qa = env::var_os("CARGO_FEATURE_FILE_WORKFLOWS_QA").is_some();
+    let webext_qa = env::var_os("CARGO_FEATURE_WEBEXT_QA").is_some();
+    if webext_qa {
+        let config = config_override
+            .as_ref()
+            .ok_or("the extensions QA app requires its isolated configuration override")?;
+        if config.get("identifier").and_then(Value::as_str) != Some("app.zephium.webext-qa")
+            || config.get("productName").and_then(Value::as_str) != Some("Zephium Extensions QA")
+        {
+            return Err("the extensions QA app must use its exact isolated identity".into());
+        }
+    }
     if usize::from(resource_ui_qa) + usize::from(file_workflows_qa) + usize::from(external_qa) > 1 {
         return Err("product QA identities are mutually exclusive".into());
     }
@@ -174,6 +185,7 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
                 && !resource_ui_qa
                 && !file_workflows_qa
                 && !external_qa
+                && !webext_qa
             {
                 validate_linux_identity("effective", &config, &root)?;
             }
