@@ -6815,6 +6815,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-webext"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "url",
+ "zip",
+]
+
+[[package]]
 name = "zephium-work-composition"
 version = "0.1.0"
 dependencies = [
