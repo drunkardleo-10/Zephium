@@ -249,11 +249,12 @@ fn validate_account_refresh(
         || !sample.contains(".refresh_account(account)")
         || !work.contains("session.continue_inspection(")
         // Pinned across the actor's two files; new admission paths (discovery,
-        // waits, screenshots, decisions) each sample once more.
+        // waits, screenshots, decisions, a site's whole first look) each
+        // sample once more.
         || format!("{work}\n{decision}")
             .matches("state.refresh_account(worker, browser)?")
             .count()
-            != 20
+            != 21
         || !policy.contains("MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;")
     {
         return Err("Work lost per-admission sampling, control or original expiry boundary".into());
@@ -443,7 +444,10 @@ fn validate_navigation(actor: &str, policy: &str, continuation: &str) -> Result<
                 "state.navigation_hops += 1;",
                 "remaining_hops + 1",
                 // 64d6c7b9: Back is exempt; any other proposal must equal the target.
-                "(AgentBrowserToolProposal::Navigate(proposed), Some(target)) if proposed == target",
+                // A site-session follow carries no proposal; its target is
+                // the engine's own record, admitted by scope and policy.
+                "(Some(AgentBrowserToolProposal::Navigate(proposed)), Some(target)) if proposed == target",
+                "scope.is_site_session() && scope.admits(target)",
                 "state.refresh_account(worker, browser)?",
                 "retire_for_navigation(observation, &target, &session.config)",
                 ".authorize_navigation(",

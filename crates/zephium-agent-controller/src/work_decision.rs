@@ -614,6 +614,16 @@ impl AgentWorkController {
             )
             .map_err(AgentWorkFailure::Browser)?;
         let action_deadline = request.deadline();
+        let _ = state.follow.take();
+        let request = if state
+            .navigation_discovery
+            .as_ref()
+            .is_some_and(AgentNavigationDiscovery::is_site_session)
+        {
+            request.with_follow(state.follow.clone())
+        } else {
+            request
+        };
         let dispatch = if let Some(retained) = &mut state.native.retained {
             retained.dispatch_action(request, now)
         } else {

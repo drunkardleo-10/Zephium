@@ -58,6 +58,12 @@ pub trait AgentWorkLocalActionPolicy: Send {
         None
     }
 
+    /// The first view is judged whole, before any model call, rather than
+    /// as the model's fitted look.
+    fn whole_first_look(&self) -> bool {
+        false
+    }
+
     /// Narrows the model effect vocabulary when the assignment has one effect.
     fn model_action_effect(&self) -> Option<SemanticEffectClass> {
         None
@@ -182,6 +188,11 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
             .as_ref()
             .and_then(|policy| policy.human_wall(observation))
     }
+    fn whole_first_look(&self) -> bool {
+        self.local_actions
+            .as_ref()
+            .is_some_and(|policy| policy.whole_first_look())
+    }
 
     fn allows_baseline_read(&self) -> bool {
         true
@@ -285,16 +296,6 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
             .frames()
             .first()
             .ok_or(AgentWorkFailure::Contract)?;
-        // In a site session a proposal declared past local drafting is the
-        // page agent's to reconsider, not a broken contract.
-        if self.discovery.is_site_session()
-            && !matches!(
-                action.effect(),
-                SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
-            )
-        {
-            return Err(AgentWorkFailure::ActionDenied);
-        }
         if self.complete
             || self.current != Some((request.context(), request.id()))
             || action.source_observation() != request.id()
@@ -303,10 +304,13 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
             || action.bound_action().snapshot_generation() != snapshot.generation()
             || action.checkpoint_snapshot() != snapshot.generation()
             || action.checkpoint_invocation() != snapshot.invocation()
-            || !matches!(
-                action.effect(),
-                SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
-            )
+            // Past local drafting only in a site session, where the policy
+            // holds every commitment for the person.
+            || !(self.discovery.is_site_session()
+                || matches!(
+                    action.effect(),
+                    SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
+                ))
         {
             return Err(AgentWorkFailure::Contract);
         }

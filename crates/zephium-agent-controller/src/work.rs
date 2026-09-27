@@ -303,6 +303,10 @@ pub trait AgentWorkTask: Send {
     fn human_wall(&self, _: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
         None
     }
+    /// The first view is judged whole before any model call.
+    fn whole_first_look(&self) -> bool {
+        false
+    }
     /// Supplies independently sourced current account facts for this exact
     /// context. Called at startup and before each provider/effect admission,
     /// including nonterminal inspection and extraction mapping. It must be
@@ -1262,6 +1266,7 @@ impl AgentWorkController {
                     navigation_hops: 0,
                     extraction: None,
                     retained_read_evidence: SemanticRetainedReadEvidence::default(),
+                    follow: zephium_agentic::SemanticActionFollow::default(),
                     failure: None,
                     observation: None,
                     native_terminal: None,
@@ -1279,6 +1284,8 @@ impl AgentWorkController {
 
 struct WorkState {
     retained_read_evidence: SemanticRetainedReadEvidence,
+    /// A same-site load the page started during the last action.
+    follow: zephium_agentic::SemanticActionFollow,
     navigation_target: Option<ContextNavigationTarget>,
     navigation_route: Option<AgentNavigationRoute>,
     navigation_discovery: Option<AgentNavigationDiscovery>,
@@ -2106,7 +2113,14 @@ impl AgentWorkController {
             };
         }
         if state.has_navigation() {
-            session.config = if state.actions_before_extraction {
+            session.config = if state.actions_before_extraction
+                && state
+                    .navigation_discovery
+                    .as_ref()
+                    .is_some_and(AgentNavigationDiscovery::is_site_session)
+            {
+                session.config.restrict_to_site_actions_and_extraction()
+            } else if state.actions_before_extraction {
                 session
                     .config
                     .restrict_to_navigation_actions_and_extraction()
@@ -2135,6 +2149,10 @@ impl AgentWorkController {
         if state.history_back {
             session.config = session.config.with_history_back();
         }
+        session.unverified_local_writes = state
+            .navigation_discovery
+            .as_ref()
+            .is_some_and(AgentNavigationDiscovery::is_site_session);
         if decision_budget {
             session.config = session
                 .config
@@ -2530,6 +2548,7 @@ impl AgentWorkController {
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
         initial: SemanticObservation,
+        kind: SemanticExpansionKind,
     ) -> Result<SemanticObservation, AgentWorkFailure> {
         let Some((baseline, root)) = state
             .native
@@ -2546,11 +2565,7 @@ impl AgentWorkController {
         let capability = state.observation_capability();
         match state
             .native
-            .observe_retained_scope(
-                worker,
-                Some((&initial, &baseline, root, SemanticExpansionKind::Region)),
-                capability,
-            )
+            .observe_retained_scope(worker, Some((&initial, &baseline, root, kind)), capability)
             .await
         {
             // A catalog's records may sit under landmarks the region capture
@@ -2584,10 +2599,24 @@ impl AgentWorkController {
             .as_ref()
             .is_some_and(SemanticExtractionSchema::reads_whole_page);
         let observation = Self::observe_initial_ready(state, worker, browser).await?;
-        let observation = if whole_page {
+        let first_look = state.task.whole_first_look();
+        let observation = if whole_page || first_look {
             // Boxed: the read loop's future must stay well inside the
             // runtime worker's stack.
-            Box::pin(Self::whole_page_capture(state, worker, browser, observation)).await?
+            // A first look reads the whole document, landmarks and all.
+            let kind = if first_look {
+                SemanticExpansionKind::Subtree
+            } else {
+                SemanticExpansionKind::Region
+            };
+            Box::pin(Self::whole_page_capture(
+                state,
+                worker,
+                browser,
+                observation,
+                kind,
+            ))
+            .await?
         } else {
             Self::fit_model_observation(observation)?
         };
@@ -2596,6 +2625,12 @@ impl AgentWorkController {
         if challenged {
             state.observation = Some(observation);
             return Ok(());
+        }
+        // The model starts from an ordinary fitted look.
+        if first_look && !whole_page {
+            state.refresh_account(worker, browser)?;
+            observation =
+                Self::fit_model_observation(Box::pin(Self::observe(state, worker, browser)).await?)?;
         }
         let mut captured_at = SemanticCaptureInstant::from_millis(
             state
@@ -2926,7 +2961,7 @@ impl AgentWorkController {
                     state,
                     worker,
                     browser,
-                    step,
+                    navigation::NavigationStart::Model(Box::new(step)),
                     &observation,
                     captured_at,
                     progress,
@@ -3018,6 +3053,11 @@ impl AgentWorkController {
                                     Err(AgentWorkFailure::ActionDenied) => Err(proposal
                                         .into_refusal(SemanticActionBindingError::AssignmentDenied)
                                         .ok_or(AgentWorkFailure::Contract)?),
+                                    Err(AgentWorkFailure::EffectRequired(effect)) => Err(proposal
+                                        .into_refusal(
+                                            SemanticActionBindingError::TaskEffectMismatch(effect),
+                                        )
+                                        .ok_or(AgentWorkFailure::Contract)?),
                                     Err(failure) => return Err(failure),
                                 }
                             }
@@ -3032,6 +3072,12 @@ impl AgentWorkController {
                             state.journal_mut()?.emit(
                                 AgentWorkEventKind::ActionProposalRefused(refusal.reason()),
                             )?;
+                            // A step held for the person's decision stops here,
+                            // the page kept as it is.
+                            if state.human_request && Self::raise_human_wall(state, &observation)? {
+                                state.observation = Some(observation);
+                                return Ok(());
+                            }
                             if let Some(key) = refusal.key() {
                                 if action_refusals.contains(&key) {
                                     return Err(AgentWorkFailure::Browser(
@@ -3084,6 +3130,30 @@ impl AgentWorkController {
                         .as_mut()
                         .and_then(|session| session.take_rejected_refusal())
                         .ok_or(AgentWorkFailure::Contract)?;
+                    if let Some(target) = state.follow.take() {
+                        let next = Self::navigate_current(
+                            state,
+                            worker,
+                            browser,
+                            navigation::NavigationStart::Follow(Box::new((
+                                refusal.into_continuation(),
+                                target,
+                            ))),
+                            &observation,
+                            captured_at,
+                            progress,
+                        )
+                        .await?;
+                        (observation, captured_at, progress, turn) = next;
+                        frames.clear();
+                        frames.extend(
+                            observation
+                                .frames()
+                                .iter()
+                                .map(|snapshot| snapshot.frame().clone()),
+                        );
+                        continue;
+                    }
                     state.native.check_control(worker, browser)?;
                     state.refresh_account(worker, browser)?;
                     state
@@ -3113,14 +3183,37 @@ impl AgentWorkController {
                 }
                 Err(error) => return Err(error),
             };
-            observation = current;
-            captured_at = current_at;
             state.task.accept_verified_action(
                 transition
                     .batch_result()
                     .ok_or(AgentWorkFailure::Contract)?,
-                &observation,
+                &current,
             )?;
+            if let Some(target) = state.follow.take() {
+                let (continuation, _) =
+                    transition.into_parts().ok_or(AgentWorkFailure::Contract)?;
+                let next = Self::navigate_current(
+                    state,
+                    worker,
+                    browser,
+                    navigation::NavigationStart::Follow(Box::new((continuation, target))),
+                    &observation,
+                    captured_at,
+                    progress,
+                )
+                .await?;
+                (observation, captured_at, progress, turn) = next;
+                frames.clear();
+                frames.extend(
+                    observation
+                        .frames()
+                        .iter()
+                        .map(|snapshot| snapshot.frame().clone()),
+                );
+                continue;
+            }
+            observation = current;
+            captured_at = current_at;
             progress = state.task_progress(&observation)?;
             if progress == AgentWorkTaskProgress::Complete
                 || (state.human_request && Self::raise_human_wall(state, &observation)?)
@@ -4716,6 +4809,8 @@ pub enum AgentWorkFailure {
     /// The task's own policy declines this one proposed action; the model
     /// may choose another, nothing having been issued.
     ActionDenied,
+    /// The proposal must declare this effect, which the page shows it has.
+    EffectRequired(SemanticEffectClass),
 }
 
 pub(super) struct WorkEvents {

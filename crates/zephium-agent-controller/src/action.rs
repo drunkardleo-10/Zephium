@@ -525,13 +525,16 @@ impl AgentBrowserAction {
     /// its batch fails with that reason and the model hears why.
     pub(crate) fn into_unverified_refusal(
         self,
+        local_writes: bool,
     ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
+        let effect = self.proposal.action.effect();
         if !self.finished
             || self.native.is_some()
             || self.pending.is_some()
             || self.terminal.is_some()
             || self.journal_failed
-            || self.proposal.action.effect() != SemanticEffectClass::Read
+            || !(effect == SemanticEffectClass::Read
+                || (local_writes && effect == SemanticEffectClass::LocalWrite))
             || self.proposal.continuation.is_none()
             || self.failed.as_ref().is_none_or(|failed| {
                 self.receipt != Some(failed.receipt()) || failed.verification_error().is_none()

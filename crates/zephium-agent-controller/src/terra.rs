@@ -8,12 +8,12 @@ use thiserror::Error;
 use zephium_agent_model_catalog::{
     settle_gpt6_luna_provider_terminal, settle_luna_provider_terminal,
     try_gpt6_luna_provider_exact_call_config, try_luna_provider_exact_call_config,
-    GPT6_LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS, GPT6_LUNA_MAX_OUTPUT_TOKENS,
-    GPT6_LUNA_MODEL_REVISION, GPT6_LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS,
-    GPT6_LUNA_STANDARD_RATE_MAX_INPUT_TOKENS,
-    LunaProviderTerminalSettlement, LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS,
-    LUNA_MAX_OUTPUT_TOKENS, LUNA_MODEL_REVISION, LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS,
-    LUNA_STANDARD_RATE_MAX_INPUT_TOKENS, TERRA_MODEL_REVISION,
+    LunaProviderTerminalSettlement, GPT6_LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS,
+    GPT6_LUNA_MAX_OUTPUT_TOKENS, GPT6_LUNA_MODEL_REVISION,
+    GPT6_LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS, GPT6_LUNA_STANDARD_RATE_MAX_INPUT_TOKENS,
+    LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS, LUNA_MAX_OUTPUT_TOKENS, LUNA_MODEL_REVISION,
+    LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS, LUNA_STANDARD_RATE_MAX_INPUT_TOKENS,
+    TERRA_MODEL_REVISION,
 };
 use zephium_agent_model_catalog::{
     settle_terra_provider_terminal, try_terra_provider_exact_call_config,
@@ -1991,6 +1991,9 @@ pub struct AgentBrowserSession {
     action_proposal_failure: Option<crate::action::AgentBrowserActionProposalRefusal>,
     action_terminal: Option<zephium_agentic::SemanticActionBatchResult>,
     rejected_refusal: Option<zephium_agentic::AgentProviderActionRefusal>,
+    /// A site session hands an unverified draft step back to the model
+    /// instead of ending the page task.
+    pub(crate) unverified_local_writes: bool,
     failure: Option<AgentBrowserProviderError>,
     deadline: Instant,
     turns: u8,
@@ -2223,6 +2226,7 @@ impl AgentBrowserSession {
             action_proposal_failure: None,
             action_terminal: None,
             rejected_refusal: None,
+            unverified_local_writes: false,
             failure: None,
             deadline,
             turns: 0,
@@ -3555,7 +3559,8 @@ impl AgentBrowserSession {
         let Some(action) = self.action.take() else {
             return Ok(None);
         };
-        let (terminal, refusal) = match action.into_unverified_refusal() {
+        let (terminal, refusal) = match action.into_unverified_refusal(self.unverified_local_writes)
+        {
             Ok(parts) => parts,
             Err(action) => {
                 self.action = Some(*action);

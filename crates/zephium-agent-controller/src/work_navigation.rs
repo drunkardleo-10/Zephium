@@ -4,6 +4,13 @@ use super::*;
 #[cfg(feature = "probe-harness")]
 use std::io::Write as _;
 
+/// Where a document checkpoint comes from: the model's Navigate or Back, or
+/// a same-site load the page started after an admitted action.
+pub(super) enum NavigationStart {
+    Model(Box<AgentBrowserProviderTurn>),
+    Follow(Box<(AgentProviderContinuation, ContextNavigationTarget)>),
+}
+
 pub(super) struct NavigationTerminal {
     receipt: AgentNavigationReceipt,
     journal_failure: Option<AgentWorkFailure>,
@@ -30,7 +37,7 @@ impl AgentWorkController {
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
-        turn: AgentBrowserProviderTurn,
+        start: NavigationStart,
         observation: &SemanticObservation,
         captured_at: SemanticCaptureInstant,
         progress: AgentWorkTaskProgress,
@@ -44,7 +51,15 @@ impl AgentWorkController {
         AgentWorkFailure,
     > {
         state.check_task_contract()?;
-        let kind = turn.turn.proposal().kind();
+        let (turn, follow) = match start {
+            NavigationStart::Model(turn) => (Some(*turn), None),
+            NavigationStart::Follow(follow) => (None, Some(*follow)),
+        };
+        let kind = turn
+            .as_ref()
+            .map_or(AgentBrowserToolKind::Navigate, |turn| {
+                turn.turn.proposal().kind()
+            });
         let is_back = kind == AgentBrowserToolKind::Back;
         if !matches!(
             kind,
@@ -70,7 +85,12 @@ impl AgentWorkController {
         }
         let proposed_target = if is_back {
             None
-        } else if let Some(scope) = discovery {
+        } else if let Some((_, target)) = &follow {
+            if !discovery.is_some_and(|scope| scope.is_site_session() && scope.admits(target)) {
+                return Err(AgentWorkFailure::Contract);
+            }
+            Some(target.clone())
+        } else if let (Some(scope), Some(turn)) = (discovery, turn.as_ref()) {
             let AgentBrowserToolProposal::Navigate(target) = turn.turn.proposal() else {
                 return Err(AgentWorkFailure::Contract);
             };
@@ -87,9 +107,10 @@ impl AgentWorkController {
             )
         };
         if !is_back
+            && follow.is_none()
             && !matches!(
-                (turn.turn.proposal(), proposed_target.as_ref()),
-                (AgentBrowserToolProposal::Navigate(proposed), Some(target)) if proposed == target
+                (turn.as_ref().map(|turn| turn.turn.proposal()), proposed_target.as_ref()),
+                (Some(AgentBrowserToolProposal::Navigate(proposed)), Some(target)) if proposed == target
             )
         {
             return Err(AgentWorkFailure::Contract);
@@ -129,9 +150,11 @@ impl AgentWorkController {
                 .is_some_and(|target| discovery.is_some_and(|scope| scope.departure() == target)),
         );
         state.refresh_account(worker, browser)?;
-        state
-            .journal_mut()?
-            .emit(AgentWorkEventKind::ToolProposed(kind))?;
+        if follow.is_none() {
+            state
+                .journal_mut()?
+                .emit(AgentWorkEventKind::ToolProposed(kind))?;
+        }
         state.native.check_control(worker, browser)?;
         state.check_task_contract()?;
         let id = state.native.identity.id();
@@ -156,7 +179,11 @@ impl AgentWorkController {
             None
         };
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        let continuation = turn.into_tool_turn().into_parts().1;
+        let (continuation, following) = match (turn, follow) {
+            (Some(turn), None) => (turn.into_tool_turn().into_parts().1, false),
+            (None, Some((continuation, _))) => (continuation, true),
+            _ => return Err(AgentWorkFailure::Contract),
+        };
         if state.navigation_discovery.is_some() {
             let schema = state
                 .extraction_schema
@@ -191,6 +218,13 @@ impl AgentWorkController {
                 observation,
                 continuation.baseline(),
             )
+        } else if following {
+            session.policy.authorize_follow(
+                authorization,
+                observation,
+                continuation.baseline(),
+                proposed_target.as_ref().ok_or(AgentWorkFailure::Contract)?,
+            )
         } else {
             session.policy.authorize_navigation(
                 authorization,
@@ -210,6 +244,8 @@ impl AgentWorkController {
         let target = permit.target().clone();
         let checkpoint = if is_back {
             continuation.retire_for_history_back(observation, &target, &session.config)
+        } else if following {
+            continuation.retire_for_follow(observation, &target, &session.config)
         } else {
             continuation.retire_for_navigation(observation, &target, &session.config)
         }
