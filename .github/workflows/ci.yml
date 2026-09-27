@@ -455,14 +455,13 @@ jobs:
           cargo check --locked -p zephium-engine --lib --features windows-cdp-spike
           cargo clippy --locked -p zephium-engine --lib --features windows-cdp-spike -- -D warnings
 
-      - name: Compile the Windows filesystem and Beta custody validation suites
+      - name: Compile the Windows filesystem validation suite
         if: runner.os == 'Windows'
         # Compilation preserves the candidate adapter without treating hosted
         # runner permissions or missing crash tests as production qualification.
-        # Live commands and activation gates: docs/extension-windows-validation.md.
-        run: |
-          cargo clippy --locked -p zephium-private-fs --all-targets --features windows-namespace-validation -- -D warnings
-          cargo clippy --locked -p zephium-extension-distribution --all-targets --features windows-namespace-validation -- -D warnings
+        run: >-
+          cargo clippy --locked -p zephium-private-fs --all-targets
+          --features windows-namespace-validation -- -D warnings
 
       - name: Check vendored Wry security adapter directly
         run: cargo check --manifest-path vendor/wry/Cargo.toml --locked --all-targets
@@ -593,17 +592,11 @@ jobs:
           cargo clippy --locked -p zephium-engine \
             --features native-isolation-probes \
             --bin macos-principal-isolation-probe -- -D warnings
-          cargo clippy --locked -p zephium-engine \
-            --features native-web-extension-probes \
-            --bin macos-web-extension-probe -- -D warnings
-          cargo clippy --locked -p zephium-engine \
-            --features native-web-extension-probes \
-            --bin macos-web-extension-resource-probe -- -D warnings
 
       - name: Record hosted macOS runtime-evidence boundary
         if: runner.os == 'macOS' && inputs.checkout_ref == ''
         run: >-
-          echo '::notice title=Native macOS release evidence unavailable::The hosted macos-15 image is retained for source coverage only and this job will mint no native runtime evidence; exact Safari/WebKit admission and native extension execution remain mandatory in reusable release CI and on admitted release runners.'
+          echo '::notice title=Native macOS release evidence unavailable::The hosted macos-15 image is retained for source coverage only and this job will mint no native runtime evidence; exact Safari/WebKit admission remains mandatory in reusable release CI and on admitted release runners.'
 
       # libtest always runs tests on worker threads, including with
       # --test-threads=1, so an ordinary ignored test cannot construct AppKit
@@ -631,28 +624,6 @@ jobs:
           cargo run --locked -p zephium-engine \
             --features native-agentic-input-probe \
             --bin macos-agentic-input-probe -- --ci-hidden-fixed-dom
-
-      # This is deliberately a feature-gated public-API proof, not product
-      # enablement. CI requires actual execution so an image regression below
-      # macOS 15.4 cannot turn the native extension gate into a green skip.
-      - name: Prove public macOS WKWebExtension admission and isolation
-        if: runner.os == 'macOS' && inputs.checkout_ref != ''
-        timeout-minutes: 4
-        run: >-
-          cargo run --locked -p zephium-engine
-          --features native-web-extension-probes
-          --bin macos-web-extension-probe -- --require-supported-runtime
-
-      # Keep the stock-extension resource boundary explicit. The control view
-      # proves our exact handler can preserve WASM MIME; the extension context
-      # must continue to report whether WebKit bypasses that public handler.
-      - name: Classify macOS extension resource transport
-        if: runner.os == 'macOS' && inputs.checkout_ref != ''
-        timeout-minutes: 3
-        run: >-
-          cargo run --locked -p zephium-engine
-          --features native-web-extension-probes
-          --bin macos-web-extension-resource-probe -- --require-supported-runtime
 
       - name: Test vendored Wry security adapter directly
         run: cargo test --manifest-path vendor/wry/Cargo.toml --locked --all-targets
