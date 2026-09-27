@@ -2,7 +2,6 @@
 resolver = "2"
 members = ["crates/*", "desktop", "xtask"]
 exclude = [
-    "crates/zephium-extension-updater",
     "vendor/adblock",
     "vendor/tauri",
     "vendor/tauri-runtime-wry",
@@ -26,11 +25,6 @@ zephium-blocker = { path = "crates/zephium-blocker", version = "=0.1.0", default
 zephium-blocker-service = { path = "crates/zephium-blocker-service", version = "=0.1.0", default-features = false }
 zephium-blocker-update = { path = "crates/zephium-blocker-update", version = "=0.1.0", default-features = false }
 zephium-core = { path = "crates/zephium-core", version = "=0.1.0" }
-zephium-extension-authority = { path = "crates/zephium-extension-authority", version = "=0.1.0" }
-zephium-extension-distribution = { path = "crates/zephium-extension-distribution", version = "=0.1.0", default-features = false }
-zephium-extension-repository = { path = "crates/zephium-extension-repository", version = "=0.1.0" }
-zephium-extension-runtime-api = { path = "crates/zephium-extension-runtime-api", version = "=0.1.0" }
-zephium-extension-service = { path = "crates/zephium-extension-service", version = "=0.1.0" }
 zephium-ipc = { path = "crates/zephium-ipc", version = "=0.1.0" }
 zephium-engine = { path = "crates/zephium-engine", version = "=0.1.0" }
 zephium-notes = { path = "crates/zephium-notes", version = "=0.1.0" }
@@ -88,16 +82,3 @@ strip = "symbols"
 # Bounds checks remain enabled independently; retain integer overflow checks
 # as well so release builds do not silently wrap security/resource counters.
 overflow-checks = true
-
-# Real extension packages are authenticated, decompressed and revalidated at
-# custody boundaries. Keep these byte-processing dependencies optimized in
-# development too, so native QA exercises the production operation deadlines
-# instead of timing out in unoptimized cryptographic/compression loops.
-[profile.dev.package.sha2]
-opt-level = 3
-
-[profile.dev.package.miniz_oxide]
-opt-level = 3
-
-[profile.dev.package.flate2]
-opt-level = 3
