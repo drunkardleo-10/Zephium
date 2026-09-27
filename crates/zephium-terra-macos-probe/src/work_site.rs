@@ -34,6 +34,14 @@ const INBOX_FACT: &str = "Quarterly report from Dana";
 const REPORT_FACT: &str = "Reports total is 4,812";
 const LANDED_FACT: &str = "Landing desk opens at nine";
 const AUTOPOST_FACT: &str = "Autopost page lists three drafts";
+const SEARCH_FACT: &str = "Brass lantern stock is 42 units";
+const FILTER_FACT: &str = "Open orders number 7";
+const VAULT_FACT: &str = "Vault balance is 318 credits";
+const HOME_FACT: &str = "Front page lists five offers";
+/// The vault's own sign-in, kept by the server: a tab sign-in stands for it.
+static VAULT_OPEN: AtomicBool = AtomicBool::new(false);
+/// Page loads the person's tabs made on the site, as the engine would count them.
+static TAB_LOADS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Check {
@@ -55,8 +63,22 @@ enum Check {
     Held,
     /// A sign-in page stops for the person before any model call.
     Wall,
+    /// A search form and a script filter load their results without asking.
+    Search,
+    /// An approved send runs once, exactly as previewed.
+    Approve,
+    /// A total that changes after approval spends the approval.
+    Changed,
+    /// A declined booking commits nothing.
+    Decline,
+    /// An autosaving editor asks once; the run-wide allowance covers the rest.
+    Autosave,
+    /// A signed-out start page is worked on without the entry question.
+    SignedOut,
+    /// A sign-in finished in a tab wakes the held page, which starts over once.
+    TabSignIn,
 }
-const ALL: [Check; 9] = [
+const ALL: [Check; 16] = [
     Check::Session,
     Check::Always,
     Check::Never,
@@ -66,6 +88,13 @@ const ALL: [Check; 9] = [
     Check::Autopost,
     Check::Held,
     Check::Wall,
+    Check::Search,
+    Check::Approve,
+    Check::Changed,
+    Check::Decline,
+    Check::Autosave,
+    Check::SignedOut,
+    Check::TabSignIn,
 ];
 static CHECKS: OnceLock<Vec<Check>> = OnceLock::new();
 
@@ -81,6 +110,13 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("autopost") => vec![Check::Autopost],
         Some("held") => vec![Check::Held],
         Some("wall") => vec![Check::Wall],
+        Some("search") => vec![Check::Search],
+        Some("approve") => vec![Check::Approve],
+        Some("changed") => vec![Check::Changed],
+        Some("decline") => vec![Check::Decline],
+        Some("autosave") => vec![Check::Autosave],
+        Some("signedout") => vec![Check::SignedOut],
+        Some("tabsignin") => vec![Check::TabSignIn],
         _ => return Err(super::ProbeFailure::Authority),
     };
     let _ = CHECKS.set(checks);
@@ -118,6 +154,11 @@ pub(super) fn install_presence(engine: std::sync::Arc<zephium_engine::WebviewEng
             engine.work_sessions_present(profile, hosts)
         },
     ));
+    zephium_app::work_context::install_site_loads(std::sync::Arc::new(|_, _| {
+        let (reply, answer) = std::sync::mpsc::channel();
+        let _ = reply.send(TAB_LOADS.load(Ordering::SeqCst));
+        answer
+    }));
 }
 
 /// Two HTTP/1.1 loopback servers that record method, path and cookie only.
@@ -273,9 +314,78 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
             String::new(),
             page(
                 "Compose",
-                "<h1>Message #design</h1><label>Message <input id=\"m\" name=\"message\"></label><button id=\"s\" type=\"button\">Send</button><script>document.getElementById('s').addEventListener('click',function(){fetch('/send',{method:'POST',body:document.getElementById('m').value});});</script>",
+                "<h1>Message #design</h1><label>Message <input id=\"m\" name=\"message\"></label><button id=\"s\" type=\"button\">Send</button><div id=\"log\" role=\"status\"></div><script>document.getElementById('s').addEventListener('click',function(){var m=document.getElementById('m');fetch('/send',{method:'POST',body:m.value});document.getElementById('log').textContent='Message sent: '+m.value;m.value='';});</script>",
             ),
         ),
+        (Site::Account, _, path) if path.starts_with("/book") => {
+            // /book/live raises its total every second, so a later look differs.
+            let live = path.starts_with("/book/live");
+            (
+                "200 OK",
+                String::new(),
+                page(
+                    "Cabin",
+                    &format!("<h1>Cabin by the lake</h1><form method=\"post\" action=\"/book/confirm\" aria-label=\"Reserve\"><p>Dates: 3-5 May</p><p>Guests: 2</p><p>Total: <span id=\"t\">$1,240</span></p><button>Request to book</button></form>{}",
+                        if live { "<script>var n=1240,s=Date.now();setInterval(function(){document.getElementById('t').textContent='$'+(n+Math.floor((Date.now()-s)/1000)*10).toLocaleString('en-US');},250);</script>" } else { "" }),
+                ),
+            )
+        }
+        (Site::Account, _, "/notes") => (
+            "200 OK",
+            String::new(),
+            page(
+                "Notes",
+                "<h1>Meeting notes</h1><div id=\"n\" contenteditable=\"true\" role=\"textbox\" aria-label=\"Notes\" aria-multiline=\"true\" style=\"min-height:120px;border:1px solid #999\"></div><script>var t;document.getElementById('n').addEventListener('input',function(){clearTimeout(t);t=setTimeout(function(){fetch('/save',{method:'POST',body:document.getElementById('n').textContent});},300);});</script>",
+            ),
+        ),
+        (Site::Account, _, "/home") => (
+            "200 OK",
+            String::new(),
+            page(
+                "Home",
+                &format!("<header><nav><a href=\"/login\">Sign in</a></nav></header><h1>Welcome</h1><p>{HOME_FACT}.</p>"),
+            ),
+        ),
+        (Site::Account, _, "/vault-login") => {
+            VAULT_OPEN.store(true, Ordering::SeqCst);
+            ("200 OK", String::new(), page("Signed in", "<p>Signed in.</p>"))
+        }
+        (Site::Account, _, "/vault") if !VAULT_OPEN.load(Ordering::SeqCst) => (
+            "200 OK",
+            String::new(),
+            page("Sign in", "<h1>Sign in to your vault</h1><form method=\"post\" action=\"/login\"><label>Email <input type=\"email\" name=\"email\" autocomplete=\"email\"></label><label>Password <input type=\"password\" name=\"password\"></label><button>Sign in</button></form>"),
+        ),
+        (Site::Account, _, "/vault") => (
+            "200 OK",
+            String::new(),
+            page("Vault", &format!("<h1>Vault</h1><p>{VAULT_FACT}.</p>")),
+        ),
+        (Site::Account, _, "/find") => (
+            "200 OK",
+            String::new(),
+            page(
+                "Catalog",
+                "<h1>Catalog</h1><form role=\"search\" action=\"/results\" method=\"get\"><label>Search the catalog <input type=\"search\" name=\"q\"></label><button>Search</button></form>",
+            ),
+        ),
+        (Site::Account, _, "/filters") => (
+            "200 OK",
+            String::new(),
+            page(
+                "Orders",
+                "<h1>Orders</h1><button id=\"o\" type=\"button\">Show open orders</button><script>document.getElementById('o').addEventListener('click',function(){location.assign('/results?status=open');});</script>",
+            ),
+        ),
+        (Site::Account, _, path) if path.starts_with("/results") && signed_in => {
+            let found = if path.contains("lantern") {
+                format!("<p>{SEARCH_FACT}.</p>")
+            } else if path.contains("status=open") {
+                format!("<p>{FILTER_FACT}.</p>")
+            } else {
+                "<p>No matches.</p>".to_owned()
+            };
+            ("200 OK", String::new(), page("Results", &format!("<h1>Results</h1>{found}")))
+        }
         (Site::Account, _, _) if !signed_in => (
             "200 OK",
             String::new(),
@@ -394,6 +504,8 @@ struct Run {
     notices: Vec<String>,
     opened: Vec<Opened>,
     asked: Vec<String>,
+    /// Headlines of the held steps the probe decided, in order.
+    confirmed: Vec<String>,
 }
 
 struct Context<'a> {
@@ -403,6 +515,8 @@ struct Context<'a> {
     binding: zephium_app::AgentWorkProfileBinding,
     keys: Mutex<Vec<zephium_agentic::AgentProviderCredential>>,
     sites: Sites,
+    /// Sign-in walls are passed in a tab rather than released.
+    tab_sign_in: AtomicBool,
 }
 impl Context<'_> {
     async fn create(&self, objective: &str) -> Result<(WorkId, WorkRevision), &'static str> {
@@ -448,12 +562,33 @@ impl Context<'_> {
         answer: &str,
         done: &AtomicBool,
         asked: &Mutex<Vec<String>>,
+        decisions: &Mutex<Vec<(bool, bool)>>,
+        confirmed: &Mutex<Vec<String>>,
     ) {
         while !done.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_millis(200)).await;
             if let Ok(pages) = self.composition.human_pages(self.profile, work) {
                 for page in pages {
-                    if page.phase == WorkHumanPhaseV1::WaitingForHuman {
+                    // The person signs in in a tab instead of the pane.
+                    if self.tab_sign_in.load(Ordering::Relaxed)
+                        && page.reason == WorkHumanReasonV1::SignIn
+                        && page.phase == WorkHumanPhaseV1::WaitingForHuman
+                    {
+                        if !VAULT_OPEN.load(Ordering::SeqCst) {
+                            let _ = std::net::TcpStream::connect(("127.0.0.1", self.sites.account))
+                                .and_then(|mut stream| {
+                                    write!(stream, "GET /vault-login HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")?;
+                                    let mut sink = Vec::new();
+                                    stream.read_to_end(&mut sink).map(|_| ())
+                                });
+                            TAB_LOADS.fetch_add(1, Ordering::SeqCst);
+                        }
+                        continue;
+                    }
+                    // A held step is decided on its Confirm step, not in the pane.
+                    if page.phase == WorkHumanPhaseV1::WaitingForHuman
+                        && page.reason != WorkHumanReasonV1::UserDecision
+                    {
                         let _ = self
                             .composition
                             .release_human_page(self.profile, work, page.id);
@@ -463,6 +598,49 @@ impl Context<'_> {
             let Some(state) = self.projection(work).await else {
                 continue;
             };
+            let held = state.executions.last().and_then(|execution| {
+                execution.steps.iter().find_map(|step| match &step.kind {
+                    WorkStepKindV1::Confirm { confirm: held }
+                        if step.status == WorkStepStatus::Running && held.decision.is_none() =>
+                    {
+                        Some((execution.id, step.id, held.headline.clone()))
+                    }
+                    _ => None,
+                })
+            });
+            if let Some((execution, step, headline)) = held {
+                let (approve, for_run) = decisions
+                    .lock()
+                    .ok()
+                    .and_then(|mut queue| (!queue.is_empty()).then(|| queue.remove(0)))
+                    .unwrap_or((false, false));
+                let applied = self
+                    .handle
+                    .work_command(
+                        self.profile,
+                        WorkCommandV1 {
+                            version: 1,
+                            work,
+                            expected_revision: state.work.revision,
+                            command: WorkCommandId::generate(),
+                            intent: WorkRuntimeIntent::ApproveStep {
+                                execution,
+                                step,
+                                approve,
+                                for_run,
+                            },
+                        },
+                    )
+                    .ok();
+                if let Some(applied) = applied {
+                    if applied.await.is_ok() {
+                        if let Ok(mut confirmed) = confirmed.lock() {
+                            confirmed.push(headline);
+                        }
+                    }
+                }
+                continue;
+            }
             let Some((execution, step, prompt)) = state.executions.last().and_then(|execution| {
                 execution.steps.iter().find_map(|step| match &step.kind {
                     WorkStepKindV1::Ask { prompt, .. }
@@ -510,6 +688,21 @@ impl Context<'_> {
         answer: &str,
         turns: Vec<Vec<WorkAgentFetch>>,
     ) -> Result<Run, &'static str> {
+        self.run_deciding(objective, private, answer, turns, vec![])
+            .await
+    }
+
+    /// One run whose held steps the probe decides in order, then declines.
+    async fn run_deciding(
+        &self,
+        objective: &str,
+        private: bool,
+        answer: &str,
+        turns: Vec<Vec<WorkAgentFetch>>,
+        decisions: Vec<(bool, bool)>,
+    ) -> Result<Run, &'static str> {
+        let decisions = Mutex::new(decisions);
+        let confirmed = Mutex::new(Vec::new());
         let work = self.create(objective).await?;
         let script = Script::new(turns);
         let opened = Mutex::new(Vec::<Opened>::new());
@@ -603,13 +796,17 @@ impl Context<'_> {
             done.store(true, Ordering::Relaxed);
             state
         };
-        let (state, ()) = tokio::join!(run, self.person(work.0, answer, &done, &asked));
+        let (state, ()) = tokio::join!(
+            run,
+            self.person(work.0, answer, &done, &asked, &decisions, &confirmed)
+        );
         let state = state.map_err(|_| "run")?;
         Ok(Run {
             state,
             notices: script.notices.lock().map(|n| n.clone()).unwrap_or_default(),
             opened: opened.into_inner().unwrap_or_default(),
             asked: asked.into_inner().unwrap_or_default(),
+            confirmed: confirmed.into_inner().unwrap_or_default(),
         })
     }
 
@@ -658,6 +855,29 @@ fn says(run: &Run, text: &str) -> bool {
     })
 }
 
+/// Each Confirm step's decision and status, in order.
+fn confirms(run: &Run) -> Vec<(Option<WorkConfirmDecisionV1>, WorkStepStatus)> {
+    run.state
+        .executions
+        .iter()
+        .flat_map(|execution| &execution.steps)
+        .filter_map(|step| match &step.kind {
+            WorkStepKindV1::Confirm { confirm: held } => Some((held.decision, step.status)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every word appears in one artifact, for facts a page task may rephrase.
+fn mentions(run: &Run, words: &[&str]) -> bool {
+    run.state.executions.iter().any(|execution| {
+        execution.artifacts.iter().any(|artifact| {
+            let text = artifact.data.plain_text().to_lowercase();
+            words.iter().all(|word| text.contains(word))
+        })
+    })
+}
+
 pub(super) async fn workflow(
     handle: &zephium_app::Handle,
     composition: &MacosWorkComposition,
@@ -673,6 +893,7 @@ pub(super) async fn workflow(
         binding,
         keys: Mutex::new(keys),
         sites: Sites::start()?,
+        tab_sign_in: AtomicBool::new(false),
     };
     let line = |text: String| {
         let _ = writeln!(std::io::stdout().lock(), "loopback-site: {text}");
@@ -906,6 +1127,198 @@ pub(super) async fn workflow(
                 // The page agent may stop before Send on its own; if it tried,
                 // the gate held it and the lead heard. Nothing is ever sent.
                 held == noticed && posts == 0
+            }
+            Check::Search => {
+                let run = context
+                    .run(
+                        "Catalog",
+                        false,
+                        "Allow",
+                        vec![vec![
+                            browse(
+                                "/find",
+                                "Search the catalog for lantern and report the stock",
+                            ),
+                            browse(
+                                "/filters",
+                                "Show the open orders and report how many there are",
+                            ),
+                        ]],
+                    )
+                    .await?;
+                let queried = context.sites.hits(Site::Account, "/results?q=");
+                let filtered = context.sites.hits(Site::Account, "/results?status=open");
+                let found = says(&run, SEARCH_FACT);
+                let filters = says(&run, FILTER_FACT) || mentions(&run, &["open orders", "7"]);
+                let held = run.opened.iter().any(|p| p.held_back);
+                line(format!(
+                    "check=search asked={} queried={} filtered={} found={found} filters={filters} held={held} cookie={}",
+                    run.asked.len(),
+                    queried.len(),
+                    filtered.len(),
+                    queried.iter().chain(&filtered).all(|(_, c)| c.contains(ACCOUNT_COOKIE)),
+                ));
+                last = run.state;
+                run.asked.len() <= 1 && found && filters && !held && !queried.is_empty()
+            }
+            Check::Approve => {
+                let before = context.sites.hits(Site::Account, "/send").len();
+                let run = context
+                    .run_deciding(
+                        "Tell #design I'm on my way",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            "/compose",
+                            "Write 'On my way' in the message box and send it",
+                        )]],
+                        vec![(true, false)],
+                    )
+                    .await?;
+                let sent = context.sites.hits(Site::Account, "/send").len() - before;
+                let held = confirms(&run);
+                line(format!(
+                    "check=approve sent={sent} confirms={held:?} headline={:?}",
+                    run.confirmed.first()
+                ));
+                last = run.state;
+                sent == 1
+                    && held.len() == 1
+                    && held[0]
+                        == (
+                            Some(WorkConfirmDecisionV1::Approved),
+                            WorkStepStatus::Succeeded,
+                        )
+                    && run.confirmed.first().is_some_and(|h| h.contains("#design"))
+            }
+            Check::Changed => {
+                let before = context.sites.posts();
+                let run = context
+                    .run_deciding(
+                        "Book the cabin",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            "/book/live",
+                            "Request to book the cabin for these dates",
+                        )]],
+                        vec![(true, false)],
+                    )
+                    .await?;
+                let posts = context.sites.posts() - before;
+                let held = confirms(&run);
+                line(format!(
+                    "check=changed posts={posts} confirms={held:?} headlines={:?}",
+                    run.confirmed
+                ));
+                last = run.state;
+                // The approved total moved on before the step ran: nothing is
+                // posted; a new total would be put to the person again.
+                posts == 0
+                    && held.first()
+                        == Some(&(
+                            Some(WorkConfirmDecisionV1::Approved),
+                            WorkStepStatus::Failed,
+                        ))
+            }
+            Check::Decline => {
+                let before = context.sites.posts();
+                let run = context
+                    .run_deciding(
+                        "Book the cabin",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            "/book",
+                            "Request to book the cabin for these dates",
+                        )]],
+                        vec![(false, false)],
+                    )
+                    .await?;
+                let posts = context.sites.posts() - before;
+                let held = confirms(&run);
+                line(format!(
+                    "check=decline posts={posts} confirms={held:?} headlines={:?}",
+                    run.confirmed
+                ));
+                last = run.state;
+                posts == 0
+                    && held.first()
+                        == Some(&(
+                            Some(WorkConfirmDecisionV1::Declined),
+                            WorkStepStatus::Cancelled,
+                        ))
+                    && held.len() == 1
+            }
+            Check::Autosave => {
+                let before = context.sites.hits(Site::Account, "/save").len();
+                let run = context
+                    .run_deciding(
+                        "Meeting notes",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            "/notes",
+                            "Type 'Agenda: launch' into the notes, then replace it with 'Agenda: launch. Owner: Dana'",
+                        )]],
+                        vec![(true, true)],
+                    )
+                    .await?;
+                let saves = context.sites.hits(Site::Account, "/save").len() - before;
+                let held = confirms(&run);
+                line(format!("check=autosave saves={saves} confirms={held:?}"));
+                last = run.state;
+                saves >= 1
+                    && held.len() == 1
+                    && held[0]
+                        == (
+                            Some(WorkConfirmDecisionV1::AllowedForRun),
+                            WorkStepStatus::Succeeded,
+                        )
+            }
+            Check::SignedOut => {
+                let run = context
+                    .run(
+                        "Offers",
+                        false,
+                        "Not now",
+                        vec![vec![browse(
+                            "/home",
+                            "Report how many offers the front page lists",
+                        )]],
+                    )
+                    .await?;
+                let content = says(&run, HOME_FACT) || mentions(&run, &["five offers"]);
+                line(format!(
+                    "check=signedout asked={} content={content} yours={}",
+                    run.asked.len(),
+                    run.opened.iter().all(|p| p.yours)
+                ));
+                last = run.state;
+                run.asked.is_empty() && content
+            }
+            Check::TabSignIn => {
+                VAULT_OPEN.store(false, Ordering::SeqCst);
+                context.tab_sign_in.store(true, Ordering::Relaxed);
+                let run = context
+                    .run(
+                        "Vault",
+                        false,
+                        "Allow",
+                        vec![vec![browse("/vault", "Report the vault balance")]],
+                    )
+                    .await;
+                context.tab_sign_in.store(false, Ordering::Relaxed);
+                let run = run?;
+                let loads = context.sites.hits(Site::Account, "/vault").len();
+                let content = says(&run, VAULT_FACT) || mentions(&run, &["318"]);
+                line(format!(
+                    "check=tabsignin asked={} vault_loads={loads} content={content} pages={}",
+                    run.asked.len(),
+                    run.opened.len()
+                ));
+                last = run.state;
+                content && loads >= 2 && run.asked.is_empty()
             }
             Check::Wall => {
                 let run = context

@@ -2354,6 +2354,7 @@ async fn agent_workflow(
                             execution: execution.id,
                             step: step.id,
                             approve: true,
+                            for_run: false,
                         },
                     },
                 ) else {
