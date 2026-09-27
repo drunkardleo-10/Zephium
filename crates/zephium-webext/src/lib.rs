@@ -3,6 +3,7 @@
 //! preparation for the WebKit extension runtime.
 #![forbid(unsafe_code)]
 
+pub mod archive;
 pub mod crx;
 pub mod id;
 
