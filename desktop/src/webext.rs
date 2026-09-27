@@ -94,10 +94,64 @@ impl WebExtensions {
 
     /// Restores every profile's extensions at launch.
     pub(crate) fn restore(&self, shell: &Handle) {
+        if let Some(data_dir) = self.root.parent() {
+            remove_previous_repository(data_dir);
+        }
         #[cfg(target_os = "macos")]
         imp::restore(self, shell);
         #[cfg(not(target_os = "macos"))]
         let _ = shell;
+    }
+}
+
+/// Removes the package repository left by the previous extension stack, in
+/// the background and best effort. It sealed its directories read-only, so
+/// they are made writable first.
+fn remove_previous_repository(data_dir: &Path) {
+    let path = data_dir.join("extension-repository-v1");
+    if !path.exists() {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("zephium-legacy-extension-cleanup".into())
+        .spawn(move || {
+            unseal(&path);
+            if let Err(error) = std::fs::remove_dir_all(&path) {
+                eprintln!("extensions: could not remove the previous repository: {error}");
+            }
+        });
+    if let Err(error) = spawned {
+        eprintln!("extensions: could not start the previous repository cleanup: {error}");
+    }
+}
+
+fn unseal(path: &Path) {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() {
+        return;
+    }
+    #[cfg(unix)]
+    let permissions = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::Permissions::from_mode(if metadata.is_dir() { 0o700 } else { 0o600 })
+    };
+    #[cfg(not(unix))]
+    let permissions = {
+        let mut permissions = metadata.permissions();
+        // Windows only clears the read-only attribute.
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        permissions
+    };
+    let _ = std::fs::set_permissions(path, permissions);
+    if metadata.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                unseal(&entry.path());
+            }
+        }
     }
 }
 
@@ -701,5 +755,26 @@ mod imp {
             let _ = std::fs::remove_dir_all(extensions.packages(id));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn removes_the_previous_repository_even_when_sealed() {
+        use std::os::unix::fs::PermissionsExt;
+        let data = tempfile::tempdir().unwrap();
+        let sealed = data.path().join("extension-repository-v1/objects");
+        std::fs::create_dir_all(&sealed).unwrap();
+        std::fs::write(sealed.join("package"), b"old").unwrap();
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let path = data.path().join("extension-repository-v1");
+        unseal(&path);
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(!path.exists());
     }
 }
