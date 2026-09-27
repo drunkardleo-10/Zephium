@@ -1,0 +1,261 @@
+use std::ptr::NonNull;
+use std::rc::{Rc, Weak as RcWeak};
+
+use block2::DynBlock;
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
+use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2_foundation::{NSArray, NSDate, NSError, NSObjectProtocol, NSSet, NSString, NSURL};
+use objc2_web_kit::{
+    WKWebExtensionAction, WKWebExtensionContext, WKWebExtensionController,
+    WKWebExtensionControllerDelegate, WKWebExtensionMatchPattern, WKWebExtensionMessagePort,
+    WKWebExtensionPermission, WKWebExtensionTab, WKWebExtensionTabConfiguration,
+    WKWebExtensionWindow,
+};
+
+use crate::runtime::Shared;
+use crate::{bridge, error, socket, LogLevel, TabRequest};
+
+pub(crate) struct Ivars {
+    shared: RcWeak<Shared>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ZephiumWebExtControllerDelegate"]
+    #[ivars = Ivars]
+    pub(crate) struct Delegate;
+
+    unsafe impl NSObjectProtocol for Delegate {}
+
+    unsafe impl WKWebExtensionControllerDelegate for Delegate {
+        #[unsafe(method_id(webExtensionController:openWindowsForExtensionContext:))]
+        fn open_windows(
+            &self,
+            _controller: &WKWebExtensionController,
+            _context: &WKWebExtensionContext,
+        ) -> Retained<NSArray<ProtocolObject<dyn WKWebExtensionWindow>>> {
+            let windows: Vec<_> = self
+                .shared()
+                .map(|shared| shared.graph.borrow().windows.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .map(ProtocolObject::from_retained)
+                .collect();
+            NSArray::from_retained_slice(&windows)
+        }
+
+        #[unsafe(method_id(webExtensionController:focusedWindowForExtensionContext:))]
+        fn focused_window(
+            &self,
+            _controller: &WKWebExtensionController,
+            _context: &WKWebExtensionContext,
+        ) -> Option<Retained<ProtocolObject<dyn WKWebExtensionWindow>>> {
+            let window = self
+                .shared()
+                .and_then(|shared| shared.graph.borrow().focused_window());
+            window.map(ProtocolObject::from_retained)
+        }
+
+        #[unsafe(method(webExtensionController:openNewTabUsingConfiguration:forExtensionContext:completionHandler:))]
+        fn open_new_tab(
+            &self,
+            _controller: &WKWebExtensionController,
+            configuration: &WKWebExtensionTabConfiguration,
+            _context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut NSError)>,
+        ) {
+            let completion = completion.copy();
+            let Some(shared) = self.shared() else {
+                return completion.call((
+                    std::ptr::null_mut(),
+                    Retained::as_ptr(&error("The browser is closing.")).cast_mut(),
+                ));
+            };
+            let request = unsafe {
+                TabRequest::Create {
+                    window: configuration.window().and_then(|window| {
+                        let window: &AnyObject = window.as_ref();
+                        window_id(&shared, window)
+                    }),
+                    url: configuration
+                        .url()
+                        .and_then(|url| url.absoluteString())
+                        .map(|url| url.to_string()),
+                    active: configuration.shouldBeActive(),
+                    pinned: configuration.shouldBePinned(),
+                    index: Some(configuration.index()).filter(|index| *index != usize::MAX),
+                }
+            };
+            let weak = Rc::downgrade(&shared);
+            shared.host().tab_request(
+                request,
+                Box::new(move |result| {
+                    let tab = match (result, weak.upgrade()) {
+                        (Ok(Some(id)), Some(shared)) => shared.graph.borrow().tab(id),
+                        (Err(message), _) => {
+                            let error = error(&message);
+                            return completion
+                                .call((std::ptr::null_mut(), Retained::as_ptr(&error).cast_mut()));
+                        }
+                        _ => None,
+                    };
+                    match tab {
+                        Some(tab) => {
+                            let tab = ProtocolObject::<dyn WKWebExtensionTab>::from_retained(tab);
+                            completion
+                                .call((Retained::as_ptr(&tab).cast_mut(), std::ptr::null_mut()));
+                        }
+                        None => completion.call((std::ptr::null_mut(), std::ptr::null_mut())),
+                    }
+                }),
+            );
+        }
+
+        #[unsafe(method(webExtensionController:promptForPermissions:inTab:forExtensionContext:completionHandler:))]
+        fn prompt_permissions(
+            &self,
+            _controller: &WKWebExtensionController,
+            permissions: &NSSet<WKWebExtensionPermission>,
+            _tab: Option<&ProtocolObject<dyn WKWebExtensionTab>>,
+            context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(NonNull<NSSet<WKWebExtensionPermission>>, *mut NSDate)>,
+        ) {
+            let requested: Vec<String> = permissions.iter().map(|p| p.to_string()).collect();
+            self.log(
+                context,
+                LogLevel::Info,
+                &format!("declined optional permissions {requested:?}"),
+            );
+            let none = NSSet::<WKWebExtensionPermission>::new();
+            completion.call((NonNull::from(&*none), std::ptr::null_mut()));
+        }
+
+        // Chrome never prompts when an extension touches a page it lacks
+        // access to; the call simply fails. WebKit asks here instead.
+        #[unsafe(method(webExtensionController:promptForPermissionToAccessURLs:inTab:forExtensionContext:completionHandler:))]
+        fn prompt_urls(
+            &self,
+            _controller: &WKWebExtensionController,
+            _urls: &NSSet<NSURL>,
+            _tab: Option<&ProtocolObject<dyn WKWebExtensionTab>>,
+            _context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(NonNull<NSSet<NSURL>>, *mut NSDate)>,
+        ) {
+            let none = NSSet::<NSURL>::new();
+            completion.call((NonNull::from(&*none), std::ptr::null_mut()));
+        }
+
+        #[unsafe(method(webExtensionController:promptForPermissionMatchPatterns:inTab:forExtensionContext:completionHandler:))]
+        fn prompt_patterns(
+            &self,
+            _controller: &WKWebExtensionController,
+            patterns: &NSSet<WKWebExtensionMatchPattern>,
+            _tab: Option<&ProtocolObject<dyn WKWebExtensionTab>>,
+            context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(NonNull<NSSet<WKWebExtensionMatchPattern>>, *mut NSDate)>,
+        ) {
+            let requested: Vec<String> = patterns
+                .iter()
+                .map(|p| unsafe { p.string() }.to_string())
+                .collect();
+            self.log(
+                context,
+                LogLevel::Info,
+                &format!("declined optional host access {requested:?}"),
+            );
+            let none = NSSet::<WKWebExtensionMatchPattern>::new();
+            completion.call((NonNull::from(&*none), std::ptr::null_mut()));
+        }
+
+        #[unsafe(method(webExtensionController:presentPopupForAction:forExtensionContext:completionHandler:))]
+        fn present_popup(
+            &self,
+            _controller: &WKWebExtensionController,
+            action: &WKWebExtensionAction,
+            context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            // Popups are shown in the browser's own view (see `popup`), never
+            // WebKit's; its view is only consulted for the page it would show.
+            unsafe { action.closePopup() };
+            self.log(
+                context,
+                LogLevel::Info,
+                "declined WebKit's own popup presentation",
+            );
+            completion.call((std::ptr::null_mut(),));
+        }
+
+        #[unsafe(method(webExtensionController:sendMessage:toApplicationWithIdentifier:forExtensionContext:replyHandler:))]
+        fn send_message(
+            &self,
+            _controller: &WKWebExtensionController,
+            message: &AnyObject,
+            application: Option<&NSString>,
+            context: &WKWebExtensionContext,
+            reply: &DynBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
+        ) {
+            let application = application.map(|id| id.to_string()).unwrap_or_default();
+            match self.shared() {
+                Some(shared) if application == bridge::APPLICATION => {
+                    bridge::handle(&shared, context, message, reply);
+                }
+                _ => {
+                    let error = error("Specified native messaging host not found.");
+                    reply.call((std::ptr::null_mut(), Retained::as_ptr(&error).cast_mut()));
+                }
+            }
+        }
+
+        #[unsafe(method(webExtensionController:connectUsingMessagePort:forExtensionContext:completionHandler:))]
+        fn connect(
+            &self,
+            _controller: &WKWebExtensionController,
+            port: &WKWebExtensionMessagePort,
+            context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            let application = unsafe { port.applicationIdentifier() }
+                .map(|id| id.to_string())
+                .unwrap_or_default();
+            match self.shared() {
+                Some(shared) if application == socket::APPLICATION => {
+                    socket::connect(&shared, context, port);
+                    completion.call((std::ptr::null_mut(),));
+                }
+                _ => {
+                    let error = error("Specified native messaging host not found.");
+                    completion.call((Retained::as_ptr(&error).cast_mut(),));
+                }
+            }
+        }
+    }
+);
+
+impl Delegate {
+    pub(crate) fn new(mtm: MainThreadMarker, shared: RcWeak<Shared>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(Ivars { shared });
+        unsafe { msg_send![super(this), init] }
+    }
+
+    fn shared(&self) -> Option<Rc<Shared>> {
+        self.ivars().shared.upgrade()
+    }
+
+    fn log(&self, context: &WKWebExtensionContext, level: LogLevel, message: &str) {
+        if let Some(shared) = self.shared() {
+            shared.log(context, level, message);
+        }
+    }
+}
+
+fn window_id(shared: &Shared, window: &AnyObject) -> Option<u64> {
+    let graph = shared.graph.borrow();
+    graph
+        .windows
+        .iter()
+        .find(|candidate| std::ptr::eq(Retained::as_ptr(candidate).cast::<AnyObject>(), window))
+        .map(|window| window.id())
+}
