@@ -975,7 +975,7 @@ impl Shell {
         }
 
         // Preserve retryability only while every earlier boundary is still
-        // known-good and before the unique extension owner is consumed.
+        // known-good.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.store.flush_until(deadline)
         })) {
