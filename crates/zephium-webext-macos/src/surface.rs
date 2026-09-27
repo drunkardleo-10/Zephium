@@ -71,7 +71,19 @@ define_class!(
 
         #[unsafe(method_id(webViewForWebExtensionContext:))]
         fn webview_for(&self, _context: &WKWebExtensionContext) -> Option<Retained<WKWebView>> {
-            self.webview()
+            let view = self.webview();
+            if view.is_none() && crate::tracing() {
+                let snapshot = self.ivars().snapshot.borrow();
+                eprintln!(
+                    "webext-trace: tab {} has no view (url {:?})",
+                    self.id(),
+                    snapshot
+                        .url
+                        .as_deref()
+                        .map(|u| u.split('?').next().unwrap_or(u))
+                );
+            }
+            view
         }
 
         #[unsafe(method_id(titleForWebExtensionContext:))]
@@ -249,6 +261,16 @@ impl Tab {
     }
 
     pub(crate) fn set_webview(&self, view: Option<&WKWebView>) {
+        if crate::tracing() {
+            let had = self.webview().is_some();
+            if had != view.is_some() {
+                eprintln!(
+                    "webext-trace: tab {} view {}",
+                    self.id(),
+                    if view.is_some() { "bound" } else { "unbound" }
+                );
+            }
+        }
         *self.ivars().webview.borrow_mut() = view.map(Weak::new);
     }
 

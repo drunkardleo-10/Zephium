@@ -202,7 +202,16 @@ impl WebextHost {
         // trails view creation and would unbind a view bound on insertion.
         for tab in surface.tabs() {
             let id = entry.bridge.ids.borrow_mut().tab(tab.id());
-            entry.runtime.bind_view(id, view_for(tab.id()).as_deref());
+            let view = view_for(tab.id());
+            if zephium_webext_macos::tracing() {
+                eprintln!(
+                    "webext-trace: publish tab {id} resident={} view={} url={:?}",
+                    tab.resident(),
+                    view.is_some(),
+                    tab.url().map(|u| u.split('?').next().unwrap_or(u))
+                );
+            }
+            entry.runtime.bind_view(id, view.as_deref());
         }
         entry.surface = Some(surface.clone());
     }

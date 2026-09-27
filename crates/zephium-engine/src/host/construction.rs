@@ -1577,6 +1577,12 @@ impl EngineHost {
                 return None;
             }
         };
+        // Lets Safari's Web Inspector reach tab pages and the content scripts
+        // running in them while diagnosing extensions.
+        #[cfg(feature = "webext")]
+        if zephium_webext_macos::tracing() {
+            unsafe { crate::platform::imp::native_webview(&view).setInspectable(true) };
+        }
         #[cfg(target_os = "macos")]
         if let Err(error) = self
             .macos_extension_controllers

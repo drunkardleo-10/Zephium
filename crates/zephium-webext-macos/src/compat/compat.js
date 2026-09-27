@@ -173,12 +173,17 @@
   const permissions = namespace("permissions");
   if (permissions) {
     const invalid = /'([^']+)' is not a valid permission/;
+    // WebKit rejects some unknown names synchronously and others only in the
+    // returned promise; names learned either way are filtered up front.
+    const unknownNames = new Set(["privacy", "proxy", "debugger"]);
     const guard = (method, withUnknown) => {
       const original = permissions[method];
       if (typeof original !== "function") return;
       pin(permissions, method, function (request, callback) {
         const current = Object.assign({}, request);
-        let unknown = false;
+        const requested = Array.isArray(current.permissions) ? current.permissions : [];
+        let unknown = requested.some((name) => unknownNames.has(name));
+        current.permissions = requested.filter((name) => !unknownNames.has(name));
         let result;
         for (;;) {
           const listed = Array.isArray(current.permissions) ? current.permissions : [];
@@ -197,9 +202,16 @@
               break;
             }
             unknown = true;
+            unknownNames.add(name);
             current.permissions = listed.filter((permission) => permission !== name);
           }
         }
+        result = result.catch((error) => {
+          const name = (invalid.exec(String(error && error.message)) || [])[1];
+          if (!name) throw error;
+          unknownNames.add(name);
+          return withUnknown();
+        });
         return withCallback(unknown ? result.then(withUnknown) : result, callback);
       });
     };
@@ -211,6 +223,18 @@
   const scripting = namespace("scripting");
   if (scripting && !scripting.ExecutionWorld) {
     pin(scripting, "ExecutionWorld", Object.freeze({ ISOLATED: "ISOLATED", MAIN: "MAIN" }));
+  }
+  // WebKit keeps dynamically registered scripts across restarts, which Chrome
+  // extensions registering at every startup don't expect.
+  if (scripting && typeof scripting.registerContentScripts === "function" && typeof scripting.updateContentScripts === "function") {
+    const register = scripting.registerContentScripts;
+    pin(scripting, "registerContentScripts", function (scripts, callback) {
+      const attempt = register.call(scripting, scripts).catch((error) => {
+        if (!/Duplicate ID/.test(String(error && error.message))) throw error;
+        return scripting.updateContentScripts(scripts);
+      });
+      return withCallback(attempt, callback);
+    });
   }
 
   const makeEvent = () => {
@@ -337,6 +361,84 @@
         ? WebAssembly.compile(await response.arrayBuffer())
         : compile.call(this, response);
     };
+  }
+
+  // ---- Tracing ---------------------------------------------------------------
+  // Development builds started with ZEPHIUM_WEBEXT_TRACE=1 record the names of
+  // messages and ports the worker handles, never their content. Listeners
+  // are wrapped at startup, when extensions register them.
+  if (isWorker && Z.report) {
+    let tracing = false;
+    native("trace", {})
+      .then((enabled) => (tracing = enabled === true))
+      .catch(() => {});
+    const label = (message) =>
+      message && typeof message === "object"
+        ? String(message.command || message.type || message.name || Object.keys(message)[0] || "?").slice(0, 60)
+        : typeof message;
+    const origin = (sender) =>
+      sender && sender.tab
+        ? `tab ${sender.tab.id} frame ${sender.frameId}`
+        : sender && sender.url
+          ? sender.url.replace(/^[a-z-]+:\/\/[^/]+/, "")
+          : "?";
+    // Each listener sees the same delivery; report it once.
+    let lastReported = "";
+    const reportOnce = (text) => {
+      if (text === lastReported) return;
+      lastReported = text;
+      setTimeout(() => (lastReported = ""), 0);
+      Z.report("info", text);
+    };
+    const traced = (event, describe) => {
+      if (!event || typeof event.addListener !== "function") return;
+      kept.push(event);
+      const wrappers = new WeakMap();
+      const add = event.addListener;
+      const remove = event.removeListener;
+      const has = event.hasListener;
+      pin(event, "addListener", function (listener, ...rest) {
+        if (typeof listener !== "function") return add.call(this, listener, ...rest);
+        let wrapper = wrappers.get(listener);
+        if (!wrapper) {
+          wrapper = function (...args) {
+            if (tracing) reportOnce(describe(...args));
+            return listener.apply(this, args);
+          };
+          wrappers.set(listener, wrapper);
+        }
+        return add.call(this, wrapper, ...rest);
+      });
+      pin(event, "removeListener", function (listener) {
+        return remove.call(this, wrappers.get(listener) || listener);
+      });
+      pin(event, "hasListener", function (listener) {
+        return has.call(this, wrappers.get(listener) || listener);
+      });
+    };
+    namespace("runtime");
+    traced(runtime.onMessage, (message, sender) => `message ${label(message)} from ${origin(sender)}`);
+    const watched = new WeakSet();
+    traced(runtime.onConnect, (port) => {
+      if (port && !watched.has(port)) {
+        watched.add(port);
+        const opened = Date.now();
+        try {
+          port.onDisconnect.addListener(() =>
+            Z.report("info", `port ${port.name} disconnected after ${Date.now() - opened}ms`),
+          );
+        } catch {}
+      }
+      return `port ${port && port.name} from ${origin(port && port.sender)}`;
+    });
+    const tabs = namespace("tabs");
+    if (tabs && typeof tabs.sendMessage === "function") {
+      const send = tabs.sendMessage;
+      pin(tabs, "sendMessage", function (tabId, message, ...rest) {
+        if (tracing) Z.report("info", `tabs.sendMessage ${label(message)} to tab ${tabId}`);
+        return send.call(this, tabId, message, ...rest);
+      });
+    }
   }
 
   // ---- Worker WebSockets ---------------------------------------------------

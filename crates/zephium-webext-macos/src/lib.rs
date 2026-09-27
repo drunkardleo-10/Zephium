@@ -93,6 +93,13 @@ pub trait Host {
     fn present_popup(&self, extension: &str, action: &objc2_web_kit::WKWebExtensionAction) -> bool;
 }
 
+/// Diagnostics for development builds: `ZEPHIUM_WEBEXT_TRACE=1` prints how
+/// tabs bind to views and the shape (never the content) of bridged frames.
+pub fn tracing() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some_and(|v| v == "1"))
+}
+
 /// The application name every web view in the browser must share.
 ///
 /// WebKit runs service workers with the user agent of the page that loaded

@@ -37,6 +37,7 @@ pub(crate) fn handle(
             shared.log(context, level, &text);
             Ok(Value::Null)
         }
+        Some("trace") => Ok(Value::Bool(crate::tracing())),
         Some("notify") => {
             let title = message
                 .get("title")
