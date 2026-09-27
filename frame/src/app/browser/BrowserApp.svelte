@@ -3,6 +3,8 @@
   import "$styles/global.css";
   import { onMount, untrack } from "svelte";
   import { ExtensionPermissionPrompt } from "$features/extensions";
+  import { WebExtensionReview } from "$features/webext";
+  import { webext } from "$domain/webext";
   import { PagePermissionPrompt } from "$features/permissions";
   import * as sidebar from "$session/sidebar-mode.svelte";
   import { Dividers } from "$features/split";
@@ -116,6 +118,7 @@
     const preferencesReady = preferences.init();
     const runtimeReady = runtime.init();
     const extensionsReady = extensions.init();
+    void webext.refresh();
     const pagePermissionsReady = pagePermissions.init();
 
     // Rasters are emitted immediately before the projection that references
@@ -188,7 +191,9 @@
     <Dividers />
   {/if}
 </div>
-{#if extensionPermissionPrompt !== null}
+{#if webext.review() !== null}
+  <WebExtensionReview review={webext.review()!} />
+{:else if extensionPermissionPrompt !== null}
   {#key `${extensionPermissionPrompt.runtime_generation}:${extensionPermissionPrompt.request_id}`}
     <ExtensionPermissionPrompt prompt={extensionPermissionPrompt} />
   {/key}

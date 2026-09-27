@@ -18,6 +18,16 @@ export const commands = {
 	tabsUnsplit: () => __TAURI_INVOKE<OperationAdmission>("tabs_unsplit"),
 	extensionActionInvoke: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_invoke", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
 	/**
+	 *  Downloads and verifies the extension on the active store page, and
+	 *  returns what the user is asked to approve.
+	 */
+	webExtensionPrepare: (tabId: string) => typedError<WebExtensionReview, string>(__TAURI_INVOKE("web_extension_prepare", { tabId })),
+	webExtensionConfirm: (id: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_confirm", { id })),
+	webExtensionCancel: () => __TAURI_INVOKE<void>("web_extension_cancel"),
+	webExtensionList: () => typedError<WebExtensionView[], string>(__TAURI_INVOKE("web_extension_list")),
+	webExtensionSetEnabled: (id: string, enabled: boolean) => typedError<null, string>(__TAURI_INVOKE("web_extension_set_enabled", { id, enabled })),
+	webExtensionUninstall: (id: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_uninstall", { id })),
+	/**
 	 *  Opens or closes the one focused-profile management subscription.
 	 *  This is deliberately an explicit, non-polling visibility signal: the Shell
 	 *  retains authenticated management metadata only while privileged chrome is
@@ -1517,6 +1527,29 @@ export type UiCommand = string;
 
 export type UiInfo = {
 	material: Material,
+};
+
+export type WebExtensionReview = {
+	id: string,
+	name: string,
+	version: string,
+	description: string,
+	warnings: string[],
+	icon: string | null,
+	update: boolean,
+};
+
+export type WebExtensionView = {
+	id: string,
+	name: string,
+	version: string,
+	description: string,
+	enabled: boolean,
+	icon: string | null,
+	/**  `running`, `starting`, `failed` or `off`. */
+	state: string,
+	error: string | null,
+	warnings: string[],
 };
 
 /* Tauri Specta runtime */

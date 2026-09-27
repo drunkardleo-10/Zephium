@@ -3,6 +3,7 @@
   import { Alert02Icon } from "@hugeicons/core-free-icons";
   import { settle } from "$domain/operations";
   import { extensions } from "$domain/extensions";
+  import { webext } from "$domain/webext";
   import { tabs } from "$domain/tabs";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { commands } from "$shared/ipc/bindings";
@@ -227,7 +228,25 @@
 
     {#if !compact && trailing}{@render trailing()}{/if}
   </div>
-  {#if !compact && extensions.managementAvailability() === "configured" && extensions.isChromeStoreListing(activeUrl)}
+  {#if !compact && webext.isAvailable() && extensions.isChromeStoreListing(activeUrl)}
+    <Button
+      variant="primary"
+      size="compact"
+      class="mt-2 w-full"
+      pending={webext.isPreparing()}
+      data-extension-store-install
+      title="Install this extension in Zephium"
+      onclick={() => {
+        const id = tabs.activeId();
+        if (id !== null) void webext.prepare(id);
+      }}
+    >
+      {webext.isPreparing() ? "Preparing…" : "Add to Zephium"}
+    </Button>
+    {#if webext.error() !== null && webext.review() === null}
+      <p class="mt-1 text-[11px] leading-4 text-danger" role="alert">{webext.error()}</p>
+    {/if}
+  {:else if !compact && extensions.managementAvailability() === "configured" && extensions.isChromeStoreListing(activeUrl)}
     <Button
       variant="primary"
       size="compact"

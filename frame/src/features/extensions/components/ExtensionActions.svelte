@@ -1,6 +1,7 @@
 <script lang="ts">
   import { PuzzleIcon } from "@hugeicons/core-free-icons";
   import { extensions } from "$domain/extensions";
+  import { webext } from "$domain/webext";
   import { surface as browserPage } from "$domain/surface";
   import { tabs } from "$domain/tabs";
   import Icon from "$shared/ui/Icon";
@@ -111,7 +112,7 @@
     {/each}
   {/if}
 
-  {#if managementAvailability === "configured"}
+  {#if managementAvailability === "configured" || webext.isAvailable()}
     <button
       type="button"
       aria-label="Open Extensions"
