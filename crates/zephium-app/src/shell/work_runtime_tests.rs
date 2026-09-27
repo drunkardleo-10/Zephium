@@ -820,6 +820,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                         },
                     }],
                     held_back: false,
+                    signed_in_elsewhere: false,
                 })
             },
             |_| {},
@@ -939,6 +940,7 @@ async fn a_run_that_runs_out_of_time_says_so() {
                     helped: false,
                     artifacts: vec![],
                     held_back: false,
+                    signed_in_elsewhere: false,
                 })
             },
             |_| {},

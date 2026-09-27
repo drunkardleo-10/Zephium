@@ -15,6 +15,7 @@ use zephium_agent_runtime::*;
 
 #[path = "work_resources_human.rs"]
 mod human;
+pub(in crate::work_resources) use human::HumanStep;
 pub use human::{RetainedHumanPhase, RetainedHumanResume, RetainedHumanSnapshot};
 
 #[cfg(feature = "work-execution-probe")]

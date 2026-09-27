@@ -241,6 +241,8 @@ pub struct RunSites {
     private: bool,
     standing: Vec<WorkSiteEntryV1>,
     decided: BTreeMap<String, Option<String>>,
+    /// Sites where the person allowed edits for this run.
+    edits: Vec<String>,
 }
 impl RunSites {
     pub fn new(private: bool, standing: Vec<WorkSiteEntryV1>) -> Self {
@@ -248,13 +250,27 @@ impl RunSites {
             private,
             standing,
             decided: BTreeMap::new(),
+            edits: Vec::new(),
         }
+    }
+    pub fn allow_edits(&mut self, site: &str) {
+        if !self.edits.iter().any(|edit| edit == site) {
+            self.edits.push(site.to_owned());
+        }
+    }
+    pub fn edits_allowed(&self, site: &str) -> bool {
+        self.edits.iter().any(|edit| edit == site)
     }
     fn standing(&self, site: &str) -> Option<WorkSiteAccessV1> {
         self.standing
             .iter()
             .find(|entry| entry.site == site)
             .map(|entry| entry.access)
+    }
+    /// The person's session for a page task whose entry question waits on
+    /// the start page: signed out, it is never asked.
+    pub fn tentative(&mut self, site: &str) -> SiteSession {
+        self.yours(site)
     }
     fn yours(&mut self, site: &str) -> SiteSession {
         let account = self

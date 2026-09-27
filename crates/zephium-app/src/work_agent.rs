@@ -31,6 +31,114 @@ pub struct WorkAgentBrowseRequest {
     pub limits: WorkExecutionLimits,
     /// The person's session on the page's site, or the run's own storage.
     pub session: crate::work_sites::SiteSession,
+    /// Where a page task asks the person about a step that commits something.
+    pub confirm: Option<WorkConfirmPort>,
+    /// The person allowed edits on this site for the run.
+    pub allow_edits: bool,
+    /// The site's entry question waits on the start page: Rust checks it
+    /// for a signed-out state before the question and before any model call.
+    pub entry: bool,
+}
+
+/// A step a page task holds for the person, as the site policy read it
+/// from the page.
+#[derive(Clone, Debug)]
+pub struct WorkSiteConfirmation {
+    pub category: WorkConfirmCategoryV1,
+    pub headline: String,
+    pub action: String,
+    pub text: Option<String>,
+    pub facts: Vec<WorkConfirmFactV1>,
+    pub run_option: bool,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkSiteDecision {
+    Approve,
+    AllowForRun,
+    Decline,
+}
+/// How a held step ended once the person decided.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkSiteReceipt {
+    Committed,
+    /// It ran, but the page never showed it happened.
+    Unverified,
+    /// It never ran: the page changed first or the step was not taken.
+    NotSent,
+    Declined,
+}
+
+/// What the start page's check or the person decided about entering a site.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkSiteEntry {
+    /// The start page is signed out: nothing to ask.
+    SignedOut,
+    Allow,
+    Always,
+    NotNow,
+}
+
+#[derive(Default)]
+struct ConfirmMailbox {
+    /// The page task's entry: asked, then answered or found signed out.
+    entry_asked: bool,
+    entry: Option<WorkSiteEntry>,
+    next: u32,
+    asks: std::collections::VecDeque<(u32, WorkSiteConfirmation)>,
+    decisions: Vec<(u32, WorkSiteDecision)>,
+    settled: std::collections::VecDeque<(u32, WorkSiteReceipt)>,
+}
+/// One page task's line to the loop: held steps go out, decisions come
+/// back, receipts go out. Polled on both sides; it carries no authority.
+#[derive(Clone, Default)]
+pub struct WorkConfirmPort(std::sync::Arc<std::sync::Mutex<ConfirmMailbox>>);
+impl WorkConfirmPort {
+    fn mailbox(&self) -> std::sync::MutexGuard<'_, ConfirmMailbox> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    pub fn ask(&self, confirmation: WorkSiteConfirmation) -> u32 {
+        let mut mailbox = self.mailbox();
+        mailbox.next += 1;
+        let id = mailbox.next;
+        mailbox.asks.push_back((id, confirmation));
+        id
+    }
+    pub fn decision(&self, id: u32) -> Option<WorkSiteDecision> {
+        let mut mailbox = self.mailbox();
+        let at = mailbox.decisions.iter().position(|(ask, _)| *ask == id)?;
+        Some(mailbox.decisions.remove(at).1)
+    }
+    pub fn settle(&self, id: u32, receipt: WorkSiteReceipt) {
+        self.mailbox().settled.push_back((id, receipt));
+    }
+    pub(crate) fn take_ask(&self) -> Option<(u32, WorkSiteConfirmation)> {
+        self.mailbox().asks.pop_front()
+    }
+    pub(crate) fn decide(&self, id: u32, decision: WorkSiteDecision) {
+        self.mailbox().decisions.push((id, decision));
+    }
+    pub(crate) fn take_settled(&self) -> Option<(u32, WorkSiteReceipt)> {
+        self.mailbox().settled.pop_front()
+    }
+    /// The start page is signed in or unknown: put the entry question.
+    pub fn ask_entry(&self) {
+        self.mailbox().entry_asked = true;
+    }
+    /// The start page is signed out: the page goes on without a question.
+    pub fn signed_out(&self) {
+        self.mailbox().entry = Some(WorkSiteEntry::SignedOut);
+    }
+    pub fn entry(&self) -> Option<WorkSiteEntry> {
+        self.mailbox().entry
+    }
+    pub(crate) fn take_entry_ask(&self) -> bool {
+        std::mem::take(&mut self.mailbox().entry_asked)
+    }
+    pub(crate) fn answer_entry(&self, entry: WorkSiteEntry) {
+        self.mailbox().entry = Some(entry);
+    }
 }
 pub struct WorkBrowserOutcome {
     pub status: WorkStepStatus,
@@ -45,6 +153,9 @@ pub struct WorkBrowserOutcome {
     pub helped: bool,
     /// The page agent was stopped before a step that would commit something.
     pub held_back: bool,
+    /// The page waited on a sign-in the person then finished in a tab: the
+    /// page task starts over once, in the fresh session.
+    pub signed_in_elsewhere: bool,
 }
 pub struct WorkAgentProviders<'a> {
     pub turn: &'a dyn WorkAgentTurnProvider,
@@ -144,6 +255,8 @@ pub enum WorkAgentDiagnostic {
         because: crate::work_sites::PrivateBecause,
     },
     /// The person answered a site's entry question.
+    /// A page task's start page was signed out: no entry question.
+    SiteSignedOut,
     SiteEntered {
         answer: crate::work_sites::EntryAnswer,
     },
@@ -317,6 +430,8 @@ impl WorkAgentService {
             pending_output_repair: false,
             sites,
             session_steps: Vec::new(),
+            page_sites: Vec::new(),
+            private_sites: Vec::new(),
             base_limits: attempt.specification().limits,
             handle: self.handle.clone(),
             profile,
@@ -401,6 +516,10 @@ struct Driver {
     sites: crate::work_sites::RunSites,
     /// Steps worked in the person's session: their facts never ride a search.
     session_steps: Vec<WorkStepId>,
+    /// Each page step's site.
+    page_sites: Vec<(WorkStepId, String)>,
+    /// Text from the person's own pages, by site, for a held step's provenance.
+    private_sites: Vec<(String, String)>,
     /// The limits the run started with: one Keep going adds them again.
     base_limits: WorkExecutionLimits,
     handle: crate::Handle,
@@ -1594,6 +1713,16 @@ impl Driver {
                             self.private.extend(
                                 artifacts.iter().map(|artifact| artifact.data.plain_text()),
                             );
+                            if let Some((_, site)) =
+                                self.page_sites.iter().find(|(step, _)| *step == id)
+                            {
+                                let site = site.clone();
+                                self.private_sites.extend(
+                                    artifacts
+                                        .iter()
+                                        .map(|artifact| (site.clone(), artifact.data.plain_text())),
+                                );
+                            }
                         }
                         let links = browser_preview_links(&artifacts);
                         let published = artifacts.len();
@@ -1804,43 +1933,56 @@ impl Driver {
 
     /// The session a page task on `site` opens in, asking the person first
     /// when the profile holds a session there. A stop ends the run.
+    /// A page task's session, or None when its entry question waits on the
+    /// start page: the page task checks it for a signed-out state first.
     async fn page_task_session(
         &mut self,
         site: &str,
-        goal: &str,
-    ) -> Result<Result<crate::work_sites::SiteSession, WorkAttemptStatus>, WorkError> {
+        _goal: &str,
+    ) -> Result<Result<Option<crate::work_sites::SiteSession>, WorkAttemptStatus>, WorkError> {
         use crate::work_sites::*;
         let present = crate::work_context::sessions_present(self.profile, vec![site.to_owned()])
             .await
             .first()
             .copied()
             .unwrap_or(false);
-        let mut entry = self.sites.entry(site, present);
-        if entry == Entry::Ask {
-            let (prompt, options) = entry_question(site, goal);
-            let answer = match self.ask_person(prompt, options).await? {
-                Ok(answer) => entry_answer(site, &answer),
-                Err(status) => return Ok(Err(status)),
-            };
-            self.report(WorkAgentDiagnostic::SiteEntered { answer });
-            if answer == EntryAnswer::Always {
-                if let Err(error) = set_standing(
-                    &self.handle,
-                    self.profile,
-                    site.to_owned(),
-                    Some(zephium_core::work::sites::WorkSiteAccessV1::Always),
-                )
-                .await
-                {
-                    self.report(WorkAgentDiagnostic::CommitRefused {
-                        kind: "site",
-                        error,
-                    });
-                }
-            }
-            entry = self.sites.answer(site, answer);
-        }
+        let entry = self.sites.entry(site, present);
         Ok(Ok(match entry {
+            Entry::Ask => None,
+            entry => Some(self.entered(site, entry)),
+        }))
+    }
+
+    /// Records the person's answer to a site's entry question.
+    async fn answer_entry(&mut self, site: &str, answer: crate::work_sites::EntryAnswer) {
+        use crate::work_sites::*;
+        self.report(WorkAgentDiagnostic::SiteEntered { answer });
+        if answer == EntryAnswer::Always {
+            if let Err(error) = set_standing(
+                &self.handle,
+                self.profile,
+                site.to_owned(),
+                Some(zephium_core::work::sites::WorkSiteAccessV1::Always),
+            )
+            .await
+            {
+                self.report(WorkAgentDiagnostic::CommitRefused {
+                    kind: "site",
+                    error,
+                });
+            }
+        }
+        let entry = self.sites.answer(site, answer);
+        self.entered(site, entry);
+    }
+
+    fn entered(
+        &mut self,
+        site: &str,
+        entry: crate::work_sites::Entry,
+    ) -> crate::work_sites::SiteSession {
+        use crate::work_sites::*;
+        match entry {
             Entry::Session(session) => session,
             Entry::Private(because) => {
                 self.report(WorkAgentDiagnostic::PrivatePage { because });
@@ -1858,7 +2000,7 @@ impl Driver {
                 SiteSession::Private
             }
             Entry::Ask => SiteSession::Private,
-        }))
+        }
     }
 
     /// Seeds the thread from this work's earlier executions. Objects come
@@ -2240,6 +2382,7 @@ fn step_kind_label(kind: &WorkStepKindV1) -> &'static str {
         WorkStepKindV1::Discover { .. } => "discover",
         WorkStepKindV1::Publish => "publish",
         WorkStepKindV1::Ask { .. } => "ask",
+        WorkStepKindV1::Confirm { confirm: _ } => "confirm",
         WorkStepKindV1::Steer { .. } => "person",
         WorkStepKindV1::List { .. } => "list",
         WorkStepKindV1::ReadFile { .. } => "read_file",

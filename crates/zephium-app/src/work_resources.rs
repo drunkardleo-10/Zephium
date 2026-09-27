@@ -484,7 +484,7 @@ impl WorkResourceOwner {
     fn human_lifecycle(
         &self,
         join: &WorkBrowserResourceJoin,
-        region: Option<(WorkBrowserHumanRegion, bool)>,
+        step: application::HumanStep,
         now: AgentPolicyInstant,
         deadline: AgentPolicyInstant,
     ) -> Result<PendingLifecycle, Refusal> {
@@ -495,15 +495,23 @@ impl WorkResourceOwner {
         {
             return Err(Refusal::Busy);
         }
-        let request = if let Some((region, sign_in)) = region {
-            if !resource.reusable.load(Ordering::Acquire) {
+        let request = match step {
+            application::HumanStep::Present(..) | application::HumanStep::HandOver
+                if !resource.reusable.load(Ordering::Acquire) =>
+            {
                 return Err(Refusal::Busy);
             }
-            self.shared
+            application::HumanStep::Present(region, sign_in) => self
+                .shared
                 .lock_rows()?
-                .present_human_for(join, region, now, deadline, sign_in)?
-        } else {
-            self.shared.lock_rows()?.continue_after_human(join, now)?
+                .present_human_for(join, region, now, deadline, sign_in)?,
+            application::HumanStep::HandOver => self
+                .shared
+                .lock_rows()?
+                .hand_over_unpresented(join, now, deadline)?,
+            application::HumanStep::Continue => {
+                self.shared.lock_rows()?.continue_after_human(join, now)?
+            }
         };
         resource.reusable.store(false, Ordering::Release);
         PendingLifecycle::dispatch(self.shared.clone(), resource, request, None, None)

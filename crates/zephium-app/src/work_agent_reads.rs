@@ -22,6 +22,8 @@ impl Driver {
     {
         use crate::work_sites::SiteSession;
         let mut reads = Vec::new();
+        // Page tasks whose entry question waits on their start page.
+        let mut entries: Vec<String> = Vec::new();
         for kind in browses {
             if matches!(kind, WorkStepKindV1::Discover { .. }) {
                 self.notice("Native discovery is not available in this run: provider search covers the web. Use search for facts and read for exact URLs listed in sources.");
@@ -54,7 +56,11 @@ impl Driver {
                         }
                     }
                     match self.page_task_session(&site, &goal).await? {
-                        Ok(session) => session,
+                        Ok(Some(session)) => session,
+                        Ok(None) => {
+                            entries.push(url.clone());
+                            self.sites.tentative(&site)
+                        }
                         Err(status) => return Ok(Some(status)),
                     }
                 }
@@ -132,6 +138,9 @@ impl Driver {
                         break;
                     }
                 };
+                if let Some(site) = crate::work_sites::site_of(url) {
+                    self.page_sites.push((id, site));
+                }
                 if *session != SiteSession::Private {
                     self.session_steps.push(id);
                     self.report(WorkAgentDiagnostic::SessionPage {
@@ -160,6 +169,11 @@ impl Driver {
                     },
                     output: self.output.clone(),
                     session: session.clone(),
+                    confirm: task.then(WorkConfirmPort::default),
+                    entry: task && entries.contains(&url.clone()),
+                    allow_edits: task
+                        && crate::work_sites::site_of(url)
+                            .is_some_and(|site| self.sites.edits_allowed(&site)),
                 };
                 let future = Box::pin(browser(self.probe.clone(), request.clone()));
                 pending.push(PendingRead {
@@ -191,16 +205,20 @@ impl Driver {
                     }
                     (request, outcome, None)
                 } else {
-                    next_read(&mut pending).await
+                    self.next_read_confirming(&mut pending).await?
                 };
                 let outcome = checked_outcome(outcome, request.limits);
-                // A page task may have drafted something: it is never run twice.
+                // A page task may have drafted something: it is never run
+                // twice, unless it only waited on a sign-in the person then
+                // finished in a tab.
+                let signed_in = matches!(&outcome, Ok(outcome) if outcome.signed_in_elsewhere && outcome.usage.is_some());
                 let retry = prior.is_none()
-                    && !matches!(request.step, WorkStepKindV1::Read { goal: Some(_), .. })
                     && terminal.is_none()
                     && failure.is_none()
-                    && matches!(&outcome, Ok(WorkBrowserOutcome { status: WorkStepStatus::Failed, usage: Some(_), note: Some(note), helped, .. })
-                        if (note == read_note::HUMAN_CHECK && *helped) || note == read_note::UNSETTLED || note == read_note::CONSTRUCTION_TIMEOUT);
+                    && (signed_in
+                        || (!matches!(request.step, WorkStepKindV1::Read { goal: Some(_), .. })
+                            && matches!(&outcome, Ok(WorkBrowserOutcome { status: WorkStepStatus::Failed, usage: Some(_), note: Some(note), helped, .. })
+                                if (note == read_note::HUMAN_CHECK && *helped) || note == read_note::UNSETTLED || note == read_note::CONSTRUCTION_TIMEOUT)));
                 if retry && !pending.is_empty() {
                     retries.push((request, outcome));
                     continue;
@@ -213,6 +231,14 @@ impl Driver {
                         .expect("retry requires known usage");
                     if let Some(limits) = retry_limits(request.limits, first) {
                         self.report(WorkAgentDiagnostic::ReadRetried);
+                        if signed_in {
+                            if let WorkStepKindV1::Read { url, .. } = &request.step {
+                                if let Some(site) = crate::work_sites::site_of(url) {
+                                    self.sites
+                                        .answer(&site, crate::work_sites::EntryAnswer::Allow);
+                                }
+                            }
+                        }
                         let request = retry_request(request, &outcome, limits);
                         let future = Box::pin(browser(self.probe.clone(), request.clone()));
                         pending.push(PendingRead {
@@ -244,6 +270,259 @@ impl Driver {
             offset += count;
         }
         Ok(None)
+    }
+}
+
+/// A held step's Confirm step while its page task runs.
+struct OpenConfirm {
+    port: WorkConfirmPort,
+    ask: u32,
+    step: WorkStepId,
+    site: String,
+    decided: bool,
+}
+
+impl Driver {
+    /// Waits for the next page to settle, meanwhile putting each held step
+    /// to the person as a Confirm step and handing back their decision.
+    async fn next_read_confirming<F>(
+        &mut self,
+        pending: &mut Vec<PendingRead<F>>,
+    ) -> Result<
+        (
+            WorkAgentBrowseRequest,
+            Result<WorkBrowserOutcome, WorkError>,
+            Option<WorkUsage>,
+        ),
+        WorkError,
+    >
+    where
+        F: Future<Output = Result<WorkBrowserOutcome, WorkError>>,
+    {
+        let mut open: Vec<OpenConfirm> = Vec::new();
+        // An entry question the start page's check put to the person.
+        let mut entry: Option<(WorkConfirmPort, WorkStepId, String)> = None;
+        let mut signed_out = false;
+        loop {
+            let settled = tokio::time::timeout(ASK_POLL, next_read(pending))
+                .await
+                .ok();
+            let port_of = |request: &WorkAgentBrowseRequest| {
+                let WorkStepKindV1::Read { url, goal, .. } = &request.step else {
+                    return None;
+                };
+                Some((
+                    request.confirm.clone()?,
+                    request.id,
+                    crate::work_sites::site_of(url)?,
+                    goal.clone().unwrap_or_default(),
+                ))
+            };
+            let ports: Vec<(WorkConfirmPort, WorkStepId, String, String)> = pending
+                .iter()
+                .filter_map(|read| port_of(&read.request))
+                .chain(
+                    settled
+                        .as_ref()
+                        .and_then(|(request, _, _)| port_of(request)),
+                )
+                .collect();
+            for (port, page, site, goal) in ports {
+                if port.take_entry_ask() && entry.is_none() {
+                    let (prompt, options) = crate::work_sites::entry_question(&site, &goal);
+                    self.probe.record_activity(WorkActivityV1::WaitingForHuman);
+                    let step = self.step(
+                        WorkStepKindV1::Ask {
+                            prompt,
+                            options,
+                            answer: None,
+                        },
+                        WorkStepStatus::Running,
+                    );
+                    let step = self.begin(step, vec![], None).await?;
+                    entry = Some((port.clone(), step, site.clone()));
+                }
+                if port.entry() == Some(WorkSiteEntry::SignedOut) && !signed_out {
+                    signed_out = true;
+                    self.report(WorkAgentDiagnostic::SiteSignedOut);
+                }
+                while let Some((ask, confirmation)) = port.take_ask() {
+                    let step = self.confirm_step(page, &site, confirmation).await?;
+                    open.push(OpenConfirm {
+                        port: port.clone(),
+                        ask,
+                        step,
+                        site: site.clone(),
+                        decided: false,
+                    });
+                }
+                while let Some((ask, receipt)) = port.take_settled() {
+                    if let Some(at) = open.iter().position(|confirm| confirm.ask == ask) {
+                        let confirm = open.swap_remove(at);
+                        let (status, note) = match receipt {
+                            WorkSiteReceipt::Committed => (WorkStepStatus::Succeeded, None),
+                            WorkSiteReceipt::Unverified => (
+                                WorkStepStatus::OutcomeUnknown,
+                                Some("It ran, but the page did not show that it happened"),
+                            ),
+                            WorkSiteReceipt::NotSent => (
+                                WorkStepStatus::Failed,
+                                Some("The page changed before it ran; nothing was sent"),
+                            ),
+                            WorkSiteReceipt::Declined => (WorkStepStatus::Cancelled, None),
+                        };
+                        self.settle(
+                            confirm.step,
+                            status,
+                            None,
+                            vec![],
+                            None,
+                            note.map(str::to_owned),
+                            None,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            if let Some((port, step, site)) =
+                entry.clone().filter(|(port, _, _)| port.entry().is_none())
+            {
+                let state = self.probe.runtime_projection().await?;
+                let answer = state
+                    .executions
+                    .iter()
+                    .find(|execution| execution.id == self.probe.execution())
+                    .and_then(|execution| execution.steps.iter().find(|s| s.id == step))
+                    .and_then(|asked| match &asked.kind {
+                        WorkStepKindV1::Ask {
+                            answer: Some(answer),
+                            ..
+                        } => Some(answer.clone()),
+                        _ => None,
+                    });
+                if let Some(answer) = answer {
+                    let answer = crate::work_sites::entry_answer(&site, &answer);
+                    self.answer_entry(&site, answer).await;
+                    port.answer_entry(match answer {
+                        crate::work_sites::EntryAnswer::Allow => WorkSiteEntry::Allow,
+                        crate::work_sites::EntryAnswer::Always => WorkSiteEntry::Always,
+                        crate::work_sites::EntryAnswer::NotNow => WorkSiteEntry::NotNow,
+                    });
+                }
+            }
+            if open.iter().any(|confirm| !confirm.decided) {
+                let state = self.probe.runtime_projection().await?;
+                let steps = state
+                    .executions
+                    .iter()
+                    .find(|execution| execution.id == self.probe.execution())
+                    .map(|execution| execution.steps.clone())
+                    .unwrap_or_default();
+                for confirm in open.iter_mut().filter(|confirm| !confirm.decided) {
+                    let decision = steps.iter().find_map(|step| match &step.kind {
+                        WorkStepKindV1::Confirm { confirm: held } if step.id == confirm.step => held.decision,
+                        _ => None,
+                    });
+                    let Some(decision) = decision else {
+                        continue;
+                    };
+                    confirm.decided = true;
+                    confirm.port.decide(
+                        confirm.ask,
+                        match decision {
+                            WorkConfirmDecisionV1::Approved => WorkSiteDecision::Approve,
+                            WorkConfirmDecisionV1::AllowedForRun => {
+                                self.sites.allow_edits(&confirm.site);
+                                WorkSiteDecision::AllowForRun
+                            }
+                            WorkConfirmDecisionV1::Declined => WorkSiteDecision::Decline,
+                        },
+                    );
+                }
+            }
+            if let Some(read) = settled {
+                if let Some((port, step, site)) = entry.take() {
+                    if port.entry().is_none() {
+                        self.settle(
+                            step,
+                            WorkStepStatus::Cancelled,
+                            None,
+                            vec![],
+                            None,
+                            Some("The page closed before you decided".to_owned()),
+                            None,
+                        )
+                        .await?;
+                        self.answer_entry(&site, crate::work_sites::EntryAnswer::NotNow)
+                            .await;
+                    }
+                }
+                for confirm in open {
+                    self.settle(
+                        confirm.step,
+                        if confirm.decided {
+                            WorkStepStatus::Failed
+                        } else {
+                            WorkStepStatus::Cancelled
+                        },
+                        None,
+                        vec![],
+                        None,
+                        Some(
+                            if confirm.decided {
+                                "The page ended before the step ran"
+                            } else {
+                                "The page closed before you decided"
+                            }
+                            .to_owned(),
+                        ),
+                        None,
+                    )
+                    .await?;
+                }
+                return Ok(read);
+            }
+        }
+    }
+
+    /// Records a held step for the person; the text's provenance is the
+    /// other sites whose pages it quotes.
+    async fn confirm_step(
+        &mut self,
+        page: WorkStepId,
+        site: &str,
+        confirmation: WorkSiteConfirmation,
+    ) -> Result<WorkStepId, WorkError> {
+        let mut provenance: Vec<String> = Vec::new();
+        if let Some(text) = &confirmation.text {
+            for (source, body) in &self.private_sites {
+                if source != site
+                    && !provenance.contains(source)
+                    && provenance.len() < 8
+                    && query_discloses(text, std::slice::from_ref(body))
+                {
+                    provenance.push(source.clone());
+                }
+            }
+        }
+        self.probe.record_activity(WorkActivityV1::WaitingForHuman);
+        let step = self.step(
+            WorkStepKindV1::Confirm {
+                confirm: Box::new(WorkConfirmV1 {
+                site: site.to_owned(),
+                category: confirmation.category,
+                headline: confirmation.headline,
+                action: confirmation.action,
+                text: confirmation.text,
+                facts: confirmation.facts,
+                page: Some(page),
+                provenance,
+                run_option: confirmation.run_option,
+                decision: None,
+            }) },
+            WorkStepStatus::Running,
+        );
+        self.begin(step, vec![], None).await
     }
 }
 
@@ -345,9 +624,12 @@ fn retry_request(
     } else {
         request.construction_attempt
     };
+    // A sign-in the person finished counts as their yes for the site.
+    let entry = request.entry && !matches!(outcome, Ok(outcome) if outcome.signed_in_elsewhere);
     WorkAgentBrowseRequest {
         limits,
         construction_attempt,
+        entry,
         ..request
     }
 }
@@ -604,6 +886,7 @@ mod tests {
                 measurements: None,
                 helped: false,
                 held_back: false,
+                signed_in_elsewhere: false,
             };
             assert!(matches!(
                 checked_outcome(Ok(outcome), limits),

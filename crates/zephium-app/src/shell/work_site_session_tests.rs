@@ -51,6 +51,34 @@ async fn open(
         panic!("pages only");
     };
     let draft = goal.as_deref().is_some_and(|goal| goal.contains("reply"));
+    // The start page reads as signed in: the entry question is put before
+    // any model call, and Not now closes the page unread.
+    if let Some(port) = request.confirm.as_ref().filter(|_| request.entry) {
+        port.ask_entry();
+        let answer = loop {
+            if let Some(answer) = port.entry() {
+                break answer;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        if answer == crate::work_agent::WorkSiteEntry::NotNow {
+            opened
+                .lock()
+                .unwrap()
+                .push((url.clone(), goal.is_some(), SiteSession::Private));
+            return Ok(WorkBrowserOutcome {
+                status: WorkStepStatus::Failed,
+                usage: Some(WorkUsage::default()),
+                artifacts: vec![],
+                intervention: None,
+                note: Some("The person said not now to working in their session here".into()),
+                measurements: None,
+                helped: false,
+                held_back: false,
+                signed_in_elsewhere: false,
+            });
+        }
+    }
     opened
         .lock()
         .unwrap()
@@ -427,4 +455,112 @@ async fn work_a_spent_budget_asks_to_keep_going_and_grows_by_the_same_amount() {
     assert_eq!(execution.spec.limits.cost_micro_usd, 200_100);
     assert_eq!(opened.into_inner().unwrap().len(), 1);
     settled_with_notes(execution);
+}
+
+/// A page task that holds one edit for the person, then reports it ran.
+async fn edit_page(
+    edits: &Mutex<Vec<bool>>,
+    probe: WorkAttemptProbe,
+    request: WorkAgentBrowseRequest,
+) -> Result<WorkBrowserOutcome, WorkError> {
+    edits.lock().unwrap().push(request.allow_edits);
+    if !request.allow_edits {
+        let port = request.confirm.clone().expect("a page task can ask");
+        let ask = port.ask(crate::work_agent::WorkSiteConfirmation {
+            category: WorkConfirmCategoryV1::Edit,
+            headline: "Save changes on notion.so?".into(),
+            action: "type into Notes".into(),
+            text: Some("Agenda: launch".into()),
+            facts: vec![],
+            run_option: true,
+        });
+        let decision = loop {
+            if let Some(decision) = port.decision(ask) {
+                break decision;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(decision, crate::work_agent::WorkSiteDecision::AllowForRun);
+        port.settle(ask, crate::work_agent::WorkSiteReceipt::Committed);
+    }
+    page(probe, request, false).await
+}
+
+#[tokio::test]
+async fn work_a_held_edit_is_confirmed_once_and_allowed_for_the_run() {
+    install_sessions();
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let service = WorkAgentService::new(handle.clone());
+    drive(
+        &mut shell,
+        &queue,
+        crate::work_sites::set_standing(
+            &handle,
+            profile,
+            "notion.so".into(),
+            Some(zephium_core::work::sites::WorkSiteAccessV1::Always),
+        ),
+    )
+    .await
+    .unwrap();
+    let work = new_work(&mut shell, &queue, &handle, "Meeting notes").await;
+    let script = Script::default();
+    script.play([
+        output(vec![browse("notion.so", "Write the agenda")]),
+        output(vec![browse("notion.so", "Add the owner")]),
+    ]);
+    let edits = Mutex::new(Vec::new());
+    let sources = Sources::default();
+    let decide = async {
+        let (execution, step) = running_step(&handle, profile, work, |kind| {
+            matches!(kind, WorkStepKindV1::Confirm { confirm: _ })
+        })
+        .await;
+        command(
+            &handle,
+            profile,
+            work,
+            WorkRuntimeIntent::ApproveStep {
+                execution,
+                step,
+                approve: true,
+                for_run: true,
+            },
+        )
+        .await;
+    };
+    let (result, ()) = drive(&mut shell, &queue, async {
+        tokio::join!(
+            service.run(
+                profile,
+                run_command(work, WorkRevision::INITIAL, false, 200_000),
+                None,
+                WorkAgentProviders {
+                    turn: &script,
+                    search: &sources,
+                },
+                |probe, request| edit_page(&edits, probe, request),
+                |_| {},
+            ),
+            decide
+        )
+    })
+    .await;
+    let execution = &result.unwrap().executions[0];
+    let held: Vec<_> = execution
+        .steps
+        .iter()
+        .filter_map(|step| match &step.kind {
+            WorkStepKindV1::Confirm { confirm: held } => {
+                Some((held.decision, step.status, held.page))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].0, Some(WorkConfirmDecisionV1::AllowedForRun));
+    assert_eq!(held[0].1, WorkStepStatus::Succeeded);
+    assert!(held[0].2.is_some());
+    assert_eq!(*edits.lock().unwrap(), [false, true]);
 }

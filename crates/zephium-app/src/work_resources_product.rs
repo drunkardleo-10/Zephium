@@ -51,7 +51,7 @@ impl PreparedRetainedContinuation {
 }
 
 enum HumanCommand {
-    Present(u32, WorkBrowserHumanRegion),
+    Present(u32, Option<WorkBrowserHumanRegion>),
     Continue(u32),
 }
 
@@ -338,7 +338,16 @@ impl RetainedWorkHandle {
         self.human_command(
             generation,
             RetainedHumanPhase::WaitingForHuman,
-            HumanCommand::Present(generation, region),
+            HumanCommand::Present(generation, Some(region)),
+        )
+    }
+    /// Ends the page's actor lease without showing it, for a decision the
+    /// person makes elsewhere; `continue_human` then re-admits the page.
+    pub fn hand_over(&self, generation: u32) -> bool {
+        self.human_command(
+            generation,
+            RetainedHumanPhase::WaitingForHuman,
+            HumanCommand::Present(generation, None),
         )
     }
     /// Retire human input and freeze the page; fresh trusted admission remains separate.

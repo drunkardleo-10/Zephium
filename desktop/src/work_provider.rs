@@ -22,8 +22,12 @@ impl WorkProviders {
         #[cfg(target_os = "macos")]
         {
             let engine = engine.clone();
+            let loads = engine.clone();
             zephium_app::work_context::install_session_presence(Arc::new(move |profile, hosts| {
                 engine.work_sessions_present(profile, hosts)
+            }));
+            zephium_app::work_context::install_site_loads(Arc::new(move |profile, site| {
+                loads.work_site_loads(profile, site)
             }));
         }
         Self {

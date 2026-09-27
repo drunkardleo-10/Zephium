@@ -33,6 +33,15 @@ pub struct RetainedHumanResume {
     pub actions: u32,
 }
 
+/// One native human-handoff operation on a retained page.
+pub(in crate::work_resources) enum HumanStep {
+    Present(WorkBrowserHumanRegion, bool),
+    /// Ends the actor lease without showing the page, for a decision the
+    /// person makes elsewhere.
+    HandOver,
+    Continue,
+}
+
 pub(super) struct HumanHandoff {
     pub(super) phase: RetainedHumanPhase,
     generation: u32,
@@ -124,7 +133,7 @@ impl RetainedWork {
     pub(in crate::work_resources) fn present_human(
         &mut self,
         generation: u32,
-        region: WorkBrowserHumanRegion,
+        region: Option<WorkBrowserHumanRegion>,
         now: AgentPolicyInstant,
     ) -> bool {
         let Some(human) = self.human.as_mut().filter(|human| {
@@ -137,12 +146,16 @@ impl RetainedWork {
         }) else {
             return false;
         };
-        let pending = match self.owner.human_lifecycle(
-            &self.resource,
-            Some((region, human.reason == AgentBrowserHumanReason::SignIn)),
-            now,
-            human.expires,
-        ) {
+        let step = match region {
+            Some(region) => {
+                HumanStep::Present(region, human.reason == AgentBrowserHumanReason::SignIn)
+            }
+            None => HumanStep::HandOver,
+        };
+        let pending = match self
+            .owner
+            .human_lifecycle(&self.resource, step, now, human.expires)
+        {
             Ok(pending) => pending,
             Err(_) => return false,
         };
@@ -171,10 +184,12 @@ impl RetainedWork {
         }) else {
             return false;
         };
-        let pending = match self
-            .owner
-            .human_lifecycle(&self.resource, None, now, human.expires)
-        {
+        let pending = match self.owner.human_lifecycle(
+            &self.resource,
+            HumanStep::Continue,
+            now,
+            human.expires,
+        ) {
             Ok(pending) => pending,
             Err(_) => return false,
         };

@@ -42,6 +42,26 @@ pub(crate) async fn sessions_present(profile: ProfileId, hosts: Vec<String>) -> 
         .unwrap_or_else(|| vec![false; count])
 }
 
+/// Finished page loads in the profile's ordinary tabs on one site: a count
+/// only, so a sign-in the person finishes in a tab can wake a held page.
+pub type WorkSiteLoads = dyn Fn(ProfileId, String) -> std::sync::mpsc::Receiver<u64> + Send + Sync;
+static SITE_LOADS: std::sync::RwLock<Option<std::sync::Arc<WorkSiteLoads>>> =
+    std::sync::RwLock::new(None);
+pub fn install_site_loads(loads: std::sync::Arc<WorkSiteLoads>) {
+    if let Ok(mut slot) = SITE_LOADS.write() {
+        *slot = Some(loads);
+    }
+}
+/// None when the count is unavailable.
+pub async fn site_loads(profile: ProfileId, site: String) -> Option<u64> {
+    let loads = SITE_LOADS.read().ok().and_then(|slot| slot.clone())?;
+    let receiver = loads(profile, site);
+    tokio::task::spawn_blocking(move || receiver.recv_timeout(PRESENCE_TIMEOUT))
+        .await
+        .ok()
+        .and_then(Result::ok)
+}
+
 pub struct WorkContextAdmission {
     handle: crate::Handle,
 }

@@ -162,6 +162,7 @@ async fn work_local_file_and_command_approval_journal_inner() {
                             execution: execution.id,
                             step: step.id,
                             approve,
+                            for_run: false,
                         },
                     )
                     .await;
@@ -259,6 +260,7 @@ async fn work_local_command_timeout_and_stop_settle_with_output_inner() {
                     execution,
                     step,
                     approve: true,
+                    for_run: false,
                 },
             )
             .await;
@@ -370,7 +372,7 @@ async fn work_local_quit_recovers_command_as_failed_without_replay_inner() {
         tokio::select! {
             _=service.run(profile,local_begin(work,WorkRevision::INITIAL,&root),None,WorkAgentProviders{turn:&script,search:&sources},|probe,request|page(probe,request,false),|_|{})=>panic!("command should still be running"),
             _=async{
-                let (execution,step)=running_step(&handle,profile,work,|k|matches!(k,WorkStepKindV1::RunCommand{..})).await;command(&handle,profile,work,WorkRuntimeIntent::ApproveStep{execution,step,approve:true}).await;
+                let (execution,step)=running_step(&handle,profile,work,|k|matches!(k,WorkStepKindV1::RunCommand{..})).await;command(&handle,profile,work,WorkRuntimeIntent::ApproveStep{execution,step,approve:true,for_run:false}).await;
                 loop {let state=projection(&handle,profile,work).await;if state.executions[0].steps.iter().any(|s|s.local.as_ref().and_then(|l|l.output.as_ref()).is_some_and(|o|o.text.contains("started"))){break;}tokio::time::sleep(Duration::from_millis(20)).await;}
             }=>{}
         }

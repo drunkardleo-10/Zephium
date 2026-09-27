@@ -227,6 +227,7 @@ async fn page(
                 measurements: None,
                 helped: false,
                 held_back: false,
+                signed_in_elsewhere: false,
             });
         }
         if !hang {
@@ -259,6 +260,7 @@ async fn page(
         measurements: None,
         helped: false,
         held_back: false,
+        signed_in_elsewhere: false,
     })
 }
 
@@ -963,6 +965,7 @@ async fn work_a_human_check_is_read_again_only_after_a_person_continued_it() {
                             measurements: None,
                             helped,
                             held_back: false,
+                            signed_in_elsewhere: false,
                         })
                     }
                 },

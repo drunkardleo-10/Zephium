@@ -200,6 +200,7 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                                     }]
                                 },
                                 held_back: false,
+                                signed_in_elsewhere: false,
                             })
                         }
                     },
