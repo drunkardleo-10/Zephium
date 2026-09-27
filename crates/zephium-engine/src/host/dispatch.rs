@@ -20,10 +20,6 @@ use super::ParentHandle;
 thread_local! {
     static HOST: RefCell<Option<EngineHost>> = const { RefCell::new(None) };
     static PENDING: RefCell<VecDeque<QueuedHostTask>> = const { RefCell::new(VecDeque::new()) };
-    static PENDING_EXTENSION_RUNTIME_TERMINALS: Cell<ExtensionRuntimeTerminalSlots> =
-        const { Cell::new(ExtensionRuntimeTerminalSlots::EMPTY) };
-    static EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
-    static EXTENSION_RUNTIME_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
     #[cfg(target_os = "macos")]
     static PENDING_EXTENSION_BROWSER_REQUEST_TERMINALS: Cell<ExtensionBrowserRequestTerminalSlots> =
         const { Cell::new(ExtensionBrowserRequestTerminalSlots::EMPTY) };
@@ -31,20 +27,6 @@ thread_local! {
     static EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
     #[cfg(target_os = "macos")]
     static EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
-    #[cfg(target_os = "macos")]
-    static PENDING_EXTENSION_RUNTIME_GRANT_TERMINALS: Cell<ExtensionRuntimeGrantTerminalSlots> =
-        const { Cell::new(ExtensionRuntimeGrantTerminalSlots::EMPTY) };
-    #[cfg(target_os = "macos")]
-    static EXTENSION_RUNTIME_GRANT_TERMINAL_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
-    #[cfg(target_os = "macos")]
-    static EXTENSION_RUNTIME_GRANT_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
-    #[cfg(target_os = "macos")]
-    static PENDING_EXTENSION_ACTION_POPUP_TERMINALS: Cell<ExtensionActionPopupTerminalSlots> =
-        const { Cell::new(ExtensionActionPopupTerminalSlots::EMPTY) };
-    #[cfg(target_os = "macos")]
-    static EXTENSION_ACTION_POPUP_TERMINAL_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
-    #[cfg(target_os = "macos")]
-    static EXTENSION_ACTION_POPUP_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
     #[cfg(target_os = "macos")]
     static PENDING_PAGE_PERMISSION_TERMINALS: Cell<PagePermissionTerminalSlots> =
         const { Cell::new(PagePermissionTerminalSlots::EMPTY) };
@@ -66,26 +48,13 @@ thread_local! {
 
 type HostTask = Box<dyn FnOnce(&mut EngineHost)>;
 
-const EXTENSION_RUNTIME_TERMINAL_CAPACITY: usize =
-    2 * super::extension_runtime::MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS;
 #[cfg(target_os = "macos")]
-const EXTENSION_BROWSER_REQUEST_TERMINAL_CAPACITY: usize = 2
-    * (zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
-        + zephium_core::extensions::MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS
-        + zephium_core::extensions::MAX_EXTENSION_NATIVE_HOST_CONNECTIONS);
+const EXTENSION_BROWSER_REQUEST_TERMINAL_CAPACITY: usize =
+    2 * zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS;
 
-type ExtensionRuntimeTerminalSlots = ExactTerminalSlots<EXTENSION_RUNTIME_TERMINAL_CAPACITY>;
 #[cfg(target_os = "macos")]
 type ExtensionBrowserRequestTerminalSlots =
     ExactTerminalSlots<EXTENSION_BROWSER_REQUEST_TERMINAL_CAPACITY>;
-#[cfg(target_os = "macos")]
-const EXTENSION_RUNTIME_GRANT_TERMINAL_CAPACITY: usize =
-    3 * zephium_core::ports::extensions::MAX_PENDING_EXTENSION_RUNTIME_GRANT_REQUESTS;
-#[cfg(target_os = "macos")]
-type ExtensionRuntimeGrantTerminalSlots =
-    ExactTerminalSlots<EXTENSION_RUNTIME_GRANT_TERMINAL_CAPACITY>;
-#[cfg(target_os = "macos")]
-type ExtensionActionPopupTerminalSlots = ExactTerminalSlots<1>;
 #[cfg(target_os = "macos")]
 const PAGE_PERMISSION_TERMINAL_CAPACITY: usize =
     3 * super::page_permissions::MAX_PENDING_PAGE_PERMISSION_REQUESTS;
@@ -97,6 +66,7 @@ type PagePermissionTerminalSlots = ExactTerminalSlots<PAGE_PERMISSION_TERMINAL_C
 /// Native callbacks and their independently scheduled cancellation barriers
 /// can contribute at most two exact tasks per logical reservation. The ring
 /// never allocates, grows, replaces, or silently drops an accepted terminal.
+#[cfg(target_os = "macos")]
 struct ExactTerminalSlots<const CAPACITY: usize> {
     slots: [Option<HostTask>; CAPACITY],
     head: usize,
@@ -110,6 +80,7 @@ struct ExactTerminalSlots<const CAPACITY: usize> {
     overflow_predecessors: usize,
 }
 
+#[cfg(target_os = "macos")]
 impl<const CAPACITY: usize> ExactTerminalSlots<CAPACITY> {
     const EMPTY: Self = Self {
         slots: [const { None }; CAPACITY],
@@ -119,7 +90,6 @@ impl<const CAPACITY: usize> ExactTerminalSlots<CAPACITY> {
         overflow_predecessors: 0,
     };
 
-    #[cfg(any(target_os = "macos", test))]
     fn push_back(&mut self, task: HostTask) -> Result<(), HostTask> {
         if self.len >= CAPACITY {
             return Err(task);
@@ -151,16 +121,6 @@ impl<const CAPACITY: usize> ExactTerminalSlots<CAPACITY> {
         task
     }
 
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.len + usize::from(self.overflow_quarantine.is_some())
-    }
-
-    const fn is_empty(&self) -> bool {
-        self.len == 0 && self.overflow_quarantine.is_none()
-    }
-
-    #[cfg(any(target_os = "macos", test))]
     fn quarantine_overflow(&mut self, task: HostTask) -> Result<(), HostTask> {
         if self.overflow_quarantine.is_some() {
             return Err(task);
@@ -171,6 +131,7 @@ impl<const CAPACITY: usize> ExactTerminalSlots<CAPACITY> {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl<const CAPACITY: usize> Default for ExactTerminalSlots<CAPACITY> {
     fn default() -> Self {
         Self::EMPTY
@@ -251,12 +212,6 @@ enum HostTaskPriority {
     Observation,
     Lifecycle,
     Close,
-    // A read-only profile fence owns an independently bounded slot. It must
-    // never consume the exact owner-debt cohort below.
-    ExtensionRuntimeProfileFence,
-    // Exact extension-owner lifecycle and terminal debts are never keyed,
-    // coalesced, replaced, or admitted from an ordinary task's capacity.
-    ExtensionRuntime,
     #[cfg(feature = "agentic-browser")]
     // Exact agent-context lifecycle and audit tasks own an independent fixed
     // band and are never coalesced or replaced.
@@ -284,11 +239,6 @@ enum HostTaskKey {
     Source(ItemId),
     Title(ItemId),
     NavigationCommit(ItemId),
-    #[cfg(target_os = "macos")]
-    ExtensionBackgroundWake(ItemId),
-    #[cfg(target_os = "macos")]
-    ProvisionalTabUrl(ItemId),
-    ExtensionPermitInvalidation(ItemId),
     NavigationSettlement(ItemId),
     Discard(ItemId),
     #[cfg(target_os = "windows")]
@@ -346,30 +296,13 @@ const NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY: usize =
 #[cfg(not(feature = "agentic-browser"))]
 const NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY: usize =
     NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY;
-// A lifecycle call and its independently held publication proxy can each
-// contribute one accepted task for every bounded logical owner reservation.
-// Reserve and independently hard-cap that complete cohort before navigation
-// and ordinary work.
-const EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY: usize =
-    2 * super::extension_runtime::MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS;
-const NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY: usize =
-    NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY - EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY;
-// The unique runtime factory admits at most one physical profile-fence
-// callback across the platform dispatcher and this reentrant host queue. Keep
-// its slot below the exact owner band so a timed-out read cannot crowd out a
-// lifecycle or publication debt.
-const EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY: usize = 1;
-const NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY: usize =
-    NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
-        - EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY;
 // One globally coalesced commit gate per native view remains admissible even
 // if ordinary observations/lifecycle work fill their band. The native view
 // resource ceiling proves no more distinct live commit keys can exist while
 // the host is re-entrantly borrowed.
 const NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY: usize = MAX_NATIVE_VIEW_RESOURCES;
 const NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY: usize =
-    NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
-        - NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY;
+    NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY - NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY;
 static PENDING_OVERFLOW_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(4);
 
 #[allow(
@@ -381,7 +314,6 @@ pub(crate) fn install(
     data_root: PathBuf,
     initial_user_content_generation: UserContentGeneration,
     initial_user_content: UserContent,
-    extension_runtime_gate: super::extension_runtime::ExtensionRuntimeFactoryGate,
     #[cfg(any(target_os = "macos", target_os = "windows"))] native_open_authority: Arc<
         crate::NativeOpenAuthority,
     >,
@@ -389,14 +321,6 @@ pub(crate) fn install(
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
 ) -> Result<(), String> {
     let _install_claim = HostInstallClaim::acquire()?;
-    if EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED.with(Cell::get) {
-        // The quarantine may own the only wrapper returned by a native API.
-        // Process restart, not host reinstall, is the safe recovery boundary.
-        return Err(
-            "extension runtime terminal transport is fail-stopped; process restart required"
-                .to_owned(),
-        );
-    }
     let user_content = super::scripts::UserContentRegistry::with_initial_global(
         initial_user_content_generation,
         initial_user_content,
@@ -425,11 +349,6 @@ pub(crate) fn install(
             .clear();
         Ok::<(), String>(())
     })?;
-    PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
-        drop(pending.replace(ExtensionRuntimeTerminalSlots::EMPTY));
-    });
-    EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
-    EXTENSION_RUNTIME_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(target_os = "macos")]
     PENDING_EXTENSION_BROWSER_REQUEST_TERMINALS.with(|pending| {
         drop(pending.replace(ExtensionBrowserRequestTerminalSlots::EMPTY));
@@ -438,22 +357,6 @@ pub(crate) fn install(
     EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
     #[cfg(target_os = "macos")]
     EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
-    #[cfg(target_os = "macos")]
-    PENDING_EXTENSION_RUNTIME_GRANT_TERMINALS.with(|pending| {
-        drop(pending.replace(ExtensionRuntimeGrantTerminalSlots::EMPTY));
-    });
-    #[cfg(target_os = "macos")]
-    EXTENSION_RUNTIME_GRANT_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
-    #[cfg(target_os = "macos")]
-    EXTENSION_RUNTIME_GRANT_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
-    #[cfg(target_os = "macos")]
-    PENDING_EXTENSION_ACTION_POPUP_TERMINALS.with(|pending| {
-        drop(pending.replace(ExtensionActionPopupTerminalSlots::EMPTY));
-    });
-    #[cfg(target_os = "macos")]
-    EXTENSION_ACTION_POPUP_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
-    #[cfg(target_os = "macos")]
-    EXTENSION_ACTION_POPUP_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(target_os = "macos")]
     PENDING_PAGE_PERMISSION_TERMINALS.with(|pending| {
         drop(pending.replace(PagePermissionTerminalSlots::EMPTY));
@@ -493,11 +396,6 @@ pub(crate) fn install(
             #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
             agent_cookie_quarantined_profiles: HashSet::new(),
             native_resources: NativeResourceLedger::default(),
-            extension_runtime_registry:
-                super::extension_runtime::ExtensionRuntimeRegistry::new(extension_runtime_gate),
-            #[cfg(target_os = "macos")]
-            publisher_native_messaging_denials: [0; 6],
-            extension_document_authority: super::extensions::ExtensionDocumentAuthority::default(),
             extension_browser_surfaces: HashMap::new(),
             #[cfg(target_os = "macos")]
             page_permissions: super::page_permissions::PagePermissionBroker::default(),
@@ -539,11 +437,6 @@ pub(crate) fn install(
             #[cfg(target_os = "macos")]
             macos_ephemeral_data_stores: HashMap::new(),
             #[cfg(target_os = "macos")]
-            macos_extension_controllers:
-                crate::platform::imp::PersistentControllerRegistry::with_browser_request_sink(
-                    sink.clone(),
-                ),
-            #[cfg(target_os = "macos")]
             webext: Default::default(),
             #[cfg(target_os = "windows")]
             hidden: std::collections::HashSet::new(),
@@ -565,11 +458,6 @@ pub(crate) fn install(
             browser_version_observers: HashMap::new(),
             #[cfg(target_os = "windows")]
             environments: HashMap::new(),
-            #[cfg(target_os = "windows")]
-            windows_extension_profiles: HashMap::new(),
-            #[cfg(target_os = "windows")]
-            windows_extension_environments:
-                super::WindowsExtensionEnvironmentRegistry::default(),
             #[cfg(target_os = "windows")]
             browser_processes: HashMap::new(),
             #[cfg(target_os = "windows")]
@@ -655,36 +543,12 @@ pub(super) fn finish_windows_native_tab(child: zephium_core::ids::ItemId, attach
     })
 }
 
-/// Local AppKit monitors must decide synchronously whether to consume an
-/// event. Reentrant host ownership therefore fails open to ordinary page input
-/// instead of queueing a stale keyboard gesture for later execution.
-#[cfg(target_os = "macos")]
-pub(crate) fn try_dispatch_macos_extension_command(event: &objc2_app_kit::NSEvent) -> bool {
-    if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
-        return false;
-    }
-    HOST.with(|host| {
-        host.try_borrow_mut()
-            .ok()
-            .and_then(|mut host| {
-                host.as_mut()
-                    .map(|host| host.dispatch_macos_extension_command(event))
-            })
-            .unwrap_or(false)
-    })
-}
-
 #[cfg(test)]
 pub(crate) fn make_unavailable_for_test() {
     HOST_SEALED.with(|sealed| sealed.set(false));
     HOST_INSTALLING.with(|installing| installing.set(false));
     HOST.with(|host| *host.borrow_mut() = None);
     PENDING.with(|pending| pending.borrow_mut().clear());
-    PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
-        drop(pending.replace(ExtensionRuntimeTerminalSlots::EMPTY));
-    });
-    EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
-    EXTENSION_RUNTIME_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(target_os = "macos")]
     PENDING_EXTENSION_BROWSER_REQUEST_TERMINALS.with(|pending| {
         drop(pending.replace(ExtensionBrowserRequestTerminalSlots::EMPTY));
@@ -693,22 +557,6 @@ pub(crate) fn make_unavailable_for_test() {
     EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
     #[cfg(target_os = "macos")]
     EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
-    #[cfg(target_os = "macos")]
-    PENDING_EXTENSION_RUNTIME_GRANT_TERMINALS.with(|pending| {
-        drop(pending.replace(ExtensionRuntimeGrantTerminalSlots::EMPTY));
-    });
-    #[cfg(target_os = "macos")]
-    EXTENSION_RUNTIME_GRANT_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
-    #[cfg(target_os = "macos")]
-    EXTENSION_RUNTIME_GRANT_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
-    #[cfg(target_os = "macos")]
-    PENDING_EXTENSION_ACTION_POPUP_TERMINALS.with(|pending| {
-        drop(pending.replace(ExtensionActionPopupTerminalSlots::EMPTY));
-    });
-    #[cfg(target_os = "macos")]
-    EXTENSION_ACTION_POPUP_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
-    #[cfg(target_os = "macos")]
-    EXTENSION_ACTION_POPUP_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(target_os = "macos")]
     PENDING_PAGE_PERMISSION_TERMINALS.with(|pending| {
         drop(pending.replace(PagePermissionTerminalSlots::EMPTY));
@@ -770,19 +618,6 @@ where
     with_priority(HostTaskPriority::ProfileErasure, None, f)
 }
 
-/// Admit one exact extension-runtime lifecycle or terminal debt.
-///
-/// The dedicated band is noncoalescing and cannot be consumed or replaced by
-/// ordinary renderer work. Shutdown sealing rejects new debts, while every
-/// debt admitted before the shutdown barrier remains ahead of it in FIFO
-/// order.
-pub(super) fn try_with_extension_runtime<F>(f: F) -> bool
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    with_priority(HostTaskPriority::ExtensionRuntime, None, f)
-}
-
 /// Admit one exact production agent-context lifecycle or resource-audit task.
 ///
 /// Its fixed noncoalescing band is independently capped by the public native
@@ -830,122 +665,6 @@ pub(crate) fn agent_context_terminal_depth_for_audit() -> Option<usize> {
 ))]
 pub(crate) const fn agent_context_terminal_depth_for_audit() -> Option<usize> {
     Some(0)
-}
-
-/// Admits one exact native extension terminal independently of ordinary
-/// ingress. Shutdown sealing and host reentrancy cannot discard it.
-#[cfg(any(target_os = "macos", test))]
-pub(super) fn with_extension_runtime_terminal<F>(f: F) -> bool
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    admit_extension_runtime_terminal(Box::new(f))
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn admit_extension_runtime_terminal(task: HostTask) -> bool {
-    enum Admission {
-        Accepted,
-        Quarantined,
-        QuarantineExhausted(HostTask),
-    }
-
-    let admission = PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
-        let mut slots = pending.take();
-        let admission = match slots.push_back(task) {
-            Ok(()) => Admission::Accepted,
-            Err(task) => match slots.quarantine_overflow(task) {
-                Ok(()) => Admission::Quarantined,
-                Err(task) => Admission::QuarantineExhausted(task),
-            },
-        };
-        pending.set(slots);
-        admission
-    });
-    match admission {
-        Admission::Accepted => drain_extension_runtime_terminals(),
-        Admission::Quarantined => {
-            EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(true));
-            HOST_SEALED.with(|sealed| sealed.set(true));
-            let _ = drain_extension_runtime_terminals();
-            false
-        }
-        Admission::QuarantineExhausted(task) => {
-            // Reaching a second overflow contradicts both the fixed logical
-            // owner ceiling and the first overflow's process-wide fail-stop.
-            // Aborting is the only bounded, non-unwinding action that cannot
-            // destroy another unknown native owner.
-            let _retained = std::mem::ManuallyDrop::new(task);
-            std::process::abort();
-        }
-    }
-}
-
-fn drain_extension_runtime_terminals() -> bool {
-    enum Drain {
-        Complete(bool),
-        Deferred,
-        Unavailable,
-    }
-
-    let drain = HOST.with(|cell| {
-        let Ok(mut slot) = cell.try_borrow_mut() else {
-            return Drain::Deferred;
-        };
-        let Some(host) = slot.as_mut() else {
-            return Drain::Unavailable;
-        };
-        Drain::Complete(drain_extension_runtime_terminals_with_host(host))
-    });
-    match drain {
-        Drain::Complete(clean) => clean,
-        Drain::Deferred => true,
-        Drain::Unavailable => false,
-    }
-}
-
-fn drain_extension_runtime_terminals_with_host(host: &mut EngineHost) -> bool {
-    loop {
-        let task = PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
-            let mut slots = pending.take();
-            let task = slots.pop_front();
-            pending.set(slots);
-            task
-        });
-        let Some(task) = task else {
-            break;
-        };
-        task(host);
-        #[cfg(not(target_os = "windows"))]
-        host.finish_content_policy_shutdown_if_quiescent();
-    }
-
-    if !EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED.with(Cell::get) {
-        return true;
-    }
-    HOST_SEALED.with(|sealed| sealed.set(true));
-    host.extension_runtime_registry
-        .fail_terminal_transport_invariant();
-    let report =
-        EXTENSION_RUNTIME_TERMINAL_FAILURE_REPORTED.with(|reported| !reported.replace(true));
-    if report {
-        (host.native_terminal_failure)(
-            "extension runtime terminal transport exceeded its proven exact capacity",
-        );
-    }
-    false
-}
-
-pub(super) fn extension_runtime_terminals_are_quiescent() -> bool {
-    if EXTENSION_RUNTIME_TERMINAL_INVARIANT_FAILED.with(Cell::get) {
-        return false;
-    }
-    PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
-        let slots = pending.take();
-        let empty = slots.is_empty();
-        pending.set(slots);
-        empty
-    })
 }
 
 /// Admit a Shell settlement or watchdog for an already-retained native
@@ -1123,157 +842,6 @@ fn drain_page_permission_terminals_with_host(host: &mut EngineHost) -> bool {
     false
 }
 
-/// Admits collection, timeout, and Shell-settlement tasks for the fixed
-/// optional-grant cohort. This ring is independent from tab mutations and
-/// popup loading, so saturation in one native delegate surface cannot strand
-/// another surface's retained Objective-C completion blocks.
-#[cfg(target_os = "macos")]
-pub(crate) fn with_extension_runtime_grant_terminal<F>(f: F) -> bool
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    let task: HostTask = Box::new(f);
-    enum Admission {
-        Accepted,
-        Quarantined,
-        Exhausted,
-    }
-    let admission = PENDING_EXTENSION_RUNTIME_GRANT_TERMINALS.with(|pending| {
-        let mut slots = pending.take();
-        let admission = match slots.push_back(task) {
-            Ok(()) => Admission::Accepted,
-            Err(task) => match slots.quarantine_overflow(task) {
-                Ok(()) => Admission::Quarantined,
-                Err(_task) => Admission::Exhausted,
-            },
-        };
-        pending.set(slots);
-        admission
-    });
-    match admission {
-        Admission::Accepted => drain_extension_runtime_grant_terminals(),
-        Admission::Quarantined | Admission::Exhausted => {
-            EXTENSION_RUNTIME_GRANT_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(true));
-            HOST_SEALED.with(|sealed| sealed.set(true));
-            let _ = drain_extension_runtime_grant_terminals();
-            false
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn drain_extension_runtime_grant_terminals() -> bool {
-    enum Drain {
-        Complete(bool),
-        Deferred,
-        Unavailable,
-    }
-    let drain = HOST.with(|cell| {
-        let Ok(mut slot) = cell.try_borrow_mut() else {
-            return Drain::Deferred;
-        };
-        let Some(host) = slot.as_mut() else {
-            return Drain::Unavailable;
-        };
-        Drain::Complete(drain_extension_runtime_grant_terminals_with_host(host))
-    });
-    match drain {
-        Drain::Complete(clean) => clean,
-        Drain::Deferred => true,
-        Drain::Unavailable => false,
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn drain_extension_runtime_grant_terminals_with_host(host: &mut EngineHost) -> bool {
-    loop {
-        let task = PENDING_EXTENSION_RUNTIME_GRANT_TERMINALS.with(|pending| {
-            let mut slots = pending.take();
-            let task = slots.pop_front();
-            pending.set(slots);
-            task
-        });
-        let Some(task) = task else {
-            break;
-        };
-        task(host);
-    }
-    if !EXTENSION_RUNTIME_GRANT_TERMINAL_INVARIANT_FAILED.with(Cell::get) {
-        return true;
-    }
-    let report =
-        EXTENSION_RUNTIME_GRANT_TERMINAL_FAILURE_REPORTED.with(|reported| !reported.replace(true));
-    if report {
-        (host.native_terminal_failure)(
-            "extension runtime grant terminals exceeded their proven exact capacity",
-        );
-    }
-    false
-}
-
-#[cfg(target_os = "macos")]
-fn drain_extension_action_popup_terminals() -> bool {
-    enum Drain {
-        Complete(bool),
-        Deferred,
-        Unavailable,
-    }
-    let drain = HOST.with(|cell| {
-        let Ok(mut slot) = cell.try_borrow_mut() else {
-            return Drain::Deferred;
-        };
-        let Some(host) = slot.as_mut() else {
-            return Drain::Unavailable;
-        };
-        Drain::Complete(drain_extension_action_popup_terminals_with_host(host))
-    });
-    match drain {
-        Drain::Complete(clean) => clean,
-        Drain::Deferred => true,
-        Drain::Unavailable => false,
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn drain_extension_action_popup_terminals_with_host(host: &mut EngineHost) -> bool {
-    loop {
-        let task = PENDING_EXTENSION_ACTION_POPUP_TERMINALS.with(|pending| {
-            let mut slots = pending.take();
-            let task = slots.pop_front();
-            pending.set(slots);
-            task
-        });
-        let Some(task) = task else {
-            break;
-        };
-        task(host);
-    }
-    if !EXTENSION_ACTION_POPUP_TERMINAL_INVARIANT_FAILED.with(Cell::get) {
-        return true;
-    }
-    let report =
-        EXTENSION_ACTION_POPUP_TERMINAL_FAILURE_REPORTED.with(|reported| !reported.replace(true));
-    if report {
-        (host.native_terminal_failure)(
-            "extension action popup terminals exceeded their proven exact capacity",
-        );
-    }
-    false
-}
-
-/// Admit the sole read-only extension profile-absence fence.
-///
-/// This separately budgeted slot cannot consume the exact owner lifecycle and
-/// publication cohort. The factory-side ingress prevents a second physical
-/// callback from reaching this queue while a timed-out callback is still
-/// retained by the platform dispatcher or this host queue.
-pub(super) fn try_with_extension_runtime_profile_fence<F>(f: F) -> bool
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    with_priority(HostTaskPriority::ExtensionRuntimeProfileFence, None, f)
-}
-
 pub(crate) fn try_with_close<F>(id: ItemId, f: F) -> bool
 where
     F: FnOnce(&mut EngineHost) + 'static,
@@ -1310,52 +878,6 @@ where
     with_priority(
         HostTaskPriority::Lifecycle,
         Some(HostTaskKey::NavigationCommit(id)),
-        f,
-    )
-}
-
-/// Coalesces provisional navigation wake hints per physical view. The hint is
-/// compatibility work rather than ownership authority: losing it degrades the
-/// extension request but never authorizes page access or consumes the reserved
-/// commit/lifecycle bands.
-#[cfg(target_os = "macos")]
-pub(super) fn with_extension_background_wake<F>(id: ItemId, f: F) -> bool
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    with_priority(
-        HostTaskPriority::Lifecycle,
-        Some(HostTaskKey::ExtensionBackgroundWake(id)),
-        f,
-    )
-}
-
-/// Latest accepted main-frame URL attempt for one physical tab. It precedes
-/// the terminal navigation settlement in the same lifecycle band, so an
-/// extension can observe an OAuth callback even when no page commits there.
-#[cfg(target_os = "macos")]
-pub(super) fn with_provisional_tab_url<F>(id: ItemId, f: F) -> bool
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    with_priority(
-        HostTaskPriority::Lifecycle,
-        Some(HostTaskKey::ProvisionalTabUrl(id)),
-        f,
-    )
-}
-
-/// A Started transition is an ordering barrier for extension document
-/// permits. Its key intentionally does not use the globally coalesced commit
-/// slot: adjacent duplicates may collapse, but no intervening redemption or
-/// settlement can be crossed by a later start/commit.
-pub(super) fn with_extension_permit_invalidation<F>(id: ItemId, f: F) -> bool
-where
-    F: FnOnce(&mut EngineHost) + 'static,
-{
-    with_priority(
-        HostTaskPriority::Lifecycle,
-        Some(HostTaskKey::ExtensionPermitInvalidation(id)),
         f,
     )
 }
@@ -1512,6 +1034,7 @@ where
         Executed,
         Reentrant,
         Unavailable,
+        #[cfg(target_os = "macos")]
         TerminalFailed,
     }
 
@@ -1526,19 +1049,8 @@ where
                 return Access::Unavailable;
             };
             if priority == HostTaskPriority::Shutdown {
-                if !drain_extension_runtime_terminals_with_host(host) {
-                    return Access::TerminalFailed;
-                }
                 #[cfg(target_os = "macos")]
                 if !drain_extension_browser_request_terminals_with_host(host) {
-                    return Access::TerminalFailed;
-                }
-                #[cfg(target_os = "macos")]
-                if !drain_extension_runtime_grant_terminals_with_host(host) {
-                    return Access::TerminalFailed;
-                }
-                #[cfg(target_os = "macos")]
-                if !drain_extension_action_popup_terminals_with_host(host) {
                     return Access::TerminalFailed;
                 }
                 #[cfg(target_os = "macos")]
@@ -1561,6 +1073,7 @@ where
     });
     match access {
         Access::Unavailable => return false,
+        #[cfg(target_os = "macos")]
         Access::TerminalFailed => return false,
         Access::Reentrant => {
             return PENDING.with(|pending| {
@@ -1605,25 +1118,8 @@ where
         Access::Executed => {}
     }
 
-    if !drain_extension_runtime_terminals() {
-        HOST_SEALED.with(|sealed| sealed.set(true));
-        return false;
-    }
-
     #[cfg(target_os = "macos")]
     if !drain_extension_browser_request_terminals() {
-        HOST_SEALED.with(|sealed| sealed.set(true));
-        return false;
-    }
-
-    #[cfg(target_os = "macos")]
-    if !drain_extension_runtime_grant_terminals() {
-        HOST_SEALED.with(|sealed| sealed.set(true));
-        return false;
-    }
-
-    #[cfg(target_os = "macos")]
-    if !drain_extension_action_popup_terminals() {
         HOST_SEALED.with(|sealed| sealed.set(true));
         return false;
     }
@@ -1691,22 +1187,8 @@ where
             HOST_SEALED.with(|sealed| sealed.set(true));
             return false;
         }
-        if !drain_extension_runtime_terminals() {
-            HOST_SEALED.with(|sealed| sealed.set(true));
-            return false;
-        }
         #[cfg(target_os = "macos")]
         if !drain_extension_browser_request_terminals() {
-            HOST_SEALED.with(|sealed| sealed.set(true));
-            return false;
-        }
-        #[cfg(target_os = "macos")]
-        if !drain_extension_runtime_grant_terminals() {
-            HOST_SEALED.with(|sealed| sealed.set(true));
-            return false;
-        }
-        #[cfg(target_os = "macos")]
-        if !drain_extension_action_popup_terminals() {
             HOST_SEALED.with(|sealed| sealed.set(true));
             return false;
         }
@@ -1734,18 +1216,6 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
         // when exercised directly as well.
         return false;
     }
-    if queued.priority == HostTaskPriority::ExtensionRuntime
-        && pending
-            .iter()
-            .filter(|task| task.priority == HostTaskPriority::ExtensionRuntime)
-            .count()
-            >= EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
-    {
-        // These are exact, noncoalescible owner obligations. Their reserved
-        // band is also a hard cohort ceiling; spare ordinary/navigation space
-        // is never borrowed by retries while the UI thread is stalled.
-        return false;
-    }
     #[cfg(feature = "agentic-browser")]
     if queued.priority == HostTaskPriority::AgentContext
         && pending
@@ -1769,17 +1239,6 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
     {
         return false;
     }
-    if queued.priority == HostTaskPriority::ExtensionRuntimeProfileFence
-        && pending
-            .iter()
-            .filter(|task| task.priority == HostTaskPriority::ExtensionRuntimeProfileFence)
-            .count()
-            >= EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
-    {
-        // A stale timed-out callback remains a physical queue occupant until
-        // the UI borrow unwinds. Never borrow another band for a duplicate.
-        return false;
-    }
     #[cfg(all(
         feature = "agentic-browser",
         any(target_os = "macos", target_os = "windows")
@@ -1797,31 +1256,29 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
     if queued.priority == HostTaskPriority::AgentContext {
         return enqueue_bounded_pending(pending, queued);
     }
-    if queued.priority != HostTaskPriority::ExtensionRuntime {
-        let Some(key) = queued.key else {
-            return enqueue_bounded_pending(pending, queued);
-        };
-        if matches!(key, HostTaskKey::NavigationCommit(_)) {
-            // A newer exact commit makes an older still-queued commit task a
-            // stale no-op. Coalesce globally (not merely adjacently), keeping
-            // at most one reserved security gate per bounded native view.
-            if let Some(index) = pending.iter().rposition(|task| task.key == Some(key)) {
-                pending.remove(index);
-                pending.push_back(queued);
-                return true;
-            }
-        }
-        if let Some(back) = pending.back().filter(|task| task.key == Some(key)) {
-            // Coalesce only an adjacent callback. Crossing an intervening host
-            // task can invert native facts around a create/navigation (most
-            // critically, a profile-process exit around a profile rebuild).
-            if queued.priority < back.priority {
-                return true;
-            }
-            pending.pop_back();
+    let Some(key) = queued.key else {
+        return enqueue_bounded_pending(pending, queued);
+    };
+    if matches!(key, HostTaskKey::NavigationCommit(_)) {
+        // A newer exact commit makes an older still-queued commit task a
+        // stale no-op. Coalesce globally (not merely adjacently), keeping
+        // at most one reserved security gate per bounded native view.
+        if let Some(index) = pending.iter().rposition(|task| task.key == Some(key)) {
+            pending.remove(index);
             pending.push_back(queued);
             return true;
         }
+    }
+    if let Some(back) = pending.back().filter(|task| task.key == Some(key)) {
+        // Coalesce only an adjacent callback. Crossing an intervening host
+        // task can invert native facts around a create/navigation (most
+        // critically, a profile-process exit around a profile rebuild).
+        if queued.priority < back.priority {
+            return true;
+        }
+        pending.pop_back();
+        pending.push_back(queued);
+        return true;
     }
     enqueue_bounded_pending(pending, queued)
 }
@@ -1842,12 +1299,8 @@ fn enqueue_bounded_pending(pending: &mut VecDeque<QueuedHostTask>, queued: Queue
         HostTaskPriority::AgentContextTerminal => NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY,
         #[cfg(feature = "agentic-browser")]
         HostTaskPriority::AgentContext => NON_AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY,
-        HostTaskPriority::ExtensionRuntime => NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY,
-        HostTaskPriority::ExtensionRuntimeProfileFence => {
-            NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
-        }
         _ if matches!(queued.key, Some(HostTaskKey::NavigationCommit(_))) => {
-            NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
+            NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY
         }
         _ => NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY,
     };
@@ -1878,14 +1331,10 @@ fn enqueue_bounded_pending(pending: &mut VecDeque<QueuedHostTask>, queued: Queue
             .iter()
             .position(|task| task.priority < queued.priority),
         HostTaskPriority::Observation | HostTaskPriority::Lifecycle | HostTaskPriority::Close => {
-            pending.iter().position(|task| {
-                task.priority < queued.priority
-                    && task.priority != HostTaskPriority::ExtensionRuntime
-            })
+            pending
+                .iter()
+                .position(|task| task.priority < queued.priority)
         }
-        // Accepted owner operations are exact authority debts. Replacing one
-        // would leak or fabricate native ownership settlement.
-        HostTaskPriority::ExtensionRuntime => None,
         #[cfg(all(
             feature = "agentic-browser",
             any(target_os = "macos", target_os = "windows")
@@ -1896,7 +1345,6 @@ fn enqueue_bounded_pending(pending: &mut VecDeque<QueuedHostTask>, queued: Queue
             not(any(target_os = "macos", target_os = "windows"))
         ))]
         HostTaskPriority::AgentContext => None,
-        HostTaskPriority::ExtensionRuntimeProfileFence => None,
         // Its dedicated band guarantees the bounded first cohort. Past that
         // point rejecting this attempt is safer than dropping an already
         // admitted close/lifecycle obligation; the public retirement gate has
@@ -2159,176 +1607,6 @@ mod tests {
         HOST_SEALED.with(|sealed| sealed.set(false));
     }
 
-    #[test]
-    fn extension_runtime_terminals_survive_shutdown_seal_and_recursive_queue_borrow() {
-        make_unavailable_for_test();
-        HOST_SEALED.with(|sealed| sealed.set(true));
-        HOST.with(|host| {
-            let _active_host_borrow = host.borrow_mut();
-            PENDING.with(|pending| {
-                let _recursive_pending_borrow = pending.borrow_mut();
-                assert!(admit_extension_runtime_terminal(Box::new(|_| {
-                    panic!("reentrant terminal must not execute early")
-                })));
-                assert!(admit_extension_runtime_terminal(Box::new(|_| {
-                    panic!("reentrant terminal must not execute early")
-                })));
-            });
-        });
-        assert_eq!(
-            PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
-                let slots = pending.take();
-                let len = slots.len();
-                pending.set(slots);
-                len
-            }),
-            2
-        );
-        assert!(!extension_runtime_terminals_are_quiescent());
-        assert!(PENDING.with(|pending| pending.borrow().is_empty()));
-        make_unavailable_for_test();
-    }
-
-    #[test]
-    fn extension_runtime_terminal_slots_are_fixed_capacity_fifo_and_noncoalescing() {
-        struct DropMarker {
-            value: usize,
-            order: Arc<std::sync::Mutex<Vec<usize>>>,
-        }
-
-        impl Drop for DropMarker {
-            fn drop(&mut self) {
-                self.order
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(self.value);
-            }
-        }
-
-        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut slots = ExtensionRuntimeTerminalSlots::default();
-        for value in 0..EXTENSION_RUNTIME_TERMINAL_CAPACITY {
-            let marker = DropMarker {
-                value,
-                order: Arc::clone(&order),
-            };
-            assert!(slots.push_back(Box::new(move |_| drop(marker))).is_ok());
-        }
-        assert_eq!(slots.len(), EXTENSION_RUNTIME_TERMINAL_CAPACITY);
-        assert!(slots.push_back(Box::new(|_| {})).is_err());
-        for _ in 0..EXTENSION_RUNTIME_TERMINAL_CAPACITY {
-            drop(slots.pop_front());
-        }
-        assert!(slots.is_empty());
-        assert_eq!(
-            *order
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            (0..EXTENSION_RUNTIME_TERMINAL_CAPACITY).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn extension_runtime_overflow_quarantine_stays_before_reentrant_new_work() {
-        struct DropMarker {
-            value: usize,
-            order: Arc<std::sync::Mutex<Vec<usize>>>,
-        }
-
-        impl Drop for DropMarker {
-            fn drop(&mut self) {
-                self.order
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(self.value);
-            }
-        }
-
-        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let task = |value| {
-            let marker = DropMarker {
-                value,
-                order: Arc::clone(&order),
-            };
-            Box::new(move |_: &mut EngineHost| drop(marker)) as HostTask
-        };
-        let mut slots = ExtensionRuntimeTerminalSlots::default();
-        for value in 0..EXTENSION_RUNTIME_TERMINAL_CAPACITY {
-            assert!(slots.push_back(task(value)).is_ok());
-        }
-        let quarantined = slots
-            .push_back(task(EXTENSION_RUNTIME_TERMINAL_CAPACITY))
-            .expect_err("the normal ring is full");
-        assert!(slots.quarantine_overflow(quarantined).is_ok());
-
-        drop(slots.pop_front());
-        assert!(slots
-            .push_back(task(EXTENSION_RUNTIME_TERMINAL_CAPACITY + 1))
-            .is_ok());
-        while !slots.is_empty() {
-            drop(slots.pop_front());
-        }
-
-        assert_eq!(
-            *order
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            (0..(EXTENSION_RUNTIME_TERMINAL_CAPACITY + 2)).collect::<Vec<_>>(),
-            "Q must remain ahead of R appended by an older task during drain"
-        );
-    }
-
-    #[test]
-    fn extension_runtime_terminal_overflow_is_sticky_and_never_claims_quiescence() {
-        struct DropMarker(Arc<AtomicUsize>);
-
-        impl Drop for DropMarker {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        make_unavailable_for_test();
-        PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
-            let mut slots = pending.take();
-            for _ in 0..EXTENSION_RUNTIME_TERMINAL_CAPACITY {
-                assert!(slots.push_back(Box::new(|_| {})).is_ok());
-            }
-            pending.set(slots);
-        });
-        let drops = Arc::new(AtomicUsize::new(0));
-        let marker = DropMarker(Arc::clone(&drops));
-        assert!(!admit_extension_runtime_terminal(Box::new(move |_| {
-            drop(marker);
-        })));
-        assert_eq!(drops.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
-                let slots = pending.take();
-                let len = slots.len();
-                pending.set(slots);
-                len
-            }),
-            EXTENSION_RUNTIME_TERMINAL_CAPACITY + 1,
-            "the only rejected owner-bearing closure remains in the fixed quarantine"
-        );
-        assert!(!extension_runtime_terminals_are_quiescent());
-
-        PENDING_EXTENSION_RUNTIME_TERMINALS.with(|pending| {
-            let mut slots = pending.take();
-            for _ in 0..EXTENSION_RUNTIME_TERMINAL_CAPACITY {
-                drop(slots.pop_front());
-                assert_eq!(drops.load(Ordering::SeqCst), 0);
-            }
-            drop(slots.pop_front());
-            assert_eq!(drops.load(Ordering::SeqCst), 1);
-            assert!(slots.is_empty());
-            pending.set(slots);
-        });
-        make_unavailable_for_test();
-        assert!(extension_runtime_terminals_are_quiescent());
-    }
-
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn content_policy_terminals_survive_recursive_queue_borrow_and_shutdown_seal() {
@@ -2413,31 +1691,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn extension_runtime_band_is_hard_capped_in_an_otherwise_empty_queue() {
-        let mut pending = VecDeque::new();
-        for _ in 0..EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY {
-            assert!(enqueue_pending(
-                &mut pending,
-                queued(HostTaskPriority::ExtensionRuntime)
-            ));
-        }
-        for _ in 0..(2 * EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY) {
-            assert!(!enqueue_pending(
-                &mut pending,
-                queued(HostTaskPriority::ExtensionRuntime)
-            ));
-        }
-        assert_eq!(pending.len(), EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY);
-        assert_eq!(
-            pending
-                .iter()
-                .filter(|task| task.priority == HostTaskPriority::ExtensionRuntime)
-                .count(),
-            EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
-        );
-    }
-
     #[cfg(feature = "agentic-browser")]
     #[test]
     fn agent_context_band_is_fixed_noncoalescing_and_recovers_exact_capacity() {
@@ -2499,87 +1752,6 @@ mod tests {
     }
 
     #[test]
-    fn extension_runtime_band_recovers_only_after_an_exact_task_leaves() {
-        let mut pending = VecDeque::new();
-        let key = HostTaskKey::View(ItemId::from(1_u128));
-        assert!(enqueue_pending(
-            &mut pending,
-            keyed(HostTaskPriority::ExtensionRuntime, key)
-        ));
-        assert!(enqueue_pending(
-            &mut pending,
-            keyed(HostTaskPriority::ExtensionRuntime, key)
-        ));
-        assert_eq!(pending.len(), 2, "exact tasks are never coalesced");
-        for _ in 2..EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY {
-            assert!(enqueue_pending(
-                &mut pending,
-                queued(HostTaskPriority::ExtensionRuntime)
-            ));
-        }
-        assert!(!enqueue_pending(
-            &mut pending,
-            queued(HostTaskPriority::ExtensionRuntime)
-        ));
-
-        drop(
-            pending
-                .pop_front()
-                .expect("one exact task leaves the queue"),
-        );
-        assert!(enqueue_pending(
-            &mut pending,
-            queued(HostTaskPriority::ExtensionRuntime)
-        ));
-        assert_eq!(pending.len(), EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY);
-        assert_eq!(
-            pending
-                .iter()
-                .filter(|task| task.priority == HostTaskPriority::ExtensionRuntime)
-                .count(),
-            EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
-        );
-    }
-
-    #[test]
-    fn profile_fence_has_one_separate_slot_and_cannot_consume_exact_owner_debts() {
-        let mut pending = VecDeque::new();
-        assert!(enqueue_pending(
-            &mut pending,
-            queued(HostTaskPriority::ExtensionRuntimeProfileFence)
-        ));
-        assert!(!enqueue_pending(
-            &mut pending,
-            queued(HostTaskPriority::ExtensionRuntimeProfileFence)
-        ));
-
-        for _ in 0..EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY {
-            assert!(enqueue_pending(
-                &mut pending,
-                queued(HostTaskPriority::ExtensionRuntime)
-            ));
-        }
-        assert!(!enqueue_pending(
-            &mut pending,
-            queued(HostTaskPriority::ExtensionRuntime)
-        ));
-        assert_eq!(
-            pending
-                .iter()
-                .filter(|task| task.priority == HostTaskPriority::ExtensionRuntimeProfileFence)
-                .count(),
-            EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
-        );
-        assert_eq!(
-            pending
-                .iter()
-                .filter(|task| task.priority == HostTaskPriority::ExtensionRuntime)
-                .count(),
-            EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
-        );
-    }
-
-    #[test]
     fn reentrant_queue_bounds_shutdown_and_prioritizes_close() {
         let mut pending = VecDeque::new();
         for _ in 0..NORMAL_PENDING_HOST_TASK_CAPACITY {
@@ -2615,26 +1787,6 @@ mod tests {
                     HostTaskPriority::Lifecycle,
                     HostTaskKey::NavigationCommit(ItemId::from(raw as u128))
                 )
-            ));
-        }
-        assert_eq!(
-            pending.len(),
-            NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
-        );
-
-        assert!(enqueue_pending(
-            &mut pending,
-            queued(HostTaskPriority::ExtensionRuntimeProfileFence)
-        ));
-        assert_eq!(
-            pending.len(),
-            NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
-        );
-
-        for _ in 0..EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY {
-            assert!(enqueue_pending(
-                &mut pending,
-                queued(HostTaskPriority::ExtensionRuntime)
             ));
         }
         assert_eq!(pending.len(), NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY);
@@ -2706,31 +1858,7 @@ mod tests {
                 )
             ));
         }
-        assert_eq!(
-            pending.len(),
-            NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
-        );
-
-        assert!(enqueue_pending(
-            &mut pending,
-            queued(HostTaskPriority::ExtensionRuntimeProfileFence)
-        ));
-        assert_eq!(
-            pending.len(),
-            NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
-        );
-
-        for _ in 0..EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY {
-            assert!(enqueue_pending(
-                &mut pending,
-                queued(HostTaskPriority::ExtensionRuntime)
-            ));
-        }
         assert_eq!(pending.len(), NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY);
-        assert!(!enqueue_pending(
-            &mut pending,
-            queued(HostTaskPriority::ExtensionRuntime)
-        ));
         #[cfg(feature = "agentic-browser")]
         for _ in 0..AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY {
             assert!(enqueue_pending(
@@ -2773,21 +1901,7 @@ mod tests {
                 .iter()
                 .filter(|task| task.priority == HostTaskPriority::Lifecycle)
                 .count(),
-            NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
-        );
-        assert_eq!(
-            pending
-                .iter()
-                .filter(|task| { task.priority == HostTaskPriority::ExtensionRuntimeProfileFence })
-                .count(),
-            EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
-        );
-        assert_eq!(
-            pending
-                .iter()
-                .filter(|task| task.priority == HostTaskPriority::ExtensionRuntime)
-                .count(),
-            EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
+            NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY
         );
         assert_eq!(
             pending
@@ -2807,21 +1921,7 @@ mod tests {
                 .iter()
                 .filter(|task| task.priority == HostTaskPriority::Lifecycle)
                 .count(),
-            NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
-        );
-        assert_eq!(
-            pending
-                .iter()
-                .filter(|task| { task.priority == HostTaskPriority::ExtensionRuntimeProfileFence })
-                .count(),
-            EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY
-        );
-        assert_eq!(
-            pending
-                .iter()
-                .filter(|task| task.priority == HostTaskPriority::ExtensionRuntime)
-                .count(),
-            EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
+            NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY
         );
         assert_eq!(
             pending
@@ -2893,51 +1993,6 @@ mod tests {
     }
 
     #[test]
-    fn extension_permit_invalidation_never_crosses_an_intervening_operation() {
-        let id = ItemId::from(7);
-        let invalidation = HostTaskKey::ExtensionPermitInvalidation(id);
-        let mut pending = VecDeque::new();
-        assert!(enqueue_pending(
-            &mut pending,
-            keyed(HostTaskPriority::Lifecycle, invalidation)
-        ));
-        assert!(enqueue_pending(
-            &mut pending,
-            queued(HostTaskPriority::Normal)
-        ));
-        assert!(enqueue_pending(
-            &mut pending,
-            keyed(HostTaskPriority::Lifecycle, invalidation)
-        ));
-        assert!(enqueue_pending(
-            &mut pending,
-            keyed(
-                HostTaskPriority::Lifecycle,
-                HostTaskKey::NavigationCommit(id)
-            )
-        ));
-
-        assert_eq!(pending.len(), 4);
-        assert_eq!(pending[0].key, Some(invalidation));
-        assert_eq!(pending[1].key, None);
-        assert_eq!(pending[2].key, Some(invalidation));
-        assert_eq!(pending[3].key, Some(HostTaskKey::NavigationCommit(id)));
-
-        // Back-to-back redirects may collapse without crossing work.
-        assert!(enqueue_pending(
-            &mut pending,
-            keyed(HostTaskPriority::Lifecycle, invalidation)
-        ));
-        assert_eq!(pending.len(), 5);
-        assert!(enqueue_pending(
-            &mut pending,
-            keyed(HostTaskPriority::Lifecycle, invalidation)
-        ));
-        assert_eq!(pending.len(), 5);
-        assert_eq!(pending[4].key, Some(invalidation));
-    }
-
-    #[test]
     fn committed_document_gate_has_one_reserved_globally_coalesced_slot_per_native_view() {
         let id = ItemId::from(7);
         let commit = HostTaskKey::NavigationCommit(id);
@@ -2986,7 +2041,7 @@ mod tests {
             &mut pending,
             keyed(HostTaskPriority::Lifecycle, commit)
         ));
-        assert!(pending.len() <= NON_EXTENSION_RUNTIME_PROFILE_FENCE_PENDING_HOST_TASK_CAPACITY);
+        assert!(pending.len() <= NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY);
     }
 
     #[test]

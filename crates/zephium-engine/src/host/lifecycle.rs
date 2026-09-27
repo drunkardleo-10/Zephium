@@ -69,9 +69,6 @@ impl EngineHost {
     pub(crate) fn close(&mut self, id: ItemId) {
         #[cfg(target_os = "macos")]
         self.webext.close_page(id);
-        // Revoke browser-document authority before the native view can begin
-        // teardown or its logical id can be reused by a replacement.
-        self.extension_document_authority.revoke_item(id);
         #[cfg(target_os = "macos")]
         self.revoke_page_permission_requests_for_close(id);
         let profile = self
@@ -157,13 +154,6 @@ impl EngineHost {
     ) {
         self.shutdown_common();
         self.retry_windows_cleanup_debts(3);
-        let extension_environment_bindings_valid = self
-            .windows_extension_environments
-            .bindings_are_consistent(&self.environments, &self.windows_extension_profiles);
-        // Runtime owners are already quiescent at this boundary. Release the
-        // read-only profile COM authorities before environment/process
-        // shutdown so they cannot keep an otherwise viewless profile alive.
-        self.windows_extension_profiles.clear();
 
         let mut provenance_valid = self.unverifiable_browser_processes.is_empty()
             && self.construction_unproven.is_empty()
@@ -171,10 +161,7 @@ impl EngineHost {
             && self.unproven_environments.is_empty()
             && self.windows_cleanup_debts.is_empty()
             && !self.windows_cleanup_invariant_failed
-            && !crate::platform::imp::native_extension_cleanup_invariant_failed()
             && !self.native_resource_accounting_failed
-            && extension_environment_bindings_valid
-            && self.extension_runtime_registry.is_quiescent()
             && self.native_resources.is_quiescent()
             && self
                 .environments
@@ -209,7 +196,6 @@ impl EngineHost {
         // initiates normal runtime shutdown. Observer guards intentionally
         // remain UI-thread-owned until process exit signals their proofs.
         self.browser_version_observers.clear();
-        self.windows_extension_environments.clear();
         self.environments.clear();
         self.exiting_browser_processes.clear();
         self.pending_profile_recovery.clear();
@@ -222,10 +208,6 @@ impl EngineHost {
     }
 
     fn shutdown_common(&mut self) {
-        // Shutdown is a terminal authority barrier, including runtimes that
-        // currently have no tab-scoped grant rows.
-        self.extension_runtime_registry.seal();
-        self.extension_document_authority.revoke_all();
         #[cfg(all(
             feature = "agentic-browser",
             any(target_os = "macos", target_os = "windows")
@@ -253,23 +235,6 @@ impl EngineHost {
             self.close(id);
         }
         self.spare = None;
-        #[cfg(target_os = "macos")]
-        {
-            // Ingress is already terminally sealed by the Engine boundary,
-            // but closing each view must still clear its weak native binding
-            // while the exact controller entry is inspectable. Seal the
-            // controller registry only after those non-allocating retirements;
-            // sealing earlier would turn an orderly close into a fabricated
-            // integrity failure.
-            self.macos_extension_controllers.seal();
-        }
-        #[cfg(target_os = "macos")]
-        if !self.macos_extension_controllers.release_all_after_views() {
-            // Reuse the host's existing sticky clean-shutdown barrier. A
-            // loaded context, ownership contradiction, or out-of-order
-            // release must never be normalized by clearing the native map.
-            self.native_resource_accounting_failed = true;
-        }
         self.begin_content_policy_shutdown();
         self.navigation_snapshots.clear();
         self.partitions.clear();

@@ -585,17 +585,6 @@ const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec; 3] = [
     },
 ];
 
-/// Exact native installation descriptors for the feature-gated macOS
-/// WKWebExtension admission probe. Keeping the probe sourced from this single
-/// registry makes a future protected-script addition fail the installed-state
-/// gate unless its real source and frame scope survive native extension
-/// load/unload as well.
-#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
-pub(crate) fn protected_script_specs_for_native_probe(
-) -> [(&'static str, bool); PROTECTED_SCRIPT_SPECS.len()] {
-    PROTECTED_SCRIPT_SPECS.map(|spec| (spec.source, spec.all_frames))
-}
-
 fn protected_scripts() -> &'static [UserScript; PROTECTED_SCRIPT_SPECS.len()] {
     // These descriptors contain only immutable, profile-independent source
     // and matching rules. Each view still gets its own native registrations

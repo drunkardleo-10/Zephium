@@ -1,7 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-#[cfg(target_os = "macos")]
-use std::sync::OnceLock;
 
 use zephium_core::ids::ItemId;
 use zephium_core::navigation;
@@ -13,34 +11,6 @@ use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker};
 
 use super::permits::{navigation_callback_matches, EventPermit};
 use super::{EngineHost, NavigationSnapshot};
-
-#[cfg(target_os = "macos")]
-pub(super) fn extension_tab_trace_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("ZEPHIUM_EXTENSION_TAB_TRACE").as_deref() == Ok("1"))
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn extension_tab_origin_category(target: &str) -> &'static str {
-    let Ok(url) = url::Url::parse(target) else {
-        return "invalid";
-    };
-    if url.scheme() == "https"
-        && url.host_str().is_some_and(|host| {
-            host.strip_suffix(".chromiumapp.org").is_some_and(|id| {
-                id.len() == 32 && id.bytes().all(|byte| matches!(byte, b'a'..=b'p'))
-            })
-        })
-    {
-        "chromiumapp_shaped"
-    } else if url.scheme() == "https" {
-        "other_https"
-    } else if url.scheme() == "http" {
-        "other_http"
-    } else {
-        "other_scheme"
-    }
-}
 
 pub(super) fn bounded_title(title: &str) -> String {
     zephium_core::item::sanitize_page_title(title)
@@ -127,71 +97,6 @@ fn restored_navigation_can_present(
 }
 
 impl EngineHost {
-    #[cfg(target_os = "macos")]
-    fn clear_extension_tab_url_attempt(&mut self, id: ItemId) {
-        let Some(view) = self.views.get(&id) else {
-            return;
-        };
-        let Some(profile) = self
-            .partitions
-            .get(&id)
-            .map(|partition| partition.profile())
-        else {
-            return;
-        };
-        let native = crate::platform::imp::native_webview(&view.view);
-        self.macos_extension_controllers
-            .clear_browser_tab_url_attempt(profile, id, &native);
-    }
-
-    #[cfg(target_os = "macos")]
-    pub(super) fn observe_extension_tab_url_attempt(
-        &mut self,
-        id: ItemId,
-        source_permit: &EventPermit,
-        target: &str,
-    ) {
-        let trace = |outcome: &str| {
-            if extension_tab_trace_enabled() {
-                eprintln!(
-                    "extension-tab-trace: host-observe origin={} outcome={outcome}",
-                    extension_tab_origin_category(target)
-                );
-            }
-        };
-        let Some(view) = self.views.get(&id) else {
-            trace("view-absent");
-            return;
-        };
-        if !view.event_permit.same_generation(source_permit)
-            || view.event_permit.active_token().is_none()
-            || !navigation::is_allowed_str(target)
-        {
-            trace("view-generation-or-policy-refused");
-            return;
-        }
-        let Some(profile) = self
-            .partitions
-            .get(&id)
-            .map(|partition| partition.profile())
-        else {
-            trace("profile-absent");
-            return;
-        };
-        let native = crate::platform::imp::native_webview(&view.view);
-        match self
-            .macos_extension_controllers
-            .observe_browser_tab_url_attempt(profile, id, &native, target)
-        {
-            Ok(true) => trace("published"),
-            Ok(false) => trace("native-tab-unavailable"),
-            Err(_) => {
-                trace("native-refused");
-                eprintln!("extensions: native provisional tab URL observation refused");
-            }
-        }
-    }
-
     /// Re-arm the native presentation gate for one exact identity-bearing
     /// main-frame commit. Provisional loads leave the prior document visible;
     /// this transition runs only at commit, before the new document is allowed
@@ -228,24 +133,6 @@ impl EngineHost {
                     epoch,
                 ) && view.navigation.current_committed() == Some(epoch)
             });
-        }
-
-        #[cfg(target_os = "macos")]
-        self.clear_extension_tab_url_attempt(id);
-
-        if let Some((committed, url)) = source_navigation.committed_snapshot() {
-            if committed == epoch {
-                // The identity-bearing commit is the earliest point at which
-                // a retained activeTab origin may move to a new document. Do
-                // this before any native hide/stage operation can pump.
-                self.extension_document_authority.on_committed_document(
-                    id,
-                    source_permit,
-                    source_navigation,
-                    epoch,
-                    &url,
-                );
-            }
         }
 
         if let Some(view) = self.views.get_mut(&id) {
@@ -479,44 +366,9 @@ impl EngineHost {
             }
             announce
         };
-        // A same-document History API/hash observation can update the exact
-        // URL inside the committed epoch. Preserve the origin grant, but
-        // consume permits tied to the prior URL before emitting chrome facts.
-        self.extension_document_authority.on_committed_document(
-            id,
-            &event_permit,
-            &navigation,
-            epoch,
-            &url,
-        );
         let previous = self.navigation_snapshots.entry(id).or_default();
         for event in navigation_observation_events(id, previous, Some(&url), history) {
             event_permit.emit(&self.sink, event);
-        }
-        #[cfg(target_os = "macos")]
-        if same_document_url_changed {
-            // The fixed signal carries no page- or extension-selected data.
-            // Revalidate the exact physical generation immediately before
-            // scheduling it, after document-bound extension permits have
-            // moved to the newly observed URL.
-            let Some(view) = self.views.get(&id).filter(|view| {
-                navigation_callback_matches(
-                    &view.event_permit,
-                    &view.navigation,
-                    &event_permit,
-                    &navigation,
-                    epoch,
-                ) && view.navigation.matches_committed_snapshot(epoch, &url)
-            }) else {
-                return false;
-            };
-            if crate::platform::imp::signal_same_document_navigation(view).is_err() {
-                // Normal browsing remains valid if WebKit refuses this
-                // compatibility notification. The authenticated product gate
-                // makes such a regression release-blocking without turning a
-                // recoverable extension degradation into a tab crash.
-                eprintln!("engine: same-document extension signal was not scheduled");
-            }
         }
         if became_presentable || same_document_url_changed {
             // The URL event above enters the shell's ordered critical band

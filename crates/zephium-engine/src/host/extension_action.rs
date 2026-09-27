@@ -1,9 +1,8 @@
 //! Product action projection at the authenticated runtime/controller/tab join.
 
 use zephium_core::extensions::{
-    ExtensionActionRejection, ExtensionActionRequest, ExtensionActionSettlement,
-    ExtensionActionSnapshotSettlement, ExtensionBrowserSurfaceGeneration,
-    ExtensionOptionsPageSettlement, ExtensionRuntimeInstance,
+    ExtensionActionRequest, ExtensionActionSettlement, ExtensionActionSnapshotSettlement,
+    ExtensionBrowserSurfaceGeneration,
 };
 use zephium_core::ids::{ItemId, ProfileId};
 
@@ -29,17 +28,6 @@ impl EngineHost {
     ) -> ExtensionActionSettlement {
         let parent = popup_parent_view(&self.parent);
         self.webext.invoke(request, parent)
-    }
-
-    pub(crate) fn open_extension_options(
-        &mut self,
-        runtime: ExtensionRuntimeInstance,
-    ) -> ExtensionOptionsPageSettlement {
-        if self.webext.open_options(runtime) {
-            ExtensionOptionsPageSettlement::Opened
-        } else {
-            ExtensionOptionsPageSettlement::Rejected(ExtensionActionRejection::RuntimeUnavailable)
-        }
     }
 }
 

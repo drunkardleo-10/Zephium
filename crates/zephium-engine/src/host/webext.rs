@@ -286,7 +286,7 @@ impl WebextHost {
             };
             let label = unsafe { action.label() }.to_string();
             let badge = unsafe { action.badgeText() }.to_string();
-            let icon = crate::platform::imp::rasterize_webext_action_icon(&action);
+            let icon = crate::platform::imp::rasterize_action_icon(&action);
             let revision = presentation_revision(&label, &badge, icon.as_ref().map(|i| i.rgba()));
             let runtime = ExtensionRuntimeInstance::new(profile, *install_id, install.generation);
             let badge = truncate(
@@ -512,27 +512,6 @@ impl WebextHost {
                 _ => page.view.stopLoading(),
             }
         }
-        true
-    }
-
-    pub(crate) fn open_options(&mut self, runtime: ExtensionRuntimeInstance) -> bool {
-        let Some(entry) = self.profiles.get(&runtime.profile()) else {
-            return false;
-        };
-        let Some(install) = entry.installs.get(&runtime.install_id()) else {
-            return false;
-        };
-        let Some(url) = entry
-            .runtime
-            .context(&install.extension_id)
-            .and_then(|context| unsafe { context.optionsPageURL() })
-            .and_then(|url| url.absoluteString())
-        else {
-            return false;
-        };
-        entry
-            .bridge
-            .open_page(install.extension_id.clone(), url.to_string(), None);
         true
     }
 }

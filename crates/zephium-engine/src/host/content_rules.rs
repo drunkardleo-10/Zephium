@@ -1268,7 +1268,6 @@ impl EngineHost {
             return;
         };
         let clean = !self.native_resource_accounting_failed
-            && self.extension_runtime_registry.is_quiescent()
             && self.native_resources.is_quiescent()
             && self.declarative_content_policy_bytes == 0
             && self.declarative_content_policy_queue.is_empty();

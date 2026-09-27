@@ -1800,10 +1800,9 @@ fn validate_engine_windows_agent_context_boundary(
         "with_permission_handler(|_|wry::PermissionResponse::Deny)",
         "with_download_policy(DownloadPolicy::DenyWithoutMetadata)",
         "with_environment(environment.clone())",
-        "with_browser_extension_startup_gate(gate)",
-        "builder.with_profile_name(name)",
+        "builder.with_profile_name(name.clone())",
         "builder.with_incognito(true)",
-        "profile_inventory_is_empty(&profile,deadline)",
+        "attest_profile(&profile,&view.environment(),&view.webview(),",
         "super::attest_environment(environment,expected_user_data_folder)",
         "controller_environment_matches(environment,core)",
         "profile_is_private(&profile)",
@@ -1821,7 +1820,7 @@ fn validate_engine_windows_agent_context_boundary(
         "pub(crate)fncookie_destination(",
         "matches!(self.profile,AgentOwnedProfile::Automation{..})",
         "super::same_environment(&self.view.environment(),expected_environment)",
-        "self.attest(deadline)?",
+        "self.attest()?",
         "ifself.attest_suspension_state()?",
         "core.CookieManager()",
         "profile.cast::<ICoreWebView2Profile2>()",
@@ -1879,7 +1878,7 @@ fn validate_engine_windows_agent_context_boundary(
 
     let host = compact(host);
     for required in [
-        "ensure_windows_extension_profile_at_path",
+        "ensure_windows_profile_environment_at_path",
         "browser_process(view.view())",
         "install_content_policy_on_view(view.view(),&content_policy)",
         "resource.reclassify(NativeResourceClass::AgentContext)",
@@ -1899,7 +1898,7 @@ fn validate_engine_windows_agent_context_boundary(
         "self.agent_cookie_transfers.len()>=MAX_PENDING_COOKIE_TRANSFERS",
         "pending.destination_profile==destination_profile",
         "self.selected_profile_cookie_source(",
-        ".cookie_destination(&expected_environment,terminal_deadline)",
+        ".cookie_destination(&expected_environment)",
         "map_cookie_transfer_deadline(request.window(),admitted_at,Instant::now(),)",
         "schedule_content_policy_timeout(watchdog_duration",
         "fnfinish_windows_agent_cookie_transfer",
@@ -1952,6 +1951,8 @@ fn validate_engine_windows_agent_context_boundary(
             "keybd_event",
             "CGEvent",
             "native-agentic-input-probe",
+            "with_browser_extension_startup_gate",
+            "with_browser_extensions_enabled",
         ] {
             if source.contains(forbidden) {
                 return Err(format!(
@@ -3802,9 +3803,6 @@ fn validate_windows_semantic_probe(
         ".with_incognito(true)",
         ".with_visible(false)",
         ".with_focused(false)",
-        ".with_browser_extension_startup_gate(move|environment,core|",
-        "attest_environment(environment,&bootstrap_path)?",
-        "super::extensions::profile_inventory_is_empty(",
         "ContextProfileStorageClass::Ephemeral",
         "ContextOwnedViewport::STANDARD",
         "AgentOwnedProfile::automation(profile_id)",
