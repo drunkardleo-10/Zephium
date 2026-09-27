@@ -8383,7 +8383,7 @@ fn validate_agent_app_lifecycle(
 
     let root = compact_without_line_comments(root);
     for required in [
-        "#[cfg(feature=\"agentic-browser\")]pubuseactor::{spawn_agentic,spawn_agentic_suspended,AgenticLifecycles,AgenticSpawnFailure};",
+        "#[cfg(feature=\"agentic-browser\")]pubuseactor::{spawn_agentic,spawn_agentic_suspended,AgenticSpawnFailure};",
         "#[cfg(feature=\"agentic-browser\")]pubuseapi::AgentLifecycle;",
     ] {
         if !root.contains(required) {
@@ -8410,14 +8410,12 @@ fn validate_agent_app_lifecycle(
         "typeFailure=AgenticSpawnFailure;",
         "structShellHandoff<Agent=NoAgentLifecycle>",
         "agent_lifecycle:Agent,",
-        "pubstructAgenticLifecycles{extension:ExtensionLifecycle,agent:AgentLifecycle,}",
-        "pubfninto_parts(self)->(ExtensionLifecycle,AgentLifecycle)",
-        "pubstructAgenticSpawnFailure{error:SpawnError,extension_lifecycle:ExtensionLifecycle,agent_lifecycle:AgentLifecycle,worker_cleanup_proven:bool,}",
-        "pubfninto_parts(self)->(SpawnError,ExtensionLifecycle,AgentLifecycle)",
+        "pubstructAgenticSpawnFailure{error:SpawnError,agent_lifecycle:AgentLifecycle,worker_cleanup_proven:bool,}",
+        "pubfninto_parts(self)->(SpawnError,AgentLifecycle)",
         "pubfnspawn_agentic_suspended(",
         "agent_lifecycle:PendingAgentBrowserLifecycle(agent_lifecycle),",
         "#[cfg_attr(not(test),deny(clippy::panic,clippy::unreachable,clippy::unwrap_used))]fnspawn_suspended_with_worker_spawner",
-        "lethandoff=ShellHandoff{engine,store,blocker,extension_service,agent_lifecycle,terminal_failure,chrome,emit,};",
+        "lethandoff=ShellHandoff{engine,store,blocker,agent_lifecycle,terminal_failure,chrome,emit,};",
         "ShellHandoff<Agent>",
         "ports.with_agent_lifecycle(agent_lifecycle.into_shell_lifecycle())",
     ] {
@@ -8433,9 +8431,7 @@ fn validate_agent_app_lifecycle(
         );
     }
     for forbidden in [
-        "letmutextension_service=Some(extension_service)",
         "letmutagent_lifecycle=Some(agent_lifecycle)",
-        "expect(\"pendingextension-serviceownerisunique\")",
         "expect(\"pendingagentlifecycleownerisunique\")",
     ] {
         if actor.contains(forbidden) {
@@ -8480,18 +8476,15 @@ fn validate_agent_app_lifecycle(
     let agent = ordered
         .find("self.shutdown_agent_lifecycle_until(deadline)")
         .ok_or_else(|| "application agent lifecycle shutdown is missing".to_owned())?;
-    let extension = ordered
-        .find("self.shutdown_extension_service_until(deadline)")
-        .ok_or_else(|| "application extension lifecycle shutdown is missing".to_owned())?;
     let store = ordered
         .find("self.store.shutdown_until(deadline)")
         .ok_or_else(|| "application terminal Store shutdown is missing".to_owned())?;
     let engine = ordered
         .rfind("self.shutdown_native_and_blocker_until(deadline)")
         .ok_or_else(|| "application terminal engine shutdown is missing".to_owned())?;
-    if !(flush < agent && agent < extension && extension < store && store < engine) {
+    if !(flush < agent && agent < store && store < engine) {
         return Err(
-            "agent lifecycle must follow retryable durability preflight and precede extension, Store, and engine teardown"
+            "agent lifecycle must follow retryable durability preflight and precede Store and engine teardown"
                 .to_owned(),
         );
     }
@@ -8506,7 +8499,6 @@ fn validate_agent_app_lifecycle(
     let unexpected = &shell[unexpected_start..unexpected_end];
     for required in [
         "self.shutdown_agent_lifecycle_until(deadline)",
-        "self.shutdown_extension_service_until(deadline)",
         "self.store.shutdown_until(deadline)",
         "self.shutdown_native_and_blocker_until(deadline)",
     ] {
@@ -9512,16 +9504,16 @@ mod tests {
                 .is_err()
         );
         let invalid_actor = actor.replace(
-            "pub fn into_parts(self) -> (SpawnError, ExtensionLifecycle, AgentLifecycle)",
-            "pub fn into_parts(self) -> (SpawnError, ExtensionLifecycle)",
+            "pub fn into_parts(self) -> (SpawnError, AgentLifecycle)",
+            "pub fn into_parts(self) -> SpawnError",
         );
         assert!(
             validate_agent_app_lifecycle(manifest, root, api, &invalid_actor, shell, desktop)
                 .is_err()
         );
         let invalid_actor = actor.replace(
-            "        extension_service,\n        agent_lifecycle,\n        terminal_failure,",
-            "        extension_service: Some(extension_service)\n            .take()\n            .expect(\"pending extension-service owner is unique\"),\n        agent_lifecycle,\n        terminal_failure,",
+            "        blocker,\n        agent_lifecycle,\n        terminal_failure,",
+            "        blocker,\n        agent_lifecycle: Some(agent_lifecycle)\n            .take()\n            .expect(\"pending agent lifecycle owner is unique\"),\n        terminal_failure,",
         );
         assert!(
             validate_agent_app_lifecycle(manifest, root, api, &invalid_actor, shell, desktop)
@@ -9537,8 +9529,8 @@ mod tests {
                 .is_err()
         );
         let invalid_shell = shell.replacen(
-            "let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);\n        #[cfg(not(feature = \"agentic-browser\"))]\n        let agent_lifecycle_clean = true;\n        let extension_service_clean = self.shutdown_extension_service_until(deadline);",
-            "let extension_service_clean = self.shutdown_extension_service_until(deadline);\n        #[cfg(not(feature = \"agentic-browser\"))]\n        let agent_lifecycle_clean = true;\n        let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);",
+            "self.shutdown_agent_lifecycle_until(deadline)",
+            "self.shutdown_agent_lifecycle_after_store(deadline)",
             1,
         );
         assert!(

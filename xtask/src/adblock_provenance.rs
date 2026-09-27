@@ -707,8 +707,6 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
             "zephium-blocker",
             "zephium-blocker-service",
             "zephium-blocker-update",
-            "zephium-extension-distribution",
-            "zephium-extension-updater",
             "zephium-update-transport",
         ],
     )?;
@@ -731,10 +729,6 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
             "zephium-update-transport",
             "crates/zephium-update-transport",
         ),
-        (
-            "zephium-extension-distribution",
-            "crates/zephium-extension-distribution",
-        ),
     ] {
         let dependency = workspace_dependencies
             .get(name)
@@ -749,23 +743,6 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
         require_string(dependency, "version", "=0.1.0")?;
         require_bool(dependency, "default-features", false)?;
     }
-    let updater_workspace = workspace_dependencies
-        .get("zephium-extension-updater")
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| {
-            "root workspace has no structured zephium-extension-updater dependency".to_owned()
-        })?;
-    require_key_set(
-        updater_workspace,
-        &["path", "version"],
-        "root zephium-extension-updater dependency",
-    )?;
-    require_string(
-        updater_workspace,
-        "path",
-        "crates/zephium-extension-updater",
-    )?;
-    require_string(updater_workspace, "version", "=0.1.0")?;
     let tough = workspace_dependencies
         .get("tough")
         .and_then(toml::Value::as_table)
@@ -824,9 +801,7 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
     )?;
     validate_blocker_update_manifest(repository)?;
     validate_update_transport_manifest(repository)?;
-    validate_extension_distribution_manifest(repository)?;
     validate_private_fs_validation_manifest(repository)?;
-    validate_extension_updater_manifest(repository)?;
     validate_blocker_service_manifest(repository)?;
     validate_blocker_fuzz_manifest(repository)?;
 
@@ -837,13 +812,7 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
     for kind in ["dependencies", "build-dependencies", "dev-dependencies"] {
         if let Some(dependencies) = desktop.get(kind).and_then(toml::Value::as_table) {
             let allowed = if kind == "dependencies" {
-                [
-                    "zephium-blocker-service",
-                    "zephium-extension-authority",
-                    "zephium-extension-distribution",
-                    "zephium-extension-updater",
-                ]
-                .as_slice()
+                ["zephium-blocker-service"].as_slice()
             } else {
                 [].as_slice()
             };
@@ -867,36 +836,6 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
         "desktop zephium-blocker-service dependency",
     )?;
     require_bool(service, "workspace", true)?;
-    for name in [
-        "url",
-        "zephium-extension-authority",
-        "zephium-extension-distribution",
-        "zephium-extension-updater",
-    ] {
-        let dependency = desktop_dependencies
-            .get(name)
-            .and_then(toml::Value::as_table)
-            .ok_or_else(|| format!("desktop has no structured optional {name} dependency"))?;
-        require_key_set(
-            dependency,
-            &["optional", "workspace"],
-            &format!("desktop optional {name} dependency"),
-        )?;
-        require_bool(dependency, "workspace", true)?;
-        require_bool(dependency, "optional", true)?;
-    }
-    let desktop_features = require_table(&desktop, "features")?;
-    require_string_array(
-        desktop_features,
-        "curated-extension-distribution",
-        &[
-            "dep:url",
-            "dep:zephium-extension-authority",
-            "dep:zephium-extension-distribution",
-            "dep:zephium-extension-updater",
-            "zephium-extension-service/acquired-packages",
-        ],
-    )?;
     let targets = require_table(&desktop, "target")?;
     let reviewed_targets = BTreeSet::from([
         "cfg(target_os = \"windows\")",
@@ -918,8 +857,6 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
                     "adblock"
                         | "zephium-blocker-service"
                         | "zephium-blocker-update"
-                        | "zephium-extension-distribution"
-                        | "zephium-extension-updater"
                         | "zephium-update-transport"
                 ) || (package == "zephium-blocker"
                     && (!reviewed_targets.contains(target.as_str())
@@ -1203,207 +1140,6 @@ fn validate_private_fs_validation_manifest(repository: &Path) -> Result<(), Stri
     // There is deliberately no default feature or production forwarding alias.
     // The crate independently rejects optimized builds with this gate enabled.
     require_string_array(features, "windows-namespace-validation", &[])
-}
-
-fn validate_extension_distribution_manifest(repository: &Path) -> Result<(), String> {
-    let distribution = parse_table(
-        &read_text(&repository.join("crates/zephium-extension-distribution/Cargo.toml"))?,
-        "zephium-extension-distribution Cargo.toml",
-    )?;
-    require_string(
-        require_table(&distribution, "package")?,
-        "name",
-        "zephium-extension-distribution",
-    )?;
-    let dependencies = require_table(&distribution, "dependencies")?;
-    let features = require_table(&distribution, "features")?;
-    require_key_set(
-        features,
-        &[
-            "beta-admission",
-            "local-extension-lab",
-            "public-policy",
-            "staging-extension-catalog",
-            "windows-namespace-validation",
-        ],
-        "zephium-extension-distribution feature table",
-    )?;
-    require_string_array(
-        features,
-        "beta-admission",
-        &[
-            "public-policy",
-            "dep:zephium-extension-acquisition",
-            "dep:base64",
-        ],
-    )?;
-    require_string_array(
-        features,
-        "windows-namespace-validation",
-        &[
-            "beta-admission",
-            "zephium-private-fs/windows-namespace-validation",
-        ],
-    )?;
-    require_string_array(
-        features,
-        "public-policy",
-        &[
-            "dep:async-trait",
-            "dep:bytes",
-            "dep:futures-util",
-            "dep:serde",
-            "dep:serde_json",
-            "dep:tough",
-            "dep:zephium-private-fs",
-        ],
-    )?;
-    require_key_set(
-        dependencies,
-        &[
-            "async-trait",
-            "base64",
-            "bytes",
-            "futures-util",
-            "serde",
-            "serde_json",
-            "sha2",
-            "thiserror",
-            "tokio",
-            "tough",
-            "url",
-            "zephium-core",
-            "zephium-extension-acquisition",
-            "zephium-extension-authority",
-            "zephium-extension-package",
-            "zephium-private-fs",
-            "zephium-update-transport",
-        ],
-        "zephium-extension-distribution dependency table",
-    )?;
-    for (name, version) in [
-        ("async-trait", "=0.1.89"),
-        ("bytes", "1"),
-        ("futures-util", "0.3"),
-    ] {
-        let dependency = require_dependency_table(dependencies, name)?;
-        require_key_set(
-            dependency,
-            &["optional", "version"],
-            &format!("optional extension policy {name}"),
-        )?;
-        require_string(dependency, "version", version)?;
-        require_bool(dependency, "optional", true)?;
-    }
-    for name in [
-        "base64",
-        "serde",
-        "serde_json",
-        "tough",
-        "zephium-private-fs",
-    ] {
-        let dependency = require_dependency_table(dependencies, name)?;
-        require_key_set(
-            dependency,
-            &["optional", "workspace"],
-            &format!("optional extension policy {name}"),
-        )?;
-        require_bool(dependency, "workspace", true)?;
-        require_bool(dependency, "optional", true)?;
-    }
-    require_dependency_version(dependencies, "sha2", "=0.10.9")?;
-    for name in [
-        "thiserror",
-        "url",
-        "zephium-core",
-        "zephium-extension-authority",
-        "zephium-update-transport",
-    ] {
-        require_workspace_dependency(dependencies, name, &[])?;
-    }
-    require_workspace_dependency(dependencies, "tokio", &["sync", "time"])?;
-    let package = require_dependency_table(dependencies, "zephium-extension-package")?;
-    require_key_set(
-        package,
-        &["path", "version"],
-        "zephium-extension-distribution package dependency",
-    )?;
-    require_string(package, "path", "../zephium-extension-package")?;
-    require_string(package, "version", "=0.1.0")?;
-
-    let acquisition = require_dependency_table(dependencies, "zephium-extension-acquisition")?;
-    require_key_set(
-        acquisition,
-        &["path", "version", "optional"],
-        "Beta acquired-source dependency",
-    )?;
-    require_string(acquisition, "path", "../zephium-extension-acquisition")?;
-    require_string(acquisition, "version", "=0.1.0")?;
-    require_bool(acquisition, "optional", true)?;
-
-    let dev_dependencies = require_table(&distribution, "dev-dependencies")?;
-    require_key_set(
-        dev_dependencies,
-        &[
-            "base64",
-            "jiff",
-            "ring",
-            "tempfile",
-            "zephium-store",
-            "zephium-extension-runtime-api",
-            "zip",
-        ],
-        "zephium-extension-distribution dev-dependency table",
-    )?;
-    require_workspace_dependency(dev_dependencies, "base64", &[])?;
-    let zip = require_dependency_table(dev_dependencies, "zip")?;
-    require_key_set(
-        zip,
-        &["version", "default-features"],
-        "Beta test ZIP dependency",
-    )?;
-    require_string(zip, "version", "=8.6.0")?;
-    require_bool(zip, "default-features", false)?;
-    require_dependency_version(dev_dependencies, "jiff", "0.2")?;
-    require_workspace_dependency(dev_dependencies, "tempfile", &[])?;
-    require_workspace_dependency(dev_dependencies, "ring", &[])?;
-    // Test-only real Store joins; no fixture authority is exported and the
-    // production distribution dependency graph still excludes Store.
-    require_workspace_dependency(dev_dependencies, "zephium-store", &[])?;
-    require_workspace_dependency(dev_dependencies, "zephium-extension-runtime-api", &[])?;
-    Ok(())
-}
-
-fn validate_extension_updater_manifest(repository: &Path) -> Result<(), String> {
-    let updater = parse_table(
-        &read_text(&repository.join("crates/zephium-extension-updater/Cargo.toml"))?,
-        "zephium-extension-updater Cargo.toml",
-    )?;
-    require_string(
-        require_table(&updater, "package")?,
-        "name",
-        "zephium-extension-updater",
-    )?;
-    let dependencies = require_table(&updater, "dependencies")?;
-    require_key_set(
-        dependencies,
-        &[
-            "tokio",
-            "zephium-app",
-            "zephium-core",
-            "zephium-extension-distribution",
-        ],
-        "zephium-extension-updater dependency table",
-    )?;
-    require_workspace_dependency(dependencies, "tokio", &["rt", "sync", "time"])?;
-    for name in [
-        "zephium-app",
-        "zephium-core",
-        "zephium-extension-distribution",
-    ] {
-        require_workspace_dependency(dependencies, name, &[])?;
-    }
-    Ok(())
 }
 
 fn validate_blocker_service_manifest(repository: &Path) -> Result<(), String> {
@@ -1927,8 +1663,6 @@ fn reject_blocker_packages_except(
                 | "zephium-blocker"
                 | "zephium-blocker-service"
                 | "zephium-blocker-update"
-                | "zephium-extension-distribution"
-                | "zephium-extension-updater"
                 | "zephium-update-transport"
         ) && (!allowed.contains(&package) || name != package)
         {
@@ -2373,11 +2107,7 @@ fn verify_desktop_feature_graph(
     require_package_features(&tree, target, "zephium-blocker-service", "0.1.0", &[])?;
     require_package_features(&tree, target, "zephium-blocker-update", "0.1.0", &[])?;
     require_direct_product_package(&tree, target, "reqwest", "0.13.4")?;
-    for package in [
-        "tough",
-        "zephium-extension-distribution",
-        "zephium-update-transport",
-    ] {
+    for package in ["tough", "zephium-update-transport"] {
         reject_package(&tree, target, package)?;
     }
     Ok(())
