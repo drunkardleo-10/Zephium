@@ -230,6 +230,22 @@ impl Runtime {
         unsafe { context.loadBackgroundContentWithCompletionHandler(&completion) };
     }
 
+    /// Runs an extension's toolbar action as a user click on `tab`: WebKit
+    /// either fires `action.onClicked` or asks the host to present the popup.
+    pub fn perform_action(&self, id: &str, tab: Option<u64>) -> bool {
+        let Some(context) = self.context(id) else {
+            return false;
+        };
+        let tab = tab.and_then(|tab| self.shared.graph.borrow().tab(tab));
+        unsafe {
+            if let Some(tab) = &tab {
+                context.userGesturePerformedInTab(ProtocolObject::from_ref(&**tab));
+            }
+            context.performActionForTab(tab.as_deref().map(ProtocolObject::from_ref));
+        }
+        true
+    }
+
     /// Replaces the browser's windows and tabs, telling WebKit what changed.
     pub fn publish(&self, windows: &[WindowSnapshot], focused: Option<u64>) {
         let mtm = self.shared.mtm;

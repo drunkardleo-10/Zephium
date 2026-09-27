@@ -78,6 +78,24 @@ impl Host for LabHost {
         eprintln!("[{extension} {tag}] {message}");
     }
 
+    fn present_popup(&self, extension: &str, view: Retained<WKWebView>) -> bool {
+        eprintln!("[lab] WebKit popup for {extension}");
+        let Some(lab) = self.lab.borrow().upgrade() else {
+            return false;
+        };
+        view.setFrame(NSRect::new(
+            NSPoint::new(900.0, 0.0),
+            NSSize::new(500.0, 800.0),
+        ));
+        if let Some(old) = lab.page.borrow_mut().replace(view.clone()) {
+            old.removeFromSuperview();
+        }
+        if let Some(content) = lab.window.contentView() {
+            content.addSubview(&view);
+        }
+        true
+    }
+
     fn tab_request(&self, request: TabRequest, done: TabRequestDone) {
         eprintln!("[lab] extension tab request: {request:?}");
         let Some(lab) = self.lab.borrow().upgrade() else {
@@ -239,6 +257,27 @@ impl Lab {
                 println!("RESULT {result}");
                 next();
             });
+        } else if step.get("action").is_some() {
+            let id = this.extension.borrow().clone().unwrap_or_default();
+            let tab = Some(this.active.get()).filter(|tab| *tab != 0);
+            *this.page.borrow_mut() = None;
+            this.runtime.perform_action(&id, tab);
+            let lab = this.clone();
+            let ticks = Cell::new(0u32);
+            let waiting = this.clone();
+            wait_until(
+                move || {
+                    ticks.set(ticks.get() + 1);
+                    waiting.page.borrow().is_some() || ticks.get() > 100
+                },
+                move || match lab.page.borrow().clone() {
+                    Some(view) => wait_loaded(view, next),
+                    None => {
+                        println!("NO POPUP");
+                        next()
+                    }
+                },
+            );
         } else if step.get("errors").is_some() {
             let id = this.extension.borrow().clone().unwrap_or_default();
             if let Some(context) = this.runtime.context(&id) {
@@ -429,6 +468,19 @@ fn wait_loaded(view: Retained<WKWebView>, next: impl FnOnce() + 'static) {
         }
     });
     unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.1, true, &block) };
+}
+
+fn wait_until(condition: impl Fn() -> bool + 'static, then: impl FnOnce() + 'static) {
+    let then = RefCell::new(Some(then));
+    let block = RcBlock::new(move |timer: NonNull<NSTimer>| {
+        if condition() {
+            unsafe { timer.as_ref().invalidate() };
+            if let Some(then) = then.take() {
+                then();
+            }
+        }
+    });
+    unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.05, true, &block) };
 }
 
 fn after(ms: u64, next: impl FnOnce() + 'static) {

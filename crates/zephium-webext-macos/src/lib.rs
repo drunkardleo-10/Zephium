@@ -86,6 +86,10 @@ pub trait Host {
     /// Applies a tab change. A created tab must be published through
     /// [`Runtime::publish`] before `done` reports it.
     fn tab_request(&self, request: TabRequest, done: TabRequestDone);
+
+    /// Shows WebKit's popup view for an extension's action. Returning false
+    /// declines it, and WebKit closes the popup.
+    fn present_popup(&self, extension: &str, view: Retained<objc2_web_kit::WKWebView>) -> bool;
 }
 
 /// The application name every web view in the browser must share.

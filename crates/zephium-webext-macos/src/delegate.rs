@@ -177,14 +177,16 @@ define_class!(
             context: &WKWebExtensionContext,
             completion: &DynBlock<dyn Fn(*mut NSError)>,
         ) {
-            // Popups are shown in the browser's own view (see `popup`), never
-            // WebKit's; its view is only consulted for the page it would show.
-            unsafe { action.closePopup() };
-            self.log(
-                context,
-                LogLevel::Info,
-                "declined WebKit's own popup presentation",
-            );
+            let id = unsafe { context.uniqueIdentifier() }.to_string();
+            let shown = match (self.shared(), unsafe { action.popupWebView() }) {
+                (Some(shared), Some(view)) => shared.host().present_popup(&id, view),
+                _ => false,
+            };
+            if !shown {
+                unsafe { action.closePopup() };
+                let error = error("The popup could not be shown.");
+                return completion.call((Retained::as_ptr(&error).cast_mut(),));
+            }
             completion.call((std::ptr::null_mut(),));
         }
 
