@@ -126,10 +126,6 @@ const EVENT_FAVICONS: &str = "zephium:favicons";
 const EVENT_EXTENSION_ACTIONS: &str = "zephium:extension-actions";
 const EVENT_EXTENSION_ACTION_FAILED: &str = "zephium:extension-action-failed";
 const EVENT_EXTENSION_ACTION_SHORTCUT: &str = "zephium:extension-action-shortcut";
-const EVENT_EXTENSION_MANAGEMENT_AVAILABILITY: &str = "zephium:extension-management-availability";
-const EVENT_EXTENSION_MANAGEMENT: &str = "zephium:extension-management";
-const EVENT_EXTENSION_DISTRIBUTION: &str = "zephium:extension-distribution";
-const EVENT_EXTENSION_RUNTIME_GRANT_PROMPT: &str = "zephium:extension-runtime-grant-prompt";
 const EVENT_PAGE_PERMISSION_PROMPT: &str = "zephium:page-permission-prompt";
 const EVENT_PRESENTATION_TAB: &str = "zephium:presentation-tab";
 const EVENT_UI: &str = "zephium:ui-command";
@@ -1052,20 +1048,6 @@ struct ExtensionActionFailed(zephium_ipc::ExtensionActionFailedView);
 struct ExtensionActionShortcut(zephium_ipc::ExtensionActionShortcutView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
-struct ExtensionManagementAvailabilityChanged(
-    zephium_ipc::ExtensionManagementAvailabilityChangedView,
-);
-
-#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
-struct ExtensionManagementChanged(zephium_ipc::ExtensionManagementView);
-
-#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
-struct ExtensionDistributionChanged(zephium_ipc::ExtensionDistributionView);
-
-#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
-struct ExtensionRuntimeGrantPromptChanged(zephium_ipc::ExtensionRuntimeGrantPromptView);
-
-#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct PagePermissionPromptChanged(zephium_ipc::PagePermissionPromptView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -1301,10 +1283,6 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ExtensionActionsChanged,
             ExtensionActionFailed,
             ExtensionActionShortcut,
-            ExtensionManagementAvailabilityChanged,
-            ExtensionManagementChanged,
-            ExtensionDistributionChanged,
-            ExtensionRuntimeGrantPromptChanged,
             browser_credentials::BrowserCredentialCapabilityChanged,
             PagePermissionPromptChanged,
             UiCommand,
@@ -4336,30 +4314,6 @@ pub fn run() {
                     MAIN_LABEL,
                     EVENT_EXTENSION_ACTION_SHORTCUT,
                     &shortcut,
-                ),
-                Projection::ExtensionManagementAvailability(availability) => emit_to_privileged(
-                    &emit_handle,
-                    MAIN_LABEL,
-                    EVENT_EXTENSION_MANAGEMENT_AVAILABILITY,
-                    &availability,
-                ),
-                Projection::ExtensionManagement(management) => emit_to_privileged(
-                    &emit_handle,
-                    MAIN_LABEL,
-                    EVENT_EXTENSION_MANAGEMENT,
-                    &management,
-                ),
-                Projection::ExtensionDistribution(distribution) => emit_to_privileged(
-                    &emit_handle,
-                    MAIN_LABEL,
-                    EVENT_EXTENSION_DISTRIBUTION,
-                    &distribution,
-                ),
-                Projection::ExtensionRuntimeGrantPrompt(prompt) => emit_to_privileged(
-                    &emit_handle,
-                    MAIN_LABEL,
-                    EVENT_EXTENSION_RUNTIME_GRANT_PROMPT,
-                    &prompt,
                 ),
                 Projection::PagePermissionPrompt(prompt) => emit_to_privileged(
                     &emit_handle,

@@ -1347,10 +1347,6 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::ExtensionActions(_) => {}
         Projection::ExtensionActionFailed(_) => {}
         Projection::ExtensionActionShortcut(_) => {}
-        Projection::ExtensionManagementAvailability(_) => {}
-        Projection::ExtensionManagement(_) => {}
-        Projection::ExtensionDistribution(_) => {}
-        Projection::ExtensionRuntimeGrantPrompt(_) => {}
         Projection::PagePermissionPrompt(_) => {}
         Projection::Favicons(_) => {}
         Projection::PanelOwner(_) => {}
