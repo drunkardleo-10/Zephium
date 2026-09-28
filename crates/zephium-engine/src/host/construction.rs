@@ -1834,6 +1834,7 @@ impl EngineHost {
                 .with_picture_in_picture_enabled(false)
                 .with_general_autofill_enabled(false)
                 .with_navigation_handler(|target| target == "about:blank")
+                .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
                 .with_permission_handler(|_| wry::PermissionResponse::Deny)
                 .with_download_policy(DownloadPolicy::DenyWithoutMetadata)
                 .with_page_close_policy(wry::PageClosePolicy::Ignore);
