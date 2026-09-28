@@ -450,7 +450,8 @@ impl Runtime {
                 tab.webview()
                     .and_then(|view| unsafe { view.URL() })
                     .is_some_and(|url| {
-                        url.scheme().is_some_and(|scheme| scheme.to_string() == SCHEME)
+                        url.scheme()
+                            .is_some_and(|scheme| scheme.to_string() == SCHEME)
                             && url.host().is_some_and(|host| host.to_string() == id)
                     })
             })

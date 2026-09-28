@@ -52,11 +52,7 @@ async fn fetch(token: &str) -> Option<Vec<u8>> {
         .timeout(Duration::from_secs(20))
         .build()
         .ok()?;
-    let response = client
-        .get(format!("{HOST}{token}=s64"))
-        .send()
-        .await
-        .ok()?;
+    let response = client.get(format!("{HOST}{token}=s64")).send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -94,6 +90,9 @@ mod tests {
     #[test]
     fn only_raster_images_are_kept() {
         assert_eq!(image_type(b"\x89PNG\r\n\x1a\n...."), Some("image/png"));
-        assert_eq!(image_type(b"<svg xmlns='http://www.w3.org/2000/svg'/>"), None);
+        assert_eq!(
+            image_type(b"<svg xmlns='http://www.w3.org/2000/svg'/>"),
+            None
+        );
     }
 }

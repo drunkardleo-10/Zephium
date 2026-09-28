@@ -85,8 +85,9 @@ fn schedule(shared: Weak<Shared>) {
         return;
     }
     let touch = RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| touch(&shared));
-    let timer =
-        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(TOUCH_SECONDS, true, &touch) };
+    let timer = unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_repeats_block(TOUCH_SECONDS, true, &touch)
+    };
     TIMER.with(|slot| *slot.borrow_mut() = Some(timer));
 }
 
@@ -94,7 +95,10 @@ fn touch(shared: &Weak<Shared>) {
     let held: Vec<String> = WORKERS.with(|workers| {
         let mut workers = workers.borrow_mut();
         for worker in workers.values_mut() {
-            if worker.held_since.is_some_and(|since| since.elapsed() >= HOLD) {
+            if worker
+                .held_since
+                .is_some_and(|since| since.elapsed() >= HOLD)
+            {
                 worker.held_since = None;
             }
         }
@@ -114,7 +118,11 @@ fn touch(shared: &Weak<Shared>) {
     for id in held {
         if let Some(loaded) = loaded.get(&id) {
             let done = RcBlock::new(|_error: *mut NSError| {});
-            unsafe { loaded.context.loadBackgroundContentWithCompletionHandler(&done) };
+            unsafe {
+                loaded
+                    .context
+                    .loadBackgroundContentWithCompletionHandler(&done)
+            };
         }
     }
 }

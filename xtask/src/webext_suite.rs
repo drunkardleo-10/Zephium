@@ -346,7 +346,10 @@ mod tests {
         let passed = "LOADED Ok(..)\nRESULT 12\nRESULT CHECK true\nDONE\n";
         assert!(evaluate(&entry, passed).is_empty());
         let failed = "LOADED Ok(..)\nRESULT 12\nRESULT CHECK false\nDONE\n";
-        assert_eq!(evaluate(&entry, failed), ["did nothing on https://example.com/"]);
+        assert_eq!(
+            evaluate(&entry, failed),
+            ["did nothing on https://example.com/"]
+        );
     }
 
     #[test]
