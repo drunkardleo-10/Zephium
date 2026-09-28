@@ -13,7 +13,7 @@
   import { DownloadStatus } from "$features/downloads";
   import { EssentialsRail } from "$features/essentials";
   import { ExtensionActions } from "$features/extensions";
-  import { WebExtensionManager } from "$features/webext";
+  import { loadWebExtensionManager } from "$features/webext";
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
@@ -310,7 +310,12 @@
                 retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
               >
             {:else if browserPage.currentPage() === "extensions"}
-              <WebExtensionManager />
+              <LazyView
+                loader={loadWebExtensionManager}
+                loadingLabel={m.surface_loading()}
+                failureLabel={m.surface_render_failed()}
+                retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
+              >
             {:else if browserPage.currentPage() === "work"}
               {#key tabs.profile()?.id}<LazyView
                   loader={loadWorkWorkspace}

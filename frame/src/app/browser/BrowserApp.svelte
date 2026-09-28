@@ -118,6 +118,7 @@
     const extensionsReady = extensions.init();
     void webext.refresh();
     const stopAccess = webext.listenForAccess();
+    const stopDrops = webext.listenForDrops();
     const pagePermissionsReady = pagePermissions.init();
 
     // Rasters are emitted immediately before the projection that references
@@ -176,6 +177,7 @@
       extensions.dispose();
       pagePermissions.dispose();
       void stopAccess.then((stop) => stop());
+      void stopDrops.then((stop) => stop());
       favicons.dispose();
       tabs.dispose();
       ui.dispose();

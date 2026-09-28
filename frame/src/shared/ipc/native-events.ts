@@ -55,6 +55,7 @@ export const nativeEventNames = {
   extensionActionShortcut: "zephium:extension-action-shortcut",
   pagePermissionPromptChanged: "zephium:page-permission-prompt",
   webExtensionAccessRequested: "zephium:web-extension-access",
+  webExtensionDropped: "zephium:web-extension-dropped",
   browserReturn: "zephium:browser-return",
   presentationTab: "zephium:presentation-tab",
   uiCommand: "zephium:ui-command",
@@ -92,6 +93,8 @@ export const events = {
   webExtensionAccessRequested: scopedEvent<WebExtensionAccessRequested>(
     nativeEventNames.webExtensionAccessRequested,
   ),
+  /** The path of an extension package dropped on the browser. */
+  webExtensionDropped: scopedEvent<string>(nativeEventNames.webExtensionDropped),
   browserReturn: scopedEvent<ItemsChanged>(nativeEventNames.browserReturn),
   presentationTab: scopedEvent<PresentationTab>(nativeEventNames.presentationTab),
   uiCommand: scopedEvent<UiCommand>(nativeEventNames.uiCommand),

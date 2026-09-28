@@ -60,14 +60,28 @@ export async function refresh(): Promise<void> {
   }
 }
 
-export async function prepare(tabId: string): Promise<void> {
+type Reviewed =
+  { status: "ok"; data: WebExtensionReview | null } | { status: "error"; error: string };
+
+// Every way of installing ends in the same review; one runs at a time.
+async function reviewing(request: () => Promise<Reviewed>): Promise<void> {
   if (preparing) return;
   preparing = true;
   failure = null;
-  const result = await commands.webExtensionPrepare(tabId);
+  const result = await request();
   preparing = false;
   if (result.status === "ok") pendingReview = result.data;
   else failure = result.error;
+}
+
+export const prepare = (tabId: string) => reviewing(() => commands.webExtensionPrepare(tabId));
+export const chooseFile = (folder: boolean) =>
+  reviewing(() => commands.webExtensionChooseFile(folder));
+const prepareFile = (path: string) => reviewing(() => commands.webExtensionPrepareFile(path));
+export const reviewUpdate = (id: string) => reviewing(() => commands.webExtensionReviewUpdate(id));
+
+export function listenForDrops(): Promise<() => void> {
+  return events.webExtensionDropped.listen((event) => void prepareFile(event.payload));
 }
 
 export async function confirm(): Promise<void> {
@@ -95,6 +109,23 @@ export async function setEnabled(id: string, enabled: boolean): Promise<void> {
   const result = await commands.webExtensionSetEnabled(id, enabled);
   failure = result.status === "ok" ? null : result.error;
   await refresh();
+}
+
+export async function setAccess(id: string, mode: string, sites: string[] = []): Promise<void> {
+  const result = await commands.webExtensionSetAccess(id, mode, sites);
+  failure = result.status === "ok" ? null : result.error;
+  await refresh();
+}
+
+export async function openOptions(id: string): Promise<void> {
+  const result = await commands.webExtensionOpenOptions(id);
+  if (result.status !== "ok") failure = result.error;
+}
+
+// Turning it off and on starts it from scratch.
+export async function retry(id: string): Promise<void> {
+  await setEnabled(id, false);
+  await setEnabled(id, true);
 }
 
 export async function uninstall(id: string): Promise<void> {

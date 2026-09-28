@@ -178,5 +178,9 @@
   "lazy:features/notes/index.ts": {
     "js": 138000,
     "css": 4000
+  },
+  "lazy:features/webext/components/WebExtensionManager.svelte": {
+    "js": 418500,
+    "css": 97000
   }
 }

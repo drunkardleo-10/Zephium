@@ -5,6 +5,7 @@
   import { webext } from "$domain/webext";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
+  import * as m from "$shared/i18n/messages";
 
   let { review }: { review: WebExtensionReview } = $props();
   let cancelButton = $state<HTMLButtonElement>();
@@ -55,6 +56,10 @@
 
     {#if review.description}
       <p class="mt-3 text-[11.5px] leading-4 text-muted">{review.description}</p>
+    {/if}
+
+    {#if review.from_file}
+      <p class="mt-3 text-[11.5px] leading-4 text-warning">{m.webext_from_file()}</p>
     {/if}
 
     <div id="web-extension-review-access" class="mt-3 rounded-row bg-fill px-3 py-2.5">

@@ -1,15 +1,23 @@
 <script lang="ts">
-  import { Key01Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
+  import { ArrowLeft02Icon, Key01Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
   import { onDestroy, onMount } from "svelte";
   import { browserCredentials, browserPasskeyStatus } from "$domain/credentials";
+  import { surface as browser } from "$domain/surface";
   import { webext } from "$domain/webext";
+  import { commands } from "$shared/ipc/bindings";
   import Button from "$shared/ui/Button";
+  import EmptyState from "$shared/ui/EmptyState";
   import Icon from "$shared/ui/Icon";
+  import IconButton from "$shared/ui/IconButton";
+  import Menu from "$shared/ui/Menu";
+  import * as m from "$shared/i18n/messages";
+  import { catalog, storeListing } from "../lib/catalog";
+  import ExtensionRow from "./ExtensionRow.svelte";
 
   let extensions = $derived(webext.list());
   let failure = $derived(webext.error());
-  let removing = $state<string | null>(null);
   let credentials = $derived(browserCredentials.current());
+  let installedIds = $derived(new Set(extensions.map((extension) => extension.id)));
 
   onMount(() => {
     void webext.refresh();
@@ -17,139 +25,279 @@
   });
   onDestroy(() => browserCredentials.deactivate());
 
-  const stateLabel = (state: string) =>
-    state === "running"
-      ? "On"
-      : state === "starting"
-        ? "Starting…"
-        : state === "failed"
-          ? "Couldn't start"
-          : "Off";
+  const openInTab = (url: string) => void commands.browserOpenUrl(url, true);
 </script>
 
-<section class="mx-auto w-full max-w-[680px] px-6 py-8" aria-labelledby="web-extensions-title">
-  <h1 id="web-extensions-title" class="text-[20px] leading-7 font-semibold text-text">
-    Extensions
-  </h1>
-  <p class="mt-1 text-[12.5px] leading-5 text-muted">
-    Open an extension's page in the Chrome Web Store and choose Add to Zephium.
-  </p>
+<section class="library-shell">
+  <header class="internal-toolbar">
+    <IconButton
+      icon={ArrowLeft02Icon}
+      label={m.settings_back()}
+      onclick={() => void browser.open(null)}
+    /><span class="toolbar-current">{m.webext_page_title()}</span>
+    <span class="spacer"></span>
+    <Menu
+      label={m.webext_install_file()}
+      triggerClass="toolbar-action"
+      align="end"
+      entries={[
+        { kind: "item", id: "package", label: m.webext_install_package() },
+        { kind: "item", id: "folder", label: m.webext_install_folder() },
+      ]}
+      onselect={(id) => void webext.chooseFile(id === "folder")}
+    >
+      {#snippet trigger()}{m.webext_install_file()}{/snippet}
+    </Menu>
+    <button
+      type="button"
+      class="toolbar-action"
+      onclick={() => openInTab("https://chromewebstore.google.com/")}
+      >{m.webext_open_store()}</button
+    >
+  </header>
 
-  {#if failure !== null}
-    <p role="alert" class="mt-4 text-[12px] leading-4 text-danger">{failure}</p>
-  {/if}
+  <div class="content">
+    {#if failure !== null}
+      <p class="failure" role="alert">{failure}</p>
+    {/if}
 
-  {#if credentials !== null && (credentials.system_password_autofill || credentials.passkey_authorization !== "unsupported")}
-    <div class="mt-6 flex items-start gap-3 rounded-panel border border-border bg-raised p-3">
-      <span
-        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-control-compact bg-fill text-muted"
-        aria-hidden="true"
-      >
-        <Icon icon={Key01Icon} size={18} />
-      </span>
-      <div class="min-w-0 flex-1">
-        <h2 class="text-[13.5px] leading-5 font-semibold text-text">System passwords & passkeys</h2>
-        {#if credentials.system_password_autofill}
-          <p class="text-[11.5px] leading-4 text-muted">
-            Password AutoFill is available through macOS credential providers.
-          </p>
-        {/if}
-        <p
-          class="text-[11.5px] leading-4 text-faint"
-          class:text-warning={credentials.passkey_authorization === "denied" ||
-            credentials.passkey_authorization === "entitlement_required" ||
-            credentials.passkey_authorization === "unknown" ||
-            credentials.passkey_authorization === "unavailable"}
-          role="status"
-        >
-          {browserPasskeyStatus(credentials.passkey_authorization)}
-        </p>
+    {#if extensions.length === 0}
+      <div class="empty">
+        <EmptyState title={m.webext_empty_title()} description={m.webext_empty_help()}>
+          {#snippet icon()}<Icon icon={PuzzleIcon} size={28} />{/snippet}
+        </EmptyState>
       </div>
-      {#if credentials.can_request_passkey_authorization}
-        <Button
-          size="compact"
-          variant="secondary"
-          pending={browserCredentials.busy()}
-          onclick={() => void browserCredentials.requestPasskeyAuthorization()}
-          >{browserCredentials.busy() ? "Waiting…" : "Enable passkeys"}</Button
-        >
-      {/if}
-    </div>
-  {/if}
+    {:else}
+      <h2 class="heading">
+        {m.webext_installed()} <span class="count">{extensions.length}</span>
+      </h2>
+      <ul class="group">
+        {#each extensions as extension (extension.id)}
+          <ExtensionRow {extension} />
+        {/each}
+      </ul>
+    {/if}
 
-  {#if extensions.length === 0}
-    <div class="mt-8 flex flex-col items-center gap-2 text-center text-muted">
-      <Icon icon={PuzzleIcon} size={28} />
-      <p class="text-[12.5px]">No extensions yet.</p>
-    </div>
-  {:else}
-    <ul class="mt-6 space-y-2">
-      {#each extensions as extension (extension.id)}
-        <li
-          class="rounded-panel border border-border bg-raised p-3"
-          data-web-extension={extension.id}
-        >
-          <div class="flex items-start gap-3">
-            <span
-              class="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-control-compact bg-fill"
-            >
-              {#if extension.icon}
-                <img src={extension.icon} alt="" class="h-7 w-7" />
-              {:else}
-                <Icon icon={PuzzleIcon} size={18} />
-              {/if}
-            </span>
-            <div class="min-w-0 flex-1">
-              <div class="flex items-baseline gap-2">
-                <h2 class="truncate text-[13.5px] leading-5 font-semibold text-text">
-                  {extension.name}
-                </h2>
-                <span class="shrink-0 text-[11px] text-faint">{extension.version}</span>
-              </div>
-              <p
-                class="text-[11.5px] leading-4"
-                class:text-danger={extension.state === "failed"}
-                class:text-muted={extension.state !== "failed"}
-              >
-                {stateLabel(extension.state)}{#if extension.error}: {extension.error}{/if}
-              </p>
-              {#if extension.description}
-                <p class="mt-1 line-clamp-2 text-[11.5px] leading-4 text-muted">
-                  {extension.description}
-                </p>
-              {/if}
-            </div>
+    {#if credentials !== null && (credentials.system_password_autofill || credentials.passkey_authorization !== "unsupported")}
+      <div class="group passwords">
+        <span class="badge" aria-hidden="true"><Icon icon={Key01Icon} size={16} /></span>
+        <div class="text">
+          <span class="name">{m.webext_system_passwords()}</span>
+          <span
+            class="status"
+            class:warning={credentials.passkey_authorization === "denied" ||
+              credentials.passkey_authorization === "entitlement_required" ||
+              credentials.passkey_authorization === "unknown" ||
+              credentials.passkey_authorization === "unavailable"}
+            role="status"
+          >
+            {#if credentials.system_password_autofill}{m.webext_system_autofill()}
+            {/if}{browserPasskeyStatus(credentials.passkey_authorization)}
+          </span>
+        </div>
+        {#if credentials.can_request_passkey_authorization}
+          <Button
+            size="compact"
+            variant="secondary"
+            pending={browserCredentials.busy()}
+            onclick={() => void browserCredentials.requestPasskeyAuthorization()}
+            >{m.webext_enable_passkeys()}</Button
+          >
+        {/if}
+      </div>
+    {/if}
+
+    <h2 class="heading">{m.webext_recommended()}</h2>
+    <ul class="catalog">
+      {#each catalog as entry (entry.id)}
+        <li class="card">
+          <span class="badge monogram" aria-hidden="true">{entry.name.charAt(0)}</span>
+          <span class="text">
+            <span class="name">{entry.name}</span>
+            <span class="status">{entry.blurb()}</span>
+          </span>
+          {#if installedIds.has(entry.id)}
+            <span class="installed">{m.webext_already_installed()}</span>
+          {:else}
             <Button
               size="compact"
-              variant={extension.enabled ? "secondary" : "primary"}
-              aria-pressed={extension.enabled}
-              onclick={() => void webext.setEnabled(extension.id, !extension.enabled)}
-              >{extension.enabled ? "Turn off" : "Turn on"}</Button
+              variant="secondary"
+              aria-label={m.webext_get_named({ name: entry.name })}
+              onclick={() => openInTab(storeListing(entry.id))}>{m.webext_get()}</Button
             >
-          </div>
-          <div class="mt-2 flex justify-end">
-            {#if removing === extension.id}
-              <span class="me-2 self-center text-[11.5px] text-muted">Remove it and its data?</span>
-              <Button size="compact" variant="secondary" onclick={() => (removing = null)}
-                >Keep</Button
-              >
-              <Button
-                size="compact"
-                variant="danger"
-                class="ms-1.5"
-                onclick={() => {
-                  removing = null;
-                  void webext.uninstall(extension.id);
-                }}>Remove</Button
-              >
-            {:else}
-              <Button size="compact" variant="ghost" onclick={() => (removing = extension.id)}
-                >Remove</Button
-              >
-            {/if}
-          </div>
+          {/if}
         </li>
       {/each}
     </ul>
-  {/if}
+
+    <p class="note">{m.webext_blocker_note()}</p>
+  </div>
 </section>
+
+<style>
+  .spacer {
+    flex: 1;
+  }
+
+  .internal-toolbar :global(.toolbar-action) {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    padding-inline: 10px;
+    border: 0;
+    border-radius: var(--radius-control-compact);
+    background: none;
+    font: inherit;
+    color: var(--color-muted);
+    cursor: pointer;
+    transition:
+      background-color var(--motion-instant) var(--ease-smooth),
+      color var(--motion-instant) var(--ease-smooth);
+  }
+
+  .internal-toolbar :global(.toolbar-action:hover),
+  .internal-toolbar :global(.toolbar-action[data-state="open"]) {
+    background: var(--row-active);
+    color: var(--color-text);
+  }
+
+  /* The same reading column as History, so the destinations line up. */
+  .content {
+    --library-gutter: clamp(16px, 4vw, 48px);
+    --library-column: 720px;
+
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-inline: max(var(--library-gutter), calc((100% - var(--library-column)) / 2));
+    padding-block: 8px 32px;
+  }
+
+  .failure {
+    margin: 0 0 12px;
+    font-size: var(--text-label);
+    color: var(--color-danger);
+  }
+
+  .heading {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    margin: 18px 0 8px;
+    padding-inline: 10px;
+    font-size: var(--text-label);
+    font-weight: 550;
+    letter-spacing: 0.01em;
+    color: var(--color-muted);
+  }
+
+  .heading:first-child,
+  .failure + .heading {
+    margin-block-start: 4px;
+  }
+
+  .count {
+    font-weight: 400;
+    color: var(--color-faint);
+  }
+
+  .group {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-panel);
+    background: var(--color-raised);
+  }
+
+  .passwords {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-block-start: 10px;
+    padding: 10px 12px;
+  }
+
+  .catalog {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    padding: 10px 10px 10px 12px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-panel);
+    background: var(--color-raised);
+  }
+
+  .badge {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-control-compact);
+    background: var(--color-fill);
+    color: var(--color-muted);
+  }
+
+  .text {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .name {
+    overflow: hidden;
+    font-size: var(--text-body);
+    color: var(--color-text);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .status {
+    overflow: hidden;
+    font-size: var(--text-label);
+    color: var(--color-muted);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .status.warning {
+    color: var(--color-warning);
+  }
+
+  .installed {
+    flex: none;
+    font-size: var(--text-label);
+    color: var(--color-faint);
+  }
+
+  .note {
+    margin: 18px 0 0;
+    padding-inline: 10px;
+    font-size: var(--text-label);
+    line-height: 1.45;
+    color: var(--color-faint);
+  }
+
+  .monogram {
+    font-size: var(--text-body);
+    font-weight: 550;
+    color: var(--color-text);
+  }
+
+  .empty {
+    padding-block: 12px;
+  }
+</style>
