@@ -11,6 +11,8 @@
 //! - `{"page": "<path>"}` opens one of the extension's pages in a probe view
 //! - `{"eval": "<async function body>", "in": "page" | "tab", "timeout": 5000}`
 //! - `{"sleep": <ms>}`
+//! - `{"unload": true}` unloads the last loaded extension; `{"erase": true}`
+//!   unloads it and erases its stored data
 //!
 //! Every eval result and every extension log line is printed.
 
@@ -318,6 +320,17 @@ impl Lab {
                 );
             }
             next();
+        } else if step.get("unload").is_some() {
+            let id = this.extension.borrow().clone().unwrap_or_default();
+            *this.page.borrow_mut() = None;
+            println!("UNLOADED {}", this.runtime.unload(&id));
+            next();
+        } else if step.get("erase").is_some() {
+            let id = this.extension.borrow().clone().unwrap_or_default();
+            this.runtime.erase(&id, move || {
+                println!("ERASED");
+                after(1500, next);
+            });
         } else if let Some(ms) = step.get("sleep").and_then(Value::as_u64) {
             after(ms, next);
         } else {

@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Once;
 
@@ -8,11 +9,13 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{MainThreadMarker, MainThreadOnly};
-use objc2_foundation::{NSError, NSString, NSURL, NSUUID};
+use objc2_foundation::{NSArray, NSError, NSSet, NSString, NSURL, NSUUID};
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionContextPermissionStatus,
-    WKWebExtensionController, WKWebExtensionControllerConfiguration, WKWebExtensionMatchPattern,
-    WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
+    WKWebExtensionController, WKWebExtensionControllerConfiguration, WKWebExtensionDataRecord,
+    WKWebExtensionDataType, WKWebExtensionDataTypeLocal, WKWebExtensionDataTypeSession,
+    WKWebExtensionDataTypeSynchronized, WKWebExtensionMatchPattern, WKWebView,
+    WKWebViewConfiguration, WKWebsiteDataStore,
 };
 
 use crate::delegate::Delegate;
@@ -203,15 +206,25 @@ impl Runtime {
     }
 
     pub fn unload(&self, id: &str) -> bool {
-        let Some(loaded) = self.shared.loaded.borrow_mut().remove(id) else {
-            return false;
+        unload(&self.shared, &self.controller, id)
+    }
+
+    /// Unloads an extension and deletes everything it stored in this
+    /// profile: its origin's website data, cleared from a page of its own
+    /// while it is still loaded, then its `chrome.storage` areas.
+    pub fn erase(&self, id: &str, done: impl FnOnce() + 'static) {
+        let controller = self.controller.clone();
+        let shared = self.shared.clone();
+        let target = id.to_string();
+        let finish = move || {
+            unload(&shared, &controller, &target);
+            erase_storage(&controller, &shared.host, &target);
+            done();
         };
-        crate::offscreen::close(id);
-        unsafe {
-            self.controller
-                .unloadExtensionContext_error(&loaded.context)
+        match self.context(id) {
+            Some(context) => crate::offscreen::clear_origin(&context, Box::new(finish)),
+            None => finish(),
         }
-        .is_ok()
     }
 
     /// Starts an extension's background now rather than on its first event.
@@ -565,4 +578,52 @@ pub(crate) fn describe(error: Option<&NSError>) -> String {
         _ => unsafe { text(error, objc2::sel!(description)) }
             .unwrap_or_else(|| "unknown error".into()),
     }
+}
+
+fn unload(shared: &Shared, controller: &WKWebExtensionController, id: &str) -> bool {
+    let Some(loaded) = shared.loaded.borrow_mut().remove(id) else {
+        return false;
+    };
+    crate::offscreen::close(id);
+    unsafe { controller.unloadExtensionContext_error(&loaded.context) }.is_ok()
+}
+
+/// Deletes an unloaded extension's `chrome.storage` areas.
+fn erase_storage(controller: &Retained<WKWebExtensionController>, host: &Rc<dyn Host>, id: &str) {
+    let types: Vec<&WKWebExtensionDataType> = unsafe {
+        [
+            WKWebExtensionDataTypeLocal,
+            WKWebExtensionDataTypeSession,
+            WKWebExtensionDataTypeSynchronized,
+        ]
+    }
+    .into_iter()
+    .flatten()
+    .collect();
+    let types = NSSet::from_slice(&types);
+    let removal_types = types.clone();
+    let removal = controller.clone();
+    let host = host.clone();
+    let target = id.to_string();
+    let fetched = RcBlock::new(move |records: NonNull<NSArray<WKWebExtensionDataRecord>>| {
+        let matching: Vec<_> = unsafe { records.as_ref() }
+            .iter()
+            .filter(|record| unsafe { record.uniqueIdentifier() }.to_string() == target)
+            .collect();
+        if matching.is_empty() {
+            return;
+        }
+        let (host, target) = (host.clone(), target.clone());
+        let removed = RcBlock::new(move || {
+            host.log(&target, LogLevel::Info, "erased the extension's data");
+        });
+        unsafe {
+            removal.removeDataOfTypes_fromDataRecords_completionHandler(
+                &removal_types,
+                &NSArray::from_retained_slice(&matching),
+                &removed,
+            )
+        };
+    });
+    unsafe { controller.fetchDataRecordsOfTypes_completionHandler(&types, &fetched) };
 }

@@ -1,39 +1,76 @@
-//! Offscreen documents (`chrome.offscreen`): one hidden extension page per
-//! extension, which WebKit doesn't provide. The page runs in a view built
-//! from the extension's own configuration, so it has the extension APIs and
-//! messaging like any other extension page.
+//! Hidden extension pages: offscreen documents (`chrome.offscreen`), which
+//! WebKit doesn't provide, and the page that clears an extension's origin
+//! data on uninstall. Each runs in a view built from the extension's own
+//! configuration, so it has the extension's origin and APIs.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::{NSObject, ProtocolObject};
+use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_foundation::{NSError, NSObjectProtocol, NSRect, NSString, NSURLRequest, NSURL};
-use objc2_web_kit::{WKNavigation, WKNavigationDelegate, WKWebExtensionContext, WKWebView};
+use objc2_foundation::{NSError, NSObjectProtocol, NSRect, NSString, NSTimer, NSURLRequest, NSURL};
+use objc2_web_kit::{
+    WKContentWorld, WKNavigation, WKNavigationDelegate, WKWebExtensionContext, WKWebView,
+};
 
-type Done = Box<dyn FnOnce(Result<(), String>)>;
+type Loaded = Box<dyn FnOnce(Result<(), String>)>;
 
-struct Document {
+struct Page {
     view: Retained<WKWebView>,
-    _delegate: Retained<LoadDelegate>,
+    delegate: Retained<LoadDelegate>,
+}
+
+impl Page {
+    /// Opens `path` of the extension in a view outside any window; `loaded`
+    /// runs once the page has finished loading or has failed to.
+    fn open(context: &WKWebExtensionContext, path: &str, loaded: Loaded) -> Option<Self> {
+        let url = match resolve(context, path) {
+            Ok(url) => url,
+            Err(message) => {
+                loaded(Err(message));
+                return None;
+            }
+        };
+        let (Some(mtm), Some(configuration)) = (MainThreadMarker::new(), unsafe {
+            context.webViewConfiguration()
+        }) else {
+            loaded(Err("The extension is not loaded.".into()));
+            return None;
+        };
+        let view = unsafe {
+            WKWebView::initWithFrame_configuration(mtm.alloc(), NSRect::default(), &configuration)
+        };
+        let delegate = LoadDelegate::new(mtm, loaded);
+        unsafe {
+            view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+            view.loadRequest(&NSURLRequest::requestWithURL(&url));
+        }
+        Some(Self { view, delegate })
+    }
+
+    fn close(&self) {
+        self.delegate.settle(Err("The page was closed.".into()));
+        unsafe {
+            self.view.stopLoading();
+            self.view.setNavigationDelegate(None);
+        }
+    }
 }
 
 thread_local! {
-    static DOCUMENTS: RefCell<HashMap<String, Document>> = RefCell::new(HashMap::new());
-    /// Creations waiting for their page to load, as Chrome resolves
-    /// `createDocument` only once the document can receive messages.
-    static PENDING: RefCell<HashMap<String, Done>> = RefCell::new(HashMap::new());
+    static DOCUMENTS: RefCell<HashMap<String, Page>> = RefCell::new(HashMap::new());
 }
 
 pub(crate) struct Ivars {
-    extension: String,
+    loaded: RefCell<Option<Loaded>>,
 }
 
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[name = "ZephiumOffscreenLoadDelegate"]
+    #[name = "ZephiumHiddenPageLoadDelegate"]
     #[ivars = Ivars]
     pub(crate) struct LoadDelegate;
 
@@ -42,7 +79,7 @@ define_class!(
     unsafe impl WKNavigationDelegate for LoadDelegate {
         #[unsafe(method(webView:didFinishNavigation:))]
         fn did_finish(&self, _view: &WKWebView, _navigation: Option<&WKNavigation>) {
-            settle(&self.ivars().extension, Ok(()));
+            self.settle(Ok(()));
         }
 
         #[unsafe(method(webView:didFailNavigation:withError:))]
@@ -63,92 +100,121 @@ define_class!(
 );
 
 impl LoadDelegate {
-    fn new(mtm: MainThreadMarker, extension: &str) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker, loaded: Loaded) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(Ivars {
-            extension: extension.to_string(),
+            loaded: RefCell::new(Some(loaded)),
         });
         unsafe { msg_send![super(this), init] }
     }
 
     fn failed(&self, error: &NSError) {
-        let extension = &self.ivars().extension;
-        let message = format!(
-            "The offscreen document failed to load: {}",
+        self.settle(Err(format!(
+            "The page failed to load: {}",
             error.localizedDescription()
-        );
-        if settle(extension, Err(message)) {
-            close(extension);
+        )));
+    }
+
+    fn settle(&self, result: Result<(), String>) {
+        let loaded = self.ivars().loaded.borrow_mut().take();
+        if let Some(loaded) = loaded {
+            loaded(result);
         }
     }
 }
 
-/// Settles a pending creation; false when none was waiting.
-fn settle(extension: &str, result: Result<(), String>) -> bool {
-    let done = PENDING.with(|pending| pending.borrow_mut().remove(extension));
-    match done {
-        Some(done) => {
-            done(result);
-            true
-        }
-        None => false,
-    }
-}
-
-pub(crate) fn create(context: &WKWebExtensionContext, path: &str, done: Done) {
+/// Creates the extension's offscreen document. As in Chrome, `done` runs once
+/// the document has loaded and can receive messages.
+pub(crate) fn create(context: &WKWebExtensionContext, path: &str, done: Loaded) {
     let extension = unsafe { context.uniqueIdentifier() }.to_string();
     if has(&extension) {
         return done(Err(
             "Only a single offscreen document may be created.".into()
         ));
     }
-    let url = match resolve(context, path) {
-        Ok(url) => url,
-        Err(message) => return done(Err(message)),
-    };
-    let (Some(mtm), Some(configuration)) = (MainThreadMarker::new(), unsafe {
-        context.webViewConfiguration()
-    }) else {
-        return done(Err("The extension is not loaded.".into()));
-    };
-    let view = unsafe {
-        WKWebView::initWithFrame_configuration(mtm.alloc(), NSRect::default(), &configuration)
-    };
-    let delegate = LoadDelegate::new(mtm, &extension);
-    unsafe { view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
-    PENDING.with(|pending| pending.borrow_mut().insert(extension.clone(), done));
-    unsafe { view.loadRequest(&NSURLRequest::requestWithURL(&url)) };
-    DOCUMENTS.with(|documents| {
-        documents.borrow_mut().insert(
-            extension,
-            Document {
-                view,
-                _delegate: delegate,
-            },
-        )
+    let failed = extension.clone();
+    let loaded: Loaded = Box::new(move |result| {
+        if result.is_err() {
+            close(&failed);
+        }
+        done(result);
     });
+    if let Some(page) = Page::open(context, path, loaded) {
+        DOCUMENTS.with(|documents| documents.borrow_mut().insert(extension, page));
+    }
 }
 
 pub(crate) fn close(extension: &str) -> bool {
-    settle(extension, Err("The offscreen document was closed.".into()));
-    let document = DOCUMENTS.with(|documents| documents.borrow_mut().remove(extension));
-    match document {
-        Some(document) => {
-            unsafe {
-                document.view.stopLoading();
-                document.view.setNavigationDelegate(None);
-            }
-            true
-        }
-        None => false,
-    }
+    let page = DOCUMENTS.with(|documents| documents.borrow_mut().remove(extension));
+    page.inspect(Page::close).is_some()
 }
 
 pub(crate) fn has(extension: &str) -> bool {
     DOCUMENTS.with(|documents| documents.borrow().contains_key(extension))
 }
 
-/// Resolves a document path against the extension's own origin; Chrome only
-/// accepts the extension's own pages.
+/// Clears the website data of the extension's origin (IndexedDB,
+/// `localStorage`, Cache Storage) from a page of its own, since WebKit
+/// doesn't list extension origins among a data store's records. `done` runs
+/// once clearing has been requested; the page stays open a little longer so
+/// deletions its other pages were blocking can finish after they close.
+pub(crate) fn clear_origin(context: &WKWebExtensionContext, done: Box<dyn FnOnce()>) {
+    const SCRIPT: &str = "\
+        try { localStorage.clear(); } catch {}\n\
+        try {\n\
+          const names = (await indexedDB.databases()).map((database) => database.name);\n\
+          await Promise.all(names.map((name) => new Promise((settle) => {\n\
+            const request = indexedDB.deleteDatabase(name);\n\
+            request.onsuccess = request.onerror = request.onblocked = settle;\n\
+          })));\n\
+        } catch {}\n\
+        try { await Promise.all((await caches.keys()).map((key) => caches.delete(key))); } catch {}";
+    let page: RefCell<Option<Page>> = RefCell::new(None);
+    let page = std::rc::Rc::new(page);
+    let opened = page.clone();
+    let loaded: Loaded = Box::new(move |result| {
+        let Some(view) = opened.borrow().as_ref().map(|page| page.view.clone()) else {
+            return done();
+        };
+        if result.is_err() {
+            return done();
+        }
+        let done = RefCell::new(Some(done));
+        let keep = opened.clone();
+        let cleared = RcBlock::new(move |_value: *mut AnyObject, _error: *mut NSError| {
+            if let Some(done) = done.borrow_mut().take() {
+                done();
+            }
+            linger(keep.clone());
+        });
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        unsafe {
+            view.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(
+                &NSString::from_str(SCRIPT),
+                None,
+                None,
+                &WKContentWorld::pageWorld(mtm),
+                Some(&cleared),
+            )
+        };
+    });
+    // The manifest is part of every package, so the page always exists.
+    let opened = Page::open(context, "manifest.json", loaded);
+    *page.borrow_mut() = opened;
+}
+
+fn linger(page: std::rc::Rc<RefCell<Option<Page>>>) {
+    let release = RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
+        if let Some(page) = page.borrow_mut().take() {
+            page.close();
+        }
+    });
+    unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(30.0, false, &release) };
+}
+
+/// Resolves a path against the extension's own origin; hidden pages are
+/// only ever the extension's own.
 fn resolve(context: &WKWebExtensionContext, path: &str) -> Result<Retained<NSURL>, String> {
     let base = unsafe { context.baseURL() };
     let url = NSURL::URLWithString_relativeToURL(&NSString::from_str(path), Some(&base))
