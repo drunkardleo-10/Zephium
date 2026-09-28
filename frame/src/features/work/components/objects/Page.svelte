@@ -8,8 +8,9 @@
     detail,
     actions = {},
   }: { object: PageObjectView; detail: Detail; actions?: ObjectActions } = $props();
-  let failed = $state(false);
-  const frame = $derived(object.frame && !failed ? object.frame : null);
+  /** The capture that would not load; a newer frame gets its own chance. */
+  let broken = $state<string | null>(null);
+  const frame = $derived(object.frame && broken !== object.frame ? object.frame : null);
   const site = $derived(host(object.url));
 </script>
 
@@ -32,7 +33,7 @@
         decoding="async"
         loading="lazy"
         draggable="false"
-        onerror={() => (failed = true)}
+        onerror={() => (broken = object.frame ?? null)}
       />{:else}<span class="blank">
         <span class="sign"><Mark address={object.url} size={detail === "full" ? 28 : 56} /></span>
         <span class="name">{object.title}</span>

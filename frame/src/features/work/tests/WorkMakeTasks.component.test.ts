@@ -87,9 +87,11 @@ test("a plan's steps become the person's tasks on request, and a task done in Ta
       work: "objective",
     });
   }
-  // Asked twice for the same lane, the action is spent.
-  const again = screen.getByRole("button", { name: "Tasks made", exact: true });
-  await expect.element(again).toBeDisabled();
+  // Asked twice for the same lane, the action is spent: the steps are the tasks now and
+  // nothing announces it.
+  await expect
+    .element(screen.getByRole("button", { name: "Make tasks", exact: true }))
+    .not.toBeInTheDocument();
   expect(await tasks.make("plan-card")).toBe(false);
   expect(server.records.size).toBe(4);
 

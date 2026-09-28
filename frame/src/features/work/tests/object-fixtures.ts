@@ -1179,6 +1179,18 @@ export const centred: { object: ObjectView; width: number }[] = [
 /** What the look test draws: one sheet per group, each object at its width. */
 export const looks: Record<string, { object: ObjectView; width: number }[]> = {
   replies: [
+    {
+      object: {
+        kind: "reply",
+        id: "reply-pending",
+        state: "pending",
+        headline: "The answer is on its way",
+        text: "",
+        figures: [],
+        points: [],
+      },
+      width: 560,
+    },
     { object: replySmall, width: 560 },
     { object: replyFigures, width: 640 },
   ],

@@ -503,3 +503,6 @@ const KINDS: Record<string, () => string> = {
 };
 /** What a part is, in a word; an unnamed kind says nothing. */
 export const diagramKindLabel = (kind: string) => KINDS[kind]?.() ?? m.work_diagram_other();
+
+/** The width a diagram draws at full size, with no scaling: what its object should be given. */
+export const diagramWidth = (diagram: Diagram) => Math.ceil(diagramLayout(diagram).bounds.width);

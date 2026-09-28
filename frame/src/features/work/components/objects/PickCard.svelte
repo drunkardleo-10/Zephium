@@ -25,7 +25,9 @@
     actions?: ObjectActions;
     onopen?: () => void;
   } = $props();
-  let failed = $state(false);
+  /** The address that would not load; a new picture gets its own chance. */
+  let broken = $state<string | null>(null);
+  const failed = $derived(!!pick.picture && broken === pick.picture.src);
   const picture = $derived(pick.picture && !failed ? pick.picture : null);
   const logo = $derived(!picture && pick.logo && hasMark(pick.logo) ? pick.logo : null);
   /** "$4,350 / month": the figure loud, its period quiet. */
@@ -36,6 +38,15 @@
       ? { figure: display.slice(0, at), period: display.slice(at) }
       : { figure: display, period: "" };
   });
+  const lead = $derived(pick.facts[0]);
+  /** A yes or no says itself with its mark; a value reads after its label. */
+  const leadText = $derived(
+    !lead
+      ? ""
+      : /^(yes|no)$/iu.test(lead.value.trim())
+        ? lead.label
+        : `${lead.label} ${lead.value}`,
+  );
   const rating = $derived(
     pick.rating
       ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(pick.rating.value)
@@ -62,7 +73,7 @@
         draggable="false"
         width={picture.width}
         height={picture.height}
-        onerror={() => (failed = true)}
+        onerror={() => (broken = pick.picture?.src ?? null)}
       />
       {#if video && detail !== "tile"}<span class="play" aria-hidden="true"
           ><PlayMark size={detail === "full" ? 44 : 88} /></span
@@ -91,7 +102,9 @@
                 }}>{pick.name}</a
               >{:else}{pick.name}{/if}
           </h4>
-          {#if pick.subtitle && detail === "full"}<p class="subtitle">{pick.subtitle}</p>{/if}
+          {#if pick.subtitle && (detail === "full" || !picture)}<p class="subtitle">
+              {pick.subtitle}
+            </p>{/if}
         </div>
       </header>
       {#if detail === "full"}
@@ -127,6 +140,14 @@
             {#each pick.tags as tag (tag)}<li>{tag}</li>{/each}
           </ul>
         {/if}
+      {:else if !picture && (lead || (video && pick.duration))}
+        <!-- Words alone from afar: the one fact that tells it apart. -->
+        <p class="lead">
+          {#if lead}{#if lead.kind === "yes" || lead.kind === "no" || lead.kind === "partial"}<YesNo
+                value={lead.kind}
+                size={28}
+              />{/if}<span>{leadText}</span>{:else}<span>{pick.duration}</span>{/if}
+        </p>
       {/if}
       {#if pick.price}
         <p class="price">
@@ -456,6 +477,20 @@
   .overview h4 {
     font-size: var(--text-overview-title);
     line-height: 1.2;
+  }
+
+  .lead {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0;
+    color: var(--color-label-secondary);
+    font-size: var(--text-overview-label);
+  }
+
+  .overview .subtitle {
+    font-size: var(--text-overview-label);
+    line-height: 1.3;
   }
 
   .overview .figure {

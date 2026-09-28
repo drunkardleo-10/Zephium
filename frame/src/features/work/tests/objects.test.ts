@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import { inline } from "../components/objects/inline";
 import { blocks, noteBlocks } from "../components/objects/markdown";
-import { bests, cellOrder, figure, rating, yesNo } from "../components/objects/sheet";
+import { bests, cellOrder, farColumns, figure, rating, yesNo } from "../components/objects/sheet";
 import { size } from "../components/objects/size-text";
 import type { SheetColumn } from "../lib/board/types";
 
@@ -55,4 +55,41 @@ test("a file's size reads as the system writes it", () => {
   expect(size(412_000)).toBe("412 KB");
   expect(size(3_200)).toBe("3.2 KB");
   expect(size(18_400_000)).toBe("18 MB");
+});
+
+test("from afar a sheet keeps its subject and the short columns that fit, never a column of sentences", () => {
+  const costs = {
+    columns: [
+      { label: "Cost category", kind: "text" as const },
+      { label: "MVP per month", kind: "money" as const },
+      { label: "Growth per month", kind: "money" as const },
+    ],
+    rows: [
+      ["Application hosting and edge", "$100–800", "$1,000–8,000"],
+      ["Queue, workers and background compute", "$100–1,000", "$1,000–15,000"],
+    ].map((cells) => ({ cells })),
+  };
+  expect(farColumns(costs, 488)).toEqual([1]);
+  expect(farColumns(costs, 720)).toEqual([1, 2]);
+  const stack = {
+    columns: [
+      { label: "Layer", kind: "text" as const },
+      { label: "Technology", kind: "text" as const },
+      { label: "Why", kind: "text" as const },
+    ],
+    rows: [
+      [
+        "Web client",
+        "Next.js + TypeScript",
+        "Fast product iteration, typed UI and server-rendered pages.",
+      ],
+      [
+        "API",
+        "TypeScript service (Fastify or NestJS)",
+        "Stateless endpoints, validation, tenant authorization and billing hooks.",
+      ],
+    ].map((cells) => ({ cells })),
+  };
+  expect(farColumns(stack, 544)).toEqual([1]);
+  expect(farColumns(stack, 2000)).toEqual([1]);
 });

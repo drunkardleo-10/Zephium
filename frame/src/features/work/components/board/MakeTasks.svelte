@@ -7,17 +7,14 @@
   const state = $derived(tasks?.state(id) ?? "none");
 </script>
 
-{#if state !== "none"}<button
+<!-- Once made, the steps are the tasks: they show their own ticks, and nothing here says so. -->
+{#if state !== "none" && state !== "made"}<button
     type="button"
     class="make nodrag nopan"
     disabled={state !== "ready"}
     title={m.work_make_tasks_hint()}
     onclick={() => void tasks?.make(id)}
-    >{state === "made"
-      ? m.work_tasks_made()
-      : state === "making"
-        ? m.work_making_tasks()
-        : m.work_make_tasks()}</button
+    >{state === "making" ? m.work_making_tasks() : m.work_make_tasks()}</button
   >{/if}
 
 <style>

@@ -23,8 +23,8 @@
     !!pick.route;
   const flights = $derived(object.facet === "flight" && object.items.every(routed));
   const pictured = $derived(object.items.some((item) => item.picture));
-  /** Some with pictures and some without: each card keeps its own height. */
-  const mixed = $derived(pictured && object.items.some((item) => !item.picture));
+  /** Only a set of pictured cards shares one height; words alone keep their own. */
+  const mixed = $derived(!object.items.every((item) => item.picture));
   /** At a distance a set shows its first few; the rest wait for a closer look. */
   const shown = $derived(
     detail !== "tile" || flights

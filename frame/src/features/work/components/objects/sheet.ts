@@ -82,3 +82,75 @@ export function host(url: string): string {
     return url;
   }
 }
+
+/** The room a column takes when read from afar, at the overview's type size. */
+const FAR: Partial<Record<SheetColumn["kind"], number>> = {
+  money: 150,
+  number: 120,
+  percent: 110,
+  duration: 130,
+  date: 160,
+  yes_no: 76,
+  rating: 140,
+  tag: 190,
+  link: 220,
+};
+/** Kinds that say the most in the least room, first. */
+const TELLING: SheetColumn["kind"][] = [
+  "money",
+  "yes_no",
+  "rating",
+  "tag",
+  "number",
+  "percent",
+  "duration",
+  "date",
+  "entity",
+];
+/** An overview character at 22 px, and the widest a subject may stand before it wraps. */
+const CHAR = 11;
+const SUBJECT = 200;
+const GAP = 24;
+
+/**
+ * The columns a sheet keeps from afar, in their own order: the typed ones that
+ * say most first, then short text; a column of sentences gives way. They fit
+ * the room beside the subject column.
+ */
+export function farColumns(sheet: Pick<SheetView, "columns" | "rows">, width: number): number[] {
+  const longest = (index: number) =>
+    Math.max(0, ...sheet.rows.map((row) => (row.cells[index] ?? "").trim().length));
+  const average = (index: number) =>
+    sheet.rows.reduce((sum, row) => sum + (row.cells[index] ?? "").trim().length, 0) /
+    Math.max(1, sheet.rows.length);
+  const room = (index: number) => {
+    const column = sheet.columns[index]!;
+    const fixed = FAR[column.kind];
+    if (fixed) return fixed;
+    // Short text may wrap to two lines from afar; its label still wants its own line.
+    const words = Math.max(column.label.length, Math.ceil(longest(index) * 0.6));
+    return Math.min(260, words * CHAR + (column.kind === "entity" ? 40 : 0));
+  };
+  const short = (index: number) =>
+    sheet.columns[index]!.kind !== "text" || (average(index) <= 32 && longest(index) <= 48);
+  const candidates = sheet.columns
+    .map((column, index) => ({ column, index }))
+    .filter(({ index }) => index > 0 && short(index))
+    .sort((a, b) => {
+      const rank = (kind: SheetColumn["kind"]) =>
+        TELLING.includes(kind) ? TELLING.indexOf(kind) : TELLING.length;
+      return rank(a.column.kind) - rank(b.column.kind) || a.index - b.index;
+    });
+  let left =
+    width -
+    Math.min(SUBJECT, Math.max(sheet.columns[0]?.label.length ?? 0, longest(0)) * CHAR + 40) -
+    56;
+  const kept: number[] = [];
+  for (const { index } of candidates) {
+    const need = room(index) + GAP;
+    if (need > left) continue;
+    kept.push(index);
+    left -= need;
+  }
+  return kept.sort((a, b) => a - b);
+}

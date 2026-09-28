@@ -1,9 +1,14 @@
 import type { ObjectView, PicksView, SheetColumn, SheetView } from "../../lib/board/types";
+import { diagramWidth } from "../../lib/diagram";
 
 /** The size an object asks of the centre: wide for what spreads, a reading measure for text. */
 export function centreSize(object: ObjectView): { width: number; height: number } {
   switch (object.kind) {
     case "diagram":
+      return {
+        width: Math.max(1040, Math.min(1600, diagramWidth(object.diagram) + 96)),
+        height: 860,
+      };
     case "sheet":
     case "picks":
       return { width: 1280, height: 860 };

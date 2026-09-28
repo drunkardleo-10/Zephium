@@ -6,7 +6,7 @@
   } from "$shared/ui/data/DataTable";
   import * as m from "$shared/i18n/messages";
   import type { Detail, ObjectActions, SheetView } from "../../lib/board/types";
-  import { bests, cellOrder, figure, host, numeric, rating, yesNo } from "./sheet";
+  import { bests, cellOrder, farColumns, figure, host, numeric, rating, yesNo } from "./sheet";
   import { vendorHost } from "../../lib/vendors";
   import Title from "./Title.svelte";
   import Mark, { hasMark } from "./Mark.svelte";
@@ -62,14 +62,9 @@
     range: (from: number, to: number, total: number) =>
       m.work_table_range({ first: from, last: to, total }),
   });
-  /** At a distance a sheet is its subjects and the one column that decides between them. */
-  const key = $derived.by(() => {
-    const marked = object.columns.findIndex((column, index) => index > 0 && column.best);
-    if (marked > 0) return marked;
-    const figureColumn = object.columns.findIndex((column, index) => index > 0 && numeric(column));
-    if (figureColumn > 0) return figureColumn;
-    return object.columns.findIndex((column, index) => index > 0 && column.kind === "entity");
-  });
+  let width = $state(0);
+  /** At a distance a sheet is its subjects and the short columns that decide between them. */
+  const far = $derived(detail === "overview" ? farColumns(object, width || 720) : []);
   /** The row's own logo, else a known product its name is. */
   function logo(index: number): string | null {
     const row = object.rows[index];
@@ -99,7 +94,7 @@
   {@const column = object.columns[at]!}
   {@const text = object.rows[index]?.cells[at] ?? ""}
   {@const marked = best[at]?.has(String(index))}
-  {#if column.kind === "yes_no"}<YesNo value={yesNo(text)} />
+  {#if column.kind === "yes_no"}<YesNo value={yesNo(text)} size={detail === "full" ? 16 : 28} />
   {:else if column.kind === "rating"}
     {@const score = rating(text)}
     {#if score}<Dots
@@ -133,7 +128,7 @@
   {:else}<span class="text">{text}</span>{/if}
 {/snippet}
 
-<section class="sheet {detail}" class:centre aria-label={object.title}>
+<section class="sheet {detail}" class:centre aria-label={object.title} bind:clientWidth={width}>
   {#if object.title}<Title text={object.title} {detail} />{/if}
   {#if detail === "full"}
     <DataTable
@@ -166,16 +161,35 @@
       </footer>
     {/if}
   {:else if detail === "overview"}
-    <ol class="far">
+    <div
+      class="far"
+      role="table"
+      aria-label={object.title}
+      style:grid-template-columns={`minmax(0, auto) ${far.map(() => "auto").join(" ")}`}
+    >
+      <div class="head" role="row">
+        <span role="columnheader">{first?.label ?? ""}</span>
+        {#each far as at (at)}<span
+            role="columnheader"
+            class:end={numeric(object.columns[at]!)}
+            class:centered={object.columns[at]!.kind === "yes_no" ||
+              object.columns[at]!.kind === "rating"}>{object.columns[at]!.label}</span
+          >{/each}
+      </div>
       {#each object.rows.slice(0, limit) as row, index (index)}
-        <li>
-          <span class="subject"
+        <div class="line" role="row">
+          <span class="subject" role="rowheader"
             >{@render subject(index, 28)}<span class="name">{row.cells[0]}</span></span
           >
-          {#if key > 0}<span class="key">{@render value(index, key)}</span>{/if}
-        </li>
+          {#each far as at (at)}<span
+              role="cell"
+              class:end={numeric(object.columns[at]!)}
+              class:centered={object.columns[at]!.kind === "yes_no" ||
+                object.columns[at]!.kind === "rating"}>{@render value(index, at)}</span
+            >{/each}
+        </div>
       {/each}
-    </ol>
+    </div>
   {:else}
     <div class="marks">
       {#each object.rows.slice(0, 6) as row, index (index)}
@@ -318,36 +332,69 @@
     color: var(--color-text);
   }
 
+  /* From afar: the subject and its telling columns, set to read at half size. */
   .far {
-    display: flex;
-    flex-direction: column;
-    margin: 0;
-    padding: 0;
-    list-style: none;
+    display: grid;
+    column-gap: 24px;
     font-size: var(--text-overview-label);
   }
 
-  .far li {
+  .far .head,
+  .far .line {
+    display: contents;
+  }
+
+  .far .head span {
+    padding-block-end: 12px;
+    color: var(--color-muted);
+    white-space: nowrap;
+  }
+
+  .far .line > * {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 24px;
-    padding-block: 12px;
+    min-block-size: 64px;
     border-block-start: 2px solid var(--color-border);
   }
 
+  .far .end {
+    justify-content: flex-end;
+    text-align: end;
+  }
+
+  .far .centered {
+    justify-content: center;
+    text-align: center;
+  }
+
   .far .name {
+    max-inline-size: 200px;
     font-weight: 600;
   }
 
-  .far .key :global(.mark) {
-    inline-size: 28px;
-    block-size: 28px;
+  .far .text {
+    min-inline-size: 0;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+
+  .far :global(.dots) {
+    gap: 5px;
+  }
+
+  .far :global(.dot) {
+    inline-size: 13px;
+    block-size: 13px;
   }
 
   .far .figure.best {
     padding: 2px 14px;
     margin-inline-end: 0;
+  }
+
+  .far .tag {
+    padding: 3px 14px;
+    font-size: var(--text-overview-label);
   }
 
   .marks {

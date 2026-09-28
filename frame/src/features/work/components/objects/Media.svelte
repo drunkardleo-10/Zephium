@@ -22,7 +22,9 @@
   }: { object: MediaView; detail: Detail; actions?: ObjectActions } = $props();
   const video = $derived(object.media === "video" ? youtubeId(object.url) : null);
   const poster = $derived(object.poster ?? object.picture);
-  let failed = $state(false);
+  /** The address that would not load; a new poster gets its own chance. */
+  let broken = $state<string | null>(null);
+  const failed = $derived(!!poster && broken === poster.src);
   /** The player refused this context (YouTube's embed errors); the page plays it instead. */
   let refused = $state(false);
   const on = $derived(playing === object.id && !!video && !refused);
@@ -90,7 +92,7 @@
         decoding="async"
         loading="lazy"
         draggable="false"
-        onerror={() => (failed = true)}
+        onerror={() => (broken = poster?.src ?? null)}
       />{:else}<div class="missing">{object.title ?? m.work_media_missing()}</div>{/if}
   {:else if object.media === "video"}
     <div class="screen">
@@ -112,7 +114,7 @@
             decoding="async"
             loading="lazy"
             draggable="false"
-            onerror={() => (failed = true)}
+            onerror={() => (broken = poster?.src ?? null)}
           />{/if}
         {#if detail !== "tile"}<button
             type="button"

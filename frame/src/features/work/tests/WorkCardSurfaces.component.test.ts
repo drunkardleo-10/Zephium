@@ -84,7 +84,8 @@ test("a page being read shows the loading arc in place of its mark, and the mark
     item: { ...item, page: { ...item.page!, live: false } },
     selected: false,
   });
-  expect(mark().dataset.loading).toBe("false");
+  // Read, with no mark in the cache: nothing stands in, never a globe or an initial.
+  expect(screen.container.querySelector(".about .favicon")).toBeNull();
   await screen.unmount();
 });
 
@@ -199,9 +200,10 @@ test("a comparison whose subjects have no pictures shows each site's icon, askin
   });
   const tiles = [...card.container.querySelectorAll(".picture")];
   expect(tiles).toHaveLength(3);
-  // Never a blank plate and never an initial: the held marks draw, the missing one waits on a globe.
+  // Never a blank plate, a globe or an initial: the held marks draw, the missing one is its name.
   expect(tiles.map((tile) => !!tile.querySelector(".favicon canvas"))).toEqual([true, true, false]);
-  expect(tiles[2]!.querySelector(".favicon svg")).not.toBeNull();
+  expect(tiles[2]!.querySelector(".favicon")).toBeNull();
+  expect(tiles[2]!.textContent?.trim()).toBe("Vercel");
   expect(card.container.querySelector(".picture img")).toBeNull();
   expect(probed).toEqual(["https://vercel.com"]);
   await card.unmount();

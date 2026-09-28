@@ -15,27 +15,37 @@
   } = $props();
 </script>
 
-<article class="reply {detail}" aria-label={object.headline}>
-  <h2>{object.headline}</h2>
-  {#if detail === "full" && object.text}<p class="text"><Inline text={object.text} /></p>{/if}
-  {#if detail !== "tile" && object.figures.length}
-    <dl class="figures">
-      {#each object.figures as figure (figure.label)}
-        <div>
-          <dt>{figure.label}</dt>
-          <dd>
-            <span class="value">{figure.value}</span>{#if figure.note && detail === "full"}<span
-                class="note">{figure.note}</span
-              >{/if}
-          </dd>
-        </div>
-      {/each}
-    </dl>
-  {/if}
-  {#if detail === "full" && object.points.length}
-    <ul class="points">
-      {#each object.points as point (point)}<li><Inline text={point} /></li>{/each}
-    </ul>
+<article
+  class="reply {detail}"
+  class:waiting={object.state === "pending"}
+  aria-label={object.headline}
+>
+  {#if object.state === "pending"}
+    <!-- Still coming: a quiet line, never set as the answer's headline. -->
+    <p class="pending" role="status">{object.headline}</p>
+    <span class="bar" aria-hidden="true"></span><span class="bar short" aria-hidden="true"></span>
+  {:else}
+    <h2>{object.headline}</h2>
+    {#if detail === "full" && object.text}<p class="text"><Inline text={object.text} /></p>{/if}
+    {#if detail !== "tile" && object.figures.length}
+      <dl class="figures">
+        {#each object.figures as figure (figure.label)}
+          <div>
+            <dt>{figure.label}</dt>
+            <dd>
+              <span class="value">{figure.value}</span>{#if figure.note && detail === "full"}<span
+                  class="note">{figure.note}</span
+                >{/if}
+            </dd>
+          </div>
+        {/each}
+      </dl>
+    {/if}
+    {#if detail === "full" && object.points.length}
+      <ul class="points">
+        {#each object.points as point (point)}<li><Inline text={point} /></li>{/each}
+      </ul>
+    {/if}
   {/if}
   {#if centre && object.more?.length}<div class="more">
       <DocumentView
@@ -134,6 +144,33 @@
     border-radius: var(--radius-capsule);
     background: var(--color-faint);
     content: "";
+  }
+
+  .pending {
+    margin: 0;
+    color: var(--color-muted);
+    font-size: var(--text-reading);
+  }
+
+  .bar {
+    display: block;
+    inline-size: 100%;
+    max-inline-size: 460px;
+    block-size: 10px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill);
+  }
+
+  .bar.short {
+    max-inline-size: 300px;
+  }
+
+  .waiting {
+    gap: 10px;
+  }
+
+  .overview .pending {
+    font-size: var(--text-overview-label);
   }
 
   .more {

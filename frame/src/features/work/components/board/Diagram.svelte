@@ -117,6 +117,9 @@
   });
   const shift = (points: readonly { x: number; y: number }[]) =>
     points.map((point) => ({ x: point.x - bounds.x, y: point.y - bounds.y }));
+  /** From afar a mark keeps its place only where the name still fits two lines beside it. */
+  const roomy = (name: string) =>
+    name.length <= 22 && name.split(/\s+/u).every((word) => word.length <= 10);
   const mark = (vendor: string) => (vendor ? siteMark(`https://${vendor}`) : null);
   onMount(() => {
     for (const node of nodes)
@@ -153,6 +156,7 @@
 
 <div
   class="diagram {detail}"
+  style:--grow={Math.min(1.4, 1 / Math.max(scale, 0.01))}
   style:inline-size={`${bounds.width * scale}px`}
   style:block-size={`${bounds.height * scale}px`}
 >
@@ -204,7 +208,7 @@
           onkeydown={(event) => keys(event, node.id)}
           onclick={() => (opened = opened === node.id ? null : node.id)}
         >
-          {#if logo}<span class="mark"
+          {#if logo && (detail !== "overview" || roomy(node.name))}<span class="mark"
               ><FavIcon
                 image={logo.image}
                 tone={logo.tone}
@@ -416,11 +420,12 @@
     box-shadow: inset 0 0 0 2px var(--color-border-strong);
   }
 
+  /* Drawn smaller to fit, the words grow back by as much as a part can hold (up to 1.4x). */
   .overview .name {
     display: -webkit-box;
     overflow: hidden;
     overflow-wrap: normal;
-    font-size: var(--text-overview-label);
+    font-size: calc(var(--text-overview-label) * var(--grow, 1));
     line-height: 1.2;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
@@ -428,7 +433,9 @@
   }
 
   .overview .tier {
-    font-size: var(--text-overview-label);
+    font-size: calc(var(--text-overview-label) * var(--grow, 1));
+    line-height: 1.1;
+    translate: 0 calc(-100% + 16px);
   }
 
   .overview .flow path,

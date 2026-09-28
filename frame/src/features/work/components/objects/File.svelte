@@ -22,7 +22,9 @@
     /** Opened in the centre: all of it, at reading size. */
     centre?: boolean;
   } = $props();
-  let failed = $state(false);
+  /** The address that would not load; a new picture gets its own chance. */
+  let broken = $state<string | null>(null);
+  const failed = $derived(!!object.picture && broken === object.picture.src);
   const picture = $derived(object.picture && !failed ? object.picture : null);
   const markdown = $derived(
     /\.(md|markdown)$/iu.test(object.name) || object.language === "markdown",
@@ -49,7 +51,7 @@
         decoding="async"
         loading="lazy"
         draggable="false"
-        onerror={() => (failed = true)}
+        onerror={() => (broken = object.picture?.src ?? null)}
       />
     {:else if (object.file === "text" || object.file === "code") && object.lines !== undefined}
       <span class="sheet lines" class:mono={object.file === "code"} class:whole={centre}>
@@ -78,7 +80,7 @@
             width="64"
             height="64"
             decoding="async"
-            onerror={() => (failed = true)}
+            onerror={() => (broken = object.picture?.src ?? null)}
           />{:else}<Icon icon={File01Icon} size={detail === "full" ? 40 : 80} />{/if}
       </span>
     {/if}
