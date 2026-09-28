@@ -53,7 +53,9 @@ checkout, verifies the binary's QA product identity, and launches
   ZIP/folder installs require a manifest key; keyless packages are rejected
   before native loading. Manifest V2 is not supported.
 - Up to eight extensions can run across this Windows process, with one popup.
-  Hidden observer pages use a separate bounded native-resource pool.
+  Hidden observer pages use a separate bounded native-resource pool. This is a
+  provisional QA budget, not a WebView2 limit; the handoff records the measured
+  1/3/5-extension costs and shared-management-view comparison.
 - Work's native adapter uses the extension-free automation subprofile. Its
   isolation was checked in the lab; the separately developing Work product is
   not made available by this QA build.
@@ -83,3 +85,21 @@ short-lived processes can make sampled CPU an underestimate. Debug-build numbers
 are qualification evidence, not release performance claims.
 
 Detailed probe findings and remaining work: [Windows handoff](windows-extensions-handoff.md).
+
+## Review follow-up acceptance
+
+- Install the storage fixture from `crates/zephium-webext-windows/fixtures/storage`
+  using **Install from file > Unpacked folder**. Open its popup on a normal page
+  and save the test value. Change All sites to Specific sites, add that page's
+  host and select Done. Reopen the popup, then switch back to All sites and
+  reopen it again. The stored value should survive both changes and restart.
+- Try a malformed native package. The tested invalid-CSP fixture produces
+  **Couldn't start / Retry**. Retry should attempt only that install; existing
+  pages and other extensions should remain usable. Remove the failed fixture
+  when finished. A preparation-time rejection may instead stop at review.
+- Repeat ordinary store install, disable/enable, popup opening and removal with
+  Bitwarden and Dark Reader. Dark Reader's per-site popup controls still have
+  the documented targeting limitation. Use a disposable account for signed-in
+  Bitwarden testing; native storage preservation alone does not qualify autofill.
+- Recheck profile separation and closing/reopening QA. No Work product behavior
+  was added by the boundary fix. Options pages remain withheld.

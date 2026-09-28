@@ -1,6 +1,6 @@
 # Windows extension lab
 
-Step 1 qualification only. No product crate depends on this crate. The empty
+Native extension qualification only. No product crate depends on this crate. The empty
 default feature set exposes no runtime; the binary requires `lab` and refuses
 release builds. Wry's existing extension startup boundary is unchanged.
 
@@ -30,7 +30,8 @@ The additional access/action scenario checks revocation and a 22-line diagnostic
 action-call observer; the worker scenario leaves the diagnostic worker without
 messages for 45 seconds and then wakes it through a new content script.
 
-All lab host windows are hidden. These measurements describe hidden controllers,
+Lab host windows are hidden unless a scenario requests a visible human/popup window.
+The resource measurements describe hidden controllers,
 not foreground UI performance. There is no synthetic user activation: a
 host-opened popup or script `.click()` must not be reported as a real toolbar
 action click. A missing tab mapping or gesture path is a finding to report,
@@ -68,6 +69,19 @@ A scenario is an array of steps:
 
 `--prepare <crx> <NEW-directory>` validates/extracts a package without starting
 WebView2. Package records include version, manifest version and SHA-256.
+
+## QA follow-up qualifiers
+
+- `run-access-transition.ps1` replaces a keyed test extension from a different,
+  narrowed directory without removing its native ID. It asserts local storage
+  survival, the native manifest change, and allowed/denied content injection.
+- `run-management-resources.ps1` compares 1/3/5 cumulative store extensions with
+  persistent per-extension pages and one shared page parked on `about:blank`.
+  Each fresh profile idles for 120 seconds; use `-Counts 1 -Modes shared` for one
+  case. It reports sample gaps. No worker debugger is attached during idle.
+- `fixtures/storage` is a keyed, account-free extension for the actual QA UI.
+  Its popup saves and reads a visible `chrome.storage.local` marker. Install as
+  an unpacked folder, change site access, and reopen its popup to inspect data.
 
 `ok` in a step record means the harness operation returned, **not extension
 compatibility**. Inspect CDP `exceptionDetails`, returned error objects and
