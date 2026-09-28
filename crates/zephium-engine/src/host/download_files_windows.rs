@@ -328,9 +328,7 @@ fn verify_private_directory(file: &File) -> Result<(), DownloadError> {
     }
 }
 fn dispose(file: &File) -> Result<(), DownloadError> {
-    let value = FILE_DISPOSITION_INFO {
-        DeleteFile: true.into(),
-    };
+    let value = FILE_DISPOSITION_INFO { DeleteFile: true };
     // SAFETY: this exact opened object is marked for deletion, never a path traversal.
     unsafe {
         SetFileInformationByHandle(

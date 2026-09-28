@@ -102,11 +102,11 @@ impl EngineHost {
         if let (Some(profile), Some(view)) = (profile, removed) {
             let view = if let Some(downloads) = &self.downloads {
                 match downloads.retain_closed_view(view) {
-                    Ok(()) => {
+                    None => {
                         self.close_idle_spare(profile);
                         return;
                     }
-                    Err(view) => view,
+                    Some(view) => view,
                 }
             } else {
                 view
