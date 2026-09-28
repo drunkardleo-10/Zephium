@@ -18,6 +18,7 @@ import {
   DashboardSpeed01Icon,
   PuzzleIcon,
   InformationCircleIcon,
+  Plug01Icon,
 } from "@hugeicons/core-free-icons";
 export const sections = [
   {
@@ -123,7 +124,7 @@ export const sections = [
     group: "intelligence",
     title: m.section_mcp,
     description: m.section_mcp_description,
-    icon: Globe02Icon,
+    icon: Plug01Icon,
   },
   {
     id: "skills",
@@ -196,7 +197,7 @@ export const groups = [
   { id: "intelligence", label: m.settings_intelligence },
   { id: "application", label: m.settings_application },
 ] as const;
-export const emptySections = new Set<SettingsSection>(["plugins", "mcp"]);
+export const emptySections = new Set<SettingsSection>(["plugins"]);
 export function searchSettings(query: string) {
   const words = query.trim().toLocaleLowerCase().split(/\s+/u);
   const matches = (text: string) => words.every((word) => text.toLocaleLowerCase().includes(word));
