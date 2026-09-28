@@ -31,7 +31,14 @@
     object,
     detail = "full",
     actions = {},
-  }: { object: ObjectView; detail?: Detail; actions?: ObjectActions } = $props();
+    centre = false,
+  }: {
+    object: ObjectView;
+    detail?: Detail;
+    actions?: ObjectActions;
+    /** The object opened in the centre: its whole reading or editing surface. */
+    centre?: boolean;
+  } = $props();
   let Drawn = $state.raw<Renderer | null>(null);
   $effect(() => {
     const kind = object.kind;
@@ -55,5 +62,5 @@
   });
 </script>
 
-{#if object.kind === "reply"}<Reply {object} {detail} />
-{:else if Drawn}<Drawn {object} {detail} {actions} />{/if}
+{#if object.kind === "reply"}<Reply {object} {detail} {centre} />
+{:else if Drawn}<Drawn {object} {detail} {actions} {centre} />{/if}

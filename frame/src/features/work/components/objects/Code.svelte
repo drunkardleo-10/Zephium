@@ -10,7 +10,14 @@
     object,
     detail,
     actions = {},
-  }: { object: CodeView; detail: Detail; actions?: ObjectActions } = $props();
+    centre = false,
+  }: {
+    object: CodeView;
+    detail: Detail;
+    actions?: ObjectActions;
+    /** Opened in the centre: all of it, at reading size. */
+    centre?: boolean;
+  } = $props();
   const LINES = 16;
   const count = $derived(codeLines(object.text).length);
   const path = $derived(object.path ? splitPath(object.path) : null);
@@ -30,11 +37,12 @@
         text={object.text}
         label={object.title ?? object.path ?? ""}
         notes={object.notes}
-        limit={LINES}
+        limit={centre ? undefined : LINES}
+        variant={centre ? "lift" : "card"}
         start={object.start ?? 1}
       />
     </div>
-    {#if count > LINES}<button
+    {#if count > LINES && !centre}<button
         type="button"
         class="all nodrag nopan"
         onclick={() => actions.open?.(object.id)}>{m.work_object_show_all_lines({ count })}</button

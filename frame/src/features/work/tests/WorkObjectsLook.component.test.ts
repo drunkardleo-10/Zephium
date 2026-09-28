@@ -3,7 +3,7 @@ import { test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import ObjectsSheet from "./ObjectsSheet.svelte";
-import { looks } from "./object-fixtures";
+import { centred, looks } from "./object-fixtures";
 import type { DiagramView, ObjectView } from "../lib/board/types";
 
 // The QA profile's cached site icons, so marks draw as they do in the app.
@@ -78,6 +78,7 @@ async function drawn(): Promise<{ object: ObjectView; width: number }[]> {
 const scenes: Record<string, () => Promise<{ object: ObjectView; width: number }[]>> = {
   ...Object.fromEntries(Object.entries(looks).map(([name, rows]) => [name, async () => rows])),
   diagrams: drawn,
+  centre: async () => centred,
 };
 
 test.each(Object.keys(scenes))("%s at full, overview and tile", async (name) => {
@@ -87,6 +88,7 @@ test.each(Object.keys(scenes))("%s at full, overview and tile", async (name) => 
   if (!rows.length) return;
   const screen = await render(ObjectsSheet, {
     rows,
+    centre: name === "centre",
     actions: {
       choose: noop,
       ask: noop,
@@ -102,7 +104,7 @@ test.each(Object.keys(scenes))("%s at full, overview and tile", async (name) => 
   for (const theme of ["dark", "light"]) {
     document.documentElement.dataset.theme = theme;
     await settle();
-    for (const row of sheet.querySelectorAll<HTMLElement>(".row")) {
+    for (const row of sheet.querySelectorAll<HTMLElement>(":scope > .row")) {
       row.scrollIntoView({ block: "start" });
       await settle(120);
       await page

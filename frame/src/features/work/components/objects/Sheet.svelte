@@ -17,12 +17,15 @@
     detail,
     actions = {},
     rows: shown = 8,
+    centre = false,
   }: {
     object: SheetView;
     detail: Detail;
     actions?: ObjectActions;
     /** Rows the canvas shows before the rest are read in the centre. */
     rows?: number;
+    /** Opened in the centre: every row, every word. */
+    centre?: boolean;
   } = $props();
   const first = $derived(object.columns[0]);
   const rest = $derived(object.columns.slice(1));
@@ -76,7 +79,7 @@
     const known = vendorHost(undefined, row?.cells[0] ?? "");
     return known && hasMark(known) ? known : null;
   }
-  const limit = $derived(detail === "full" ? shown : 5);
+  const limit = $derived(centre ? object.rows.length : detail === "full" ? shown : 5);
 </script>
 
 {#snippet subject(index: number, size: number)}
@@ -130,7 +133,7 @@
   {:else}<span class="text">{text}</span>{/if}
 {/snippet}
 
-<section class="sheet {detail}" aria-label={object.title}>
+<section class="sheet {detail}" class:centre aria-label={object.title}>
   {#if object.title}<Title text={object.title} {detail} />{/if}
   {#if detail === "full"}
     <DataTable
@@ -234,6 +237,12 @@
     -webkit-line-clamp: 2;
     line-clamp: 2;
     text-wrap: pretty;
+  }
+
+  .centre .text {
+    display: inline;
+    -webkit-line-clamp: none;
+    line-clamp: none;
   }
 
   .figure {

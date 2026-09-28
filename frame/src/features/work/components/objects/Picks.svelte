@@ -4,12 +4,21 @@
   import PickCard from "./PickCard.svelte";
   import FlightCard from "./FlightCard.svelte";
   import Title from "./Title.svelte";
+  import Sheet from "./Sheet.svelte";
+  import { picksSheet } from "./centre";
   /** Things to choose between, side by side; the set opens as a sheet to compare. */
   let {
     object,
     detail,
     actions = {},
-  }: { object: PicksView; detail: Detail; actions?: ObjectActions } = $props();
+    centre = false,
+  }: {
+    object: PicksView;
+    detail: Detail;
+    actions?: ObjectActions;
+    /** Opened in the centre: all of it, at reading size. */
+    centre?: boolean;
+  } = $props();
   const routed = (pick: PickView): pick is PickView & { route: NonNullable<PickView["route"]> } =>
     !!pick.route;
   const flights = $derived(object.facet === "flight" && object.items.every(routed));
@@ -53,6 +62,9 @@
         />{/if}
     {/each}
   </div>
+  {#if centre && object.items.length > 1 && !flights}<div class="compare-sheet">
+      <Sheet object={picksSheet(object)} detail="full" {actions} rows={object.items.length} />
+    </div>{/if}
 </section>
 
 <style>
@@ -103,6 +115,10 @@
   .flights .set {
     grid-template-columns: minmax(0, 1fr);
     gap: 12px;
+  }
+
+  .compare-sheet {
+    margin-block-start: 16px;
   }
 
   .overview {

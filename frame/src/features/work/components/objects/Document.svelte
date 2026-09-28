@@ -7,7 +7,14 @@
     object,
     detail,
     actions = {},
-  }: { object: DocumentObjectView; detail: Detail; actions?: ObjectActions } = $props();
+    centre = false,
+  }: {
+    object: DocumentObjectView;
+    detail: Detail;
+    actions?: ObjectActions;
+    /** Opened in the centre: all of it, at reading size. */
+    centre?: boolean;
+  } = $props();
   let body = $state<HTMLElement>();
   let width = $state(0);
   let overflows = $state(false);
@@ -28,7 +35,7 @@
     class:overflows
     bind:this={body}
     bind:clientWidth={width}
-    style:max-block-size={width ? `${Math.round(width * 1.294)}px` : undefined}
+    style:max-block-size={width && !centre ? `${Math.round(width * 1.294)}px` : undefined}
     style:min-block-size={width ? `${Math.round(width * 0.72)}px` : undefined}
   >
     {#if object.title}<h2>{object.title}</h2>{/if}
@@ -49,7 +56,7 @@
       </div>
     {/if}
   </div>
-  {#if overflows && detail === "full"}<button
+  {#if overflows && detail === "full" && !centre}<button
       type="button"
       class="read nodrag nopan"
       onclick={() => actions.open?.(object.id)}>{m.work_object_read_all()}</button

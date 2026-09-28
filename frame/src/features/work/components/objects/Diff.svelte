@@ -8,7 +8,14 @@
     object,
     detail,
     actions = {},
-  }: { object: DiffView; detail: Detail; actions?: ObjectActions } = $props();
+    centre = false,
+  }: {
+    object: DiffView;
+    detail: Detail;
+    actions?: ObjectActions;
+    /** Opened in the centre: all of it, at reading size. */
+    centre?: boolean;
+  } = $props();
   /** Lines the canvas shows before the rest are read in the centre. */
   const LINES = 24;
   const path = $derived(splitPath(object.path));
@@ -62,7 +69,7 @@
     });
     return out;
   });
-  const shown = $derived(detail === "full" ? rows.slice(0, LINES) : []);
+  const shown = $derived(detail !== "full" ? [] : centre ? rows : rows.slice(0, LINES));
   const digits = $derived(
     String(Math.max(...object.hunks.map((hunk) => hunk.newStart + hunk.lines.length), 1)).length,
   );

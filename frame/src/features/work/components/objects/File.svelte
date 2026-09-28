@@ -14,7 +14,14 @@
     object,
     detail,
     actions = {},
-  }: { object: FileView; detail: Detail; actions?: ObjectActions } = $props();
+    centre = false,
+  }: {
+    object: FileView;
+    detail: Detail;
+    actions?: ObjectActions;
+    /** Opened in the centre: all of it, at reading size. */
+    centre?: boolean;
+  } = $props();
   let failed = $state(false);
   const picture = $derived(object.picture && !failed ? object.picture : null);
   const markdown = $derived(
@@ -45,13 +52,13 @@
         onerror={() => (failed = true)}
       />
     {:else if (object.file === "text" || object.file === "code") && object.lines !== undefined}
-      <span class="sheet lines" class:mono={object.file === "code"}>
+      <span class="sheet lines" class:mono={object.file === "code"} class:whole={centre}>
         {#if detail === "full"}
           {#if object.file === "code"}<CodeBlock
               language={object.language ?? ""}
               text={object.lines}
               label={object.name}
-              limit={12}
+              limit={centre ? undefined : 12}
             />{:else if markdown}{#each noteBlocks(object.lines).slice(0, 8) as part, index (index)}{#if part.kind === "heading"}<strong
                   class="heading">{part.text}</strong
                 >{:else if part.kind === "list"}{#each part.items as item, at (at)}<span
@@ -156,6 +163,11 @@
   .item::before {
     content: "•  ";
     color: var(--color-faint);
+  }
+
+  .lines.whole {
+    aspect-ratio: auto;
+    mask-image: none;
   }
 
   .lines.mono {

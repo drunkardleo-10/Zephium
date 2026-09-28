@@ -4,7 +4,16 @@
   import type { Detail, PlotView } from "../../lib/board/types";
   import { watchNear } from "./near";
   import Title from "./Title.svelte";
-  let { object, detail }: { object: PlotView; detail: Detail } = $props();
+  let {
+    object,
+    detail,
+    centre = false,
+  }: {
+    object: PlotView;
+    detail: Detail;
+    /** Opened in the centre: the chart with its exact values. */
+    centre?: boolean;
+  } = $props();
   type ChartComponent = Awaited<ReturnType<typeof loadChart>>["default"];
   let Chart = $state.raw<ChartComponent | null>(null);
   let root = $state<HTMLElement>();
@@ -19,7 +28,7 @@
     return () => (current = false);
   });
   // The exact values are read in the centre view; the canvas shows the chart.
-  const spec = $derived({ ...object.spec, values: false as const });
+  const spec = $derived(centre ? object.spec : { ...object.spec, values: false as const });
   const Drawn = $derived(Chart as Component<Record<string, unknown>> | null);
 </script>
 

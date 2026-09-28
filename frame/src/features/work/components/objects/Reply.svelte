@@ -1,8 +1,18 @@
 <script lang="ts">
   import type { Detail, ReplyView } from "../../lib/board/types";
+  import DocumentView from "$shared/ui/data/Artifact/DocumentView.svelte";
   import Inline from "./Inline.svelte";
   /** The answer, set on the canvas like a caption: a headline, a few lines, the figures. */
-  let { object, detail }: { object: ReplyView; detail: Detail } = $props();
+  let {
+    object,
+    detail,
+    centre = false,
+  }: {
+    object: ReplyView;
+    detail: Detail;
+    /** Opened in the centre: an older answer's remaining paragraphs read on below. */
+    centre?: boolean;
+  } = $props();
 </script>
 
 <article class="reply {detail}" aria-label={object.headline}>
@@ -27,6 +37,11 @@
       {#each object.points as point (point)}<li><Inline text={point} /></li>{/each}
     </ul>
   {/if}
+  {#if centre && object.more?.length}<div class="more">
+      <DocumentView
+        document={{ version: 1, document: { type: "doc", content: [...object.more] } }}
+      />
+    </div>{/if}
 </article>
 
 <style>
@@ -120,6 +135,12 @@
     border-radius: var(--radius-capsule);
     background: var(--color-faint);
     content: "";
+  }
+
+  .more {
+    color: var(--color-label-secondary);
+    font-size: var(--text-reading);
+    line-height: 1.55;
   }
 
   .overview {

@@ -8,8 +8,15 @@
     object,
     detail,
     actions = {},
-  }: { object: FolderView; detail: Detail; actions?: ObjectActions } = $props();
-  const shown = $derived(object.entries.slice(0, 4));
+    centre = false,
+  }: {
+    object: FolderView;
+    detail: Detail;
+    actions?: ObjectActions;
+    /** Opened in the centre: all of it, at reading size. */
+    centre?: boolean;
+  } = $props();
+  const shown = $derived(centre ? object.entries : object.entries.slice(0, 4));
 </script>
 
 <figure class="folder {detail}" aria-label={object.name}>

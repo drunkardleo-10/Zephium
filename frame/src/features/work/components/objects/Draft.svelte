@@ -15,7 +15,16 @@
     object,
     detail,
     actions = {},
-  }: { object: DraftView; detail: Detail; actions?: ObjectActions } = $props();
+    centre = false,
+  }: {
+    object: DraftView;
+    detail: Detail;
+    actions?: ObjectActions;
+    /** Opened in the centre: the words can be changed before they go. */
+    centre?: boolean;
+  } = $props();
+  // What the person is writing, reset whenever the draft itself changes.
+  let text = $derived(object.body);
   const HOST = {
     slack: "slack.com",
     email: "mail.google.com",
@@ -57,15 +66,20 @@
 </script>
 
 {#snippet body()}
-  <div class="body">
-    {#each parts as part, index (index)}
-      {#if part.kind === "list"}<ul>
-          {#each part.items as item, at (at)}<li><Inline text={item} /></li>{/each}
-        </ul>{:else}<p>
-          {#each part.lines as line, at (at)}{#if at}<br />{/if}<Inline text={line} />{/each}
-        </p>{/if}
-    {/each}
-  </div>
+  {#if centre && actions.write}<textarea
+      class="body edit nodrag nopan nowheel"
+      aria-label={where}
+      bind:value={text}
+      onblur={() => text !== object.body && actions.write?.(object.id, text)}></textarea>{:else}
+    <div class="body">
+      {#each parts as part, index (index)}
+        {#if part.kind === "list"}<ul>
+            {#each part.items as item, at (at)}<li><Inline text={item} /></li>{/each}
+          </ul>{:else}<p>
+            {#each part.lines as line, at (at)}{#if at}<br />{/if}<Inline text={line} />{/each}
+          </p>{/if}
+      {/each}
+    </div>{/if}
 {/snippet}
 
 {#snippet author(size: number)}
@@ -232,6 +246,21 @@
     font-size: var(--text-page-title);
     line-height: 1.5;
     text-wrap: pretty;
+  }
+
+  .edit {
+    box-sizing: border-box;
+    inline-size: 100%;
+    min-block-size: 220px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    font-size: var(--text-page-title);
+    line-height: 1.5;
+    resize: vertical;
+    outline: none;
   }
 
   .body p,

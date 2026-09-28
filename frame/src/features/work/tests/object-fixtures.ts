@@ -17,6 +17,7 @@ import type {
   ReplyView,
   SheetView,
 } from "../lib/board/types";
+import { centreSize } from "../components/objects/centre";
 
 /**
  * Every object as the new runtime fills it, from the acceptance tasks (spec §9).
@@ -1161,6 +1162,19 @@ const sets: SheetView = {
     },
   ],
 };
+
+/** What opens in the centre, each at the width the lift gives it. */
+export const centred: { object: ObjectView; width: number }[] = [
+  stays,
+  providers,
+  trip,
+  fix,
+  excerpt,
+  guide,
+  drafts[1]!,
+  growth,
+  replyFigures,
+].map((object) => ({ object, width: centreSize(object).width - 80 }));
 
 /** What the look test draws: one sheet per group, each object at its width. */
 export const looks: Record<string, { object: ObjectView; width: number }[]> = {
