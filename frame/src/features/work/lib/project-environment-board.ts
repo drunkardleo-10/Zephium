@@ -21,7 +21,6 @@ import { RUN, placeRun } from "./run/layout";
 import { runParts, type PartAsk, type RunInputView, type RunPart } from "./run/parts";
 import { PART, askKey, contentKey, partSize, type PartShape } from "./run/part-size";
 import { computerRows, computerView } from "./parts/computer";
-import { connectionRows, connectionView } from "./parts/connection";
 import { foundByPart } from "./run/found";
 import * as m from "$shared/i18n/messages";
 
@@ -205,12 +204,8 @@ export function partShape(
     const rows =
       part.helper === "computer"
         ? computerRows(computerView(projection, steps))
-        : connectionRows(
-            connectionView(projection, steps, {
-              title: part.title,
-              ...(part.host ? { host: part.host } : {}),
-            }),
-          );
+        : // A call a step, four shown and a line for the rest, until the view measures itself.
+          Math.max(1, Math.min(steps.length, 4) + (steps.length > 4 ? 1 : 0));
     return {
       kind: "helper",
       rows: Math.max(rows, Math.min(PART.helperLines, part.lines?.length ?? 0)),
