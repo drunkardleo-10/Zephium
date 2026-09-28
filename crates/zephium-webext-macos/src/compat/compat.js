@@ -859,6 +859,23 @@
     });
   }
 
+  // ---- Worker lifetime -----------------------------------------------------
+  // Each start is reported on a port the browser keeps, and beats on, only
+  // for a worker that keeps being woken within a minute or so of sleeping.
+  if (isWorker && typeof runtime.connectNative === "function") {
+    try {
+      const port = runtime.connectNative("app.zephium.keepalive");
+      port.onMessage.addListener((message) => {
+        if (message && message.op === "alive") {
+          try {
+            port.postMessage({ op: "beat" });
+          } catch {}
+        }
+      });
+      port.onDisconnect.addListener(() => void (chromeRuntime && chromeRuntime.lastError));
+    } catch {}
+  }
+
   // ---- Worker WebSockets ---------------------------------------------------
   // A WebSocket opened in an extension worker deadlocks it in WebKit; connect
   // through the browser instead.
