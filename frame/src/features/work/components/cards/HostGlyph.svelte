@@ -43,7 +43,7 @@
   import FavIcon from "$shared/ui/FavIcon";
   import type { IconRef } from "$shared/ipc/bindings";
   import { canvasProbe } from "../../lib/canvas-context";
-  import { File01Icon, GlobalIcon } from "../../lib/icons";
+  import { File01Icon } from "../../lib/icons";
   let {
     host = "",
     url = "",
@@ -51,7 +51,7 @@
     file = false,
     size = 16,
     loading = false,
-    initial = true,
+    initial: _initial = true,
   }: {
     host?: string;
     url?: string;
@@ -61,7 +61,7 @@
     size?: number;
     /** The page is being read: the mark steps back under main's arc. */
     loading?: boolean;
-    /** Without a mark, a letter stands in; a subject or a page takes a neutral globe instead. */
+    /** Kept for callers; without a mark nothing stands in, never a letter or a globe. */
     initial?: boolean;
   } = $props();
   const held = $derived(icon ? favicons.image(icon) : null);
@@ -77,10 +77,10 @@
   });
 </script>
 
-{#if mark || loading || !initial}<FavIcon
+{#if mark || loading}<FavIcon
     image={mark?.image ?? null}
     tone={mark?.tone ?? "mid"}
     {size}
     {loading}
-    fallback={file ? File01Icon : GlobalIcon}
-  />{:else}<HostGlyph {host} {file} {size} />{/if}
+    fallback={file ? File01Icon : undefined}
+  />{:else if file}<HostGlyph {host} {file} {size} />{/if}

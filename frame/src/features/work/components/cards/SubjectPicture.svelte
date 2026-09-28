@@ -1,9 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { mediaUrl } from "$domain/resources";
-  import Icon from "$shared/ui/Icon";
   import HostGlyph from "./HostGlyph.svelte";
-  import { Image01Icon } from "../../lib/icons";
   import type { ComparePicture } from "../../lib/compare";
   let {
     picture,
@@ -39,9 +37,8 @@
     ><HostGlyph url={homepage} size={markSize} initial={false} /></span
   >
 {:else}
-  <span class="mark" aria-hidden="true" title={name}
-    ><Icon icon={Image01Icon} size={large ? 20 : 14} /></span
-  >
+  <!-- No picture and no mark: the subject is its name, set, never a letter or a stock icon. -->
+  <span class="mark named" class:large aria-hidden="true">{name}</span>
 {/if}
 
 <style>
@@ -50,6 +47,22 @@
     inline-size: 100%;
     block-size: 100%;
     object-fit: cover;
+  }
+
+  .named {
+    box-sizing: border-box;
+    padding: 10px;
+    color: var(--color-label-secondary);
+    font-size: var(--text-label);
+    font-weight: 600;
+    line-height: 1.3;
+    text-align: center;
+    text-wrap: balance;
+    overflow-wrap: anywhere;
+  }
+
+  .named.large {
+    font-size: var(--text-page-title);
   }
 
   .mark {

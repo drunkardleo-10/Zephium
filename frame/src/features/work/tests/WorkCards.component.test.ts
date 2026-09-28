@@ -78,9 +78,11 @@ test("a subject card shows four facts whole, the lead one first", async () => {
     expect(value.scrollHeight).toBeLessThanOrEqual(value.clientHeight + 1);
     expect(getComputedStyle(value).textOverflow).not.toBe("ellipsis");
   }
-  // No picture yet: the site's mark stands beside the name, not a hero placeholder or an initial.
+  // No picture yet: no hero placeholder, and beside the name only a mark the cache holds,
+  // never a stock globe or an initial.
   expect(screen.container.querySelector(".hero")).toBeNull();
-  expect(screen.container.querySelector("header .leading .favicon")).not.toBeNull();
+  expect(screen.container.querySelector("header .leading .favicon-fallback")).toBeNull();
+  expect(screen.container.querySelector("header .leading")?.textContent?.trim() ?? "").toBe("");
   await expect.element(screen.getByText("airbnb.com")).toBeVisible();
   await screen.unmount();
 });

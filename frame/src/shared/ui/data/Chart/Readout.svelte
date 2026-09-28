@@ -12,11 +12,6 @@
     onevidence?: (reference: ChartEvidence) => void;
     glyph?: Snippet<[ChartEvidence]>;
   } = $props();
-  const letter = (reference: ChartEvidence) =>
-    (reference.origin || reference.label)
-      .replace(/^www\./u, "")
-      .slice(0, 1)
-      .toLocaleUpperCase();
 </script>
 
 <div class="tip">
@@ -38,9 +33,7 @@
           title={reference.label}
           onclick={() => onevidence?.(reference)}
         >
-          {#if glyph}{@render glyph(reference)}{:else}<span class="letter" aria-hidden="true"
-              >{letter(reference)}</span
-            >{/if}
+          {#if glyph}{@render glyph(reference)}{/if}
           <span class="host"
             >{reference.file ? reference.label : reference.origin || reference.label}</span
           >
@@ -126,19 +119,6 @@
   .chip:focus-visible {
     outline: 2px solid var(--color-ring);
     outline-offset: 2px;
-  }
-
-  .letter {
-    display: grid;
-    place-items: center;
-    flex: none;
-    inline-size: 12px;
-    block-size: 12px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill);
-    color: var(--color-faint);
-    font-size: 8px;
-    font-weight: 600;
   }
 
   .host {

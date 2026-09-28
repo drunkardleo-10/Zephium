@@ -3,7 +3,7 @@
   import FavIcon from "$shared/ui/FavIcon";
   import File01Icon from "@hugeicons/core-free-icons/File01Icon";
   import { siteMarks } from "./site-marks";
-  /** A site's real mark when its owner holds one; otherwise a neutral stand-in. */
+  /** A site's real mark when its owner holds one, a file's glyph for a file, else nothing. */
   let {
     host = "",
     url = "",
@@ -12,22 +12,13 @@
   }: { host?: string; url?: string; file?: boolean; size?: number } = $props();
   const resolve = siteMarks();
   const mark = $derived(!file && resolve ? resolve(url || host) : null);
-  const letter = $derived(
-    host
-      .replace(/^www\./u, "")
-      .slice(0, 1)
-      .toLocaleUpperCase(),
-  );
 </script>
 
-{#if mark}<FavIcon image={mark.image} tone={mark.tone} {size} />{:else}<span
+{#if mark}<FavIcon image={mark.image} tone={mark.tone} {size} />{:else if file}<span
     class="glyph"
-    class:file
     style:--glyph={`${size}px`}
-    aria-hidden="true"
-  >
-    {#if file}<Icon icon={File01Icon} size={Math.round(size * 0.62)} />{:else}{letter}{/if}
-  </span>{/if}
+    aria-hidden="true"><Icon icon={File01Icon} size={Math.round(size * 0.62)} /></span
+  >{/if}
 
 <style>
   .glyph {
@@ -36,15 +27,8 @@
     flex: none;
     inline-size: var(--glyph);
     block-size: var(--glyph);
-    border-radius: 50%;
+    border-radius: calc(var(--glyph) * 0.3);
     background: var(--color-fill);
     color: var(--color-faint);
-    font-size: max(9px, calc(var(--glyph) * 0.56));
-    font-weight: 600;
-    line-height: 1;
-  }
-
-  .glyph.file {
-    border-radius: calc(var(--glyph) * 0.3);
   }
 </style>
