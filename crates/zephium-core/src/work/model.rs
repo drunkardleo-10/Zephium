@@ -221,11 +221,11 @@ pub struct WorkModelSupports {
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct WorkModelPrice {
-    #[cfg_attr(feature = "ipc-types", specta(type = f64))]
+    #[cfg_attr(feature = "ipc-types", specta(type = u32))]
     pub input: u64,
-    #[cfg_attr(feature = "ipc-types", specta(type = f64))]
+    #[cfg_attr(feature = "ipc-types", specta(type = u32))]
     pub cached_input: u64,
-    #[cfg_attr(feature = "ipc-types", specta(type = f64))]
+    #[cfg_attr(feature = "ipc-types", specta(type = u32))]
     pub output: u64,
 }
 
