@@ -5,9 +5,12 @@
   let {
     sites,
     above,
+    extensions,
     compact = false,
   }: {
     sites?: Snippet;
+    /** Extension buttons stacked into the tool case, at rail width only. */
+    extensions?: Snippet;
     /** Kept sites that did not fit beside the shelf, in rows over it. */
     above?: Snippet;
     compact?: boolean;
@@ -24,7 +27,7 @@
 <footer class="dock" data-compact={compact} data-cascade style:--cascade={8}>
   {#if above}{@render above()}{/if}
   <div class="dock-base">
-    <ToolShelf {compact} />
+    <ToolShelf {compact} {extensions} />
     <span class="dock-rule" aria-hidden="true"></span>
     {#if sites}<div class="dock-sites-slot">{@render sites()}</div>{/if}
   </div>

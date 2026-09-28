@@ -1171,5 +1171,7 @@
   "webext_group_developers": "For developers",
   "webext_catalog_refined_github": "A cleaner, faster GitHub",
   "webext_catalog_octotree": "Code tree for GitHub",
-  "webext_catalog_wappalyzer": "See what sites are built with"
+  "webext_catalog_wappalyzer": "See what sites are built with",
+  "webext_action": "Extension action",
+  "webext_manage": "Manage extensions"
 }

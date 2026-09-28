@@ -12,7 +12,7 @@
   import { Dock } from "$features/dock";
   import { DownloadStatus } from "$features/downloads";
   import { EssentialsRail } from "$features/essentials";
-  import { ExtensionActions } from "$features/extensions";
+  import { ExtensionActions, ManageExtensions } from "$features/extensions";
   import { loadWebExtensionManager } from "$features/webext";
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
@@ -181,10 +181,9 @@
         <AddressField {compact}>
           {#snippet trailing()}
             <UtilityTray>
-              <div class="utility-panel">
-                <BlockerShield />
-                <ExtensionActions />
-              </div>
+              <BlockerShield labelled />
+              <ExtensionActions />
+              <ManageExtensions />
             </UtilityTray>
           {/snippet}
         </AddressField>
@@ -198,6 +197,9 @@
         <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
       {/if}
     {/snippet}{#snippet dock(compact)}{#if compact}<Dock compact>
+          {#snippet extensions()}<ExtensionActions variant="stack" /><ManageExtensions
+              variant="stack"
+            />{/snippet}
           {#snippet sites()}<EssentialsRail
               entries={railEssentials}
               onSelect={selectTab}

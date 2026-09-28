@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import * as m from "$shared/i18n/messages";
   import { ToolCaseIcon } from "@hugeicons/core-free-icons";
   import { commands } from "$shared/ipc/bindings";
@@ -7,7 +8,7 @@
   import Icon from "$shared/ui/Icon";
   import { RECORD_TOOLS, SHELF_TOOLS, toolPresentation } from "../lib/dock-tools";
 
-  let { compact = false }: { compact?: boolean } = $props();
+  let { compact = false, extensions }: { compact?: boolean; extensions?: Snippet } = $props();
 
   const groups = [SHELF_TOOLS, RECORD_TOOLS] as const;
   const count = SHELF_TOOLS.length + RECORD_TOOLS.length;
@@ -47,6 +48,11 @@
     panelClass="shelf-stack"
   >
     {#snippet trigger()}<Icon icon={ToolCaseIcon} size={18} />{/snippet}
+    {#if extensions}
+      <!-- The web's buttons sit farthest from the case, apart from ours. -->
+      <div class="shelf-extensions" style:--step={count}>{@render extensions()}</div>
+      <div class="shelf-rule shelf-extensions-rule" role="separator"></div>
+    {/if}
     {#each groups as group, at (at)}
       {#if at > 0}<div class="shelf-rule" role="separator"></div>{/if}
       {#each group as kind, index (kind)}
@@ -162,6 +168,17 @@
       opacity: 0;
       translate: 0 6px;
     }
+  }
+
+  .shelf-extensions {
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Nothing to set apart when no extension has a button. */
+  .shelf-extensions:not(:has(:global(button))),
+  .shelf-extensions:not(:has(:global(button))) + .shelf-extensions-rule {
+    display: none;
   }
 
   .shelf-rule {
