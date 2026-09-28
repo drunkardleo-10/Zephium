@@ -112,6 +112,21 @@ export function setMode(next: SidebarMode) {
   save(next);
 }
 
+/**
+ * Shows the full column for a moment without touching the preference. The
+ * returned function puts the rail back, unless a shape was chosen meanwhile.
+ */
+export function expandBriefly(): () => void {
+  if (mode !== "compact") return () => {};
+  mode = "default";
+  publish(true);
+  return () => {
+    if (mode !== "default" || desiredMode !== "compact") return;
+    mode = "compact";
+    publish(true);
+  };
+}
+
 export function toggleMode() {
   desiredMode = desiredMode === "compact" ? "default" : "compact";
   setMode(desiredMode);

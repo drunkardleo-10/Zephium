@@ -4,9 +4,8 @@
   import {
     COMPACT_WIDTH,
     effectiveWidth,
+    expandBriefly,
     hasPanel,
-    isCompact,
-    setPanelExtent,
   } from "$session/sidebar-mode.svelte";
 
   let {
@@ -15,19 +14,17 @@
     children,
   }: { labelledby: string; describedby: string; children: Snippet } = $props();
 
-  const SHEET_WIDTH = 340;
   const INSET = 8;
 
   // The page is a native view drawn over the window, so a prompt in the
-  // middle of it would sit underneath. It belongs to the sidebar instead; at
-  // rail width it borrows a panel's width beside the rail, as the tools do.
-  const borrowed = isCompact() && !hasPanel();
-  if (borrowed) setPanelExtent(SHEET_WIDTH);
-  onDestroy(() => {
-    if (borrowed) setPanelExtent(0);
-  });
+  // middle of it would sit underneath. It belongs to the sidebar instead: at
+  // rail width the full column opens for it and folds away after, and beside
+  // an open tool it covers the tool's panel.
+  const beside = hasPanel();
+  const restore = beside ? () => {} : expandBriefly();
+  onDestroy(restore);
 
-  let left = $derived(isCompact() ? COMPACT_WIDTH + INSET : INSET);
+  let left = $derived(beside ? COMPACT_WIDTH + INSET : INSET);
 </script>
 
 <div class="scrim" style:width={`${effectiveWidth()}px`} aria-hidden="true"></div>
@@ -55,7 +52,8 @@
 
   .sheet {
     position: fixed;
-    top: 48px;
+    top: 50%;
+    translate: 0 -50%;
     z-index: 51;
     box-sizing: border-box;
     max-height: calc(100vh - 56px);
@@ -72,7 +70,7 @@
   @keyframes sheet-in {
     from {
       opacity: 0;
-      translate: 0 -6px;
+      scale: 0.97;
     }
   }
 </style>

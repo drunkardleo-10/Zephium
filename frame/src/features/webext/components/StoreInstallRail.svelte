@@ -45,8 +45,8 @@
     margin-block: 2px 6px;
     border: 0;
     border-radius: var(--radius-row);
-    background: var(--color-accent-soft);
-    color: var(--color-accent);
+    background: var(--color-lit);
+    color: var(--color-on-lit);
     cursor: default;
     animation: interface-fade var(--motion-fast) var(--ease-out) both;
     transition: scale var(--motion-slow) var(--ease-spring);
@@ -59,5 +59,9 @@
 
   .install:disabled {
     opacity: 0.6;
+  }
+
+  .install:hover:not(:disabled) {
+    background: var(--color-lit-hover);
   }
 </style>

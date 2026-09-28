@@ -41,10 +41,17 @@
     }
   };
 
+  // The menu holding the tiles closes when one is chosen, so a popup hangs
+  // from the menu's own button, which stays, rather than from a vanished tile.
+  const anchor = (tile: HTMLElement) =>
+    (
+      tile.closest(".ui-disclosure")?.querySelector<HTMLElement>(":scope > button") ?? tile
+    ).getBoundingClientRect();
+
   function invoke(event: MouseEvent, action: (typeof actions)[number]) {
     const target = event.currentTarget;
     if (profileId === null || tabId === null || !(target instanceof HTMLButtonElement)) return;
-    void extensions.invoke(profileId, tabId, action, target.getBoundingClientRect());
+    void extensions.invoke(profileId, tabId, action, anchor(target));
   }
 
   $effect(() => {
@@ -63,7 +70,7 @@
     ].find((candidate) => candidate.dataset.extensionInstall === request.runtime.install_id);
     if (button === undefined || button.disabled) return;
     if (!extensions.consumeActionShortcut(request.projection_revision)) return;
-    void extensions.invoke(profileId, tabId, action, button.getBoundingClientRect());
+    void extensions.invoke(profileId, tabId, action, anchor(button));
   });
 </script>
 
