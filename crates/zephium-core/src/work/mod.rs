@@ -14,6 +14,7 @@ mod ids;
 pub mod model;
 pub mod objects;
 pub mod parts;
+pub mod personal;
 pub mod planning;
 pub mod port;
 pub mod proposal;

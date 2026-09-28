@@ -14,6 +14,9 @@ pub use sites::*;
 #[path = "work_decision.rs"]
 mod decision;
 pub use decision::*;
+#[path = "work_personal.rs"]
+mod personal;
+pub use personal::*;
 
 pub type WorkProjectionV1 = WorkRuntimeProjection;
 
@@ -512,6 +515,7 @@ impl WorkResponseV1 {
                 port::WorkReply::RuntimeStarted { .. }
                 | port::WorkReply::Deleted { .. }
                 | port::WorkReply::SiteAccess(_)
+                | port::WorkReply::Personal(_)
                 | port::WorkReply::MediaContext(_),
             ) => WorkReplyV1::Error {
                 error: WorkFailureV1::Invalid,

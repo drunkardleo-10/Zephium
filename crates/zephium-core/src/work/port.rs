@@ -5,6 +5,9 @@ use super::*;
 
 #[derive(Clone)]
 pub enum WorkRequest {
+    /// The person's memory, a work's consent to their history, notes and
+    /// tabs, and history search for the agent's context tools.
+    Personal(super::personal::WorkPersonalRequest),
     /// The profile's standing site answers; `set` changes one first (None clears it).
     SiteAccess {
         set: Option<(String, Option<super::sites::WorkSiteAccessV1>)>,
@@ -126,6 +129,7 @@ impl WorkRequest {
                 validate_text(resource, 128)?;
                 validate_text(revision, 128)
             }
+            Self::Personal(request) => request.validate(),
             Self::SiteAccess { set } => set
                 .as_ref()
                 .map_or(Ok(()), |(site, _)| super::sites::validate_site(site)),
@@ -299,6 +303,7 @@ impl std::fmt::Debug for WorkSummary {
 }
 #[derive(Clone, Debug)]
 pub enum WorkReply {
+    Personal(super::personal::WorkPersonalReply),
     SiteAccess(Vec<super::sites::WorkSiteEntryV1>),
     MediaContext(WorkMediaContext),
     Environment(environment::WorkEnvironmentReply),

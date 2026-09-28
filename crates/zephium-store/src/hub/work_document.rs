@@ -14,6 +14,8 @@ mod authoring_store;
 mod environment_store;
 #[path = "work_runtime.rs"]
 pub(super) mod runtime_store;
+#[path = "work_personal.rs"]
+mod personal_store;
 const _: [(); 512] = [(); MAX_WORKS_PER_PROFILE];
 const _: [(); 256] = [(); MAX_ACTIVE_WORKS_PER_PROFILE];
 const _: [(); 32] = [(); MAX_WORK_PLAN_REVISIONS];
@@ -84,6 +86,25 @@ impl Hub {
         }
         if self.recovery_required.is_some() {
             return Err(WorkError::Unavailable);
+        }
+        if let WorkRequest::Personal(request) = request {
+            use zephium_core::work::personal::{WorkHistoryHit, WorkPersonalReply, WorkPersonalRequest};
+            if let WorkPersonalRequest::SearchHistory { query, limit } = &request {
+                let hits = self
+                    .search_history(profile, query, u32::from(*limit))
+                    .into_iter()
+                    .map(|hit| WorkHistoryHit {
+                        url: hit.url,
+                        title: hit.title,
+                        last_visit: hit.last_visit,
+                    })
+                    .collect();
+                return Ok(WorkReply::Personal(WorkPersonalReply::History(hits)));
+            }
+            let conn = self
+                .profile_conn(profile)
+                .map_err(|_| WorkError::Unavailable)?;
+            return personal_store::call(conn, request).map(WorkReply::Personal);
         }
         if let WorkRequest::SiteAccess { set } = request {
             let conn = self
@@ -303,7 +324,8 @@ fn apply(
         }
         WorkRequest::ReadEvidence { .. }
         | WorkRequest::ReadMediaContext { .. }
-        | WorkRequest::SiteAccess { .. } => return Err(WorkError::Invalid),
+        | WorkRequest::SiteAccess { .. }
+        | WorkRequest::Personal(_) => return Err(WorkError::Invalid),
         WorkRequest::RuntimeAbandon {
             id,
             execution,

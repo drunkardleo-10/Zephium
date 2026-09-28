@@ -29,7 +29,7 @@ pub struct Migration {
     pub up: fn(&Transaction) -> rusqlite::Result<()>,
 }
 
-// The release and Work lineages together hold 133 objects at PROFILE v28.
+// The release and Work lineages together hold 146 objects at PROFILE v29.
 const MAX_SCHEMA_OBJECTS: i64 = 192;
 const MAX_SCHEMA_IDENTIFIER_BYTES: i64 = 256;
 const MAX_SCHEMA_SQL_BYTES: i64 = 256 * 1024;
@@ -2102,6 +2102,10 @@ pub static PROFILE: &[Migration] = &[
         version: 28,
         up: |tx| tx.execute_batch(include_str!("user_resources_v28.sql")),
     },
+    Migration {
+        version: 29,
+        up: |tx| tx.execute_batch(include_str!("work_personal_v29.sql")),
+    },
 ];
 
 #[cfg(test)]
@@ -2166,6 +2170,7 @@ mod tests {
         (26, 0x74e2_6238_bcd2_12bf),
         (27, 0x36af_9c91_941c_2c09),
         (28, 0xfe58_4294_8d0f_e4c6),
+        (29, 0x2dd7_8da7_cb07_5ee2),
     ];
 
     fn schema_fingerprint(migrations: &[Migration], version: i64) -> u64 {
@@ -2302,7 +2307,7 @@ mod tests {
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            28
+            29
         );
     }
 
@@ -3452,7 +3457,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(28));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(29));
     }
 
     #[test]

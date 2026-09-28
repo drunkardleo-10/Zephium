@@ -209,7 +209,8 @@ impl WorkDocumentSubmission {
             WorkRequest::List { .. }
             | WorkRequest::Environment { .. }
             | WorkRequest::ReadMediaContext { .. }
-            | WorkRequest::SiteAccess { .. } => None,
+            | WorkRequest::SiteAccess { .. }
+            | WorkRequest::Personal(_) => None,
         };
         PENDING
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
