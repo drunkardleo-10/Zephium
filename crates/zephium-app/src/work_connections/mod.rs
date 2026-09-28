@@ -138,3 +138,6 @@ mod tests {
         assert_eq!(bounded("héllo", 2), ("h".into(), true));
     }
 }
+
+#[cfg(test)]
+mod live_tests;
