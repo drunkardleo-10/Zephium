@@ -218,8 +218,8 @@
   },
   "lazy:features/work/components/AgentLine.svelte": {
     "js": 256500,
-    "css": 12800,
-    "description": "Measured 113866 JS and 8299 CSS bytes: a clipped headline opens whole, and follow-ups wait behind Next as rows in the line's panel; every ending of a run and every refused request has its own line. The local-work commits grow the shared graph to 114551 JS (measured on 236b43c4). Merged with main: 187486 JS and 12262 CSS measured. Signed-in origin grants, open tabs as context and the plain-word page budget sentence add 1.6 KB JS to the shared Work graph and catalog (190959 measured). The line's closed run facts under a finished run, Sign in to a walled site and Try again as me add 2.3 KB JS (196186 measured over 193844 with the current dependencies). LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (193844 measured over 191544 at 714054aa). The sidebar's project list shares the Work environment session with the canvas, so rolldown moves that session into the chunk the line shares with Work: +15 KB in this static graph, none of it new to a Work window, which has already loaded it (211537 measured). The run's elapsed time and the docked line are under 1 KB of it. The docked capsule and the elapsed time add 0.2 KB CSS (12563 measured). Its words open in place, wrapping inside the island, instead of repeating in a panel: +0.1 KB CSS (12740 measured). The island holds the run's open asks as their cards (Confirm, site entry, sign-in, context, connections, questions) and the old account handoff is gone: 254797 measured. The shared chunk grown by the concurrent streams: 256009 measured."
+    "css": 21500,
+    "description": "Measured 113866 JS and 8299 CSS bytes: a clipped headline opens whole, and follow-ups wait behind Next as rows in the line's panel; every ending of a run and every refused request has its own line. The local-work commits grow the shared graph to 114551 JS (measured on 236b43c4). Merged with main: 187486 JS and 12262 CSS measured. Signed-in origin grants, open tabs as context and the plain-word page budget sentence add 1.6 KB JS to the shared Work graph and catalog (190959 measured). The line's closed run facts under a finished run, Sign in to a walled site and Try again as me add 2.3 KB JS (196186 measured over 193844 with the current dependencies). LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (193844 measured over 191544 at 714054aa). The sidebar's project list shares the Work environment session with the canvas, so rolldown moves that session into the chunk the line shares with Work: +15 KB in this static graph, none of it new to a Work window, which has already loaded it (211537 measured). The run's elapsed time and the docked line are under 1 KB of it. The docked capsule and the elapsed time add 0.2 KB CSS (12563 measured). Its words open in place, wrapping inside the island, instead of repeating in a panel: +0.1 KB CSS (12740 measured). The island holds the run's open asks as their cards (Confirm, site entry, sign-in, context, connections, questions) and the old account handoff is gone: 254797 measured. The shared chunk grown by the concurrent streams: 256009 measured. The ask cards bring their styles: 21021 CSS measured."
   },
   "lazy:features/work/components/WorkObjectiveInspector.svelte": {
     "js": 263000,
@@ -393,7 +393,7 @@
   },
   "lazy:features/work/components/objects/ObjectCentre.svelte": {
     "js": 166500,
-    "css": 9000,
-    "description": "An object opened in the centre, loaded with the first lift of an object: measured 164683 JS and 8899 CSS. The shared chunk grown by the concurrent streams: 165902 measured."
+    "css": 9500,
+    "description": "An object opened in the centre, loaded with the first lift of an object: measured 164683 JS and 8899 CSS. The shared chunk grown by the concurrent streams: 165902 measured. 9316 CSS measured."
   }
 }
