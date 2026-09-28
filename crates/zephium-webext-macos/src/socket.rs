@@ -182,28 +182,6 @@ impl Socket {
                     let bytes = message.data().map(|data| data.to_vec()).unwrap_or_default();
                     json!({ "op": "message", "base64": base64::engine::general_purpose::STANDARD.encode(bytes) })
                 };
-                if crate::tracing() {
-                    let (kind, bytes) =
-                        if message.r#type() == NSURLSessionWebSocketMessageType::String {
-                            (
-                                "text",
-                                message
-                                    .string()
-                                    .map(|s| s.to_string().into_bytes())
-                                    .unwrap_or_default(),
-                            )
-                        } else {
-                            (
-                                "binary",
-                                message.data().map(|d| d.to_vec()).unwrap_or_default(),
-                            )
-                        };
-                    eprintln!(
-                        "webext-trace: socket {kind} frame {} bytes, last {:?}",
-                        bytes.len(),
-                        bytes.last()
-                    );
-                }
                 socket.post(payload);
                 socket.receive_next();
             },
