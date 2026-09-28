@@ -52,42 +52,53 @@ fn authenticated_browser_mutations_follow_shell_scope_and_settle_exactly_once() 
     };
     assert_ne!(created, original);
     assert_eq!(shell.windows.focused().unwrap().active, Some(created));
-    let (first_url, first_intent) = engine.extension_browser_first_urls()[0].clone().unwrap();
-    assert_eq!(first_url.as_ref(), "https://created.example/");
-    assert!(
-        !engine
-            .calls()
-            .iter()
-            .any(|call| call.starts_with(&format!("create {created} "))),
-        "the requested URL must wait for the native tabs.create reply"
-    );
-    shell.handle(Command::Engine(EngineEvent::ExtensionCreatedTabReplied {
-        profile,
-        request: ExtensionBrowserRequestId::new(1).unwrap(),
-        tab: created,
-        url: Arc::from("https://created.example/"),
-        intent: first_intent,
-    }));
-    assert!(engine
-        .calls()
-        .iter()
-        .any(|call| { call == &format!("create {created} https://created.example/ [default]") }));
-    shell.handle(Command::Engine(EngineEvent::ExtensionCreatedTabReplied {
-        profile,
-        request: ExtensionBrowserRequestId::new(1).unwrap(),
-        tab: created,
-        url: Arc::from("https://created.example/"),
-        intent: first_intent,
-    }));
-    assert_eq!(
-        engine
-            .calls()
-            .iter()
-            .filter(|call| call == &&format!("create {created} https://created.example/ [default]"))
-            .count(),
-        1,
-        "duplicate native settlement cannot start the first load twice"
-    );
+    #[cfg(target_os = "macos")]
+    {
+        let (first_url, first_intent) = engine.extension_browser_first_urls()[0].clone().unwrap();
+        assert_eq!(first_url.as_ref(), "https://created.example/");
+        assert!(
+            !engine
+                .calls()
+                .iter()
+                .any(|call| call.starts_with(&format!("create {created} "))),
+            "the requested URL must wait for the native tabs.create reply"
+        );
+        shell.handle(Command::Engine(EngineEvent::ExtensionCreatedTabReplied {
+            profile,
+            request: ExtensionBrowserRequestId::new(1).unwrap(),
+            tab: created,
+            url: Arc::from("https://created.example/"),
+            intent: first_intent,
+        }));
+        assert!(engine.calls().iter().any(|call| {
+            call == &format!("create {created} https://created.example/ [default]")
+        }));
+        shell.handle(Command::Engine(EngineEvent::ExtensionCreatedTabReplied {
+            profile,
+            request: ExtensionBrowserRequestId::new(1).unwrap(),
+            tab: created,
+            url: Arc::from("https://created.example/"),
+            intent: first_intent,
+        }));
+        assert_eq!(
+            engine
+                .calls()
+                .iter()
+                .filter(
+                    |call| call == &&format!("create {created} https://created.example/ [default]")
+                )
+                .count(),
+            1,
+            "duplicate native settlement cannot start the first load twice"
+        );
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        assert!(engine.extension_browser_first_urls()[0].is_none());
+        assert!(engine.calls().iter().any(|call| {
+            call == &format!("create {created} https://created.example/ [default]")
+        }));
+    }
 
     shell.handle(Command::Engine(request(
         profile,
@@ -137,6 +148,7 @@ fn authenticated_browser_mutations_follow_shell_scope_and_settle_exactly_once() 
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn delayed_create_reply_cannot_override_a_newer_failed_navigation_or_closed_tab() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
