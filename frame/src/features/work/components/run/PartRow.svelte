@@ -13,6 +13,9 @@
     Search01Icon,
   } from "../../lib/icons";
   import { askCard, partContent } from "./slots";
+  import { getContext, untrack } from "svelte";
+  import { canvasBoard, canvasFocusResult, type BoardActions } from "../../lib/canvas-context";
+  import { askKey } from "../../lib/run/part-size";
   import HostGlyph from "../cards/HostGlyph.svelte";
   import PageFace from "./PageFace.svelte";
   import AgentOrb from "../cards/AgentOrb.svelte";
@@ -71,6 +74,26 @@
     search: Search01Icon,
   } as const;
   const lines = $derived(part.lines ?? []);
+  const board = getContext<BoardActions | undefined>(canvasBoard);
+  const focus = getContext<((id: string) => void) | undefined>(canvasFocusResult);
+  // The ask card's own height, so its row makes the room it needs at each detail.
+  let askBody = $state<HTMLElement>();
+  $effect(() => {
+    const element = askBody;
+    const level = detail;
+    if (!element) return;
+    let reported = 0;
+    const report = () => {
+      const height = Math.ceil(element.offsetHeight);
+      if (!height || height === reported) return;
+      reported = height;
+      untrack(() => board?.measure(askKey(item.id), PART.ask, false, height, level));
+    };
+    report();
+    const observer = new ResizeObserver(() => requestAnimationFrame(report));
+    observer.observe(element);
+    return () => observer.disconnect();
+  });
   /** A one-word name longer than its column is set smaller rather than cut. */
   const fitted = $derived.by(() => {
     const longest = Math.max(...part.title.split(/\s+/u).map((word) => word.length), 1);
@@ -127,8 +150,14 @@
   </button>
 
   {#if shape === "ask" && part.ask}
-    <div class="slot" style:inset-inline-start="{lead}px" data-part-ask={item.id}>
-      {#if asking}{#await asking() then view}<view.default {...part.ask.props} />{/await}{/if}
+    <div class="slot ask" style:inset-inline-start="{lead}px" data-part-ask={item.id}>
+      <div bind:this={askBody}>
+        {#if asking}{#await asking() then view}<view.default
+              {...part.ask.props}
+              {detail}
+              onfocus={() => focus?.(item.id)}
+            />{/await}{/if}
+      </div>
     </div>
   {:else if shape === "helper"}
     <div class="slot" style:inset-inline-start="{lead}px">

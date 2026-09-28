@@ -15,13 +15,17 @@
   import { environmentRequests } from "../lib/project-environment-thread";
   import type { BoardActions } from "../lib/canvas-context";
   import type { Detail } from "../lib/board/types";
+  import type { PartAsk } from "../lib/run/parts";
   import type { BoardScene } from "./board-fixtures";
   let {
     scene,
     viewport = { x: 40, y: 40, zoom: 1 },
     asked = [],
+    asks,
   }: {
     scene: BoardScene;
+    /** Questions waiting on the person, by part. */
+    asks?: (objective: string) => readonly PartAsk[];
     viewport?: { x: number; y: number; zoom: number };
     asked?: string[];
   } = $props();
@@ -36,6 +40,7 @@
       measured,
       open,
       detail,
+      ...(asks ? { asks } : {}),
     }),
   );
   const requests = $derived(environmentRequests(stages));

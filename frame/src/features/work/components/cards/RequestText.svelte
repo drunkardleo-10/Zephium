@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { CanvasItem } from "../../lib/canvas-model";
   import type { Detail } from "../../lib/board/types";
+  import Remembered from "../asks/Remembered.svelte";
   import * as m from "$shared/i18n/messages";
 
   let {
@@ -67,10 +68,14 @@
           }}>{item.actionLabel}</button
         >{/if}
     </p>{/if}
+  {#if item.remember && detail === "full"}<div class="remembered">
+      <Remembered {...item.remember} />
+    </div>{/if}
 </div>
 
 <style>
   .request {
+    position: relative;
     box-sizing: border-box;
     inline-size: 100%;
     block-size: 100%;
@@ -81,6 +86,13 @@
 
   .request.selected {
     box-shadow: 0 0 0 1.5px var(--color-ring);
+  }
+
+  /* What the run remembered hangs under the words, clear of the thread. */
+  .remembered {
+    position: absolute;
+    inset-block-start: calc(100% + 4px);
+    inset-inline: 4px 0;
   }
 
   .meta {

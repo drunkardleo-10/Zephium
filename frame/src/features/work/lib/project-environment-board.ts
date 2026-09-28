@@ -19,7 +19,7 @@ import { runTrail } from "./board/trail";
 import type { Detail, Picture } from "./board/types";
 import { RUN, placeRun } from "./run/layout";
 import { runParts, type PartAsk, type RunInputView, type RunPart } from "./run/parts";
-import { PART, partSize, type PartShape } from "./run/part-size";
+import { PART, askKey, partSize, type PartShape } from "./run/part-size";
 import { foundByPart } from "./run/found";
 import * as m from "$shared/i18n/messages";
 
@@ -186,8 +186,14 @@ function leadEntries(
 }
 
 /** How a part's own node stands: frames while it works, a stack once done. */
-export function partShape(part: RunPart): PartShape {
-  if (part.ask) return { kind: "ask" };
+export function partShape(part: RunPart, measured?: number): PartShape {
+  if (part.ask) {
+    const ask = part.ask.props["ask"] as { kind?: string } | undefined;
+    return {
+      kind: "ask",
+      height: measured ?? (ask?.kind === "confirm" ? PART.askConfirm : PART.askHeight),
+    };
+  }
   if (part.helper === "computer" || part.helper === "connection")
     return { kind: "helper", lines: part.lines?.length ?? 0 };
   if (part.helper === "research")
@@ -323,7 +329,17 @@ export function environmentStages(
         }),
       );
       const rows = parts.map((part) => ({
-        part: { id: part.id, ...partSize(partShape(part)) },
+        part: {
+          id: part.id,
+          ...partSize(
+            partShape(
+              part,
+              (detail !== "full"
+                ? measured.get(measureKey(askKey(part.id), PART.ask, false, detail))
+                : undefined) ?? measured.get(measureKey(askKey(part.id), PART.ask, false)),
+            ),
+          ),
+        },
         found: set.objects.flatMap((object) => {
           if (found.get(object.id) !== part.id || pinned.has(object.id)) return [];
           const width = Math.round(range(object).ideal);

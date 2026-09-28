@@ -413,18 +413,21 @@ test("prompt submission keeps work on canvas and clarification choices above the
     },
   ];
   objective.projection = { ...objective.projection!, executions: [asking] };
-  await screen.getByRole("button", { name: "Answer", exact: true }).click();
-  await screen.getByRole("button", { name: "Under 150", exact: true }).click();
+  // The question stands in the island as its card, above the bar.
+  await expect
+    .element(screen.getByRole("button", { name: "Under 150", exact: true }))
+    .toBeVisible();
   // One field, two meanings: while the run asks, the same field adds to it.
   await expect
     .element(screen.getByRole("textbox", { name: "Add to this…", exact: true }))
     .toBeVisible();
-  const question = screen.container.querySelector(".agent-line input")!;
+  const question = screen.container.querySelector(".agent-line .ask input")!;
   const prompt = screen.container.querySelector(".work-bar textarea")!;
   expect(question.compareDocumentPosition(prompt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(question.getBoundingClientRect().bottom).toBeLessThan(prompt.getBoundingClientRect().top);
   const answerStep = vi.spyOn(objective, "answerStep").mockResolvedValue(true);
-  await screen.getByRole("button", { name: "Send answer", exact: true }).click();
+  await screen.getByRole("button", { name: "Under 150", exact: true }).click();
+  await expect.poll(() => answerStep.mock.calls.length).toBe(1);
   expect(answerStep).toHaveBeenCalledExactlyOnceWith("execution", "ask-1", "Under 150");
   expect(planning).toHaveBeenCalledTimes(1);
   const link = { extraction_id: "provider-record", source_id: 1 };

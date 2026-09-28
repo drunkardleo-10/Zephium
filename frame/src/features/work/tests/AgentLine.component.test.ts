@@ -56,7 +56,7 @@ function agentRun(status: WorkExecutionFact["status"]): WorkExecutionFact {
   };
 }
 
-test("a running agent says only what it is doing and answers its question in place", async () => {
+test("a running agent says only what it is doing and its question stands in the island", async () => {
   const session = new WorkSession("profile");
   session.selected = "objective";
   const execution = agentRun("running");
@@ -101,9 +101,9 @@ test("a running agent says only what it is doing and answers its question in pla
   expect(screen.container.textContent).not.toContain("Found 6 sources");
   expect(screen.container.textContent).not.toContain("Looking for quiet keyboards.");
   expect(screen.container.textContent).not.toContain(projection.work.objective);
-  await screen.getByRole("button", { name: "Answer", exact: true }).click();
+  // The question stands in the island as its card: an option answers in one press.
   await screen.getByRole("button", { name: "Under 150", exact: true }).click();
-  await screen.getByRole("button", { name: "Send answer", exact: true }).click();
+  await expect.poll(() => execute.mock.calls.length).toBe(1);
   expect(execute).toHaveBeenCalledExactlyOnceWith({
     kind: "answer_step",
     execution: "execution",
@@ -546,7 +546,7 @@ test("a finished run states what it did beneath its words, counted from its step
   session.dispose();
 });
 
-test("a sign-in wall offers to sign in, then the same request goes again as the person", async () => {
+test("a sign-in wall offers to sign in, and the run goes on by itself once the person has", async () => {
   const session = new WorkSession("profile");
   session.selected = "objective";
   const execution = agentRun("running");
@@ -568,36 +568,11 @@ test("a sign-in wall offers to sign in, then the same request goes again as the 
     remaining: 150_000,
   };
   const onsignin = vi.fn();
-  const onretry = vi.fn();
-  const screen = await render(AgentLine, { session, waiting, onsignin, onretry });
+  const screen = await render(AgentLine, { session, waiting, onsignin });
   await screen.getByRole("button", { name: "Sign in to jobs.example.com", exact: true }).click();
   expect(onsignin).toHaveBeenCalledExactlyOnceWith("page:execution:read-1");
-  // The run stopped for the sign-in; once the person is back, the line offers the retry.
-  const stopped = { ...execution, status: "cancelled" as const };
-  session.projection = { ...structuredClone(projection), executions: [stopped] };
-  await screen.rerender({
-    session,
-    waiting: null,
-    onsignin,
-    onretry,
-    retry: { host: "jobs.example.com" },
-  });
-  await screen.getByRole("button", { name: "Try again as me", exact: true }).click();
-  expect(onretry).toHaveBeenCalledOnce();
-  // Trying again sends the same request naming the origin: Rust drafts the grant to allow.
-  native.operation.mockResolvedValue({
-    version: 1,
-    profile: "profile",
-    operation: "op",
-    state: { kind: "pending", work: "objective" },
-  });
-  await session.retrySignedIn("https://jobs.example.com");
-  const input = native.operation.mock.lastCall?.[2];
-  expect(input).toMatchObject({
-    kind: "run",
-    signed_in: { kind: "origin", origin: "https://jobs.example.com" },
-  });
-  expect(input.command.intent.grant.accounts).toBeUndefined();
+  // No "as me" retry: the run itself resumes after the sign-in.
+  expect(screen.container.textContent).not.toContain("Try again as me");
   await screen.unmount();
   session.dispose();
 });

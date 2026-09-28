@@ -4,7 +4,11 @@ import type {
   WorkExecutionFact,
   WorkPartFactV1,
 } from "$shared/ipc/bindings";
+import type { PartAsk } from "../lib/run/parts";
+import { askPart, asksOf, openAsks } from "../components/asks/asks";
+import type { AskActions } from "../components/asks/actions";
 import type { BoardScene } from "./board-fixtures";
+import { airbnbBook } from "./ask-fixtures";
 
 type Data = WorkArtifactV1["data"];
 
@@ -272,4 +276,44 @@ export function leadTrip(scene: BoardScene, live: boolean): BoardScene {
     ],
   };
   return { ...scene, snapshot, objectives: new Map([[objective, copy]]) };
+}
+
+/**
+ * The same trip waiting on the person twice: a Confirm to book the stay, and
+ * the first question on a site the flights part has not worked on.
+ */
+export function askingTrip(scene: BoardScene): {
+  scene: BoardScene;
+  asks: (objective: string) => PartAsk[];
+} {
+  const lead = leadTrip(scene, true);
+  const [objective, projection] = [...lead.objectives.entries()][0]!;
+  const run = projection.executions.at(-1)!;
+  run.steps = [
+    ...(run.steps ?? []),
+    { ...airbnbBook, part: "stay" },
+    {
+      id: "entry-lot",
+      turn: 3,
+      kind: {
+        kind: "ask",
+        prompt: "Work on lot.com? Look up fares from Warsaw to San Francisco for 3 January.",
+        options: ["Allow", "Always for LOT", "Not now"],
+      },
+      status: "running",
+      part: "flights",
+    },
+  ];
+  const actions: AskActions = {
+    confirm: async () => false,
+    answer: async () => false,
+  };
+  const asks = (work: string): PartAsk[] =>
+    work === objective
+      ? openAsks(asksOf(run, lead.pages)).flatMap((ask) => {
+          const part = askPart(ask);
+          return part ? [{ part, props: { ask, actions, placement: "canvas" } }] : [];
+        })
+      : [];
+  return { scene: lead, asks };
 }

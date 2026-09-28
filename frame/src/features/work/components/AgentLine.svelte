@@ -5,7 +5,7 @@
 </script>
 
 <script lang="ts">
-  import { tick, untrack, type Snippet } from "svelte";
+  import { tick, untrack } from "svelte";
   import type { WorkSession } from "$domain/work";
   import type { WorkHumanReasonV1 } from "$shared/ipc/bindings";
   import { currentActivity } from "$domain/work";
@@ -17,12 +17,10 @@
     runFacts,
     runFactsLine,
   } from "../lib/agent-steps";
-  import {
-    accountRefusal,
-    accountRefusalSentence,
-    cardCountdown,
-    reasonSentence,
-  } from "../lib/work-human";
+  import { cardCountdown, reasonSentence } from "../lib/work-human";
+  import type { WorkHumanSession } from "$domain/work-human";
+  import RunAsks from "./asks/RunAsks.svelte";
+  import { asksOf, openAsks } from "./asks/asks";
   import { preparationFailure } from "../lib/preparation-failure";
   import { fileName } from "../lib/work-files";
   import type { CanvasItem } from "../lib/canvas-model";
@@ -46,13 +44,11 @@
     writeup,
     onfocusagent,
     onwaitingpage,
-    onopenpage,
     onreview,
     onsteered,
     onsignin,
-    retry = null,
-    onretry,
-    ask,
+    human = null,
+    onopenstep,
   }: {
     session: WorkSession;
     /** The run's agent presences, as the canvas already projects them. */
@@ -74,19 +70,16 @@
     onfocusagent?: (id: string) => void;
     /** Pans to the waiting page card and focuses it. */
     onwaitingpage?: (card: string) => void;
-    /** Presents the signed-in page for sign-in handoff or takeover. */
-    onopenpage?: (tab: string) => void;
     /** Opens the change the run is proposing, so the person can read it whole. */
     onreview?: (step: string) => void;
     /** The draft was handed to the agent or queued; clear the composer. */
     onsteered?: () => void;
     /** A read met a sign-in wall: stop there and open the page to sign in. */
     onsignin?: (card: string) => void;
-    /** The site the person went to sign in to; the same request can go again as them. */
-    retry?: { host: string } | null;
-    onretry?: () => void;
-    /** A question waiting on the person (the ask card), set above the line until it is answered. */
-    ask?: Snippet;
+    /** The work's held pages, for the asks a sign-in wall puts. */
+    human?: WorkHumanSession | null;
+    /** Opens the page an ask is about, in the centre. */
+    onopenstep?: (step: string) => void;
   } = $props();
   const id = $props.id();
   const runtime = $derived(session.projection);
@@ -179,16 +172,20 @@
       return undefined;
     return { id: step.id, prompt: step.kind.prompt, options: step.kind.options };
   });
-  const question = $derived(questions.at(-1) ?? stoppedQuestion);
+  /** The run's open asks stand in the island as cards; the line's own question gives way. */
+  const asking = $derived.by(() => {
+    if (!execution || !work) return false;
+    const held = human ? (human.pages.get(work.id) ?? []) : [];
+    return openAsks(asksOf(execution, session.pages, held)).length > 0;
+  });
+  const question = $derived(asking ? undefined : (questions.at(-1) ?? stoppedQuestion));
   const failure = $derived(
     preparationFailure(run?.state) ??
       (run?.state.kind === "settled" && run.state.response.reply.kind === "error"
         ? run.state.response.reply.error
         : null),
   );
-  const approval = $derived(
-    work ? session.operations.latest(work.id, ["prepare_plan", "prepare_account"]) : undefined,
-  );
+  const approval = $derived(work ? session.operations.latest(work.id, "prepare_plan") : undefined);
   const approvalDraft = $derived.by(() => {
     const state = approval?.state;
     const reply =
@@ -201,17 +198,11 @@
       ? reply
       : null;
   });
-  const accountScope = $derived.by(() => {
-    for (const node of execution?.spec.nodes ?? [])
-      if (node.capability.kind === "account_read" || node.capability.kind === "account_update")
-        return node.capability.scope;
-    return null;
-  });
   const intervention = $derived(execution?.intervention ?? null);
   /** Why the agent stopped for a person, in the person's words. */
   const interventionLabel = $derived.by(() => {
     if (!intervention) return "";
-    const origin = intervention.origin ?? accountScope?.origin ?? "";
+    const origin = intervention.origin ?? "";
     switch (intervention.kind) {
       case "sign_in":
         return m.work_intervention_sign_in({ origin });
@@ -227,16 +218,9 @@
         return m.work_intervention_human_takeover();
     }
   });
-  /** A signed-in page the person may need: to finish a challenge, or to take over. */
-  const pageHandoff = $derived(!!accountScope && !!onopenpage && (live || !!intervention));
   const closing = $derived(execution ? agentLine(execution) : null);
   /** Why the run ended early, in Rust's words: the note its last unfinished step left. */
   const ending = $derived(execution ? endingNote(execution) : null);
-  /** A signed-in limit the run reached, said plainly where nothing more specific stands. */
-  const refusal = $derived.by(() => {
-    const found = execution ? accountRefusal(execution) : null;
-    return found ? accountRefusalSentence(found) : null;
-  });
   /** A request refused before it ran says why, never an older run's words. */
   const refusals: Record<string, () => string> = {
     capacity: m.work_line_full,
@@ -257,9 +241,6 @@
     if (live) {
       if (fileState) return fileState;
       if (activity === "reading" && readingHost) return m.work_line_reading({ host: readingHost });
-      // Past a signed-in limit, the plain sentence stands in for "Thinking".
-      const thinking = !activity || activity === "planning" || activity === "delegating";
-      if (refusal && thinking && execution?.status !== "cancel_requested") return refusal;
       if (activity) return activityStates[activity]?.() ?? m.work_line_thinking();
       return execution?.status === "cancel_requested"
         ? m.work_line_stopping()
@@ -268,13 +249,13 @@
     switch (execution?.status) {
       case "completed":
       case "needs_review":
-        return closing ?? refusal ?? m.work_env_status_done();
+        return closing ?? m.work_env_status_done();
       case "cancelled":
-        return ending ?? refusal ?? m.work_line_stopped();
+        return ending ?? m.work_line_stopped();
       case "interrupted":
-        return ending ?? refusal ?? m.work_line_interrupted();
+        return ending ?? m.work_line_interrupted();
       case "failed":
-        return ending ?? refusal ?? m.work_line_failed();
+        return ending ?? m.work_line_failed();
       default:
         return run?.state.kind === "pending" ? m.work_line_thinking() : m.work_line_ready();
     }
@@ -311,7 +292,6 @@
       : "",
   );
   const signInWall = $derived(waiting?.reason === "sign_in" && !!onsignin);
-  const tryAgain = $derived(!!retry && !live && !!onretry);
   const followups = $derived(settled ? session.followups.slice(0, 3) : []);
   const writeupOffer = $derived(settled ? writeup : undefined);
   const nextRows = $derived(followups.length > 0 || !!writeupOffer);
@@ -386,20 +366,6 @@
     if (!text) return;
     if (!(await session.steer(text))) session.enqueue(text);
     onsteered?.();
-  }
-  /** Handing the page back: a live run is revoked with the reason before it opens. */
-  async function openPage() {
-    const scope = accountScope;
-    if (!scope || blocked) return;
-    if (live && execution) {
-      const stopped = await session.execute({
-        kind: "cancel",
-        execution: execution.id,
-        intervention: { kind: "human_takeover", origin: scope.origin },
-      });
-      if (!stopped) return;
-    }
-    onopenpage?.(scope.tab);
   }
   async function stop() {
     if (!execution || blocked) return;
@@ -512,7 +478,15 @@
           {/if}
         </div>
       </div>
-      {#if ask}<div class="ask" role="group">{@render ask()}</div>{/if}
+      {#if asking}<div class="ask">
+          <RunAsks
+            {session}
+            {human}
+            placement="island"
+            seed={agents[0]?.agent?.seed ?? 0}
+            onopenpage={(step) => onopenstep?.(step)}
+          />
+        </div>{/if}
       <div class="line">
         <button
           type="button"
@@ -581,10 +555,6 @@
               onclick={() => onsignin?.(waiting.card)}
               >{m.work_line_sign_in({ host: waiting.host })}</button
             >
-          {:else if tryAgain}
-            <button type="button" class="action" disabled={blocked} onclick={() => onretry?.()}
-              >{m.work_line_try_as_me()}</button
-            >
           {:else if proposal}
             <button
               type="button"
@@ -604,10 +574,6 @@
               aria-expanded={panel === "next"}
               onclick={() => (want = want === "next" ? null : "next")}
               >{m.work_line_next()}<Icon icon={ArrowDown01Icon} size={12} /></button
-            >
-          {:else if pageHandoff}
-            <button type="button" class="action" disabled={blocked} onclick={() => void openPage()}
-              >{m.work_line_open()}</button
             >
           {:else if approvalDraft && !live}
             <button

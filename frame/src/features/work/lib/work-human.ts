@@ -1,5 +1,4 @@
 import type {
-  WorkExecutionFact,
   WorkHumanPageV1,
   WorkHumanPhaseV1,
   WorkHumanReasonV1,
@@ -50,28 +49,6 @@ export function reasonSentence(reason: WorkHumanReasonV1, host: string): string 
     case "unsupported_interaction":
       return m.work_human_why_unsupported_interaction();
   }
-}
-
-/** Why the loop refused a signed-in step, by the closed names Rust gives them. */
-export type AccountRefusal =
-  { kind: "AccountWrite"; host: string } | { kind: "PageBudget"; host: string; pages: number };
-
-/** A signed-in refusal on the agent line, as a plain sentence. */
-export function accountRefusalSentence(refusal: AccountRefusal): string {
-  switch (refusal.kind) {
-    case "AccountWrite":
-      return m.work_line_account_write({ host: refusal.host });
-    case "PageBudget":
-      return m.work_line_page_budget({ host: refusal.host, pages: refusal.pages });
-  }
-}
-
-/** The refusal a run's projection shows: a granted origin whose pages are all used. */
-export function accountRefusal(execution: WorkExecutionFact): AccountRefusal | null {
-  const spent = (execution.accounts ?? []).find(
-    (use) => use.pages > 0 && use.pages_used >= use.pages,
-  );
-  return spent ? { kind: "PageBudget", host: spent.host, pages: spent.pages } : null;
 }
 
 /** A refused command is one line in the pane, in the person's words. */

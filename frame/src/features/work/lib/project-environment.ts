@@ -664,7 +664,7 @@ export function environmentParts(
         };
       });
       const rect = stage.lane.rects[part.id]!;
-      const needs = entries.some((page) => page.human?.phase === "waiting_for_human");
+      const needs = !!part.ask || entries.some((page) => page.human?.phase === "waiting_for_human");
       // The orb stands at the first part at work; every other part at work has its own small one.
       const helper =
         part.state === "running" &&

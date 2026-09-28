@@ -4,7 +4,6 @@ import { projection, snapshot } from "./environment-fixtures";
 import { environmentParts } from "../lib/project-environment";
 import { environmentStages } from "../lib/project-environment-board";
 import { runTrail } from "../lib/board/trail";
-import { accountRefusal, accountRefusalSentence } from "../lib/work-human";
 
 function agentRun(): { state: WorkRuntimeProjection; run: WorkExecutionFact } {
   const state = structuredClone(projection);
@@ -94,18 +93,5 @@ test("a signed-in read carries its host to the card, and the trail its session u
   expect(pagesOf(state).map((page) => page.account)).toEqual(["app.notion.com", undefined]);
   expect(runTrail([run], true)).toContainEqual(
     expect.objectContaining({ text: "As you on app.notion.com", detail: "1 of 12 pages" }),
-  );
-});
-
-test("signed-in refusals reach the line as plain sentences", () => {
-  const { run } = agentRun();
-  expect(accountRefusal(run)).toBeNull();
-  run.accounts = [{ host: "app.notion.com", pages_used: 12, pages: 12 }];
-  const spent = accountRefusal(run);
-  expect(spent && accountRefusalSentence(spent)).toBe(
-    "The agent used all 12 pages it was allowed on app.notion.com",
-  );
-  expect(accountRefusalSentence({ kind: "AccountWrite", host: "app.notion.com" })).toBe(
-    "The agent stopped before changing something on app.notion.com",
   );
 });

@@ -128,10 +128,10 @@ export function environmentRequests(stages: readonly WorkStage[]): {
       kind: "thread",
       route: {
         points: [
-          { x, y: above.y + above.height + 8 },
+          { x, y: above.y + above.height + 40 },
           { x, y: below.y - 12 },
         ],
-        from: { x, y: above.height + 8 },
+        from: { x, y: above.height + 40 },
         to: { x, y: -12 },
         laid: { source: { x: above.x, y: above.y }, target: { x: below.x, y: below.y } },
       },

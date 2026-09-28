@@ -21,17 +21,22 @@ export const PART = {
   helper: 400,
   helperLines: 5,
   ask: 360,
-  askHeight: 136,
+  /** Until an ask card has measured itself: a Confirm carries the page it will change. */
+  askConfirm: 432,
+  askHeight: 176,
   /** The name and one line under it. */
   labelHeight: 48,
 } as const;
+
+/** Where a part's ask card reports its height. */
+export const askKey = (part: string) => `${part}:ask`;
 
 export type PartShape =
   | { kind: "frames"; count: number }
   | { kind: "stack"; count: number }
   | { kind: "sources"; rows: number; more: boolean }
   | { kind: "helper"; lines: number }
-  | { kind: "ask" }
+  | { kind: "ask"; height: number }
   | { kind: "label" };
 
 export function partSize(shape: PartShape): { width: number; height: number } {
@@ -66,7 +71,7 @@ export function partSize(shape: PartShape): { width: number; height: number } {
         height: Math.max(PART.labelHeight, Math.min(PART.helperLines, shape.lines) * 24 + 8),
       };
     case "ask":
-      return { width: lead + PART.ask, height: PART.askHeight };
+      return { width: lead + PART.ask, height: Math.max(PART.labelHeight, shape.height) };
     case "label":
       return { width: 320, height: 56 };
   }

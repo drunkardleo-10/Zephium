@@ -107,6 +107,8 @@ export type CanvasItem = {
     /** An open tab the request was shown, not read: no frame, its title and a caption. */
     tab?: boolean;
   };
+  /** Where the facts a request's run remembered are read from, shown with Undo beside it. */
+  remember?: { profile: string; work: string; execution: string; version: number };
   /** A request opened to show every line of the person's words. */
   expanded?: boolean;
   /** When the person asked, as a short clock time. */
@@ -462,6 +464,9 @@ export function reconcileNodes(
         JSON.stringify(node.data.page) === JSON.stringify(item.page) &&
         JSON.stringify(node.data.part) === JSON.stringify(item.part) &&
         JSON.stringify(node.data.input) === JSON.stringify(item.input) &&
+        JSON.stringify(node.data.remember) === JSON.stringify(item.remember) &&
+        node.data.expanded === item.expanded &&
+        node.data.when === item.when &&
         JSON.stringify(node.data.object) === JSON.stringify(item.object) &&
         JSON.stringify(node.data.facts) === JSON.stringify(item.facts) &&
         JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility) &&

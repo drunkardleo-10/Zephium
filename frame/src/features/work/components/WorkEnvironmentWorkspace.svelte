@@ -12,14 +12,10 @@
   import { editTool, toolSession } from "$session/tool-drafts.svelte";
   import type {
     TabView,
-    WorkHumanAccountV1,
     WorkHumanPageIdV1,
     WorkHumanRegionV1,
     WorkEnvironmentReference,
     WorkFileEvidenceV1,
-    WorkAccountEffectV1,
-    WorkAccountModeV1,
-    WorkContextSelectionV1,
     WorkEnvironmentSnapshot,
     WorkExecutionFact,
     WorkRuntimeProjection,
@@ -42,18 +38,19 @@
     StickyNote03Icon,
     Cursor01Icon,
     HandIcon,
+    IncognitoIcon,
   } from "../lib/icons";
+  import Icon from "$shared/ui/Icon";
   import WorkBar from "./bar/WorkBar.svelte";
   import { centreSize, picksSheet } from "./objects/centre";
+  import { partAsks } from "./asks/actions";
   import BarTool from "./bar/BarTool.svelte";
   import NotePanel from "./bar/NotePanel.svelte";
   import AttachPanel, { type AttachKind } from "./bar/AttachPanel.svelte";
   import AccountButton from "./top/AccountButton.svelte";
   import WorksMenu from "./top/WorksMenu.svelte";
   import ContextManifest from "./composer/ContextManifest.svelte";
-  import AccountScopeChip from "./composer/AccountScopeChip.svelte";
   import OpenTabsChip from "./composer/OpenTabsChip.svelte";
-  import AccountGrantReview from "./AccountGrantReview.svelte";
   import { contextSelection } from "../lib/context-selection";
   import WorkTabPicker from "./WorkTabPicker.svelte";
   import WorkMediaPicker from "./WorkMediaPicker.svelte";
@@ -192,7 +189,6 @@
     followAgent: () => boolean;
   }>();
   let selectedIds = $state.raw<string[]>([]);
-  let accountEffect = $state.raw<WorkAccountEffectV1>({ kind: "read" });
   /** The person's consent to list their open tabs, for the next request only. */
   let openTabs = $state(false);
   const contextSel = $derived(
@@ -275,6 +271,18 @@
       return;
     }
     openPane({ kind: "url", url: entry.page.url }, null, entry.page.account);
+  }
+  /**
+   * The page an ask is about, opened in the centre: a page held for the
+   * person opens its takeover; any other opens as itself.
+   */
+  function openStep(step: string) {
+    for (const [id, entry] of pageEntries)
+      if (id.endsWith(`:${step}`)) {
+        if (entry.page.human?.phase === "waiting_for_human") openTakeover(id);
+        else openPane({ kind: "url", url: entry.page.url }, entry.part, entry.page.account);
+        return;
+      }
   }
   /** A lifted tab card's one action: the tab opens in the pane, over its card. */
   function openLiftedTab() {
@@ -541,11 +549,12 @@
     if (sent) applyTakeover(() => human.release(current.work, current.page), false);
     if (next) applyTakeover(() => human.present(current.work, current.page, next), true);
   }
-  function continueTakeover(account: WorkHumanAccountV1) {
+  /** The person hands the page back; the run goes on without their session. */
+  function continueTakeover() {
     const current = takeover;
     if (!current) return;
     takeoverSent = null;
-    applyTakeover(() => human.continue(current.work, current.page, account), true);
+    applyTakeover(() => human.continue(current.work, current.page, "anonymous"), true);
   }
   /** A window that goes away hands the page back; the command is already sent. */
   function abandonTakeover() {
@@ -590,7 +599,12 @@
   let panel = $state<"note" | "tabs" | "media" | "attach" | null>(null);
   let attachKind = $state<AttachKind>("tabs");
   let objectivePending = $state(false);
-  let composerFailure = $state<"account" | null>(null);
+  /** The next requests run on their own, without the person's sessions or context. */
+  let privateRun = $state(false);
+  $effect(() => {
+    void snapshot?.id;
+    privateRun = false;
+  });
   let composerElement = $state<HTMLElement>();
   let composerHeight = $state(0);
   $effect(() => {
@@ -826,6 +840,10 @@
           chosen,
           measured,
           open: openBlock,
+          asks: (objective: string) =>
+            objectiveSession?.projection?.work.id === objective
+              ? partAsks(objectiveSession, { session: human, work: objective }, openStep)
+              : [],
           detail: canvasDetail,
           requests: openRequests,
         })
@@ -915,6 +933,29 @@
     return null;
   });
   const requests = $derived(environmentRequests(stages));
+  /** What each run remembered, shown beside its request with Undo. */
+  const remembering = $derived(
+    new Map(
+      stages.flatMap((stage) => {
+        const last = stage.executions.at(-1);
+        if (!last) return [];
+        const run = context.objectives
+          .get(stage.objective)
+          ?.executions.find((entry) => entry.id === last);
+        return [
+          [
+            stage.card,
+            {
+              profile: session.profile,
+              work: stage.objective,
+              execution: last,
+              version: run?.steps?.length ?? 0,
+            },
+          ] as const,
+        ];
+      }),
+    ),
+  );
   const items = $derived([
     ...[...results.items, ...requests.items].map((item) =>
       item.type === "objective" || item.type === "request"
@@ -922,6 +963,7 @@
             ...item,
             expanded: openRequests.has(item.id),
             ...(askedAt.get(item.id) ? { when: askedAt.get(item.id) } : {}),
+            ...(remembering.get(item.id) ? { remember: remembering.get(item.id) } : {}),
           }
         : item,
     ),
@@ -1729,57 +1771,12 @@
       ),
   );
   /**
-   * A read that met a sign-in wall: the run stops there, the page opens in the
-   * pane for the person to sign in, and the same request can then be sent as
-   * them, once they allow the grant Rust drafts.
+   * A read that met a sign-in wall: the page opens over the canvas for the
+   * person to sign in; the run notices and goes on by itself.
    */
-  let signInRetry = $state.raw<{ work: string; origin: string; host: string } | null>(null);
-  async function signIn(card: string) {
-    const current = objectiveSession;
+  function signIn(card: string) {
     const url = pageEntries.get(card)?.page.url;
-    const work = current?.projection?.work.id;
-    const execution = current?.projection?.executions.at(-1);
-    if (!current || !url || !work) return;
-    let origin: string;
-    try {
-      origin = new URL(url).origin;
-    } catch {
-      return;
-    }
-    if (execution && current.projection && isLive(current.projection, execution)) {
-      const stopped = await current.execute({
-        kind: "cancel",
-        execution: execution.id,
-        intervention: { kind: "sign_in", origin },
-      });
-      if (!stopped) return;
-    }
-    signInRetry = { work, origin, host: new URL(origin).host };
-    openPane({ kind: "url", url }, card);
-  }
-  async function retrySignedIn() {
-    const current = objectiveSession;
-    const retry = signInRetry;
-    if (!current || !retry || current.projection?.work.id !== retry.work) return;
-    closePane();
-    signInRetry = null;
-    await current.retrySignedIn(retry.origin);
-  }
-  /** A field change needs both values, and different ones, before it is sent. */
-  function accountInvalid() {
-    const account = session.accountScope;
-    return (
-      !!account &&
-      account.mode === "page" &&
-      accountEffect.kind === "update" &&
-      (!accountEffect.update.from.trim() ||
-        !accountEffect.update.to.trim() ||
-        accountEffect.update.from === accountEffect.update.to)
-    );
-  }
-  function clearAccount() {
-    session.accountScope = null;
-    accountEffect = { kind: "read" };
+    if (url) openPane({ kind: "url", url }, card);
   }
   /** One field, one meaning: the first message starts the work, the rest continue it. */
   async function send() {
@@ -1787,89 +1784,28 @@
     if (!text || busy) return;
     const current = objectiveSession;
     if (runningObjective && current) {
-      const account = session.accountScope;
-      if (account && !activeExecution) {
-        await continueSignedIn(current, text, account);
-        return;
-      }
-      const context = contextSel;
+      const context = privateRun ? null : contextSel;
       session.composer = "";
       openTabs = false;
       // Words typed while the agent works steer it now; if it cannot take
       // them mid-step, they go next.
       if (activeExecution) {
         if (!(await current.steer(text))) current.enqueue(text);
-      } else await current.continueWith(text, context);
+      } else await current.continueWith(text, context, { private: privateRun });
       return;
     }
     await createObjective();
-  }
-  /** The next message of a work, read with the tab's signed-in session. */
-  async function continueSignedIn(
-    current: WorkSession,
-    text: string,
-    account: NonNullable<typeof session.accountScope>,
-  ) {
-    const environment = session.snapshot?.id;
-    if (!environment) return;
-    if (accountInvalid()) {
-      composerFailure = "account";
-      return;
-    }
-    composerFailure = null;
-    const context = account.mode === "origin" ? contextSel : null;
-    const effect = accountEffect;
-    if (!(await current.edit({ kind: "set_objective", objective: text }))) return;
-    const work = current.projection?.work;
-    if (!work) return;
-    session.composer = "";
-    openTabs = false;
-    clearAccount();
-    await prepareSignedIn(current, work.id, work.revision, environment, account, effect, context);
-  }
-  async function prepareSignedIn(
-    current: WorkSession,
-    work: string,
-    revision: string,
-    environment: string,
-    account: { element: string; mode?: WorkAccountModeV1 },
-    effect: WorkAccountEffectV1,
-    context: WorkContextSelectionV1 | null,
-  ) {
-    const request = {
-      version: 1,
-      work,
-      expected_revision: revision,
-      environment,
-      element: account.element,
-    };
-    if (account.mode === "origin") await current.prepareGrant(request, context);
-    else
-      await current.operations.begin({
-        kind: "prepare_account",
-        request: { ...request, effect },
-      });
   }
   async function createObjective() {
     if (!session.composer.trim() || objectivePending || busy) return;
     const current = workSession(session.profile);
     if (!current) return;
-    const account = session.accountScope;
-    if (accountInvalid()) {
-      composerFailure = "account";
-      return;
-    }
     const submission = session.objectiveSubmission ?? {
       objective: session.composer.trim(),
       command: commandId(),
       attached: false,
-      // An origin grant serves an ordinary request: its context rides along once allowed.
-      context: account?.mode === "page" ? null : contextSel,
-      account: account
-        ? { element: account.element, effect: accountEffect, mode: account.mode }
-        : null,
+      context: privateRun ? null : contextSel,
     };
-    composerFailure = null;
     session.objectiveSubmission = submission;
     objectivePending = true;
     objectiveSession = current;
@@ -1938,19 +1874,7 @@
       session.objectiveToAttach = null;
       session.objectiveSubmission = null;
       openTabs = false;
-      clearAccount();
-      const environmentId = session.snapshot?.id;
-      if (submission.account && environmentId)
-        await prepareSignedIn(
-          current,
-          objectiveId,
-          basis.revision,
-          environmentId,
-          submission.account,
-          submission.account.effect,
-          submission.context,
-        );
-      else await current.run(submission.context);
+      await current.run(submission.context, { private: privateRun });
     } finally {
       objectivePending = false;
     }
@@ -2072,9 +1996,6 @@
     panel = next;
   }
   const model = $derived(currentModel(objectiveSession?.projection));
-  const grantOpen = $derived(
-    runningObjective && !!(objectiveSession?.grantDraft || objectiveSession?.grantDeclined),
-  );
   /** The run on this canvas is going, or waits on the person: the bar is its line. */
   const lineRunning = $derived(
     runningObjective && (activeExecution || needsDecision || !!agentWaiting),
@@ -2198,13 +2119,6 @@
     onopenchange={(open) => openPanel("attach", open)}
     content={attachPanel}
   />{/snippet}
-{#snippet barAbove()}
-  <!-- An open grant question stands over the bar, in the line's place, until it is answered. -->
-  {#if grantOpen}<AccountGrantReview session={objectiveSession!} />{/if}
-  {#if composerFailure}<p class="composer-alert" role="alert">
-      {m.work_account_update_invalid()}
-    </p>{/if}
-{/snippet}
 {#snippet agentLine()}
   <LazyView
     loader={loadAgentLine}
@@ -2239,16 +2153,9 @@
         }}
         onfocusagent={(id) => canvasRef?.center(id)}
         onsteered={() => (session.composer = "")}
-        onsignin={(card: string) => void signIn(card)}
-        retry={signInRetry?.work === objectiveSession?.selected ? signInRetry : null}
-        onretry={() => void retrySignedIn()}
-        onopenpage={(tab) => {
-          if (!tabs.some((candidate) => candidate.id === tab)) return;
-          const origin = snapshot?.elements.find(
-            (element) => element.reference.kind === "browser" && element.reference.tab === tab,
-          );
-          openPane({ kind: "tab", id: tab }, origin?.id ?? null);
-        }}
+        onsignin={(card: string) => signIn(card)}
+        {human}
+        onopenstep={openStep}
       />{/snippet}</LazyView
   >
 {/snippet}
@@ -2257,19 +2164,7 @@
       disabled={objectivePending || !!session.objectiveSubmission}
       onremove={() => (openTabs = false)}
     />{/if}
-  {#if session.accountScope}
-    <AccountScopeChip
-      title={session.accountScope.title}
-      origin={session.accountScope.origin}
-      mode={session.accountScope.mode}
-      bind:effect={accountEffect}
-      disabled={objectivePending || !!session.objectiveSubmission}
-      onremove={() => {
-        clearAccount();
-        composerFailure = null;
-      }}
-    />
-  {:else if contextSel?.items.length}
+  {#if contextSel?.items.length}
     <ContextManifest profile={session.profile} selection={contextSel} purpose="agent" />
   {/if}
 {/snippet}
@@ -2372,25 +2267,6 @@
                   composerElement?.querySelector<HTMLElement>("textarea")?.focus();
                   return;
                 }
-                // One page as the person: read it, or change one field and restore it.
-                if (action === "account" || action === "account-update") {
-                  const item = items.find((item) => item.id === id);
-                  if (item?.type === "tab" && !item.unavailable && item.detail) {
-                    session.accountScope = {
-                      element: id,
-                      title: item.title,
-                      origin: item.detail,
-                      mode: "page",
-                    };
-                    accountEffect =
-                      action === "account"
-                        ? { kind: "read" }
-                        : { kind: "update", update: { field: null, from: "", to: "" } };
-                    composerFailure = null;
-                    composerElement?.querySelector<HTMLElement>("textarea")?.focus();
-                  }
-                  return;
-                }
                 const reference = results.references.get(id);
                 if (reference) {
                   void saveResult(id);
@@ -2417,7 +2293,7 @@
     <div class="canvas-top">
       <WorksMenu {session} untitled={m.work_env_default_title()} live={!!runStatus} />
       <span class="canvas-top-gap"></span>
-      {#if runningObjective && objectiveSession && !grantOpen}<div class="island">
+      {#if runningObjective && objectiveSession}<div class="island">
           {@render agentLine()}
         </div>{/if}
       {#if troubled}<div class="status" role="status">
@@ -2751,11 +2627,21 @@
         {model}
         tools={barTools}
         attach={barAttach}
-        above={grantOpen || composerFailure ? barAbove : undefined}
-        context={openTabs || contextSel || session.accountScope ? composerContext : undefined}
+        context={openTabs || contextSel ? composerContext : undefined}
         onsubmit={() => void send()}
       >
-        {#snippet trailing()}{#await loadModels() then picker}<picker.default
+        {#snippet trailing()}<button
+            type="button"
+            class="private"
+            class:on={privateRun}
+            aria-pressed={privateRun}
+            aria-label={m.work_private_run()}
+            title={m.work_private_run_hint()}
+            onclick={() => (privateRun = !privateRun)}
+            ><Icon icon={IncognitoIcon} size={15} strokeWidth={1.6} />{#if privateRun}<span
+                >{m.work_private_run()}</span
+              >{/if}</button
+          >{#await loadModels() then picker}<picker.default
               profile={session.profile}
             />{/await}{/snippet}
       </WorkBar>{:else}<div class="tools-only" role="toolbar" aria-label={m.work_env_toolbar()}>
@@ -2993,19 +2879,45 @@
     border-radius: var(--radius-row);
   }
 
+  /* A private run: a quiet mark before the model; lit, it names itself. */
+  .private {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    block-size: 28px;
+    min-inline-size: 28px;
+    margin-block: 3px;
+    padding-inline: 7px;
+    border: 0;
+    border-radius: var(--radius-control);
+    background: transparent;
+    color: var(--color-faint);
+    font: inherit;
+    font-size: var(--text-label);
+    font-weight: 500;
+    cursor: default;
+    transition:
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out);
+  }
+
+  .private:hover {
+    background: var(--color-fill-hover);
+    color: var(--color-text);
+  }
+
+  .private:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 1px;
+  }
+
+  .private.on {
+    background: var(--color-accent-soft);
+    color: var(--color-accent);
+  }
+
   .lift-plain p {
     margin: 0;
     color: var(--color-muted);
-  }
-
-  .composer-alert {
-    margin: 0;
-    padding: 10px 14px;
-    border-radius: var(--radius-control);
-    background: var(--color-menu);
-    backdrop-filter: blur(10px);
-    box-shadow: var(--shadow-popover);
-    color: var(--color-warning);
-    font-size: var(--text-label);
   }
 </style>

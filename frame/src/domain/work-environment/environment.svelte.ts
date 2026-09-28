@@ -1,7 +1,5 @@
 import { commands } from "$shared/ipc/bindings";
 import type {
-  WorkAccountEffectV1,
-  WorkAccountModeV1,
   WorkContextSelectionV1,
   WorkEnvironmentCall,
   WorkEnvironmentIntent,
@@ -42,15 +40,6 @@ export class WorkEnvironmentSession {
     /** Selected context is connected to the goal card once; retries skip it. */
     related?: boolean;
     context: WorkContextSelectionV1 | null;
-    /** The attached tab whose signed-in session the request should use. */
-    account?: { element: string; effect: WorkAccountEffectV1; mode?: WorkAccountModeV1 } | null;
-  } | null>(null);
-  /** A tab chosen for signed-in work, one page or its origin; cleared when the request is sent. */
-  accountScope = $state.raw<{
-    element: string;
-    title: string;
-    origin: string;
-    mode: WorkAccountModeV1;
   } | null>(null);
   objectiveToAttach = $state<string | null>(null);
   viewDraft = $state.raw<{ id: string; expected: string; view: WorkEnvironmentView } | null>(null);

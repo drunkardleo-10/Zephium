@@ -5,7 +5,7 @@ import { page } from "vitest/browser";
 import type { WorkRuntimeProjection } from "$shared/ipc/bindings";
 import BoardCanvas from "./BoardCanvas.svelte";
 import type { BoardScene } from "./board-fixtures";
-import { leadTrip } from "./lead-look";
+import { askingTrip, leadTrip } from "./lead-look";
 
 // Real runs exported read-only from the QA profile into node_modules/.work-look;
 // without them there is nothing to look at and the test only renders nothing.
@@ -86,22 +86,27 @@ const LOOKS = [
   ["trip-lead", 100],
   ["trip-lead", 50],
   ["trip-leadlive", 100],
+  ["trip-asks", 100],
+  ["trip-asks", 50],
   ["trip-lead", 30],
   ["jobs", 30],
 ] as const;
 
 test.each(LOOKS)("%s at %d%%", async (name, percent) => {
   await page.viewport(1440, 900);
-  const base = name.replace(/-(live|lead|leadlive)$/u, "");
+  const base = name.replace(/-(live|lead|leadlive|asks)$/u, "");
   const found = await scene(base);
   if (!found) return;
-  const loaded = name.endsWith("-live")
-    ? midRun(found)
-    : name.endsWith("-lead")
-      ? leadTrip(found, false)
-      : name.endsWith("-leadlive")
-        ? leadTrip(found, true)
-        : found;
+  const asking = name.endsWith("-asks") ? askingTrip(found) : null;
+  const loaded = asking
+    ? asking.scene
+    : name.endsWith("-live")
+      ? midRun(found)
+      : name.endsWith("-lead")
+        ? leadTrip(found, false)
+        : name.endsWith("-leadlive")
+          ? leadTrip(found, true)
+          : found;
   shown = base;
   const errors: string[] = [];
   const listen = (event: ErrorEvent) => errors.push(event.message);
@@ -109,6 +114,7 @@ test.each(LOOKS)("%s at %d%%", async (name, percent) => {
   const zoom = percent / 100;
   const screen = await render(BoardCanvas, {
     scene: loaded,
+    ...(asking ? { asks: asking.asks } : {}),
     viewport: { x: zoom === 1 ? 120 : zoom < 0.4 ? 120 : 200, y: 72, zoom },
   });
   screen.container.style.width = "1440px";
