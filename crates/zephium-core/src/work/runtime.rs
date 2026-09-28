@@ -1068,6 +1068,9 @@ pub enum WorkStepKindV1 {
         options: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         answer: Option<String>,
+        /// Why it asks, so the question shows where it belongs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        purpose: Option<WorkAskPurposeV1>,
     },
     /// A message the person sent while the agent ran; the agent reads it at
     /// its next turn.
@@ -1142,6 +1145,25 @@ pub enum WorkStepKindV1 {
     Confirm {
         confirm: Box<WorkConfirmV1>,
     },
+}
+
+/// Why a step asks the person.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkAskPurposeV1 {
+    /// The agent's own question about the request.
+    Question,
+    /// Whether the agent may work in the person's session on a site.
+    Entry,
+    /// The run spent its budget: keep going or stop.
+    Budget,
+    /// Whether the agent may read the person's history, notes or tabs.
+    Context,
+    /// Whether the agent may use an installed tool or connected service.
+    Connection,
+    /// Any other yes or no before the agent acts.
+    Confirm,
 }
 
 /// What a held step would commit.
@@ -1312,6 +1334,7 @@ impl WorkStepKindV1 {
                 prompt,
                 options,
                 answer,
+                ..
             } => {
                 validate_text(prompt, MAX_WORK_TEXT_BYTES)?;
                 if options.len() > 8 {

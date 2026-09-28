@@ -4,6 +4,7 @@ use std::{
     io::Write as _,
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -172,7 +173,11 @@ fn measure(output: &str, wall_ms: u128) -> (Row, Option<FailureReason>, bool) {
 pub(super) fn run() -> Result<(), super::ProbeFailure> {
     run_queue(
         (0..RUNS)
-            .flat_map(|repetition| SCENARIOS.iter().map(move |scenario| (repetition, *scenario)))
+            .flat_map(|repetition| {
+                SCENARIOS
+                    .iter()
+                    .map(move |scenario| (repetition, *scenario))
+            })
             .collect(),
     )
 }
@@ -250,8 +255,460 @@ fn run_queue(
             );
         }
     }
-    let _ = writeln!(std::io::stdout().lock(), "acceptance: passes={passes}/{runs}");
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "acceptance: passes={passes}/{runs}"
+    );
     Ok(())
+}
+
+/// The lead's acceptance tasks (spec §9), each run once by name with
+/// `--live-lead <name>`: the requests in order in one work, and the answer a
+/// stand-in person gives to the lead's own questions.
+pub(super) struct LeadScenario {
+    pub name: &'static str,
+    pub requests: &'static [&'static str],
+    pub answer: &'static str,
+    /// A throwaway folder the person grants, for code work.
+    pub folder: bool,
+}
+
+pub(super) const LEAD_SCENARIOS: [LeadScenario; 8] = [
+    LeadScenario {
+        name: "trip",
+        requests: &["Plan my YC batch trip from Warsaw"],
+        answer: "The Winter 2027 batch, 5 January to 20 March 2027. One traveller with a Polish passport. Budget up to $9,000 for flights and stay together.",
+        folder: false,
+    },
+    LeadScenario {
+        name: "architecture",
+        requests: &[
+            "A modern AI SaaS architecture",
+            "Compare AWS, Vercel, Hetzner and Cloudflare for this",
+        ],
+        answer: "A B2B SaaS with chat over the customer's documents, about 5,000 users in the first year.",
+        folder: false,
+    },
+    LeadScenario {
+        name: "today",
+        requests: &["What do I need to do today? Check my Slack and Gmail."],
+        answer: "Allow",
+        folder: false,
+    },
+    LeadScenario {
+        name: "bug",
+        requests: &["The tests fail in my granted folder: fix the bug and show the tests passing"],
+        answer: "Go ahead",
+        folder: true,
+    },
+    LeadScenario {
+        name: "compilers",
+        requests: &["Learn compilers from free university material"],
+        answer: "A software engineer, about 6 hours a week, 12 weeks.",
+        folder: false,
+    },
+    LeadScenario {
+        name: "products",
+        requests: &["Compare three LEGO Star Wars sets from lego.com and pick one for a 10-year-old"],
+        answer: "Up to $100.",
+        folder: false,
+    },
+    LeadScenario {
+        name: "question",
+        requests: &["Who wrote Dune?"],
+        answer: "",
+        folder: false,
+    },
+    LeadScenario {
+        name: "conversion",
+        requests: &["30 EUR in PLN"],
+        answer: "",
+        folder: false,
+    },
+];
+
+/// A throwaway repository under the home folder with one failing test.
+fn bug_folder() -> Result<std::path::PathBuf, &'static str> {
+    let home = std::env::var_os("HOME").ok_or("home")?;
+    let folder = std::path::PathBuf::from(home)
+        .join("Library/Caches/app.zephium.probe")
+        .join(format!("lead-bug-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).map_err(|_| "bug_folder")?;
+    std::fs::write(
+        folder.join("pricing.py"),
+        "def nightly_total(nightly, nights, cleaning_fee=0):\n    \"\"\"Total for a stay: every night plus one cleaning fee.\"\"\"\n    return nightly * (nights - 1) + cleaning_fee\n",
+    )
+    .map_err(|_| "bug_folder")?;
+    std::fs::write(
+        folder.join("test_pricing.py"),
+        "import unittest\nfrom pricing import nightly_total\n\n\nclass NightlyTotal(unittest.TestCase):\n    def test_counts_every_night(self):\n        self.assertEqual(nightly_total(100, 3), 300)\n\n    def test_adds_the_cleaning_fee_once(self):\n        self.assertEqual(nightly_total(100, 2, 50), 250)\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n",
+    )
+    .map_err(|_| "bug_folder")?;
+    Ok(folder)
+}
+
+static STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+fn say(line: std::fmt::Arguments<'_>) {
+    let at = STARTED.get_or_init(Instant::now).elapsed().as_millis();
+    let _ = writeln!(std::io::stdout().lock(), "[{at:>7}ms] {line}");
+}
+
+/// Stands in for the person: answers the lead's questions with the
+/// scenario's answer, lets sites in for this run, approves file changes
+/// and commands in the granted folder, and declines every held step that
+/// would commit something on a site.
+async fn stand_in(
+    handle: zephium_app::Handle,
+    profile: zephium_core::ids::ProfileId,
+    work: zephium_core::work::WorkId,
+    answer: &'static str,
+) {
+    use zephium_core::work::{runtime::*, *};
+    use zephium_ipc::work::*;
+    let mut kept_going = 0;
+    loop {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let Ok(request) = handle.work_projection(profile, work) else {
+            continue;
+        };
+        let WorkReplyV1::Projection { projection } = request.response(profile).await.reply else {
+            continue;
+        };
+        let Some(execution) = projection
+            .executions
+            .iter()
+            .rev()
+            .find(|e| !e.status.terminal())
+        else {
+            continue;
+        };
+        let Some(step) = execution
+            .steps
+            .iter()
+            .find(|step| step.status == WorkStepStatus::Running && needs_person(&step.kind))
+        else {
+            continue;
+        };
+        let intent = match &step.kind {
+            WorkStepKindV1::Ask { options, .. } => {
+                let reply = if options.iter().any(|o| o == "Keep going") {
+                    kept_going += 1;
+                    if kept_going <= 2 {
+                        "Keep going"
+                    } else {
+                        "Stop"
+                    }
+                    .to_owned()
+                } else if let Some(allow) = options.iter().find(|o| o.starts_with("Allow")) {
+                    allow.clone()
+                } else if !answer.is_empty() && answer != "Allow" {
+                    answer.to_owned()
+                } else {
+                    options
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "Go ahead".into())
+                };
+                say(format_args!(
+                    "lead-person: answered question options={}",
+                    options.len()
+                ));
+                WorkRuntimeIntent::AnswerStep {
+                    execution: execution.id,
+                    step: step.id,
+                    answer: reply,
+                }
+            }
+            WorkStepKindV1::Confirm { .. } => {
+                say(format_args!("lead-person: declined held step"));
+                WorkRuntimeIntent::ApproveStep {
+                    execution: execution.id,
+                    step: step.id,
+                    approve: false,
+                    for_run: false,
+                }
+            }
+            _ => {
+                say(format_args!("lead-person: approved proposed change"));
+                WorkRuntimeIntent::ApproveStep {
+                    execution: execution.id,
+                    step: step.id,
+                    approve: true,
+                    for_run: false,
+                }
+            }
+        };
+        if let Ok(request) = handle.work_command(
+            profile,
+            WorkCommandV1 {
+                version: 1,
+                work,
+                expected_revision: projection.work.revision,
+                command: WorkCommandId::generate(),
+                intent,
+            },
+        ) {
+            let _ = request.response(profile).await;
+        }
+    }
+}
+
+fn needs_person(kind: &zephium_core::work::runtime::WorkStepKindV1) -> bool {
+    use zephium_core::work::runtime::WorkStepKindV1 as K;
+    match kind {
+        K::Ask { answer, .. } => answer.is_none(),
+        K::Confirm { confirm } => confirm.decision.is_none(),
+        kind => kind.proposes_write() && kind.file_decision().is_none(),
+    }
+}
+
+/// One lead scenario in a live host: every request in turn, one closed
+/// row per request, and the projection kept for reading its objects.
+pub(super) async fn lead_workflow(
+    handle: &zephium_app::Handle,
+    composition: &zephium_work_composition::MacosWorkComposition,
+    profile: zephium_core::ids::ProfileId,
+    binding: zephium_app::AgentWorkProfileBinding,
+    mut keys: Vec<zephium_agentic::AgentProviderCredential>,
+    scenario: &'static LeadScenario,
+) -> Result<super::work_durable::WorkflowResult, &'static str> {
+    use zephium_agentic::{
+        AgentProviderTransport, AgentProviderTransportConfig, OpenAiPublicSearch,
+        OpenAiPublicSearchConfig,
+    };
+    use zephium_app::work_lead::{LeadModel, WorkLeadModels, WorkLeadService};
+    use zephium_core::work::{model::WorkModelRole, runtime::*, search::*, *};
+    use zephium_ipc::work::*;
+    let resolve = |role| async move {
+        zephium_app::work_models::resolve_entry(profile, role)
+            .await
+            .ok()
+            .map(|(entry, client)| LeadModel { entry, client })
+    };
+    let lead = resolve(WorkModelRole::Lead).await.ok_or("lead_model")?;
+    let page = resolve(WorkModelRole::Page)
+        .await
+        .unwrap_or_else(|| lead.clone());
+    let light = resolve(WorkModelRole::Light)
+        .await
+        .unwrap_or_else(|| page.clone());
+    say(format_args!(
+        "lead-run: models lead={} page={} light={}",
+        lead.entry.id, page.entry.id, light.entry.id
+    ));
+    let models = WorkLeadModels { lead, page, light };
+    let folder = if scenario.folder {
+        Some(bug_folder()?)
+    } else {
+        None
+    };
+    let created = handle
+        .work_authoring_command(
+            profile,
+            WorkAuthoringCommandV1 {
+                version: 1,
+                command: WorkCommandId::generate(),
+                intent: WorkAuthoringIntent::Create {
+                    objective: scenario.requests[0].into(),
+                },
+            },
+        )
+        .map_err(|_| "create_admission")?
+        .response(profile)
+        .await;
+    let WorkReplyV1::AuthoringApplied { receipt: created } = created.reply else {
+        return Err("create_persistence");
+    };
+    let work = created.work;
+    let transport = AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
+        .map_err(|_| "transport")?;
+    let search = OpenAiPublicSearch::try_new(
+        transport,
+        keys.pop().ok_or("search_key")?,
+        OpenAiPublicSearchConfig::try_new(
+            zephium_agent_model_catalog::try_public_search_provider_exact_call_config(
+                PUBLIC_SEARCH_MODEL,
+                4096,
+            )
+            .map_err(|_| "search_model")?,
+        )
+        .map_err(|_| "search_config")?,
+    )
+    .map_err(|_| "search_provider")?;
+    let person = tokio::spawn(stand_in(handle.clone(), profile, work, scenario.answer));
+    let keys = Arc::new(Mutex::new(keys));
+    let callback = handle.callback_handle();
+    let service = WorkLeadService::new(handle.clone()).with_diagnostic(|event| {
+        say(format_args!("lead-run: event={event:?}"));
+    });
+    let mut expected = created.applied_revision;
+    let mut state = None;
+    let mut failure = None;
+    for (index, request) in scenario.requests.iter().enumerate() {
+        if index > 0 {
+            let edited = handle
+                .work_authoring_command(
+                    profile,
+                    WorkAuthoringCommandV1 {
+                        version: 1,
+                        command: WorkCommandId::generate(),
+                        intent: WorkAuthoringIntent::Edit {
+                            work,
+                            expected_revision: expected,
+                            edit: WorkUserEdit::SetObjective {
+                                objective: (*request).into(),
+                            },
+                        },
+                    },
+                )
+                .map_err(|_| "follow_up_admission")?
+                .response(profile)
+                .await;
+            let WorkReplyV1::AuthoringApplied { receipt } = edited.reply else {
+                return Err("follow_up_persistence");
+            };
+            expected = receipt.applied_revision;
+        }
+        let started = Instant::now();
+        let result = service
+            .run(
+                profile,
+                WorkCommandV1 {
+                    version: 1,
+                    work,
+                    expected_revision: expected,
+                    command: WorkCommandId::generate(),
+                    intent: WorkRuntimeIntent::BeginAgent {
+                        grant: WorkAgentGrantV1 {
+                            provider: WorkSearchProvider::OpenAi,
+                            model: PUBLIC_SEARCH_MODEL.into(),
+                            max_turns: 10,
+                            max_steps: 32,
+                            browse_hops: 4,
+                            folders: folder
+                                .iter()
+                                .map(|f| f.to_string_lossy().into_owned())
+                                .collect(),
+                            accounts: vec![],
+                            private: false,
+                            lead: None,
+                        },
+                        limits: WorkExecutionLimits {
+                            model_tokens: 1_000_000,
+                            cost_micro_usd: 3_000_000,
+                            operations: 256,
+                            timeout_seconds: 1_800,
+                            max_workers: 4,
+                        },
+                    },
+                },
+                None,
+                models.clone(),
+                &search,
+                |probe, request| {
+                    let key = keys.lock().ok().and_then(|mut keys| keys.pop());
+                    let callback = &callback;
+                    async move {
+                        let key = match key {
+                            Some(key) => key,
+                            None => tokio::task::spawn_blocking(
+                                zephium_agentic::load_macos_probe_openai_credential,
+                            )
+                            .await
+                            .map_err(|_| WorkError::Unavailable)?
+                            .map_err(|_| WorkError::Unavailable)?,
+                        };
+                        composition
+                            .run_agent_step(
+                                callback,
+                                &probe,
+                                request,
+                                super::work_durable::browser_settings(binding, key),
+                            )
+                            .await
+                    }
+                },
+                |_| {},
+            )
+            .await;
+        let projection = match result {
+            Ok(projection) => projection,
+            Err(error) => {
+                say(format_args!(
+                    "lead-run: scenario={} request={} run_failure={error:?}",
+                    scenario.name,
+                    index + 1
+                ));
+                failure = Some("lead_run");
+                break;
+            }
+        };
+        expected = projection.work.revision;
+        let execution = projection.executions.last().ok_or("lead_execution")?;
+        let usage = execution.attempts.first().and_then(|a| a.usage);
+        let mut kinds: Vec<&str> = execution
+            .steps
+            .iter()
+            .filter(|s| matches!(s.kind, WorkStepKindV1::Publish))
+            .flat_map(|s| s.artifacts.iter())
+            .filter_map(|id| execution.artifacts.iter().find(|a| a.id == *id))
+            .map(|a| a.data.kind_name())
+            .collect();
+        kinds.sort_unstable();
+        let revised = execution
+            .artifacts
+            .iter()
+            .filter(|a| a.revises.is_some())
+            .count();
+        say(format_args!(
+            "lead-run: scenario={} request={} status={:?} wall_ms={} steps={} turns={} searches={} pages={} parts={} parts_done={} objects={} revised={} inputs={} tokens={} cost_micro_usd={} accounting={:?}",
+            scenario.name,
+            index + 1,
+            execution.status,
+            started.elapsed().as_millis(),
+            execution.steps.len(),
+            execution.steps.iter().filter(|s| matches!(s.kind, WorkStepKindV1::Turn)).count(),
+            execution.steps.iter().filter(|s| matches!(s.kind, WorkStepKindV1::Search { .. })).count(),
+            execution.steps.iter().filter(|s| matches!(s.kind, WorkStepKindV1::Read { .. })).count(),
+            execution.parts.len(),
+            execution
+                .parts
+                .iter()
+                .filter(|p| p.state == zephium_core::work::parts::WorkPartStateV1::Done)
+                .count(),
+            kinds.join(","),
+            revised,
+            execution.inputs.len(),
+            usage.map_or(0, |u| u.model_tokens),
+            usage.map_or(0, |u| u.cost_micro_usd),
+            usage.map(|u| u.accounting),
+        ));
+        if !matches!(
+            execution.status,
+            WorkExecutionStatus::Completed | WorkExecutionStatus::NeedsReview
+        ) {
+            failure = failure.or(Some("lead_outcome"));
+        }
+        state = Some(projection);
+    }
+    person.abort();
+    if let Some(folder) = folder {
+        let fixed = std::fs::read_to_string(folder.join("pricing.py")).unwrap_or_default();
+        say(format_args!(
+            "lead-run: scenario=bug fixed={}",
+            fixed.contains("nightly * nights")
+        ));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+    let state = state.ok_or("lead_no_run")?;
+    let directory = std::path::Path::new("target/work-runtime-proof/lead");
+    let _ = std::fs::create_dir_all(directory);
+    let _ = std::fs::write(
+        directory.join(format!("{}.json", scenario.name)),
+        serde_json::to_vec_pretty(&state).unwrap_or_default(),
+    );
+    Ok(super::work_durable::WorkflowResult { state, failure })
 }
 
 #[cfg(test)]
@@ -263,7 +720,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let started = Instant::now();
         let mut child = spawn_logged(
-            Command::new("/bin/sh").args(["-c", "head -c 3000000 /dev/zero | tr '\\0' x; echo done >&2"]),
+            Command::new("/bin/sh").args([
+                "-c",
+                "head -c 3000000 /dev/zero | tr '\\0' x; echo done >&2",
+            ]),
             directory.path(),
         )
         .unwrap();
@@ -275,7 +735,9 @@ mod tests {
         };
         assert!(status.is_some_and(|status| status.success()));
         assert_eq!(
-            std::fs::metadata(directory.path().join("run.log")).unwrap().len(),
+            std::fs::metadata(directory.path().join("run.log"))
+                .unwrap()
+                .len(),
             3_000_000
         );
         assert_eq!(
@@ -286,8 +748,7 @@ mod tests {
         let mut child =
             spawn_logged(Command::new("/bin/sleep").arg("60"), directory.path()).unwrap();
         let status = loop {
-            if let Some(status) =
-                settled(&mut child, started, Duration::from_millis(200)).unwrap()
+            if let Some(status) = settled(&mut child, started, Duration::from_millis(200)).unwrap()
             {
                 break status;
             }

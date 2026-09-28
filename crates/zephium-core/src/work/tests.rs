@@ -800,6 +800,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
             prompt: "Which budget?".into(),
             options: vec!["Low".into(), "High".into()],
             answer: Some("Low".into()),
+            purpose: Some(WorkAskPurposeV1::Question),
         },
         WorkStepStatus::Running,
     ));

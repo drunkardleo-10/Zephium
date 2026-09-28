@@ -215,7 +215,19 @@ impl<'a> LeadToolContext<'a> {
         prompt: String,
         options: Vec<String>,
     ) -> Result<Option<String>, WorkError> {
-        self.run.ask(prompt, options, self.part).await
+        self.ask_for(WorkAskPurposeV1::Question, prompt, options)
+            .await
+    }
+    /// Asks with the purpose the frame shows it by: `Context` for history,
+    /// notes or tabs, `Connection` for a tool or service, `Confirm` for any
+    /// other yes or no.
+    pub async fn ask_for(
+        &self,
+        purpose: WorkAskPurposeV1,
+        prompt: String,
+        options: Vec<String>,
+    ) -> Result<Option<String>, WorkError> {
+        self.run.ask(purpose, prompt, options, self.part).await
     }
     /// Makes a durable record citable by objects: returns the key the model
     /// names in `sources` (a file record's link is `{record id, 1}`).

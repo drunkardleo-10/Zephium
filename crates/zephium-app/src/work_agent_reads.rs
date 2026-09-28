@@ -336,6 +336,7 @@ impl Driver {
                             prompt,
                             options,
                             answer: None,
+                            purpose: Some(WorkAskPurposeV1::Entry),
                         },
                         WorkStepStatus::Running,
                     );

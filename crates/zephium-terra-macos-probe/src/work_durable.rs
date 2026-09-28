@@ -164,6 +164,21 @@ enum Mode {
     AgentConceptComparison,
     /// Signed-in origin grants against two loopback sites; no public site.
     LoopbackSite,
+    /// One of the lead's acceptance tasks, by name.
+    Lead,
+}
+
+static LEAD_SCENARIO: std::sync::OnceLock<&'static super::acceptance::LeadScenario> =
+    std::sync::OnceLock::new();
+
+/// One lead acceptance task in a live host, by its name.
+pub(super) fn run_lead(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
+    let scenario = super::acceptance::LEAD_SCENARIOS
+        .iter()
+        .find(|scenario| name == scenario.name)
+        .ok_or(super::ProbeFailure::Authority)?;
+    let _ = LEAD_SCENARIO.set(scenario);
+    run_mode(Mode::Lead)
 }
 
 pub(super) fn run_loopback_site() -> Result<(), super::ProbeFailure> {
@@ -493,6 +508,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             | Mode::AgentExplainMechanism
             | Mode::AgentCodeReview
             | Mode::AgentConceptComparison
+            | Mode::Lead
     ) {
         6
     } else {
@@ -525,6 +541,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         | Mode::AgentExplainMechanism
         | Mode::AgentCodeReview
         | Mode::AgentConceptComparison => 720,
+        Mode::Lead => 860,
         Mode::Public => 160,
         _ => 240,
     });
@@ -686,6 +703,15 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     };
     if *restored != state {
         return Err(Error::Runtime);
+    }
+    if mode == Mode::Lead {
+        let clean = reopened.shutdown_until(Instant::now() + Duration::from_secs(5))
+            == zephium_core::ports::store::StoreShutdownOutcome::Clean;
+        return if clean && failure.is_none() {
+            Ok(())
+        } else {
+            Err(Error::Verification)
+        };
     }
     if mode == Mode::CancelCoordinated {
         let execution = state.executions.first().ok_or(Error::Runtime)?;
@@ -1089,6 +1115,19 @@ async fn workflow(
         let _ = planning_key;
         return super::work_site::workflow(handle, composition, profile, binding, browser_keys)
             .await;
+    }
+    if mode == Mode::Lead {
+        let _ = planning_key;
+        let scenario = LEAD_SCENARIO.get().ok_or("lead_scenario")?;
+        return super::acceptance::lead_workflow(
+            handle,
+            composition,
+            profile,
+            binding,
+            browser_keys,
+            scenario,
+        )
+        .await;
     }
     if matches!(
         mode,

@@ -1811,7 +1811,10 @@ impl Driver {
         question: WorkAgentQuestion,
     ) -> Result<Option<WorkAttemptStatus>, WorkError> {
         let prompt = question.prompt.clone();
-        match self.ask_person(question.prompt, question.options).await? {
+        match self
+            .ask_person(question.prompt, question.options, WorkAskPurposeV1::Question)
+            .await?
+        {
             Ok(answer) => {
                 self.decisions.push(planning::PlanningAnswer {
                     question: prompt,
@@ -1829,6 +1832,7 @@ impl Driver {
         &mut self,
         prompt: String,
         options: Vec<String>,
+        purpose: WorkAskPurposeV1,
     ) -> Result<Result<String, WorkAttemptStatus>, WorkError> {
         self.probe.record_activity(WorkActivityV1::WaitingForHuman);
         let step = self.step(
@@ -1836,6 +1840,7 @@ impl Driver {
                 prompt,
                 options,
                 answer: None,
+                purpose: Some(purpose),
             },
             WorkStepStatus::Running,
         );
@@ -1932,6 +1937,7 @@ impl Driver {
             .ask_person(
                 format!("Used ${spent:.2}. Keep going?"),
                 vec![KEEP_GOING.into(), STOP_HERE.into()],
+                WorkAskPurposeV1::Budget,
             )
             .await?
         {
@@ -2427,6 +2433,7 @@ fn pending_question(execution: &WorkExecutionFact) -> Option<(&str, &[String])> 
                 prompt,
                 options,
                 answer: None,
+                ..
             } if step.status != WorkStepStatus::Running => {
                 Some((prompt.as_str(), options.as_slice()))
             }

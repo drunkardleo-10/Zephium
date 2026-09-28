@@ -56,6 +56,15 @@ pub enum WorkLeadDiagnostic {
         objects: usize,
     },
     ObjectRefused,
+    /// A batch of searches, page reads or file steps settled.
+    Fetched {
+        part: bool,
+        searches: usize,
+        pages: usize,
+        others: usize,
+        failed: usize,
+        elapsed_ms: u64,
+    },
     SkillLoaded {
         builtin: bool,
     },
@@ -217,6 +226,18 @@ impl WorkLeadService {
         for input in inputs(&bodies, &tabs, &grant) {
             run.input(input).await;
         }
+        let memory = crate::work_personal::digest(&self.handle, profile)
+            .await
+            .filter(|digest| !digest.trim().is_empty());
+        if memory.is_some() {
+            run.input(WorkInputFactV1 {
+                kind: WorkInputKindV1::Memory,
+                label: "Your memory".into(),
+                count: None,
+                reference: None,
+            })
+            .await;
+        }
         let context = context_text(
             &objective,
             &projection,
@@ -247,6 +268,7 @@ impl WorkLeadService {
             skills::load(profile),
             objective,
             context,
+            memory,
         );
         let outcome = lead.drive().await;
         drop(lead);

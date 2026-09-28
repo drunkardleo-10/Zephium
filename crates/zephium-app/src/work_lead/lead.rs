@@ -59,6 +59,8 @@ pub(crate) struct Lead<'a, B> {
     pub helpers: Vec<Arc<dyn LeadHelper>>,
     pub objective: String,
     pub context: String,
+    /// What the person's memory holds, as the prompt's stable tail.
+    pub memory: Option<String>,
     pub base_limits: WorkExecutionLimits,
     pub slots: tokio::sync::Semaphore,
     state: Mutex<LeadState>,
@@ -83,6 +85,7 @@ where
         skills: Vec<Skill>,
         objective: String,
         context: String,
+        memory: Option<String>,
     ) -> Self {
         Self {
             run,
@@ -96,6 +99,7 @@ where
             helpers: super::registry::helpers(),
             objective,
             context,
+            memory,
             base_limits: run.limits(),
             slots: tokio::sync::Semaphore::new(parts::PARALLEL_PARTS),
             state: Mutex::new(LeadState::default()),
@@ -130,6 +134,12 @@ where
         }
         if self.skills.is_empty() {
             index.push_str("- none\n");
+        }
+        if let Some(memory) = &self.memory {
+            index.push_str(
+                "\nWhat you know about the person (their memory; use it, never repeat it back):\n",
+            );
+            index.push_str(memory);
         }
         vec![
             WorkModelSystemBlock {
@@ -622,7 +632,16 @@ where
                 options.push(option);
             }
         }
-        match self.run.ask(question.to_owned(), options, None).await {
+        match self
+            .run
+            .ask(
+                WorkAskPurposeV1::Question,
+                question.to_owned(),
+                options,
+                None,
+            )
+            .await
+        {
             Ok(Some(answer)) => (format!("The person answered: {answer}"), false),
             Ok(None) => ("No answer: the run stopped while waiting".into(), true),
             Err(_) => ("The question could not be recorded".into(), true),
@@ -683,7 +702,12 @@ where
         let say = args
             .get("say")
             .and_then(Value::as_str)
-            .map(|s| clip(s.trim().lines().next().unwrap_or(""), 300))
+            .map(|s| {
+                clip(
+                    &super::call::plain(s.trim().lines().next().unwrap_or("")),
+                    300,
+                )
+            })
             .filter(|s| !s.is_empty());
         let mut followups: Vec<String> = Vec::new();
         for followup in strings(args.get("followups")) {
@@ -776,6 +800,7 @@ where
         let answer = self
             .run
             .ask(
+                WorkAskPurposeV1::Budget,
                 format!("Used ${spent:.2}. Keep going?"),
                 vec![KEEP_GOING.into(), "Stop".into()],
                 None,

@@ -1062,6 +1062,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
                     prompt: "Which budget?".into(),
                     options: vec!["Low".into(), "High".into()],
                     answer: None,
+                    purpose: None,
                 },
                 WorkStepStatus::Running,
             ),

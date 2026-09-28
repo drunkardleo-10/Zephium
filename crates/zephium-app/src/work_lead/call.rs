@@ -171,16 +171,35 @@ pub(crate) fn tool_calls(parts: &[WorkModelPart]) -> Vec<WorkModelToolCall> {
         .collect()
 }
 
-/// A line for the person from what the model said: its first sentence-ish
-/// line, bounded, never a paragraph.
+/// A line for the person from what the model said: its first line, as
+/// plain text, bounded, never a paragraph.
 pub(crate) fn say_line(text: &str) -> Option<String> {
-    let line = text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?
-        .trim_start_matches(['#', '*', '-', ' '])
-        .trim();
+    let line = plain(text.lines().map(str::trim).find(|line| !line.is_empty())?);
+    let line = line.trim_start_matches(['#', '-', '>', ' ']).trim();
     (!line.is_empty()).then(|| clip(line, 240))
+}
+
+/// Markdown emphasis and code marks removed: the island and headlines are
+/// set as plain type.
+pub(crate) fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    for (index, c) in chars.iter().enumerate() {
+        let word = |at: Option<&char>| at.is_some_and(|c| c.is_alphanumeric());
+        let marker = match c {
+            '*' | '`' => true,
+            // Underscores inside words (snake_case) stay.
+            '_' => {
+                !(word(index.checked_sub(1).and_then(|i| chars.get(i)))
+                    && word(chars.get(index + 1)))
+            }
+            _ => false,
+        };
+        if !marker {
+            out.push(*c);
+        }
+    }
+    out.trim().to_owned()
 }
 
 /// At most `max` bytes, cut at a character boundary.

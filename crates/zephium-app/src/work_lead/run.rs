@@ -326,6 +326,7 @@ impl LeadRun {
     /// means the run stopped first or nobody answered within the patience.
     pub(crate) async fn ask(
         &self,
+        purpose: WorkAskPurposeV1,
         prompt: String,
         options: Vec<String>,
         part: Option<WorkPartId>,
@@ -336,6 +337,7 @@ impl LeadRun {
                 prompt,
                 options,
                 answer: None,
+                purpose: Some(purpose),
             },
             WorkStepStatus::Running,
             part,

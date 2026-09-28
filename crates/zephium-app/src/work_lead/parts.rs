@@ -30,6 +30,8 @@ const PART_MAX: WorkExecutionLimits = WorkExecutionLimits {
     max_workers: 3,
 };
 const PART_TURNS: u8 = 10;
+/// Searches one part may run; past them it reports what it has.
+const PART_SEARCHES: usize = 6;
 
 pub(crate) struct PartSpec {
     pub title: String,
@@ -331,6 +333,7 @@ where
         let mut spent = WorkUsage::default();
         let mut warned = false;
         let mut idle = 0u8;
+        let mut searches = 0usize;
         for turn in 0..max_turns {
             let over = {
                 let pages = hands.used().await;
@@ -417,10 +420,19 @@ where
                         if !matches!(kit, Kit::Registered(_)) =>
                     {
                         match step_request(&tool_call.name, &tool_call.arguments, self.run) {
-                            Ok(kind) => requests.push(Request {
-                                call: tool_call.id.clone(),
-                                kind,
-                            }),
+                            Ok(WorkStepKindV1::Search { .. }) if searches >= PART_SEARCHES => {
+                                results[index] = Some(answer(
+                                    "This part has used its searches: place what you found and finish, saying what is missing.".into(),
+                                    true,
+                                ))
+                            }
+                            Ok(kind) => {
+                                searches += usize::from(matches!(kind, WorkStepKindV1::Search { .. }));
+                                requests.push(Request {
+                                    call: tool_call.id.clone(),
+                                    kind,
+                                })
+                            }
                             Err(fault) => results[index] = Some(answer(fault, true)),
                         }
                     }

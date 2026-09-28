@@ -621,6 +621,7 @@ impl WorkAgentTurnDisclosure {
                     prompt: prompt.clone(),
                     options: options.clone(),
                     answer: None,
+                    purpose: None,
                 },
                 status: WorkStepStatus::Running,
                 usage: None,

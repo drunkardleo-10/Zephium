@@ -218,6 +218,19 @@ fn normalize(kind: &str, data: &mut Value) {
         }
     }
     trim(data);
+    // Headlines, names and labels are set as type: no Markdown marks.
+    for field in ["headline"] {
+        if let Some(Value::String(text)) = data.get_mut(field) {
+            *text = super::call::plain(text);
+        }
+    }
+    items_mut(data, |item| {
+        for field in ["name", "title"] {
+            if let Some(Value::String(text)) = item.get_mut(field) {
+                *text = super::call::plain(text);
+            }
+        }
+    });
     match kind {
         "picks" => items_mut(data, |item| {
             if let Some(price) = item.get_mut("price").and_then(Value::as_object_mut) {
@@ -279,7 +292,8 @@ pub(crate) fn propose(
     sources: &[String],
     inherited: &[WorkEvidenceLink],
 ) -> Result<Proposed, String> {
-    let title = title.trim();
+    let title = super::call::plain(title);
+    let title = title.as_str();
     if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS || title.contains('\n') {
         return Err(format!(
             "title is one line of 1 to {MAX_TITLE_CHARS} characters"

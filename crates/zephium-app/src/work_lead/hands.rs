@@ -111,6 +111,7 @@ where
             Ok(execution) => execution.steps.iter().map(|s| s.id).collect(),
             Err(_) => BTreeSet::new(),
         };
+        let started = std::time::Instant::now();
         let mut driver = self.driver.lock().await;
         let mut gate = |probe: WorkAttemptProbe, request: WorkAgentBrowseRequest| {
             let future = {
@@ -207,6 +208,24 @@ where
                 content.push_str(notice);
             }
         }
+        let count = |search: bool| {
+            requests
+                .iter()
+                .filter(|r| matches!(r.kind, WorkStepKindV1::Search { .. }) == search)
+                .count()
+        };
+        let pages = requests
+            .iter()
+            .filter(|r| matches!(r.kind, WorkStepKindV1::Read { .. }))
+            .count();
+        self.run.report(super::WorkLeadDiagnostic::Fetched {
+            part: self.part.is_some(),
+            searches: count(true),
+            pages,
+            others: count(false) - pages,
+            failed: results.iter().filter(|(_, _, error)| *error).count(),
+            elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        });
         match terminal {
             Some(status) if status != WorkAttemptStatus::Succeeded => Err(status),
             _ => Ok(results),

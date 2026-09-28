@@ -75,7 +75,8 @@ pub fn builtins() -> Vec<Skill> {
         .collect()
 }
 
-/// Built-ins, then the profile's own skills replacing any of the same name.
+/// Built-ins, then the profile's own skills replacing any of the same name,
+/// less the ones the person turned off.
 pub fn load(profile: ProfileId) -> Vec<Skill> {
     let mut skills = builtins();
     if let Some(dir) = user_dir(profile) {
@@ -86,6 +87,8 @@ pub fn load(profile: ProfileId) -> Vec<Skill> {
             }
         }
     }
+    let off = crate::work_personal::skills::disabled(profile);
+    skills.retain(|skill| !off.contains(&skill.name));
     skills
 }
 
