@@ -6,6 +6,7 @@
 //! compatibility layer that `zephium_webext::prepare` injects into packages.
 #![cfg(target_os = "macos")]
 
+mod access;
 mod bridge;
 pub mod compat;
 mod delegate;
@@ -82,6 +83,15 @@ pub type TabRequestDone = Box<dyn FnOnce(Result<Option<u64>, String>)>;
 
 /// What the browser provides to the runtime. Every call arrives on the main
 /// thread.
+/// Access an extension asked for at run time, with the warnings to show.
+#[derive(Clone, Debug)]
+pub struct AccessRequest {
+    pub extension: String,
+    pub warnings: Vec<String>,
+    pub permissions: Vec<String>,
+    pub patterns: Vec<String>,
+}
+
 pub trait Host {
     fn log(&self, extension: &str, level: LogLevel, message: &str);
 
@@ -106,6 +116,14 @@ pub trait Host {
     /// its `popupWebView` in a view of the host's own). Returning false
     /// declines it, and WebKit closes the popup.
     fn present_popup(&self, extension: &str, action: &objc2_web_kit::WKWebExtensionAction) -> bool;
+
+    /// Asks the user whether `extension` may have access it requested at run
+    /// time (`permissions.request`): API permissions and match patterns,
+    /// batched into one question. Declines unless the host asks.
+    fn prompt_access(&self, request: AccessRequest, done: Box<dyn FnOnce(bool)>) {
+        let _ = request;
+        done(false);
+    }
 }
 
 /// Diagnostics for development builds: `ZEPHIUM_WEBEXT_TRACE=1` prints how

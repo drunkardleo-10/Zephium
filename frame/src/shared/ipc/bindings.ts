@@ -28,6 +28,11 @@ export const commands = {
 	webExtensionSetEnabled: (id: string, enabled: boolean) => typedError<null, string>(__TAURI_INVOKE("web_extension_set_enabled", { id, enabled })),
 	webExtensionUninstall: (id: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_uninstall", { id })),
 	/**
+	 *  Answers an extension's run-time request for access; granted access is
+	 *  kept for the next launch.
+	 */
+	webExtensionAnswerAccess: (request: WebExtensionAccessRequestView, allowed: boolean) => typedError<null, string>(__TAURI_INVOKE("web_extension_answer_access", { request, allowed })),
+	/**
 	 *  Reads only platform capability state. It never enumerates credentials,
 	 *  relying parties, or extension-owned vault data and never opens native UI.
 	 */
@@ -133,6 +138,7 @@ export const events = {
 	searchChanged: makeEvent<SearchChanged>("search-changed"),
 	tabChanged: makeEvent<TabChanged>("tab-changed"),
 	uiCommand: makeEvent<UiCommand>("ui-command"),
+	webExtensionAccessRequested: makeEvent<WebExtensionAccessRequested>("web-extension-access-requested"),
 };
 
 /* Types */
@@ -1247,6 +1253,18 @@ export type UiCommand = string;
 export type UiInfo = {
 	material: Material,
 };
+
+/**  An extension's run-time request for access, awaiting the user's answer. */
+export type WebExtensionAccessRequestView = {
+	profile_id: string,
+	request: string,
+	extension_id: string,
+	warnings: string[],
+	permissions: string[],
+	patterns: string[],
+};
+
+export type WebExtensionAccessRequested = WebExtensionAccessRequestView;
 
 export type WebExtensionReview = {
 	id: string,

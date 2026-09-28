@@ -10,6 +10,7 @@
 //! - `{"tab": "<url>"}` opens a tab and waits for it to load
 //! - `{"page": "<path>"}` opens one of the extension's pages in a probe view
 //! - `{"eval": "<async function body>", "in": "page" | "tab", "timeout": 5000}`
+//! - `{"keys": "<text>", "in": "tab" | "page"}` types real key presses
 //! - `{"sleep": <ms>}`
 //! - `{"unload": true}` unloads the last loaded extension; `{"erase": true}`
 //!   unloads it and erases its stored data
@@ -78,6 +79,18 @@ impl Host for LabHost {
             LogLevel::Error => "ERROR",
         };
         eprintln!("[{extension} {tag}] {message}");
+    }
+
+    fn prompt_access(
+        &self,
+        request: zephium_webext_macos::AccessRequest,
+        done: Box<dyn FnOnce(bool)>,
+    ) {
+        println!(
+            "ACCESS {} warnings={:?} permissions={:?} patterns={:?}",
+            request.extension, request.warnings, request.permissions, request.patterns
+        );
+        done(true);
     }
 
     fn present_popup(&self, extension: &str, action: &objc2_web_kit::WKWebExtensionAction) -> bool {
@@ -298,7 +311,11 @@ impl Lab {
                 },
             );
         } else if let Some(keys) = step.get("keys").and_then(Value::as_str) {
-            if let Some(view) = this.tab_view(this.active.get()) {
+            let view = match step.get("in").and_then(Value::as_str) {
+                Some("page") => this.page.borrow().clone(),
+                _ => this.tab_view(this.active.get()),
+            };
+            if let Some(view) = view {
                 this.window.makeFirstResponder(Some(&view));
                 for key in keys.chars() {
                     press(&this.window, key);

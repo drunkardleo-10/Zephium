@@ -1,4 +1,10 @@
-import { commands, type WebExtensionReview, type WebExtensionView } from "$shared/ipc/bindings";
+import {
+  commands,
+  type WebExtensionAccessRequestView,
+  type WebExtensionReview,
+  type WebExtensionView,
+} from "$shared/ipc/bindings";
+import { events } from "$shared/ipc/native-events";
 
 let available = $state<boolean | null>(null);
 let installed = $state<WebExtensionView[]>([]);
@@ -7,6 +13,9 @@ let preparing = $state(false);
 let confirming = $state(false);
 let failure = $state<string | null>(null);
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+// Extensions ask for access one request at a time; later ones wait.
+let accessQueue = $state<WebExtensionAccessRequestView[]>([]);
+let answering = $state(false);
 
 export const isAvailable = () => available === true;
 export const list = () => installed;
@@ -14,6 +23,26 @@ export const review = () => pendingReview;
 export const isPreparing = () => preparing;
 export const isConfirming = () => confirming;
 export const error = () => failure;
+export const accessRequest = () => accessQueue[0] ?? null;
+export const isAnswering = () => answering;
+export const named = (id: string) => installed.find((extension) => extension.id === id) ?? null;
+
+export function listenForAccess(): Promise<() => void> {
+  return events.webExtensionAccessRequested.listen((event) => {
+    accessQueue = [...accessQueue, event.payload];
+    if (named(event.payload.extension_id) === null) void refresh();
+  });
+}
+
+export async function answerAccess(allowed: boolean): Promise<void> {
+  const current = accessQueue[0];
+  if (current === undefined || answering) return;
+  answering = true;
+  const result = await commands.webExtensionAnswerAccess(current, allowed);
+  answering = false;
+  accessQueue = accessQueue.slice(1);
+  if (result.status !== "ok") failure = result.error;
+}
 
 export async function refresh(): Promise<void> {
   const result = await commands.webExtensionList();

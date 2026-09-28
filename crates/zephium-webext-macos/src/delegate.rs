@@ -4,7 +4,7 @@ use std::rc::{Rc, Weak as RcWeak};
 use block2::DynBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
-use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
 use objc2_foundation::{NSArray, NSDate, NSError, NSObjectProtocol, NSSet, NSString, NSURL};
 use objc2_web_kit::{
     WKWebExtensionAction, WKWebExtensionContext, WKWebExtensionController,
@@ -14,7 +14,7 @@ use objc2_web_kit::{
 };
 
 use crate::runtime::Shared;
-use crate::{bridge, error, native, socket, LogLevel, TabRequest};
+use crate::{access, bridge, error, native, socket, TabRequest};
 
 pub(crate) struct Ivars {
     shared: RcWeak<Shared>,
@@ -187,13 +187,24 @@ define_class!(
             completion: &DynBlock<dyn Fn(NonNull<NSSet<WKWebExtensionPermission>>, *mut NSDate)>,
         ) {
             let requested: Vec<String> = permissions.iter().map(|p| p.to_string()).collect();
-            self.log(
-                context,
-                LogLevel::Info,
-                &format!("declined optional permissions {requested:?}"),
+            let Some(shared) = self.shared() else {
+                let none = NSSet::<WKWebExtensionPermission>::new();
+                return completion.call((NonNull::from(&*none), std::ptr::null_mut()));
+            };
+            let granted = permissions.retain();
+            let completion = completion.copy();
+            let extension = unsafe { context.uniqueIdentifier() }.to_string();
+            access::request(
+                &shared,
+                &extension,
+                requested,
+                Vec::new(),
+                Box::new(move |allowed| {
+                    let none = NSSet::<WKWebExtensionPermission>::new();
+                    let answer = if allowed { &granted } else { &none };
+                    completion.call((NonNull::from(&**answer), std::ptr::null_mut()));
+                }),
             );
-            let none = NSSet::<WKWebExtensionPermission>::new();
-            completion.call((NonNull::from(&*none), std::ptr::null_mut()));
         }
 
         // Chrome never prompts when an extension touches a page it lacks
@@ -224,13 +235,24 @@ define_class!(
                 .iter()
                 .map(|p| unsafe { p.string() }.to_string())
                 .collect();
-            self.log(
-                context,
-                LogLevel::Info,
-                &format!("declined optional host access {requested:?}"),
+            let Some(shared) = self.shared() else {
+                let none = NSSet::<WKWebExtensionMatchPattern>::new();
+                return completion.call((NonNull::from(&*none), std::ptr::null_mut()));
+            };
+            let granted = patterns.retain();
+            let completion = completion.copy();
+            let extension = unsafe { context.uniqueIdentifier() }.to_string();
+            access::request(
+                &shared,
+                &extension,
+                Vec::new(),
+                requested,
+                Box::new(move |allowed| {
+                    let none = NSSet::<WKWebExtensionMatchPattern>::new();
+                    let answer = if allowed { &granted } else { &none };
+                    completion.call((NonNull::from(&**answer), std::ptr::null_mut()));
+                }),
             );
-            let none = NSSet::<WKWebExtensionMatchPattern>::new();
-            completion.call((NonNull::from(&*none), std::ptr::null_mut()));
         }
 
         #[unsafe(method(webExtensionController:presentPopupForAction:forExtensionContext:completionHandler:))]
@@ -322,12 +344,6 @@ impl Delegate {
 
     fn shared(&self) -> Option<Rc<Shared>> {
         self.ivars().shared.upgrade()
-    }
-
-    fn log(&self, context: &WKWebExtensionContext, level: LogLevel, message: &str) {
-        if let Some(shared) = self.shared() {
-            shared.log(context, level, message);
-        }
     }
 }
 

@@ -122,6 +122,7 @@ const EVENT_TAB: &str = "zephium:tab";
 const EVENT_FAVICONS: &str = "zephium:favicons";
 const EVENT_EXTENSION_ACTIONS: &str = "zephium:extension-actions";
 const EVENT_EXTENSION_ACTION_FAILED: &str = "zephium:extension-action-failed";
+const EVENT_WEB_EXTENSION_ACCESS: &str = "zephium:web-extension-access";
 const EVENT_EXTENSION_ACTION_SHORTCUT: &str = "zephium:extension-action-shortcut";
 const EVENT_PAGE_PERMISSION_PROMPT: &str = "zephium:page-permission-prompt";
 const EVENT_PRESENTATION_TAB: &str = "zephium:presentation-tab";
@@ -1045,6 +1046,9 @@ struct ExtensionActionFailed(zephium_ipc::ExtensionActionFailedView);
 struct ExtensionActionShortcut(zephium_ipc::ExtensionActionShortcutView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct WebExtensionAccessRequested(zephium_ipc::WebExtensionAccessRequestView);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct PagePermissionPromptChanged(zephium_ipc::PagePermissionPromptView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -1224,6 +1228,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             webext::web_extension_list,
             webext::web_extension_set_enabled,
             webext::web_extension_uninstall,
+            webext::web_extension_answer_access,
             browser_credentials::browser_credential_capability,
             browser_credentials::browser_passkey_authorization_request,
             page_permission_respond,
@@ -1280,6 +1285,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ExtensionActionsChanged,
             ExtensionActionFailed,
             ExtensionActionShortcut,
+            WebExtensionAccessRequested,
             browser_credentials::BrowserCredentialCapabilityChanged,
             PagePermissionPromptChanged,
             UiCommand,
@@ -4305,6 +4311,12 @@ pub fn run() {
                     MAIN_LABEL,
                     EVENT_EXTENSION_ACTION_FAILED,
                     &failure,
+                ),
+                Projection::WebExtensionAccessRequest(request) => emit_to_privileged(
+                    &emit_handle,
+                    MAIN_LABEL,
+                    EVENT_WEB_EXTENSION_ACCESS,
+                    &request,
                 ),
                 Projection::ExtensionActionShortcut(shortcut) => emit_to_privileged(
                     &emit_handle,

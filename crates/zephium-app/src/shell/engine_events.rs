@@ -261,6 +261,19 @@ impl Shell {
                 install,
                 result,
             } => self.on_web_extension_settled(profile, install, result),
+            EngineEvent::WebExtensionAccessRequested(request) => {
+                let request = *request;
+                (self.emit)(Projection::WebExtensionAccessRequest(
+                    zephium_ipc::WebExtensionAccessRequestView {
+                        profile_id: request.profile.to_string(),
+                        request: request.request.to_string(),
+                        extension_id: request.extension_id,
+                        warnings: request.warnings,
+                        permissions: request.permissions,
+                        patterns: request.patterns,
+                    },
+                ));
+            }
             EngineEvent::ExtensionActionsInvalidated { profile } => {
                 let refresh = self.refresh_extension_actions(profile);
                 if refresh.rejected {
@@ -548,6 +561,7 @@ impl Shell {
             EngineEvent::ExtensionActionSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),
             EngineEvent::WebExtensionSettled { profile, .. } => Some(*profile),
+            EngineEvent::WebExtensionAccessRequested(request) => Some(request.profile),
             EngineEvent::ExtensionActionShortcutRequested { runtime, .. } => {
                 Some(runtime.profile())
             }

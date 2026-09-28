@@ -837,7 +837,8 @@ impl RetirementGate {
             // retained native completion instead of waiting for its timeout.
             event @ EngineEvent::ExtensionBrowserRequested { .. }
             | event @ EngineEvent::ExtensionPageClosed { .. }
-            | event @ EngineEvent::PermissionRequested { .. } => Some(event),
+            | event @ EngineEvent::PermissionRequested { .. }
+            | event @ EngineEvent::WebExtensionAccessRequested(_) => Some(event),
             EngineEvent::WebExtensionSettled {
                 profile,
                 install,
@@ -1721,6 +1722,20 @@ impl Engine for WebviewEngine {
     ) -> NativeDispatch {
         NativeDispatch::from_scheduled(self.run(move || {
             host::best_effort_with(move |host| host.unload_web_extension(profile, install));
+        }))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn answer_web_extension_access(
+        &self,
+        profile: ProfileId,
+        request: u64,
+        allowed: bool,
+    ) -> NativeDispatch {
+        NativeDispatch::from_scheduled(self.run(move || {
+            host::best_effort_with(move |host| {
+                host.answer_web_extension_access(profile, request, allowed)
+            });
         }))
     }
 

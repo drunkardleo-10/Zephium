@@ -658,6 +658,15 @@ pub trait Engine {
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Settles a [`EngineEvent::WebExtensionAccessRequested`].
+    fn answer_web_extension_access(
+        &self,
+        _profile: ProfileId,
+        _request: u64,
+        _allowed: bool,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Stops an extension being uninstalled and erases what it stored.
     fn remove_web_extension(&self, _profile: ProfileId, _load: WebExtensionLoad) -> NativeDispatch {
         NativeDispatch::Unsupported
@@ -867,6 +876,16 @@ impl PartialEq for NativeTabAdoption {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebExtensionAccessRequest {
+    pub profile: ProfileId,
+    pub request: u64,
+    pub extension_id: String,
+    pub warnings: Vec<String>,
+    pub permissions: Vec<String>,
+    pub patterns: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineEvent {
     /// A native browser environment reported that a newer runtime is
@@ -957,6 +976,9 @@ pub enum EngineEvent {
         install: ExtensionInstallId,
         result: Result<WebExtensionLoaded, String>,
     },
+    /// An extension asked at run time for access the user must approve;
+    /// answered through [`EnginePort::answer_web_extension_access`].
+    WebExtensionAccessRequested(Box<WebExtensionAccessRequest>),
     /// A native command matched the reserved browser-action shortcut for one
     /// exact published runtime and resident tab. The event carries no popup
     /// geometry: Shell must rejoin it to the current action snapshot and ask

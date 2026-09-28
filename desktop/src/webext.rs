@@ -262,6 +262,29 @@ pub(crate) async fn web_extension_set_enabled(
     }
 }
 
+/// Answers an extension's run-time request for access; granted access is
+/// kept for the next launch.
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn web_extension_answer_access(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    extensions: State<'_, WebExtensions>,
+    request: zephium_ipc::WebExtensionAccessRequestView,
+    allowed: bool,
+) -> Result<(), String> {
+    if !authorize(&caller, CallerPolicy::Main, "web_extension_answer_access") {
+        return Err(UNAVAILABLE.into());
+    }
+    #[cfg(target_os = "macos")]
+    return imp::answer_access(&shell, &extensions, request, allowed);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (shell, extensions, request, allowed);
+        Err(UNAVAILABLE.into())
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn web_extension_uninstall(
@@ -989,6 +1012,42 @@ mod imp {
         entry.enabled = enabled;
         extensions.save(profile, &registry)?;
         extensions.apply(shell, profile, &mut registry);
+        Ok(())
+    }
+
+    pub(super) fn answer_access(
+        shell: &Handle,
+        extensions: &WebExtensions,
+        request: zephium_ipc::WebExtensionAccessRequestView,
+        allowed: bool,
+    ) -> Result<(), String> {
+        let profile = ProfileId::parse(&request.profile_id).ok_or("Invalid profile.")?;
+        let number: u64 = request.request.parse().map_err(|_| "Invalid request.")?;
+        if allowed {
+            let mut registry = extensions.registry(profile);
+            if let Some(entry) = registry
+                .extensions
+                .iter_mut()
+                .find(|entry| entry.id == request.extension_id)
+            {
+                for permission in request.permissions {
+                    if !entry.permissions.contains(&permission) {
+                        entry.permissions.push(permission);
+                    }
+                }
+                for pattern in request.patterns {
+                    if !entry.hosts.contains(&pattern) {
+                        entry.hosts.push(pattern);
+                    }
+                }
+                extensions.save(profile, &registry)?;
+            }
+        }
+        shell.dispatch(zephium_app::Command::AnswerWebExtensionAccess {
+            profile,
+            request: number,
+            allowed,
+        });
         Ok(())
     }
 

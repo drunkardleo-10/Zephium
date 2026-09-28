@@ -190,6 +190,17 @@ pub struct PagePermissionPromptView {
     pub prompt: Option<PagePermissionPromptEntryView>,
 }
 
+/// An extension's run-time request for access, awaiting the user's answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct WebExtensionAccessRequestView {
+    pub profile_id: String,
+    pub request: String,
+    pub extension_id: String,
+    pub warnings: Vec<String>,
+    pub permissions: Vec<String>,
+    pub patterns: Vec<String>,
+}
+
 /// The one retained split group owned by the focused window. Members are
 /// normalized references into [`ItemsState::tabs`] in native pane traversal
 /// order; geometry and mutable divider ratios remain native-only authority.
@@ -868,6 +879,7 @@ pub enum Projection {
     ExtensionActionFailed(ExtensionActionFailedView),
     ExtensionActionShortcut(ExtensionActionShortcutView),
     PagePermissionPrompt(PagePermissionPromptView),
+    WebExtensionAccessRequest(WebExtensionAccessRequestView),
     UiCommand(String),
     Search(SearchResults),
     OpenNote { profile: String, id: String },

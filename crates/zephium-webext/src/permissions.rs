@@ -47,19 +47,27 @@ enum HostAccess {
 }
 
 pub fn warnings(manifest: &Manifest) -> Vec<String> {
-    let permissions = manifest.permissions();
+    let patterns: Vec<String> = manifest
+        .host_permissions()
+        .into_iter()
+        .chain(
+            manifest
+                .content_scripts()
+                .into_iter()
+                .flat_map(|script| script.matches),
+        )
+        .collect();
+    access_warnings(&manifest.permissions(), &patterns)
+}
+
+/// Warnings for access asked for at run time, worded as at install.
+pub fn access_warnings(permissions: &[String], patterns: &[String]) -> Vec<String> {
     let has = |name: &str| permissions.iter().any(|p| p == name);
 
     let mut all_sites = ALL_SITES_EQUIVALENT.iter().any(|p| has(p));
     let mut hosts = Vec::new();
-    let patterns = manifest.host_permissions().into_iter().chain(
-        manifest
-            .content_scripts()
-            .into_iter()
-            .flat_map(|script| script.matches),
-    );
     for pattern in patterns {
-        match host_access(&pattern) {
+        match host_access(pattern) {
             Some(HostAccess::All) => all_sites = true,
             Some(HostAccess::Named(host)) => hosts.push(host),
             None => {}
@@ -133,6 +141,21 @@ fn describe_hosts(mut hosts: Vec<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn runtime_requests_are_worded_like_installs() {
+        let all = super::access_warnings(&["clipboardRead".into()], &["*://*/*".into()]);
+        assert_eq!(
+            all,
+            [
+                "Read and change all your data on all websites",
+                "Read data you copy and paste"
+            ]
+        );
+        let one = super::access_warnings(&[], &["https://*.github.com/*".into()]);
+        assert_eq!(one.len(), 1);
+        assert!(one[0].contains("github.com"), "{one:?}");
+    }
 
     use super::*;
 

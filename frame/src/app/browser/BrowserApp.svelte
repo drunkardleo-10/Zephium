@@ -2,7 +2,7 @@
   import { installCloseService } from "$shared/lib/close";
   import "$styles/global.css";
   import { onMount, untrack } from "svelte";
-  import { WebExtensionReview } from "$features/webext";
+  import { WebExtensionAccessPrompt, WebExtensionReview } from "$features/webext";
   import { webext } from "$domain/webext";
   import { PagePermissionPrompt } from "$features/permissions";
   import * as sidebar from "$session/sidebar-mode.svelte";
@@ -117,6 +117,7 @@
     const runtimeReady = runtime.init();
     const extensionsReady = extensions.init();
     void webext.refresh();
+    const stopAccess = webext.listenForAccess();
     const pagePermissionsReady = pagePermissions.init();
 
     // Rasters are emitted immediately before the projection that references
@@ -174,6 +175,7 @@
       runtime.dispose();
       extensions.dispose();
       pagePermissions.dispose();
+      void stopAccess.then((stop) => stop());
       favicons.dispose();
       tabs.dispose();
       ui.dispose();
@@ -191,6 +193,10 @@
 </div>
 {#if webext.review() !== null}
   <WebExtensionReview review={webext.review()!} />
+{:else if webext.accessRequest() !== null}
+  {#key webext.accessRequest()!.request}
+    <WebExtensionAccessPrompt request={webext.accessRequest()!} />
+  {/key}
 {:else if pagePermissionPrompt !== null}
   {#key `${pagePermissionPrompt.profile_id}:${pagePermissionPrompt.item_id}:${pagePermissionPrompt.request_id}`}
     <PagePermissionPrompt prompt={pagePermissionPrompt} />

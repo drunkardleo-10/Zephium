@@ -18,6 +18,7 @@ import type {
   SearchChanged,
   TabChanged,
   UiCommand,
+  WebExtensionAccessRequested,
 } from "./bindings";
 
 type PayloadEvent<T> = { payload: T };
@@ -53,6 +54,7 @@ export const nativeEventNames = {
   extensionActionFailed: "zephium:extension-action-failed",
   extensionActionShortcut: "zephium:extension-action-shortcut",
   pagePermissionPromptChanged: "zephium:page-permission-prompt",
+  webExtensionAccessRequested: "zephium:web-extension-access",
   browserReturn: "zephium:browser-return",
   presentationTab: "zephium:presentation-tab",
   uiCommand: "zephium:ui-command",
@@ -86,6 +88,9 @@ export const events = {
   ),
   pagePermissionPromptChanged: scopedEvent<PagePermissionPromptChanged>(
     nativeEventNames.pagePermissionPromptChanged,
+  ),
+  webExtensionAccessRequested: scopedEvent<WebExtensionAccessRequested>(
+    nativeEventNames.webExtensionAccessRequested,
   ),
   browserReturn: scopedEvent<ItemsChanged>(nativeEventNames.browserReturn),
   presentationTab: scopedEvent<PresentationTab>(nativeEventNames.presentationTab),

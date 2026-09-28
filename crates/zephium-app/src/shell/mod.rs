@@ -569,6 +569,15 @@ impl Shell {
                 profile,
                 extensions,
             } => self.set_web_extensions(profile, extensions),
+            Command::AnswerWebExtensionAccess {
+                profile,
+                request,
+                allowed,
+            } => {
+                let _ = self
+                    .engine
+                    .answer_web_extension_access(profile, request, allowed);
+            }
             Command::RemoveWebExtension { profile, extension } => {
                 self.remove_web_extension(profile, *extension)
             }

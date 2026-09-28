@@ -109,6 +109,7 @@ impl WebextHost {
                 popup: RefCell::new(None),
                 self_weak: RefCell::new(std::rc::Weak::new()),
                 repeats: RefCell::new(HashMap::new()),
+                access: RefCell::new(HashMap::new()),
             });
             *bridge.self_weak.borrow_mut() = Rc::downgrade(&bridge);
             let runtime = Runtime::new(mtm, &store, Some(&identifier), bridge.clone());
@@ -200,7 +201,8 @@ impl WebextHost {
     /// Its origin's data can only be cleared from one of its own pages, so a
     /// disabled extension is loaded first, without its background.
     pub(crate) fn remove(&mut self, profile: ProfileId, load: WebExtensionLoad, sink: &Sink) {
-        self.loaded_before.remove(&(profile, load.extension_id.clone()));
+        self.loaded_before
+            .remove(&(profile, load.extension_id.clone()));
         let entry = self.profile(profile, sink);
         entry.installs.remove(&load.install);
         sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
@@ -613,7 +615,10 @@ struct Bridge {
     popup: RefCell<Option<(Retained<NSView>, Rect)>>,
     self_weak: RefCell<std::rc::Weak<Bridge>>,
     repeats: RefCell<HashMap<u64, (std::time::Instant, u32)>>,
+    access: RefCell<HashMap<u64, AccessAnswer>>,
 }
+
+type AccessAnswer = Box<dyn FnOnce(bool)>;
 
 impl Bridge {
     fn request(&self, action: ExtensionBrowserRequestAction, done: TabRequestDone) {
@@ -740,7 +745,37 @@ fn extension_of(url: &str) -> Option<&str> {
     (id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b))).then_some(id)
 }
 
+impl Bridge {
+    fn answer_access(&self, request: u64, allowed: bool) {
+        let done = self.access.borrow_mut().remove(&request);
+        if let Some(done) = done {
+            done(allowed);
+        }
+    }
+}
+
 impl Host for Bridge {
+    fn prompt_access(
+        &self,
+        request: zephium_webext_macos::AccessRequest,
+        done: Box<dyn FnOnce(bool)>,
+    ) {
+        let number = self.next_request.get();
+        self.next_request.set(number.wrapping_add(1));
+        self.access.borrow_mut().insert(number, done);
+        self.sink
+            .emit(EngineEvent::WebExtensionAccessRequested(Box::new(
+                zephium_core::ports::engine::WebExtensionAccessRequest {
+                    profile: self.profile,
+                    request: number,
+                    extension_id: request.extension,
+                    warnings: request.warnings,
+                    permissions: request.permissions,
+                    patterns: request.patterns,
+                },
+            )));
+    }
+
     fn log(&self, extension: &str, level: LogLevel, message: &str) {
         // Extensions retry failing calls in loops; print each distinct line
         // once a minute with how often it repeated.
@@ -930,6 +965,17 @@ impl super::EngineHost {
     pub(crate) fn unload_web_extension(&mut self, profile: ProfileId, install: ExtensionInstallId) {
         let sink = self.sink.clone();
         self.webext.unload(profile, install, &sink);
+    }
+
+    pub(crate) fn answer_web_extension_access(
+        &mut self,
+        profile: ProfileId,
+        request: u64,
+        allowed: bool,
+    ) {
+        if let Some(entry) = self.webext.profiles.get(&profile) {
+            entry.bridge.answer_access(request, allowed);
+        }
     }
 
     pub(crate) fn remove_web_extension(&mut self, profile: ProfileId, load: WebExtensionLoad) {

@@ -307,6 +307,12 @@ pub enum Command {
         profile: ProfileId,
         extensions: Vec<zephium_core::ports::engine::WebExtensionLoad>,
     },
+    /// The user's answer to an extension's run-time access request.
+    AnswerWebExtensionAccess {
+        profile: ProfileId,
+        request: u64,
+        allowed: bool,
+    },
     /// Uninstalls one extension, erasing what it stored.
     RemoveWebExtension {
         profile: ProfileId,
