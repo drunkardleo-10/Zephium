@@ -5,7 +5,7 @@
 //! Bounded admission for native requests that outlive their initiating callback.
 
 use std::{
-  collections::HashSet,
+  collections::{HashSet, VecDeque},
   sync::{Arc, Mutex, TryLockError},
 };
 
@@ -14,6 +14,11 @@ use std::{
 /// compromised chrome renderer from retaining an unbounded number of native
 /// tasks, deferrals, response channels, and request bodies.
 pub(crate) const CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT: usize = 32;
+/// Requests past the ceiling wait their turn rather than fail: a refused
+/// module import stays failed until its document reloads, and a lazy view's
+/// static graph routinely arrives as one burst larger than the ceiling. The
+/// wait list is bounded as well, so only a flood beyond both is refused.
+pub(crate) const CUSTOM_PROTOCOL_WAITING_LIMIT: usize = 512;
 pub(crate) const CUSTOM_PROTOCOL_OVERFLOW_STATUS: http::StatusCode =
   http::StatusCode::SERVICE_UNAVAILABLE;
 
@@ -120,6 +125,69 @@ impl InFlightAdmission {
   }
 }
 
+/// Requests waiting for an in-flight slot, in arrival order within each pool.
+/// A pool is one admission scope (one scheme of one webview); a full pool never
+/// holds back another, and within a pool nothing overtakes an earlier arrival.
+#[derive(Debug)]
+pub(crate) struct WaitList<K, T> {
+  entries: VecDeque<(K, T)>,
+  limit: usize,
+}
+
+impl<K: PartialEq, T> WaitList<K, T> {
+  pub(crate) const fn new(limit: usize) -> Self {
+    Self {
+      entries: VecDeque::new(),
+      limit,
+    }
+  }
+
+  pub(crate) fn is_empty(&self) -> bool {
+    self.entries.is_empty()
+  }
+
+  /// Whether a new arrival in `pool` must queue behind one already waiting.
+  pub(crate) fn has_waiting(&self, pool: &K) -> bool {
+    self.entries.iter().any(|(key, _)| key == pool)
+  }
+
+  /// Queues an arrival; a full list hands it back to be refused.
+  pub(crate) fn push(&mut self, pool: K, item: T) -> Result<(), T> {
+    if self.entries.len() >= self.limit {
+      return Err(item);
+    }
+    self.entries.push_back((pool, item));
+    Ok(())
+  }
+
+  /// Removes the earliest waiter whose pool admits it now. Only the head of
+  /// each pool is offered a slot, so a pool's order holds.
+  pub(crate) fn take_ready<P>(&mut self, mut admit: impl FnMut(&K) -> Option<P>) -> Option<(T, P)> {
+    let mut tried: Vec<usize> = Vec::new();
+    for index in 0..self.entries.len() {
+      let pool = &self.entries[index].0;
+      if tried
+        .iter()
+        .any(|earlier| &self.entries[*earlier].0 == pool)
+      {
+        continue;
+      }
+      match admit(pool) {
+        Some(permit) => {
+          let (_, item) = self.entries.remove(index)?;
+          return Some((item, permit));
+        }
+        None => tried.push(index),
+      }
+    }
+    None
+  }
+
+  pub(crate) fn retain(&mut self, mut keep: impl FnMut(&K, &T) -> bool) {
+    self.entries.retain(|(pool, item)| keep(pool, item));
+  }
+}
+
 impl Drop for InFlightPermit {
   fn drop(&mut self) {
     let Some(state) = self.state.take() else {
@@ -182,6 +250,72 @@ mod tests {
       .expect("permit drop thread");
     assert_eq!(admission.active(), 0);
     assert!(admission.try_acquire().is_some());
+  }
+
+  #[test]
+  fn a_burst_past_the_ceiling_waits_and_completes_in_order() {
+    let admission = InFlightAdmission::new(CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT);
+    let mut waiting = WaitList::new(CUSTOM_PROTOCOL_WAITING_LIMIT);
+    let mut running = VecDeque::new();
+    let mut peak = 0;
+    for request in 0..68 {
+      if waiting.has_waiting(&"assets") {
+        waiting.push("assets", request).expect("room to wait");
+      } else if let Some(permit) = admission.try_acquire() {
+        running.push_back((request, permit));
+      } else {
+        waiting.push("assets", request).expect("room to wait");
+      }
+      peak = peak.max(admission.active());
+    }
+    assert_eq!(running.len(), CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT);
+    let mut finished = Vec::new();
+    while let Some((request, permit)) = running.pop_front() {
+      drop(permit);
+      finished.push(request);
+      while let Some((next, permit)) = waiting.take_ready(|_| admission.try_acquire()) {
+        running.push_back((next, permit));
+        peak = peak.max(admission.active());
+      }
+    }
+    assert_eq!(finished, (0..68).collect::<Vec<_>>());
+    assert_eq!(peak, CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT);
+    assert!(waiting.is_empty());
+    assert_eq!(admission.active(), 0);
+  }
+
+  #[test]
+  fn a_full_pool_never_holds_back_another_and_order_holds_within_one() {
+    let assets = InFlightAdmission::new(1);
+    let ipc = InFlightAdmission::new(1);
+    let held = assets.try_acquire().expect("assets slot");
+    let mut waiting = WaitList::new(8);
+    waiting.push("assets", 1).unwrap();
+    waiting.push("assets", 2).unwrap();
+    waiting.push("ipc", 3).unwrap();
+    let admit = |pool: &&str| match *pool {
+      "assets" => assets.try_acquire(),
+      _ => ipc.try_acquire(),
+    };
+    let (item, _ipc_permit) = waiting.take_ready(admit).expect("ipc is free");
+    assert_eq!(item, 3);
+    assert!(waiting.take_ready(admit).is_none());
+    drop(held);
+    let (item, _permit) = waiting.take_ready(admit).expect("assets freed");
+    assert_eq!(item, 1);
+  }
+
+  #[test]
+  fn the_wait_list_is_bounded_and_forgets_cancelled_waiters() {
+    let mut waiting = WaitList::new(2);
+    waiting.push("assets", 1).unwrap();
+    waiting.push("assets", 2).unwrap();
+    assert_eq!(waiting.push("assets", 3), Err(3));
+    waiting.retain(|_, item| *item != 1);
+    assert!(waiting.push("assets", 3).is_ok());
+    let admission = InFlightAdmission::new(4);
+    let (first, _permit) = waiting.take_ready(|_| admission.try_acquire()).unwrap();
+    assert_eq!(first, 2);
   }
 
   #[test]

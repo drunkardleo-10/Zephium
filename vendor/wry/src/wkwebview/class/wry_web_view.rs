@@ -39,7 +39,9 @@ pub struct WryWebViewIvars {
   #[cfg(target_os = "ios")]
   pub(crate) input_accessory_view_builder: Option<Box<crate::InputAccessoryViewBuilder>>,
   pub(crate) custom_protocol_task_ids: Mutex<HashMap<usize, Retained<NSUUID>>>,
-  pub(crate) custom_protocol_admission: InFlightAdmission,
+  /// One in-flight scope per registered scheme, by protocol index: a slow IPC
+  /// call never holds back the app's own assets, nor they it.
+  pub(crate) custom_protocol_admission: Vec<InFlightAdmission>,
 }
 
 define_class!(

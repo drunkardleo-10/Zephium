@@ -530,6 +530,7 @@ impl InnerWebView {
         }
       }
 
+      let protocol_count = protocol_ptrs.len();
       WEBVIEW_STATE
         .write()
         .map_err(|_| Error::WebKitStatePoisoned("custom protocol registry"))?
@@ -549,9 +550,13 @@ impl InnerWebView {
         #[cfg(target_os = "ios")]
         input_accessory_view_builder: pl_attrs.input_accessory_view_builder,
         custom_protocol_task_ids: Default::default(),
-        custom_protocol_admission: crate::native_admission::InFlightAdmission::new(
-          crate::native_admission::CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT,
-        ),
+        custom_protocol_admission: (0..protocol_count)
+          .map(|_| {
+            crate::native_admission::InFlightAdmission::new(
+              crate::native_admission::CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT,
+            )
+          })
+          .collect(),
       });
 
       let _preference = config.preferences();
@@ -1789,11 +1794,9 @@ pub fn platform_webview_version() -> Result<String> {
 impl Drop for InnerWebView {
   fn drop(&mut self) {
     url_scheme_handler::cancel_pending_for_webview(&self.id);
-    self
-      .webview
-      .ivars()
-      .custom_protocol_admission
-      .seal_and_drain();
+    for admission in &self.webview.ivars().custom_protocol_admission {
+      admission.seal_and_drain();
+    }
     if let Ok(mut state) = WEBVIEW_STATE.write() {
       state.remove(&self.id);
     }
