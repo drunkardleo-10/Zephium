@@ -26,11 +26,18 @@ vi.mock("$shared/ipc/bindings", async () => {
   });
 });
 vi.mock("$domain/operations", () => ({ settle: native.settle }));
+// The admitted thumbnail as a picture the test page can draw.
+const PIXEL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+vi.mock("$domain/resources", async (original) => ({
+  ...(await original<typeof import("$domain/resources")>()),
+  mediaUrl: (_profile: string, digest: string) => `${PIXEL}#${digest}`,
+}));
 
 const profile = "00000000000000000000000001";
 const video = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42";
 
-test("a video link admits its thumbnail as its picture and plays in the pane", async () => {
+test("a video link admits its thumbnail as its poster and plays in place", async () => {
   await page.viewport(1200, 800);
   const snapshot: WorkEnvironmentSnapshot = {
     version: 1,
@@ -134,17 +141,18 @@ test("a video link admits its thumbnail as its picture and plays in the pane", a
     "link",
     "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
   ]);
-  // The thumbnail is the link card's picture, never a media card of its own.
+  // The thumbnail is the video's poster, never a media card of its own.
   // The picture waits on a notes lookup before its media read.
-  await expect
-    .poll(() => screen.container.querySelector(".thumbnail .play-mark") !== null, {
-      timeout: 5000,
-    })
-    .toBe(true);
+  const poster = () =>
+    screen.container.querySelector<HTMLImageElement>(".media.video img")?.getAttribute("src") ?? "";
+  await expect.poll(poster, { timeout: 5000 }).toBe(`${PIXEL}#${"e".repeat(64)}`);
   expect(screen.container.textContent).not.toContain("hqdefault.jpg");
-  await screen.getByRole("button", { name: "Play here" }).click();
-  await expect.poll(() => native.paneShow.mock.calls.length).toBeGreaterThan(0);
-  expect(native.paneShow.mock.lastCall?.[0]).toEqual({ kind: "url", url: video });
+  // It plays where it stands, in YouTube's own player, not in the pane.
+  (screen.container.querySelector(".media.video button") as HTMLElement).click();
+  await expect
+    .poll(() => screen.container.querySelector("iframe")?.getAttribute("src") ?? "")
+    .toContain("youtube-nocookie.com/embed/dQw4w9WgXcQ");
+  expect(native.paneShow).not.toHaveBeenCalled();
   await screen.unmount();
   environment.dispose();
 });

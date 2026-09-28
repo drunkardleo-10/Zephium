@@ -7,7 +7,12 @@ import WorkEnvironmentWorkspace from "../components/WorkEnvironmentWorkspace.sve
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
+  const { models } = await import("$shared/testing/work-models");
   return mockBindings({
+    workModels: vi.fn(async (profile: string) => ({
+      ...models({ keys: { anthropic: "valid" }, lead: "anthropic/claude-opus-5-5" }),
+      profile,
+    })),
     faviconProbe: async () => true,
     runCommand: vi.fn(async () => ({ accepted: true, operation_id: null })),
     workCall: vi.fn(async (profile: string) => ({
@@ -76,6 +81,9 @@ test("the Work screen's own chrome, at rest and in use, in both themes", async (
   const field = screen.getByRole("textbox", { name: "What do you want to do?" });
   await field.click();
   await userEvent.keyboard("Plan my trip to the next YC batch from Warsaw");
+  await expect
+    .poll(() => screen.container.querySelector<HTMLButtonElement>(".model-trigger")?.disabled)
+    .toBe(false);
   await shoot("typing");
   await field.fill("");
   (document.activeElement as HTMLElement | null)?.blur();

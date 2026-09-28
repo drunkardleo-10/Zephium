@@ -6,6 +6,7 @@ import {
 } from "$shared/ui/data/Artifact/artifact";
 import { TABLE_CARD, tableGrid } from "$shared/ui/data/Artifact/table";
 import { CODE_CARD_LINES, codeLines } from "$shared/ui/data/Code";
+import { objectHeight, objectWidth } from "./board/object-size";
 import type { CanvasItem, CanvasSize } from "./canvas-model";
 
 /**
@@ -271,6 +272,12 @@ export function defaultSize(item: CanvasItem): CanvasSize {
       return { width: 248, height: 168 };
     case "agent":
       return { width: 24, height: 24 };
+    case "object": {
+      const view = item.object?.view;
+      if (!view) return { width: 280, height: 160 };
+      const width = objectWidth(view).ideal;
+      return { width, height: Math.round(objectHeight(view, width)) };
+    }
     default:
       return { width: 280, height: 160 };
   }

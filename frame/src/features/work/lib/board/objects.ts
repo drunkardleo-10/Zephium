@@ -28,7 +28,7 @@ import type {
 export type RunObject = {
   id: string;
   view: ObjectView;
-  /** A legacy block that still draws this object where no object renderer exists yet. */
+  /** The legacy block it was, for the group it stands in. */
   block?: Block;
   emphasis: Emphasis;
   /** The lead part that made it: it sits at the end of that part's row. */
@@ -36,17 +36,6 @@ export type RunObject = {
   /** Its own name, kept for its opened view where the canvas leaves it unsaid. */
   name?: string;
 };
-
-/** Objects the canvas draws as themselves; the rest still draw through their legacy block. */
-export const DRAWN: ReadonlySet<string> = new Set([
-  "reply",
-  "picks",
-  "plan",
-  "list",
-  "sheet",
-  "plot",
-  "diagram",
-]);
 
 const NEW_KINDS = new Set([
   "reply",

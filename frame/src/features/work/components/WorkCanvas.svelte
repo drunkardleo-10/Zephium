@@ -14,7 +14,6 @@
     canvasOpen,
     canvasOpenLink,
     canvasAreas,
-    canvasAuthor,
     canvasPictures,
     canvasAreaActions,
     canvasArrival,
@@ -73,7 +72,6 @@
     items,
     links,
     areas = [],
-    author = "",
     pictures = new Map(),
     initialView,
     remoteView,
@@ -102,8 +100,6 @@
     items: readonly CanvasItem[];
     links: readonly CanvasLink[];
     areas?: readonly CanvasArea[];
-    /** The person whose request starts a path on this canvas. */
-    author?: string;
     /** The admitted picture of each subject, by merge key. */
     pictures?: ReadonlyMap<string, { profile: string; digest: string }>;
     initialView?: CanvasView;
@@ -153,6 +149,9 @@
     command: (record: string) => board?.command(record),
     page: (url: string) => board?.page(url),
     note: (id: string) => board?.note(id),
+    compare: (id: string) => board?.compare?.(id),
+    send: (id: string) => board?.send?.(id),
+    write: (id: string, markdown: string) => board?.write?.(id, markdown),
   } satisfies BoardActions);
   /** Each origin is asked for once per canvas. */
   const probed: Record<string, true> = {};
@@ -173,11 +172,6 @@
   setContext(canvasAreas, {
     get list() {
       return areas;
-    },
-  });
-  setContext(canvasAuthor, {
-    get initial() {
-      return author.slice(0, 1).toLocaleUpperCase();
     },
   });
   setContext(canvasPictures, {

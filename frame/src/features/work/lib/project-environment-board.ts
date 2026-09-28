@@ -12,10 +12,9 @@ import { clipText, type CanvasPosition } from "./canvas-model";
 import { threadOf, type WorkStage } from "./project-environment-thread";
 import { boardOf } from "./board/adapter";
 import { boardLayout, type LayoutBlock } from "./board/layout";
-import { DRAWN, leadObject, runObjects, type RunObject } from "./board/objects";
+import { leadObject, runObjects, type RunObject } from "./board/objects";
 import { objectHeight, objectWidth } from "./board/object-size";
 import { ulidTime } from "./ulid-time";
-import { estimate, widthRange } from "./board/size";
 import { runTrail } from "./board/trail";
 import type { Detail, Picture } from "./board/types";
 import { RUN, placeRun } from "./run/layout";
@@ -285,18 +284,13 @@ export function environmentStages(
         if (part) found.set(object.id, part);
       }
       const open = options.open ?? undefined;
-      const range = (object: RunObject) =>
-        object.block && !DRAWN.has(object.view.kind)
-          ? widthRange(object.block)
-          : objectWidth(object.view);
+      const range = (object: RunObject) => objectWidth(object.view);
       const sized = (object: RunObject, width: number, opened: boolean) =>
         (detail !== "full"
           ? measured.get(measureKey(object.id, width, opened, detail))
           : undefined) ??
         measured.get(measureKey(object.id, width, opened)) ??
-        (object.block && !DRAWN.has(object.view.kind)
-          ? estimate(object.block, width, opened)
-          : objectHeight(object.view, width));
+        objectHeight(object.view, width);
       const pinned = new Set(
         set.objects.flatMap((object) => (pins.has(object.id) ? [object.id] : [])),
       );

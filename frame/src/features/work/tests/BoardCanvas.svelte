@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
+  import { detailAt } from "../lib/zoom";
   import WorkCanvas from "../components/WorkCanvas.svelte";
   import { clearOfBands, environmentStages, measureKey } from "../lib/project-environment-board";
   import {
@@ -25,9 +27,7 @@
   } = $props();
   const measured = new SvelteMap<string, number>();
   let open = $state<string | null>(null);
-  let detail = $state<Detail>(
-    viewport.zoom >= 0.75 ? "full" : viewport.zoom >= 0.4 ? "overview" : "tile",
-  );
+  let detail = $state<Detail>(untrack(() => detailAt(viewport.zoom)));
   const recorded = () => scene.pages;
   const stages = $derived(
     environmentStages(scene.snapshot, scene.objectives, {
@@ -46,7 +46,7 @@
   const items = $derived([
     ...environmentItems(scene.snapshot, [], [], scene.objectives),
     ...requests.items,
-    ...environmentBoards(stages, open),
+    ...environmentBoards(stages),
     ...environmentParts(scene.objectives, stages, recorded),
     ...environmentInputs(stages),
     ...agents.items,

@@ -72,7 +72,10 @@
     onfocusin={() => (focused = true)}
     onfocusout={(event) => {
       const next = event.relatedTarget;
-      if (!(next instanceof Node && event.currentTarget.contains(next))) focused = false;
+      if (next instanceof Node && event.currentTarget.contains(next)) return;
+      // A menu the bar's own control opened holds the bar open while it is open.
+      if (event.currentTarget.querySelector('.trail [aria-expanded="true"]')) return;
+      focused = false;
     }}
   >
     {#if tools}
@@ -107,7 +110,7 @@
           onkeydown={keydown}
           oninput={grow}></textarea>
         <div class="trail">
-          {#if trailing}{@render trailing()}
+          {#if trailing && engaged}{@render trailing()}
           {:else if model && engaged}<span class="model" title={m.work_bar_model()}>{model}</span
             >{/if}
           {#if value.trim()}<button

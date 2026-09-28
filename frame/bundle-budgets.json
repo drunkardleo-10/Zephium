@@ -375,5 +375,15 @@
     "js": 87000,
     "css": 5700,
     "description": "One kind's renderer, fetched the first time the canvas shows one: a folder as a small stack. Measured 85954 JS and 5345 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches."
+  },
+  "lazy:features/work/components/bar/ModelPicker.svelte": {
+    "js": 285000,
+    "css": 14000,
+    "description": "The model picker in the ask bar, loaded the first time the bar is engaged: measured 284234 JS and 13947 CSS."
+  },
+  "lazy:features/work/components/objects/ObjectCentre.svelte": {
+    "js": 165500,
+    "css": 9000,
+    "description": "An object opened in the centre, loaded with the first lift of an object: measured 164683 JS and 8899 CSS."
   }
 }

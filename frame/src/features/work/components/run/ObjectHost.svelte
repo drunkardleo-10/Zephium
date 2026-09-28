@@ -40,6 +40,9 @@
     ask: (subject) => board?.ask(subject),
     evidence: (reference) => board?.evidence(reference),
     link: (url) => board?.page(url),
+    compare: (target) => board?.compare?.(target),
+    send: (target) => board?.send?.(target),
+    write: (target, markdown) => board?.write?.(target, markdown),
     // A step made into a task opens it in Tasks; its tick lives there.
     check: (_object, index) => {
       const task = made[index];

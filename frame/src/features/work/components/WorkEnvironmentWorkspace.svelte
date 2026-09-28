@@ -44,6 +44,7 @@
     HandIcon,
   } from "../lib/icons";
   import WorkBar from "./bar/WorkBar.svelte";
+  import { centreSize, picksSheet } from "./objects/centre";
   import BarTool from "./bar/BarTool.svelte";
   import NotePanel from "./bar/NotePanel.svelte";
   import AttachPanel, { type AttachKind } from "./bar/AttachPanel.svelte";
@@ -69,6 +70,7 @@
     measureKey,
   } from "../lib/project-environment-board";
   import type { BoardActions } from "../lib/canvas-context";
+  import type { ObjectActions, ObjectView } from "../lib/board/types";
   import type { Detail } from "../lib/board/types";
   import HostGlyph from "./cards/HostGlyph.svelte";
   import { clipText, defaultSize } from "../lib/canvas-model";
@@ -167,6 +169,8 @@
     origin: DOMRect | null;
     /** A change the run proposed: the lift opens on the step, not on a card. */
     proposal?: string;
+    /** Picks opened side by side as a sheet. */
+    compare?: boolean;
   } | null>(null);
   let canvasRef = $state<{
     screenRect: (id: string) => DOMRect | null;
@@ -229,6 +233,7 @@
     if (item.type === "block" || item.type === "object") {
       // A reviewed plan's result keeps its review: it opens in the lift, on its run.
       if (results.references.has(id) && !agentBlock(id)) void openResult(id);
+      else if (item.type === "object") lift(id);
       else toggleBlock(id);
       return;
     }
@@ -550,6 +555,7 @@
   onMount(() => abandonTakeover);
   function liftSize(item: CanvasItem | undefined) {
     if (!item) return { width: 720, height: 520 };
+    if (liftedObject && item.object) return centreSize(liftedObject);
     // A product compare wants every column at once, not a scrollbar.
     if (item.artifact?.content.kind === "matrix")
       return {
@@ -881,7 +887,7 @@
       ),
     ),
   );
-  const boards = $derived(environmentBoards(stages, openBlock, blockArtifact));
+  const boards = $derived(environmentBoards(stages, blockArtifact));
   /** The page this canvas's run is held on, so the line can point at its card. */
   const agentWaiting = $derived.by(() => {
     const work = objectiveSession?.projection?.work.id;
@@ -1175,6 +1181,32 @@
   const stepPlans = $derived(
     new Map(
       items.flatMap((item): [string, StepPlan][] => {
+        const view = item.object?.view;
+        // A checkable plan or a to-do list on the canvas makes its steps into tasks.
+        if (
+          view &&
+          item.artifact &&
+          (view.kind === "plan" ? view.checkable : view.kind === "list" && view.style === "todo")
+        ) {
+          const objective = stages.find((stage) =>
+            stage.objects.some((object) => object.id === item.id),
+          )?.objective;
+          const steps =
+            view.kind === "plan"
+              ? view.steps.map((step) => ({
+                  text: step.title,
+                  ...(step.detail ? { detail: step.detail } : {}),
+                }))
+              : view.kind === "list"
+                ? view.items.map((entry) => ({
+                    text: entry.title,
+                    ...(entry.detail ? { detail: entry.detail } : {}),
+                  }))
+                : [];
+          return objective && steps.length
+            ? [[item.id, stepPlan(item.id, objective, item.artifact, steps)]]
+            : [];
+        }
         const reference = results.references.get(item.id);
         const steps = item.artifact ? resultPlan(item.artifact.content) : [];
         return reference && item.artifact && steps.length
@@ -1353,7 +1385,30 @@
     },
     page: (url) => openCitation(url),
     note: (id) => noteAction(id),
+    compare(id) {
+      panel = null;
+      inspected = null;
+      lifted = { id, origin: canvasRef?.screenRect(id) ?? null, compare: true };
+    },
   };
+  /** What an object opened in the centre asks of the canvas. */
+  const centreActions: ObjectActions = {
+    choose: (element, chosen) => boardActions.choose(element, chosen),
+    compare: (id) => boardActions.compare?.(id),
+    ask: (subject) => askAbout(subject),
+    evidence: (reference) => boardActions.evidence(reference),
+    link: (url) => openCitation(url),
+    check(id, index) {
+      const task = workTasks.tasks(id)[index];
+      if (task) openTask(task.id);
+    },
+  };
+  /** The object the centre shows: the lifted one, or its picks laid side by side. */
+  const liftedObject = $derived.by((): ObjectView | undefined => {
+    const view = liftedItem?.object?.view;
+    if (!view) return undefined;
+    return lifted?.compare && view.kind === "picks" ? picksSheet(view) : view;
+  });
   const liftedElement = $derived(snapshot?.elements.find((element) => element.id === lifted?.id));
   /** A request opens its run: what it did, its steps, its sources. */
   const liftedStage = $derived(stages.find((stage) => stage.card === lifted?.id));
@@ -1437,6 +1492,8 @@
   let liftSource = $state.raw<EvidenceReference | null>(null);
   const loadResult = () => import("./WorkResultInspector.svelte");
   const loadFile = () => import("./WorkFileInspector.svelte");
+  const loadCentre = () => import("./objects/ObjectCentre.svelte");
+  const loadModels = () => import("./bar/ModelPicker.svelte");
   const loadSubject = () => import("./WorkSubjectInspector.svelte");
   const loadDetail = () => import("./WorkObjectiveInspector.svelte");
   /** The file a source row opened, shown as the run recorded it. */
@@ -2229,7 +2286,6 @@
               {items}
               {links}
               areas={snapshot.areas}
-              author={profileLabel}
               {pictures}
               initialView={canvasView}
               {remoteView}
@@ -2581,6 +2637,17 @@
             canvasRef?.focusCard(id);
           }}
         />
+      {:else if liftedObject && !(liftedItem && results.references.has(liftedItem.id) && !agentBlock(liftedItem.id))}
+        <LazyView
+          loader={loadCentre}
+          loadingLabel={m.surface_loading()}
+          failureLabel={m.surface_render_failed()}
+          retryLabel={m.surface_retry()}
+          >{#snippet children(Centre)}<Centre
+              object={liftedObject!}
+              actions={centreActions}
+            />{/snippet}</LazyView
+        >
       {:else if liftedItem?.artifact}
         <div class="lift-result">
           {#if results.references.get(liftedItem.id) && objectiveSession}
@@ -2687,7 +2754,11 @@
         above={grantOpen || composerFailure ? barAbove : undefined}
         context={openTabs || contextSel || session.accountScope ? composerContext : undefined}
         onsubmit={() => void send()}
-      />{:else}<div class="tools-only" role="toolbar" aria-label={m.work_env_toolbar()}>
+      >
+        {#snippet trailing()}{#await loadModels() then picker}<picker.default
+              profile={session.profile}
+            />{/await}{/snippet}
+      </WorkBar>{:else}<div class="tools-only" role="toolbar" aria-label={m.work_env_toolbar()}>
         {@render barTools()}
       </div>{/if}
   </div>

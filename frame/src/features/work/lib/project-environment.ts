@@ -17,11 +17,11 @@ import { host, observedTitle } from "./project-environment-stage";
 import { BOARD_PIN, laneElement, partShape } from "./project-environment-board";
 import type { RunPart } from "./run/parts";
 import { RUN } from "./run/layout";
-import { DRAWN } from "./board/objects";
 import { PART } from "./run/part-size";
 import { fileName } from "./work-files";
+import { linkVideo } from "./link-media";
 import { heldPage, humanPage, phaseLabel } from "./work-human";
-import { pageFrameUrl } from "$domain/resources";
+import { mediaUrl, pageFrameUrl } from "$domain/resources";
 import {
   clipText,
   type PartPage,
@@ -119,6 +119,14 @@ export function environmentItems(
   return elementItems(snapshot, tabs, notes, objectives, media).map((item) => {
     const decision = decisions.get(item.id);
     const image = pictures.get(item.id);
+    // A video's admitted thumbnail is its poster, read from the profile rather than the web.
+    const src =
+      image && item.object?.view.kind === "media" ? mediaUrl(image.profile, image.digest) : null;
+    if (src && item.object?.view.kind === "media")
+      item = {
+        ...item,
+        object: { ...item.object, view: { ...item.object.view, poster: { src } } },
+      };
     return {
       ...item,
       ...(decision === undefined ? {} : { decision }),
@@ -216,16 +224,30 @@ function elementItems(
       } catch {
         /* Rust admits the address; an unreadable one simply has no origin line. */
       }
+      const title = clipText(
+        observedTitle(objectives, link.url) || link.title || host(link.url) || link.url,
+        TITLE_TEXT,
+      );
+      // A video is its poster, played in place; the poster is the admitted thumbnail.
+      const video = linkVideo(element.id, link.url, link.title ? { title: link.title } : {});
+      if (video)
+        return {
+          id: element.id,
+          type: "object" as const,
+          area: element.area,
+          kind: m.work_env_link(),
+          title,
+          detail: origin,
+          status: area,
+          object: { view: video, live: false },
+        };
       return {
         id: element.id,
         type: "link" as const,
         area: element.area,
         kind: m.work_env_link(),
         // A read's observed page title names the card; the stored title stays as it is.
-        title: clipText(
-          observedTitle(objectives, link.url) || link.title || host(link.url) || link.url,
-          TITLE_TEXT,
-        ),
+        title,
         detail: origin,
         status: area,
       };
@@ -735,7 +757,6 @@ export function environmentInputs(stages: readonly WorkStage[]): CanvasItem[] {
 /** Each run's result and what its parts found: the reply at its head, then its objects. */
 export function environmentBoards(
   stages: readonly WorkStage[],
-  open: string | null,
   /** The one result a block stands for, when it stands for one: its note and tasks come from it. */
   artifactOf: (id: string) => CanvasItem["artifact"] = () => undefined,
 ): CanvasItem[] {
@@ -771,19 +792,7 @@ export function environmentBoards(
         size: size(object.id),
         ...(artifact ? { artifact } : {}),
       };
-      if (object.block && !DRAWN.has(object.view.kind))
-        items.push({
-          ...base,
-          type: "block",
-          kind: object.block.kind,
-          block: {
-            data: object.block,
-            sources: stage.board.sources,
-            open: object.id === open,
-            live: stage.live,
-          },
-        });
-      else items.push({ ...base, type: "object", object: { view: object.view, live: stage.live } });
+      items.push({ ...base, type: "object", object: { view: object.view, live: stage.live } });
     }
   }
   return items;

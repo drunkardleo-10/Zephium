@@ -40,7 +40,7 @@ test("a plan's steps become the person's tasks on request, and a task done in Ta
   const view = artifactView(run.artifacts[0]!, run);
   const items = [
     ...environmentItems(scene, [], [], objectives),
-    ...environmentBoards(stages, null, (id) => (id === "plan-card" ? view : undefined)),
+    ...environmentBoards(stages, (id) => (id === "plan-card" ? view : undefined)),
   ];
   const plan = stepPlan("plan-card", "objective", view, resultPlan(view.content));
   const session = new TaskSession(profile);

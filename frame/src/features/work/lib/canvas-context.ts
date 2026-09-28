@@ -10,8 +10,6 @@ export const canvasFocusResult = Symbol("canvas-focus-result");
 export const canvasOpen = Symbol("canvas-open");
 export const canvasOpenLink = Symbol("canvas-open-link");
 export const canvasAreas = Symbol("canvas-areas");
-/** The person whose words the request card carries. */
-export const canvasAuthor = Symbol("canvas-author");
 /** The admitted picture of each subject, by merge key, for compare columns. */
 export const canvasPictures = Symbol("canvas-pictures");
 /** An area's own actions: fit to members, rename in place, remove. */
@@ -44,6 +42,12 @@ export type BoardActions = {
   command: (record: string) => void;
   /** A page, opened in the pane. */
   page: (url: string) => void;
+  /** Picks laid side by side as a sheet, in the centre. */
+  compare?: (id: string) => void;
+  /** A draft's Send: always through Confirm. */
+  send?: (id: string) => void;
+  /** A note's new Markdown, written through the notes store. */
+  write?: (id: string, markdown: string) => void;
   /** Save as note until the note exists, then Open note; nothing for what has no text. */
   note: (id: string) => { label: string; disabled?: boolean; onclick?: () => void } | undefined;
 };

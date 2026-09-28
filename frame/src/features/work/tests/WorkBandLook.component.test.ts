@@ -86,6 +86,8 @@ const LOOKS = [
   ["trip-lead", 100],
   ["trip-lead", 50],
   ["trip-leadlive", 100],
+  ["trip-lead", 30],
+  ["jobs", 30],
 ] as const;
 
 test.each(LOOKS)("%s at %d%%", async (name, percent) => {
@@ -107,7 +109,7 @@ test.each(LOOKS)("%s at %d%%", async (name, percent) => {
   const zoom = percent / 100;
   const screen = await render(BoardCanvas, {
     scene: loaded,
-    viewport: { x: zoom === 1 ? 120 : 200, y: 72, zoom },
+    viewport: { x: zoom === 1 ? 120 : zoom < 0.4 ? 120 : 200, y: 72, zoom },
   });
   screen.container.style.width = "1440px";
   screen.container.style.height = "900px";

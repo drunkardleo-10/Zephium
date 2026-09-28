@@ -177,7 +177,9 @@ async function board(
     const screen = await render(BoardCanvas, { scene });
     screen.container.style.width = `${size.width}px`;
     screen.container.style.height = `${size.height}px`;
-    await expect.poll(() => screen.container.querySelectorAll(".block, .object").length).toBeGreaterThan(0);
+    await expect
+      .poll(() => screen.container.querySelectorAll(".block, .object").length)
+      .toBeGreaterThan(0);
     await settle(screen.container);
     expect(overlaps(screen.container)).toEqual([]);
     await page.screenshot({ path: `${SHOTS}/${name}-${theme}.png` });
@@ -210,37 +212,21 @@ test("a live run: the column shows its pages, the board waits for the answer", a
   await board("running", runningScene, { width: 1400, height: 900 });
 });
 
-test("a brief opens in place: it takes the board's width and its neighbours make room", async () => {
-  await page.viewport(1720, 2300);
-  const scene = saasScene();
-  const screen = await render(BoardCanvas, { scene });
-  screen.container.style.width = "1720px";
-  screen.container.style.height = "2300px";
-  await settle(screen.container);
-  const node = (title: string) =>
-    [...screen.container.querySelectorAll<HTMLElement>(".svelte-flow__node")].find(
-      (candidate) => candidate.querySelector("h3")?.textContent === title,
-    )!;
-  const stack = () => node("Recommended stack").getBoundingClientRect();
-  const checklist = () => node("Launch checklist").getBoundingClientRect();
-  const before = { stack: stack(), checklist: checklist() };
-  expect(screen.container.textContent).not.toContain("Show less");
-  (screen.container.querySelector(".document footer .more") as HTMLElement).click();
-  await settle(screen.container);
-  const brief = node("Architecture brief").getBoundingClientRect();
-  const board = node("Reference architecture").getBoundingClientRect();
-  expect(Math.round(brief.width)).toBe(Math.round(board.width));
-  // It leaves the checklist's row for one of its own under it; what stood above stays.
-  expect(brief.top).toBeGreaterThan(checklist().bottom);
-  expect(stack().top).toBe(before.stack.top);
-  expect(overlaps(screen.container)).toEqual([]);
-  await expect.element(screen.getByText("Show less", { exact: true })).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/saas-open-dark.png` });
-  (screen.getByText("Show less", { exact: true }).element() as HTMLElement).click();
-  await settle(screen.container);
-  expect(node("Architecture brief").getBoundingClientRect().top).toBe(before.checklist.top);
-  await screen.unmount();
-  screen.container.remove();
+test("surveyed at half size, every run makes room for what it shows: nothing overlaps", async () => {
+  for (const make of [saasScene, tripScene, jobsScene]) {
+    await page.viewport(1720, 1400);
+    const screen = await render(BoardCanvas, {
+      scene: make(),
+      viewport: { x: 40, y: 40, zoom: 0.5 },
+    });
+    screen.container.style.width = "1720px";
+    screen.container.style.height = "1400px";
+    await expect.poll(() => screen.container.querySelectorAll(".object").length).toBeGreaterThan(0);
+    await settle(screen.container);
+    expect(overlaps(screen.container)).toEqual([]);
+    await screen.unmount();
+    screen.container.remove();
+  }
 });
 
 test("a diagram part lights its flows and opens a popover beside itself, never the diagram again", async () => {
