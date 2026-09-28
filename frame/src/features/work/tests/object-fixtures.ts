@@ -933,3 +933,161 @@ export const allObjects: readonly ObjectView[] = [
   ...files,
   folder,
 ];
+
+const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"];
+const plot = (id: string, title: string, spec: PlotView["spec"]): PlotView => ({
+  kind: "plot",
+  id,
+  title,
+  spec,
+});
+const money = { format: "money", currency: "USD" } as const;
+const quotes = [
+  { x: "Hetzner", y: 64 },
+  { x: "Cloudflare", y: 190 },
+  { x: "Vercel", y: 420 },
+  { x: "AWS", y: 780 },
+];
+/** One chart per plot style, with the data each style is for. */
+const plots: PlotView[] = [
+  plot("plot-bar", "Hosting per month", {
+    kind: "bars",
+    y: { label: "Cost", ...money },
+    headline: { label: "Hetzner is the cheapest", value: "$64 / mo" },
+    basis: "Smallest production tier with 4 vCPU, list prices on 28 Sep.",
+    series: [{ name: "Cost", points: quotes }],
+  }),
+  plot("plot-bar-horizontal", "Time to first byte", {
+    kind: "bars",
+    horizontal: true,
+    y: { label: "Latency", unit: "ms" },
+    headline: { label: "Median from Warsaw", value: "38 ms" },
+    series: [
+      {
+        name: "Latency",
+        points: [
+          { x: "Cloudflare Workers", y: 38 },
+          { x: "Vercel Edge", y: 52 },
+          { x: "AWS Lambda eu-central-1", y: 91 },
+          { x: "Hetzner Falkenstein", y: 44 },
+        ],
+      },
+    ],
+  }),
+  plot("plot-bar-stacked", "Monthly bill by service", {
+    kind: "stacked",
+    y: { label: "Cost", ...money },
+    headline: { label: "June total", value: "$2,310" },
+    series: [
+      { name: "Model API", points: months.map((x, i) => ({ x, y: 600 + i * 150 })) },
+      { name: "Database", points: months.map((x, i) => ({ x, y: 320 + i * 20 })) },
+      { name: "Hosting", points: months.map((x, i) => ({ x, y: 180 + i * 16 })) },
+    ],
+  }),
+  plot("plot-bar-grouped", "Signups by channel", {
+    kind: "bars",
+    y: { label: "Signups" },
+    headline: { label: "Organic grew fastest", value: "+64%" },
+    series: [
+      { name: "Organic", points: months.map((x, i) => ({ x, y: 120 + i * 26 })) },
+      { name: "Paid", points: months.map((x, i) => ({ x, y: 160 + (i % 3) * 18 })) },
+    ],
+  }),
+  plot("plot-line", "Weekly active teams", {
+    kind: "line",
+    y: { label: "Teams" },
+    headline: { label: "Up from 212 in January", value: "486" },
+    series: [
+      {
+        name: "Teams",
+        points: [212, 240, 268, 310, 402, 486].map((y, i) => ({ x: months[i]!, y })),
+      },
+    ],
+  }),
+  plot("plot-area", "Model spend as usage grows", {
+    kind: "area",
+    y: { label: "Spend", ...money },
+    headline: { label: "By June", value: "$3,310" },
+    basis: "At $3 per million input tokens and 40% cache hits.",
+    series: [
+      { name: "Model API", points: months.map((x, i) => ({ x, y: Math.round(820 * 1.32 ** i) })) },
+    ],
+  }),
+  plot("plot-area-stacked", "Requests by region", {
+    kind: "area",
+    stack: true,
+    y: { label: "Requests", unit: "M" },
+    headline: { label: "Requests in June", value: "18.2M" },
+    series: [
+      { name: "Europe", points: months.map((x, i) => ({ x, y: 4 + i * 1.1 })) },
+      { name: "North America", points: months.map((x, i) => ({ x, y: 3 + i * 0.9 })) },
+      { name: "Asia", points: months.map((x, i) => ({ x, y: 1 + i * 0.5 })) },
+    ],
+  }),
+  costs,
+  plot("plot-radial", "Launch readiness", {
+    kind: "radial",
+    y: { format: "percent" },
+    headline: { label: "Ready overall", value: "72%" },
+    series: [
+      {
+        name: "Done",
+        points: [
+          { x: "Security review", y: 90 },
+          { x: "Billing", y: 75 },
+          { x: "Docs", y: 60 },
+          { x: "Load tests", y: 40 },
+        ],
+      },
+    ],
+  }),
+  plot("plot-radar", "How the providers compare", {
+    kind: "radar",
+    y: { label: "Score", max: 5 },
+    series: [
+      {
+        name: "AWS",
+        points: [
+          { x: "Managed services", y: 5 },
+          { x: "Price", y: 2 },
+          { x: "Simplicity", y: 2 },
+          { x: "Edge", y: 3 },
+          { x: "Portability", y: 3 },
+        ],
+      },
+      {
+        name: "Cloudflare",
+        points: [
+          { x: "Managed services", y: 3 },
+          { x: "Price", y: 4 },
+          { x: "Simplicity", y: 4 },
+          { x: "Edge", y: 5 },
+          { x: "Portability", y: 2 },
+        ],
+      },
+    ],
+  }),
+  plot("plot-range", "Rent near YC for a month", {
+    kind: "range",
+    y: { label: "Rent", ...money },
+    headline: { label: "A furnished studio", value: "$3.2–4.8K" },
+    series: [
+      {
+        name: "Rent",
+        points: [
+          { x: "Dogpatch", y: 3400, y2: 6900 },
+          { x: "Mission Bay", y: 3200, y2: 4800 },
+          { x: "SoMa", y: 2600, y2: 4400 },
+          { x: "Mission", y: 2200, y2: 3900 },
+        ],
+      },
+    ],
+  }),
+];
+
+/** What the look test draws: one sheet per group, each object at its width. */
+export const looks: Record<string, { object: ObjectView; width: number }[]> = {
+  "charts-bars": plots.slice(0, 4).map((object) => ({ object, width: 520 })),
+  "charts-trends": plots.slice(4, 7).map((object) => ({ object, width: 520 })),
+  "charts-round": plots.slice(7).map((object) => ({ object, width: 520 })),
+};

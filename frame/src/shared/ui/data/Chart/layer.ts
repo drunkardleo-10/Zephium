@@ -54,8 +54,8 @@ export type Plan = {
   series: PlanSeries[];
   /** Bars lying down: categories on y, values on x. */
   horizontal: boolean;
-  scale: "band" | "time" | "linear";
-  layout: "group" | "stackDiverging" | "overlap";
+  scale: "band" | "time" | "linear" | "index";
+  layout: "group" | "stack" | "stackDiverging" | "overlap";
   /** The value axis: round ticks, and the domain they span. */
   ticks: number[];
   domain: [number, number];
@@ -172,16 +172,21 @@ function rowX(key: string, kind: NonNullable<ChartSpec["x"]>["kind"]): Row["x"] 
 export function plan(spec: ChartSpec, other = "Other"): Plan {
   const keys = categoryKeys(spec);
   const trend = spec.kind === "line" || spec.kind === "area" || spec.kind === "spark";
-  const scale =
-    trend && (spec.x?.kind === "time" || spec.x?.kind === "linear") ? spec.x.kind : "band";
+  // A trend over categories runs edge to edge: its categories stand at even steps.
+  const scale: Plan["scale"] =
+    trend && (spec.x?.kind === "time" || spec.x?.kind === "linear")
+      ? spec.x.kind
+      : trend && spec.kind !== "spark"
+        ? "index"
+        : "band";
   const rows: Row[] = keys.map((key, index) => ({
     index,
     key,
-    x: scale === "band" ? key : rowX(key, spec.x?.kind),
+    x: scale === "band" ? key : scale === "index" ? index : rowX(key, spec.x?.kind),
     label: xText(key, spec.x?.kind),
     points: spec.series.map((series) => series.points.find((point) => String(point.x) === key)),
   }));
-  const stacked = spec.kind === "stacked";
+  const stacked = spec.kind === "stacked" || (spec.kind === "area" && !!spec.stack);
   const series: PlanSeries[] = spec.series.map((entry, order) => {
     const y = (row: Row) => row.points[order]?.y ?? (stacked ? 0 : null);
     return {
@@ -203,14 +208,15 @@ export function plan(spec: ChartSpec, other = "Other"): Plan {
       );
   const zero = spec.kind !== "line" && spec.kind !== "spark";
   const ticks = valueTicks(spec, values, zero);
-  const parts = spec.kind === "donut" ? donutParts(spec, other) : [];
+  const parts =
+    spec.kind === "donut" ? donutParts(spec, other) : spec.kind === "radial" ? rings(spec) : [];
   return {
     keys,
     rows,
     series,
     horizontal: horizontal(spec, keys),
     scale,
-    layout: stacked ? "stackDiverging" : trend ? "overlap" : "group",
+    layout: stacked ? (trend ? "stack" : "stackDiverging") : trend ? "overlap" : "group",
     ticks,
     domain: [ticks[0] ?? 0, ticks.at(-1) ?? 1],
     parts,
@@ -243,6 +249,76 @@ function heatCells(spec: ChartSpec, rows: Row[]): Cell[] {
   );
 }
 
+/** Past this many a radial chart's rings grow too thin to read. */
+const RINGS = 5;
+/**
+ * A radial chart's rings, outermost first: the first series' positive values
+ * in their own order, each a share of the scale's top (`y.max`, 100 for a
+ * percent, else the largest value).
+ */
+export function rings(spec: ChartSpec): Part[] {
+  return (spec.series[0]?.points ?? [])
+    .filter((point) => point.y !== null && point.y >= 0)
+    .slice(0, RINGS)
+    .map((point, index) => ({
+      index,
+      label: xText(point.x, spec.x?.kind),
+      value: point.y!,
+      points: [point],
+      color: seriesColor(index),
+    }));
+}
+
+/** Where a radial ring's value ends, as a share of its full turn. */
+export function ringTop(spec: ChartSpec, parts: readonly Part[]): number {
+  if (spec.y?.max !== undefined) return spec.y.max;
+  if (spec.y?.format === "percent") return 100;
+  return Math.max(...parts.map((part) => part.value), 0) || 1;
+}
+
+export type RadarShape = {
+  /** One spoke per category, clockwise from twelve o'clock. */
+  axes: { key: string; label: string; angle: number }[];
+  /** Each series' reach along every spoke, 0 at the centre and 1 at the rim; null is no value. */
+  series: { name: string; color: string; reach: (number | null)[] }[];
+  /** Ring values, rim last. */
+  ticks: number[];
+};
+
+/** A radar's spokes and each series' polygon, scaled to round ticks from zero. */
+export function radar(spec: ChartSpec): RadarShape {
+  const keys = categoryKeys(spec);
+  const values = spec.series.flatMap((series) =>
+    series.points.flatMap((point) => (point.y === null ? [] : [point.y])),
+  );
+  const most = Math.max(...values, 0);
+  const max = spec.y?.max;
+  // A stated scale is the rim ("out of 5"), in whole steps when it has few.
+  const ticks =
+    max !== undefined && max >= most
+      ? Number.isInteger(max) && max <= 10
+        ? Array.from({ length: max }, (_, index) => index + 1)
+        : [max / 4, max / 2, (max * 3) / 4, max]
+      : axisTicks(0, most, 4).filter((tick) => tick > 0);
+  const top = ticks.at(-1) ?? 1;
+  return {
+    axes: keys.map((key, index) => ({
+      key,
+      label: xText(key, spec.x?.kind),
+      angle: (index / Math.max(1, keys.length)) * Math.PI * 2,
+    })),
+    series: spec.series.map((series, order) => ({
+      name: series.name,
+      color: seriesColor(order),
+      reach: keys.map((key) => {
+        const y = series.points.find((point) => String(point.x) === key)?.y;
+        return y === null || y === undefined ? null : Math.max(0, y) / top;
+      }),
+    })),
+    ticks,
+  };
+}
+
 /** A value as short as a card needs it: 1.2K, $3.4K, 45%. */
 export function shortValue(point: ChartPoint | undefined, y?: ChartY): string {
   if (!point || point.y === null) return "";
@@ -270,7 +346,7 @@ const shares = new Intl.NumberFormat(undefined, { style: "percent", maximumFract
 /** What a card writes beside its marks, so it is never mute. */
 export function card(spec: ChartSpec, shape: Plan): Card {
   const legend =
-    spec.kind === "donut" || spec.kind === "heat" || spec.kind === "spark"
+    spec.kind === "donut" || spec.kind === "radial" || spec.kind === "heat" || spec.kind === "spark"
       ? "none"
       : legendRule(spec.series.length, true);
   const bars = spec.kind === "bars" || spec.kind === "range" || spec.kind === "stacked";
@@ -300,6 +376,15 @@ export function card(spec: ChartSpec, shape: Plan): Card {
 
 /** What the tooltip says for a row, a slice or a cell. */
 export function readout(spec: ChartSpec, shape: Plan, index: number): Readout | null {
+  if (spec.kind === "radial") {
+    const part = shape.parts[index];
+    if (!part) return null;
+    return {
+      title: part.label,
+      rows: [{ name: "", color: part.color, text: pointText(part.points[0], spec.y) }],
+      evidence: pointEvidence(part.points),
+    };
+  }
   if (spec.kind === "donut") {
     const part = shape.parts[index];
     if (!part) return null;

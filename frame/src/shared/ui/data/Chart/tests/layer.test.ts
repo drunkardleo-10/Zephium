@@ -7,6 +7,9 @@ import {
   horizontal,
   legendRule,
   plan,
+  radar,
+  ringTop,
+  rings,
   readout,
   shortValue,
   valuesCsv,
@@ -268,4 +271,74 @@ test("values copy as CSV in the source's own words", () => {
       ],
     }),
   ).toBe('Builder,"Quote, total"\nAcme,"$3,000"\nBolt,');
+});
+
+test("a trend over categories stands them at even steps, edge to edge", () => {
+  const shape = plan({
+    kind: "area",
+    stack: true,
+    series: [
+      {
+        name: "A",
+        points: [
+          { x: "Jan", y: 1 },
+          { x: "Feb", y: 2 },
+        ],
+      },
+      {
+        name: "B",
+        points: [
+          { x: "Jan", y: 3 },
+          { x: "Feb", y: 4 },
+        ],
+      },
+    ],
+  });
+  expect(shape.scale).toBe("index");
+  expect(shape.rows.map((row) => row.x)).toEqual([0, 1]);
+  expect(shape.layout).toBe("stack");
+  expect(shape.domain[1]).toBeGreaterThanOrEqual(6);
+});
+
+test("radial: a ring per value against the scale's top, percent out of 100", () => {
+  const spec = {
+    kind: "radial" as const,
+    y: { format: "percent" as const },
+    series: [
+      {
+        name: "Done",
+        points: [
+          { x: "Docs", y: 60 },
+          { x: "Billing", y: 75 },
+        ],
+      },
+    ],
+  };
+  const parts = rings(spec);
+  expect(parts.map((part) => [part.label, part.value])).toEqual([
+    ["Docs", 60],
+    ["Billing", 75],
+  ]);
+  expect(ringTop(spec, parts)).toBe(100);
+  expect(ringTop({ ...spec, y: {} }, parts)).toBe(75);
+});
+
+test("radar: a spoke per category, reach against a stated scale", () => {
+  const shape = radar({
+    kind: "radar",
+    y: { max: 5 },
+    series: [
+      {
+        name: "AWS",
+        points: [
+          { x: "Price", y: 2 },
+          { x: "Edge", y: 5 },
+          { x: "Ops", y: null },
+        ],
+      },
+    ],
+  });
+  expect(shape.axes.map((axis) => axis.label)).toEqual(["Price", "Edge", "Ops"]);
+  expect(shape.ticks).toEqual([1, 2, 3, 4, 5]);
+  expect(shape.series[0]!.reach).toEqual([0.4, 1, null]);
 });

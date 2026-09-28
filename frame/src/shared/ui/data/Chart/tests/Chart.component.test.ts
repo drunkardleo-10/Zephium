@@ -53,6 +53,8 @@ test.each([
   ["line", "path.mark.line", 2],
   ["area", "path.mark.area", 2],
   ["donut", "path.mark.slice", 3],
+  ["radial", "path.mark.slice", 3],
+  ["radar", "polygon.mark.web", 2],
   ["heat", "rect.mark.cell", 6],
   ["spark", "path.mark.line", 1],
 ] as const)("%s draws its marks through LayerChart", async (kind, selector, count) => {
@@ -79,7 +81,7 @@ test.each([
     .toBeInTheDocument();
 });
 
-test("the lift names the extremes, keeps a legend and copies its values", async () => {
+test("the lift names the extremes to assistive technology, keeps a legend and copies its values", async () => {
   const { default: Chart } = await loadChart();
   const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
   const screen = await render(Chart, { title: "Week", spec: two("bars") });
@@ -90,7 +92,8 @@ test("the lift names the extremes, keeps a legend and copies its values", async 
       }),
     )
     .toBeInTheDocument();
-  await expect.element(screen.getByText("lowest Mon at 5, highest Mon at 30")).toBeVisible();
+  // The extremes are read aloud, never written under the plot.
+  expect(screen.container.textContent).not.toContain("lowest Mon at 5");
   await expect.element(screen.getByRole("list").getByText("Reading")).toBeVisible();
   expect(texts(screen.container, ".lc-axis-tick-label")).toEqual(
     expect.arrayContaining(["0", "30", "Mon", "Wed"]),

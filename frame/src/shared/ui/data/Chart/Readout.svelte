@@ -25,7 +25,7 @@
     <span class="row">
       {#if row.name}<span class="swatch" style:background={row.color}></span><span class="name"
           >{row.name}</span
-        >{/if}<span class="value">{row.text}</span>
+        >{/if}<span class="value" class:alone={!row.name}>{row.text}</span>
     </span>
   {/each}
   {#if readout.evidence.length}
@@ -54,25 +54,27 @@
   .tip {
     display: flex;
     flex-direction: column;
-    gap: 3px;
-    max-inline-size: 240px;
-    padding: 6px 10px;
-    border-radius: var(--radius-control);
+    gap: 5px;
+    min-inline-size: 132px;
+    max-inline-size: 260px;
+    padding: 8px 10px;
+    border-radius: var(--radius-control-compact);
     background: var(--color-float);
-    box-shadow: var(--shadow-control);
+    box-shadow: var(--shadow-float);
     color: var(--color-text);
     font-size: var(--text-caption);
+    line-height: 14px;
   }
 
   .title {
-    color: var(--color-muted);
+    font-weight: 600;
     overflow-wrap: anywhere;
   }
 
   .row {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
   }
 
   .swatch {
@@ -83,12 +85,20 @@
   }
 
   .name {
+    flex: 1;
+    min-inline-size: 0;
     color: var(--color-muted);
   }
 
   .value {
+    padding-inline-start: 12px;
     font-variant-numeric: tabular-nums;
     font-weight: 550;
+  }
+
+  .value.alone {
+    padding: 0;
+    font-size: var(--text-body);
   }
 
   .chips {

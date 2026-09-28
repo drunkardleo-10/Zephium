@@ -1,0 +1,64 @@
+<script lang="ts">
+  import type { Component } from "svelte";
+  import { loadChart } from "$shared/ui/data/Chart";
+  import type { Detail, PlotView } from "../../lib/board/types";
+  import { watchNear } from "./near";
+  import Title from "./Title.svelte";
+  let { object, detail }: { object: PlotView; detail: Detail } = $props();
+  type ChartComponent = Awaited<ReturnType<typeof loadChart>>["default"];
+  let Chart = $state.raw<ChartComponent | null>(null);
+  let root = $state<HTMLElement>();
+  let near = $state(false);
+  $effect(() => (root ? watchNear(root, (value) => (near = value)) : undefined));
+  $effect(() => {
+    if (!near || Chart) return;
+    let current = true;
+    void loadChart().then((module) => {
+      if (current) Chart = module.default as ChartComponent;
+    });
+    return () => (current = false);
+  });
+  // The exact values are read in the centre view; the canvas shows the chart.
+  const spec = $derived({ ...object.spec, values: false as const });
+  const Drawn = $derived(Chart as Component<Record<string, unknown>> | null);
+</script>
+
+<section class="plot {detail}" bind:this={root} aria-label={object.title}>
+  {#if object.title}<Title text={object.title} {detail} />{/if}
+  <div class="figure">
+    {#if near && Drawn}<Drawn
+        title={object.title ?? ""}
+        {spec}
+        {detail}
+        height={detail === "tile" ? 132 : undefined}
+      />{/if}
+  </div>
+</section>
+
+<style>
+  .plot {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    box-sizing: border-box;
+    inline-size: 100%;
+    padding: 20px 22px 18px;
+    border-radius: var(--radius-card);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-raised);
+  }
+
+  .plot.overview {
+    gap: 20px;
+    padding: 28px;
+  }
+
+  .plot.tile {
+    gap: 24px;
+    padding: 32px;
+  }
+
+  .figure {
+    min-block-size: 120px;
+  }
+</style>

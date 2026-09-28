@@ -207,9 +207,9 @@
     "description": "LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (149394 measured over 147091 at 714054aa)."
   },
   "lazy:shared/ui/data/Chart/Chart.svelte": {
-    "js": 520000,
-    "css": 16500,
-    "description": "Measured 512177 JS and 16027 CSS bytes: Work's board loads the kit through loadChart, so this entry carries LayerChart and is bounded by WorkChart's measured graph."
+    "js": 530000,
+    "css": 19500,
+    "description": "Measured 512177 JS and 16027 CSS bytes: Work's board loads the kit through loadChart, so this entry carries LayerChart and is bounded by WorkChart's measured graph. The shadcn-svelte chart designs (radial rings with their track, the radar web, line points, area washes, stacked areas, the headline and the overview and tile levels) add 12.5 KB JS and 2.7 KB CSS (524686 and 18703 measured)."
   },
   "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
     "js": 787000,
@@ -277,9 +277,9 @@
     "description": "LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (170048 measured over 167743 at 714054aa)."
   },
   "lazy:shared/ui/data/Artifact/WorkChart.svelte": {
-    "js": 520000,
-    "css": 16500,
-    "description": "Measured 513414 JS and 16034 CSS bytes (148822 and 9549 before): the chart kit drawn by LayerChart 2.5.0, loaded only when a chart result is shown. Its own chunk is 350179 JS and 12059 CSS bytes (59639 and 6378 before); 66981 bytes are the icon and search chunks the browser loads at startup, where the merge puts modules the kit shares, the rest the shared runtime. LayerChart is patched so pan, zoom, brush and voronoi are not bundled."
+    "js": 532000,
+    "css": 19500,
+    "description": "Measured 513414 JS and 16034 CSS bytes (148822 and 9549 before): the chart kit drawn by LayerChart 2.5.0, loaded only when a chart result is shown. Its own chunk is 350179 JS and 12059 CSS bytes (59639 and 6378 before); 66981 bytes are the icon and search chunks the browser loads at startup, where the merge puts modules the kit shares, the rest the shared runtime. LayerChart is patched so pan, zoom, brush and voronoi are not bundled. The shadcn-svelte chart designs with radial and radar add 13.3 KB JS and 2.7 KB CSS (526696 and 18703 measured)."
   },
   "lazy:dependency/d3-quadtree/src/index.js": {
     "js": 5200,

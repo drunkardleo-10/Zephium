@@ -9,7 +9,7 @@ on d3).
 
 | Ours                                                                                              | LayerChart's                                   |
 | ------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| `ChartSpec` and its eight kinds (`chart.ts`)                                                      | Scales, stacking and grouping                  |
+| `ChartSpec` and its ten kinds (`chart.ts`)                                                        | Scales, stacking and grouping                  |
 | Value parsing, formats, ticks, extremes (`chart.ts`)                                              | Marks: bars, splines, areas, arcs, rects, text |
 | The spec as LayerChart rows and series, the card rules, the tooltip's words, the CSV (`layer.ts`) | Axes, gridlines, the hover highlight           |
 | Work's conversion (`Artifact/work-chart.ts`, `WorkChart.svelte`)                                  | Tooltip placement and hit areas                |
@@ -32,7 +32,8 @@ patch when LayerChart is upgraded.
 ```ts
 type ChartSpec = {
   kind:
-    "bars" | "stacked" | "line" | "area" | "range" | "donut" | "heat" | "spark";
+    | "bars" | "stacked" | "line" | "area" | "range"
+    | "donut" | "radial" | "radar" | "heat" | "spark";
   series: { name: string; points: ChartPoint[] }[];
   x?: { label?: string; kind?: "category" | "time" | "linear" };
   y?: {
@@ -48,6 +49,8 @@ type ChartSpec = {
   compact?: boolean; // the card: see the card rules
   horizontal?: boolean; // bars lie down whatever their names: the owner knows they collide
   values?: false; // the owner shows the exact values itself: no values table
+  stack?: boolean; // areas pile up to a total instead of overlapping
+  headline?: { label: string; value: string }; // the one figure, set large above the plot
 };
 type ChartPoint = {
   x: string | number; // a category, a number, or an ISO date for a time axis
@@ -69,7 +72,13 @@ are points out of 100 (`42` reads `42%`), bytes use decimal units (`1.2 GB`),
 money and numbers go through `Intl.NumberFormat`. Every figure is tabular.
 A bare ISO date on a time axis is that day's local midnight.
 
-Render it with `loadChart()` (lazy) and `<Chart {title} {spec} {onevidence} {glyph} />`.
+Render it with `loadChart()` (lazy) and `<Chart {title} {spec} {detail} {onevidence} {glyph} />`.
+`detail` is `full` (default), `overview` (the headline set large and the marks,
+no text that would read under 11px at 50% zoom, no tooltip) or `tile` (the marks
+alone, at `height`). The runtime's plot styles map onto the spec through
+`styleSpec(style)`: `bar`/`bar_grouped` → `bars`, `bar_horizontal` → `bars` with
+`horizontal`, `bar_stacked` → `stacked`, `area_stacked` → `area` with `stack`,
+the rest by name.
 `title` names the chart for assistive technology; `glyph` is an optional snippet
 that draws a source's mark in the tooltip (Work passes its favicon glyph).
 `parseValue` and `formatValue` are exported for owners that hold text.
@@ -80,10 +89,12 @@ that draws a source's mark in the tooltip (Work passes its favicon glyph).
 | --------- | ----------------------------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `bars`    | Comparing a few things: prices, scores, time per site | `Bars`, grouped by series                       | Lie down past eight categories or with long names (never on a card). One series writes its values on the bars, up to twelve. |
 | `stacked` | One total per x made of parts                         | `Bars`, `stackDiverging`                        | Negatives stack below zero; a 2px gap parts segments; only the outer segment is rounded.                                     |
-| `line`    | A trend over ordered x                                | `Spline`, monotone                              | Its own y range (zero not forced), points on hover, gaps at null.                                                            |
-| `area`    | A trend whose volume matters                          | `Area` + `Spline`                               | As `line`, filled to zero with a 10% wash.                                                                                   |
+| `line`    | A trend over ordered x                                | `Spline`, monotone, `Points`                    | Its own y range (zero not forced), a dot on each value up to sixteen, gaps at null. Categories stand at even steps, edge to edge. |
+| `area`    | A trend whose volume matters                          | `Area` with its line                            | As `line`, filled to zero with a vertical wash of its colour (36% to 2%); `stack` piles series up.                            |
 | `range`   | A spread per item: "$3,000–8,000"                     | `Bars` from `y` to `y2`                         | Both ends rounded.                                                                                                           |
-| `donut`   | A share of one whole                                  | `Pie` + `Arc`                                   | First series only, largest first, seven slices then "Other"; the total in the middle.                                        |
+| `donut`   | A share of one whole                                  | `Pie` + `Arc`                                   | First series only, largest first, seven slices then "Other"; the headline (else the total) in the middle, parts and shares beside it. |
+| `radial`  | Progress of a few things toward a top                 | `Arc` with its track                            | First series, up to five rings, outermost first, against `y.max` (100 for percent, else the largest value).                  |
+| `radar`   | A few things scored on the same criteria              | Our own SVG (`Radar.svelte`)                    | A spoke per category, rings per step of `y.max` ("out of 5"), a filled web per series; hover a spoke for its values.          |
 | `heat`    | Two categorical axes and a magnitude: hour by day     | `Rect` on two band scales                       | x categories across, series names down, one tone from the surface rung to the lit rung.                                      |
 | `spark`   | A trend in a row                                      | `Spline`, or `Bars` when `x.kind` is `category` | No axes, no tooltip, no table. Fills its container; pass `height` if it has none.                                            |
 
@@ -103,13 +114,16 @@ that draws a source's mark in the tooltip (Work passes its favicon glyph).
 
 No axis labels and no ticks on the card; gridlines stay.
 
-## The lift
+## Full size
 
-Full size: axes with rounded ticks (`axisTicks`, clock steps for durations) and
-labels, gridlines, the legend when there are two series or more, a tooltip on
-hover with every series at that x and its sources as chips, the extremes
-sentence under the plot ("lowest Mon at 5, highest Wed at 30"), the basis line,
-and the values table with **Copy values (CSV)**, in the sources' own words.
+After the shadcn-svelte chart designs: the headline figure above the plot, the
+category axis under it, value ticks on the right (only when the marks do not
+carry their own values), horizontal gridlines, the legend under the plot when
+there are two series or more, a tooltip on hover with every series at that x and
+its sources as chips, the basis line in the faint rung, and the values table
+with **Copy values (CSV)**, in the sources' own words. The extremes are spoken
+to assistive technology, never written under the plot. Bars are rounded at
+their data end; a single series writes each value above its bar.
 
 ## Tokens
 
@@ -122,8 +136,10 @@ and the values table with **Copy values (CSV)**, in the sources' own words.
   `--radius-control`, `--shadow-control`; the point, its values and its sources.
 - Heat mixes `--color-surface` toward `--color-lit`. The hover column is
   `--color-fill`.
-- No gradients, no glow, no blur. A bar's data end is rounded; its baseline is
-  square.
+- No glow, no blur. The one gradient is an area's wash, its own colour fading
+  down. A bar's data end is rounded; its baseline is square.
+- The headline figure is `--text-title` at 650; at overview it is
+  `--text-overview-figure` with its label at `--text-overview-label`.
 
 ## Motion
 
@@ -163,6 +179,10 @@ workChartSpec({
 });
 // → { kind: "range", y: { label: "Quote", format: "money", currency: "USD" }, … }
 ```
+
+**Work's objects.** A `plot` object draws the chart on its own surface with
+its title, at full, overview or tile, only while it is near the viewport; its
+exact values are read in the centre view.
 
 **Work's board.** A chart block draws the full chart, not the card, at its
 block's width. Before it draws, it measures its category names against the
