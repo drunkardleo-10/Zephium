@@ -296,6 +296,16 @@
     "css": 4000,
     "description": "Work's entry, loaded when Work is chosen so the sidebar can ask it for the project list: the shared runtime chunk and two loaders (149380 measured; the board adds a few bytes to the shared runtime)."
   },
+  "lazy:features/work/components/parts/ComputerPart.svelte": {
+    "js": 120500,
+    "css": 7900,
+    "description": "Measured 119078 JS and 7393 CSS bytes: a computer part's own view (changed files, the command that matters with its tests, what it read), loaded only when a run has one."
+  },
+  "lazy:features/work/components/parts/ConnectionPart.svelte": {
+    "js": 114000,
+    "css": 5900,
+    "description": "Measured 112647 JS and 5407 CSS bytes: a connection part's calls as rows with the service's mark, loaded only when a run has one."
+  },
   "lazy:features/work/components/asks/AskCard.svelte": {
     "js": 251500,
     "css": 21500,
