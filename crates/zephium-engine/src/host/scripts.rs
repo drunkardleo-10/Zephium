@@ -1324,6 +1324,9 @@ mod tests {
             platform_refusals(&content),
             vec![UserScriptRefusal {
                 registration: content.scripts[0].key(),
+                #[cfg(target_os = "windows")]
+                reason: UserScriptRefusalReason::UnsupportedWorld,
+                #[cfg(not(target_os = "windows"))]
                 reason: UserScriptRefusalReason::UnsupportedMatchSet,
             }]
         );
