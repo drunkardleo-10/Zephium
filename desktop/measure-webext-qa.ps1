@@ -15,6 +15,7 @@ New-Item -ItemType Directory -Path $results -Force | Out-Null
 $previous = @{}
 $clock = [Diagnostics.Stopwatch]::StartNew()
 $lastSample = 0.0
+$longestGap = 0.0
 while ($true) {
     $owner.Refresh()
     if ($owner.HasExited) { throw 'QA exited during measurement.' }
@@ -28,6 +29,7 @@ while ($true) {
         }
     } while ($added)
     $now = $clock.Elapsed.TotalSeconds
+    if ($previous.Count) { $longestGap = [Math]::Max($longestGap, $now - $lastSample) }
     $privateBytes = 0L; $workingSet = 0L; $cpuDelta = 0.0; $count = 0
     $current = @{}
     foreach ($processId in $ids) {
@@ -56,4 +58,7 @@ while ($true) {
 }
 # Working sets double-count shared pages. CPU is a sampled lower bound when
 # child processes exit between observations. No debugger is attached.
+if ($longestGap -gt 45) {
+    Write-Warning "Sampling gap of $([Math]::Round($longestGap, 1)) seconds; continuous idle CPU qualification is incomplete."
+}
 Write-Output $results
