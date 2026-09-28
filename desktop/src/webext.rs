@@ -57,6 +57,9 @@ struct Entry {
     hosts: Vec<String>,
     #[serde(default)]
     icon: Option<String>,
+    /// A newer version held back because it asks for more access.
+    #[serde(default)]
+    held_update: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, specta::Type)]
@@ -98,7 +101,10 @@ impl WebExtensions {
             remove_previous_repository(data_dir);
         }
         #[cfg(target_os = "macos")]
-        imp::restore(self, shell);
+        {
+            imp::restore(self, shell);
+            imp::start_updates(&self.root, shell);
+        }
         #[cfg(not(target_os = "macos"))]
         let _ = shell;
     }
@@ -492,6 +498,168 @@ mod imp {
         assert!(!packages.path().join("removed").exists());
     }
 
+    /// The first check waits so launch stays free of network work.
+    const FIRST_UPDATE_CHECK: Duration = Duration::from_secs(5 * 60);
+    const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60 * 60);
+    const MAX_UPDATE_RESPONSE_BYTES: usize = 1024 * 1024;
+
+    /// Keeps installed extensions current with the Chrome Web Store.
+    pub(super) fn start_updates(root: &Path, shell: &Handle) {
+        let extensions = WebExtensions {
+            root: root.to_path_buf(),
+            state: std::sync::Mutex::new(None),
+        };
+        let shell = shell.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(FIRST_UPDATE_CHECK).await;
+            loop {
+                if let Err(error) = check_updates(&extensions, &shell).await {
+                    eprintln!("extensions: update check failed: {error}");
+                }
+                tokio::time::sleep(UPDATE_CHECK_INTERVAL).await;
+            }
+        });
+    }
+
+    async fn check_updates(extensions: &WebExtensions, shell: &Handle) -> Result<(), String> {
+        let mut installed: std::collections::BTreeMap<String, String> = Default::default();
+        for profile in extensions.profiles() {
+            for entry in extensions.registry(profile).extensions {
+                installed.entry(entry.id).or_insert(entry.version);
+            }
+        }
+        let entries: Vec<(ExtensionId, String)> = installed
+            .iter()
+            .filter_map(|(id, version)| Some((ExtensionId::parse(id)?, version.clone())))
+            .collect();
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let url = store::update_check_url(&entries, zephium_webext_macos::compat::CHROME_VERSION);
+        let response = store_client()?
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| "The Chrome Web Store could not be reached.")?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "The Chrome Web Store answered {}.",
+                response.status()
+            ));
+        }
+        let body = response
+            .bytes()
+            .await
+            .map_err(|_| "The update check was interrupted.")?;
+        if body.len() > MAX_UPDATE_RESPONSE_BYTES {
+            return Err("The update check answered too much.".into());
+        }
+        for info in store::parse_update_response(&String::from_utf8_lossy(&body)) {
+            let newer = info.status == "ok"
+                && info.version.as_deref().is_some_and(|version| {
+                    installed
+                        .get(info.id.as_str())
+                        .is_some_and(|current| store::compare_versions(version, current).is_gt())
+                });
+            if newer {
+                if let Err(error) = update(extensions, shell, &info).await {
+                    eprintln!("extensions: could not update {}: {error}", info.id);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Downloads and verifies one update, then applies it everywhere the
+    /// extension is installed, unless it asks for access the user never
+    /// granted: then it waits for approval, as in Chrome.
+    async fn update(
+        extensions: &WebExtensions,
+        shell: &Handle,
+        info: &store::UpdateInfo,
+    ) -> Result<(), String> {
+        let bytes = download(&info.id).await?;
+        if let Some(hash) = &info.hash_sha256 {
+            if !store::matches_sha256(&bytes, hash) {
+                return Err("the package doesn't match the published hash".into());
+            }
+        }
+        let holders: Vec<(ProfileId, Entry)> = extensions
+            .profiles()
+            .into_iter()
+            .filter_map(|profile| {
+                let entry = extensions
+                    .registry(profile)
+                    .extensions
+                    .into_iter()
+                    .find(|entry| entry.id == info.id.as_str())?;
+                Some((profile, entry))
+            })
+            .collect();
+        let Some((profile, existing)) = holders.first().cloned() else {
+            return Ok(());
+        };
+        let root = extensions.root.clone();
+        let id = info.id.clone();
+        let staged = tauri::async_runtime::spawn_blocking(move || {
+            stage(&root, &id, bytes, profile, Some(existing))
+        })
+        .await
+        .map_err(|_| "staging failed")??;
+        let pending = staged.pending;
+        let fresh = &pending.entry;
+        let asks_more = |old: &Entry| {
+            fresh
+                .permissions
+                .iter()
+                .any(|name| !old.permissions.contains(name))
+                || fresh.hosts.iter().any(|host| !old.hosts.contains(host))
+        };
+        if holders.iter().any(|(_, old)| asks_more(old)) {
+            let _ = std::fs::remove_dir_all(&pending.staged);
+            for (profile, _) in &holders {
+                let mut registry = extensions.registry(*profile);
+                if let Some(entry) = registry
+                    .extensions
+                    .iter_mut()
+                    .find(|entry| entry.id == fresh.id)
+                {
+                    entry.held_update = Some(fresh.version.clone());
+                }
+                extensions.save(*profile, &registry)?;
+            }
+            return Ok(());
+        }
+
+        let packages = extensions.packages(&fresh.id);
+        std::fs::create_dir_all(&packages).map_err(|e| e.to_string())?;
+        std::fs::write(
+            packages.join(format!("{}.crx", fresh.version)),
+            &pending.crx,
+        )
+        .map_err(|e| e.to_string())?;
+        let target = packages.join(&fresh.package);
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::rename(&pending.staged, &target).map_err(|e| e.to_string())?;
+        for (profile, _) in &holders {
+            let mut registry = extensions.registry(*profile);
+            if let Some(entry) = registry
+                .extensions
+                .iter_mut()
+                .find(|entry| entry.id == fresh.id)
+            {
+                *entry = Entry {
+                    install: entry.install.clone(),
+                    enabled: entry.enabled,
+                    ..fresh.clone()
+                };
+            }
+            extensions.save(*profile, &registry)?;
+            extensions.apply(shell, *profile, &mut registry);
+        }
+        Ok(())
+    }
+
     pub(super) fn restore(extensions: &WebExtensions, shell: &Handle) {
         for profile in extensions.profiles() {
             let mut registry = extensions.registry(profile);
@@ -512,14 +680,32 @@ mod imp {
             .ok_or_else(|| "Extensions can't be installed in this window.".to_owned())
     }
 
-    async fn download(id: &ExtensionId) -> Result<Vec<u8>, String> {
-        let client = reqwest::Client::builder()
+    /// A client that talks only to Google's update and download hosts, where
+    /// the Web Store serves packages from.
+    fn store_client() -> Result<reqwest::Client, String> {
+        let policy = reqwest::redirect::Policy::custom(|attempt| {
+            let google = attempt.url().host_str().is_some_and(|host| {
+                ["google.com", "googleusercontent.com", "gvt1.com"]
+                    .iter()
+                    .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+            });
+            if attempt.previous().len() >= 5 || !google {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        });
+        reqwest::Client::builder()
             .https_only(true)
-            .redirect(reqwest::redirect::Policy::limited(5))
+            .redirect(policy)
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(90))
             .build()
-            .map_err(|_| "Downloads are unavailable.")?;
+            .map_err(|_| "Downloads are unavailable.".to_string())
+    }
+
+    async fn download(id: &ExtensionId) -> Result<Vec<u8>, String> {
+        let client = store_client()?;
         let url = store::download_url(id, zephium_webext_macos::compat::CHROME_VERSION);
         let mut response = client
             .get(url)
@@ -623,7 +809,7 @@ mod imp {
             .map_err(|_| "The package isn't correctly signed by its publisher.")?;
         let staging = root.join("staging");
         std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
-        let dir = staging.join(format!("{id}-{}", std::process::id()));
+        let dir = staging.join(format!("{id}-{}", ExtensionInstallId::generate()));
         let _ = std::fs::remove_dir_all(&dir);
         archive::extract(verified.zip, &dir, &archive::Limits::default())
             .map_err(|error| format!("The package can't be unpacked safely ({error})."))?;
@@ -665,6 +851,7 @@ mod imp {
                 permissions,
                 hosts,
                 icon: icon.clone(),
+                held_update: None,
             };
             Ok(Staged {
                 review: WebExtensionReview {

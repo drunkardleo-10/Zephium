@@ -266,6 +266,20 @@ fn unescape(value: &str) -> String {
     out
 }
 
+/// Whether `bytes` are the package an update response described by its
+/// `hash_sha256`.
+pub fn matches_sha256(bytes: &[u8], hex: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let expected = hex.trim().to_ascii_lowercase();
+    expected.len() == 64
+        && digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+            == expected
+}
+
 /// Orders Chrome's dotted versions numerically; missing parts count as zero.
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
     fn parts(version: &str) -> [u64; 4] {
@@ -280,6 +294,15 @@ pub fn compare_versions(a: &str, b: &str) -> Ordering {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn package_hashes_are_compared_case_insensitively() {
+        let hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        assert!(matches_sha256(b"hello", hash));
+        assert!(matches_sha256(b"hello", &hash.to_uppercase()));
+        assert!(!matches_sha256(b"hello!", hash));
+        assert!(!matches_sha256(b"hello", ""));
+    }
+
     use super::*;
 
     const BITWARDEN: &str = "nngceckbapebfimnlniiiahkandclblb";
