@@ -11,6 +11,7 @@ pub mod document;
 pub mod environment;
 pub mod execution_proposal;
 mod ids;
+pub mod model;
 pub mod planning;
 pub mod port;
 pub mod proposal;
