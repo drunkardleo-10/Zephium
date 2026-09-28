@@ -98,6 +98,8 @@ pub mod work_execution;
 #[cfg(feature = "work-runtime")]
 pub mod work_files;
 #[cfg(feature = "work-runtime")]
+pub mod work_lead;
+#[cfg(feature = "work-runtime")]
 pub mod work_commands;
 #[cfg(feature = "work-planning")]
 pub mod work_models;
