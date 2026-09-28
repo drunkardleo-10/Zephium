@@ -1176,6 +1176,17 @@ export const looks: Record<string, { object: ObjectView; width: number }[]> = {
   flights: [{ object: flights, width: 460 }],
   plans: [{ object: trip, width: 720 }],
   documents: [{ object: guide, width: 520 }],
+  media: [
+    { object: photo, width: 360 },
+    { object: lecture, width: 520 },
+    { object: memo, width: 420 },
+  ],
+  pages: [
+    { object: docsPage, width: 480 },
+    { object: failedPage, width: 480 },
+  ],
+  notes: [{ object: note, width: 420 }],
+  files: [...files.map((object) => ({ object, width: 280 })), { object: folder, width: 300 }],
   drafts: drafts.map((object) => ({ object, width: 520 })),
   code: [
     { object: excerpt, width: 640 },

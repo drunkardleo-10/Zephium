@@ -6,3 +6,5 @@ export { default as Calendar03Icon } from "@hugeicons/core-free-icons/Calendar03
 export { default as Flag02Icon } from "@hugeicons/core-free-icons/Flag02Icon";
 export { default as CheckmarkCircle02Icon } from "@hugeicons/core-free-icons/CheckmarkCircle02Icon";
 export { default as Note01Icon } from "@hugeicons/core-free-icons/Note01Icon";
+export { default as Folder01Icon } from "@hugeicons/core-free-icons/Folder01Icon";
+export { default as File01Icon } from "@hugeicons/core-free-icons/File01Icon";

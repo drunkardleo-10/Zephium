@@ -12,3 +12,32 @@ export function blocks(markdown: string): Block[] {
   }
   return out;
 }
+
+/** A note's Markdown as blocks: its headings too. */
+export type NoteBlock = Block | { kind: "heading"; text: string };
+
+const BULLET = /^\s*[-*•]\s+/u;
+const run = (lines: string[]): Block =>
+  lines.every((line) => BULLET.test(line))
+    ? { kind: "list", items: lines.map((line) => line.replace(BULLET, "")) }
+    : { kind: "paragraph", lines };
+
+export function noteBlocks(markdown: string): NoteBlock[] {
+  return blocks(markdown).flatMap((block): NoteBlock[] => {
+    if (block.kind !== "paragraph") return [block];
+    const out: NoteBlock[] = [];
+    let lines: string[] = [];
+    for (const line of block.lines) {
+      const heading = /^#{1,6}\s+(.*)$/u.exec(line);
+      if (!heading) {
+        lines.push(line);
+        continue;
+      }
+      if (lines.length) out.push(run(lines));
+      lines = [];
+      out.push({ kind: "heading", text: heading[1]! });
+    }
+    if (lines.length) out.push(run(lines));
+    return out;
+  });
+}

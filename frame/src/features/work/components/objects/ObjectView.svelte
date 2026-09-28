@@ -14,8 +14,13 @@
     diff: () => import("./Diff.svelte"),
     document: () => import("./Document.svelte"),
     draft: () => import("./Draft.svelte"),
+    media: () => import("./Media.svelte"),
+    page: () => import("./Page.svelte"),
+    note: () => import("./Note.svelte"),
+    file: () => import("./File.svelte"),
+    folder: () => import("./Folder.svelte"),
   };
-  const loaded = new Map<ObjectKind, Renderer>();
+  const loaded: Partial<Record<ObjectKind, Renderer>> = {};
 </script>
 
 <script lang="ts">
@@ -30,7 +35,7 @@
   let Drawn = $state.raw<Renderer | null>(null);
   $effect(() => {
     const kind = object.kind;
-    const known = loaded.get(kind);
+    const known = loaded[kind];
     if (known) {
       Drawn = known;
       return;
@@ -41,7 +46,7 @@
     let current = true;
     void load().then((module) => {
       const renderer = module.default as Renderer;
-      loaded.set(kind, renderer);
+      loaded[kind] = renderer;
       if (current) Drawn = renderer;
     });
     return () => {
