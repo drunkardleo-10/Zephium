@@ -1,5 +1,6 @@
 /** One chart spec for every caller. Rendering inputs only; the owner resolves evidence. */
-export type ChartKind = "bars" | "stacked" | "line" | "area" | "range" | "donut" | "heat" | "spark";
+export type ChartKind =
+  "bars" | "stacked" | "line" | "area" | "range" | "donut" | "radial" | "radar" | "heat" | "spark";
 export type ChartEvidence = {
   key: string;
   label: string;
@@ -44,7 +45,41 @@ export type ChartSpec = {
   horizontal?: boolean;
   /** The owner shows the exact values itself: no values table under the plot. */
   values?: false;
+  /** Areas pile up to a total instead of overlapping. */
+  stack?: boolean;
+  /** The one figure the chart exists to say, set large above it. */
+  headline?: { label: string; value: string };
 };
+
+/** The agent's plot styles, as the runtime names them. */
+export type ChartStyle =
+  | "bar"
+  | "bar_horizontal"
+  | "bar_stacked"
+  | "bar_grouped"
+  | "line"
+  | "area"
+  | "area_stacked"
+  | "donut"
+  | "radial"
+  | "radar"
+  | "range";
+/** A plot style as the spec draws it: its kind and the variant it implies. */
+export function styleSpec(style: ChartStyle): Pick<ChartSpec, "kind" | "horizontal" | "stack"> {
+  switch (style) {
+    case "bar":
+    case "bar_grouped":
+      return { kind: "bars" };
+    case "bar_horizontal":
+      return { kind: "bars", horizontal: true };
+    case "bar_stacked":
+      return { kind: "stacked" };
+    case "area_stacked":
+      return { kind: "area", stack: true };
+    default:
+      return { kind: style };
+  }
+}
 
 /** Categorical slots; a ninth series takes the neutral tone rather than a new hue. */
 export function seriesColor(order: number): string {

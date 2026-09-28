@@ -1,8 +1,9 @@
 export const loadChart = () => import("./Chart.svelte");
-export { formatValue, parseValue } from "./chart";
+export { formatValue, parseValue, styleSpec } from "./chart";
 export type {
   ChartSpec,
   ChartKind,
+  ChartStyle,
   ChartSeries,
   ChartPoint,
   ChartEvidence,

@@ -703,6 +703,8 @@
   "chart_kind_area": "Area chart",
   "chart_kind_range": "Range chart",
   "chart_kind_donut": "Donut chart",
+  "chart_kind_radial": "Radial chart",
+  "chart_kind_radar": "Radar chart",
   "chart_kind_heat": "Heat map",
   "chart_kind_spark": "Sparkline",
   "chart_extremes": "lowest {low}, highest {high}",

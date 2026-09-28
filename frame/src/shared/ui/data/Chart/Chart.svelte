@@ -67,6 +67,8 @@
     area: m.chart_kind_area,
     range: m.chart_kind_range,
     donut: m.chart_kind_donut,
+    radial: m.chart_kind_radial,
+    radar: m.chart_kind_radar,
     heat: m.chart_kind_heat,
     spark: m.chart_kind_spark,
   };
