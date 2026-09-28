@@ -384,6 +384,9 @@
   --mask-fade-end: linear-gradient(to right, #000 calc(100% - 26px), transparent);
   --mask-fade-end-rtl: linear-gradient(to left, #000 calc(100% - 26px), transparent);
 
+  /* A page that runs on past its sheet fades out at its foot. */
+  --mask-fade-bottom: linear-gradient(to bottom, #000 78%, transparent);
+
   /* Favicon plate. Inactive rows desaturate so mixed-brightness site icons
      stop competing with each other and with the surface. */
   --favicon-plate: color-mix(in srgb, var(--color-text) 88%, transparent);

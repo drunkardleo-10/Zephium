@@ -9,6 +9,7 @@
     notes = [],
     limit,
     variant = "card",
+    start = 1,
   }: {
     language: string;
     text: string;
@@ -16,6 +17,8 @@
     notes?: readonly CodeNoteView[];
     limit?: number;
     variant?: "card" | "lift";
+    /** The first line's number in its file. */
+    start?: number;
   } = $props();
   const rows = $derived(tokenize(language, text, limit));
   const owners = $derived(noteOwners(notes, rows.length));
@@ -34,7 +37,7 @@
   }
 </script>
 
-<div class="code {variant}" style:--digits={String(rows.length).length}>
+<div class="code {variant}" style:--digits={String(rows.length + start - 1).length}>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <pre
     bind:this={body}
@@ -48,7 +51,7 @@
           class:lit={owner !== undefined && owner === lit}
           role="presentation"
           onpointerenter={() => (hovered = owner)}
-          ><span class="n" aria-hidden="true">{index + 1}</span
+          ><span class="n" aria-hidden="true">{index + start}</span
           >{#each row as token, at (at)}{#if token.kind === "plain" || token.kind === "punctuation"}{token.text}{:else}<span
                 class={token.kind}>{token.text}</span
               >{/if}{/each}{#if variant === "card" && owner !== undefined && owner === hovered && index + 1 === Math.max(1, notes[owner]!.from)}<span

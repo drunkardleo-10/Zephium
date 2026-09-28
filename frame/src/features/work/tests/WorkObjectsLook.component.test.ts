@@ -87,7 +87,15 @@ test.each(Object.keys(scenes))("%s at full, overview and tile", async (name) => 
   if (!rows.length) return;
   const screen = await render(ObjectsSheet, {
     rows,
-    actions: { choose: noop, ask: noop, compare: noop, open: noop, link: noop, check: noop },
+    actions: {
+      choose: noop,
+      ask: noop,
+      compare: noop,
+      open: noop,
+      link: noop,
+      check: noop,
+      send: noop,
+    },
   });
   const sheet = screen.container.querySelector<HTMLElement>(".sheet")!;
   await settle(1800);
