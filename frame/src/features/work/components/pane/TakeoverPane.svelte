@@ -2,7 +2,6 @@
   import { onMount, untrack } from "svelte";
   import type { WorkHumanAccountV1 } from "$shared/ipc/bindings";
   import Button from "$shared/ui/Button";
-  import SegmentedControl from "$shared/ui/SegmentedControl";
   import { paneGeometry, remember, type PaneRect } from "../../lib/pane-geometry";
   import { countdownLabel, reasonSentence, type HumanPage } from "../../lib/work-human";
   import * as m from "$shared/i18n/messages";
@@ -24,6 +23,7 @@
     error?: string | null;
     /** The well in window logical points, or null while it is not stable. */
     onregion: (rect: PaneRect | null) => void;
+    /** The page is the person's session either way; the value only closes the old contract. */
     oncontinue: (account: WorkHumanAccountV1) => void;
     onclose: () => void;
   } = $props();
@@ -32,16 +32,9 @@
   let heading = $state<HTMLElement>();
   let well = $state<HTMLElement>();
   let closing = $state(false);
-  let account = $state<WorkHumanAccountV1>("anonymous");
   const handingBack = $derived(page.phase === "continuing");
   const presented = $derived(page.phase === "presented");
   const countdown = $derived(countdownLabel(page.remaining));
-  /** Only a sign-in has an account to keep; every other page hands back anonymously. */
-  const signIn = $derived(page.reason === "sign_in");
-  const accounts = $derived([
-    { value: "anonymous", label: m.work_human_account_anonymous() },
-    { value: "signed_in_public_only", label: m.work_human_account_signed_in() },
-  ]);
   function clamp(next: PaneRect): PaneRect {
     const width = Math.max(MIN.width, Math.min(next.width, bounds.width));
     const height = Math.max(MIN.height, Math.min(next.height, bounds.height));
@@ -193,25 +186,12 @@
     {#if handingBack}
       <p class="handing" role="status">{m.work_human_handing_back()}</p>
     {:else}
-      {#if signIn}
-        <SegmentedControl
-          label={m.work_human_account()}
-          options={accounts}
-          bind:value={() => account, (next) => (account = next as WorkHumanAccountV1)}
-        />
-        <p class="help">
-          {account === "anonymous"
-            ? m.work_human_account_anonymous_help()
-            : m.work_human_account_signed_in_help()}
-        </p>
-      {/if}
       <div class="actions">
         <Button
           variant="primary"
           size="compact"
           disabled={!page.canContinue}
-          onclick={() => oncontinue(signIn ? account : "anonymous")}
-          >{m.work_human_continue()}</Button
+          onclick={() => oncontinue("anonymous")}>{m.work_human_continue()}</Button
         >
         <Button size="compact" onclick={close}>{m.work_human_release()}</Button>
         <span class="skip">{m.work_human_release_help()}</span>
@@ -319,13 +299,6 @@
     color: var(--color-muted);
     font-size: var(--text-label);
     font-variant-numeric: tabular-nums;
-  }
-
-  .help {
-    margin: 0;
-    color: var(--color-muted);
-    font-size: var(--text-label);
-    line-height: 16px;
   }
 
   .handing,

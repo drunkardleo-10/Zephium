@@ -166,7 +166,7 @@ test("a page waiting for a person is taken over in the pane, handed back, and re
   });
   const pane = screen.getByRole("region", { name: "Help the agent", exact: true });
   await expect.element(pane).toBeVisible();
-  // The header says who, why in one sentence, and how long; the choice of account is a sign-in's.
+  // The header says who, why in one sentence, and how long.
   await expect
     .element(pane.getByText("Sign in to ferry.example so the agent can continue", { exact: true }))
     .toBeVisible();
@@ -183,12 +183,11 @@ test("a page waiting for a person is taken over in the pane, handed back, and re
   phase = "presented";
   emitNativeEvent("workHumanChanged", { profile: PROFILE, work: WORK });
 
-  // The segmented control hides its radio behind the label it draws.
-  await pane.getByText("Keep the sign-in").click();
-  await expect.element(screen.getByRole("radio", { name: "Keep the sign-in" })).toBeChecked();
+  // The page is the person's own session: there is no account to choose.
+  expect(pane.getByRole("radio").elements()).toHaveLength(0);
   await screen.getByRole("button", { name: "I’m done, continue", exact: true }).click();
   await expect.poll(() => native.continue.mock.calls.length).toBe(1);
-  expect(native.continue.mock.lastCall![3]).toBe("signed_in_public_only");
+  expect(native.continue.mock.lastCall![3]).toBe("anonymous");
 
   phase = "continuing";
   emitNativeEvent("workHumanChanged", { profile: PROFILE, work: WORK });

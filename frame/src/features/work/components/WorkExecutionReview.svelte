@@ -4,13 +4,10 @@
   import { preparationFailure } from "../lib/preparation-failure";
   import Button from "$shared/ui/Button";
   import ContextManifestList from "./composer/ContextManifestList.svelte";
-  import AccountGrantReview from "./AccountGrantReview.svelte";
   import * as m from "$shared/i18n/messages";
   let { session }: { session: WorkSession } = $props();
   const work = $derived(session.projection?.work);
-  const operation = $derived(
-    work ? session.operations.latest(work.id, ["prepare_plan", "prepare_account"]) : undefined,
-  );
+  const operation = $derived(work ? session.operations.latest(work.id, "prepare_plan") : undefined);
   const executionOperation = $derived(
     work ? session.operations.latest(work.id, "start") : undefined,
   );
@@ -31,18 +28,6 @@
         : null,
   );
   const approval = $derived(reply?.kind === "approval_draft" ? reply : null);
-  const account = $derived(
-    approval?.spec.nodes
-      .map((node) => node.capability)
-      .find(
-        (capability) => capability.kind === "account_read" || capability.kind === "account_update",
-      ) ?? null,
-  );
-  let attested = $state(false);
-  $effect(() => {
-    void approval;
-    attested = false;
-  });
   const executed = $derived(
     approval &&
       session.projection?.executions.some(
@@ -109,7 +94,6 @@
       </p>{/if}
     {#if operation?.state.kind === "unknown"}<p role="status">{m.work_operation_unknown()}</p>{/if}
     {#if failure}<p role="alert">{m.work_request_failed()}</p>{/if}
-    {#if !unsettled}<AccountGrantReview {session} />{/if}
     {#if approval && !current && !unsettled && !executed}<p role="status">
         {m.work_approval_stale()}
       </p>{/if}
@@ -154,44 +138,12 @@
                   ? m.work_capability_provider_search()
                   : node.capability.kind === "synthesize"
                     ? m.work_capability_synthesis()
-                    : node.capability.kind === "account_read"
-                      ? m.work_capability_account_read()
-                      : node.capability.kind === "account_update"
-                        ? m.work_capability_account_update()
-                        : node.capability.kind === "coordinate" ||
-                            node.capability.kind === "coordinate_public_discovery" ||
-                            node.capability.kind === "coordinate_public_research"
-                          ? m.work_capability_coordination()
-                          : m.work_capability_discovery()}
+                    : node.capability.kind === "coordinate" ||
+                        node.capability.kind === "coordinate_public_discovery" ||
+                        node.capability.kind === "coordinate_public_research"
+                      ? m.work_capability_coordination()
+                      : m.work_capability_discovery()}
               </p>
-              {#if node.capability.kind === "account_read" || node.capability.kind === "account_update"}<dl
-                  class="account"
-                >
-                  <div>
-                    <dt>{m.work_account_origin()}</dt>
-                    <dd>{node.capability.scope.origin}</dd>
-                  </div>
-                  <div>
-                    <dt>{m.work_account_page()}</dt>
-                    <dd>{node.capability.scope.url}</dd>
-                  </div>
-                  <div>
-                    <dt>{m.work_account_effect()}</dt>
-                    <dd>
-                      {node.capability.kind === "account_read"
-                        ? m.work_account_effect_read_label()
-                        : m.work_account_effect_update_label()}
-                    </dd>
-                  </div>
-                </dl>
-                {#if node.capability.kind === "account_update"}<blockquote>
-                    {m.work_account_update_summary({
-                      field: node.capability.update.field ?? m.work_account_update_any_field(),
-                      from: node.capability.update.from,
-                      to: node.capability.update.to,
-                    })}
-                  </blockquote>{/if}
-                <p>{m.work_account_disclosure()}</p>{/if}
               {#if node.capability.kind === "public_search"}<p>
                   {m.work_provider_search_scope({
                     provider: "OpenAI",
@@ -232,15 +184,8 @@
             </li>
           {/each}
         </ol>
-        {#if account}<label class="attest"
-            ><input
-              type="checkbox"
-              bind:checked={attested}
-              disabled={blocked}
-            />{m.work_account_attest()}</label
-          >{/if}
         <Button
-          disabled={blocked || !current || (!!account && !attested)}
+          disabled={blocked || !current}
           onclick={() => {
             if (approval && current)
               void session.execute(
@@ -338,29 +283,6 @@
 
   li {
     margin-block: 8px;
-  }
-
-  .account {
-    display: grid;
-    gap: 6px;
-    margin: 8px 0;
-  }
-
-  .account dd {
-    margin: 2px 0 0;
-    font-weight: 500;
-  }
-
-  .attest {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    margin-block: 12px;
-    font-size: var(--text-caption);
-  }
-
-  .attest input {
-    margin-block-start: 2px;
   }
 
   blockquote {
