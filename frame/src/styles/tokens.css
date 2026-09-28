@@ -230,6 +230,10 @@
   --text-title: 22px;
   --text-display: 36px;
 
+  /* Text set on the canvas to be read: an answer's headline and its lines. */
+  --text-headline: 26px;
+  --text-reading: 15px;
+
   /* Canvas objects read from afar. Below 75% zoom an object sets only what
      stays at least 11px on screen at 50% (overview); below 40% only its name,
      at least 11px at 25% (tile). The figure is the one number an object says. */

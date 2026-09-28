@@ -1,6 +1,13 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import { tableInputValid, type TableColumn, type TableRow, type TableLabels } from "./table";
+  import {
+    sortRows,
+    tableInputValid,
+    type TableColumn,
+    type TableRow,
+    type TableLabels,
+    type TableSort,
+  } from "./table";
   let {
     caption,
     columns,
@@ -9,6 +16,12 @@
     pageSize = 25,
     showCaption = true,
     actions,
+    cell,
+    head,
+    headSortable = false,
+    sort = $bindable(null),
+    plain = false,
+    limit,
   }: {
     caption: string;
     columns: readonly TableColumn[];
@@ -17,6 +30,17 @@
     pageSize?: number;
     showCaption?: boolean;
     actions?: Snippet<[TableRow]>;
+    /** Draws a cell's value; plain text otherwise. */
+    cell?: Snippet<[TableRow, TableColumn]>;
+    /** Draws a row's heading; its label otherwise. */
+    head?: Snippet<[TableRow]>;
+    /** The heading column sorts by row label. */
+    headSortable?: boolean;
+    sort?: TableSort | null;
+    /** No frame of its own: the owner's surface holds it, its heading column stays put. */
+    plain?: boolean;
+    /** Shows the first rows only, with no pages: the rest are read elsewhere. */
+    limit?: number;
   } = $props();
   let page = $state(0);
   let size = $derived(
@@ -26,21 +50,54 @@
   let pages = $derived(Math.max(1, Math.ceil(rows.length / size)));
   let current = $derived(Math.min(page, pages - 1));
   let first = $derived(current * size);
-  let visible = $derived(valid ? rows.slice(first, first + size) : []);
+  let ordered = $derived(sortRows(rows, sort));
+  let visible = $derived(
+    !valid
+      ? []
+      : limit !== undefined
+        ? ordered.slice(0, Math.max(0, limit))
+        : ordered.slice(first, first + size),
+  );
+  function toggle(key: string) {
+    sort =
+      sort?.key !== key
+        ? { key, descending: false }
+        : sort.descending
+          ? null
+          : { key, descending: true };
+  }
+  const order = (key: string) =>
+    sort?.key === key ? (sort.descending ? "descending" : "ascending") : undefined;
 </script>
 
 {#if !valid}<p role="alert">{labels.unavailable}</p>
 {:else}
+  {#snippet heading(key: string, label: string, sortable: boolean)}
+    {#if sortable}<button
+        type="button"
+        class="sort"
+        class:on={sort?.key === key}
+        onclick={() => toggle(key)}
+        >{label}<svg viewBox="0 0 8 8" aria-hidden="true" class:down={sort?.descending}
+          ><path d="M1.5 5 4 2.5 6.5 5" /></svg
+        ></button
+      >{:else}{label}{/if}
+  {/snippet}
   <!-- The scroll region needs keyboard focus for horizontal navigation. -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <div class="table-scroll" role="region" aria-label={caption} tabindex="0">
+  <div class="table-scroll" class:plain role="region" aria-label={caption} tabindex="0">
     <table>
       <caption class:sr-only={!showCaption}>{caption}</caption>
       <thead
         ><tr
-          ><th scope="col">{labels.rowHeading}</th>{#each columns as column (column.key)}<th
+          ><th scope="col" aria-sort={order("")}
+            >{@render heading("", labels.rowHeading, headSortable)}</th
+          >{#each columns as column (column.key)}<th
               scope="col"
-              class:numeric={column.numeric}>{column.label}</th
+              class:numeric={column.numeric}
+              class:centered={column.centered}
+              aria-sort={order(column.key)}
+              >{@render heading(column.key, column.label, !!column.sortable)}</th
             >{/each}{#if actions}<th scope="col"><span class="sr-only">{labels.actions}</span></th
             >{/if}</tr
         ></thead
@@ -48,9 +105,12 @@
       <tbody>
         {#each visible as row (row.key)}
           <tr data-row-key={row.key}>
-            <th scope="row">{row.label}</th>
-            {#each columns as column (column.key)}<td class:numeric={column.numeric}
-                >{row.cells[column.key] ?? labels.missing}</td
+            <th scope="row"
+              >{#if head}{@render head(row)}{:else}{row.label}{/if}</th
+            >
+            {#each columns as column (column.key)}<td class:numeric={column.numeric} class:centered={column.centered}
+                >{#if cell}{@render cell(row, column)}{:else}{row.cells[column.key] ??
+                    labels.missing}{/if}</td
               >{/each}
             {#if actions}<td>{@render actions(row)}</td>{/if}
           </tr>
@@ -59,7 +119,7 @@
       </tbody>
     </table>
   </div>
-  {#if pages > 1}
+  {#if pages > 1 && limit === undefined}
     <div class="pagination">
       <span role="status">{labels.range(first + 1, first + visible.length, rows.length)}</span>
       <div>
@@ -121,6 +181,100 @@
   .numeric {
     text-align: end;
     font-variant-numeric: tabular-nums;
+  }
+
+  .centered {
+    text-align: center;
+  }
+
+  .sort {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: default;
+  }
+
+  .sort:hover,
+  .sort.on {
+    color: var(--color-text);
+  }
+
+  .sort svg {
+    inline-size: 8px;
+    block-size: 8px;
+    fill: none;
+    stroke: currentcolor;
+    stroke-width: 1.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0;
+    transition: transform var(--motion-fast) var(--ease-out);
+  }
+
+  .sort.on svg {
+    opacity: 1;
+  }
+
+  .sort svg.down {
+    transform: rotate(180deg);
+  }
+
+  .numeric .sort {
+    flex-direction: row-reverse;
+  }
+
+  /* On its owner's surface: no frame, rows parted by hairlines, the heading column held. */
+  .plain table {
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+
+  .plain {
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+  }
+
+  .plain th,
+  .plain td {
+    min-inline-size: 0;
+    padding: 11px 12px;
+    vertical-align: middle;
+  }
+
+  .plain thead {
+    background: none;
+    font-size: var(--text-label);
+  }
+
+  .plain thead th {
+    padding-block: 0 9px;
+    border-block-start: 0;
+    white-space: nowrap;
+  }
+
+  .plain tbody th {
+    position: sticky;
+    inset-inline-start: 0;
+    z-index: 1;
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-weight: 600;
+  }
+
+  .plain th:first-child,
+  .plain td:first-child {
+    padding-inline-start: 0;
+  }
+
+  .plain th:last-child,
+  .plain td:last-child {
+    padding-inline-end: 0;
   }
 
   .pagination {

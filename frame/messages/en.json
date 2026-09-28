@@ -715,6 +715,8 @@
   "work_flight_direct": "Direct",
   "work_flight_via": "via {places}",
   "work_flight_stops": "{count} stops",
+  "work_list_high": "Urgent",
+  "work_list_open_in": "Open in {app}",
   "chart_kind_radar": "Radar chart",
   "chart_kind_heat": "Heat map",
   "chart_kind_spark": "Sparkline",

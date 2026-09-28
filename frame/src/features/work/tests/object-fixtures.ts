@@ -1085,8 +1085,102 @@ const plots: PlotView[] = [
   }),
 ];
 
+/** A legacy table as the adapter carries it: sentences in cells, read whole in the centre. */
+const stack: SheetView = {
+  kind: "sheet",
+  id: "stack",
+  title: "Recommended technology stack",
+  columns: [
+    { label: "Layer", kind: "text" },
+    { label: "Technology", kind: "entity" },
+    { label: "Why", kind: "text" },
+  ],
+  rows: [
+    ["Web client", "Next.js", "Fast iteration, typed UI and server-rendered pages"],
+    ["Edge", "Cloudflare", "TLS, caching, request filtering and edge protection"],
+    ["Identity", "Amazon Cognito", "Managed identity with standard federation"],
+    ["Primary data", "PostgreSQL on RDS", "Transactions, backups and room for pgvector"],
+    ["Async work", "Amazon SQS", "Slow model calls leave the request path"],
+    ["AI integration", "OpenAI API", "One adapter for models, timeouts and usage"],
+    ["Observability", "OpenTelemetry", "Vendor-neutral traces, metrics and alerts"],
+    ["Infrastructure", "Terraform", "Repeatable, reviewed environments"],
+    ["Delivery", "GitHub Actions", "Checks, staged releases and a rollback path"],
+    ["Secrets", "AWS KMS", "Managed keys and secret rotation"],
+  ].map((cells) => ({ cells })),
+};
+
+const sets: SheetView = {
+  kind: "sheet",
+  id: "sets",
+  title: "LEGO Architecture sets side by side",
+  columns: [
+    { label: "Set", kind: "entity" },
+    { label: "Price", kind: "money", currency: "USD", best: "min" },
+    { label: "Pieces", kind: "number", best: "max" },
+    { label: "Per piece", kind: "money", currency: "USD", best: "min" },
+    { label: "In stock", kind: "yes_no" },
+    { label: "Rating", kind: "rating", best: "max" },
+    { label: "Page", kind: "link" },
+  ],
+  rows: [
+    {
+      cells: [
+        "Neuschwanstein Castle",
+        "279.99",
+        "3455",
+        "0.08",
+        "yes",
+        "4.8/5",
+        "https://www.lego.com/en-us/product/neuschwanstein-castle-21063",
+      ],
+      entity: { picture: picture("c89b72e433.jpg", 1500, 1132) },
+    },
+    {
+      cells: [
+        "Sagrada Família",
+        "799.99",
+        "12060",
+        "0.07",
+        "partial",
+        "4.9/5",
+        "https://www.lego.com/en-us/product/sagrada-familia-21065",
+      ],
+      entity: { picture: picture("b7b16b22a0.png", 703, 800) },
+    },
+    {
+      cells: [
+        "London",
+        "39.99",
+        "468",
+        "0.09",
+        "yes",
+        "4.6/5",
+        "https://www.lego.com/en-us/product/london-21034",
+      ],
+      entity: { picture: picture("816667de11.jpg", 800, 800) },
+    },
+  ],
+};
+
 /** What the look test draws: one sheet per group, each object at its width. */
 export const looks: Record<string, { object: ObjectView; width: number }[]> = {
+  replies: [
+    { object: replySmall, width: 560 },
+    { object: replyFigures, width: 640 },
+  ],
+  picks: [
+    { object: stays, width: 860 },
+    { object: products, width: 860 },
+    { object: videos, width: 860 },
+  ],
+  flights: [{ object: flights, width: 460 }],
+  plans: [{ object: trip, width: 720 }],
+  lists: [{ object: today, width: 620 }],
+  sheets: [
+    { object: providers, width: 880 },
+    { object: sets, width: 880 },
+    { object: stack, width: 720 },
+  ],
   "charts-bars": plots.slice(0, 4).map((object) => ({ object, width: 520 })),
   "charts-trends": plots.slice(4, 7).map((object) => ({ object, width: 520 })),
   "charts-round": plots.slice(7).map((object) => ({ object, width: 520 })),

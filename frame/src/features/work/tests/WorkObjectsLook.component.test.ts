@@ -5,6 +5,23 @@ import { page } from "vitest/browser";
 import ObjectsSheet from "./ObjectsSheet.svelte";
 import { looks } from "./object-fixtures";
 
+// The QA profile's cached site icons, so marks draw as they do in the app.
+vi.mock("$domain/favicons", async (original) => {
+  const actual = await original<typeof import("$domain/favicons")>();
+  const response = await fetch("/node_modules/.work-look/objects/favicons.json");
+  const icons = response.ok ? ((await response.json()) as Record<string, string>) : {};
+  const images = new Map<string, ImageData>();
+  for (const [origin, rgba] of Object.entries(icons)) {
+    const bytes = Uint8ClampedArray.from(atob(rgba), (char) => char.charCodeAt(0));
+    if (bytes.length === 4096) images.set(origin, new ImageData(bytes, 32, 32));
+  }
+  const forPage = (url: string) => {
+    const origin = /^https?:\/\/[^/?#]+/iu.exec(url)?.[0]?.toLowerCase();
+    const image = origin ? images.get(origin) : undefined;
+    return image ? { image, tone: "mid" as const } : null;
+  };
+  return { ...actual, favicons: { ...actual.favicons, forPage } };
+});
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({ faviconProbe: async () => true });
@@ -14,8 +31,12 @@ const shots = "../../../../../target/work-objects";
 const settle = (ms = 700) => new Promise((done) => setTimeout(done, ms));
 
 test.each(Object.keys(looks))("%s at full, overview and tile", async (name) => {
-  await page.viewport(1440, 900);
-  const screen = await render(ObjectsSheet, { rows: looks[name]! });
+  await page.viewport(2400, 1000);
+  const noop = () => {};
+  const screen = await render(ObjectsSheet, {
+    rows: looks[name]!,
+    actions: { choose: noop, ask: noop, compare: noop, open: noop, link: noop, check: noop },
+  });
   const sheet = screen.container.querySelector<HTMLElement>(".sheet")!;
   await settle(1800);
   for (const theme of ["dark", "light"]) {
