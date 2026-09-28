@@ -53,7 +53,10 @@ impl Shell {
             let _ = self.engine.unload_web_extension(profile, install);
         }
         for (install, load) in wanted {
-            if current.get(&install) == Some(&load) {
+            if current
+                .get(&install)
+                .is_some_and(|loaded| unchanged(loaded, &load))
+            {
                 continue;
             }
             current.insert(install, load.clone());
@@ -171,5 +174,42 @@ impl Shell {
             profile: window.profile,
             listing_url,
         })
+    }
+}
+
+/// `start_background` asks for one background run after a package changed; a
+/// later apply that clears it changes nothing that is loaded.
+fn unchanged(loaded: &WebExtensionLoad, wanted: &WebExtensionLoad) -> bool {
+    loaded.install == wanted.install
+        && loaded.extension_id == wanted.extension_id
+        && loaded.root == wanted.root
+        && loaded.permissions == wanted.permissions
+        && loaded.match_patterns == wanted.match_patterns
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clearing_the_background_run_does_not_reload_an_extension() {
+        let loaded = WebExtensionLoad {
+            install: ExtensionInstallId::from(7),
+            extension_id: "abcdefghijklmnopabcdefghijklmnop".into(),
+            root: "/packages/a/1.0-rev".into(),
+            permissions: vec!["storage".into()],
+            match_patterns: vec!["<all_urls>".into()],
+            start_background: true,
+        };
+        let settled = WebExtensionLoad {
+            start_background: false,
+            ..loaded.clone()
+        };
+        assert!(unchanged(&loaded, &settled));
+        let narrowed = WebExtensionLoad {
+            match_patterns: vec!["*://github.com/*".into()],
+            ..settled.clone()
+        };
+        assert!(!unchanged(&loaded, &narrowed));
     }
 }
