@@ -2,15 +2,11 @@
   import { onMount } from "svelte";
   import { useSvelteFlow, useViewport, Panel } from "@xyflow/svelte";
   import { duration, reducedMotion } from "$shared/lib/motion";
-  import type { PointerTool } from "../lib/selection";
   import * as m from "$shared/i18n/messages";
   let {
     bottomInset = 0,
   }: {
     bottomInset?: number;
-    /** No longer drawn: panning is the default, Shift draws a marquee, Space pans. */
-    tool?: PointerTool;
-    ontool?: (tool: PointerTool) => void;
   } = $props();
   const flow = useSvelteFlow();
   const viewport = useViewport();

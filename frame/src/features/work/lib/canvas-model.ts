@@ -32,7 +32,8 @@ type CanvasKind =
   | "agent"
   | "block"
   | "head"
-  | "trail";
+  | "trail"
+  | "branch";
 type RelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
 /** Display values only; deliberately independent from the generated Work wire contract. */
 export type CanvasItem = {
@@ -104,6 +105,12 @@ export type CanvasItem = {
     /** An open tab the request was shown, not read: no frame, its title and a caption. */
     tab?: boolean;
   };
+  /** A request opened to show every line of the person's words. */
+  expanded?: boolean;
+  /** When the person asked, as a short clock time. */
+  when?: string;
+  /** A branch of a request's band: one site and every page its runs worked on there. */
+  branch?: { host: string; pages: readonly BranchPage[]; live: boolean };
   unavailable?: boolean;
   /** The stage a run is working in right now; it glows while that is true. */
   active?: boolean;
@@ -114,13 +121,31 @@ export type CanvasItem = {
   /** An admitted image related to this element, shown as its picture. */
   image?: { profile: string; digest: string };
 };
+/** One page of a branch, as the band shows it. */
+export type BranchPage = {
+  id: string;
+  url: string;
+  title: string;
+  /** How the read went, or that it waits on the person. */
+  status: string;
+  frame: string | null;
+  live: boolean;
+  /** Set while the run is holding this page open for a person. */
+  human?: HumanPage;
+  /** Read with the person's signed-in session: the host it was granted on. */
+  account?: string;
+  /** An open tab the request was shown, not read. */
+  tab?: boolean;
+};
 export type CanvasLink = {
   id: string;
   source: string;
   target: string;
   /** `thread` joins one request to the next; relation kinds show only while an end is hovered or selected. */
-  kind: "dependency" | "reference" | "thread" | RelationKind;
+  kind: "dependency" | "reference" | "thread" | "flow" | RelationKind;
   label?: string;
+  /** A band's line while work is moving along it. */
+  live?: boolean;
 };
 /** Past this many ties a focused card lights none: a fan of lines says nothing. */
 const RELATION_CAP = 6;
@@ -137,9 +162,12 @@ const QUIET = new Set<CanvasKind | undefined>([
   "head",
   "trail",
 ]);
-/** Drawn at rest: the thread, and a plan's own structure. */
+/** Drawn at rest: the thread, a band's flow, and a plan's own structure. */
 export const restLink = (link: CanvasLink) =>
-  link.kind === "thread" || link.kind === "dependency" || link.kind === "reference";
+  link.kind === "thread" ||
+  link.kind === "flow" ||
+  link.kind === "dependency" ||
+  link.kind === "reference";
 /**
  * The relations a focused card lights: the ties the person drew between their
  * own cards. More than six light nothing.

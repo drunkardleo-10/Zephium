@@ -1,11 +1,7 @@
-<script lang="ts" module>
-  import type { PointerTool } from "../lib/selection";
-  /** Select or hand: remembered for this app session only. */
-  let pointerTool = $state<PointerTool>("hand");
-</script>
-
 <script lang="ts">
   import "@xyflow/svelte/dist/base.css";
+  import { pointerTool as currentTool, setPointerTool } from "../lib/pointer-tool.svelte";
+  const pointerTool = $derived(currentTool());
   import { SvelteFlow, Background, type Edge, type useSvelteFlow } from "@xyflow/svelte";
   import { NodeToolbar, Position, SelectionMode } from "@xyflow/svelte";
   import { untrack, setContext, tick } from "svelte";
@@ -199,6 +195,20 @@
     publishView();
   }
   setContext(canvasFocusResult, center);
+  /** Brings a card to the reading place, at actual size: its corner near the top left. */
+  function reveal(id: string) {
+    const node = nodeFor(id);
+    if (!node || !flow) return;
+    const position = absolutePosition(node, nodes);
+    void flow.setViewport(
+      { x: 64 - position.x, y: fitTopInset + 24 - position.y, zoom: 1 },
+      {
+        duration: reducedMotion() ? 0 : duration("page"),
+        ease: curve(easing("emphasized")),
+        interpolate: "linear",
+      },
+    );
+  }
   const restoredViewport = untrack(() => validViewport(initialView?.viewport));
   let viewport = $state(restoredViewport ?? { x: 0, y: 0, zoom: 1 });
   // One bad card never hides the canvas: the scene is repaired, then guarded.
@@ -237,7 +247,15 @@
           type: "work",
           ...handles(link),
           data: {
-            tone: link.kind === "thread" ? "thread" : rest ? "rest" : "relation",
+            tone:
+              link.kind === "thread"
+                ? "thread"
+                : link.kind === "flow"
+                  ? "flow"
+                  : rest
+                    ? "rest"
+                    : "relation",
+            ...(link.live ? { live: true } : {}),
           },
           deletable: false,
           selectable: false,
@@ -398,6 +416,7 @@
     placeArea: (area: string, rect: CanvasPosition & CanvasSize) => void;
     center: (id: string) => void;
     focusCard: (id: string) => void;
+    reveal: (id: string) => void;
     followAgent: () => boolean;
     resumeFollow: () => void;
   };
@@ -446,6 +465,7 @@
       placeArea,
       center,
       focusCard: (id: string) => void focusCard(id),
+      reveal,
       followAgent: () => following,
       resumeFollow,
     });
@@ -591,7 +611,7 @@
     if (target?.closest("input, textarea, select, [contenteditable]")) return;
     const key = event.key.toLowerCase();
     if (key === "v" || key === "h") {
-      pointerTool = key === "v" ? "select" : "hand";
+      setPointerTool(key === "v" ? "select" : "hand");
       event.preventDefault();
     } else if (event.key === "Escape" && clearSelection()) event.preventDefault();
   }
@@ -703,11 +723,7 @@
     >
       <CanvasFlowHandle onready={(handle) => (flow = handle)} />
       <Background patternColor="var(--work-canvas-dot)" gap={20} size={1.5} />
-      <CanvasControls
-        bottomInset={fitBottomInset}
-        tool={pointerTool}
-        ontool={(tool) => (pointerTool = tool)}
-      />
+      <CanvasControls bottomInset={fitBottomInset} />
       <NodeToolbar
         nodeId={selectedItems}
         isVisible={selectedItems.length > 1 && !dragging && !marquee}

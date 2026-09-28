@@ -7,28 +7,28 @@ import type {
 } from "$shared/ipc/bindings";
 import type { MediaAssetV1 } from "$domain/resources";
 import { isLive } from "./agent-steps";
-import { requestSize, sourcesSize } from "./card-size";
+import { sourcesSize } from "./card-size";
 import { clipText, UNREAD_FOOTER, type CanvasPosition } from "./canvas-model";
 import { pageGroups, sourceRows, unreadPages, type PageGroup } from "./project-environment-stage";
-import { threadOf, type WorkStage } from "./project-environment-thread";
+import { threadOf, type Branch, type WorkStage } from "./project-environment-thread";
 import { boardOf } from "./board/adapter";
 import { boardLayout, type LayoutBlock } from "./board/layout";
-import { LANE, placeLane } from "./board/lane";
+import { BAND, LANE, placeBand } from "./board/lane";
 import { estimate, widthRange } from "./board/size";
-import { runTrail, type TrailLine } from "./board/trail";
+import { runTrail } from "./board/trail";
 import { plain } from "./board/text";
 import type { Block, Picture } from "./board/types";
 import * as m from "$shared/i18n/messages";
 
 /** A placement written in board terms: the person moved the block; `x, y` are from the lane's corner. */
 export const BOARD_PIN = 3;
-/** A page card in the process column while its run reads. */
-const PAGE = { width: LANE.column, height: 196 } as const;
-/** The column shows this many pages at once; the sources card keeps every frame after. */
-const LIVE_PAGES = 2;
-/** Captured frames the sources card shows above its rows. */
-export const FRAMES = 4;
-const FRAME_STRIP = 54;
+/** A branch: its site's line over one row of page frames with their titles, a tile per page up to three. */
+const TILE = (BAND.branch - 2 * BAND.across) / 3;
+const BRANCH = { height: 176, shown: 3 } as const;
+const branchWidth = (pages: number) => {
+  const tiles = Math.max(1, Math.min(BRANCH.shown, pages));
+  return Math.round(tiles * TILE + (tiles - 1) * BAND.across);
+};
 const REQUEST_TEXT = 512;
 
 /**
@@ -80,10 +80,43 @@ export function elementPictures(
   return pictures;
 }
 
-/** A trail line is 20 px, 16 more for its detail, 6 apart, inside 12 px. */
-function trailSize(lines: readonly TrailLine[]) {
-  const body = lines.reduce((sum, line) => sum + 20 + (line.detail ? 16 : 0), 0);
-  return { width: LANE.column, height: 24 + body + Math.max(0, lines.length - 1) * 6 };
+/**
+ * The person's words as text on the canvas: who and when over them, two lines
+ * at rest, every line once opened.
+ */
+export function requestTextSize(text: string, open: boolean) {
+  const perLine = 38;
+  const lines = Math.max(1, Math.ceil(text.length / perLine));
+  const shown = open ? lines : Math.min(2, lines);
+  // Never under 80: a checkpoint refuses a shorter placement.
+  return { width: BAND.request, height: Math.max(80, 26 + shown * 25 + (lines > 2 ? 22 : 0)) };
+}
+
+const siteOf = (url: string) => {
+  try {
+    return new URL(url).host.replace(/^www\./u, "");
+  } catch {
+    return "";
+  }
+};
+
+/** A request's pages by the site they sit on, in the order the runs first went there. */
+function branchesOf(card: string, groups: readonly PageGroup[]): Branch[] {
+  const bySite = new Map<string, Branch>();
+  for (const group of groups) {
+    const site = siteOf(group.url);
+    if (!site) continue;
+    const branch = bySite.get(site) ?? {
+      id: `branch:${card}:${site}`,
+      host: site,
+      pages: [],
+      live: false,
+    };
+    branch.pages.push(group);
+    if (group.steps.some((step) => step.status === "running")) branch.live = true;
+    bySite.set(site, branch);
+  }
+  return [...bySite.values()];
 }
 
 /** The board's title on up to two lines, its lead at the reading size under it. */
@@ -107,18 +140,9 @@ export type StageOptions = {
   measured?: ReadonlyMap<string, number>;
   /** The block opened in place, if one is. */
   open?: string | null;
+  /** Requests whose words the person opened to read whole. */
+  requests?: ReadonlySet<string>;
 };
-
-/** The pages the column shows while a run reads: held ones first, then live, then the latest. */
-function livePages(groups: readonly PageGroup[]): PageGroup[] {
-  const rank = (group: PageGroup) =>
-    group.steps.some((step) => step.status === "running") ? 0 : 1;
-  return [...groups]
-    .map((group, index) => ({ group, index }))
-    .sort((a, b) => rank(a.group) - rank(b.group) || b.index - a.index)
-    .slice(0, LIVE_PAGES)
-    .map((entry) => entry.group);
-}
 
 /**
  * Every request of the canvas as a lane, top to bottom: its process column
@@ -163,26 +187,27 @@ export function environmentStages(
         ...(live ? { pending: m.work_board_pending() } : {}),
       });
       const request = clipText(draft.request, REQUEST_TEXT);
-      const column: { id: string; width: number; height: number }[] = [
-        { id: draft.card, ...requestSize(request) },
-      ];
-      const trailId = trail.length ? `trail:${draft.card}` : undefined;
-      if (trailId) column.push({ id: trailId, ...trailSize(trail) });
-      const pages = live ? livePages(runs.flatMap((run) => pageGroups(run, recorded))) : [];
-      for (const page of pages) column.push({ id: page.id, ...PAGE });
+      const requestPart = {
+        id: draft.card,
+        ...requestTextSize(request, !!options.requests?.has(draft.card)),
+      };
+      const branches = branchesOf(
+        draft.card,
+        runs.flatMap((run) => pageGroups(run, recorded)),
+      );
       const rows = new Set(runs.flatMap((run) => sourceRows(run).map((row) => row.key))).size;
       const unread = runs.reduce((sum, run) => sum + unreadPages(run).length, 0);
-      const framed =
-        !live && runs.some((run) => pageGroups(run, recorded).some((group) => !!group.page?.frame));
       const sourcesId = rows || unread ? `sources:${draft.card}` : undefined;
-      if (sourcesId) {
-        const size = sourcesSize(rows);
-        column.push({
-          id: sourcesId,
-          width: size.width,
-          height: size.height + (unread ? UNREAD_FOOTER : 0) + (framed ? FRAME_STRIP : 0),
-        });
-      }
+      const sourcesPart = sourcesId
+        ? (() => {
+            const size = sourcesSize(rows);
+            return {
+              id: sourcesId,
+              width: size.width,
+              height: size.height + (unread ? UNREAD_FOOTER : 0),
+            };
+          })()
+        : undefined;
       const open = options.open ?? undefined;
       const sized = (block: Block, width: number, opened: boolean) =>
         measured.get(measureKey(block.id, width, opened)) ?? estimate(block, width, opened);
@@ -224,10 +249,16 @@ export function environmentStages(
           return [[block.id, { ...pin, width, height: sized(block, width, false) }] as const];
         }),
       );
-      const lane = placeLane(top, {
-        column,
+      const lane = placeBand(top, {
+        request: requestPart,
+        branches: branches.map((branch) => ({
+          id: branch.id,
+          width: branchWidth(branch.pages.length),
+          height: BRANCH.height,
+        })),
         ...(head ? { head } : {}),
         board: layout,
+        ...(sourcesPart ? { sources: sourcesPart } : {}),
         pins: pinSizes,
       });
       const place = lane.rects[draft.card]!;
@@ -244,11 +275,11 @@ export function environmentStages(
         trail,
         pinned,
         column: {
-          ...(trailId ? { trail: trailId } : {}),
-          pages: pages.map((page) => page.id),
+          branches: branches.map((branch) => branch.id),
           ...(sourcesId ? { sources: sourcesId } : {}),
           ...(headId ? { head: headId } : {}),
         },
+        branches,
         targets: Object.fromEntries(
           Object.entries(lane.rects).map(([id, rect]) => [id, { x: rect.x, y: rect.y }]),
         ),
@@ -269,4 +300,33 @@ export function stageRuns(
     const execution = projection?.executions.find((entry) => entry.id === id);
     return execution ? [execution] : [];
   });
+}
+
+type Box = { x: number; y: number; width: number; height: number };
+const overlaps = (a: Box, b: Box) =>
+  a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+/**
+ * The person's own cards never sit under a band: one that a band has grown
+ * over stands just past its right edge, at the height it had, until the
+ * person moves it. Nothing here is saved.
+ */
+export function clearOfBands(
+  positions: Readonly<Record<string, CanvasPosition>>,
+  sizes: Readonly<Record<string, { width: number; height: number }>>,
+  stages: readonly WorkStage[],
+): Record<string, CanvasPosition> {
+  const bands = stages.map((stage): Box => {
+    const rects = Object.values(stage.lane.rects);
+    const right = Math.max(...rects.map((rect) => rect.x + rect.width));
+    const top = Math.min(...rects.map((rect) => rect.y));
+    return { x: 0, y: top, width: right, height: stage.lane.extent - top };
+  });
+  const moved: Record<string, CanvasPosition> = {};
+  for (const [id, at] of Object.entries(positions)) {
+    const size = sizes[id] ?? { width: 280, height: 160 };
+    const hit = bands.find((band) => overlaps(band, { ...at, ...size }));
+    moved[id] = hit ? { x: hit.x + hit.width + 48, y: at.y } : at;
+  }
+  return moved;
 }

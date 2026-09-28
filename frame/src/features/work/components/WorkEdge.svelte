@@ -23,7 +23,7 @@
   import { duration, easing, reducedMotion, type Duration } from "$shared/lib/motion";
   import { PLATE, arrowHead, elbow, flowPath, midpoint, plateHeight } from "../lib/diagram";
   import type { CanvasPosition } from "../lib/canvas-model";
-  type Tone = "rest" | "thread" | "relation" | "diagram";
+  type Tone = "rest" | "thread" | "flow" | "relation" | "diagram";
   /** A diagram flow as its layout drew it, from its parts' corners in the layout. */
   type Flow = {
     points: CanvasPosition[];
@@ -45,6 +45,8 @@
   }: EdgeProps = $props();
   const arrival = getContext<((id: string) => Duration | null) | undefined>(canvasArrival);
   const tone = $derived((data?.tone as Tone | undefined) ?? "relation");
+  /** Work moving along a band's line: a dot travels it, and only then. */
+  const moving = $derived(tone === "flow" && !!data?.live && !reducedMotion());
   const label = $derived(typeof data?.label === "string" ? data.label : "");
   /** At rest a flow is drawn whole or quiet; a looked-at part lights its own. */
   const mode = $derived((data?.state as "rest" | "lit" | "quiet" | undefined) ?? "rest");
@@ -146,7 +148,10 @@
     stroke-dasharray={tone === "relation" ? undefined : "1"}
     fill="none"
   />
-  <circle bind:this={dot} class="work-edge-dot {tone}" cx={targetX} cy={targetY} r="2" />{/if}
+  <circle bind:this={dot} class="work-edge-dot {tone}" cx={targetX} cy={targetY} r="2" />
+  {#if moving}<circle class="work-edge-pulse" r="2.5"
+      ><animateMotion dur="1.8s" repeatCount="indefinite" {path} /></circle
+    >{/if}{/if}
 
 <style>
   .work-edge-line {
@@ -161,6 +166,20 @@
 
   .thread {
     opacity: 0.6;
+  }
+
+  /* A band's line: one hairline, quieter than anything it joins. */
+  .work-edge-line.flow {
+    stroke: var(--color-border);
+    stroke-width: 1;
+  }
+
+  .work-edge-dot.flow {
+    fill: var(--color-border-strong);
+  }
+
+  .work-edge-pulse {
+    fill: var(--color-accent);
   }
 
   /* A diagram's flow: an elbow line with an arrowhead; quiet ones wait at 35 %. */

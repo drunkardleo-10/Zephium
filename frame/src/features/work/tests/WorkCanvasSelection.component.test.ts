@@ -3,6 +3,7 @@ import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import WorkCanvas from "../components/WorkCanvas.svelte";
+import { setPointerTool } from "../lib/pointer-tool.svelte";
 import type { CanvasItem, CanvasView } from "../lib/canvas-model";
 import { marquee } from "./marquee";
 
@@ -22,6 +23,8 @@ async function canvas(
   extra: Record<string, unknown> = {},
 ) {
   await page.viewport(1200, 800);
+  // The pointer is shared by the canvas and the bar; another test may have left it on Select.
+  setPointerTool("hand");
   const screen = await render(WorkCanvas, {
     items,
     links: [],

@@ -1,10 +1,9 @@
 import { expect, test } from "vitest";
 import type { WorkEnvironmentSnapshot } from "$shared/ipc/bindings";
 import { reconcileNodes, type CanvasItem } from "../lib/canvas-model";
-import { requestSize } from "../lib/card-size";
 import { environmentView, viewPlacements } from "../lib/project-environment";
 import { environmentRequests } from "../lib/project-environment-thread";
-import { environmentStages } from "../lib/project-environment-board";
+import { environmentStages, requestTextSize } from "../lib/project-environment-board";
 import { projection, snapshot } from "./environment-fixtures";
 
 type Placement = WorkEnvironmentSnapshot["view"]["placements"][number];
@@ -22,13 +21,13 @@ test("a placement saved before boards is ignored: the block takes its board plac
     "objective-card": { x: 0, y: 0 },
     "result-card": stages[0]!.targets["result-card"],
   });
-  expect(stages[0]!.targets["result-card"]!.x).toBe(348);
+  expect(stages[0]!.targets["result-card"]!.x).toBe(340 + 72);
   const view = environmentView(legacy);
   expect(view.positions).toEqual({});
   expect(view.sizes).toEqual({});
 });
 
-test("a request card is as tall as its words, whatever size an older placement saved", () => {
+test("a request is as tall as its words at rest, whatever size an older placement saved", () => {
   const saved = canvas([
     { element: "objective-card", x: 0, y: 0, width: 300, height: 110, revision: 2 },
   ]);
@@ -37,8 +36,9 @@ test("a request card is as tall as its words, whatever size an older placement s
     "Compare hosting for a small SaaS: prices, regions, managed Postgres, backups, bandwidth " +
     "and support of AWS Lightsail, Hetzner, Hostinger and Vercel, then pick one.";
   const stages = environmentStages(saved, new Map([["objective", state]]));
-  const words = requestSize(stages[0]!.request);
-  expect(words.height).toBeGreaterThan(110);
+  // Two lines at rest: the person opens the rest where it stands.
+  const words = requestTextSize(stages[0]!.request, false);
+  expect(words.height).toBeGreaterThan(80);
   expect(stages[0]!.place).toMatchObject(words);
   expect(environmentView(saved).sizes).toEqual({});
 });

@@ -40,15 +40,14 @@
     animation: orb-breathe 2.4s var(--ease-in-out) infinite alternate;
   }
 
+  /* Scale only: the compositor runs it without repainting the orb each frame. */
   @keyframes orb-breathe {
     from {
       transform: scale(0.97);
-      filter: saturate(0.9);
     }
 
     to {
       transform: scale(1.03);
-      filter: saturate(1.15);
     }
   }
 

@@ -6,6 +6,9 @@
   import { taskSession } from "$domain/resources";
   import { noteSession } from "$domain/notes";
   import * as toolHost from "$session/tools.svelte";
+  import { tabRequest } from "$session/work-tab.svelte";
+  import { pointerTool, setPointerTool } from "../lib/pointer-tool.svelte";
+  import { ulidTime } from "../lib/ulid-time";
   import { editTool, toolSession } from "$session/tool-drafts.svelte";
   import type {
     TabView,
@@ -29,23 +32,23 @@
   import Button from "$shared/ui/Button";
   import LazyView from "$shared/ui/LazyView";
   import {
-    SquareDashedTopSolidIcon,
-    BrowserIcon,
     ComputerTerminal01Icon,
     File01Icon,
     FolderAddIcon,
     GlobalIcon,
     Image01Icon,
-    Image02Icon,
     Pdf01Icon,
     PlusSignIcon,
     StickyNote03Icon,
+    Cursor01Icon,
+    HandIcon,
   } from "../lib/icons";
   import WorkBar from "./bar/WorkBar.svelte";
   import BarTool from "./bar/BarTool.svelte";
+  import NotePanel from "./bar/NotePanel.svelte";
   import AttachPanel, { type AttachKind } from "./bar/AttachPanel.svelte";
-  import AreaPanel from "./bar/AreaPanel.svelte";
-  import CanvasTitle from "./top/CanvasTitle.svelte";
+  import AccountButton from "./top/AccountButton.svelte";
+  import WorksMenu from "./top/WorksMenu.svelte";
   import ContextManifest from "./composer/ContextManifest.svelte";
   import AccountScopeChip from "./composer/AccountScopeChip.svelte";
   import OpenTabsChip from "./composer/OpenTabsChip.svelte";
@@ -59,6 +62,7 @@
   import LiftHeader from "./LiftHeader.svelte";
   import { commandRecord, pageGroups } from "../lib/project-environment-stage";
   import {
+    clearOfBands,
     elementPictures,
     environmentStages,
     laneElement,
@@ -80,7 +84,7 @@
     environmentBoards,
     environmentItems,
     environmentLinks,
-    environmentPages,
+    environmentBranches,
     environmentPictures,
     environmentSources,
     environmentView,
@@ -179,8 +183,9 @@
     ) => void;
     center: (id: string) => void;
     focusCard: (id: string) => void;
+    reveal: (id: string) => void;
+    followAgent: () => boolean;
   }>();
-  let selectionCount = $state(0);
   let selectedIds = $state.raw<string[]>([]);
   let accountEffect = $state.raw<WorkAccountEffectV1>({ kind: "read" });
   /** The person's consent to list their open tabs, for the next request only. */
@@ -205,9 +210,16 @@
     if (!element) return;
     const measure = () => (cardBounds = element.getBoundingClientRect());
     measure();
+    // Size alone misses a move: the column beside the canvas can change width
+    // while the canvas keeps its own, and a pane placed on stale bounds lands
+    // off the window.
     const observer = new ResizeObserver(measure);
     observer.observe(element);
-    return () => observer.disconnect();
+    window.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
   });
   function openLift(id: string) {
     const item = items.find((item) => item.id === id);
@@ -247,6 +259,16 @@
       return;
     }
     lift(id);
+  }
+  /** A page in a branch: the person's turn opens the run's own view; any other opens as a page. */
+  function openBranchPage(page: string) {
+    const entry = pageEntries.get(page);
+    if (!entry) return;
+    if (entry.page.human?.phase === "waiting_for_human") {
+      openTakeover(page);
+      return;
+    }
+    openPane({ kind: "url", url: entry.page.url }, null, entry.page.account);
   }
   /** A lifted tab card's one action: the tab opens in the pane, over its card. */
   function openLiftedTab() {
@@ -316,7 +338,19 @@
       current.restore?.focus({ preventScroll: true });
     }
   });
+  // A tab chosen in the rail opens here, over the canvas.
+  let tabAnswered = tabRequest()?.sequence ?? 0;
+  $effect(() => {
+    const request = tabRequest();
+    if (!request || request.sequence === tabAnswered) return;
+    tabAnswered = request.sequence;
+    untrack(() => {
+      if (tabs.some((tab) => tab.id === request.tab))
+        openPane({ kind: "tab", id: request.tab }, null);
+    });
+  });
   function openPane(target: WorkPaneTarget, originId: string | null, account?: string) {
+    if (cardHost) cardBounds = cardHost.getBoundingClientRect();
     panel = null;
     lifted = null;
     endTakeover(true);
@@ -428,9 +462,13 @@
     });
     takeoverQueue = next.catch(() => undefined);
   }
-  function openTakeover(card: string) {
-    const item = items.find((entry) => entry.id === card);
-    const state = item?.page?.human;
+  function openTakeover(page: string) {
+    const entry = pageEntries.get(page);
+    const item = entry ? undefined : items.find((candidate) => candidate.id === page);
+    const state = entry?.page.human ?? item?.page?.human;
+    // The well stands over the branch the page is in.
+    const card = entry?.branch ?? page;
+    const url = entry?.page.url ?? item?.page?.url ?? "";
     if (!state || state.phase !== "waiting_for_human") return;
     const work = [...human.pages].find(([, pages]) =>
       pages.some(
@@ -455,8 +493,8 @@
       work,
       card,
       page: { attempt: state.attempt, step: state.step, generation: state.generation },
-      host: item?.page?.host ?? "",
-      url: item?.page?.url ?? "",
+      host: host(url),
+      url,
       restore,
     };
     canvasRef?.center(card);
@@ -541,7 +579,7 @@
     }
   }
   /** The bar's one open panel: a tool's, or the field's own attach. */
-  let panel = $state<"area" | "tabs" | "media" | "attach" | null>(null);
+  let panel = $state<"note" | "tabs" | "media" | "attach" | null>(null);
   let attachKind = $state<AttachKind>("tabs");
   let objectivePending = $state(false);
   let composerFailure = $state<"account" | null>(null);
@@ -767,7 +805,9 @@
       ),
     ),
   );
-  /** Every request of the canvas as a lane: its process column and its board. */
+  /** Requests the person opened to read whole. */
+  const openRequests = new SvelteSet<string>();
+  /** Every request of the canvas as a band: its words, its branches, its result. */
   const stages = $derived(
     snapshot
       ? environmentStages(snapshot, context.objectives, {
@@ -776,22 +816,65 @@
           chosen,
           measured,
           open: openBlock,
+          requests: openRequests,
         })
       : [],
   );
+  const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+  /** When each band's request was asked: its first run carries the time in its id. */
+  const askedAt = $derived(
+    new Map(
+      stages.flatMap((stage) => {
+        const first = stage.executions[0];
+        const at = first ? ulidTime(first) : null;
+        return at ? [[stage.card, clock.format(at)] as const] : [];
+      }),
+    ),
+  );
+  // A run that ends while the person follows it hands them its result, at reading size.
+  let wasLive = new Set<string>();
+  $effect(() => {
+    const now = new Set(stages.filter((stage) => stage.live).map((stage) => stage.card));
+    untrack(() => {
+      for (const card of wasLive) {
+        if (now.has(card)) continue;
+        const stage = stages.find((entry) => entry.card === card);
+        if (stage && canvasRef?.followAgent()) canvasRef.reveal(stage.column.head ?? card);
+      }
+      wasLive = now;
+    });
+  });
+  // A new work names itself after its first result, once, unless the person already has.
+  const named: Record<string, true> = {};
+  $effect(() => {
+    const current = snapshot;
+    const title = stages.find((stage) => stage.board.title.trim())?.board.title.trim();
+    if (!current || !title || current.title !== m.work_env_default_title()) return;
+    if (current.lifecycle !== "active" || named[current.id]) return;
+    named[current.id] = true;
+    untrack(() => void session.edit({ kind: "rename", title: title.slice(0, 64) }));
+  });
   const agents = $derived(
     snapshot
       ? environmentAgents(snapshot, context.objectives, signalOf, stages)
       : { items: [], links: [], positions: {} },
   );
-  const sources = $derived(environmentSources(context.objectives, stages, recordedPages));
-  const pages = $derived(
-    environmentPages(
+  const sources = $derived(environmentSources(context.objectives, stages));
+  const branches = $derived(
+    environmentBranches(
       context.objectives,
       stages,
       recordedPages,
       signalOf,
       (objective) => human.pages.get(objective) ?? [],
+    ),
+  );
+  /** Every page a band shows, by id, with the branch it stands in. */
+  const pageEntries = $derived(
+    new Map(
+      branches.flatMap((item) =>
+        (item.branch?.pages ?? []).map((page) => [page.id, { branch: item.id, page }] as const),
+      ),
     ),
   );
   const boards = $derived(environmentBoards(stages, openBlock, blockArtifact));
@@ -800,8 +883,8 @@
     const work = objectiveSession?.projection?.work.id;
     const opened = work ? (human.pages.get(work) ?? []) : [];
     if (!opened.length) return null;
-    for (const item of pages) {
-      const state = item.page?.human;
+    for (const { page } of pageEntries.values()) {
+      const state = page.human;
       if (state?.phase !== "waiting_for_human") continue;
       if (
         !opened.some(
@@ -813,8 +896,8 @@
       )
         continue;
       return {
-        card: item.id,
-        host: item.page?.host ?? "",
+        card: page.id,
+        host: host(page.url),
         reason: state.reason,
         remaining: state.remaining,
       };
@@ -823,11 +906,18 @@
   });
   const requests = $derived(environmentRequests(stages));
   const items = $derived([
-    ...results.items,
-    ...requests.items,
+    ...[...results.items, ...requests.items].map((item) =>
+      item.type === "objective" || item.type === "request"
+        ? {
+            ...item,
+            expanded: openRequests.has(item.id),
+            ...(askedAt.get(item.id) ? { when: askedAt.get(item.id) } : {}),
+          }
+        : item,
+    ),
     ...boards,
     ...sources,
-    ...pages,
+    ...branches,
     ...agents.items,
   ]);
   const links = $derived([
@@ -1305,7 +1395,7 @@
     const stage = stages.find((entry) => entry.column.sources === item.id);
     const projection = stage ? context.objectives.get(stage.objective) : undefined;
     if (!stage || !projection) return [];
-    const shown = new Set(pages.map((page) => page.id));
+    const shown = new Set(pageEntries.keys());
     return stage.executions
       .flatMap((id) => {
         const execution = projection.executions.find((entry) => entry.id === id);
@@ -1409,7 +1499,11 @@
             ...plannedGeometry.positions,
             ...planGeometry.positions,
             ...savedResultPositions,
-            ...environmentView(snapshot).positions,
+            ...clearOfBands(
+              environmentView(snapshot).positions,
+              environmentView(snapshot).sizes ?? {},
+              stages,
+            ),
             ...requests.positions,
             ...agents.positions,
           },
@@ -1554,6 +1648,26 @@
     const element = session.snapshot ? elementFor(session.snapshot, reference) : undefined;
     if (element) lift(element.id);
   }
+  /** The bar's keys: V and H pick the pointer, N and A open their panels, / goes to the ask. */
+  function toolKeys(event: KeyboardEvent) {
+    if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target?.closest("input, textarea, select, [contenteditable], [role='dialog']")) return;
+    if (!snapshot || pane || lifted || takeover) return;
+    const key = event.key.toLowerCase();
+    if (key === "v" || key === "h") setPointerTool(key === "v" ? "select" : "hand");
+    else if (key === "n") openPanel("note", true);
+    else if (key === "a") openPanel("media", true);
+    else if (key === "/" && aiEnabled)
+      composerElement?.querySelector<HTMLElement>("textarea")?.focus();
+    else return;
+    event.preventDefault();
+  }
+  /** One of the person's own notes, placed on the canvas as it is. */
+  async function placeNote(id: string) {
+    const reference = { kind: "resource" as const, resource: id };
+    if (await place(reference, "link", null)) panel = null;
+  }
   /** The work this canvas is already talking to, if its request card is here. */
   const runningObjective = $derived(
     !!objectiveSession?.projection &&
@@ -1571,7 +1685,7 @@
   let signInRetry = $state.raw<{ work: string; origin: string; host: string } | null>(null);
   async function signIn(card: string) {
     const current = objectiveSession;
-    const url = pages.find((item) => item.id === card)?.page?.url;
+    const url = pageEntries.get(card)?.page.url;
     const work = current?.projection?.work.id;
     const execution = current?.projection?.executions.at(-1);
     if (!current || !url || !work) return;
@@ -1630,8 +1744,11 @@
       const context = contextSel;
       session.composer = "";
       openTabs = false;
-      if (activeExecution) current.enqueue(text);
-      else await current.continueWith(text, context);
+      // Words typed while the agent works steer it now; if it cannot take
+      // them mid-step, they go next.
+      if (activeExecution) {
+        if (!(await current.steer(text))) current.enqueue(text);
+      } else await current.continueWith(text, context);
       return;
     }
     await createObjective();
@@ -1857,13 +1974,6 @@
     !!objectiveSession?.projection?.work.questions.some((question) => question.state === "active"),
   );
   /** One click makes an Area: around the selection when there is one. */
-  async function createArea(title: string = m.work_env_area()) {
-    const name = title.trim() || m.work_env_area();
-    if (selectionCount > 0) return groupSelection(name);
-    if (!(await session.edit({ kind: "create_area", title: name }))) return false;
-    panel = null;
-    return true;
-  }
   const ownedElements = (ids: readonly string[]) =>
     ids.filter((id) => snapshot?.elements.some((element) => element.id === id));
   /** A new area around the person's selected elements; the canvas places it before they move in. */
@@ -1908,7 +2018,6 @@
       return;
     }
     if (next === "tabs") attachKind = "tabs";
-    if (next === "media" && (attachKind === "tabs" || !attachKind)) attachKind = "document";
     panel = next;
   }
   const model = $derived(currentModel(objectiveSession?.projection));
@@ -1918,6 +2027,14 @@
   /** The run on this canvas is going, or waits on the person: the bar is its line. */
   const lineRunning = $derived(
     runningObjective && (activeExecution || needsDecision || !!agentWaiting),
+  );
+  // Saving is silent; only a write that did not land says so.
+  const troubled = $derived(
+    !!session.failure ||
+      folderRefused ||
+      session.delivery === "unknown" ||
+      session.delivery === "conflict" ||
+      session.delivery === "rejected",
   );
   const runStatus = $derived(
     runningObjective && needsDecision
@@ -1975,36 +2092,44 @@
   >{/snippet}
 {#snippet barTools()}
   <BarTool
+    icon={Cursor01Icon}
+    label={m.work_tool_select()}
+    keys={["V"]}
+    pressed={pointerTool() === "select"}
+    onclick={() => setPointerTool("select")}
+  />
+  <BarTool
+    icon={HandIcon}
+    label={m.work_tool_hand()}
+    keys={["H"]}
+    pressed={pointerTool() === "hand"}
+    onclick={() => setPointerTool("hand")}
+  />
+  <span class="tool-rule" aria-hidden="true"></span>
+  <BarTool
     icon={StickyNote03Icon}
     label={m.work_tool_note()}
-    disabled={busy || !snapshot}
-    onclick={() => void createNote()}
-  />
-  <BarTool
-    icon={SquareDashedTopSolidIcon}
-    label={m.work_env_area()}
+    keys={["N"]}
     disabled={!snapshot}
-    open={panel === "area"}
-    onopenchange={(open) => openPanel("area", open)}
-    >{#snippet content()}<AreaPanel
-        areas={snapshot?.areas ?? []}
-        selected={selectionCount}
-        {busy}
-        oncreate={createArea}
-      />{/snippet}</BarTool
+    open={panel === "note"}
+    onopenchange={(open) => openPanel("note", open)}
+    >{#snippet content()}{#if notes}<NotePanel
+          {notes}
+          placed={snapshot?.elements.flatMap((element) =>
+            element.reference.kind === "resource" ? [element.reference.resource] : [],
+          ) ?? []}
+          {busy}
+          oncreate={() => {
+            panel = null;
+            void createNote();
+          }}
+          onpick={(id) => void placeNote(id)}
+        />{/if}{/snippet}</BarTool
   >
   <BarTool
-    icon={BrowserIcon}
-    label={m.work_tool_page()}
-    disabled={!snapshot}
-    wide
-    open={panel === "tabs"}
-    onopenchange={(open) => openPanel("tabs", open)}
-    content={attachPanel}
-  />
-  <BarTool
-    icon={Image02Icon}
-    label={m.work_tool_media()}
+    icon={PlusSignIcon}
+    label={m.work_tool_attach()}
+    keys={["A"]}
     disabled={!snapshot}
     wide
     open={panel === "media"}
@@ -2029,7 +2154,7 @@
       {m.work_account_update_invalid()}
     </p>{/if}
 {/snippet}
-{#snippet barLine()}
+{#snippet agentLine()}
   <LazyView
     loader={loadAgentLine}
     loadingLabel=""
@@ -2037,7 +2162,6 @@
     retryLabel={m.surface_retry()}
     >{#snippet children(Line)}
       <Line
-        docked
         session={objectiveSession!}
         agents={agents.items}
         draft={session.composer}
@@ -2060,7 +2184,7 @@
         {writeup}
         onwaitingpage={(card: string) => {
           panel = null;
-          canvasRef?.focusCard(card);
+          canvasRef?.focusCard(pageEntries.get(card)?.branch ?? card);
         }}
         onfocusagent={(id) => canvasRef?.center(id)}
         onsteered={() => (session.composer = "")}
@@ -2098,7 +2222,7 @@
     <ContextManifest profile={session.profile} selection={contextSel} purpose="agent" />
   {/if}
 {/snippet}
-<svelte:window onbeforeunload={abandonTakeover} />
+<svelte:window onbeforeunload={abandonTakeover} onkeydown={toolKeys} />
 <div class="environment">
   <div class="canvas-card" bind:this={cardHost}>
     {#if snapshot}{#key snapshot.id}
@@ -2130,9 +2254,7 @@
               onopen={openLift}
               onopenlink={openCitation}
               onselectionchange={(ids: string[]) => {
-                const owned = ids.filter((id) => authoritative.has(id));
-                selectionCount = owned.length;
-                selectedIds = owned;
+                selectedIds = ids.filter((id) => authoritative.has(id));
                 if (!ids.length) inspected = null;
               }}
               onareachange={(id: string, area: string | null) =>
@@ -2176,6 +2298,15 @@
                 }
                 if (action === "help") {
                   openTakeover(id);
+                  return;
+                }
+                if (action === "expand-request") {
+                  if (openRequests.has(id)) openRequests.delete(id);
+                  else openRequests.add(id);
+                  return;
+                }
+                if (action?.startsWith("page:")) {
+                  openBranchPage(action.slice("page:".length));
                   return;
                 }
                 if (action === "play") {
@@ -2229,37 +2360,18 @@
     <div class="edge-scrim top" aria-hidden="true"></div>
     <div class="edge-scrim bottom" aria-hidden="true"></div>
     <div class="canvas-top">
-      {#if snapshot}<CanvasTitle
-          title={snapshot.title}
-          disabled={busy || snapshot.lifecycle !== "active"}
-          status={runStatus}
-          onrename={(title: string) => void session.edit({ kind: "rename", title })}
-        />{/if}
+      <WorksMenu {session} untitled={m.work_env_default_title()} live={!!runStatus} />
       <span class="canvas-top-gap"></span>
-      {#if results.remaining}<button
-          type="button"
-          class="results-line"
-          onclick={() => {
-            const objective = results.remaining?.objective;
-            const request = snapshot?.elements.find(
-              (element) =>
-                element.reference.kind === "objective" && element.reference.objective === objective,
-            );
-            if (request) lift(request.id);
-          }}>{m.work_env_other_results({ count: results.remaining.count })}</button
-        >{/if}
-      {#if session.failure || session.pending || session.viewDraft || folderRefused}<div
-          class="status"
-          role="status"
-        >
+      {#if runningObjective && objectiveSession && !grantOpen}<div class="island">
+          {@render agentLine()}
+        </div>{/if}
+      {#if troubled}<div class="status" role="status">
           <span
             >{session.failure
               ? m.work_request_failed()
-              : session.pending
-                ? m.work_env_pending()
-                : session.viewDraft
-                  ? m.work_env_unsaved_view()
-                  : m.work_env_folder_refused()}</span
+              : folderRefused
+                ? m.work_env_folder_refused()
+                : m.work_env_view_unsaved()}</span
           >{#if session.delivery === "unknown"}<Button
               size="compact"
               onclick={() => void session.retry()}>{m.work_reconcile()}</Button
@@ -2270,6 +2382,7 @@
               >{m.work_env_reload()}</Button
             >{/if}
         </div>{/if}
+      <AccountButton name={profileLabel} />
     </div>
     <div class="zoom-slot" data-work-zoom-slot></div>
   </div>
@@ -2590,14 +2703,12 @@
             : m.work_composer_start()}
         disabled={objectivePending || !!session.objectiveSubmission}
         {busy}
-        running={lineRunning && !grantOpen}
         holding={panel === "attach"}
         {model}
         tools={barTools}
         attach={barAttach}
-        line={runningObjective && objectiveSession && !grantOpen ? barLine : undefined}
         above={grantOpen || composerFailure ? barAbove : undefined}
-        context={contextSel || session.accountScope ? composerContext : undefined}
+        context={openTabs || contextSel || session.accountScope ? composerContext : undefined}
         onsubmit={() => void send()}
       />{:else}<div class="tools-only" role="toolbar" aria-label={m.work_env_toolbar()}>
         {@render barTools()}
@@ -2617,9 +2728,11 @@
     font-size: var(--text-body);
   }
 
+  /* Framed like a Browse page, 8px off every window edge; the bar below it
+     stands on the window's own bottom edge, across that gap. */
   .canvas-card {
     position: absolute;
-    inset: 0;
+    inset: 0 0 8px;
     border-radius: var(--content-radius);
     background: var(--color-canvas);
     box-shadow: inset 0 0 0 1px var(--color-border);
@@ -2664,6 +2777,41 @@
 
   .canvas-top-gap {
     flex: 1;
+  }
+
+  .tool-rule {
+    flex: none;
+    inline-size: 1px;
+    block-size: 18px;
+    margin-inline: 4px;
+    background: var(--color-border);
+  }
+
+  /* The run's line stands at the top centre, where the eye goes first, and
+     opens downward over the canvas. */
+  .island {
+    position: absolute;
+    inset-block-start: -2px;
+    inset-inline-start: 50%;
+    inline-size: max-content;
+    min-inline-size: 240px;
+    max-inline-size: min(520px, calc(100% - 560px));
+    translate: -50% 0;
+    pointer-events: auto;
+    animation: island-in var(--motion-slow) var(--ease-spring) backwards;
+  }
+
+  @keyframes island-in {
+    from {
+      opacity: 0;
+      scale: 0.9;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .island {
+      animation: none;
+    }
   }
 
   .zoom-slot {
@@ -2716,30 +2864,6 @@
     color: var(--color-muted);
     font-size: var(--text-label);
     pointer-events: auto;
-  }
-
-  /* Results past the cap, when their lane has no group to hang the line under. */
-  .results-line {
-    padding: 0;
-    border: 0;
-    background: transparent;
-    color: var(--color-muted);
-    font: inherit;
-    font-size: var(--text-caption);
-    cursor: default;
-    pointer-events: auto;
-  }
-
-  .results-line:hover {
-    color: var(--color-text);
-    text-decoration: underline;
-    text-underline-offset: 2px;
-  }
-
-  .results-line:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: 2px;
-    border-radius: var(--radius-inset);
   }
 
   .lift-body {

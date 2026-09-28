@@ -52,7 +52,6 @@
     onsignin,
     retry = null,
     onretry,
-    docked = false,
   }: {
     session: WorkSession;
     /** The run's agent presences, as the canvas already projects them. */
@@ -85,8 +84,6 @@
     /** The site the person went to sign in to; the same request can go again as them. */
     retry?: { host: string } | null;
     onretry?: () => void;
-    /** Drawn as the bar's own line: the bar is its ground and holds the draft. */
-    docked?: boolean;
   } = $props();
   const id = $props.id();
   const runtime = $derived(session.projection);
@@ -318,7 +315,9 @@
   const preview = $derived(draft.trim().slice(0, 60));
 
   /** What the person opened the capsule for; a question takes it whenever it is open. */
-  let want = $state<"agents" | "answer" | "next" | "full" | null>(null);
+  let want = $state<"agents" | "answer" | "next" | null>(null);
+  /** The clipped words opened where they stand: the line itself grows to hold them. */
+  let whole = $state(false);
   let answer = $state("");
   let host = $state<HTMLElement>();
   /** The headline is one line; when it is clipped its words open the whole of it. */
@@ -333,9 +332,7 @@
           ? "question"
           : want === "next" && nextRows
             ? "next"
-            : want === "full" && clipped
-              ? "full"
-              : null,
+            : null,
   );
   const expanded = $derived(panel !== null);
   /** What the capsule holds while it closes, so it shrinks around its rows, not around nothing. */
@@ -348,8 +345,12 @@
   });
   $effect(() => {
     void headline;
+    whole = false;
+  });
+  $effect(() => {
+    void headline;
     const element = words;
-    if (!element) return;
+    if (!element || whole) return;
     const measure = () => (clipped = element.scrollWidth > element.clientWidth);
     void tick().then(measure);
     const observer = new ResizeObserver(measure);
@@ -416,14 +417,8 @@
 />
 
 {#if work}
-  <section
-    class="agent-line"
-    class:settled
-    class:docked
-    bind:this={host}
-    aria-label={m.work_agent_line()}
-  >
-    <!-- One capsule: it grows upward into its list and folds back into the line. -->
+  <section class="agent-line" class:settled bind:this={host} aria-label={m.work_agent_line()}>
+    <!-- One capsule at the canvas's top: it grows down into its list and folds back into the line. -->
     <div class="capsule" class:open={expanded}>
       <div class="expand" class:shown={expanded} aria-hidden={!expanded} inert={!expanded}>
         <div class="expand-inner">
@@ -475,8 +470,6 @@
                   >
                 </li>{/if}
             </ul>
-          {:else if held === "full"}
-            <p class="full">{headline}</p>
           {:else if held === "question" && question}
             <form
               onsubmit={(event) => {
@@ -547,16 +540,17 @@
             >
           {:else}
             {#key headline}
-              {#if clipped}
+              {#if clipped || whole}
                 <button
                   type="button"
                   class="words more"
-                  aria-expanded={panel === "full"}
-                  onclick={() => (want = want === "full" ? null : "full")}
-                  ><span class="text" bind:this={words}>{headline}</span><Icon
-                    icon={ArrowDown01Icon}
-                    size={12}
-                  /></button
+                  class:whole
+                  aria-expanded={whole}
+                  onclick={() => (whole = !whole)}
+                  ><span class="text" bind:this={words}>{headline}</span><span
+                    class="turn"
+                    aria-hidden="true"><Icon icon={ArrowDown01Icon} size={12} /></span
+                  ></button
                 >
               {:else}
                 <span class="words"><span class="text" bind:this={words}>{headline}</span></span>
@@ -564,7 +558,7 @@
             {/key}
           {/if}
           {#if elapsed && !waiting}<span class="elapsed">{elapsed}</span>{/if}
-          {#if live && preview && !docked}<span class="draft">{preview}</span>{/if}
+          {#if live && preview}<span class="draft">{preview}</span>{/if}
           {#if facts}<span class="facts">{facts}</span>{/if}
         </div>
         <div class="controls">
@@ -650,21 +644,17 @@
     min-inline-size: 0;
   }
 
-  /* The same element at rest and grown: a pill while it is one line (the panel
-     radius clamps to half its height), a sheet once it holds rows. */
+  /* The island: a pill while it is one line (the panel radius clamps to half
+     its height), a sheet once it holds rows. Its line stays on top and what it
+     opens grows down from it, the way the island at the top of a phone does. */
   .capsule {
     display: flex;
-    flex-direction: column;
+    flex-direction: column-reverse;
     min-inline-size: 0;
     border-radius: var(--radius-panel);
-    background: var(--color-float);
-    box-shadow: var(--shadow-popover);
-  }
-
-  /* In the bar the capsule is the bar's own row: no second ground, no second shadow. */
-  .docked .capsule {
-    background: transparent;
-    box-shadow: none;
+    background: var(--color-menu);
+    box-shadow: var(--shadow-menu);
+    backdrop-filter: blur(24px);
   }
 
   /* Grows on the arrival curve, folds on the exit curve; the rows fade with it. */
@@ -700,8 +690,8 @@
     padding: 0 6px 0 7px;
   }
 
-  .open .line {
-    border-block-start: 1px solid var(--color-border);
+  .capsule.open .line {
+    border-block-end: 1px solid var(--color-border);
   }
 
   .avatar {
@@ -799,6 +789,26 @@
 
   button.more[aria-expanded="true"] :global(svg) {
     rotate: 180deg;
+  }
+
+  /* Opened in place: the words wrap and the island grows to hold them. */
+  button.more.whole {
+    align-items: flex-start;
+    padding-block: 8px;
+    text-align: start;
+  }
+
+  button.more.whole .text {
+    overflow: visible;
+    white-space: normal;
+    line-height: 16px;
+  }
+
+  .turn {
+    display: grid;
+    flex: none;
+    block-size: 16px;
+    place-items: center;
   }
 
   .settled .words {
@@ -949,13 +959,6 @@
   .quiet:hover:not(:disabled) {
     background: var(--color-control-hover);
     color: var(--color-text);
-  }
-
-  .full {
-    margin: 0;
-    padding: 12px 14px;
-    font-size: var(--text-label);
-    line-height: 16px;
   }
 
   .rows {

@@ -238,22 +238,30 @@ describe("the process column", () => {
     ]);
   });
 
-  test("a lane stands its column at x = 0 and its board beside it; a live run shows its pages, a finished one folds them into its sources", () => {
+  test("a band reads left to right: the request, a branch per site, then the result with its sources under it", () => {
     const scene = runningScene();
     const [stage] = environmentStages(scene.snapshot, scene.objectives, {
       recorded: () => scene.pages,
     });
-    expect(stage!.column.pages).toHaveLength(2);
     const rects = stage!.lane.rects;
-    expect(rects[stage!.card]).toMatchObject({ x: 0, y: 0, width: 300 });
-    expect(rects[stage!.column.trail!]!.y).toBe(rects[stage!.card]!.height + 12);
-    expect(stage!.lane.board.x).toBe(348);
+    expect(rects[stage!.card]).toMatchObject({ x: 0, y: 0, width: 340 });
+    expect(stage!.branches.length).toBeGreaterThan(0);
+    for (const branch of stage!.branches) {
+      expect(rects[branch.id]!.x).toBeGreaterThanOrEqual(340 + 72);
+      expect(
+        new Set(branch.pages.map((page) => new URL(page.url).host.replace(/^www\./u, ""))),
+      ).toEqual(new Set([branch.host]));
+    }
+    expect(stage!.lane.board.x).toBe(340 + 72 + 548 + 72);
     const done = tripScene();
     const [settled] = environmentStages(done.snapshot, done.objectives, {
       recorded: () => done.pages,
     });
-    expect(settled!.column.pages).toEqual([]);
-    expect(settled!.column.sources).toBe(`sources:${settled!.card}`);
+    // A finished run keeps its pages in its branches; its sources sit under its result.
+    expect(settled!.branches.length).toBeGreaterThan(0);
+    const sources = settled!.lane.rects[settled!.column.sources!]!;
+    expect(sources.x).toBe(settled!.lane.board.x);
+    expect(sources.y).toBeGreaterThanOrEqual(settled!.lane.board.y + settled!.lane.board.height);
   });
 
   test("a block the person dragged is kept where they put it, from its lane's corner; the rest stay in the board's flow", () => {
@@ -267,7 +275,12 @@ describe("the process column", () => {
     };
     const saved = viewPlacements(scene.snapshot, view, stages, new Set([block.id]));
     const pin = saved.find((place) => place.element === block.id)!;
-    expect(pin).toMatchObject({ revision: 3, x: target.x + 200 - 348, y: target.y + 40 });
+    const corner = stages[0]!.lane.corner;
+    expect(pin).toMatchObject({
+      revision: 3,
+      x: target.x + 200 - corner.x,
+      y: target.y + 40 - corner.y,
+    });
     const pinned = environmentStages(
       { ...scene.snapshot, view: { ...scene.snapshot.view, placements: saved } },
       scene.objectives,

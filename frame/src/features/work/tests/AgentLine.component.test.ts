@@ -219,7 +219,10 @@ test("a clipped headline shows a chevron and its words open the whole line", asy
   expect(words.element().querySelector("svg")).not.toBeNull();
   await words.click();
   await expect.element(words).toHaveAttribute("aria-expanded", "true");
-  expect(screen.container.querySelector(".expand.shown .full")?.textContent).toBe(closing);
+  // The line itself opens: the words wrap in place, never repeated in a second panel.
+  expect(words.element().classList.contains("whole")).toBe(true);
+  expect(screen.container.querySelector(".expand.shown")).toBeNull();
+  expect(screen.container.textContent?.split(closing).length).toBe(2);
   await screen.unmount();
   session.dispose();
 });

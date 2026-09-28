@@ -119,14 +119,14 @@ test("the production manual environment attaches a real tab, opens it in the pan
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";
   root.style.width = "1100px";
-  await screen.getByRole("button", { name: "Page or tab", exact: true }).click();
+  await screen.getByRole("button", { name: "Add to canvas", exact: true }).click();
   await screen.getByRole("checkbox", { name: /Research tab/ }).click();
   await screen.getByRole("button", { name: "Add to Work (1)" }).click();
   await expect
     .poll(() => session.snapshot?.elements[0]?.reference)
     .toEqual({ kind: "browser", tab: "retained-tab" });
   expect(onopen).not.toHaveBeenCalled();
-  await screen.getByRole("button", { name: "Page or tab", exact: true }).click();
+  await screen.getByRole("button", { name: "Add to canvas", exact: true }).click();
   await expect.poll(() => screen.container.querySelectorAll(".work-drag-handle").length).toBe(1);
   await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
   await screen.getByRole("button", { name: "Open", exact: true }).click();
@@ -296,8 +296,8 @@ test("a real attached objective expands its historical responsibilities directly
   expect(screen.container.textContent).not.toContain(
     "Operational prose should stay in optional details",
   );
-  // Two plan dependencies; the result stands on its request's board, joined by no line.
-  await expect.poll(() => screen.container.querySelectorAll(".svelte-flow__edge").length).toBe(2);
+  // Two plan dependencies, and the band's one line from the request into its result.
+  await expect.poll(() => screen.container.querySelectorAll(".svelte-flow__edge").length).toBe(3);
   const dependency = screen.container.querySelector(
     '[aria-label="Compare findings depends on Read evidence"]',
   );
@@ -485,16 +485,10 @@ test("prompt submission keeps work on canvas and clarification choices above the
   await expect
     .poll(() => screen.container.querySelector(".agent-line.settled") !== null)
     .toBe(true);
+  // The settled line is the island at the canvas's top, one line tall.
   await expect
-    .poll(() => screen.container.querySelector(".line-slot")!.getBoundingClientRect().height)
-    .toBeLessThan(110);
-  await screen.getByRole("button", { name: "View 1 other results", exact: true }).click();
-  await expect
-    .element(screen.getByRole("button", { name: "Supporting research", exact: true }))
-    .toBeVisible();
-  await expect
-    .element(screen.getByRole("button", { name: "Back to canvas", exact: true }))
-    .toBeVisible();
+    .poll(() => screen.container.querySelector(".island")!.getBoundingClientRect().height)
+    .toBeLessThan(60);
   await screen.unmount();
   environment.dispose();
   objective.dispose();

@@ -1,7 +1,7 @@
 import "$styles/global.css";
 import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
-import { page, userEvent } from "vitest/browser";
+import { page } from "vitest/browser";
 import { WorkEnvironmentSession } from "$domain/work-environment";
 import type { WorkEnvironmentSnapshot, WorkRuntimeProjection } from "$shared/ipc/bindings";
 import { tabFixture } from "$shared/testing/fixtures";
@@ -88,7 +88,7 @@ test("the bar is tools and a field at rest, the field alone in use, the agent's 
   const objective = workSession(profile)!;
   vi.spyOn(objective, "start").mockResolvedValue();
   vi.spyOn(objective, "open").mockResolvedValue(true);
-  const rename = vi.spyOn(environment, "edit").mockResolvedValue(true);
+  vi.spyOn(environment, "edit").mockResolvedValue(true);
   const screen = await render(WorkEnvironmentWorkspace, {
     session: environment,
     tabs: [tabFixture({ id: "tab-1", title: "Stays in the Mission", url: "https://airbnb.com/" })],
@@ -105,7 +105,7 @@ test("the bar is tools and a field at rest, the field alone in use, the agent's 
 
   // At rest: the canvas tools, then the field; nothing on the right.
   const tools = screen.getByRole("toolbar", { name: "Work tools" });
-  for (const name of ["Note", "Area", "Page or tab", "File or media"])
+  for (const name of ["Note", "Add to canvas"])
     await expect.element(tools.getByRole("button", { name, exact: true })).toBeVisible();
   expect(bar().dataset.mode).toBe("rest");
   expect(screen.container.querySelector("[data-zephium-work-chrome]")).toBeNull();
@@ -114,12 +114,8 @@ test("the bar is tools and a field at rest, the field alone in use, the agent's 
     .not.toBeNull();
   await shoot(root, "bar-rest");
 
-  // The title sits in the top scrim and is renamed in place.
-  await screen.getByRole("button", { name: "Rename YC trip", exact: true }).click();
-  const title = screen.getByRole("textbox", { name: "Project title", exact: true });
-  await title.fill("YC trip, January");
-  await userEvent.keyboard("{Enter}");
-  expect(rename).toHaveBeenCalledWith({ kind: "rename", title: "YC trip, January" });
+  // The work's name heads the canvas as the way to every other work.
+  await expect.element(screen.getByRole("button", { name: "Works" })).toHaveTextContent("YC trip");
 
   // In use: the tools step aside and the field opens its own controls.
   const field = screen.getByRole("textbox", { name: "What do you want to do?", exact: true });
@@ -134,7 +130,7 @@ test("the bar is tools and a field at rest, the field alone in use, the agent's 
   (document.activeElement as HTMLElement | null)?.blur();
   await expect.poll(() => bar().dataset.mode).toBe("rest");
 
-  // A run: the same bar becomes its line, with Stop and a place to add to it.
+  // A run: its line stands at the canvas's top; the bar stays a thin field that adds to it.
   objective.selected = "objective";
   objective.projection = running();
   environment.snapshot = {
@@ -148,23 +144,24 @@ test("the bar is tools and a field at rest, the field alone in use, the agent's 
       },
     ],
   };
-  await expect.poll(() => bar().dataset.mode).toBe("running");
+  await expect.poll(() => screen.container.querySelector(".island .agent-line")).not.toBeNull();
+  expect(bar().dataset.mode).toBe("rest");
+  expect(bar().querySelector(".agent-line")).toBeNull();
   await expect.element(screen.getByRole("button", { name: "Stop" })).toBeVisible();
   await expect
     .element(screen.getByRole("textbox", { name: "Add to this…", exact: true }))
     .toBeVisible();
-  expect(screen.container.querySelector(".work-bar .agent-line.docked")).not.toBeNull();
-  await expect.element(screen.getByText("Working", { exact: true })).toBeVisible();
+  expect(screen.container.querySelector(".works-trigger .live")).not.toBeNull();
   await shoot(root, "bar-running");
 
-  // Finished: the tools come back, and the run's last words head the bar.
+  // Finished: the island keeps the run's last words; the bar is unchanged.
   const done = running();
   done.executions[0]!.status = "completed";
   done.executions[0]!.steps![0]!.status = "succeeded";
   objective.projection = done;
   await expect.poll(() => bar().dataset.mode).toBe("rest");
   await expect.element(screen.getByRole("toolbar", { name: "Work tools" })).toBeVisible();
-  expect(screen.container.querySelector(".work-bar .agent-line.settled")).not.toBeNull();
+  expect(screen.container.querySelector(".island .agent-line.settled")).not.toBeNull();
   await shoot(root, "bar-settled");
 
   await screen.unmount();

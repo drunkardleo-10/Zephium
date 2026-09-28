@@ -16,12 +16,11 @@ import { firstRequest, type WorkStage } from "./project-environment-thread";
 import {
   host,
   observedTitle,
-  pageGroups,
   sourceRows,
   unreadPages,
   type SourceRow,
 } from "./project-environment-stage";
-import { BOARD_PIN, FRAMES, laneElement, stageRuns } from "./project-environment-board";
+import { BOARD_PIN, laneElement, stageRuns } from "./project-environment-board";
 import { standBeside } from "./board/lane";
 import type { Rect } from "./board/layout";
 import { fileName } from "./work-files";
@@ -29,6 +28,7 @@ import { heldPage, humanPage, phaseLabel } from "./work-human";
 import { pageFrameUrl } from "$domain/resources";
 import {
   clipText,
+  type BranchPage,
   type CanvasItem,
   type CanvasLink,
   type CanvasPosition,
@@ -402,7 +402,7 @@ export function viewPlacements(
     });
   });
 }
-const relationLabels: Record<Exclude<CanvasLink["kind"], "thread">, () => string> = {
+const relationLabels: Record<Exclude<CanvasLink["kind"], "thread" | "flow">, () => string> = {
   dependency: m.work_env_relation_depends_on,
   reference: m.work_env_relation_uses,
   supports: m.work_env_relation_supports,
@@ -486,22 +486,17 @@ function standFor(
 ): CanvasPosition {
   const rect = (id: string | undefined): Rect | undefined =>
     id ? stage.lane.rects[id] : undefined;
-  const trail = rect(stage.column.trail);
   switch (doing) {
     case "reading": {
       const read = (execution.steps ?? []).find(
         (step) =>
           step.status === "running" && (step.kind.kind === "read" || step.kind.kind === "discover"),
       );
-      const page = pageGroups(execution, []).find((group) =>
-        group.steps.some((step) => step.id === read?.id),
-      )?.id;
-      const card = rect(stage.column.pages.find((id) => id === page) ?? stage.column.pages[0]);
-      return standBeside(card ?? trail ?? stage.place);
+      const branch = stage.branches.find((candidate) =>
+        candidate.pages.some((group) => group.steps.some((step) => step.id === read?.id)),
+      );
+      return standBeside(rect(branch?.id) ?? stage.place);
     }
-    case "searching":
-    case "working":
-      return standBeside(trail ?? stage.place);
     case "writing":
     case "done": {
       const board = stage.lane.board;
@@ -562,8 +557,6 @@ export function environmentAgents(
       const stand = standFor(execution, doing, stage);
       positions[id] = stand;
       item.agent!.stand = stand;
-      // The trail already says what it is doing; the orb only shows where.
-      if (stage.trail.some((line) => line.live)) delete item.agent!.caption;
     }
     items.push(item);
   }
@@ -571,14 +564,13 @@ export function environmentAgents(
 }
 
 /**
- * One Sources card per request, at the foot of its process column: the pages
+ * One Sources block per request, under its result: the pages
  * its searches cited and the files its steps opened, once each; the pages that
- * would not open; and once the run is done, the frames of the pages it read.
+ * would not open. The pages themselves stand in the band's branches.
  */
 export function environmentSources(
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
   stages: readonly WorkStage[],
-  pages: (objective: string) => readonly WorkPageV1[] = () => [],
 ): CanvasItem[] {
   const items: CanvasItem[] = [];
   for (const stage of stages) {
@@ -603,27 +595,6 @@ export function environmentSources(
       }
     }
     const unread = runs.flatMap((execution) => unreadPages(execution));
-    const recorded = pages(stage.objective);
-    const frames = stage.live
-      ? []
-      : runs
-          .flatMap((execution) => pageGroups(execution, recorded))
-          .flatMap((group) => {
-            const frame = group.page?.frame
-              ? pageFrameUrl(group.page.attempt, group.page.step, group.page.frame.generation)
-              : null;
-            return frame
-              ? [
-                  {
-                    key: group.id,
-                    url: clipText(group.url, DETAIL_TEXT),
-                    host: host(group.url),
-                    frame,
-                  },
-                ]
-              : [];
-          })
-          .slice(0, FRAMES);
     items.push({
       id: card,
       type: "sources",
@@ -642,17 +613,16 @@ export function environmentSources(
         return refusal ? { ...row, note: clipText(refusal, ROW_TEXT) } : row;
       }),
       ...(unread.length ? { unread } : {}),
-      ...(frames.length ? { frames } : {}),
     });
   }
   return items;
 }
 
 /**
- * The pages a live run reads, in its process column: the one it is on and the
- * last it read. A page held for a person says so; the rest say how they went.
+ * Each branch of a band: the site, and every page its runs worked on there,
+ * its newest frame, how the read went, and whether it waits on the person.
  */
-export function environmentPages(
+export function environmentBranches(
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
   stages: readonly WorkStage[],
   pages: (objective: string) => readonly WorkPageV1[],
@@ -663,26 +633,24 @@ export function environmentPages(
 ): CanvasItem[] {
   const items: CanvasItem[] = [];
   for (const stage of stages) {
-    if (!stage.column.pages.length) continue;
+    if (!stage.branches.length) continue;
     const projection = objectives.get(stage.objective);
     if (!projection) continue;
     const recorded = pages(projection.work.id);
     const waiting = human(projection.work.id);
     const paused = activity(projection.work.id) === "paused";
-    for (const execution of stageRuns(stage, objectives)) {
-      const running = isLive(projection, execution);
-      const opened = recorded.filter((page) => page.execution === execution.id);
-      for (const entry of pageGroups(execution, recorded)) {
-        if (!stage.column.pages.includes(entry.id)) continue;
-        const { id, url } = entry;
-        const pageHost = host(url);
+    const runs = stageRuns(stage, objectives);
+    const running = runs.some((execution) => isLive(projection, execution));
+    for (const branch of stage.branches) {
+      const entries = branch.pages.map((entry): BranchPage => {
+        const opened = recorded.filter((page) => entry.steps.some((step) => step.id === page.step));
         const live = running && entry.steps.some((step) => step.status === "running");
         const succeeded = entry.steps.some((step) => step.status === "succeeded");
         const refused = !succeeded && !live ? (entry.steps.at(-1)?.note?.trim() ?? "") : "";
         const frame = entry.page?.frame
           ? pageFrameUrl(entry.page.attempt, entry.page.step, entry.page.frame.generation)
           : null;
-        // Rust names a held page by its read step; one card folds several of them.
+        // Rust names a held page by its read step; one page folds several of them.
         const held = heldPage(
           waiting.filter((candidate) =>
             entry.steps.some(
@@ -699,16 +667,13 @@ export function environmentPages(
           ?.page_title;
         const shown = !!entry.tab && !entry.steps.length;
         const account = entry.steps.find((step) => step.account?.badge)?.account?.host;
-        const rect = stage.lane.rects[id]!;
-        items.push({
-          id,
-          type: "page",
-          kind: m.work_env_page(),
+        return {
+          id: entry.id,
+          url: entry.url,
           title: clipText(
-            observed?.trim() || entry.tab?.title.trim() || pageHost || m.work_env_page(),
+            observed?.trim() || entry.tab?.title.trim() || branch.host || m.work_env_page(),
             TITLE_TEXT,
           ),
-          detail: clipText(url, DETAIL_TEXT),
           status: shown
             ? m.work_env_tab_caption()
             : held
@@ -720,25 +685,31 @@ export function environmentPages(
                 : succeeded
                   ? m.work_env_page_read()
                   : clipText(refused, STATUS_TEXT) || m.work_env_status_failed(),
-          size: { width: rect.width, height: rect.height },
-          page: {
-            url,
-            host: pageHost,
-            frame,
-            live,
-            ...(held ? { human: humanPage(held) } : {}),
-            ...(account ? { account } : {}),
-            ...(shown ? { tab: true } : {}),
-          },
-          ...(shown || live || succeeded || held ? {} : { unavailable: true }),
-        });
-      }
+          frame,
+          live,
+          ...(held ? { human: humanPage(held) } : {}),
+          ...(account ? { account } : {}),
+          ...(shown ? { tab: true } : {}),
+        };
+      });
+      const rect = stage.lane.rects[branch.id]!;
+      items.push({
+        id: branch.id,
+        type: "branch",
+        kind: m.work_env_page(),
+        title: branch.host,
+        detail: "",
+        status: "",
+        size: { width: rect.width, height: rect.height },
+        branch: { host: branch.host, pages: entries, live: entries.some((page) => page.live) },
+        ...(entries.some((page) => page.live) ? { active: true } : {}),
+      });
     }
   }
   return items;
 }
 
-/** Each lane's board: its head, its blocks, and its trail in the process column. */
+/** Each band's result: its head and its blocks. */
 export function environmentBoards(
   stages: readonly WorkStage[],
   open: string | null,
@@ -751,18 +722,6 @@ export function environmentBoards(
       const rect = stage.lane.rects[id]!;
       return { width: rect.width, height: rect.height };
     };
-    if (stage.column.trail)
-      items.push({
-        id: stage.column.trail,
-        type: "trail",
-        kind: m.work_board_trail(),
-        title: stage.request,
-        detail: "",
-        status: "",
-        size: size(stage.column.trail),
-        trail: stage.trail,
-        ...(stage.live ? { active: true } : {}),
-      });
     if (stage.column.head)
       items.push({
         id: stage.column.head,

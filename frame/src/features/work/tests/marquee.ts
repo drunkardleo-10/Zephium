@@ -29,4 +29,7 @@ export async function marquee(
   fire("pointermove", to);
   fire("pointerup", to);
   pane.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: to[0], clientY: to[1] }));
+  // The flow commits the box's selection on its next frames; a key released
+  // before then reaches a selection still being drawn.
+  await new Promise((settled) => setTimeout(settled, 200));
 }

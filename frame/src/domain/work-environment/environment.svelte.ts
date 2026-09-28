@@ -54,7 +54,10 @@ export class WorkEnvironmentSession {
   } | null>(null);
   objectiveToAttach = $state<string | null>(null);
   viewDraft = $state.raw<{ id: string; expected: string; view: WorkEnvironmentView } | null>(null);
+  /** Where the person is looking, kept here until the next write or until the Work is left. */
+  private camera: { id: string; x: number; y: number; zoom_milli: number } | null = null;
   private active = false;
+  private launched = false;
   private generation = 0;
   private reads = 0;
   private listing = 0;
@@ -112,12 +115,22 @@ export class WorkEnvironmentSession {
     if (!this.active || generation !== this.generation || this.pending) return;
     const listed = await this.reload();
     if (!this.active || generation !== this.generation || !listed) return;
-    if (this.selected) await this.open(this.selected);
-    else {
-      const work = this.works.find((work) => work.lifecycle === "active");
-      if (work) await this.open(work.id);
-      else await this.create(defaultTitle);
+    // The first visit after launch starts on a clean work; an empty one is reused.
+    const launch = !this.launched;
+    this.launched = true;
+    const last = this.selected ?? this.works.find((work) => work.lifecycle === "active")?.id;
+    if (!last) {
+      await this.create(defaultTitle);
+      return;
     }
+    const opened = await this.open(last);
+    if (
+      launch &&
+      opened &&
+      this.snapshot?.lifecycle === "active" &&
+      this.snapshot.elements.length > 0
+    )
+      await this.create(defaultTitle);
   }
   stopObserving() {
     this.active = false;
@@ -271,7 +284,11 @@ export class WorkEnvironmentSession {
     return okay;
   }
   private publishRemoteView(view: WorkEnvironmentView) {
-    this.remoteView = { sequence: ++this.remoteSequence, view };
+    const camera = this.camera?.id === this.snapshot?.id ? this.camera : null;
+    this.remoteView = {
+      sequence: ++this.remoteSequence,
+      view: camera ? { ...view, x: camera.x, y: camera.y, zoom_milli: camera.zoom_milli } : view,
+    };
   }
   async create(title: string) {
     if (!(await this.flushView())) return false;
@@ -414,20 +431,53 @@ export class WorkEnvironmentSession {
     if (this.active && this.delivery === "ready" && this.viewDraft)
       this.timer = setTimeout(() => {
         void this.flushView();
-      }, 750);
+      }, 1200);
   }
+  /**
+   * Where things stand is saved once the hands have been still a moment; where
+   * the person is looking only rides along with the next write, or is saved as
+   * the Work is left, so panning never writes.
+   */
   checkpoint(view: WorkEnvironmentView) {
     const snapshot = this.snapshot;
     if (!snapshot || snapshot.lifecycle !== "active") return;
-    const expected =
-      this.viewDraft?.id === snapshot.id ? this.viewDraft.expected : snapshot.view.revision;
+    const drafted = this.viewDraft?.id === snapshot.id;
+    if (!drafted && !arranged(snapshot.view, view)) {
+      this.camera = { id: snapshot.id, x: view.x, y: view.y, zoom_milli: view.zoom_milli };
+      return;
+    }
+    const expected = drafted ? this.viewDraft!.expected : snapshot.view.revision;
+    this.camera = null;
     this.viewDraft = { id: snapshot.id, expected, view: { ...view, revision: expected } };
     this.scheduleView();
+  }
+  /** A held camera becomes a write against the latest saved arrangement. */
+  private draftCamera() {
+    const camera = this.camera;
+    const snapshot = this.snapshot;
+    this.camera = null;
+    if (!camera || this.viewDraft || snapshot?.id !== camera.id || snapshot.lifecycle !== "active")
+      return;
+    const { x, y, zoom_milli } = snapshot.view;
+    if (x === camera.x && y === camera.y && zoom_milli === camera.zoom_milli) return;
+    const expected = snapshot.view.revision;
+    this.viewDraft = {
+      id: snapshot.id,
+      expected,
+      view: {
+        ...snapshot.view,
+        revision: expected,
+        x: camera.x,
+        y: camera.y,
+        zoom_milli: camera.zoom_milli,
+      },
+    };
   }
   async flushView(): Promise<boolean> {
     clearTimeout(this.timer);
     if (this.writing && !(await this.writing)) return false;
     if (this.pending) return false;
+    this.draftCamera();
     const draft = this.viewDraft;
     if (!draft) return true;
     if (this.delivery === "conflict" || this.delivery === "unknown") return false;
@@ -437,6 +487,12 @@ export class WorkEnvironmentSession {
       return this.flushView();
     return !this.viewDraft && (okay || this.delivery === "rejected");
   }
+}
+function arranged(before: WorkEnvironmentView, after: WorkEnvironmentView) {
+  return (
+    JSON.stringify([before.placements, before.areas ?? []]) !==
+    JSON.stringify([after.placements, after.areas ?? []])
+  );
 }
 const sessions = new SvelteMap<string, WorkEnvironmentSession>();
 export function environmentSession(profile: string, space: string): WorkEnvironmentSession | null {

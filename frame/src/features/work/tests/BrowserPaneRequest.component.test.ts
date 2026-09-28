@@ -64,7 +64,7 @@ test.each(["applied", "no_op", "deferred", "rejected", "failed"] as const)(
     const root = screen.container.querySelector(".environment") as HTMLElement;
     root.style.height = "720px";
     root.style.width = "1100px";
-    await screen.getByRole("button", { name: "Page or tab", exact: true }).click();
+    await screen.getByRole("button", { name: "Add to canvas", exact: true }).click();
     await screen.getByRole("button", { name: "Open Research tab here", exact: true }).click();
     await expect.poll(() => native.settle.mock.calls.length).toBe(1);
     expect(native.paneShow.mock.lastCall?.[0]).toEqual({ kind: "tab", id: "space-tab" });

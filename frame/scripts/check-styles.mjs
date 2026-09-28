@@ -19,6 +19,7 @@ for (const file of files) {
         "--shadow-popover",
         "--shadow-menu",
         "--shadow-overlay",
+        "--shadow-sheet",
         "--shadow-float",
         "--shadow-thumb",
         "--shadow-thumb-grab",

@@ -153,9 +153,8 @@
     gap: 2px;
     padding: 4px;
     border-radius: var(--radius-control);
-    background: var(--color-menu);
-    backdrop-filter: blur(12px) saturate(1.2);
-    box-shadow: var(--shadow-popover);
+    background: var(--color-float);
+    box-shadow: var(--shadow-menu);
   }
 
   .bar button {

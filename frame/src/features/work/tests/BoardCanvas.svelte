@@ -1,13 +1,14 @@
 <script lang="ts">
   import { SvelteMap } from "svelte/reactivity";
   import WorkCanvas from "../components/WorkCanvas.svelte";
-  import { environmentStages, measureKey } from "../lib/project-environment-board";
+  import { clearOfBands, environmentStages, measureKey } from "../lib/project-environment-board";
   import {
     environmentAgents,
     environmentBoards,
+    environmentBranches,
     environmentItems,
-    environmentPages,
     environmentSources,
+    environmentView,
   } from "../lib/project-environment";
   import { environmentRequests } from "../lib/project-environment-thread";
   import type { BoardActions } from "../lib/canvas-context";
@@ -33,6 +34,7 @@
     }),
   );
   const requests = $derived(environmentRequests(stages));
+  const own = $derived(environmentView(scene.snapshot));
   const agents = $derived(
     environmentAgents(scene.snapshot, scene.objectives, () => undefined, stages),
   );
@@ -40,8 +42,8 @@
     ...environmentItems(scene.snapshot, [], [], scene.objectives),
     ...requests.items,
     ...environmentBoards(stages, open),
-    ...environmentSources(scene.objectives, stages, recorded),
-    ...environmentPages(scene.objectives, stages, recorded),
+    ...environmentSources(scene.objectives, stages),
+    ...environmentBranches(scene.objectives, stages, recorded),
     ...agents.items,
   ]);
   const pictures = $derived(
@@ -79,7 +81,15 @@
   links={requests.links}
   {pictures}
   authoritative={new Set()}
-  initialView={{ positions: { ...requests.positions, ...agents.positions }, viewport }}
+  initialView={{
+    positions: {
+      ...clearOfBands(own.positions, own.sizes ?? {}, stages),
+      ...requests.positions,
+      ...agents.positions,
+    },
+    sizes: own.sizes,
+    viewport,
+  }}
   {board}
   oninspect={() => {}}
   onopen={(id) => board.toggle(id)}

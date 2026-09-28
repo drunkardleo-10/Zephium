@@ -79,83 +79,12 @@ async function mountCanvas() {
   return { screen, environment, objective, snapshot, create, operation, run, composer };
 }
 
-async function selectTab(screen: Awaited<ReturnType<typeof mountCanvas>>["screen"]) {
-  await expect.poll(() => screen.container.querySelectorAll(".work-drag-handle").length).toBe(1);
-  await screen.container.querySelector<HTMLElement>(".work-drag-handle")!.click();
-}
-
-test("a tab card starts a signed-in request that Rust prepares for approval", async () => {
-  const { screen, environment, snapshot, create, operation, composer } = await mountCanvas();
-  await selectTab(screen);
-  await screen.getByRole("button", { name: "Change a field as me", exact: true }).click();
-  await expect.element(screen.getByRole("group", { name: "Signed-in page" })).toBeVisible();
-  await expect
-    .element(screen.getByRole("radio", { name: "Change a field and restore it", exact: true }))
-    .toBeChecked();
-  await expect
-    .element(screen.getByText("https://app.notion.com", { exact: true }).first())
-    .toBeVisible();
-  await expect.element(composer).toHaveFocus();
-  await screen.getByRole("radio", { name: "Change a field and restore it", exact: true }).click();
-  await composer.fill("Rename the sprint page briefly");
-  await screen.getByRole("button", { name: "Send", exact: true }).click();
-  await expect.element(screen.getByRole("alert")).toBeVisible();
-  expect(create).not.toHaveBeenCalled();
-  await screen.getByRole("textbox", { name: "Current value", exact: true }).fill("Sprint 42");
-  await screen
-    .getByRole("textbox", { name: "Temporary value", exact: true })
-    .fill("Sprint 42 (probe)");
-  await screen.getByRole("button", { name: "Send", exact: true }).click();
-  await expect.poll(() => operation.mock.calls.length).toBe(1);
-  expect(create).toHaveBeenCalledExactlyOnceWith(
-    "Rename the sprint page briefly",
-    expect.any(String),
-  );
-  expect(operation.mock.calls[0]![0]).toEqual({
-    kind: "prepare_account",
-    request: {
-      version: 1,
-      work: "objective",
-      expected_revision: "4",
-      environment: snapshot.id,
-      element: tabElement,
-      effect: {
-        kind: "update",
-        update: { field: null, from: "Sprint 42", to: "Sprint 42 (probe)" },
-      },
-    },
-  });
-  expect(environment.accountScope).toBeNull();
-  expect(environment.composer).toBe("");
-  await screen.unmount();
-  environment.dispose();
-});
-
-test("the tab card offers its one page as the person, and a request with it runs as asked", async () => {
-  const { screen, environment, operation, run, composer } = await mountCanvas();
-  await selectTab(screen);
-  await expect
-    .element(screen.getByRole("button", { name: "Read this page as me", exact: true }))
-    .toBeVisible();
-  await expect
-    .element(screen.getByRole("button", { name: "Change a field as me", exact: true }))
-    .toBeVisible();
-  // Signed-in reading across a site is not a mode to pick: the request's words ask for it.
-  expect(screen.container.textContent).not.toContain("Ask signed in");
-  expect(screen.container.textContent).not.toContain("as me for this request");
-  await composer.fill("What changed in the Notion sprint this week?");
-  await screen.getByRole("button", { name: "Send", exact: true }).click();
-  // Rust decides whether the words name a signed-in tab; the frontend only sends.
-  await expect.poll(() => run.mock.calls.length).toBe(1);
-  expect(operation).not.toHaveBeenCalled();
-  expect(environment.accountScope).toBeNull();
-  await screen.unmount();
-  environment.dispose();
-});
-
 test("all open tabs is consent for one request, shown in the composer", async () => {
   const { screen, environment, snapshot, run, composer } = await mountCanvas();
-  await screen.getByRole("button", { name: "Page or tab", exact: true }).click();
+  await screen
+    .getByRole("toolbar", { name: "Work tools" })
+    .getByRole("button", { name: "Add to canvas", exact: true })
+    .click();
   const all = screen.getByRole("checkbox", { name: /All open tabs/ });
   await expect
     .element(
@@ -165,6 +94,7 @@ test("all open tabs is consent for one request, shown in the composer", async ()
     )
     .toBeVisible();
   await all.click();
+  await expect.element(all).toBeChecked();
   await expect.element(screen.getByText("Using your open tabs", { exact: true })).toBeVisible();
   await userEvent.keyboard("{Escape}");
   await composer.fill("What am I researching?");

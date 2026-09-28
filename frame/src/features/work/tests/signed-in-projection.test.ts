@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import type { WorkExecutionFact, WorkRuntimeProjection } from "$shared/ipc/bindings";
 import { projection, snapshot } from "./environment-fixtures";
-import { environmentPages } from "../lib/project-environment";
+import { environmentBranches } from "../lib/project-environment";
 import { environmentStages } from "../lib/project-environment-board";
 import { runTrail } from "../lib/board/trail";
 import { accountRefusal, accountRefusalSentence } from "../lib/work-human";
@@ -23,14 +23,16 @@ function agentRun(): { state: WorkRuntimeProjection; run: WorkExecutionFact } {
   run.artifacts = [];
   run.user_artifacts = [];
   run.steps = [];
-  // Pages stand in the process column while their run goes on.
+  // Pages stand in their site's branch while their run goes on.
   run.status = "running";
   return { state, run };
 }
 const scene = { ...snapshot, elements: snapshot.elements.slice(0, 1) };
 const pagesOf = (state: WorkRuntimeProjection) => {
   const objectives = new Map([["objective", state]]);
-  return environmentPages(objectives, environmentStages(scene, objectives), () => []);
+  return environmentBranches(objectives, environmentStages(scene, objectives), () => []).flatMap(
+    (item) => item.branch?.pages ?? [],
+  );
 };
 
 test("consented open tabs stand as page cards without a read until one is read", () => {
@@ -48,17 +50,9 @@ test("consented open tabs stand as page cards without a read until one is read",
     ],
   };
   const shown = pagesOf(state);
-  expect(
-    shown.map((item) => [
-      item.title,
-      item.status,
-      item.page?.tab,
-      item.page?.frame,
-      item.unavailable,
-    ]),
-  ).toEqual([
-    ["Sprint 42", "Tab", true, null, undefined],
-    ["Quiet keyboards", "Tab", true, null, undefined],
+  expect(shown.map((page) => [page.title, page.status, page.tab, page.frame])).toEqual([
+    ["Sprint 42", "Tab", true, null],
+    ["Quiet keyboards", "Tab", true, null],
   ]);
   // Shown is not read: the trail counts no pages.
   expect(runTrail([run], true).some((line) => line.icon === "page")).toBe(false);
@@ -72,7 +66,7 @@ test("consented open tabs stand as page cards without a read until one is read",
     },
   ];
   const read = pagesOf(state);
-  expect(read.map((item) => [item.id, item.title, item.status, !!item.page?.tab])).toEqual([
+  expect(read.map((page) => [page.id, page.title, page.status, !!page.tab])).toEqual([
     ["page:execution:read", "Quiet keyboards", "Read", false],
     ["page:execution:tab:0", "Sprint 42", "Tab", true],
   ]);
@@ -97,7 +91,7 @@ test("a signed-in read carries its host to the card, and the trail its session u
     },
   ];
   run.accounts = [{ host: "app.notion.com", pages_used: 1, pages: 12 }];
-  expect(pagesOf(state).map((item) => item.page?.account)).toEqual(["app.notion.com", undefined]);
+  expect(pagesOf(state).map((page) => page.account)).toEqual(["app.notion.com", undefined]);
   expect(runTrail([run], true)).toContainEqual(
     expect.objectContaining({ text: "As you on app.notion.com", detail: "1 of 12 pages" }),
   );

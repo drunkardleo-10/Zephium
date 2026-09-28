@@ -7,7 +7,7 @@ export function remember(rect: PaneRect) {
   remembered = rect;
 }
 
-/** Launcher-like default: a tall pane hugging the canvas's trailing edge. */
+/** Everything opens in the centre: a page stands over the middle of the canvas, most of it. */
 export function paneGeometry(bounds: DOMRect): PaneRect {
   const inset = 16;
   const placed = over;
@@ -22,11 +22,11 @@ export function paneGeometry(bounds: DOMRect): PaneRect {
       height,
     };
   }
-  const width = Math.min(Math.max(640, Math.round(bounds.width * 0.56)), bounds.width - inset * 2);
-  const height = bounds.height - inset * 2;
+  const width = Math.min(Math.max(640, Math.round(bounds.width * 0.8)), bounds.width - inset * 2);
+  const height = Math.min(Math.round(bounds.height * 0.86), bounds.height - inset * 2);
   const fallback = {
-    x: bounds.right - width - inset,
-    y: bounds.top + inset,
+    x: Math.round(bounds.left + (bounds.width - width) / 2),
+    y: Math.round(bounds.top + (bounds.height - height) / 2),
     width,
     height,
   };

@@ -25,6 +25,8 @@
   import CompareCard from "./cards/CompareCard.svelte";
   import FolderCard from "./cards/FolderCard.svelte";
   import PageCard from "./cards/PageCard.svelte";
+  import BranchCard from "./cards/BranchCard.svelte";
+  import RequestText from "./cards/RequestText.svelte";
   import BlockHost from "./board/BlockHost.svelte";
   import BoardHead from "./board/BoardHead.svelte";
   import Trail from "./board/Trail.svelte";
@@ -54,10 +56,8 @@
   /** What a block shows past its first rows opens in place, and closes again. */
   const OPENS = new Set(["table", "document", "code", "comparison", "gallery"]);
   const opens = $derived(type === "block" && OPENS.has(data.block?.data.kind ?? ""));
-  /** Only a request is an end of a line: the thread runs through it. */
-  const ends = $derived(!["block", "head", "trail", "sources", "page"].includes(type));
-  /** A tab's one page, read or changed with the person's session: each asks its own approval. */
-  const signedIn = $derived(type === "tab" && !data.unavailable && !!data.detail);
+  /** What a line can reach: a request, a branch, a result's head, the person's own cards. */
+  const ends = $derived(!["block", "trail", "sources", "page"].includes(type));
   /** A page held for a person opens the takeover, never a copy in Browse. */
   const waiting = $derived(data.page?.human?.phase === "waiting_for_human");
 </script>
@@ -119,11 +119,6 @@
           <option value="">{m.work_env_no_area()}</option>
           {#each areas.list as area (area.id)}<option value={area.id}>{area.title}</option>{/each}
         </select>{/if}{/if}
-    {#if signedIn}<button type="button" onclick={() => action(id, "account")}
-        >{m.work_account_read_page()}</button
-      ><button type="button" onclick={() => action(id, "account-update")}
-        >{m.work_account_change_field()}</button
-      >{/if}
     {#if !inert && !data.actionLabel}<span class="separator"></span><button
         type="button"
         class="danger"
@@ -152,7 +147,17 @@
   {:else if type === "note"}<NoteCard item={data} {selected} />
   {:else if type === "media"}<MediaCard item={data} {selected} />
   {:else if type === "responsibility"}<ResponsibilityCard item={data} {selected} />
-  {:else if type === "request"}<ObjectiveCard item={data} {selected} onaction={() => {}} />
+  {:else if type === "objective" || type === "request"}<RequestText
+      item={data}
+      {selected}
+      ontoggle={() => action(id, "expand-request")}
+      onaction={() => action(id)}
+    />
+  {:else if type === "branch"}<BranchCard
+      item={data}
+      {selected}
+      onopen={(page) => action(id, `page:${page}`)}
+    />
   {:else if data.artifact?.content.kind === "matrix"}<CompareCard item={data} {selected} />
   {:else if type === "result" || data.artifact}<ResultCard
       {id}
@@ -219,9 +224,8 @@
     gap: 2px;
     padding: 4px;
     border-radius: var(--radius-control);
-    background: var(--color-menu);
-    backdrop-filter: blur(12px) saturate(1.2);
-    box-shadow: var(--shadow-popover);
+    background: var(--color-float);
+    box-shadow: var(--shadow-menu);
   }
 
   .bar button {

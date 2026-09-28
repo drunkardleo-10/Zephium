@@ -46,7 +46,7 @@ test("every message keeps its own request card, one lane each down the request c
   expect(first.board.blocks.map((block) => [block.id, block.kind])).toEqual([
     ["result-card", "document"],
   ]);
-  expect(first.lane.rects["result-card"]).toMatchObject({ x: 348 });
+  expect(first.lane.rects["result-card"]).toMatchObject({ x: 340 + 72 });
   const below = first.lane.extent + 96;
   expect(stages.map((stage) => [stage.card, stage.request, stage.place.x, stage.place.y])).toEqual([
     ["objective-card", "Compare quiet keyboards", 0, 0],
@@ -61,8 +61,12 @@ test("every message keeps its own request card, one lane each down the request c
     ["request:objective-card:continuation-1", "request", "Show me the quietest one"],
     ["request:objective-card:continuation-2", "request", "And the wireless ones"],
   ]);
-  // The thread joins request to request down the column.
-  expect(requests.links.map((link) => [link.kind, link.source, link.target])).toEqual([
+  // The thread joins request to request down the column; each band's own lines run across it.
+  expect(
+    requests.links
+      .filter((link) => link.kind === "thread")
+      .map((link) => [link.kind, link.source, link.target]),
+  ).toEqual([
     ["thread", "objective-card", "request:objective-card:continuation-1"],
     ["thread", "request:objective-card:continuation-1", "request:objective-card:continuation-2"],
   ]);
