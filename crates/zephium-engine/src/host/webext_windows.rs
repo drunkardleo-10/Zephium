@@ -296,7 +296,22 @@ impl super::EngineHost {
         let action = Rc::new(RefCell::new(Action::default()));
         // Profile objects are tied to their originating controller. Keep the
         // management controller alive for the entire native install lifetime.
-        let bridge = self.extension_view(profile, &load.extension_id, action.clone(), runtime)?;
+        let bridge = match self.extension_view(profile, &load.extension_id, action.clone(), runtime)
+        {
+            Ok(bridge) => bridge,
+            Err(error) => {
+                if self
+                    .windows_extensions
+                    .startups
+                    .get(&profile)
+                    .is_some_and(|startup| startup.failed.get())
+                {
+                    self.quarantine_unverifiable_windows_profile(profile);
+                }
+                return Err(error);
+            }
+        };
+        let mut rollback_failed = false;
         let result = (|| {
             let native_profile = native::profile(&bridge.view.webview())
                 .map_err(|error| format!("Extension profile: {error}"))?;
@@ -304,7 +319,6 @@ impl super::EngineHost {
                 .map_err(|error| format!("AddBrowserExtension: {error}"))?;
             let result = (|| {
                 if native::extension_id(&item).map_err(|e| e.to_string())? != load.extension_id {
-                    native::remove(&item)?;
                     return Err(
                         "Native extension identity does not match the verified package.".into(),
                     );
@@ -321,7 +335,7 @@ impl super::EngineHost {
                     .map_err(|error| error.to_string())
             })();
             if let Err(error) = result {
-                let _ = native::enable(&item, false);
+                rollback_failed = native::enable(&item, false).is_err();
                 return Err(error);
             }
             Ok(item)
@@ -330,7 +344,21 @@ impl super::EngineHost {
             Ok(item) => item,
             Err(error) => {
                 self.close_extension_view(profile, bridge);
-                self.quarantine_unverifiable_windows_profile(profile);
+                // Package rejection, ID mismatch and add/enable errors belong
+                // to this install (Failed/Retry), not the browsing profile.
+                // Quarantine only if startup attestation lost the exact native
+                // environment/profile/private identity, or rollback cannot
+                // prove a partially loaded extension disabled. Failed native
+                // view closure separately retains its cleanup-debt lease.
+                if rollback_failed
+                    || self
+                        .windows_extensions
+                        .startups
+                        .get(&profile)
+                        .is_some_and(|startup| startup.failed.get())
+                {
+                    self.quarantine_unverifiable_windows_profile(profile);
+                }
                 return Err(error);
             }
         };
