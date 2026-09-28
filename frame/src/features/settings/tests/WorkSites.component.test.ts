@@ -1,25 +1,28 @@
 import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
+import type { WorkSiteAccessV1, WorkSiteRowV1 } from "$shared/ipc/bindings";
 import SitesPage from "../components/sections/SitesPage.svelte";
 
 const native = vi.hoisted(() => {
-  const rows = [
+  const rows: WorkSiteRowV1[] = [
     { site: "slack.com", name: "Slack", access: "always", sensitive: false },
     { site: "chase.com", name: "chase.com", access: "ask", sensitive: true },
   ];
   return {
     rows,
-    set: vi.fn(async (profile: string, change: { site: string; access: string | null }) => {
-      const sites = rows
-        .filter((row) => row.site !== change.site)
-        .concat(
-          change.access
-            ? [{ site: change.site, name: change.site, access: change.access, sensitive: false }]
-            : [],
-        );
-      return { version: 1, profile, sites, error: null };
-    }),
+    set: vi.fn(
+      async (profile: string, change: { site: string; access: WorkSiteAccessV1 | null }) => {
+        const sites = rows
+          .filter((row) => row.site !== change.site)
+          .concat(
+            change.access
+              ? [{ site: change.site, name: change.site, access: change.access, sensitive: false }]
+              : [],
+          );
+        return { version: 1, profile, sites, error: null };
+      },
+    ),
   };
 });
 vi.mock("$domain/tabs", () => ({

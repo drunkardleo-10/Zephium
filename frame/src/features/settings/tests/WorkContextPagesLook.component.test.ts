@@ -2,43 +2,94 @@ import "$styles/global.css";
 import { test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
+import MemoryPage from "../components/sections/MemoryPage.svelte";
 import SitesPage from "../components/sections/SitesPage.svelte";
+import SkillsPage from "../components/sections/SkillsPage.svelte";
 import WorkContextStage from "./WorkContextStage.svelte";
 
-const PROFILE = "00000000000000000000000001";
 vi.mock("$domain/tabs", () => ({
   tabs: { profile: () => ({ id: "00000000000000000000000001", kind: "regular" }) },
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  const sites = [
-    { site: "slack.com", name: "Slack", access: "always", sensitive: false },
-    { site: "notion.so", name: "Notion", access: "always", sensitive: false },
-    { site: "linkedin.com", name: "LinkedIn", access: "ask", sensitive: false },
-    { site: "reddit.com", name: "Reddit", access: "never", sensitive: false },
-    { site: "chase.com", name: "chase.com", access: "ask", sensitive: true },
-  ];
+  const { memories, sites, skills, skillText } = await import("./work-context-fixtures");
   return mockBindings({
     faviconProbe: async () => true,
     workSites: vi.fn(async (profile: string) => ({ version: 1, profile, sites, error: null })),
+    workMemories: vi.fn(async (profile: string) => ({
+      version: 1,
+      profile,
+      memories,
+      refused: null,
+      error: null,
+    })),
+    workSkills: vi.fn(async (profile: string) => ({
+      version: 1,
+      profile,
+      skills,
+      text: null,
+      fault: null,
+      error: null,
+    })),
+    workSkillText: vi.fn(async (profile: string, name: string) => ({
+      version: 1,
+      profile,
+      skills,
+      text: skillText(name),
+      fault: null,
+      error: null,
+    })),
   });
 });
 
 const shots = "../../../../../target/work-settings";
-const settle = () => new Promise((done) => setTimeout(done, 500));
+const settle = (ms = 500) => new Promise((done) => setTimeout(done, ms));
+async function shoot(name: string) {
+  for (const theme of ["dark", "light"]) {
+    document.documentElement.dataset.theme = theme;
+    await settle();
+    await page.screenshot({ path: `${shots}/${name}-${theme}.png` });
+  }
+  document.documentElement.dataset.theme = "dark";
+}
 
-test.each([["sites", "Sites", "Where the agent works in your own session.", SitesPage]] as const)(
-  "Settings → %s in both themes",
-  async (name, title, description, section) => {
-    void PROFILE;
-    await page.viewport(1000, 900);
-    const screen = await render(WorkContextStage, { title, description, page: section });
-    for (const theme of ["dark", "light"]) {
-      document.documentElement.dataset.theme = theme;
-      await settle();
-      await page.screenshot({ path: `${shots}/${name}-${theme}.png` });
-    }
-    document.documentElement.dataset.theme = "dark";
-    await screen.unmount();
-  },
-);
+test("Settings → Sites", async () => {
+  await page.viewport(1000, 900);
+  const screen = await render(WorkContextStage, {
+    title: "Sites",
+    description: "Where the agent works in your own session.",
+    page: SitesPage,
+  });
+  await shoot("sites");
+  await screen.unmount();
+});
+
+test("Settings → Memory, at rest and editing a fact", async () => {
+  await page.viewport(1000, 1100);
+  const screen = await render(WorkContextStage, {
+    title: "Memory",
+    description: "What the agent knows about you.",
+    page: MemoryPage,
+  });
+  await shoot("memory");
+  await screen.getByRole("button", { name: /Prefers aisle seats/u }).click();
+  await shoot("memory-edit");
+  await screen.unmount();
+});
+
+test("Settings → Skills, the list, a built-in and the person's own skill open", async () => {
+  await page.viewport(1000, 1500);
+  const screen = await render(WorkContextStage, {
+    title: "Skills",
+    description: "What the agent knows how to do.",
+    page: SkillsPage,
+  });
+  await shoot("skills");
+  await screen.getByRole("button", { name: /Trip planning/u }).click();
+  await settle(300);
+  await shoot("skills-builtin");
+  await screen.getByRole("button", { name: /Weekly review/u }).click();
+  await settle(600);
+  await shoot("skills-edit");
+  await screen.unmount();
+});

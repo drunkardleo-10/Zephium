@@ -1,5 +1,6 @@
 export { default as Alert02Icon } from "@hugeicons/core-free-icons/Alert02Icon";
 export { default as ArrowUp02Icon } from "@hugeicons/core-free-icons/ArrowUp02Icon";
+export { default as Brain02Icon } from "@hugeicons/core-free-icons/Brain02Icon";
 export { default as BrowserIcon } from "@hugeicons/core-free-icons/BrowserIcon";
 export { default as Clock04Icon } from "@hugeicons/core-free-icons/Clock04Icon";
 export { default as ComputerTerminal01Icon } from "@hugeicons/core-free-icons/ComputerTerminal01Icon";

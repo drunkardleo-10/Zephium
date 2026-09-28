@@ -4,15 +4,26 @@ import { WorkSession } from "$domain/work";
 import { WorkHumanSession } from "$domain/work-human";
 import AskCard from "../components/asks/AskCard.svelte";
 import RunAsks from "../components/asks/RunAsks.svelte";
+import Remembered from "../components/asks/Remembered.svelte";
 import { partAsks, runActions } from "../components/asks/actions";
 import { asksOf } from "../components/asks/asks";
 import { projection } from "./environment-fixtures";
 import * as f from "./ask-fixtures";
 
-const native = vi.hoisted(() => ({ operation: vi.fn(), human: vi.fn() }));
+const native = vi.hoisted(() => ({
+  operation: vi.fn(),
+  human: vi.fn(),
+  memories: vi.fn(),
+  forget: vi.fn(),
+}));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ workOperation: native.operation, workHumanContinue: native.human });
+  return mockBindings({
+    workOperation: native.operation,
+    workHumanContinue: native.human,
+    workMemories: native.memories,
+    workChangeMemory: native.forget,
+  });
 });
 
 function sessionWith(...steps: Parameters<typeof f.runWith>[0]) {
@@ -178,4 +189,46 @@ test("the island holds a live run's open asks, newest first, and the rows get th
   ]);
   await screen.unmount();
   session.dispose();
+});
+
+test("a remembered fact shows beside its run and Undo forgets it", async () => {
+  const fact = {
+    id: "01M3F2YJTVB6S1M73MERQER7NA",
+    text: "Prefers aisle seats on long flights",
+    kind: "preference",
+    work: "01M3CV1H7HRABAGVH1T8HXH2DD",
+    execution: "01M3CV1H7HRABAGVH1T8HXH2DE",
+    created_ms: "1790000000000",
+  };
+  const other = { ...fact, id: "01M3F2YJTVB6S1M73MERQER7NB", text: "Older", execution: undefined };
+  native.memories.mockImplementation(async (profile: string) => ({
+    version: 1,
+    profile,
+    memories: [fact, other],
+    refused: null,
+    error: null,
+  }));
+  native.forget.mockImplementation(async (profile: string) => ({
+    version: 1,
+    profile,
+    memories: [other],
+    refused: null,
+    error: null,
+  }));
+  const screen = await render(Remembered, {
+    profile: "profile",
+    work: fact.work,
+    execution: fact.execution,
+  });
+  await expect.element(screen.getByText("Prefers aisle seats on long flights")).toBeVisible();
+  expect(screen.container.textContent).not.toContain("Older");
+  expect(native.memories).toHaveBeenCalledWith("profile", { query: null, work: fact.work });
+  await screen.getByRole("button", { name: "Undo" }).click();
+  expect(native.forget).toHaveBeenCalledExactlyOnceWith(
+    "profile",
+    { query: null, work: fact.work },
+    { kind: "forget", id: fact.id },
+  );
+  await expect.element(screen.getByRole("button", { name: "Undo" })).not.toBeInTheDocument();
+  await screen.unmount();
 });
