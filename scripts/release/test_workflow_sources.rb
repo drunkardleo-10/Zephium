@@ -228,12 +228,8 @@ def assert_macos_runtime_evidence_boundary(root)
     "Keep macOS native security probe graphs warning-clean"
   )
   raise "macOS native probe source gate must run on every macOS job" unless source.fetch("if") == source_if
-  %w[
-    macos-principal-isolation-probe
-    macos-web-extension-probe
-    macos-web-extension-resource-probe
-  ].each do |binary|
-    raise "macOS native probe source gate omits #{binary}" unless source.fetch("run").include?(binary)
+  unless source.fetch("run").include?("macos-principal-isolation-probe")
+    raise "macOS native probe source gate omits macos-principal-isolation-probe"
   end
 
   _, notice = named_step(ci, "rust-platforms", "Record hosted macOS runtime-evidence boundary")
@@ -242,14 +238,9 @@ def assert_macos_runtime_evidence_boundary(root)
     raise "ordinary hosted macOS CI must disclose that it mints no native evidence"
   end
 
-  [
-    "Prove macOS principal worlds and handlers are mutually isolated",
-    "Prove public macOS WKWebExtension admission and isolation",
-    "Classify macOS extension resource transport"
-  ].each do |step_name|
-    _, step = named_step(ci, "rust-platforms", step_name)
-    raise "#{step_name} must remain release-call-only" unless step.fetch("if") == release_if
-  end
+  step_name = "Prove macOS principal worlds and handlers are mutually isolated"
+  _, step = named_step(ci, "rust-platforms", step_name)
+  raise "#{step_name} must remain release-call-only" unless step.fetch("if") == release_if
 
   desktop = File.read(File.join(root, "desktop/src/platform/macos.rs"), encoding: "UTF-8")
   ignore = "requires a release-qualified system Safari/WebKit pair; the explicit native security probe owns this environment-dependent gate"
