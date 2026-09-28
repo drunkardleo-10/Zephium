@@ -183,6 +183,9 @@ test("pages and workers get every API fix", async () => {
     port.onMessage.removeListener(listener);
     assert.equal(port.onMessage.hasListener(listener), false, kind);
 
+    assert.equal(chrome.offscreen.Reason.CLIPBOARD, "CLIPBOARD", kind);
+    assert.equal(await chrome.offscreen.hasDocument(), false, kind);
+
     const self = await chrome.management.getSelf();
     assert.equal(self.name, "Probe", kind);
     assert.equal(self.installType, "normal", kind);

@@ -206,6 +206,7 @@ impl Runtime {
         let Some(loaded) = self.shared.loaded.borrow_mut().remove(id) else {
             return false;
         };
+        crate::offscreen::close(id);
         unsafe {
             self.controller
                 .unloadExtensionContext_error(&loaded.context)

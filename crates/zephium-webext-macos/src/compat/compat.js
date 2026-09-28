@@ -23,8 +23,12 @@
   const Z = { isWorker, isPage, isContent, config };
   Object.defineProperty(g, KEY, { value: Z });
 
+  // WebKit prefixes the browser's errors with its own; extensions compare
+  // against Chrome's text.
   const native = (api, fields) =>
-    runtime.sendNativeMessage("app.zephium.webext", Object.assign({ api }, fields));
+    runtime.sendNativeMessage("app.zephium.webext", Object.assign({ api }, fields)).catch((error) => {
+      throw new Error(String((error && error.message) || error).replace(/^Invalid call to runtime\.sendNativeMessage\(\)\. /, ""));
+    });
 
   // ---- Diagnostics ---------------------------------------------------------
   // Errors inside workers and extension pages are otherwise invisible to the
@@ -727,6 +731,59 @@
         if (tracing) Z.report("info", `tabs.sendMessage ${label(message)} to tab ${tabId}`);
         return send.call(this, tabId, message, ...rest);
       });
+    }
+  }
+
+  // ---- Offscreen documents and the clipboard -------------------------------
+  if (!isContent && !chromeApi.offscreen) {
+    const reasons = [
+      "TESTING", "AUDIO_PLAYBACK", "IFRAME_SCRIPTING", "DOM_SCRAPING", "BLOBS", "DOM_PARSER", "USER_MEDIA",
+      "DISPLAY_MEDIA", "WEB_RTC", "CLIPBOARD", "LOCAL_STORAGE", "WORKERS", "BATTERY_STATUS", "MATCH_MEDIA",
+      "GEOLOCATION",
+    ];
+    pin(chromeApi, "offscreen", {
+      Reason: Object.freeze(Object.fromEntries(reasons.map((reason) => [reason, reason]))),
+      createDocument: (parameters, callback) =>
+        withCallback(
+          native("offscreen.create", { url: String((parameters && parameters.url) || "") }).then(() => undefined),
+          callback,
+        ),
+      closeDocument: (callback) =>
+        withCallback(
+          native("offscreen.close", {}).then((closed) => {
+            if (!closed) throw new Error("No current offscreen document.");
+          }),
+          callback,
+        ),
+      hasDocument: (callback) => withCallback(native("offscreen.has", {}).then(Boolean), callback),
+    });
+  }
+  // Chrome lets extensions with clipboard permissions use the clipboard from
+  // any of their pages, focused or not; WebKit requires a user gesture, which
+  // offscreen and background-driven pages never have.
+  if (isPage && typeof document !== "undefined") {
+    const declared = (chromeRuntime && chromeRuntime.getManifest().permissions) || [];
+    const canWrite = declared.includes("clipboardWrite");
+    const canRead = declared.includes("clipboardRead");
+    const clipboard = typeof navigator !== "undefined" ? navigator.clipboard : undefined;
+    if (clipboard && canWrite) {
+      clipboard.writeText = (text) => native("clipboard.write", { text: String(text) }).then(() => undefined);
+    }
+    if (clipboard && canRead) {
+      clipboard.readText = () => native("clipboard.read", {}).then((text) => (typeof text === "string" ? text : ""));
+    }
+    if (canWrite && typeof Document === "function") {
+      const execCommand = Document.prototype.execCommand;
+      Document.prototype.execCommand = function (command, ...rest) {
+        if (String(command).toLowerCase() !== "copy") return execCommand.call(this, command, ...rest);
+        const field = this.activeElement;
+        const text =
+          field && typeof field.value === "string" && typeof field.selectionStart === "number"
+            ? field.value.slice(field.selectionStart, field.selectionEnd)
+            : String(this.getSelection ? this.getSelection() : "");
+        native("clipboard.write", { text }).catch(() => {});
+        return true;
+      };
     }
   }
 
