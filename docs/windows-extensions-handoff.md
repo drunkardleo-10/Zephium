@@ -1,7 +1,8 @@
 # Chrome extensions on Windows: handoff
 
-Status: 2026-09-28. Extension support is finished for macOS (WebKit) and not
-started for Windows (WebView2). This document is the brief for that work: what
+Status: 2026-09-28. Extension support is finished for macOS (WebKit). Windows
+(WebView2) has a step-1 lab probe; product integration has not started. This
+document is the brief for that work: what
 exists, what can be reused, what WebView2 gives and lacks, and how to verify.
 
 ## Goal and rules
@@ -156,9 +157,10 @@ update asks again for new access; 30 idle minutes with memory flat.
 
 ## Windows probe work record — 2026-09-28
 
-**Step 1 is incomplete: execution under the normal Windows account is pending.**
-The observations below are from the restricted agent account, not production
-qualification. No extension integration or desktop neutralization was started.
+**Step 1 has reached its reporting stop: native loading works, but popup/tab
+semantics, required-host revocation and Work isolation prevent a parity claim.
+Product integration and desktop neutralization have not started.** The earlier sandbox
+failures are retained as execution history, not extension capability findings.
 
 ### Approved scope adjustments
 
@@ -170,9 +172,10 @@ qualification. No extension integration or desktop neutralization was started.
   separate release qualification requirement.
 - A roughly 200-line action-reporting/click-relay script is the workaround
   ceiling. Do not reimplement tabs, action dispatch or permissions. No such
-  workaround has been implemented in this probe.
+  replacement API has been implemented. A 22-line diagnostic-only action-call
+  observer tests reporting feasibility without changing native API behavior.
 - Native messaging and removal-residue checks are optional within the timebox;
-  both are currently **not tested**.
+  both are **not tested**.
 - The archive branch is unavailable and is not a dependency. The four baseline
   Windows lints are isolated in commit `41c2404f`, not mixed with lab work.
 
@@ -204,7 +207,7 @@ the unpacked manifest to preserve the extension ID; original CRXs are unchanged.
 Packages are in `target/webext-suite`; extracted verification copies are in
 `target/webext-verified-<id>/<id>`. These are local evidence, not tracked source.
 
-### Observed native results and limitations
+### Initial sandbox execution (superseded by normal-account results below)
 
 Machine: Windows x64 build 26200; installed SDK 10.0.26100.0; Rust 1.95.0 MSVC.
 The created WebView2 environment reported **154.0.4258.37**. Execution account:
@@ -231,7 +234,7 @@ lab lacked Common Controls v6 activation. The lab now embeds that dependency;
 the executable starts, verifies packages and creates WebView2 environments.
 This was a harness defect, not an extension-runtime finding.
 
-### Build/check status and next execution
+### Initial build constraints (historical)
 
 The sandbox's Cargo TLS backend fails with `SEC_E_NO_CREDENTIALS`; an offline
 full-workspace resolution also lacks the index entry for
@@ -248,16 +251,151 @@ Repository Rust version matches the machine. Frontend checks also require
 aligning Node 24.15.0 to the pinned 24.18.0 and pnpm 11.19.0 to 11.17.0. Those
 changes are not required to execute this Rust-only probe and have not been made.
 
-Resume from a normal, non-elevated PowerShell in the repository:
+Normal-account execution subsequently became available. The repository lab
+built successfully with the pinned toolchain and `--locked`; the only lockfile
+change adds this workspace member, with no dependency version changes. The
+PowerShell script-policy error was resolved with a process-scoped policy:
 
 ```powershell
-cargo build -p zephium-webext-windows --features lab --bin webext-lab-windows
-if ($LASTEXITCODE -eq 0) {
-    powershell -NoProfile -File crates\zephium-webext-windows\run-probe.ps1
-}
+cargo build --locked -p zephium-webext-windows --features lab --bin webext-lab-windows
+powershell -NoProfile -ExecutionPolicy RemoteSigned -File crates\zephium-webext-windows\run-probe.ps1
 ```
 
-Review the first workspace lockfile update, then use `--locked` on subsequent
-builds. Review actual observations, resolve only lab defects or bounded probe
-questions, append the normal-account findings here, and **stop after step 1**.
-Do not infer extension parity or proceed to step 2 from this blocked run.
+This does not change the user or machine execution policy. Do not condition the
+retry on the previous failed invocation's `$LASTEXITCODE`.
+
+### Normal-account findings
+
+Evidence: `target/webext-windows-probe/20260928-155006`, normal non-elevated
+`DESKTOP-157E6GB/user`, Windows 11 Pro x64 build 26200, WebView2
+**154.0.4258.37**. Every scenario owns fresh disposable storage. The corrected
+loopback server explicitly puts accepted Winsock sockets into blocking mode;
+earlier runs with intermittent fixture connection errors are excluded.
+PowerShell also retains each child's process handle so a successful short-lived
+process is not misreported as having a null exit code.
+
+| Question | Observation and limit |
+| --- | --- |
+| Environment, gate, renderer | Normal-account extension-free smoke passed. The existing Wry gate is unchanged; the lab verifies storage, profile identity, non-private mode and reused COM environment before navigation. |
+| Package loading | All five signed MV3 packages load and enumerate as enabled with their verified store IDs. This establishes loading, not end-to-end functionality. |
+| Workers | Each real extension has a service-worker target. Diagnostic content-to-worker messages return successfully. No debugger is attached to service-worker targets. |
+| Content scripts | Diagnostic allowed-host content executes; denied `localhost` content does not. Dark Reader injects its style on the loopback fixture and passes its existing `example.com` suite check. Grammarly passes its existing `example.com` DOM check; its loopback marker is absent. |
+| Host-opened popups | All five popup documents execute and return DOM text. Bitwarden shows onboarding, Grammarly sign-in/onboarding, SponsorBlock no-video text. Screenshots time out with hidden controllers, so visual rendering has not been qualified. |
+| Tabs and active tab | Every hidden controller appears as its own window with one `active:true` tab. A direct `chrome.tabs.query({active:true,currentWindow:true})` from every real popup selects the **popup itself**, not the human page. Dark Reader and Vimium therefore report an unsupported/protected page in this setup. A worker query can select a different window. This is a blocker for the tested host-opened-popup strategy. |
+| Action / on-click semantics | Native setters for title, badge and icon complete; title and badge read back correctly. Opening a popup by URL is not an action click. Real toolbar `onClicked`, transient `activeTab` grants and native user-gesture permission approval are **not established**. No tabs/dispatch/permission compatibility layer was built. |
+| Site access | Diagnostic scripting succeeds on the granted host and rejects the ungranted host with the native manifest-permission error. A permission request without a gesture rejects. Cross-origin fetch also rejects, but this alone does not distinguish permissions from CORS. Product access modes are not qualified. |
+| Work topology | A hidden view in `LabHuman` receives the extension content script and is visible in its tab enumeration. A view in separate `agent-lab` has neither that content marker nor that diagnostic extension installed (built-in extensions may still enumerate). Reusing the human profile is therefore not an isolation boundary. This reproduces profile topology, not the production Work adapter. |
+| Extension-specific features | Bitwarden vault login/autofill, Grammarly authenticated features, Vimium keyboard behavior and SponsorBlock video skipping are **not tested**. The Vimium DOM selector used by the broad probe is insufficient to establish failure. |
+| Optional checks | Native messaging and extension-removal residue are **not tested** in this timebox. |
+
+Supplemental `access-and-actions.jsonl` confirms the diagnostic observer records
+native `setTitle`, `setBadgeText` and `setIcon` calls (16×16 image, 1024 bytes).
+This is a feasibility result inside the diagnostic worker, not general injection
+into store extensions, icon rendering, or a native host notification channel.
+The wrapper preserves original function results and does not dispatch actions.
+
+The same run rejects `chrome.permissions.remove({origins:
+['http://127.0.0.1/*']})` with **"You cannot remove required permissions."**
+Subsequent navigation still runs content scripts and scripting still succeeds.
+The lab records this as CDP `exceptionDetails` even though its transport operation
+has `ok:true`. Runtime site-access withholding therefore remains unresolved;
+this API call is not a working revocation mechanism for required host grants.
+
+Worker lifecycle is **not deterministic in these short trials**. In
+`worker-lifetime.jsonl` and `worker-lifetime-retry.jsonl`, the diagnostic
+service-worker target disappears after 45 seconds without extension messages.
+The retry later receives a successful content-script reply on a new navigation;
+the first trial evaluated before that reply was ready, and the retry's initial
+page evaluation timed out. With the corrected readiness wait in
+`worker-lifetime-final.jsonl`, all evaluations succeed, but the worker remains
+present and returns the same start timestamp after the idle interval. Worker
+targets remain `attached:false`. These supplemental trials overlap build
+validation and are not resource benchmarks. This establishes working worker
+messaging and observed retirement, not a reliable exact shutdown deadline or a
+reason to port the macOS keep-alive workaround. Preserve all trials as evidence.
+
+### Resource measurement
+
+The two baselines sleep for 60 seconds each; the three-extension scenario
+completes a full **600,000 ms** idle step. There are 28 samples per baseline and
+285 samples over approximately 607 seconds for the extension process family.
+No `ProcessFailed` events occurred in this normal-account run.
+
+| Three hidden loopback tabs | Late private memory, median | Processes | Late CPU, percent of one core |
+| --- | ---: | ---: | ---: |
+| Extensions disabled, no installed test extensions | 177.0 MiB | 10 | 1.88% |
+| Extensions enabled, no installed test extensions | 179.8 MiB | 10 | 2.51% |
+| Bitwarden + Dark Reader + Grammarly loaded | 351.1 MiB | 12 | 1.79% |
+
+The table uses each run's last 30 seconds. Extension memory has a minute-two
+median of 406.1 MiB (13 processes), then a final-minute median of 351.1 MiB
+(12 processes; range 350.6–352.0 MiB). From 60 seconds onward the measured
+processes consumed 10.58 CPU-seconds over approximately 546 seconds, equivalent
+to 1.94% of one core. This run shows no sustained private-memory climb.
+The late loaded-versus-enabled-baseline difference is about **171 MiB**, a
+combined workload cost that cannot be assigned to individual extensions.
+
+CSV totals include the lab and descendants, including Chromium utility/GPU
+processes. Shared working sets are not used for the primary comparison because
+summing them double-counts shared pages. CPU includes the lab's polling message
+pump and fixture server; it is not a battery benchmark. Very short-lived
+processes between samples may be missed. The original capture timestamps each
+process row separately; `summarize-resources.mjs` groups adjacent rows into its
+approximately two-second samples. The runner now stamps each batch once.
+
+These are one-machine, one-run hidden-controller measurements on simple local
+pages, without signed-in vaults, real video or Grammarly's demonstrated
+`example.com` content workload. No CDP calls or worker debugger attachments are
+made during resource idle. Per-extension/per-tab slopes, foreground interaction,
+repeated trials and the separate **30-minute product QA** are not measured.
+
+### Final validation and machine preparation
+
+- `cargo build --locked -p zephium-webext-windows --features lab --bin webext-lab-windows`: passed.
+- `cargo clippy --locked -p zephium-webext-windows --features lab --all-targets -- -D warnings`: passed.
+- `cargo clippy --locked -p zephium-engine -p zephium-notes --lib -- -D warnings`: passed, validating the four isolated fixes at the library boundary.
+- `cargo fmt --all -- --check`, JavaScript syntax checks and PowerShell parsing: passed.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`: failed on
+  the existing `items_after_test_module` lint in
+  `crates/zephium-engine/src/host/download_files_windows.rs` (test module at
+  line 623 precedes three functions). The ordering is present in starting
+  commit `a5262816`. It is not changed as part of the probe.
+- Initial `cargo test --locked --workspace`: stopped with 28 `xtask` failures
+  caused by Git's system `core.autocrlf=true` checkout conversion. The failing
+  inputs were `i/lf w/crlf`; several validators require exact LF text. Set
+  **repository-local** `core.autocrlf=input` and normalized only tracked
+  `i/lf w/crlf` files (1405 files), preserving all other bytes and existing
+  edits. Git blob comparisons confirm no added source-content changes. No
+  global Git setting or `.gitattributes` change was made.
+- After LF correction, all **154 xtask tests pass**. The workspace test run
+  advances and stops in `zephium-app`: **317 passed, 2 failed**. Failures are
+  `shell::tests::extension_browser_requests::authenticated_browser_mutations_follow_shell_scope_and_settle_exactly_once`
+  and `shell::tests::extension_browser_requests::delayed_create_reply_cannot_override_a_newer_failed_navigation_or_closed_tab`;
+  both unwrap missing first-navigation values (lines 55 and 164). The relevant
+  shell test and implementation files are unchanged from `a5262816`. These
+  Windows extension-shell failures remain unresolved; the full suite is not green.
+- Focused engine tests cannot start: the test executable exits with
+  `0xC0000139` (`STATUS_ENTRYPOINT_NOT_FOUND`) before running tests. The lab's
+  embedded Common Controls v6 manifest fix does not apply to this separate
+  executable; its loader failure remains unqualified rather than counted as
+  passing engine tests.
+- Focused Notes tests: **30 passed, 1 failed**;
+  `library::tests::the_file_name_follows_the_title_until_someone_renames_it`
+  expects `groceries.md` but receives `Groceries.md` at `library/tests.rs:148`.
+  No Notes filename behavior was changed by the isolated lint fixes.
+- Neutral extension package tests: **49 passed**; the separate disk-corpus test
+  remains ignored by default. The five probe CRXs were verified and loaded by
+  the lab independently.
+
+The three existing vendored Wry constructor warnings remain. Frontend checks
+were not run: align Node/pnpm with repository pins before that work. The runtime
+floor review, foreground QA, native messaging and removal-residue qualification
+also remain outside this completed probe. Raw build/test logs are retained with
+the native evidence, including the initial CRLF failure and corrected rerun.
+
+The popup/tab and shared-profile findings must be resolved in design before
+enabling extensions in production. A visible, correctly focused popup could
+behave differently and remains untested; these hidden-controller observations
+must not be promoted to a universal WebView2 compatibility claim. In particular,
+do not silently solve these findings by rebuilding `chrome.tabs`, native action
+dispatch or permissions. **Stop after step 1 and review the evidence.**

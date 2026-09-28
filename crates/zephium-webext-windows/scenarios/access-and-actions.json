@@ -1,0 +1,18 @@
+[
+  {"load":"crates/zephium-webext-windows/fixtures/diagnostic"},
+  {"navigate":"$ORIGIN/first"},
+  {"view":"denied"},
+  {"in":"denied","navigate":"$DENIED/second"},
+  {"sleep":2000},
+  {"view":"popup"},
+  {"in":"popup","popup":true},
+  {"sleep":1500},
+  {"label":"popup direct active tab", "in":"popup","eval":"return await chrome.tabs.query({active:true,currentWindow:true})"},
+  {"label":"minimal action observer", "in":"popup","eval":"await chrome.runtime.sendMessage({op:'action'});return await chrome.runtime.sendMessage({op:'actionReports'})"},
+  {"label":"runtime host permission removal", "in":"popup","eval":"return {removed:await chrome.permissions.remove({origins:['http://127.0.0.1/*']}),remaining:await chrome.permissions.getAll()}"},
+  {"navigate":"$ORIGIN/after-revoke"},
+  {"sleep":1500},
+  {"label":"content after removal", "eval":"return {url:location.href,data:{...document.documentElement.dataset}}"},
+  {"label":"script after removal", "in":"popup","eval":"const tabs=await chrome.tabs.query({});const tab=tabs.find(t=>t.url?.startsWith('$ORIGIN'));return {tab,result:await chrome.runtime.sendMessage({op:'inject',tabId:tab.id})}"},
+  {"label":"native action API shape", "in":"popup","eval":"return {methods:Object.keys(chrome.action),nativeClickEvents:(await chrome.storage.local.get('clicks')),permissions:await chrome.permissions.getAll()}"}
+]

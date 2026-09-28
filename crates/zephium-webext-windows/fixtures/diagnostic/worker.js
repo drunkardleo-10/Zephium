@@ -1,8 +1,10 @@
+importScripts('action-observer.js');
 const started = Date.now();
 const attempt = async fn => { try { return await fn(); } catch (error) { return {error: String(error)}; } };
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   (async () => {
     if (message.op === 'ping') return {started, senderTab: sender.tab, id: chrome.runtime.id};
+    if (message.op === 'actionReports') return globalThis.zephiumLabActionReports;
     if (message.op === 'snapshot') return {
       started,
       tabs: await attempt(() => chrome.tabs.query({})),

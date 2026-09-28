@@ -32,6 +32,9 @@ function Invoke-Lab([string]$Name, [object[]]$Steps, [switch]$Measure) {
     $stderr = Join-Path $results "$Name.stderr.log"
     Write-Host "Starting $Name"
     $process = Start-Process -FilePath $binary -ArgumentList @("`"$scenario`"", "`"$data`"") -WorkingDirectory $repo -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    # Retain the process handle before it exits; Windows PowerShell 5.1 can
+    # otherwise lose ExitCode for short-lived Start-Process children.
+    $processHandle = $process.Handle
     $samples = [System.Collections.Generic.List[object]]::new()
     $browserId = $null
     $deadline = (Get-Date).AddSeconds($IdleSeconds + 180)
@@ -60,16 +63,16 @@ function Invoke-Lab([string]$Name, [object[]]$Steps, [switch]$Measure) {
                         if ($ids.Contains([int]$item.ParentProcessId) -and $ids.Add([int]$item.ProcessId)) { $added = $true }
                     }
                 } while ($added)
+                $sampleTime = (Get-Date).ToString('o')
                 foreach ($id in $ids) {
                     $p = Get-Process -Id $id -ErrorAction SilentlyContinue
                     if ($p) {
-                        $samples.Add([pscustomobject]@{ time=(Get-Date).ToString('o'); pid=$id; name=$p.ProcessName; privateBytes=$p.PrivateMemorySize64; workingSetBytes=$p.WorkingSet64; cpuSeconds=$p.CPU })
+                        $samples.Add([pscustomobject]@{ time=$sampleTime; pid=$id; name=$p.ProcessName; privateBytes=$p.PrivateMemorySize64; workingSetBytes=$p.WorkingSet64; cpuSeconds=$p.CPU })
                     }
                 }
             }
         }
         Start-Sleep -Seconds 2
-        $process.Refresh()
     }
     $process.WaitForExit()
     if ($samples.Count) { $samples | Export-Csv -LiteralPath (Join-Path $results "$Name.resources.csv") -NoTypeInformation }
@@ -86,6 +89,10 @@ if (@($smoke | Where-Object { $_.kind -eq 'process_failed' }).Count -gt 0 -or $r
 }
 $diagnostic = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'scenarios\diagnostic.json') -Raw | ConvertFrom-Json
 Invoke-Lab 'diagnostic' $diagnostic
+foreach ($name in @('access-and-actions', 'worker-lifetime')) {
+    $steps = Get-Content -LiteralPath (Join-Path $PSScriptRoot "scenarios\$name.json") -Raw | ConvertFrom-Json
+    Invoke-Lab $name $steps
+}
 
 $suite = Get-Content -LiteralPath (Join-Path $repo 'crates\zephium-webext-macos\suite.json') -Raw | ConvertFrom-Json
 $names = @('Dark Reader','Bitwarden','Vimium','Grammarly','SponsorBlock')

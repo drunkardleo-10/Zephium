@@ -6670,6 +6670,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-webext-windows"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "raw-window-handle",
+ "serde_json",
+ "sha2",
+ "webview2-com",
+ "windows",
+ "wry",
+ "zephium-webext",
+]
+
+[[package]]
 name = "zephium-work-composition"
 version = "0.1.0"
 dependencies = [

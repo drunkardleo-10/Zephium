@@ -47,6 +47,10 @@ impl Fixture {
         let thread = std::thread::spawn(move || {
             while !signal.load(Ordering::Relaxed) {
                 if let Ok((mut stream, _)) = listener.accept() {
+                    // Winsock accepts inherit the listener's nonblocking mode.
+                    // Reading before a request arrives would send a premature
+                    // response and intermittently reset the browser connection.
+                    let _ = stream.set_nonblocking(false);
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
                     let mut request = [0; 4096];

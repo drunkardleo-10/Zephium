@@ -8,11 +8,13 @@ Run from the repository root as a normal, **non-elevated Windows user**:
 
 ```powershell
 cargo build --locked -p zephium-webext-windows --features lab --bin webext-lab-windows
-powershell -NoProfile -File crates\zephium-webext-windows\run-probe.ps1
+powershell -NoProfile -ExecutionPolicy RemoteSigned -File crates\zephium-webext-windows\run-probe.ps1
 ```
 
-The first dependency resolution for this new workspace member requires
-`cargo fetch` to update the workspace lockfile before the locked command.
+`-ExecutionPolicy RemoteSigned` applies only to this PowerShell process; it does
+not change the machine or user execution policy. A previous failed command makes
+`$LASTEXITCODE` nonzero, so rerun the command directly rather than wrapping it in
+a condition on that old exit code.
 The runner expects the five signed packages identified by the macOS suite in
 `target/webext-suite/<id>.crx`. The runner does not download or silently replace
 them. Native messaging and removal-residue checks are not implemented in this
@@ -24,6 +26,9 @@ process-family CSV samples. The default resource pass has two 60-second
 baselines (extensions disabled/enabled, three tabs each), then 600 seconds with
 Bitwarden, Dark Reader and Grammarly on three tabs. `-SkipResources` runs only
 capabilities. `-IdleSeconds` changes the measured duration and is recorded.
+The additional access/action scenario checks revocation and a 22-line diagnostic
+action-call observer; the worker scenario leaves the diagnostic worker without
+messages for 45 seconds and then wakes it through a new content script.
 
 All lab host windows are hidden. These measurements describe hidden controllers,
 not foreground UI performance. There is no synthetic user activation: a
@@ -79,6 +84,17 @@ CDP is used only for deliberate diagnostic operations. Resource scenarios do
 not attach to service workers or evaluate scripts during idle sampling. Memory
 is recorded per process; shared process costs cannot be assigned exactly to an
 individual extension. Preserve raw CSVs and report warm-up and late-run trends.
+Summarize the process-family CSVs with:
+
+```powershell
+node crates\zephium-webext-windows\summarize-resources.mjs target\webext-windows-probe\<timestamp>
+```
+
+Private bytes are the main memory comparison. Summed working sets double-count
+shared pages. CPU is cumulative process time converted to a percentage of one
+core; it includes the lab's message pump and fixture server. Short-lived processes
+between samples are not captured. These are exploratory measurements, not a
+foreground browser performance benchmark.
 
 After collecting and reviewing evidence, append findings to
 `docs/windows-extensions-handoff.md` and stop. Do not continue to step 2.
