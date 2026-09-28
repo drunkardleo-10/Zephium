@@ -1,0 +1,94 @@
+import { describe, expect, test } from "vitest";
+import { askPart, asksOf, confirmVerb, openAsks } from "../components/asks/asks";
+import * as f from "./ask-fixtures";
+
+describe("asks", () => {
+  test("a held step reads as a Confirm with the page's own words and the page's frame", () => {
+    const [ask] = asksOf(f.runWith([f.airbnbBook]), [f.tripPage]);
+    expect(ask).toMatchObject({
+      kind: "confirm",
+      step: "confirm-airbnb",
+      state: "open",
+      verb: "Request to book",
+      headline: "Request to book for $4,212?",
+      url: f.tripPage.url,
+    });
+    expect(ask?.kind === "confirm" && ask.frame).toContain("frame/01M3CV1H7HRABAGVH1T8HXH2DD/");
+  });
+
+  test("a decision moves a Confirm through working to its receipt", () => {
+    const states = [
+      f.decided(f.slackSend, "approved", "running"),
+      f.decided(f.slackSend, "approved", "succeeded"),
+      f.decided(f.slackSend, "declined", "cancelled"),
+      f.decided(
+        f.slackSend,
+        "approved",
+        "failed",
+        "The page changed before it ran; nothing was sent",
+      ),
+      f.decided(f.slackSend, "approved", "outcome_unknown"),
+      f.settled(f.slackSend, { status: "cancelled" }),
+    ].map((step) => asksOf(f.runWith([step]))[0]?.state);
+    expect(states).toEqual(["working", "done", "declined", "failed", "unknown", "gone"]);
+  });
+
+  test("Rust's fixed questions become their own cards; anything else is the agent's question", () => {
+    const asks = asksOf(
+      f.runWith([
+        f.slackTask,
+        f.slackEntry,
+        f.historyAsk,
+        f.notesAsk,
+        f.tabsAsk,
+        f.githubAsk,
+        f.budgetAsk,
+      ]),
+    );
+    expect(asks.map((ask) => ask.kind)).toEqual([
+      "entry",
+      "context",
+      "context",
+      "context",
+      "connection",
+      "question",
+    ]);
+    expect(asks[0]).toMatchObject({
+      name: "Slack",
+      host: "app.slack.com",
+      plan: "Read #design since Monday and draft a reply to Anna",
+      always: "Always for Slack",
+    });
+    expect(asks[1]).toMatchObject({
+      source: "history",
+      reason: "Looking for the flight comparison you read last week.",
+    });
+    expect(asks[4]).toMatchObject({ service: "GitHub", tool: "gh", host: "github.com" });
+  });
+
+  test("a sign-in wall on a page task is an ask on that page's host", () => {
+    const asks = asksOf(f.runWith([f.notionTask]), [], [f.notionWall]);
+    expect(asks).toMatchObject([{ kind: "sign_in", host: "notion.so", state: "open" }]);
+    expect(asksOf(f.runWith([f.notionTask]), [], [{ ...f.notionWall, phase: "released" }])).toEqual(
+      [],
+    );
+  });
+
+  test("open asks lead with the newest and leave receipts behind", () => {
+    const asks = asksOf(f.runWith([f.historyAsk, f.answered(f.notesAsk, "Allow"), f.slackSend]));
+    expect(openAsks(asks).map((ask) => ask.step)).toEqual(["confirm-slack", "ask-history"]);
+  });
+
+  test("buttons say the page's control when it is a name, else the kind's verb", () => {
+    expect(confirmVerb("communication", "press Send")).toBe("Send");
+    expect(confirmVerb("communication", "press Enter in Message #design")).toBe("Send");
+    expect(confirmVerb("edit", "type into Page")).toBe("Save");
+    expect(confirmVerb("purchase", "press Confirm and pay with the card ending 4242")).toBe("Book");
+  });
+
+  test("an ask stands on its lead part, else on the part of its site", () => {
+    const asks = asksOf(f.runWith([f.slackTask, f.slackEntry, f.airbnbBook, f.budgetAsk]));
+    expect(asks.map(askPart)).toEqual(["slack.com", "airbnb.co.uk", null]);
+    expect(askPart({ ...asks[2]!, part: "01PART" })).toBe("01PART");
+  });
+});
