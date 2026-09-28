@@ -4,6 +4,10 @@ use std::sync::Arc;
 use zephium_core::{ids::ProfileId, work::WorkError};
 use zephium_ipc::work::{WorkOperationStateV1, WorkOperationV1, WorkReplyV1, WorkResponseV1};
 
+#[cfg(target_os = "macos")]
+#[path = "work_lead_run.rs"]
+mod lead;
+
 pub(crate) struct WorkProviders {
     pub(crate) activity: super::work_activity::WorkActivity,
     #[cfg(target_os = "macos")]
@@ -185,6 +189,16 @@ impl WorkProviders {
                     grant.validate()?;
                     // Retired: sessions are decided per site inside the run.
                     let _ = signed_in;
+                    if lead::runtime(profile).await == lead::WorkRuntimeChoice::Lead {
+                        match lead::models(profile).await {
+                            Some(models) => {
+                                return self.lead(shell, profile, command, context, models).await
+                            }
+                            None => record_diagnostic(format_args!(
+                                "work: phase=lead state=no_model fallback=classic"
+                            )),
+                        }
+                    }
                     let binding_request = shell.work_profile_binding();
                     let binding =
                         tokio::time::timeout(std::time::Duration::from_secs(8), async move {
