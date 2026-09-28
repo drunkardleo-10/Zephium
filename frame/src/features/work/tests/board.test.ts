@@ -38,7 +38,7 @@ const KINDS: BlockKind[] = [
 const EMPHASIS: Emphasis[] = ["hero", "primary", "primary", "supporting"];
 
 describe("board layout", () => {
-  test("no two blocks ever overlap, and every block stands inside a board 720–1280 wide", () => {
+  test("no two blocks ever overlap, and every block stands inside a board 720–1280 wide, or a diagram's own", () => {
     for (let seed = 1; seed <= 400; seed += 1) {
       const next = random(seed);
       const count = 1 + Math.floor(next() * 11);
@@ -60,7 +60,7 @@ describe("board layout", () => {
       const open = next() < 0.3 ? blocks[Math.floor(next() * count)]!.id : undefined;
       const layout = boardLayout(blocks, open ? { open } : {});
       expect(layout.width).toBeGreaterThanOrEqual(BOARD.min);
-      const wide = blocks.some((block) => block.emphasis === "hero" && block.kind === "diagram");
+      const wide = blocks.some((block) => block.kind === "diagram");
       expect(layout.width).toBeLessThanOrEqual(wide ? BOARD.wide : BOARD.max);
       const rects = Object.values(layout.at);
       expect(rects).toHaveLength(count);

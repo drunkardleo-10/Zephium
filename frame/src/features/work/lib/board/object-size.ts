@@ -1,4 +1,5 @@
 import { diagramLayout, diagramWidth } from "../diagram";
+import { BOARD } from "./layout";
 import type { ObjectView, SheetColumn } from "./types";
 
 type Range = { min: number; ideal: number; max: number };
@@ -66,9 +67,9 @@ export function objectWidth(view: ObjectView): Range {
     case "document":
       return { min: 360, ideal: 480, max: 560 };
     case "diagram": {
-      // A diagram stands at its own drawn width, so its parts read at their size.
-      const ideal = Math.min(1600, diagramWidth(view.diagram) + 40);
-      return { min: Math.min(ideal, 720), ideal, max: 1600 };
+      // A diagram stands at its own drawn width, so its names read at their size from afar.
+      const ideal = Math.min(BOARD.wide, diagramWidth(view.diagram) + 40);
+      return { min: Math.min(ideal, 720), ideal, max: BOARD.wide };
     }
   }
 }
