@@ -11,14 +11,12 @@ use zephium_core::ids::ProfileId;
 use zephium_core::notes::{NoteCall, NoteError, NoteReply, NoteResponse};
 use zephium_core::ports::store::Store;
 use zephium_core::resources::ResourceContent;
-use zephium_ipc::ToolKind;
 use zephium_notes::legacy::LegacyNote;
 use zephium_notes::{Host, NoteService};
 use zephium_store::SqliteStore;
 
 use crate::{
-    authorize, emit_to_privileged, overlay, resource_close, shutdown_started, CallerPolicy,
-    MAIN_LABEL,
+    authorize, emit_to_privileged, resource_close, shutdown_started, CallerPolicy, MAIN_LABEL,
 };
 
 /// A store answer the one-time import waits for. The notes thread is the
@@ -37,20 +35,6 @@ impl Host for DesktopHost {
     fn changed(&self, event: zephium_core::notes::NoteChanges) {
         let event = NotesChanged(event);
         emit_to_privileged(&self.app, MAIN_LABEL, "zephium:notes-changed", &event);
-        // Every save would otherwise wake the hidden launcher's web process.
-        // Its notes are dropped when it hides and listed afresh when shown.
-        if self
-            .app
-            .try_state::<overlay::Overlay>()
-            .is_some_and(|panel| panel.showing(ToolKind::Notes))
-        {
-            emit_to_privileged(
-                &self.app,
-                overlay::PANEL_LABEL,
-                "zephium:notes-changed",
-                &event,
-            );
-        }
     }
 
     fn reveal(&self, path: &Path) {

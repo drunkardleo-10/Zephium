@@ -144,7 +144,9 @@ pub(super) fn schedule(
                             search: term.clone(),
                             trashed: false,
                             after: None,
-                            limit: 6,
+                            // Search shows at most two notes; reading more
+                            // only builds previews that are dropped.
+                            limit: 3,
                         },
                     },
                 )
@@ -153,17 +155,13 @@ pub(super) fn schedule(
                     if let NoteResponse::Page { items, .. } = reply.response {
                         let results = items
                             .into_iter()
-                            .take(6)
+                            .take(3)
                             .map(|item| SearchResult {
                                 kind: "note".into(),
                                 title: item.title,
                                 // Matches come from the body too; the preview
                                 // shows why a note was found.
-                                detail: if item.preview.is_empty() {
-                                    "Note".into()
-                                } else {
-                                    item.preview
-                                },
+                                detail: item.preview,
                                 icon: None,
                                 action: SearchAction::OpenNote { id: item.id },
                             })

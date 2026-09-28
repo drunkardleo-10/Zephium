@@ -89,45 +89,43 @@ mod macos {
             return Material::None;
         }
         let workspace = NSWorkspace::sharedWorkspace();
-        let radius = if panel {
-            f64::from(crate::overlay::PANEL_RADIUS)
+        let reduce_transparency = workspace.accessibilityDisplayShouldReduceTransparency();
+        let material = if panel {
+            // The launcher is two shapes rather than one window-sized sheet;
+            // it installs its own material behind its content.
+            crate::panel::install_shapes(
+                window,
+                reduce_transparency,
+                !matches!(window.theme(), Ok(tauri::Theme::Light)),
+            )
         } else {
-            12.0
+            // Clear before reapplying: the upstream glass API inserts a new view.
+            let _ = clear_liquid_glass(window);
+            let _ = clear_vibrancy(window);
+            // The window's own tint belongs here rather than in CSS. A wash
+            // drawn by the web layer only covers the rectangle the web layer
+            // occupies, which stops short of the window's padding and reads as
+            // a plate laid on the glass; setting it on the effect view tints
+            // the whole window.
+            let tint = glass_tint(window);
+            select_material(
+                reduce_transparency,
+                || {
+                    apply_liquid_glass(
+                        window,
+                        LiquidGlassOptions::new(NSGlassEffectViewStyle::Regular)
+                            .radius(12.0)
+                            .opaque(false)
+                            .tint_color(tint),
+                    )
+                    .is_ok()
+                },
+                || {
+                    apply_vibrancy(window, NSVisualEffectMaterial::Sidebar, None, Some(12.0))
+                        .is_ok()
+                },
+            )
         };
-        // Clear before reapplying: the upstream glass API inserts a new view.
-        let _ = clear_liquid_glass(window);
-        let _ = clear_vibrancy(window);
-        // The window's own tint belongs here rather than in CSS. A wash drawn
-        // by the web layer only covers the rectangle the web layer occupies,
-        // which stops short of the window's padding and reads as a plate laid
-        // on the glass; setting it on the effect view tints the whole window.
-        let tint = glass_tint(window);
-        let material = select_material(
-            workspace.accessibilityDisplayShouldReduceTransparency(),
-            || {
-                apply_liquid_glass(
-                    window,
-                    LiquidGlassOptions::new(NSGlassEffectViewStyle::Regular)
-                        .radius(radius)
-                        .opaque(false)
-                        .tint_color(tint),
-                )
-                .is_ok()
-            },
-            || {
-                apply_vibrancy(
-                    window,
-                    if panel {
-                        NSVisualEffectMaterial::HudWindow
-                    } else {
-                        NSVisualEffectMaterial::Sidebar
-                    },
-                    None,
-                    Some(radius),
-                )
-                .is_ok()
-            },
-        );
         // No content_view(): preserve WKWebView siblings, parent bounds,
         // native z-order and the security-sensitive chrome rectangle.
         INSTALLED
@@ -169,6 +167,18 @@ mod macos {
             let app = window.app_handle().clone();
             let label = window.label().to_owned();
             window.on_window_event(move |event| {
+                // The glass tint is chosen for one appearance and does not
+                // follow the window's own; a light launcher kept a dark cast.
+                if matches!(event, tauri::WindowEvent::ThemeChanged(_)) {
+                    let app_for_main = app.clone();
+                    let label = label.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        if let Some(window) = app_for_main.get_webview_window(&label) {
+                            install(&window, panel);
+                        }
+                    });
+                    return;
+                }
                 if matches!(event, tauri::WindowEvent::Destroyed) {
                     let label = label.clone();
                     let _ = app.run_on_main_thread(move || {

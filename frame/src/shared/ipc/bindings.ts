@@ -86,16 +86,50 @@ export const commands = {
 	revision: string,
 	session_id: string,
 	visible: boolean,
-	route: PanelRoute,
 	profile_id: string | null,
 	profile_name: string | null,
 	space_id: string | null,
 	error: boolean,
 	corner_radius: number,
-	position_restorable: boolean,
 } | null>("panel_ready"),
 	panelIntent: (intent: PanelIntent) => __TAURI_INVOKE<boolean>("panel_intent", { intent }),
-	panelDrag: () => __TAURI_INVOKE<boolean>("panel_drag"),
+	/**
+	 *  The launcher's content reports what it shows; native sizes the window and
+	 *  places the material behind it.
+	 */
+	panelLayout: (layout: PanelLayout) => __TAURI_INVOKE<void>("panel_layout", { layout }),
+	launcherTrigger: () => __TAURI_INVOKE<{
+	shortcut: string,
+	default_shortcut: string,
+	/**  The shortcut is registered and will open the launcher. */
+	registered: boolean,
+	editable: boolean,
+	double_tap: DoubleTap,
+	double_tap_supported: boolean,
+	/**
+	 *  Double tap needs Accessibility permission to observe modifier keys
+	 *  while another application is in front.
+	 */
+	accessibility: boolean,
+} | null>("launcher_trigger"),
+	launcherSetShortcut: (accelerator: string) => __TAURI_INVOKE<{ type: "applied"; trigger: LauncherTrigger } | { type: "rejected"; reason: Rejection; trigger: LauncherTrigger } | null>("launcher_set_shortcut", { accelerator }),
+	/**  Silences the current shortcut while a new one is being recorded. */
+	launcherRecordShortcut: (active: boolean) => __TAURI_INVOKE<void>("launcher_record_shortcut", { active }),
+	launcherSetDoubleTap: (mode: DoubleTap) => __TAURI_INVOKE<{
+	shortcut: string,
+	default_shortcut: string,
+	/**  The shortcut is registered and will open the launcher. */
+	registered: boolean,
+	editable: boolean,
+	double_tap: DoubleTap,
+	double_tap_supported: boolean,
+	/**
+	 *  Double tap needs Accessibility permission to observe modifier keys
+	 *  while another application is in front.
+	 */
+	accessibility: boolean,
+} | null>("launcher_set_double_tap", { mode }),
+	launcherOpenAccessibility: () => __TAURI_INVOKE<void>("launcher_open_accessibility"),
 	settingGet: (key: string) => __TAURI_INVOKE<string | null>("setting_get", { key }),
 	settingSet: (key: string, value: string) => __TAURI_INVOKE<OperationAdmission>("setting_set", { key, value }),
 	uiInfo: () => __TAURI_INVOKE<UiInfo>("ui_info"),
@@ -121,7 +155,7 @@ export const commands = {
 	newtabRun: (action: SearchAction, context: SearchContext) => __TAURI_INVOKE<OperationAdmission>("newtab_run", { action, context }),
 	newtabCancel: (context: SearchContext) => __TAURI_INVOKE<boolean>("newtab_cancel", { context }),
 	launcherSearch: (query: string, requestId: string) => __TAURI_INVOKE<boolean>("launcher_search", { query, requestId }),
-	launcherRun: (action: SearchAction, context: SearchContext) => __TAURI_INVOKE<OperationAdmission>("launcher_run", { action, context }),
+	launcherRun: (action: SearchAction, context: SearchContext, background: boolean) => __TAURI_INVOKE<OperationAdmission>("launcher_run", { action, context, background }),
 	sidebarSetWidth: (width: number | null, animate: boolean) => __TAURI_INVOKE<void>("sidebar_set_width", { width, animate }),
 	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
 	resourceCall: (expectedProfile: string, call: ResourceCall_Deserialize) => __TAURI_INVOKE<ResourceReply_Serialize>("resource_call", { expectedProfile, call }),
@@ -385,6 +419,8 @@ export type DocumentNode_Serialize = {
 	attrs?: DocumentAttrs_Serialize | null,
 	marks?: DocumentMark[],
 };
+
+export type DoubleTap = "off" | "command" | "option";
 
 export type DownloadCall = { kind: "updates" } | { kind: "retry_cleanup" } | { kind: "list"; before: string | null; limit: number } | { kind: "cancel"; id: string } | { kind: "open"; id: string } | { kind: "reveal"; id: string } | { kind: "forget"; id: string } | { kind: "preferences" } | { kind: "choose_directory" } | { kind: "set_ask_destination"; enabled: boolean };
 
@@ -828,6 +864,21 @@ export type ItemsState = {
 	split_group: SplitGroupView | null,
 };
 
+export type LauncherTrigger = {
+	shortcut: string,
+	default_shortcut: string,
+	/**  The shortcut is registered and will open the launcher. */
+	registered: boolean,
+	editable: boolean,
+	double_tap: DoubleTap,
+	double_tap_supported: boolean,
+	/**
+	 *  Double tap needs Accessibility permission to observe modifier keys
+	 *  while another application is in front.
+	 */
+	accessibility: boolean,
+};
+
 export type LayoutChanged = LayoutState;
 
 export type LayoutState = {
@@ -1017,22 +1068,45 @@ export type PagePermissionPromptView = {
 	prompt: PagePermissionPromptEntryView | null,
 };
 
-export type PanelIntent = { type: "search" } | { type: "back" } | { type: "dismiss" } | { type: "tool"; tool: ToolKind };
+export type PanelIntent = { type: "search" } | { type: "dismiss" } | 
+/**
+ *  Hands a destination to the browser, which already hosts its views, and
+ *  puts the launcher away.
+ */
+{ type: "open"; tool: ToolKind };
 
-export type PanelRoute = { type: "search" } | { type: "tool"; tool: ToolKind };
+/**
+ *  What the launcher is showing, reported by its content. Native sizes the
+ *  window to `height` and, where it draws the material itself, places the
+ *  field and result shapes behind the content.
+ */
+export type PanelLayout = {
+	height: number | null,
+	field: PanelRect,
+	sheet: PanelRect | null,
+};
+
+/**
+ *  A rectangle in the launcher's own coordinates: CSS pixels from the top-left
+ *  of its window, which are points on every platform.
+ */
+export type PanelRect = {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+};
 
 export type PanelState = {
 	window_id: string | null,
 	revision: string,
 	session_id: string,
 	visible: boolean,
-	route: PanelRoute,
 	profile_id: string | null,
 	profile_name: string | null,
 	space_id: string | null,
 	error: boolean,
 	corner_radius: number,
-	position_restorable: boolean,
 };
 
 export type ProfileKindView = "default" | "named" | "incognito";
@@ -1046,6 +1120,19 @@ export type ProfileView = {
 	name: string,
 	kind: ProfileKindView,
 };
+
+/**  Why a recorded shortcut was not taken. */
+export type Rejection = "invalid" | 
+/**  Shift alone does not make a key global; it would type a capital. */
+"needs_modifier" | 
+/**  The system itself answers to it, such as Spotlight or input sources. */
+"system" | 
+/**  Apps use it for their own commands, such as Redo. */
+"app_command" | 
+/**  Registration failed, usually because another application holds it. */
+"unavailable" | 
+/**  This platform's shortcut is managed elsewhere. */
+"unsupported";
 
 export type ResourceCall = ResourceCall_Serialize | ResourceCall_Deserialize;
 
@@ -1493,6 +1580,8 @@ export type TaskStep = {
 export type TaskView = "inbox" | "today" | "upcoming" | "all" | "completed" | "trash";
 
 export type ToolKind = "notes" | "tasks" | "ai" | "history" | "downloads" | "time";
+
+export type TriggerChange = { type: "applied"; trigger: LauncherTrigger } | { type: "rejected"; reason: Rejection; trigger: LauncherTrigger };
 
 export type UiCommand = string;
 

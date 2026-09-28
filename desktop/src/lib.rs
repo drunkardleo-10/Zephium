@@ -44,6 +44,7 @@ mod blocker_service;
 mod browser_credentials;
 #[cfg(feature = "curated-extension-distribution")]
 mod extension_distribution;
+mod launcher_trigger;
 #[cfg(target_os = "linux")]
 mod linux_global_shortcuts;
 #[cfg(any(target_os = "linux", test))]
@@ -1588,7 +1589,12 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             panel_hide,
             panel_ready,
             panel_intent,
-            panel_drag,
+            panel_layout,
+            launcher_trigger,
+            launcher_set_shortcut,
+            launcher_record_shortcut,
+            launcher_set_double_tap,
+            launcher_open_accessibility,
             setting_get,
             setting_set,
             ui_info,
@@ -1966,8 +1972,44 @@ pub(crate) fn restore_browser_chrome(
 }
 
 fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
-    for label in [MAIN_LABEL, overlay::PANEL_LABEL] {
-        emit_to_privileged(app, label, EVENT_UI, &id);
+    emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id);
+    // The launcher follows appearance and motion only; anything else would
+    // wake its hidden WebView for a command it ignores.
+    if id.starts_with("theme.") || id.starts_with("preference.ui.reduce-motion=") {
+        emit_to_privileged(app, overlay::PANEL_LABEL, EVENT_UI, &id);
+    }
+}
+
+/// Development builds name each privileged WebView's content process, so its
+/// memory and CPU can be measured on its own instead of guessed from a list
+/// of identical WebKit helpers.
+#[cfg(all(debug_assertions, target_os = "macos"))]
+fn log_webview_processes(main: &WebviewWindow, panel: &WebviewWindow) {
+    let windows = [main.clone(), panel.clone()];
+    // A content process is only assigned once navigation has started.
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        for window in windows {
+            log_webview_process(&window);
+        }
+    });
+}
+
+#[cfg(all(debug_assertions, target_os = "macos"))]
+fn log_webview_process(window: &WebviewWindow) {
+    {
+        let label = window.label().to_owned();
+        let _ = window.with_webview(move |webview| {
+            // SAFETY: a main-thread callback with Tauri's live WKWebView; the
+            // selector is WebKit's own, read without taking ownership.
+            let pid: i32 = unsafe {
+                objc2::msg_send![
+                    &*webview.inner().cast::<objc2::runtime::AnyObject>(),
+                    _webProcessIdentifier
+                ]
+            };
+            write_diagnostic(format_args!("webview: {label} content process {pid}"));
+        });
     }
 }
 
@@ -3273,23 +3315,6 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             | "tool.downloads"
             | "extensions.manage"
     ) {
-        if let Some(panel) = app.try_state::<overlay::Overlay>() {
-            if panel.always_floating() {
-                let tool = match id {
-                    "tool.notes" => Some(zephium_ipc::ToolKind::Notes),
-                    "tool.tasks" => Some(zephium_ipc::ToolKind::Tasks),
-                    "tool.ai" => Some(zephium_ipc::ToolKind::Ai),
-                    "tool.time" => Some(zephium_ipc::ToolKind::Time),
-                    "tool.history" => Some(zephium_ipc::ToolKind::History),
-                    "tool.downloads" => Some(zephium_ipc::ToolKind::Downloads),
-                    _ => None,
-                };
-                if let Some(tool) = tool {
-                    panel.intent(zephium_ipc::PanelIntent::Tool { tool });
-                    return accepted_ui_operation();
-                }
-            }
-        }
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
             accepted_ui_operation()
         } else {
@@ -3529,6 +3554,7 @@ fn newtab_run(
         Command::RunSearchAction {
             context: Box::new(context),
             action,
+            background: false,
         },
     )
 }
@@ -3551,12 +3577,16 @@ fn launcher_search(
         .try_state::<overlay::Overlay>()
         .and_then(|overlay| overlay.search_context(&request_id))
     else {
+        diagnostic!("launcher: search refused outside a presented session");
         return false;
     };
     let accepted = shell.dispatch(Command::SearchScoped {
         query: query.clone(),
         context: Box::new(context.clone()),
     });
+    if !accepted {
+        diagnostic!("launcher: search refused by a full actor queue");
+    }
     if accepted {
         search_providers::schedule(caller, app, shell.inner().clone(), query, context);
     }
@@ -3570,6 +3600,7 @@ fn launcher_run(
     app: tauri::AppHandle,
     action: zephium_ipc::SearchAction,
     context: zephium_ipc::SearchContext,
+    background: bool,
 ) -> zephium_ipc::OperationAdmission {
     if !authorize(&caller, CallerPolicy::Panel, "launcher_run") || !search_action_in_bounds(&action)
     {
@@ -3591,7 +3622,10 @@ fn launcher_run(
     if !ledger.reserve(&operation_id) {
         return rejected_operation();
     }
-    if !overlay.arm_action(&operation_id, &context) {
+    // Only an address can be sent behind the current tab; every other action
+    // is about where the user is going next.
+    let background = background && matches!(action, zephium_ipc::SearchAction::OpenUrl { .. });
+    if !overlay.arm_action(&operation_id, &context, background) {
         return finish_operation_admission(&ledger, operation_id, false);
     }
     let accepted = shell.dispatch_operation(
@@ -3599,6 +3633,7 @@ fn launcher_run(
         Command::RunSearchAction {
             context: Box::new(context),
             action,
+            background,
         },
     );
     if !accepted {
@@ -3784,9 +3819,9 @@ async fn resource_call(
                     id: id.clone(),
                     revision: revision.clone(),
                 };
-                for label in [MAIN_LABEL, overlay::PANEL_LABEL] {
-                    emit_to_privileged(&app, label, "zephium:resource-changed", &event);
-                }
+                // The launcher never hosts a resource view, so waking it for
+                // every write would only cost a hidden WebView work.
+                emit_to_privileged(&app, MAIN_LABEL, "zephium:resource-changed", &event);
             }
             let _ = send.send(reply);
         }),
@@ -4125,11 +4160,60 @@ fn panel_intent(
 }
 #[tauri::command]
 #[specta::specta]
-fn panel_drag(caller: WebviewWindow) -> bool {
-    if !authorize(&caller, CallerPolicy::Panel, "panel_drag") {
-        return false;
+fn launcher_trigger(caller: WebviewWindow) -> Option<launcher_trigger::LauncherTrigger> {
+    authorize(&caller, CallerPolicy::Main, "launcher_trigger")
+        .then(|| launcher_trigger::snapshot(caller.app_handle()))
+}
+
+#[tauri::command]
+#[specta::specta]
+fn launcher_set_shortcut(
+    caller: WebviewWindow,
+    accelerator: String,
+) -> Option<launcher_trigger::TriggerChange> {
+    authorize(&caller, CallerPolicy::Main, "launcher_set_shortcut")
+        .then(|| launcher_trigger::set_shortcut(caller.app_handle(), &accelerator))
+}
+
+/// Silences the current shortcut while a new one is being recorded.
+#[tauri::command]
+#[specta::specta]
+fn launcher_record_shortcut(caller: WebviewWindow, active: bool) {
+    if authorize(&caller, CallerPolicy::Main, "launcher_record_shortcut") {
+        launcher_trigger::recording(caller.app_handle(), active);
     }
-    caller.start_dragging().is_ok()
+}
+
+#[tauri::command]
+#[specta::specta]
+fn launcher_set_double_tap(
+    caller: WebviewWindow,
+    mode: launcher_trigger::DoubleTap,
+) -> Option<launcher_trigger::LauncherTrigger> {
+    authorize(&caller, CallerPolicy::Main, "launcher_set_double_tap")
+        .then(|| launcher_trigger::set_double_tap(caller.app_handle(), mode))
+}
+
+#[tauri::command]
+#[specta::specta]
+fn launcher_open_accessibility(caller: WebviewWindow) {
+    if authorize(&caller, CallerPolicy::Main, "launcher_open_accessibility") {
+        launcher_trigger::open_accessibility_settings();
+    }
+}
+
+/// The launcher's content reports what it shows; native sizes the window and
+/// places the material behind it.
+#[tauri::command]
+#[specta::specta]
+fn panel_layout(
+    caller: WebviewWindow,
+    overlay: State<'_, overlay::Overlay>,
+    layout: zephium_ipc::PanelLayout,
+) {
+    if authorize(&caller, CallerPolicy::Panel, "panel_layout") {
+        overlay.layout(layout);
+    }
 }
 
 #[tauri::command]
@@ -4548,9 +4632,6 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     let tauri::RunEvent::ExitRequested { code, api, .. } = event else {
         return;
     };
-    if let Some(panel) = app.try_state::<overlay::Overlay>() {
-        panel.flush();
-    }
     let Some(coordinator) = app.try_state::<ShutdownCoordinator>() else {
         write_diagnostic(format_args!(
             "shutdown: exit requested before coordinator setup"
@@ -5120,8 +5201,9 @@ pub fn run() {
                 ),
                 Projection::UiCommand(id) => {
                     if id.starts_with("preference.search.") { search_providers::cancel_all(); }
-                    if let Some(value)=id.strip_prefix("preference.tools.presentation=") {
-                        if let Some(panel)=emit_handle.try_state::<overlay::Overlay>() {panel.preference(value=="floating");}
+                    #[cfg(target_os = "macos")]
+                    if let Some(value) = id.strip_prefix("preference.ui.reduce-motion=") {
+                        panel::set_reduce_motion(value == "true");
                     }
                     if let Some(mode) = id.strip_prefix("theme.") {
                         if matches!(mode, "system" | "light" | "dark") {
@@ -5527,7 +5609,7 @@ pub fn run() {
                 .transparent(true)
                 .always_on_top(true)
                 .skip_taskbar(true)
-                .resizable(true)
+                .resizable(false)
                 .maximizable(false)
                 .fullscreen(false)
                 .shadow(true)
@@ -5598,7 +5680,6 @@ pub fn run() {
                 tauri::WindowEvent::Focused(_) => blur_overlay.focus_changed(),
                 tauri::WindowEvent::ScaleFactorChanged { .. } => blur_overlay.display_changed(),
                 tauri::WindowEvent::CloseRequested { api, .. } if !shutdown_started(blur_overlay.window_app()) => { api.prevent_close(); blur_overlay.hide(); },
-                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => blur_overlay.geometry_changed(),
                 #[cfg(target_os = "windows")]
                 tauri::WindowEvent::Destroyed
                     if !platform::imp::remove_privileged_version_observer(overlay::PANEL_LABEL) =>
@@ -5608,28 +5689,18 @@ pub fn run() {
                 _ => {}
             }});
             app.manage(overlay);
+            #[cfg(all(debug_assertions, target_os = "macos"))]
+            log_webview_processes(&window, &panel_window);
 
             #[cfg(not(target_os = "linux"))]
             {
-                use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-                let resolved = zephium_core::commands::resolve(&keymap);
-                let accel = resolved
-                    .iter()
-                    .find(|c| c.id == "launcher.toggle")
-                    .and_then(|c| c.accelerator.clone());
-                if let Some(accel) = accel {
-                    let registered = app.global_shortcut().on_shortcut(
-                        accel.as_str(),
-                        |app, _shortcut, event| {
-                            if event.state() == ShortcutState::Pressed {
-                                let _ = execute_command(app, "launcher.toggle");
-                            }
-                        },
-                    );
-                    if let Err(e) = registered {
-                        diagnostic!("global shortcut {accel} unavailable: {e}");
-                    }
-                }
+                app.manage(launcher_trigger::Trigger::default());
+                let keymap_override = zephium_core::commands::resolve(&keymap)
+                    .into_iter()
+                    .find(|command| command.id == "launcher.toggle")
+                    .and_then(|command| command.accelerator)
+                    .filter(|accelerator| accelerator != launcher_trigger::DEFAULT);
+                launcher_trigger::install(&handle, keymap_override);
             }
             #[cfg(target_os = "linux")]
             {

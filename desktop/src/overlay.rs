@@ -1,33 +1,46 @@
-//! One persistent native window, with bounded search/tool routes and no feature workers while hidden.
+//! One persistent native window for the launcher. It hosts search only:
+//! destinations are handed to the browser, which already has their views
+//! loaded, so nothing heavy is ever instantiated a second time here.
 mod geometry;
 mod model;
 use model::{Model, Owner};
 use std::sync::{Arc, Mutex};
 use tauri::{LogicalSize, Manager, PhysicalPosition, WebviewWindow};
+#[cfg(target_os = "macos")]
 use zephium_core::ports::store::Store;
 use zephium_ipc::{
-    OperationDisposition, OperationOutcome, PanelIntent, PanelOwner, PanelRoute, PanelState,
+    OperationDisposition, OperationOutcome, PanelIntent, PanelLayout, PanelOwner, PanelState,
     SearchContext, ToolKind,
 };
 pub const PANEL_LABEL: &str = "panel";
-pub const PANEL_SIZE: (f64, f64) = geometry::DEFAULT;
+pub const PANEL_SIZE: (f64, f64) = (geometry::WIDTH, geometry::RESTING_HEIGHT);
 pub const PANEL_RADIUS: u16 = model::RADIUS;
 pub const EVENT_STATE: &str = "zephium:panel-state";
 #[derive(Default)]
 pub struct ContextCache(Mutex<Option<Owner>>);
+struct Pending {
+    id: String,
+    background: bool,
+}
 struct State {
     model: Model,
-    geometry: Option<geometry::Geometry>,
-    persisted_geometry: Option<geometry::Geometry>,
-    positioned: bool,
-    geometry_loaded: bool,
-    geometry_revision: u64,
+    pending: Option<Pending>,
+    /// Height the launcher's content asked for, before the display bounds it.
+    content_height: f64,
+    layout_revision: u64,
+    placement: Option<geometry::Placement>,
     focus_revision: u64,
-    geometry_timer: bool,
     focus_timer: bool,
-    always_floating: bool,
-    preference_changed: bool,
     closed: bool,
+}
+impl State {
+    /// A new presentation never inherits an action still awaiting settlement.
+    /// A disposition that never reaches the launcher, such as one the ledger
+    /// drops as a duplicate, would otherwise refuse every later action.
+    fn begin(&mut self) {
+        self.pending = None;
+        self.model.search();
+    }
 }
 #[derive(Clone)]
 pub struct Overlay {
@@ -46,16 +59,12 @@ impl Overlay {
             window,
             state: Arc::new(Mutex::new(State {
                 model,
-                geometry: None,
-                persisted_geometry: None,
-                positioned: false,
-                geometry_loaded: false,
-                geometry_revision: 0,
+                pending: None,
+                content_height: geometry::RESTING_HEIGHT,
+                layout_revision: 0,
+                placement: None,
                 focus_revision: 0,
-                geometry_timer: false,
                 focus_timer: false,
-                always_floating: false,
-                preference_changed: false,
                 closed: false,
             })),
         };
@@ -65,46 +74,23 @@ impl Overlay {
             let _ = this
                 .window
                 .run_on_main_thread(move || crate::panel::configure(&w));
-        }
-        let restore = this.clone();
-        tauri::async_runtime::spawn(async move {
-            let values = tauri::async_runtime::spawn_blocking(|| {
-                crate::APP_STORE.get().map(|store| {
-                    (
-                        store.app_setting(geometry::KEY),
-                        store.app_setting("tools.presentation"),
-                    )
-                })
-            })
-            .await
-            .ok()
-            .flatten();
-            restore.on_main(move |this| {
-                {
-                    let mut state = this.state.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some((geometry, preference)) = values {
-                        if !state.positioned {
-                            state.geometry =
-                                geometry.and_then(|value| geometry::Geometry::decode(&value));
-                            state.persisted_geometry = state.geometry.clone();
-                        }
-                        if !state.preference_changed {
-                            state.always_floating = preference.as_deref() == Some("floating");
-                        }
-                    }
-                    state.geometry_loaded = true;
-                }
-                this.present(true);
+            // Live changes arrive as a UI command; this is the value at launch.
+            tauri::async_runtime::spawn_blocking(|| {
+                let reduce = crate::APP_STORE
+                    .get()
+                    .and_then(|store| store.app_setting("ui.reduce-motion"));
+                crate::panel::set_reduce_motion(reduce.as_deref() == Some("true"));
             });
-        });
+        }
         this
+    }
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
     fn on_main(&self, f: impl FnOnce(&Self) + Send + 'static) {
         let this = self.clone();
         let _ = self.window.run_on_main_thread(move || {
-            if !crate::shutdown_started(this.window.app_handle())
-                && !this.state.lock().unwrap_or_else(|e| e.into_inner()).closed
-            {
+            if !crate::shutdown_started(this.window.app_handle()) && !this.state().closed {
                 f(&this);
             }
         });
@@ -113,102 +99,144 @@ impl Overlay {
         self.window.app_handle()
     }
     pub fn private(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+        self.state()
             .model
             .owner
             .as_ref()
             .is_none_or(|owner| owner.private)
     }
     pub fn snapshot(&self) -> PanelState {
-        let mut snapshot = self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .model
-            .snapshot();
-        snapshot.position_restorable = position_supported();
-        snapshot
-    }
-    /// Whether the panel is on screen with `tool` open.
-    pub fn showing(&self, tool: ToolKind) -> bool {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let model = &state.model;
-        model.presented
-            && !model.suppressed
-            && matches!(&model.route, PanelRoute::Tool { tool: open } if *open == tool)
-    }
-    pub fn always_floating(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .always_floating
-    }
-    pub fn preference(&self, floating: bool) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.always_floating = floating;
-        state.preference_changed = true;
+        self.state().model.snapshot()
     }
     pub fn ready(&self) -> PanelState {
-        {
-            self.state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .model
-                .ready = true;
-        }
-        self.on_main(|this| this.present(true));
+        self.state().model.ready = true;
+        self.on_main(|this| this.present());
         self.snapshot()
     }
     pub fn intent(&self, intent: PanelIntent) {
         self.on_main(move |this| {
             let old = this.snapshot().session_id;
-            {
-                let mut state = this.state.lock().unwrap_or_else(|e| e.into_inner());
-                match intent {
-                    PanelIntent::Search | PanelIntent::Back => state.model.search(),
-                    PanelIntent::Dismiss => state.model.hide(),
-                    PanelIntent::Tool { tool } => state.model.tool(tool),
+            match intent {
+                PanelIntent::Search => this.state().begin(),
+                PanelIntent::Dismiss => {
+                    this.state().model.hide();
+                    #[cfg(target_os = "macos")]
+                    crate::panel::return_to_previous();
+                }
+                PanelIntent::Open { tool } => {
+                    this.state().model.hide();
+                    this.cancel_search(old);
+                    this.present();
+                    this.raise_browser();
+                    let _ = crate::execute_command(this.window.app_handle(), destination(tool));
+                    return;
                 }
             }
             this.cancel_search(old);
-            this.present(true);
+            this.present();
         });
     }
     pub fn toggle(&self) {
         self.on_main(|this| {
             let old = this.snapshot().session_id;
-            this.state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .model
-                .toggle();
+            let dismissing = this.state().model.presented;
+            if dismissing {
+                this.state().model.hide();
+            } else {
+                this.state().begin();
+            }
             this.cancel_search(old);
-            this.present(true);
+            this.present();
+            #[cfg(target_os = "macos")]
+            if dismissing {
+                crate::panel::return_to_previous();
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = dismissing;
         });
     }
     #[cfg(target_os = "linux")]
     pub fn toggle_with_activation(&self, activation_token: Option<String>, timestamp: Option<u32>) {
         self.on_main(move |this| {
-            if crate::shutdown_started(this.window.app_handle()) {
+            let old = this.snapshot().session_id;
+            if this.state().model.presented {
+                this.state().model.hide();
+            } else {
+                this.state().begin();
+            }
+            this.cancel_search(old);
+            if !this.snapshot().visible {
+                this.present();
                 return;
             }
-            let old = this.snapshot().session_id;
-            this.state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .model
-                .toggle();
-            this.cancel_search(old);
-            this.present(true);
-            if this.snapshot().visible {
+            this.publish();
+            if this.state().model.ready {
+                this.place();
                 do_show_with_activation(&this.window, activation_token.as_deref(), timestamp);
             }
         });
     }
     pub fn hide(&self) {
         self.intent(PanelIntent::Dismiss);
+    }
+    /// The launcher's content reports what it shows. The window follows its
+    /// height within the display's bounds, keeping its top edge where it is;
+    /// where native draws the shapes, they move first and a smaller window
+    /// follows once they have settled, so nothing is cut off mid-motion.
+    pub fn layout(&self, layout: PanelLayout) {
+        if !layout.bounded() {
+            return;
+        }
+        self.on_main(move |this| {
+            let height = layout
+                .height
+                .clamp(geometry::RESTING_HEIGHT, geometry::MAX_HEIGHT);
+            let showing = this.snapshot().visible && visible(&this.window);
+            #[cfg(target_os = "macos")]
+            crate::panel::layout(&layout, showing);
+            let (grows, revision) = {
+                let mut state = this.state();
+                let grows = height > state.content_height;
+                state.content_height = height;
+                state.layout_revision = state.layout_revision.wrapping_add(1);
+                (grows, state.layout_revision)
+            };
+            if !showing {
+                return;
+            }
+            if grows || !animated_shapes() {
+                this.resize();
+                return;
+            }
+            let later = this.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(SHAPES_SETTLE).await;
+                later.on_main(move |this| {
+                    if this.state().layout_revision == revision {
+                        this.resize();
+                    }
+                });
+            });
+        });
+    }
+    fn raise_browser(&self) {
+        #[cfg(target_os = "macos")]
+        crate::panel::forget_previous();
+        let Some(main) = self
+            .window
+            .app_handle()
+            .get_webview_window(crate::MAIN_LABEL)
+        else {
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        crate::panel::raise(&main);
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = main.unminimize();
+            let _ = main.show();
+            let _ = main.set_focus();
+        }
     }
     fn cancel_search(&self, session_id: String) {
         if let Some(shell) = self.window.app_handle().try_state::<zephium_app::Handle>() {
@@ -224,119 +252,90 @@ impl Overlay {
             &self.snapshot(),
         );
     }
-    fn present(&self, focus: bool) {
+    fn present(&self) {
         let snapshot = self.snapshot();
         self.publish();
-        if !self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .model
-            .ready
-        {
+        if !self.state().model.ready {
             return;
         }
         if !snapshot.visible {
-            self.persist_geometry();
             do_hide(&self.window);
             return;
         }
-        if !self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .geometry_loaded
-        {
-            return;
-        }
         if !visible(&self.window) {
-            self.state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .positioned = false;
+            self.place();
         }
-        self.prepare_geometry();
         #[cfg(target_os = "macos")]
-        {
-            crate::panel::set_tool_mode(
-                &self.window,
-                matches!(snapshot.route, PanelRoute::Tool { .. }),
-            );
-            if focus {
-                crate::panel::show(&self.window);
-            } else {
-                crate::panel::show_unfocused(&self.window);
-            }
-        }
+        crate::panel::show(&self.window);
         #[cfg(not(target_os = "macos"))]
         {
             let _ = self.window.show();
-            if focus {
-                let _ = self.window.set_focus();
-            }
+            let _ = self.window.set_focus();
         }
     }
     pub fn search_context(&self, request_id: &str) -> Option<SearchContext> {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .model
-            .context(request_id)
+        self.state().model.context(request_id)
     }
-    pub fn arm_action(&self, id: &str, context: &SearchContext) -> bool {
+    pub fn arm_action(&self, id: &str, context: &SearchContext, background: bool) -> bool {
         {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if !state.model.admits(context) || state.model.pending_action.is_some() {
+            let mut state = self.state();
+            if !state.model.admits(context) || state.pending.is_some() {
                 return false;
             }
             state.model.clear_error();
-            state.model.pending_action = Some(id.into());
+            state.pending = Some(Pending {
+                id: id.into(),
+                background,
+            });
         }
         self.on_main(|this| this.publish());
         true
     }
     pub fn action_rejected(&self, id: &str) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.model.pending_action.as_deref() == Some(id) {
-            state.model.pending_action = None;
+        let mut state = self.state();
+        if state
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.id == id)
+        {
+            state.pending = None;
         }
     }
     pub fn operation(&self, result: OperationDisposition) {
         self.on_main(move |this| {
             let old_session = this.snapshot().session_id;
-            let mut state = this.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.model.pending_action.as_deref() != Some(&result.operation_id) {
+            let mut state = this.state();
+            let Some(pending) = state
+                .pending
+                .take_if(|pending| pending.id == result.operation_id)
+            else {
                 return;
-            }
-            state.model.pending_action = None;
+            };
             let accepted = matches!(
                 result.outcome,
                 OperationOutcome::Applied | OperationOutcome::NoOp | OperationOutcome::Deferred
             );
-            if accepted {
-                state.model.hide();
-            } else {
+            if !accepted {
                 state.model.reject();
+                drop(state);
+                this.publish();
+                return;
             }
+            // A background open leaves the launcher where it is, so several
+            // results can be sent to the browser in one visit.
+            if pending.background {
+                return;
+            }
+            state.model.hide();
             drop(state);
-            if accepted {
-                this.cancel_search(old_session);
-            }
-            this.present(false);
-            if accepted {
-                if let Some(main) = this
-                    .window
-                    .app_handle()
-                    .get_webview_window(crate::MAIN_LABEL)
-                {
-                    let _ = main.set_focus();
-                }
-            }
+            this.cancel_search(old_session);
+            this.present();
+            this.raise_browser();
         });
     }
     pub fn focus_changed(&self) {
         {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state();
             state.focus_revision = state.focus_revision.saturating_add(1);
             if state.focus_timer {
                 return;
@@ -345,15 +344,11 @@ impl Overlay {
         }
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
-            let mut observed = this
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .focus_revision;
+            let mut observed = this.state().focus_revision;
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(35)).await;
                 let settled = {
-                    let mut state = this.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut state = this.state();
                     if state.closed {
                         return;
                     }
@@ -370,13 +365,7 @@ impl Overlay {
                 }
             }
             this.on_main(|this| {
-                if !this
-                    .state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .model
-                    .ready
-                {
+                if !this.state().model.ready {
                     return;
                 }
                 let panel_focused = this.window.is_focused().unwrap_or(false);
@@ -387,118 +376,47 @@ impl Overlay {
                     .is_some_and(|window| window.is_focused().unwrap_or(false));
                 let app_active = application_active(panel_focused, main_focused);
                 let old = this.snapshot();
-                this.state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                this.state()
                     .model
                     .focus(panel_focused, main_focused, app_active);
                 if this.snapshot() != old {
+                    #[cfg(target_os = "macos")]
+                    crate::panel::forget_previous();
                     this.cancel_search(old.session_id);
-                    this.present(false);
+                    this.present();
                 }
             });
         });
     }
-    pub fn geometry_changed(&self) {
-        {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.geometry_revision = state.geometry_revision.saturating_add(1);
-            if state.geometry_timer {
-                return;
-            }
-            state.geometry_timer = true;
-        }
-        let this = self.clone();
-        tauri::async_runtime::spawn(async move {
-            let mut observed = this
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .geometry_revision;
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                let settled = {
-                    let mut state = this.state.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.closed {
-                        return;
-                    }
-                    if state.geometry_revision == observed {
-                        state.geometry_timer = false;
-                        true
-                    } else {
-                        observed = state.geometry_revision;
-                        false
-                    }
-                };
-                if settled {
-                    break;
-                }
-            }
-            this.on_main(|this| this.persist_geometry());
-        });
-    }
     pub fn display_changed(&self) {
         self.on_main(|this| {
-            this.persist_geometry();
-            this.state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .positioned = false;
             if this.snapshot().visible {
-                this.prepare_geometry();
+                this.place();
             }
         });
     }
     pub fn destroyed(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.closed = true;
+        self.state().closed = true;
     }
-    fn prepare_geometry(&self) {
-        if self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .positioned
-        {
-            return;
-        }
-        let saved = self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .geometry
-            .clone();
+    /// Places the launcher on the display under the pointer, where the user is
+    /// looking, at the same height every time.
+    fn place(&self) {
         let monitor = self
             .window
-            .available_monitors()
+            .app_handle()
+            .cursor_position()
             .ok()
-            .and_then(|monitors| {
-                saved.as_ref().and_then(|saved| {
-                    monitors
-                        .iter()
-                        .find(|monitor| monitor.name().cloned() == saved.monitor)
-                        .cloned()
-                })
-            })
-            .or_else(|| {
+            .and_then(|cursor| {
                 self.window
-                    .app_handle()
-                    .cursor_position()
-                    .ok()
-                    .and_then(|cursor| {
-                        self.window
-                            .available_monitors()
-                            .ok()?
-                            .into_iter()
-                            .find(|monitor| {
-                                let area = monitor.work_area();
-                                cursor.x >= f64::from(area.position.x)
-                                    && cursor.y >= f64::from(area.position.y)
-                                    && cursor.x
-                                        < f64::from(area.position.x) + f64::from(area.size.width)
-                                    && cursor.y
-                                        < f64::from(area.position.y) + f64::from(area.size.height)
-                            })
+                    .available_monitors()
+                    .ok()?
+                    .into_iter()
+                    .find(|monitor| {
+                        let area = monitor.work_area();
+                        cursor.x >= f64::from(area.position.x)
+                            && cursor.y >= f64::from(area.position.y)
+                            && cursor.x < f64::from(area.position.x) + f64::from(area.size.width)
+                            && cursor.y < f64::from(area.position.y) + f64::from(area.size.height)
                     })
             })
             .or_else(|| self.window.current_monitor().ok().flatten())
@@ -511,95 +429,69 @@ impl Overlay {
             return;
         }
         let work = monitor.work_area();
-        let width = f64::from(work.size.width) / scale;
-        let height = f64::from(work.size.height) / scale;
-        let mut geometry = saved
-            .unwrap_or(geometry::Geometry {
-                version: 1,
-                monitor: monitor.name().cloned(),
-                x: (width - PANEL_SIZE.0) / 2.0,
-                y: (height - PANEL_SIZE.1) * 0.22,
-                width: PANEL_SIZE.0,
-                height: PANEL_SIZE.1,
-            })
-            .fit(width, height);
-        geometry.monitor = monitor.name().cloned();
-        let (min, max) = geometry::limits(width, height);
-        let _ = self
-            .window
-            .set_min_size(Some(LogicalSize::new(min.0, min.1)));
-        let _ = self
-            .window
-            .set_max_size(Some(LogicalSize::new(max.0, max.1)));
-        let _ = self
-            .window
-            .set_size(LogicalSize::new(geometry.width, geometry.height));
-        if position_supported() {
-            let _ = self.window.set_position(PhysicalPosition::new(
-                f64::from(work.position.x) + geometry.x * scale,
-                f64::from(work.position.y) + geometry.y * scale,
-            ));
-        }
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.positioned = true;
-        state.geometry = Some(geometry);
-    }
-    fn persist_geometry(&self) {
-        if !self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .positioned
-        {
-            return;
-        }
-        let (Ok(Some(monitor)), Ok(size)) =
-            (self.window.current_monitor(), self.window.inner_size())
-        else {
-            return;
-        };
-        let position = self.window.outer_position().ok();
-        let scale = monitor.scale_factor();
-        if !scale.is_finite() || scale <= 0.0 {
-            return;
-        }
-        let work = monitor.work_area();
-        let value = geometry::Geometry {
-            version: 1,
-            monitor: monitor.name().cloned(),
-            x: position.map_or(24.0, |p| {
-                (f64::from(p.x) - f64::from(work.position.x)) / scale
-            }),
-            y: position.map_or(24.0, |p| {
-                (f64::from(p.y) - f64::from(work.position.y)) / scale
-            }),
-            width: f64::from(size.width) / scale,
-            height: f64::from(size.height) / scale,
-        }
-        .fit(
+        let placement = geometry::Placement::new(
             f64::from(work.size.width) / scale,
             f64::from(work.size.height) / scale,
+            if animated_shapes() {
+                geometry::SHAPE_INSET
+            } else {
+                0.0
+            },
         );
-        if !value.valid() {
-            return;
+        let height = placement.height(self.state().content_height);
+        let _ = self
+            .window
+            .set_size(LogicalSize::new(placement.width, height));
+        if position_supported() {
+            let _ = self.window.set_position(PhysicalPosition::new(
+                f64::from(work.position.x) + placement.x * scale,
+                f64::from(work.position.y) + placement.y * scale,
+            ));
         }
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.persisted_geometry.as_ref() == Some(&value) {
-            return;
-        }
-        state.geometry = Some(value.clone());
-        drop(state);
-        if let (Some(store), Ok(json)) = (crate::APP_STORE.get(), serde_json::to_string(&value)) {
-            if store.set_app_setting(geometry::KEY.into(), json) {
-                self.state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .persisted_geometry = Some(value);
-            }
-        }
+        self.state().placement = Some(placement);
     }
-    pub fn flush(&self) {
-        self.persist_geometry();
+    fn resize(&self) {
+        let (placement, content) = {
+            let state = self.state();
+            (state.placement, state.content_height)
+        };
+        let Some(placement) = placement else {
+            return;
+        };
+        let height = placement.height(content);
+        #[cfg(target_os = "macos")]
+        crate::panel::set_height(&self.window, height);
+        #[cfg(not(target_os = "macos"))]
+        let _ = self
+            .window
+            .set_size(LogicalSize::new(placement.width, height));
+    }
+}
+/// Slightly longer than the shapes' own settle, so the window never shrinks
+/// under a shape still moving.
+const SHAPES_SETTLE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Native draws the launcher's material as separate shapes, which the window
+/// has to leave room around.
+fn animated_shapes() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::panel::shapes_active()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+fn destination(tool: ToolKind) -> &'static str {
+    match tool {
+        ToolKind::Notes => "browser.notes",
+        ToolKind::Tasks => "browser.tasks",
+        ToolKind::History => "browser.history",
+        ToolKind::Downloads => "browser.downloads",
+        ToolKind::Ai => "tool.ai",
+        ToolKind::Time => "tool.time",
     }
 }
 pub fn update_context(app: &tauri::AppHandle, context: &PanelOwner) {
@@ -632,7 +524,7 @@ pub fn update_context(app: &tauri::AppHandle, context: &PanelOwner) {
                 .set_owner(owner);
             if this.snapshot() != old {
                 this.cancel_search(old.session_id);
-                this.present(false);
+                this.present();
             }
         });
     }

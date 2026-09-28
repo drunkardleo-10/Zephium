@@ -572,18 +572,51 @@ pub struct SearchContext {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum PanelRoute {
-    Search,
-    Tool { tool: ToolKind },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(tag = "type", rename_all = "snake_case")]
 pub enum PanelIntent {
     Search,
-    Back,
     Dismiss,
-    Tool { tool: ToolKind },
+    /// Hands a destination to the browser, which already hosts its views, and
+    /// puts the launcher away.
+    Open {
+        tool: ToolKind,
+    },
+}
+
+/// A rectangle in the launcher's own coordinates: CSS pixels from the top-left
+/// of its window, which are points on every platform.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct PanelRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// What the launcher is showing, reported by its content. Native sizes the
+/// window to `height` and, where it draws the material itself, places the
+/// field and result shapes behind the content.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct PanelLayout {
+    pub height: f64,
+    pub field: PanelRect,
+    pub sheet: Option<PanelRect>,
+}
+
+impl PanelRect {
+    pub fn bounded(&self) -> bool {
+        [self.x, self.y, self.width, self.height]
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=4096.0).contains(value))
+    }
+}
+
+impl PanelLayout {
+    pub fn bounded(&self) -> bool {
+        self.height.is_finite()
+            && (0.0..=4096.0).contains(&self.height)
+            && self.field.bounded()
+            && self.sheet.as_ref().is_none_or(PanelRect::bounded)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -592,13 +625,11 @@ pub struct PanelState {
     pub revision: String,
     pub session_id: String,
     pub visible: bool,
-    pub route: PanelRoute,
     pub profile_id: Option<String>,
     pub profile_name: Option<String>,
     pub space_id: Option<String>,
     pub error: bool,
     pub corner_radius: u16,
-    pub position_restorable: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
