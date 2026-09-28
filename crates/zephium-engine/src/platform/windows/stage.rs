@@ -209,6 +209,10 @@ pub struct Stage {
 }
 
 impl Stage {
+    pub(crate) fn parent_window(&self) -> Option<HWND> {
+        self.state.try_borrow().ok().map(|state| state.parent)
+    }
+
     pub fn new(
         parent: HWND,
         gap: f64,

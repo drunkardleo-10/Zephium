@@ -8,6 +8,7 @@ pub const HOST_DIRECTORY: &str = "zephium-windows-host";
 const READY_FILE: &str = "zephium-windows-prepared.txt";
 const OBSERVER: &str = include_str!("windows/action-observer.js");
 const HOST_SCRIPT: &str = include_str!("windows/action-host.js");
+pub const POPUP_TARGET_SCRIPT: &str = include_str!("windows/popup-target.js");
 
 pub fn prepare(dir: &Path, sites: Option<&[String]>) -> Result<(), String> {
     let manifest = crate::manifest::Manifest::load(dir).map_err(|e| e.to_string())?;

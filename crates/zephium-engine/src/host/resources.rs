@@ -14,9 +14,11 @@ use std::rc::Rc;
 /// of every class budget, so no feature can silently consume tab or teardown
 /// capacity.
 #[cfg(feature = "agentic-browser")]
-pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize = 51;
+pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize =
+    51 + if cfg!(target_os = "windows") { 9 } else { 0 };
 #[cfg(not(feature = "agentic-browser"))]
-pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize = 43;
+pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize =
+    43 + if cfg!(target_os = "windows") { 9 } else { 0 };
 pub(super) const MAX_NATIVE_TEARDOWN_DEBTS: usize = 8;
 #[cfg(feature = "agentic-browser")]
 pub(super) const MAX_AGENT_CONTEXT_RESOURCES: usize = 8;
@@ -30,20 +32,24 @@ pub(super) enum NativeResourceClass {
     TeardownDebt,
     #[cfg(feature = "agentic-browser")]
     AgentContext,
+    #[cfg(target_os = "windows")]
+    Extension,
     TransientConstruction,
 }
 
 impl NativeResourceClass {
     #[cfg(feature = "agentic-browser")]
-    const COUNT: usize = 5;
+    const COUNT: usize = 5 + cfg!(target_os = "windows") as usize;
     #[cfg(not(feature = "agentic-browser"))]
-    const COUNT: usize = 4;
+    const COUNT: usize = 4 + cfg!(target_os = "windows") as usize;
     const ALL: [Self; Self::COUNT] = [
         Self::Tab,
         Self::WarmSpare,
         Self::TeardownDebt,
         #[cfg(feature = "agentic-browser")]
         Self::AgentContext,
+        #[cfg(target_os = "windows")]
+        Self::Extension,
         Self::TransientConstruction,
     ];
 
@@ -54,6 +60,8 @@ impl NativeResourceClass {
             Self::TeardownDebt => 2,
             #[cfg(feature = "agentic-browser")]
             Self::AgentContext => 3,
+            #[cfg(target_os = "windows")]
+            Self::Extension => Self::COUNT - 2,
             Self::TransientConstruction => Self::COUNT - 1,
         }
     }
@@ -65,6 +73,10 @@ impl NativeResourceClass {
             Self::TeardownDebt => MAX_NATIVE_TEARDOWN_DEBTS,
             #[cfg(feature = "agentic-browser")]
             Self::AgentContext => MAX_AGENT_CONTEXT_RESOURCES,
+            // Eight observer pages and one foreground popup. This pool never
+            // borrows tab, Work, warm-spare, or cleanup-debt capacity.
+            #[cfg(target_os = "windows")]
+            Self::Extension => 9,
             Self::TransientConstruction => 2,
         }
     }

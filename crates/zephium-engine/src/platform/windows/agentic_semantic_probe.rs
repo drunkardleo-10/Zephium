@@ -533,6 +533,7 @@ pub(crate) fn run(
             ContextProfileStorageClass::Ephemeral,
             profile.path(),
             construction_deadline,
+            false,
             AgentOwnedViewCallbacks::new(
                 move |terminal| {
                     if navigation_callbacks

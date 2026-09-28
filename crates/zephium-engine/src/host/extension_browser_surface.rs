@@ -139,6 +139,8 @@ impl EngineHost {
                     .map(|view| crate::platform::imp::native_webview(&view.view))
             });
         }
+        #[cfg(target_os = "windows")]
+        self.reconcile_windows_extension_popup(&surface);
         self.extension_browser_surfaces.insert(profile, surface);
         true
     }

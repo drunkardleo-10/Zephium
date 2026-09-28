@@ -2971,10 +2971,12 @@ impl EngineHost {
             profile,
             deadline,
             expected_user_data_folder.clone(),
+            request.profile_lease().storage_class() == ContextProfileStorageClass::Durable,
         )
         .map_err(map_windows_profile_environment_failure)?;
-        let selected =
-            request.profile_lease().storage_class() == ContextProfileStorageClass::Durable;
+        // Durable environments admit human extensions from startup. Work
+        // always uses its existing, separate automation subprofile.
+        let selected = false;
         if !selected && self.agent_cookie_quarantined_profiles.contains(&profile) {
             return Err(ContextPortFailure::CookieTransferFailed);
         }
@@ -3014,6 +3016,7 @@ impl EngineHost {
             request.profile_lease().storage_class(),
             &expected_user_data_folder,
             deadline,
+            request.profile_lease().storage_class() == ContextProfileStorageClass::Durable,
             crate::platform::imp::AgentOwnedViewCallbacks::new(
                 move |terminal| {
                     let rejected = navigation_guard.clone();

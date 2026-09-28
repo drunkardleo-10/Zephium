@@ -8,10 +8,9 @@
 
 //! Hidden WebView2 construction for owned agent contexts.
 //!
-//! The adapter reuses the profile's environment, which the engine never
-//! creates with browser extensions enabled. It either rejoins the selected
-//! profile or a deterministic automation subprofile, and attests that binding
-//! before the host arms any navigation.
+//! Extension-enabled human environments use a deterministic automation
+//! subprofile. The pre-initialization gate attests its exact binding and
+//! extension-free inventory before the host arms any navigation.
 
 use std::path::Path;
 use std::rc::Rc;
@@ -573,6 +572,7 @@ pub(crate) fn build_owned_agent_view<
     storage_class: ContextProfileStorageClass,
     expected_user_data_folder: &Path,
     deadline: Instant,
+    extensions_enabled: bool,
     callbacks: AgentOwnedViewCallbacks<
         Navigation,
         Location,
@@ -687,6 +687,39 @@ where
 
     if let AgentOwnedProfile::Automation { name } = &profile {
         builder = builder.with_profile_name(name.clone());
+    }
+
+    if extensions_enabled {
+        if !matches!(&profile, AgentOwnedProfile::Automation { .. }) {
+            return Err(AgentOwnedViewConstructionError::ExtensionIsolation);
+        }
+        let expected_environment = environment.clone();
+        let expected_path = expected_user_data_folder.to_owned();
+        let expected_profile = profile.clone();
+        builder = builder.with_browser_extension_startup_gate(move |environment, core| {
+            if !super::same_environment(&expected_environment, environment) {
+                return Err(windows::Win32::Foundation::E_ACCESSDENIED.into());
+            }
+            attest_profile(
+                &expected_profile,
+                environment,
+                core,
+                storage_class,
+                &expected_path,
+            )
+            .map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_ACCESSDENIED))?;
+            let profile = super::extensions::profile(core)?;
+            let items = super::extensions::list(&profile).map_err(|_| {
+                windows::core::Error::from(windows::Win32::Foundation::E_ACCESSDENIED)
+            })?;
+            for item in items {
+                let id = super::extensions::extension_id(&item)?;
+                if !super::extensions::is_runtime_component(&id) {
+                    return Err(windows::Win32::Foundation::E_ACCESSDENIED.into());
+                }
+            }
+            Ok(())
+        });
     }
 
     let view = builder

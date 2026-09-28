@@ -658,6 +658,7 @@ impl EngineHost {
                     .filter(|spare| spare.partition.profile() == profile)
                     .map(|spare| crate::platform::imp::profile_for_erasure(&spare.view))
             })
+            .or_else(|| self.windows_extension_profile_for_erasure(profile))
             .and_then(|result| match result {
                 Ok(profile) => Some(profile),
                 Err(error) => {
@@ -667,6 +668,8 @@ impl EngineHost {
             });
         #[cfg(target_os = "windows")]
         let had_environment = self.environments.contains_key(&profile);
+        #[cfg(target_os = "windows")]
+        self.forget_windows_extensions(profile);
         #[cfg(target_os = "windows")]
         let browser_process_exit_proof = self
             .browser_process_exit_observers
@@ -944,6 +947,7 @@ impl EngineHost {
 
     #[cfg(target_os = "windows")]
     fn retire_profile_process_views(&mut self, profile: ProfileId) -> Vec<ItemId> {
+        self.forget_windows_extensions(profile);
         let mut ids: Vec<ItemId> = self
             .partitions
             .iter()

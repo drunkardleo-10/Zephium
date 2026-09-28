@@ -615,7 +615,7 @@ impl EngineHost {
         let (title_id, load_id) = (id.clone(), id.clone());
         let scripts = self.scripts_for(partition);
         #[cfg(target_os = "windows")]
-        let cached_environment = self.environments.get(&partition.profile()).cloned();
+        let mut cached_environment = self.environments.get(&partition.profile()).cloned();
         #[cfg(target_os = "windows")]
         let construction_environment: Rc<RefCell<Option<ICoreWebView2Environment>>> =
             Rc::new(RefCell::new(None));
@@ -690,6 +690,8 @@ impl EngineHost {
             (builder, expected_directory, context_is_new)
         };
         #[cfg(target_os = "windows")]
+        let mut extension_startup = None;
+        #[cfg(target_os = "windows")]
         let (builder, expected_user_data_folder) = {
             let profile = partition.profile();
             let root = match partition {
@@ -707,6 +709,26 @@ impl EngineHost {
                     return None;
                 }
             };
+            if !matches!(partition, Partition::Ephemeral(_)) {
+                if let Err(error) = self.ensure_windows_profile_environment_at_path(
+                    profile,
+                    std::time::Instant::now() + std::time::Duration::from_secs(5),
+                    path.clone(),
+                    true,
+                ) {
+                    eprintln!("extensions: profile startup refused: {error:?}");
+                    if report_failure {
+                        event_permit
+                            .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                    }
+                    return None;
+                }
+                extension_startup = self.windows_extension_startup(profile, &path).ok();
+                if extension_startup.is_none() {
+                    return None;
+                }
+                cached_environment = self.environments.get(&profile).cloned();
+            }
             let builder = WebViewBuilder::new_with_web_context(
                 self.web_contexts
                     .entry(profile)
@@ -1057,6 +1079,11 @@ impl EngineHost {
             }
             if let Some(environment) = cached_environment {
                 builder = builder.with_environment(environment);
+            }
+            if let Some(startup) = extension_startup {
+                builder = builder.with_browser_extension_startup_gate(move |environment, core| {
+                    startup.authenticate(environment, core)
+                });
             }
         }
 
@@ -1721,7 +1748,7 @@ impl EngineHost {
 }
 
 /// Why a profile's WebView2 environment could not be established.
-#[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+#[cfg(target_os = "windows")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WindowsProfileEnvironmentFailure {
     /// Admission is closed or another construction holds the profile.
@@ -1732,7 +1759,7 @@ pub(super) enum WindowsProfileEnvironmentFailure {
     Construction,
 }
 
-#[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+#[cfg(target_os = "windows")]
 impl EngineHost {
     /// Establishes or rejoins a profile's environment at one exact
     /// already-authorized storage root. Without a live environment, one
@@ -1743,6 +1770,7 @@ impl EngineHost {
         profile: zephium_core::ids::ProfileId,
         deadline: std::time::Instant,
         path: std::path::PathBuf,
+        extensions_enabled: bool,
     ) -> Result<(), WindowsProfileEnvironmentFailure> {
         self.collect_pending_windows_cleanup_debts();
         if std::time::Instant::now() >= deadline
@@ -1751,7 +1779,22 @@ impl EngineHost {
         {
             return Err(WindowsProfileEnvironmentFailure::Busy);
         }
+        let startup = if extensions_enabled {
+            Some(
+                self.windows_extension_startup(profile, &path)
+                    .map_err(|_| WindowsProfileEnvironmentFailure::Mismatch)?,
+            )
+        } else {
+            None
+        };
         if let Some(environment) = self.environments.get(&profile) {
+            if extensions_enabled
+                && startup
+                    .as_ref()
+                    .is_none_or(|startup| !startup.initialized.get())
+            {
+                return Err(WindowsProfileEnvironmentFailure::Mismatch);
+            }
             return crate::platform::imp::attest_environment(environment, &path)
                 .map_err(|_| WindowsProfileEnvironmentFailure::Mismatch);
         }
@@ -1797,7 +1840,7 @@ impl EngineHost {
                 .with_download_policy(DownloadPolicy::DenyWithoutMetadata)
                 .with_page_close_policy(wry::PageClosePolicy::Ignore);
             use wry::WebViewBuilderExtWindows;
-            builder
+            let builder = builder
                 .with_additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI")
                 .with_browser_accelerator_keys(false)
                 .with_environment_created_handler(move |environment| {
@@ -1810,10 +1853,20 @@ impl EngineHost {
                         return;
                     }
                     *slot = Some(environment.clone());
+                });
+            if let Some(startup) = startup {
+                builder.with_browser_extension_startup_gate(move |environment, core| {
+                    startup.authenticate(environment, core)
                 })
+            } else {
+                builder
+            }
         };
 
         let mut built = builder.build_as_child(&parent);
+        if let Err(error) = &built {
+            eprintln!("extensions: native bootstrap build failed: {error}");
+        }
         let environment = observed_environment
             .try_borrow_mut()
             .map(|mut environment| environment.take())
@@ -1861,10 +1914,11 @@ impl EngineHost {
         self.collect_pending_windows_cleanup_debts();
 
         if let Ok(view) = built.as_mut() {
-            if failure.is_none()
-                && crate::platform::imp::configure(view, 0.0, false, &path).is_err()
-            {
-                failure = Some(WindowsProfileEnvironmentFailure::Construction);
+            if failure.is_none() {
+                if let Err(error) = crate::platform::imp::configure(view, 0.0, false, &path) {
+                    eprintln!("extensions: native bootstrap hardening failed: {error:?}");
+                    failure = Some(WindowsProfileEnvironmentFailure::Construction);
+                }
             }
             if let Err(debt) = wry::WebViewExtWindows::close(view) {
                 let debt = super::OwnedWindowsCleanupDebt::new(debt, construction_resource.take());

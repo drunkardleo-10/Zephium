@@ -208,6 +208,8 @@ impl EngineHost {
     }
 
     fn shutdown_common(&mut self) {
+        #[cfg(target_os = "windows")]
+        self.shutdown_windows_extensions();
         #[cfg(all(
             feature = "agentic-browser",
             any(target_os = "macos", target_os = "windows")

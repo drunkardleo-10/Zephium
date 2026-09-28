@@ -32,6 +32,8 @@ mod scripts;
 mod stages;
 #[cfg(target_os = "macos")]
 mod webext;
+#[cfg(target_os = "windows")]
+mod webext_windows;
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
 mod work_resource;
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
@@ -476,6 +478,8 @@ pub(crate) struct EngineHost {
     macos_ephemeral_data_stores: HashMap<ProfileId, crate::platform::imp::WebsiteDataStore>,
     #[cfg(target_os = "macos")]
     webext: webext::WebextHost,
+    #[cfg(target_os = "windows")]
+    windows_extensions: webext_windows::WindowsExtensions,
     // Off-screen views carrying the low-memory hint, and the subset the
     // shell's idle policy asked WebView2 to suspend.
     #[cfg(target_os = "windows")]

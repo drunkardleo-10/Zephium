@@ -24,6 +24,7 @@ mod content_filter;
 // The host is the sole transaction owner. Physical Windows qualification is
 // still required before claiming runtime behavior beyond cross-compilation.
 mod cookie_transfer;
+pub(crate) mod extensions;
 #[cfg(feature = "agentic-browser")]
 // Compiled and lifecycle-bound while invocation remains closed until the
 // physical Windows isolated-world qualifier promotes the support claim.

@@ -343,7 +343,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRules};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionSettlement, ExtensionActionSnapshotSettlement,
 };
@@ -1700,7 +1700,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn load_web_extension(
         &self,
         profile: ProfileId,
@@ -1714,7 +1714,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn unload_web_extension(
         &self,
         profile: ProfileId,
@@ -1752,7 +1752,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn remove_web_extension(
         &self,
         profile: ProfileId,
@@ -1769,7 +1769,7 @@ impl Engine for WebviewEngine {
         tab: ItemId,
         surface_generation: ExtensionBrowserSurfaceGeneration,
     ) -> NativeDispatch {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
                 return NativeDispatch::Rejected;
@@ -1808,7 +1808,7 @@ impl Engine for WebviewEngine {
                 }
             }))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (profile, tab, surface_generation);
             NativeDispatch::Unsupported
@@ -1816,7 +1816,7 @@ impl Engine for WebviewEngine {
     }
 
     fn invoke_extension_action(&self, request: ExtensionActionRequest) -> NativeDispatch {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let profile = request.runtime().profile();
             if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
@@ -1854,7 +1854,7 @@ impl Engine for WebviewEngine {
                 }
             }))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = request;
             NativeDispatch::Unsupported
