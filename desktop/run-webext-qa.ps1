@@ -29,7 +29,7 @@ if (-not (Test-Path -LiteralPath $qaExe)) { throw 'Run this script with -Build f
 if ((Get-Item -LiteralPath $qaExe).VersionInfo.ProductName -ne 'Zephium Extensions QA') {
     throw 'Refusing a binary without the QA identity.'
 }
-$process = Start-Process -FilePath $qaExe -WorkingDirectory $repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $qaDir 'stdout.log') -RedirectStandardError (Join-Path $qaDir 'stderr.log')
+$process = Start-Process -FilePath $qaExe -WorkingDirectory $repo -WindowStyle Normal -PassThru -RedirectStandardOutput (Join-Path $qaDir 'stdout.log') -RedirectStandardError (Join-Path $qaDir 'stderr.log')
 $processHandle = $process.Handle
 Start-Sleep -Seconds 2
 if ($process.HasExited) {
