@@ -425,7 +425,8 @@ impl ConnectionHost for Bridge<'_> {
                 Some(answer) => Some(answer),
                 None => {
                     self.context
-                        .ask(
+                        .ask_for(
+                            WorkAskPurposeV1::Connection,
                             prompt.to_owned(),
                             options.iter().map(|o| (*o).to_owned()).collect(),
                         )
