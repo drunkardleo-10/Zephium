@@ -351,6 +351,38 @@ mod imp {
 
         /// Hands a profile's enabled extensions to the shell, rebuilding any
         /// package prepared by an older compatibility layer.
+        fn load(
+            &self,
+            entry: &Entry,
+            install: ExtensionInstallId,
+            start_background: bool,
+        ) -> WebExtensionLoad {
+            WebExtensionLoad {
+                install,
+                extension_id: entry.id.clone(),
+                root: self.packages(&entry.id).join(&entry.package),
+                permissions: entry.permissions.clone(),
+                match_patterns: entry.hosts.clone(),
+                start_background,
+            }
+        }
+
+        /// Deletes package files no registry refers to: removed extensions,
+        /// which are erased by the browser before their files go, and builds
+        /// replaced by updates or compatibility-layer changes.
+        fn prune(&self) {
+            let mut kept: HashMap<String, Vec<String>> = HashMap::new();
+            for profile in self.profiles() {
+                for entry in self.registry(profile).extensions {
+                    let files = kept.entry(entry.id.clone()).or_default();
+                    files.push(entry.package.clone());
+                    files.push(format!("{}.crx", entry.version));
+                }
+            }
+            let packages = self.root.join("packages");
+            std::thread::spawn(move || prune_packages(&packages, &kept));
+        }
+
         fn apply(&self, shell: &Handle, profile: ProfileId, registry: &mut Registry) {
             let revision = compat_revision();
             let mut changed = false;
@@ -376,14 +408,7 @@ mod imp {
                     entry.started = revision.clone();
                     changed = true;
                 }
-                loads.push(WebExtensionLoad {
-                    install,
-                    extension_id: entry.id.clone(),
-                    root: self.packages(&entry.id).join(&entry.package),
-                    permissions: entry.permissions.clone(),
-                    match_patterns: entry.hosts.clone(),
-                    start_background,
-                });
+                loads.push(self.load(entry, install, start_background));
             }
             if changed {
                 let _ = self.save(profile, registry);
@@ -418,11 +443,61 @@ mod imp {
         }
     }
 
+    fn prune_packages(packages: &Path, kept: &HashMap<String, Vec<String>>) {
+        for extension in std::fs::read_dir(packages).into_iter().flatten().flatten() {
+            let name = extension.file_name().to_string_lossy().into_owned();
+            let Some(files) = kept.get(&name) else {
+                let _ = std::fs::remove_dir_all(extension.path());
+                continue;
+            };
+            for file in std::fs::read_dir(extension.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if files.iter().any(|kept| file.file_name() == kept.as_str()) {
+                    continue;
+                }
+                let path = file.path();
+                let _ = if path.is_dir() {
+                    std::fs::remove_dir_all(path)
+                } else {
+                    std::fs::remove_file(path)
+                };
+            }
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn pruning_keeps_only_the_packages_registries_use() {
+        let packages = tempfile::tempdir().unwrap();
+        for path in ["kept/1.2-aaaa", "kept/1.1-aaaa", "removed/1.0-aaaa"] {
+            std::fs::create_dir_all(packages.path().join(path)).unwrap();
+        }
+        for path in ["kept/1.2.crx", "kept/1.1.crx", "removed/1.0.crx"] {
+            std::fs::write(packages.path().join(path), b"crx").unwrap();
+        }
+        let kept = HashMap::from([(
+            "kept".to_string(),
+            vec!["1.2-aaaa".to_string(), "1.2.crx".to_string()],
+        )]);
+        prune_packages(packages.path(), &kept);
+        let mut left: Vec<_> = std::fs::read_dir(packages.path().join("kept"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["1.2-aaaa", "1.2.crx"]);
+        assert!(!packages.path().join("removed").exists());
+    }
+
     pub(super) fn restore(extensions: &WebExtensions, shell: &Handle) {
         for profile in extensions.profiles() {
             let mut registry = extensions.registry(profile);
             extensions.apply(shell, profile, &mut registry);
         }
+        extensions.prune();
     }
 
     async fn target(
@@ -737,23 +812,20 @@ mod imp {
     ) -> Result<(), String> {
         let profile = target(shell, None).await?.profile;
         let mut registry = extensions.registry(profile);
-        let before = registry.extensions.len();
-        registry.extensions.retain(|entry| entry.id != id);
-        if registry.extensions.len() == before {
+        let Some(position) = registry.extensions.iter().position(|entry| entry.id == id) else {
             return Err("That extension isn't installed.".into());
-        }
+        };
+        let entry = registry.extensions.remove(position);
         extensions.save(profile, &registry)?;
-        extensions.apply(shell, profile, &mut registry);
-        let still_used = extensions.profiles().into_iter().any(|other| {
-            extensions
-                .registry(other)
-                .extensions
-                .iter()
-                .any(|entry| entry.id == id)
-        });
-        if !still_used {
-            let _ = std::fs::remove_dir_all(extensions.packages(id));
+        // Its package files stay until the next launch: the browser may need
+        // them to load the extension once more to erase its data.
+        if let Some(install) = ExtensionInstallId::parse(&entry.install) {
+            shell.dispatch(zephium_app::Command::RemoveWebExtension {
+                profile,
+                extension: Box::new(extensions.load(&entry, install, false)),
+            });
         }
+        extensions.apply(shell, profile, &mut registry);
         Ok(())
     }
 }

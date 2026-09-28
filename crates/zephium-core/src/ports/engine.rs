@@ -658,6 +658,10 @@ pub trait Engine {
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Stops an extension being uninstalled and erases what it stored.
+    fn remove_web_extension(&self, _profile: ProfileId, _load: WebExtensionLoad) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Requests one complete effective toolbar-action cohort for the exact
     /// published logical tab generation. The terminal result arrives as
     /// [`EngineEvent::ExtensionActionsSnapshotSettled`]. This query may read

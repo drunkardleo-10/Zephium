@@ -569,6 +569,9 @@ impl Shell {
                 profile,
                 extensions,
             } => self.set_web_extensions(profile, extensions),
+            Command::RemoveWebExtension { profile, extension } => {
+                self.remove_web_extension(profile, *extension)
+            }
             Command::ResolveWebExtensionTarget { tab, reply } => {
                 let _ = reply.try_send(self.web_extension_target(tab));
             }

@@ -1724,6 +1724,17 @@ impl Engine for WebviewEngine {
         }))
     }
 
+    #[cfg(target_os = "macos")]
+    fn remove_web_extension(
+        &self,
+        profile: ProfileId,
+        load: zephium_core::ports::engine::WebExtensionLoad,
+    ) -> NativeDispatch {
+        NativeDispatch::from_scheduled(self.run(move || {
+            host::best_effort_with(move |host| host.remove_web_extension(profile, load));
+        }))
+    }
+
     fn request_extension_actions(
         &self,
         profile: ProfileId,

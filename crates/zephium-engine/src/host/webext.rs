@@ -196,6 +196,36 @@ impl WebextHost {
         }
     }
 
+    /// Removes an extension for good: unloads it and erases what it stored.
+    /// Its origin's data can only be cleared from one of its own pages, so a
+    /// disabled extension is loaded first, without its background.
+    pub(crate) fn remove(&mut self, profile: ProfileId, load: WebExtensionLoad, sink: &Sink) {
+        self.loaded_before.remove(&(profile, load.extension_id.clone()));
+        let entry = self.profile(profile, sink);
+        entry.installs.remove(&load.install);
+        sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
+        let id = load.extension_id;
+        if entry.runtime.context(&id).is_some() {
+            return entry.runtime.erase(&id, || {});
+        }
+        let spec = ExtensionSpec {
+            id: id.clone(),
+            root: load.root,
+            grants: Grants::Explicit {
+                permissions: load.permissions,
+                match_patterns: load.match_patterns,
+            },
+            inspectable: false,
+        };
+        entry.runtime.load(spec, move |_| {
+            super::dispatch::best_effort_with(move |host| {
+                if let Some(entry) = host.webext.profiles.get(&profile) {
+                    entry.runtime.erase(&id, || {});
+                }
+            });
+        });
+    }
+
     /// Mirrors the shell's windows and tabs into WebKit.
     pub(crate) fn publish(
         &mut self,
@@ -900,6 +930,11 @@ impl super::EngineHost {
     pub(crate) fn unload_web_extension(&mut self, profile: ProfileId, install: ExtensionInstallId) {
         let sink = self.sink.clone();
         self.webext.unload(profile, install, &sink);
+    }
+
+    pub(crate) fn remove_web_extension(&mut self, profile: ProfileId, load: WebExtensionLoad) {
+        let sink = self.sink.clone();
+        self.webext.remove(profile, load, &sink);
     }
 }
 

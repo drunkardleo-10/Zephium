@@ -89,6 +89,19 @@ impl Shell {
         let _ = self.refresh_extension_actions(profile);
     }
 
+    pub(super) fn remove_web_extension(&mut self, profile: ProfileId, extension: WebExtensionLoad) {
+        if let Some(current) = self.web_extensions.loaded.get_mut(&profile) {
+            current.remove(&extension.install);
+        }
+        if let Some(deferred) = self.web_extensions.deferred.get_mut(&profile) {
+            deferred.retain(|load| load.install != extension.install);
+        }
+        self.web_extensions.status.remove(&extension.install);
+        if self.engine.remove_web_extension(profile, extension) != NativeDispatch::Scheduled {
+            crate::diagnostic!("extensions: the browser could not erase a removed extension");
+        }
+    }
+
     pub(super) fn apply_deferred_web_extensions(&mut self) {
         let deferred = std::mem::take(&mut self.web_extensions.deferred);
         for (profile, wanted) in deferred {

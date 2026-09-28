@@ -307,6 +307,11 @@ pub enum Command {
         profile: ProfileId,
         extensions: Vec<zephium_core::ports::engine::WebExtensionLoad>,
     },
+    /// Uninstalls one extension, erasing what it stored.
+    RemoveWebExtension {
+        profile: ProfileId,
+        extension: Box<zephium_core::ports::engine::WebExtensionLoad>,
+    },
     /// The profile an installation from `tab` would go to.
     ResolveWebExtensionTarget {
         tab: Option<ItemId>,
