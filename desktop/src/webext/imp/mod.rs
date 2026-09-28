@@ -27,6 +27,10 @@ const MAX_PACKAGE_BYTES: u64 = 128 * 1024 * 1024;
 /// does in Chrome.
 const ADDED_PERMISSIONS: &[&str] = &["nativeMessaging", "activeTab"];
 
+/// Extensions' own console errors are for whoever is building the browser;
+/// in a release they would cost a message to the browser each and help no one.
+const DIAGNOSTICS: bool = cfg!(any(debug_assertions, feature = "webext-qa"));
+
 fn compat_revision() -> String {
     // FNV-1a over the layer and the Chrome identity it presents; changing
     // either rebuilds every package from its original.
@@ -35,6 +39,7 @@ fn compat_revision() -> String {
         .bytes()
         .chain(zephium_webext_macos::compat::CHROME_VERSION.bytes())
         .chain(ADDED_PERMISSIONS.concat().bytes())
+        .chain([u8::from(DIAGNOSTICS)])
     {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
@@ -45,6 +50,7 @@ fn compat_revision() -> String {
 fn compat_layer() -> prepare::CompatLayer {
     prepare::CompatLayer::new(zephium_webext_macos::compat::SCRIPT)
         .with_permissions(ADDED_PERMISSIONS)
+        .with_diagnostics(DIAGNOSTICS)
 }
 
 impl WebExtensions {

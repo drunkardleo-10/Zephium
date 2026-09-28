@@ -32,10 +32,11 @@
 
   // ---- Diagnostics ---------------------------------------------------------
   // Errors inside workers and extension pages are otherwise invisible to the
-  // browser; report them, bounded, so failures have a cause on record.
-  if (!isContent && typeof runtime.sendNativeMessage === "function") {
+  // browser; development builds report them, bounded, so failures have a
+  // cause on record.
+  if (config.diagnostics && !isContent && typeof runtime.sendNativeMessage === "function") {
     let budget = 60;
-    setInterval(() => (budget = 60), 10000);
+    let since = 0;
     const describe = (value) => {
       if (value instanceof Error) return value.stack ? `${value}\n${value.stack}` : String(value);
       if (typeof value === "object" && value !== null) {
@@ -49,6 +50,11 @@
     };
     const where = isWorker ? "worker" : location.pathname;
     const report = (level, text) => {
+      const now = Date.now();
+      if (now - since > 10000) {
+        since = now;
+        budget = 60;
+      }
       if (budget-- <= 0) return;
       try {
         native("log", { level, text: `[${where}] ${text}` }).catch(() => {});

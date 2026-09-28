@@ -70,6 +70,8 @@ pub struct CompatLayer {
     /// them. They are reported so consent never attributes them to the
     /// extension.
     pub permissions: Vec<String>,
+    /// Report extensions' own errors and warnings to the browser.
+    pub diagnostics: bool,
 }
 
 impl CompatLayer {
@@ -78,7 +80,13 @@ impl CompatLayer {
             script: script.into(),
             file_name: "compat.js".to_owned(),
             permissions: Vec::new(),
+            diagnostics: false,
         }
+    }
+
+    pub fn with_diagnostics(mut self, diagnostics: bool) -> Self {
+        self.diagnostics = diagnostics;
+        self
     }
 
     pub fn with_permissions(mut self, permissions: &[&str]) -> Self {
@@ -165,7 +173,10 @@ pub fn prepare(dir: &Path, compat: &CompatLayer) -> Result<PrepareReport, Prepar
     }
     let events: Vec<String> = events.into_iter().collect();
 
-    let config = json!({ "events": events, "manifestVersion": manifest.manifest_version() });
+    let mut config = json!({ "events": events, "manifestVersion": manifest.manifest_version() });
+    if compat.diagnostics {
+        config["diagnostics"] = json!(true);
+    }
     fs::create_dir(&compat_dir)?;
     fs::write(
         compat_dir.join(name),

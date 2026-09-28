@@ -404,7 +404,8 @@ impl Lab {
                 &target,
                 // The permissions the browser adds to every package.
                 &zephium_webext::prepare::CompatLayer::new(compat::SCRIPT.to_owned())
-                    .with_permissions(&["nativeMessaging", "activeTab"]),
+                    .with_permissions(&["nativeMessaging", "activeTab"])
+                    .with_diagnostics(true),
             )
             .map_err(|e| e.to_string())?;
             println!(
