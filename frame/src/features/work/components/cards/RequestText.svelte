@@ -1,15 +1,18 @@
 <script lang="ts">
   import type { CanvasItem } from "../../lib/canvas-model";
+  import type { Detail } from "../../lib/board/types";
   import * as m from "$shared/i18n/messages";
 
   let {
     item,
     selected,
+    detail = "full",
     ontoggle,
     onaction,
   }: {
     item: CanvasItem;
     selected: boolean;
+    detail?: Detail;
     ontoggle: () => void;
     /** The request's one action, when it has one, such as showing its plan. */
     onaction?: () => void;
@@ -35,7 +38,7 @@
   lines at rest, and a click opens every line where they stand.
 -->
 <div
-  class="request work-drag-handle"
+  class="request work-drag-handle {detail}"
   class:selected
   data-work-request={item.id}
   data-card-id={item.id}
@@ -71,7 +74,7 @@
     box-sizing: border-box;
     inline-size: 100%;
     block-size: 100%;
-    padding: 2px 4px;
+    padding: 0 4px;
     border-radius: var(--radius-control);
     transition: box-shadow var(--motion-fast) var(--ease-out);
   }
@@ -84,7 +87,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    margin: 0 0 6px;
+    margin: 0 0 4px;
     color: var(--color-faint);
     font-size: var(--text-label);
     font-weight: 500;
@@ -107,7 +110,7 @@
     font-size: 17px;
     font-weight: 500;
     letter-spacing: -0.012em;
-    line-height: 25px;
+    line-height: 24px;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
     line-clamp: 2;
@@ -146,5 +149,31 @@
     border-radius: var(--radius-inset);
     outline: 2px solid var(--color-ring);
     outline-offset: 2px;
+  }
+
+  /* Surveyed from afar: the words alone, set to read at half size and below. */
+  .overview .meta,
+  .overview .actions,
+  .tile .meta,
+  .tile .actions {
+    display: none;
+  }
+
+  .overview .words {
+    margin-block-start: 15px;
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 34px;
+  }
+
+  .tile .words {
+    margin-block-start: 6px;
+    font-size: 44px;
+    font-weight: 600;
+    letter-spacing: -0.025em;
+    line-height: 52px;
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
   }
 </style>

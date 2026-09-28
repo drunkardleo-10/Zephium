@@ -8,7 +8,7 @@ import type { Block } from "./board/types";
 import type { TrailLine } from "./board/trail";
 
 /** The Sources card's line for pages that could not be read. */
-export const UNREAD_FOOTER = 24;
+const UNREAD_FOOTER = 24;
 /** A card's size before it renders; Sources grows by its unread line. */
 export function defaultSize(item: CanvasItem): CanvasSize {
   if (item.size) return item.size;
@@ -33,7 +33,8 @@ type CanvasKind =
   | "block"
   | "head"
   | "trail"
-  | "branch";
+  | "part"
+  | "input";
 type RelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
 /** Display values only; deliberately independent from the generated Work wire contract. */
 export type CanvasItem = {
@@ -109,8 +110,15 @@ export type CanvasItem = {
   expanded?: boolean;
   /** When the person asked, as a short clock time. */
   when?: string;
-  /** A branch of a request's band: one site and every page its runs worked on there. */
-  branch?: { host: string; pages: readonly BranchPage[]; live: boolean };
+  /** A part of a run: its name and mark, and the pages it worked on. */
+  part?: PartView;
+  /** Something a run drew on before it began: memory, a skill, notes, tabs, files. */
+  input?: {
+    kind: "memory" | "skill" | "history" | "notes" | "tabs" | "files" | "connection" | "work";
+    label: string;
+    count?: number;
+    lit?: boolean;
+  };
   unavailable?: boolean;
   /** The stage a run is working in right now; it glows while that is true. */
   active?: boolean;
@@ -121,8 +129,35 @@ export type CanvasItem = {
   /** An admitted image related to this element, shown as its picture. */
   image?: { profile: string; digest: string };
 };
-/** One page of a branch, as the band shows it. */
-export type BranchPage = {
+/** A part's row head as the canvas shows it. */
+export type PartView = {
+  title: string;
+  /** The site whose mark stands for the part. */
+  host?: string;
+  helper: "browser" | "research" | "computer" | "connection";
+  state: "planned" | "running" | "waiting" | "done" | "failed" | "stopped";
+  /**
+   * Frames while it works, a stack once done, a list of what search cited, a
+   * helper's own view of its work, an ask waiting on the person, or just its name.
+   */
+  shape: "frames" | "stack" | "sources" | "helper" | "ask" | "label";
+  /** What it came to, in a few words: "3 homes". */
+  summary?: string;
+  pages: readonly PartPage[];
+  /** What a search part cited, first few. */
+  cited?: readonly { key: string; url: string; where: string; title: string }[];
+  /** Everything it cited, for the count past the first few. */
+  citedCount?: number;
+  /** The work the part belongs to and its steps, for a helper's own view. */
+  objective?: string;
+  steps?: readonly string[];
+  /** What a computer part touched, for the view that stands in until the helper's own. */
+  lines?: readonly { kind: "read" | "write" | "command" | "search"; text: string }[];
+  /** A question on this part waiting on the person: its card and the card's props. */
+  ask?: { view: string; props: Record<string, unknown> };
+};
+/** One page of a part, as its row shows it. */
+export type PartPage = {
   id: string;
   url: string;
   title: string;
@@ -144,8 +179,15 @@ export type CanvasLink = {
   /** `thread` joins one request to the next; relation kinds show only while an end is hovered or selected. */
   kind: "dependency" | "reference" | "thread" | "flow" | RelationKind;
   label?: string;
-  /** A band's line while work is moving along it. */
+  /** A run's line while work is moving along it. */
   live?: boolean;
+  /** A run's line as its layout routed it, and where it truly meets its two nodes. */
+  route?: {
+    points: readonly CanvasPosition[];
+    from: CanvasPosition;
+    to: CanvasPosition;
+    laid: { source: CanvasPosition; target: CanvasPosition };
+  };
 };
 /** Past this many ties a focused card lights none: a fan of lines says nothing. */
 const RELATION_CAP = 6;
@@ -412,6 +454,8 @@ export function reconcileNodes(
         node.data.image?.digest === item.image?.digest &&
         JSON.stringify(node.data.agent) === JSON.stringify(item.agent) &&
         JSON.stringify(node.data.page) === JSON.stringify(item.page) &&
+        JSON.stringify(node.data.part) === JSON.stringify(item.part) &&
+        JSON.stringify(node.data.input) === JSON.stringify(item.input) &&
         JSON.stringify(node.data.facts) === JSON.stringify(item.facts) &&
         JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility) &&
         JSON.stringify(node.data.block) === JSON.stringify(item.block) &&
@@ -508,8 +552,10 @@ export function reconcileNodes(
       type: "work",
       position,
       ...(parent ? { parentId } : {}),
-      // A board's block glides when its board makes room.
-      ...(item.type === "block" ? { class: "board-block" } : {}),
+      // A run's nodes glide when the run makes room.
+      ...(item.type === "block" || item.type === "part" || item.type === "head"
+        ? { class: "board-block" }
+        : {}),
       data: item,
       width: restoredSize?.width ?? defaultSize(item).width,
       height: restoredSize?.height ?? defaultSize(item).height,

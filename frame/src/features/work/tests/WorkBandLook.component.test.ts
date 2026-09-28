@@ -38,24 +38,73 @@ async function scene(name: string): Promise<BoardScene | null> {
   };
 }
 
-test.each(["trip", "saas", "db", "jobs", "dinner"])("%s laid out as a band", async (name) => {
+/** The same work caught mid-run: its last execution still reading its last page. */
+function midRun(loaded: BoardScene): BoardScene {
+  const objectives = new Map(
+    [...loaded.objectives].map(([id, projection]) => {
+      const copy = structuredClone(projection);
+      const execution = copy.executions.at(-1);
+      const steps = execution?.steps ?? [];
+      const last = steps.findLastIndex((step) => step.kind.kind === "read");
+      if (execution && last >= 0) {
+        execution.status = "running";
+        execution.steps = steps.slice(0, last + 1);
+        execution.steps[last] = { ...execution.steps[last]!, status: "running" };
+        execution.artifacts = execution.artifacts.filter((artifact) =>
+          execution.steps!.some((step) => step.artifacts?.includes(artifact.id)),
+        );
+      }
+      return [id, copy] as const;
+    }),
+  );
+  return { ...loaded, objectives };
+}
+
+const WORKS = [
+  "trip",
+  "saas",
+  "db",
+  "jobs",
+  "slack",
+  "dinner",
+  "learning",
+  "browser",
+  "lego",
+  "aisaas",
+];
+const LOOKS = [
+  ...WORKS.flatMap(
+    (name) =>
+      [
+        [name, 100],
+        [name, 50],
+      ] as const,
+  ),
+  ["trip-live", 100],
+  ["learning-live", 100],
+] as const;
+
+test.each(LOOKS)("%s at %d%%", async (name, percent) => {
   await page.viewport(1440, 900);
-  const loaded = await scene(name);
-  if (!loaded) return;
-  shown = name;
+  const base = name.replace(/-live$/u, "");
+  const found = await scene(base);
+  if (!found) return;
+  const loaded = name.endsWith("-live") ? midRun(found) : found;
+  shown = base;
   const errors: string[] = [];
   const listen = (event: ErrorEvent) => errors.push(event.message);
   window.addEventListener("error", listen);
+  const zoom = percent / 100;
   const screen = await render(BoardCanvas, {
     scene: loaded,
-    viewport: { x: 48, y: 72, zoom: 0.72 },
+    viewport: { x: zoom === 1 ? 120 : 200, y: 72, zoom },
   });
   screen.container.style.width = "1440px";
   screen.container.style.height = "900px";
   for (const theme of ["dark", "light"]) {
     document.documentElement.dataset.theme = theme;
     await new Promise((done) => setTimeout(done, 900));
-    await page.screenshot({ path: `${shots}/${name}-${theme}.png` });
+    await page.screenshot({ path: `${shots}/${name}-${percent}-${theme}.png` });
   }
   document.documentElement.dataset.theme = "dark";
   window.removeEventListener("error", listen);

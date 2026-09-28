@@ -38,7 +38,7 @@ function thread(): {
   };
 }
 
-test("every message keeps its own request card, one lane each down the request column", () => {
+test("every message keeps its own request card, one run each down the request column", () => {
   const { snapshot: scene, objectives } = thread();
   const stages = environmentStages(scene, objectives);
   // The first lane's board holds the result beside the column; a saved absolute place is ignored.
@@ -46,13 +46,13 @@ test("every message keeps its own request card, one lane each down the request c
   expect(first.board.blocks.map((block) => [block.id, block.kind])).toEqual([
     ["result-card", "document"],
   ]);
-  expect(first.lane.rects["result-card"]).toMatchObject({ x: 340 + 72 });
-  const below = first.lane.extent + 96;
+  expect(first.lane.rects["result-card"]).toMatchObject({ x: 320 + 48 });
+  const below = first.lane.extent + 120;
   expect(stages.map((stage) => [stage.card, stage.request, stage.place.x, stage.place.y])).toEqual([
     ["objective-card", "Compare quiet keyboards", 0, 0],
     ["request:objective-card:continuation-1", "Show me the quietest one", 0, below],
     // A lane with nothing but its request is as tall as the request: 80 px, its floor.
-    ["request:objective-card:continuation-2", "And the wireless ones", 0, below + 80 + 96],
+    ["request:objective-card:continuation-2", "And the wireless ones", 0, below + 80 + 120],
   ]);
   // The request card the work began with keeps the first sentence, not the last.
   expect(environmentItems(scene, [], [], objectives)[0]?.title).toBe("Compare quiet keyboards");

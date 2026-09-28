@@ -19,6 +19,10 @@ export const canvasAreaActions = Symbol("canvas-area-actions");
 export const canvasArrival = Symbol("canvas-arrival");
 /** Asks native once for the icon of an origin no tab has shown. */
 export const canvasProbe = Symbol("canvas-probe");
+/** The runs behind the canvas, for a helper's own view of a part: `(objective) => projection`. */
+export const canvasWork = Symbol("canvas-work");
+/** How much the canvas shows at its zoom: `{ readonly level: Detail }`. */
+export const canvasDetail = Symbol("canvas-detail");
 /** What a board's blocks ask of their canvas: see `BoardActions`. */
 export const canvasBoard = Symbol("canvas-board");
 /** A board's blocks report their size, open in place, and act through the canvas's owner. */

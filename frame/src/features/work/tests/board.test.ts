@@ -4,6 +4,7 @@ import { boardOf } from "../lib/board/adapter";
 import { runTrail } from "../lib/board/trail";
 import { DIAGRAM, diagramLayout } from "../lib/diagram";
 import { environmentStages } from "../lib/project-environment-board";
+import { siteKey } from "../lib/run/site";
 import { viewPlacements } from "../lib/project-environment";
 import type { BlockKind, Emphasis } from "../lib/board/types";
 import {
@@ -238,30 +239,45 @@ describe("the process column", () => {
     ]);
   });
 
-  test("a band reads left to right: the request, a branch per site, then the result with its sources under it", () => {
+  test("a run reads left to right on one spine: the request, a row per site, then the result", () => {
     const scene = runningScene();
     const [stage] = environmentStages(scene.snapshot, scene.objectives, {
       recorded: () => scene.pages,
     });
     const rects = stage!.lane.rects;
-    expect(rects[stage!.card]).toMatchObject({ x: 0, y: 0, width: 340 });
-    expect(stage!.branches.length).toBeGreaterThan(0);
-    for (const branch of stage!.branches) {
-      expect(rects[branch.id]!.x).toBeGreaterThanOrEqual(340 + 72);
-      expect(
-        new Set(branch.pages.map((page) => new URL(page.url).host.replace(/^www\./u, ""))),
-      ).toEqual(new Set([branch.host]));
+    expect(rects[stage!.card]).toMatchObject({ x: 0, y: 0, width: 320 });
+    expect(stage!.parts.length).toBeGreaterThan(0);
+    const browsing = stage!.parts.filter((part) => part.helper === "browser");
+    for (const part of browsing) {
+      expect(rects[part.id]!.x).toBe(320 + 48);
+      expect(new Set(part.pages.map((page) => siteKey(new URL(page.url).host)))).toEqual(
+        new Set([part.key]),
+      );
     }
-    expect(stage!.lane.board.x).toBe(340 + 72 + 548 + 72);
+    // Rows stack 32 apart, the first on the request's spine.
+    const tops = stage!.parts.map((part) => rects[part.id]!.y);
+    expect(tops[0]! + 12).toBe(32);
+    for (let index = 1; index < tops.length; index++)
+      expect(tops[index]!).toBeGreaterThanOrEqual(
+        tops[index - 1]! + rects[stage!.parts[index - 1]!.id]!.height + 32,
+      );
+    expect(stage!.lane.board.x % 8).toBe(0);
+    for (const part of stage!.parts)
+      expect(stage!.lane.board.x).toBeGreaterThanOrEqual(
+        rects[part.id]!.x + rects[part.id]!.width + 48,
+      );
+    // One line per part, never one per page.
+    expect(stage!.lane.lines.filter((line) => line.kind === "part")).toHaveLength(
+      stage!.parts.length,
+    );
     const done = tripScene();
     const [settled] = environmentStages(done.snapshot, done.objectives, {
       recorded: () => done.pages,
     });
-    // A finished run keeps its pages in its branches; its sources sit under its result.
-    expect(settled!.branches.length).toBeGreaterThan(0);
-    const sources = settled!.lane.rects[settled!.column.sources!]!;
-    expect(sources.x).toBe(settled!.lane.board.x);
-    expect(sources.y).toBeGreaterThanOrEqual(settled!.lane.board.y + settled!.lane.board.height);
+    expect(settled!.parts.every((part) => part.state !== "running")).toBe(true);
+    const feeds = settled!.lane.lines.filter((line) => line.kind === "feed");
+    expect(feeds.length).toBeGreaterThan(0);
+    expect(new Set(feeds.map((line) => line.target)).size).toBe(1);
   });
 
   test("a block the person dragged is kept where they put it, from its lane's corner; the rest stay in the board's flow", () => {

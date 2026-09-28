@@ -21,7 +21,7 @@ test("a placement saved before boards is ignored: the block takes its board plac
     "objective-card": { x: 0, y: 0 },
     "result-card": stages[0]!.targets["result-card"],
   });
-  expect(stages[0]!.targets["result-card"]!.x).toBe(340 + 72);
+  expect(stages[0]!.targets["result-card"]!.x).toBe(320 + 48);
   const view = environmentView(legacy);
   expect(view.positions).toEqual({});
   expect(view.sizes).toEqual({});

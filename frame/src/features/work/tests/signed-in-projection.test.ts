@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import type { WorkExecutionFact, WorkRuntimeProjection } from "$shared/ipc/bindings";
 import { projection, snapshot } from "./environment-fixtures";
-import { environmentBranches } from "../lib/project-environment";
+import { environmentParts } from "../lib/project-environment";
 import { environmentStages } from "../lib/project-environment-board";
 import { runTrail } from "../lib/board/trail";
 import { accountRefusal, accountRefusalSentence } from "../lib/work-human";
@@ -23,15 +23,15 @@ function agentRun(): { state: WorkRuntimeProjection; run: WorkExecutionFact } {
   run.artifacts = [];
   run.user_artifacts = [];
   run.steps = [];
-  // Pages stand in their site's branch while their run goes on.
+  // Pages stand in their site's part while their run goes on.
   run.status = "running";
   return { state, run };
 }
 const scene = { ...snapshot, elements: snapshot.elements.slice(0, 1) };
 const pagesOf = (state: WorkRuntimeProjection) => {
   const objectives = new Map([["objective", state]]);
-  return environmentBranches(objectives, environmentStages(scene, objectives), () => []).flatMap(
-    (item) => item.branch?.pages ?? [],
+  return environmentParts(objectives, environmentStages(scene, objectives), () => []).flatMap(
+    (item) => item.part?.pages ?? [],
   );
 };
 

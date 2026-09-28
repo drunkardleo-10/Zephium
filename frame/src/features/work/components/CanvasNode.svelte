@@ -10,7 +10,9 @@
     canvasFocusResult,
     canvasAreas,
     canvasArrival,
+    canvasDetail,
   } from "../lib/canvas-context";
+  import type { Detail } from "../lib/board/types";
   import { arrive } from "../lib/arrival";
   import type { Duration } from "$shared/lib/motion";
   import { ArrowUpRight01Icon, MinusSignIcon, Target01Icon, Tick02Icon } from "../lib/icons";
@@ -25,7 +27,8 @@
   import CompareCard from "./cards/CompareCard.svelte";
   import FolderCard from "./cards/FolderCard.svelte";
   import PageCard from "./cards/PageCard.svelte";
-  import BranchCard from "./cards/BranchCard.svelte";
+  import PartRow from "./run/PartRow.svelte";
+  import InputMark from "./run/InputMark.svelte";
   import RequestText from "./cards/RequestText.svelte";
   import BlockHost from "./board/BlockHost.svelte";
   import BoardHead from "./board/BoardHead.svelte";
@@ -40,6 +43,8 @@
   );
   const arrival = getContext<((id: string) => Duration | null) | undefined>(canvasArrival);
   let { id, data, selected }: NodeProps<WorkItemNode> = $props();
+  const zoom = getContext<{ readonly level: Detail } | undefined>(canvasDetail);
+  const detail = $derived<Detail>(zoom?.level ?? "full");
   let root = $state<HTMLDivElement>();
   // A card the run just placed rises into its group; one that was there already does not.
   onMount(() => {
@@ -49,26 +54,34 @@
   const type = $derived(data.type ?? (data.artifact ? "result" : "objective"));
   /** A card the run drew, not an element the person placed: it takes no orders. */
   const inert = $derived(
-    ["responsibility", "page", "sources", "request", "block", "head", "trail"].includes(type),
+    [
+      "responsibility",
+      "page",
+      "sources",
+      "request",
+      "block",
+      "head",
+      "trail",
+      "part",
+      "input",
+    ].includes(type),
   );
   /** A lane card takes its size from its lane. */
   const laid = $derived(!!data.size);
   /** What a block shows past its first rows opens in place, and closes again. */
   const OPENS = new Set(["table", "document", "code", "comparison", "gallery"]);
   const opens = $derived(type === "block" && OPENS.has(data.block?.data.kind ?? ""));
-  /** What a line can reach: a request, a branch, a result's head, the person's own cards. */
-  const ends = $derived(!["block", "trail", "sources", "page"].includes(type));
   /** A page held for a person opens the takeover, never a copy in Browse. */
   const waiting = $derived(data.page?.human?.phase === "waiting_for_human");
 </script>
 
-{#if ends}<Handle
-    type="target"
-    position={Position.Left}
-    isConnectable={false}
-    tabindex={-1}
-    aria-hidden="true"
-  />{/if}
+<Handle
+  type="target"
+  position={Position.Left}
+  isConnectable={false}
+  tabindex={-1}
+  aria-hidden="true"
+/>
 <NodeResizer
   onResizeStart={() => resize(true)}
   onResizeEnd={() => resize(false)}
@@ -150,13 +163,17 @@
   {:else if type === "objective" || type === "request"}<RequestText
       item={data}
       {selected}
+      {detail}
       ontoggle={() => action(id, "expand-request")}
       onaction={() => action(id)}
     />
-  {:else if type === "branch"}<BranchCard
+  {:else if type === "input"}<InputMark item={data} {detail} />
+  {:else if type === "part"}<PartRow
       item={data}
       {selected}
+      {detail}
       onopen={(page) => action(id, `page:${page}`)}
+      onlist={() => open(id)}
     />
   {:else if data.artifact?.content.kind === "matrix"}<CompareCard item={data} {selected} />
   {:else if type === "result" || data.artifact}<ResultCard
@@ -167,32 +184,14 @@
     />
   {:else}<ObjectiveCard item={data} {selected} onaction={() => action(id)} />{/if}
 </div>
-{#if ends}
-  <Handle
-    type="source"
-    position={Position.Right}
-    isConnectable={false}
-    tabindex={-1}
-    aria-hidden="true"
-  />
-  <!-- The thread runs down from one request into the next; other edges read left to right. -->
-  <Handle
-    id="below"
-    type="source"
-    position={Position.Bottom}
-    isConnectable={false}
-    tabindex={-1}
-    aria-hidden="true"
-  />
-  <Handle
-    id="above"
-    type="target"
-    position={Position.Top}
-    isConnectable={false}
-    tabindex={-1}
-    aria-hidden="true"
-  />
-{/if}
+<!-- Where a line meets a node is its route's to say; the handles only let the flow draw it. -->
+<Handle
+  type="source"
+  position={Position.Right}
+  isConnectable={false}
+  tabindex={-1}
+  aria-hidden="true"
+/>
 
 <style>
   .node-root {

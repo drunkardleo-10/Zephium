@@ -60,7 +60,7 @@
   import BrowserPane from "./pane/BrowserPane.svelte";
   import Lift from "./Lift.svelte";
   import LiftHeader from "./LiftHeader.svelte";
-  import { commandRecord, pageGroups } from "../lib/project-environment-stage";
+  import { commandRecord } from "../lib/project-environment-stage";
   import {
     clearOfBands,
     elementPictures,
@@ -84,9 +84,9 @@
     environmentBoards,
     environmentItems,
     environmentLinks,
-    environmentBranches,
+    environmentInputs,
+    environmentParts,
     environmentPictures,
-    environmentSources,
     environmentView,
     fileEvidence,
     viewPlacements,
@@ -466,8 +466,8 @@
     const entry = pageEntries.get(page);
     const item = entry ? undefined : items.find((candidate) => candidate.id === page);
     const state = entry?.page.human ?? item?.page?.human;
-    // The well stands over the branch the page is in.
-    const card = entry?.branch ?? page;
+    // The well stands over the part the page is in.
+    const card = entry?.part ?? page;
     const url = entry?.page.url ?? item?.page?.url ?? "";
     if (!state || state.phase !== "waiting_for_human") return;
     const work = [...human.pages].find(([, pages]) =>
@@ -568,6 +568,7 @@
       case "responsibility":
         return { width: 480, height: 320 };
       case "sources":
+      case "part":
         return { width: 560, height: 560 };
       case "subject":
         // The picture and its facts at 640, the sources at 320.
@@ -859,9 +860,8 @@
       ? environmentAgents(snapshot, context.objectives, signalOf, stages)
       : { items: [], links: [], positions: {} },
   );
-  const sources = $derived(environmentSources(context.objectives, stages));
-  const branches = $derived(
-    environmentBranches(
+  const parts = $derived(
+    environmentParts(
       context.objectives,
       stages,
       recordedPages,
@@ -869,11 +869,11 @@
       (objective) => human.pages.get(objective) ?? [],
     ),
   );
-  /** Every page a band shows, by id, with the branch it stands in. */
+  /** Every page a run shows, by id, with the part it stands in. */
   const pageEntries = $derived(
     new Map(
-      branches.flatMap((item) =>
-        (item.branch?.pages ?? []).map((page) => [page.id, { branch: item.id, page }] as const),
+      parts.flatMap((item) =>
+        (item.part?.pages ?? []).map((page) => [page.id, { part: item.id, page }] as const),
       ),
     ),
   );
@@ -916,8 +916,8 @@
         : item,
     ),
     ...boards,
-    ...sources,
-    ...branches,
+    ...parts,
+    ...environmentInputs(stages),
     ...agents.items,
   ]);
   const links = $derived([
@@ -1388,23 +1388,6 @@
   const liftedPictures = $derived(
     liftedElement?.reference.kind === "subject" ? picturesOf(liftedElement.id) : [],
   );
-  /** Pages past the cluster's cap have no card; their stage's Sources lift lists them. */
-  const foldedPages = $derived.by(() => {
-    const item = liftedItem;
-    if (item?.type !== "sources") return [];
-    const stage = stages.find((entry) => entry.column.sources === item.id);
-    const projection = stage ? context.objectives.get(stage.objective) : undefined;
-    if (!stage || !projection) return [];
-    const shown = new Set(pageEntries.keys());
-    return stage.executions
-      .flatMap((id) => {
-        const execution = projection.executions.find((entry) => entry.id === id);
-        return execution && isAgentExecution(execution)
-          ? pageGroups(execution, recordedPages(stage.objective))
-          : [];
-      })
-      .filter((group) => !shown.has(group.id));
-  });
   /** The one meta line of a media lift: what it is, how large, where it came from. */
   function mediaMeta(asset: NonNullable<CanvasItem["media"]>["asset"]) {
     const origin = asset.origin.kind === "fetched" ? host(asset.origin.url) : "";
@@ -2184,7 +2167,7 @@
         {writeup}
         onwaitingpage={(card: string) => {
           panel = null;
-          canvasRef?.focusCard(pageEntries.get(card)?.branch ?? card);
+          canvasRef?.focusCard(pageEntries.get(card)?.part ?? card);
         }}
         onfocusagent={(id) => canvasRef?.center(id)}
         onsteered={() => (session.composer = "")}
@@ -2242,6 +2225,10 @@
               {authoritative}
               expose={(api) => (canvasRef = api)}
               board={boardActions}
+              work={(objective: string) =>
+                objectiveSession?.projection?.work.id === objective
+                  ? objectiveSession.projection
+                  : context.objectives.get(objective)}
               onmoved={(ids: string[]) => {
                 for (const id of ids) moved.add(id);
               }}
@@ -2438,9 +2425,11 @@
       {:else if liftedItem?.sources}
         <div class="lift-body">
           <LiftHeader
-            kind={m.work_sources()}
+            kind={liftedItem.type === "part" ? m.work_part() : m.work_sources()}
             title={liftedItem.title}
-            meta={m.work_env_sources_count({ count: liftedItem.sources.length })}
+            meta={liftedItem.type === "part" && liftedItem.part?.helper === "browser"
+              ? m.work_part_pages({ count: liftedItem.sources.length })
+              : m.work_env_sources_count({ count: liftedItem.sources.length })}
             icon={GlobalIcon}
           />
           <ul class="lift-sources">
@@ -2467,30 +2456,6 @@
               </li>
             {/each}
           </ul>
-          {#if foldedPages.length}{@const more =
-              foldedPages.length === 1
-                ? m.work_lift_more_pages_one()
-                : m.work_lift_more_pages({ count: foldedPages.length })}
-            <section class="lift-folded" aria-label={more}>
-              <h3>{more}</h3>
-              <ul class="lift-sources">
-                {#each foldedPages as group (group.id)}<li>
-                    <button
-                      type="button"
-                      onclick={() => {
-                        lifted = null;
-                        openPane({ kind: "url", url: group.url }, null);
-                      }}
-                    >
-                      <HostGlyph host={host(group.url)} size={22} />
-                      <span class="source-text">
-                        <strong>{host(group.url) || group.url}</strong>
-                        <span>{group.url}</span>
-                      </span>
-                    </button>
-                  </li>{/each}
-              </ul>
-            </section>{/if}
         </div>
       {:else if liftedElement?.reference.kind === "resource" && liftedItem?.media}
         {@const asset = liftedItem.media.asset}
@@ -2871,13 +2836,6 @@
     flex-direction: column;
     gap: 16px;
     min-block-size: 0;
-  }
-
-  .lift-folded h3 {
-    margin: 0 0 4px;
-    color: var(--color-muted);
-    font-size: var(--text-caption);
-    font-weight: 500;
   }
 
   .lift-sources {

@@ -10,25 +10,20 @@ import type {
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
 import { activityLabel, artifactView } from "./project-work";
-import { agentDoing, isAgentExecution, isLive, type AgentDoing } from "./agent-steps";
+import { agentDoing, isLive, type AgentDoing } from "./agent-steps";
 import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
 import { firstRequest, type WorkStage } from "./project-environment-thread";
-import {
-  host,
-  observedTitle,
-  sourceRows,
-  unreadPages,
-  type SourceRow,
-} from "./project-environment-stage";
-import { BOARD_PIN, laneElement, stageRuns } from "./project-environment-board";
-import { standBeside } from "./board/lane";
-import type { Rect } from "./board/layout";
+import { host, observedTitle } from "./project-environment-stage";
+import { BOARD_PIN, laneElement, partShape } from "./project-environment-board";
+import type { RunPart } from "./run/parts";
+import { RUN } from "./run/layout";
+import { PART } from "./run/part-size";
 import { fileName } from "./work-files";
 import { heldPage, humanPage, phaseLabel } from "./work-human";
 import { pageFrameUrl } from "$domain/resources";
 import {
   clipText,
-  type BranchPage,
+  type PartPage,
   type CanvasItem,
   type CanvasLink,
   type CanvasPosition,
@@ -40,7 +35,6 @@ const SOURCE_ROWS = 24;
 /** What a card may carry: Rust admits far longer prose than a card can hold. */
 const TITLE_TEXT = 512;
 const DETAIL_TEXT = 2048;
-const ROW_TEXT = 200;
 const STATUS_TEXT = 256;
 import type { MediaAssetV1 } from "$domain/resources";
 import * as m from "$shared/i18n/messages";
@@ -475,37 +469,24 @@ function agentCaption(
 }
 
 /**
- * Where the mark stands for what the agent does: by the request while it
- * thinks, by the trail while it searches or works in files, off the page it
- * reads, at the board's corner while it writes into it.
+ * Where the orb stands for what the agent does: at the start of the run's
+ * lines while it thinks, on the live page of the part it works in, at the
+ * result's anchor while it writes.
  */
-function standFor(
-  execution: WorkExecutionFact,
-  doing: AgentDoing,
-  stage: WorkStage,
-): CanvasPosition {
-  const rect = (id: string | undefined): Rect | undefined =>
-    id ? stage.lane.rects[id] : undefined;
-  switch (doing) {
-    case "reading": {
-      const read = (execution.steps ?? []).find(
-        (step) =>
-          step.status === "running" && (step.kind.kind === "read" || step.kind.kind === "discover"),
-      );
-      const branch = stage.branches.find((candidate) =>
-        candidate.pages.some((group) => group.steps.some((step) => step.id === read?.id)),
-      );
-      return standBeside(rect(branch?.id) ?? stage.place);
-    }
-    case "writing":
-    case "done": {
-      const board = stage.lane.board;
-      return { x: board.x - 12, y: board.y - 12 };
-    }
-    default:
-      return standBeside(stage.place);
+function standFor(doing: AgentDoing, stage: WorkStage): CanvasPosition {
+  const spine = stage.place.y + RUN.spine - MARK / 2;
+  const working = stage.parts.find((part) => part.state === "running");
+  const rect = working ? stage.lane.rects[working.id] : undefined;
+  if (rect && doing !== "writing" && doing !== "done") {
+    if (working!.helper === "browser" && working!.pages.length)
+      return { x: rect.x + PART.label + PART.gap + PART.tile - MARK / 2, y: rect.y - MARK / 2 };
+    return { x: rect.x + rect.width - MARK / 2, y: rect.y - MARK / 2 };
   }
+  if (doing === "writing" || doing === "done")
+    return { x: stage.lane.corner.x - RUN.air - MARK, y: spine };
+  return { x: RUN.request + RUN.air, y: spine };
 }
+const MARK = 24;
 
 /** Transient agent presence for objectives with live executions; never persisted. */
 export function environmentAgents(
@@ -554,7 +535,7 @@ export function environmentAgents(
     };
     const stage = stages.find((stage) => stage.executions.includes(execution.id));
     if (stage) {
-      const stand = standFor(execution, doing, stage);
+      const stand = standFor(doing, stage);
       positions[id] = stand;
       item.agent!.stand = stand;
     }
@@ -563,66 +544,27 @@ export function environmentAgents(
   return { items, positions };
 }
 
-/**
- * One Sources block per request, under its result: the pages
- * its searches cited and the files its steps opened, once each; the pages that
- * would not open. The pages themselves stand in the band's branches.
- */
-export function environmentSources(
-  objectives: ReadonlyMap<string, WorkRuntimeProjection>,
-  stages: readonly WorkStage[],
-): CanvasItem[] {
-  const items: CanvasItem[] = [];
-  for (const stage of stages) {
-    const card = stage.column.sources;
-    if (!card) continue;
-    const runs = stageRuns(stage, objectives).filter(isAgentExecution);
-    const rows: SourceRow[] = [];
-    const seen = new Set<string>();
-    const read = new Set<string>();
-    const refusals = new Map<string, string>();
-    for (const execution of runs) {
-      for (const row of sourceRows(execution))
-        if (!seen.has(row.key)) {
-          seen.add(row.key);
-          rows.push(row);
-        }
-      for (const step of execution.steps ?? []) {
-        if (step.kind.kind !== "read") continue;
-        if (step.status === "succeeded") read.add(step.kind.url);
-        else if (step.status === "failed" && step.note?.trim())
-          refusals.set(step.kind.url, step.note.trim());
-      }
-    }
-    const unread = runs.flatMap((execution) => unreadPages(execution));
-    items.push({
-      id: card,
-      type: "sources",
-      kind: m.work_env_sources(),
-      title: !rows.length
-        ? m.work_env_sources()
-        : rows.length === 1
-          ? m.work_env_source_one()
-          : m.work_env_sources_count({ count: rows.length }),
-      detail: "",
-      status: "",
-      size: { width: stage.lane.rects[card]!.width, height: stage.lane.rects[card]!.height },
-      ...(stage.live ? { active: true } : {}),
-      sources: rows.slice(0, SOURCE_ROWS).map((row) => {
-        const refusal = row.url && !read.has(row.url) ? refusals.get(row.url) : undefined;
-        return refusal ? { ...row, note: clipText(refusal, ROW_TEXT) } : row;
-      }),
-      ...(unread.length ? { unread } : {}),
-    });
+/** Found things a part names in its summary, by the kind of thing. */
+function partSummary(part: RunPart, stage: WorkStage): string | undefined {
+  if (part.names?.length) return part.names.join(", ");
+  if (part.state === "failed") return m.work_part_failed();
+  if (part.state === "running")
+    return part.helper === "research" ? m.work_line_searching() : m.work_part_reading();
+  let things = 0;
+  for (const block of stage.board.blocks) {
+    if (stage.found.get(block.id) !== part.id) continue;
+    things += block.kind === "gallery" ? block.entities.length : 1;
   }
-  return items;
+  if (things) return things === 1 ? m.work_part_found_one() : m.work_part_found({ count: things });
+  return undefined;
 }
 
 /**
- * Each branch of a band: the site, and every page its runs worked on there,
- * its newest frame, how the read went, and whether it waits on the person.
+ * Each part of every run: its name and mark, and every page it worked on,
+ * each with its newest frame, how the read went, and whether it waits on the
+ * person; a search part carries what it cited.
  */
-export function environmentBranches(
+export function environmentParts(
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
   stages: readonly WorkStage[],
   pages: (objective: string) => readonly WorkPageV1[],
@@ -633,18 +575,17 @@ export function environmentBranches(
 ): CanvasItem[] {
   const items: CanvasItem[] = [];
   for (const stage of stages) {
-    if (!stage.branches.length) continue;
+    if (!stage.parts.length) continue;
     const projection = objectives.get(stage.objective);
     if (!projection) continue;
     const recorded = pages(projection.work.id);
     const waiting = human(projection.work.id);
     const paused = activity(projection.work.id) === "paused";
-    const runs = stageRuns(stage, objectives);
-    const running = runs.some((execution) => isLive(projection, execution));
-    for (const branch of stage.branches) {
-      const entries = branch.pages.map((entry): BranchPage => {
+    for (const part of stage.parts) {
+      const entries = part.pages.map((entry): PartPage => {
         const opened = recorded.filter((page) => entry.steps.some((step) => step.id === page.step));
-        const live = running && entry.steps.some((step) => step.status === "running");
+        const live =
+          part.state === "running" && entry.steps.some((step) => step.status === "running");
         const succeeded = entry.steps.some((step) => step.status === "succeeded");
         const refused = !succeeded && !live ? (entry.steps.at(-1)?.note?.trim() ?? "") : "";
         const frame = entry.page?.frame
@@ -671,7 +612,7 @@ export function environmentBranches(
           id: entry.id,
           url: entry.url,
           title: clipText(
-            observed?.trim() || entry.tab?.title.trim() || branch.host || m.work_env_page(),
+            observed?.trim() || entry.tab?.title.trim() || part.title || m.work_env_page(),
             TITLE_TEXT,
           ),
           status: shown
@@ -692,21 +633,90 @@ export function environmentBranches(
           ...(shown ? { tab: true } : {}),
         };
       });
-      const rect = stage.lane.rects[branch.id]!;
+      const rect = stage.lane.rects[part.id]!;
+      const needs = entries.some((page) => page.human?.phase === "waiting_for_human");
+      const state = needs ? "waiting" : part.state;
+      const summary = needs ? m.work_line_waiting_for_you() : partSummary(part, stage);
+      const rows: NonNullable<CanvasItem["sources"]> =
+        part.helper === "research"
+          ? part.sources.slice(0, SOURCE_ROWS).map((row) => ({
+              key: row.key,
+              url: row.url,
+              where: host(row.url).replace(/^www\./u, ""),
+              title: row.title,
+            }))
+          : [
+              ...entries.map((page) => ({
+                key: page.id,
+                url: page.url,
+                where: host(page.url).replace(/^www\./u, ""),
+                title: page.title,
+              })),
+              ...part.unread.map((page) => ({
+                key: page.key,
+                url: page.url,
+                where: page.host.replace(/^www\./u, ""),
+                title: page.url,
+                note: page.note,
+              })),
+            ];
       items.push({
-        id: branch.id,
-        type: "branch",
-        kind: m.work_env_page(),
-        title: branch.host,
+        id: part.id,
+        type: "part",
+        kind: m.work_part(),
+        title: part.title,
         detail: "",
-        status: "",
+        status: summary ?? "",
         size: { width: rect.width, height: rect.height },
-        branch: { host: branch.host, pages: entries, live: entries.some((page) => page.live) },
-        ...(entries.some((page) => page.live) ? { active: true } : {}),
+        part: {
+          title: part.title,
+          ...(part.host ? { host: part.host } : {}),
+          helper: part.helper,
+          state,
+          shape: partShape(part).kind,
+          ...(summary ? { summary } : {}),
+          pages: entries,
+          objective: stage.objective,
+          ...(part.steps ? { steps: part.steps } : {}),
+          ...(part.lines ? { lines: part.lines } : {}),
+          ...(part.ask ? { ask: part.ask } : {}),
+          ...(part.helper === "research"
+            ? {
+                cited: rows.slice(0, PART.sourceRows).map(({ key, url, where, title }) => ({
+                  key,
+                  url,
+                  where,
+                  title,
+                })),
+                citedCount: part.sources.length,
+              }
+            : {}),
+        },
+        sources: rows,
+        ...(state === "running" || state === "waiting" ? { active: true } : {}),
       });
     }
   }
   return items;
+}
+
+/** What each run drew on before it began, as marks left of its request. */
+export function environmentInputs(stages: readonly WorkStage[]): CanvasItem[] {
+  return stages.flatMap((stage) =>
+    stage.inputs.map(({ id, input }) => {
+      const rect = stage.lane.rects[id]!;
+      return {
+        id,
+        type: "input" as const,
+        kind: m.work_input(),
+        title: input.label,
+        detail: "",
+        status: "",
+        size: { width: rect.width, height: rect.height },
+        input,
+      };
+    }),
+  );
 }
 
 /** Each band's result: its head and its blocks. */

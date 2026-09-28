@@ -20,8 +20,12 @@
     canvasArrival,
     canvasProbe,
     canvasBoard,
+    canvasDetail,
+    canvasWork,
     type BoardActions,
   } from "../lib/canvas-context";
+  import { detailAt } from "../lib/zoom";
+  import type { Detail } from "../lib/board/types";
   import CanvasNode from "./CanvasNode.svelte";
   import AreaNode from "./AreaNode.svelte";
   import AgentMark from "./AgentMark.svelte";
@@ -64,6 +68,7 @@
   } from "../lib/canvas-model";
   import * as m from "$shared/i18n/messages";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
+  import type { WorkRuntimeProjection } from "$shared/ipc/bindings";
   let {
     items,
     links,
@@ -89,6 +94,7 @@
     onareaedit,
     onmoved,
     board,
+    work,
     onprobe,
     expose,
   }: {
@@ -126,10 +132,13 @@
     onmoved?: (ids: string[]) => void;
     /** What a board's blocks ask of the canvas's owner. */
     board?: BoardActions;
+    /** The runs behind the canvas, by objective, for a helper's own view of its part. */
+    work?: (objective: string) => WorkRuntimeProjection | undefined;
     /** Asks native for the icon of an origin no tab has shown. */
     onprobe?: (origin: string) => void;
     expose?: (api: CanvasApi) => void;
   } = $props();
+  setContext(canvasWork, (objective: string) => work?.(objective));
   setContext(canvasBoard, {
     measure: (id: string, width: number, open: boolean, height: number) =>
       board?.measure(id, width, open, height),
@@ -211,6 +220,20 @@
   }
   const restoredViewport = untrack(() => validViewport(initialView?.viewport));
   let viewport = $state(restoredViewport ?? { x: 0, y: 0, zoom: 1 });
+  /** Changes only when the zoom crosses a level's edge, so nodes redraw then and only then. */
+  let detail = $state<Detail>(untrack(() => detailAt(viewport.zoom)));
+  $effect(() => {
+    const next = detailAt(
+      viewport.zoom,
+      untrack(() => detail),
+    );
+    if (next !== untrack(() => detail)) detail = next;
+  });
+  setContext(canvasDetail, {
+    get level() {
+      return detail;
+    },
+  });
   // One bad card never hides the canvas: the scene is repaired, then guarded.
   const scene = $derived(sanitizeScene(items, links));
   let valid = $derived(validScene(scene.items, scene.links));
@@ -229,9 +252,6 @@
   const byId = $derived(new Map(scene.items.map((item) => [item.id, item])));
   const lit = $derived(relationLinks(scene.links, byId, focused));
   const title = (id: string) => byId.get(id)?.title ?? "";
-  /** The thread runs upright. */
-  const handles = (link: CanvasLink) =>
-    link.kind === "thread" ? { sourceHandle: "below", targetHandle: "above" } : {};
 
   let edges = $derived.by<Edge[]>(() => {
     if (!valid) return [];
@@ -245,8 +265,8 @@
           source: link.source,
           target: link.target,
           type: "work",
-          ...handles(link),
           data: {
+            ...(link.route ? { route: link.route } : {}),
             tone:
               link.kind === "thread"
                 ? "thread"
@@ -625,6 +645,7 @@
 <div
   class="work-canvas"
   class:multi={selectedItems.length > 1}
+  data-detail={detail}
   bind:this={host}
   bind:clientWidth={canvasWidth}
   bind:clientHeight={canvasHeight}

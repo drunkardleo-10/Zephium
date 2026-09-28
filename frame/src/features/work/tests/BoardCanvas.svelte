@@ -5,9 +5,9 @@
   import {
     environmentAgents,
     environmentBoards,
-    environmentBranches,
+    environmentInputs,
     environmentItems,
-    environmentSources,
+    environmentParts,
     environmentView,
   } from "../lib/project-environment";
   import { environmentRequests } from "../lib/project-environment-thread";
@@ -42,8 +42,8 @@
     ...environmentItems(scene.snapshot, [], [], scene.objectives),
     ...requests.items,
     ...environmentBoards(stages, open),
-    ...environmentSources(scene.objectives, stages),
-    ...environmentBranches(scene.objectives, stages, recorded),
+    ...environmentParts(scene.objectives, stages, recorded),
+    ...environmentInputs(stages),
     ...agents.items,
   ]);
   const pictures = $derived(

@@ -1,10 +1,10 @@
 import type { WorkRuntimeProjection } from "$shared/ipc/bindings";
 import { clipText, type CanvasItem, type CanvasLink, type CanvasPosition } from "./canvas-model";
 import type { Board } from "./board/types";
-import type { LanePlace } from "./board/lane";
 import type { Rect } from "./board/layout";
 import type { TrailLine } from "./board/trail";
-import type { PageGroup } from "./project-environment-stage";
+import type { RunPlace } from "./run/layout";
+import type { RunInputView, RunPart } from "./run/parts";
 import * as m from "$shared/i18n/messages";
 
 /**
@@ -16,40 +16,34 @@ export type WorkStage = {
   /** The objective element that owns the thread. */
   element: string;
   objective: string;
-  /** The card this message's work hangs from. */
+  /** The request this message's run hangs from. */
   card: string;
   /** The person's sentence. */
   request: string;
   /** The executions this message started, oldest first. */
   executions: string[];
-  /** Whether one of the lane's runs is still going. */
+  /** Whether one of the run's executions is still going. */
   live: boolean;
-  /** Where the request card stands, at the top of the process column. */
+  /** Where the request stands. */
   place: Rect;
   board: Board;
-  lane: LanePlace;
+  lane: RunPlace;
   /** What the runs did, as closed facts. */
   trail: TrailLine[];
-  /** The band's parts by id: its branches, the result's head and its sources. */
-  column: { branches: string[]; sources?: string; head?: string };
-  /** One branch per place the runs worked, in the order they first went there. */
-  branches: Branch[];
-  /** Blocks the person moved out of the board's flow. */
+  /** The run's nodes by role: its parts in row order, the result's head. */
+  column: { parts: string[]; head?: string };
+  /** One row per part, in the order their work began. */
+  parts: RunPart[];
+  /** What the run drew on, left of its request. */
+  inputs: { id: string; input: RunInputView }[];
+  /** The part each found block belongs to; the rest are the result's. */
+  found: ReadonlyMap<string, string>;
+  /** Blocks the person moved out of the run's flow. */
   pinned: ReadonlySet<string>;
-  /** Where every card of the lane stands. */
+  /** Where every node of the run stands. */
   targets: Record<string, CanvasPosition>;
 };
 const REQUEST_TEXT = 512;
-
-/** Every page a request's runs worked on at one site: a branch of its band. */
-export type Branch = {
-  id: string;
-  /** The site, without `www.`. */
-  host: string;
-  pages: PageGroup[];
-  /** A run is on one of its pages now. */
-  live: boolean;
-};
 
 /** The sentence a work began with; the objective element keeps saying it. */
 export function firstRequest(projection: WorkRuntimeProjection): string {
@@ -92,9 +86,8 @@ export function threadOf(
 }
 
 /**
- * The request card of every message after the first, the thread into it, and
- * where every card of every lane stands: the person's words join request to
- * request down the process column.
+ * The request of every message after the first, the thread into it from the
+ * one before, and where every node of every run stands.
  */
 export function environmentRequests(stages: readonly WorkStage[]): {
   items: CanvasItem[];
@@ -106,7 +99,7 @@ export function environmentRequests(stages: readonly WorkStage[]): {
   const positions: Record<string, CanvasPosition> = {};
   for (const [index, stage] of stages.entries()) {
     Object.assign(positions, stage.targets);
-    links.push(...bandLinks(stage));
+    links.push(...runLinks(stage));
     const previous = stages[index - 1];
     if (!previous || previous.element !== stage.element) continue;
     items.push({
@@ -117,47 +110,46 @@ export function environmentRequests(stages: readonly WorkStage[]): {
       detail: "",
       status: "",
     });
+    const above = previous.place;
+    const below = stage.place;
+    const x = THREAD_X;
     links.push({
       id: `stage:${stage.card}`,
       source: previous.card,
       target: stage.card,
       kind: "thread",
+      route: {
+        points: [
+          { x, y: above.y + above.height + 8 },
+          { x, y: below.y - 12 },
+        ],
+        from: { x, y: above.height + 8 },
+        to: { x, y: -12 },
+        laid: { source: { x: above.x, y: above.y }, target: { x: below.x, y: below.y } },
+      },
     });
   }
   return { items, links, positions };
 }
 
+/** The thread runs down the request column's left edge, under the words. */
+const THREAD_X = 10;
+
 /**
- * A band's lines, left to right: the request into each branch, each branch
- * into the result, or the request straight into the result when no page was
- * opened. A line is live while work moves along it.
+ * A run's lines: the request into each part's row, each done part's row into
+ * the result, or the request straight into the result when it has no parts.
+ * A part's line carries work while the part is live.
  */
-function bandLinks(stage: WorkStage): CanvasLink[] {
-  const result = stage.column.head ?? stage.board.blocks[0]?.id;
-  const links: CanvasLink[] = [];
-  for (const branch of stage.branches) {
-    links.push({
-      id: `flow:${stage.card}:${branch.id}`,
-      source: stage.card,
-      target: branch.id,
-      kind: "flow",
-      ...(branch.live ? { live: true } : {}),
-    });
-    if (result)
-      links.push({
-        id: `flow:${branch.id}:${result}`,
-        source: branch.id,
-        target: result,
-        kind: "flow",
-      });
-  }
-  if (!stage.branches.length && result)
-    links.push({
-      id: `flow:${stage.card}:${result}`,
-      source: stage.card,
-      target: result,
-      kind: "flow",
-      ...(stage.live ? { live: true } : {}),
-    });
-  return links;
+function runLinks(stage: WorkStage): CanvasLink[] {
+  const live = new Set(stage.parts.flatMap((part) => (part.state === "running" ? [part.id] : [])));
+  return stage.lane.lines.map((line) => ({
+    id: line.id,
+    source: line.source,
+    target: line.target,
+    kind: "flow",
+    route: { points: line.points, from: line.from, to: line.to, laid: line.laid },
+    ...(line.kind === "part" && (live.has(line.target) || (!stage.parts.length && stage.live))
+      ? { live: true }
+      : {}),
+  }));
 }
