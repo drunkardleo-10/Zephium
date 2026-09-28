@@ -100,7 +100,7 @@
           title={object.title ?? ""}
           allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
           referrerpolicy="strict-origin-when-cross-origin"
-          sandbox="allow-scripts allow-same-origin allow-presentation allow-popups"
+          sandbox="allow-scripts allow-same-origin allow-presentation"
           allowfullscreen
         ></iframe>
       {:else}

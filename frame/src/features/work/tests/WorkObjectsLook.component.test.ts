@@ -1,5 +1,5 @@
 import "$styles/global.css";
-import { test, vi } from "vitest";
+import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import ObjectsSheet from "./ObjectsSheet.svelte";
@@ -30,6 +30,25 @@ vi.mock("$shared/ipc/bindings", async () => {
 
 const shots = "../../../../../target/work-objects";
 const settle = (ms = 700) => new Promise((done) => setTimeout(done, ms));
+
+/**
+ * Every object's renderer is in: a kind whose chunk has not loaded leaves its
+ * cell empty. Waiting on a fixed delay shot the first group of a new kind blank.
+ */
+function loaded(sheet: HTMLElement): boolean {
+  const cells = [...sheet.querySelectorAll<HTMLElement>(":scope > .row > :is(.cell, .well)")];
+  return (
+    cells.length > 0 && cells.every((cell) => !!cell.querySelector("*") && cell.offsetHeight >= 8)
+  );
+}
+
+/** A row in view has drawn: its pictures decoded (or failed) and its charts in. */
+function drawnRow(row: HTMLElement): boolean {
+  if ([...row.querySelectorAll("img")].some((image) => !image.complete)) return false;
+  return [...row.querySelectorAll("section.plot")].every(
+    (plot) => !!plot.querySelector("figure.chart svg"),
+  );
+}
 
 /** The diagrams real runs drew, from the QA export. */
 async function drawn(): Promise<{ object: ObjectView; width: number }[]> {
@@ -81,37 +100,44 @@ const scenes: Record<string, () => Promise<{ object: ObjectView; width: number }
   centre: async () => centred,
 };
 
-test.each(Object.keys(scenes))("%s at full, overview and tile", async (name) => {
-  await page.viewport(2400, 1600);
-  const noop = () => {};
-  const rows = await scenes[name]!();
-  if (!rows.length) return;
-  const screen = await render(ObjectsSheet, {
-    rows,
-    centre: name === "centre",
-    actions: {
-      choose: noop,
-      ask: noop,
-      compare: noop,
-      open: noop,
-      link: noop,
-      check: noop,
-      send: noop,
-    },
-  });
-  const sheet = screen.container.querySelector<HTMLElement>(".sheet")!;
-  await settle(1800);
-  for (const theme of ["dark", "light"]) {
-    document.documentElement.dataset.theme = theme;
-    await settle();
-    for (const row of sheet.querySelectorAll<HTMLElement>(":scope > .row")) {
-      row.scrollIntoView({ block: "start" });
-      await settle(120);
-      await page
-        .elementLocator(row)
-        .screenshot({ path: `${shots}/${name}/${row.dataset.id}-${theme}.png` });
+test.each(Object.keys(scenes))(
+  "%s at full, overview and tile",
+  async (name) => {
+    await page.viewport(2400, 1600);
+    const noop = () => {};
+    const rows = await scenes[name]!();
+    if (!rows.length) return;
+    const screen = await render(ObjectsSheet, {
+      rows,
+      centre: name === "centre",
+      actions: {
+        choose: noop,
+        ask: noop,
+        compare: noop,
+        open: noop,
+        link: noop,
+        check: noop,
+        send: noop,
+        write: noop,
+      },
+    });
+    const sheet = screen.container.querySelector<HTMLElement>(".sheet")!;
+    await expect.poll(() => loaded(sheet), { timeout: 20000, interval: 100 }).toBe(true);
+    for (const theme of ["dark", "light"]) {
+      document.documentElement.dataset.theme = theme;
+      await settle();
+      for (const row of sheet.querySelectorAll<HTMLElement>(":scope > .row")) {
+        row.scrollIntoView({ block: "start" });
+        await expect.poll(() => drawnRow(row), { timeout: 20000, interval: 100 }).toBe(true);
+        // Charts arrive once over the base motion; they are shot settled.
+        await settle(theme === "dark" ? 400 : 120);
+        await page
+          .elementLocator(row)
+          .screenshot({ path: `${shots}/${name}/${row.dataset.id}-${theme}.png` });
+      }
     }
-  }
-  document.documentElement.dataset.theme = "dark";
-  await screen.unmount();
-});
+    document.documentElement.dataset.theme = "dark";
+    await screen.unmount();
+  },
+  120_000,
+);
