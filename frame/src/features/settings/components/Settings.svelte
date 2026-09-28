@@ -30,6 +30,7 @@
     docs: () => import("./sections/DocumentationPage.svelte"),
     focus: () => import("./sections/FocusPage.svelte"),
     work: () => import("./sections/WorkPage.svelte"),
+    ai: () => import("./sections/AiPage.svelte"),
     performance: () => import("./sections/PerformancePage.svelte"),
     account: () => import("./sections/AccountPage.svelte"),
     about: () => import("./sections/AboutPage.svelte"),

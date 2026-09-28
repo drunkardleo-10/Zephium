@@ -15,14 +15,11 @@ describe("settings discovery", () => {
 });
 
 it("finds the reserved agent destinations without exposing unimplemented controls", async () => {
-  const { searchSettings, emptySections } = await import("../lib/settings-model");
-  for (const id of ["ai", "models", "plugins", "mcp", "skills", "memory"] as const)
+  const { searchSettings, searchSections, emptySections } = await import("../lib/settings-model");
+  for (const id of ["plugins", "mcp", "skills", "memory"] as const)
     expect(emptySections.has(id)).toBe(true);
-  expect(
-    searchSettings("models").some(
-      (result) => result.section === "models" && result.target === null,
-    ),
-  ).toBe(true);
+  expect(emptySections.has("ai")).toBe(false);
+  expect(searchSections("models").some((section) => section.id === "ai")).toBe(true);
   expect(
     searchSettings("MCP").some((result) => result.section === "mcp" && result.target === null),
   ).toBe(true);

@@ -3469,7 +3469,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     }
     if matches!(
         id,
-        "settings.profiles" | "settings.account" | "settings.newtab"
+        "settings.profiles" | "settings.account" | "settings.newtab" | "settings.ai"
     ) {
         let section = id.replacen("settings.", "settings.section.", 1);
         let _ = try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &section);
