@@ -23,6 +23,8 @@ mod acceptance;
 mod work_navigation;
 mod work_route;
 mod work_sites;
+#[cfg(target_os = "macos")]
+mod lead_smoke;
 #[cfg(all(target_os = "macos", feature = "decision-eval"))]
 mod decision_eval;
 #[cfg(all(target_os = "macos", feature = "decision-eval"))]
@@ -70,6 +72,7 @@ fn main() {
             );
             result
         }
+        [argument] if argument == "--live-lead-smoke" => lead_smoke::run(),
         [argument] if argument == "--live-fixed-click" => run_fixed_click(),
         [argument] if argument == "--live-public-wikipedia-fill" => run_public_wikipedia_fill(),
         [argument] if argument == "--live-two-action" => run_two_action(
