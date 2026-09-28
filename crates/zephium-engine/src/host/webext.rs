@@ -71,6 +71,21 @@ struct ProfileRuntime {
     surface: Option<ExtensionBrowserSurface>,
 }
 
+impl ProfileRuntime {
+    /// Chrome closes an extension's own pages when it is turned off or
+    /// removed; left open they would also keep its process running.
+    fn close_pages(&self, extension_id: &str) {
+        for tab in self.runtime.tabs_showing(extension_id) {
+            if let Some(item) = self.bridge.item(tab) {
+                self.bridge.request(
+                    ExtensionBrowserRequestAction::CloseTab { tab: item },
+                    Box::new(|_| {}),
+                );
+            }
+        }
+    }
+}
+
 struct Install {
     extension_id: String,
     generation: ExtensionRuntimeGeneration,
@@ -191,6 +206,7 @@ impl WebextHost {
     pub(crate) fn unload(&mut self, profile: ProfileId, install: ExtensionInstallId, sink: &Sink) {
         if let Some(entry) = self.profiles.get_mut(&profile) {
             if let Some(install) = entry.installs.remove(&install) {
+                entry.close_pages(&install.extension_id);
                 entry.runtime.unload(&install.extension_id);
                 sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
             }
@@ -207,6 +223,7 @@ impl WebextHost {
         entry.installs.remove(&load.install);
         sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
         let id = load.extension_id;
+        entry.close_pages(&id);
         if entry.runtime.context(&id).is_some() {
             return entry.runtime.erase(&id, || {});
         }
