@@ -58,7 +58,7 @@ function context(kind) {
     },
     permissions: {
       contains(request) {
-        const unknown = (request.permissions || []).find((name) => name === "privacy");
+        const unknown = (request.permissions || []).find((name) => name === "tabGroups");
         if (unknown) throw invalid(unknown);
         return Promise.resolve(true);
       },
@@ -134,8 +134,10 @@ test("pages and workers get every API fix", async () => {
   for (const kind of ["page", "worker"]) {
     const { chrome, browser } = context(kind);
     assert.equal(browser, chrome, `${kind}: browser aliases chrome`);
-    assert.equal(await chrome.permissions.contains({ permissions: ["privacy"] }), false, kind);
-    assert.equal(await chrome.permissions.request({ permissions: ["privacy"] }), false, kind);
+    assert.equal(await chrome.permissions.contains({ permissions: ["privacy"] }), true, kind);
+    assert.equal(await chrome.permissions.request({ permissions: ["privacy"] }), true, kind);
+    assert.equal(await chrome.permissions.contains({ permissions: ["proxy"] }), false, kind);
+    assert.equal(await chrome.permissions.contains({ permissions: ["tabGroups"] }), false, kind);
     assert.equal(Object.keys(await chrome.storage.managed.get()).length, 0, kind);
     assert.equal(typeof chrome.storage.managed.onChanged.addListener, "function", kind);
     assert.equal(chrome.scripting.ExecutionWorld.ISOLATED, "ISOLATED", kind);
@@ -144,9 +146,10 @@ test("pages and workers get every API fix", async () => {
     assert.equal(typeof chrome.notifications.create, "function", kind);
     assert.match(chrome.identity.getRedirectURL("cb"), /^https:\/\/abcdefghijklmnopabcdefghijklmnop\.chromiumapp\.org\/cb$/);
     const saving = await chrome.privacy.services.passwordSavingEnabled.get({});
-    assert.equal(saving.value, true, kind);
-    await chrome.privacy.services.passwordSavingEnabled.set({ value: false });
-    assert.equal((await chrome.privacy.services.passwordSavingEnabled.get({})).value, false, kind);
+    assert.equal(saving.value, false, kind);
+    assert.equal(saving.levelOfControl, "controlled_by_this_extension", kind);
+    await chrome.privacy.services.passwordSavingEnabled.set({ value: true });
+    assert.equal((await chrome.privacy.services.passwordSavingEnabled.get({})).value, true, kind);
 
     assert.equal(chrome.runtime.OnInstalledReason.INSTALL, "install", kind);
     assert.equal(typeof chrome.runtime.onUpdateAvailable.addListener, "function", kind);

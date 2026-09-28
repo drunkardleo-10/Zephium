@@ -214,7 +214,9 @@
     const invalid = /'([^']+)' is not a valid permission/;
     // WebKit rejects some unknown names synchronously and others only in the
     // returned promise; names learned either way are filtered up front.
-    const unknownNames = new Set(["privacy", "proxy", "debugger"]);
+    const unknownNames = new Set(["proxy", "debugger"]);
+    // Implemented by this layer, so always granted.
+    const emulated = new Set(["privacy"]);
     const guard = (method, withUnknown) => {
       const original = permissions[method];
       if (typeof original !== "function") return;
@@ -222,13 +224,14 @@
         const current = Object.assign({}, request);
         const requested = Array.isArray(current.permissions) ? current.permissions : [];
         let unknown = requested.some((name) => unknownNames.has(name));
-        current.permissions = requested.filter((name) => !unknownNames.has(name));
+        const onlyEmulated = requested.some((name) => emulated.has(name));
+        current.permissions = requested.filter((name) => !unknownNames.has(name) && !emulated.has(name));
         let result;
         for (;;) {
           const listed = Array.isArray(current.permissions) ? current.permissions : [];
           const origins = Array.isArray(current.origins) ? current.origins : [];
-          if (unknown && listed.length === 0 && origins.length === 0) {
-            result = Promise.resolve();
+          if ((unknown || onlyEmulated) && listed.length === 0 && origins.length === 0) {
+            result = Promise.resolve(true);
             break;
           }
           try {
@@ -299,10 +302,10 @@
   // chrome.privacy; WebKit has no privacy API. The settings answer as
   // controllable by the extension and remember what it sets.
   if (!isContent && !chromeApi.privacy) {
-    const setting = (initial) => {
+    const setting = (initial, levelOfControl = "controllable_by_this_extension") => {
       let value = initial;
       const changed = makeEvent();
-      const details = () => ({ value, levelOfControl: "controllable_by_this_extension" });
+      const details = () => ({ value, levelOfControl });
       return {
         get: (_details, callback) => withCallback(Promise.resolve(details()), callback),
         set: (next, callback) => {
@@ -318,10 +321,12 @@
     };
     pin(chromeApi, "privacy", {
       services: {
-        passwordSavingEnabled: setting(true),
-        autofillEnabled: setting(true),
-        autofillAddressEnabled: setting(true),
-        autofillCreditCardEnabled: setting(true),
+        // Zephium has no password or form store of its own, so these are off
+        // and left to the extension, as when it has overridden Chrome's.
+        passwordSavingEnabled: setting(false, "controlled_by_this_extension"),
+        autofillEnabled: setting(false, "controlled_by_this_extension"),
+        autofillAddressEnabled: setting(false, "controlled_by_this_extension"),
+        autofillCreditCardEnabled: setting(false, "controlled_by_this_extension"),
         alternateErrorPagesEnabled: setting(false),
         safeBrowsingEnabled: setting(false),
         searchSuggestEnabled: setting(true),
