@@ -21,6 +21,20 @@ export default defineConfig({
     tailwindcss(),
   ],
   clearScreen: false,
+  // Scan every source up front. Crawling from the two pages alone misses
+  // dependencies that only lazy views import, such as the editor; Vite then
+  // re-bundles when one is first opened, and the already-open page is left
+  // requesting stale modules that answer 504 until it reloads.
+  optimizeDeps: {
+    entries: [
+      "browser.html",
+      "panel.html",
+      "src/**/*.svelte",
+      "src/**/*.ts",
+      "!src/**/*.d.ts",
+      "!src/**/tests/**",
+    ],
+  },
   server: {
     port: 1420,
     strictPort: true,
