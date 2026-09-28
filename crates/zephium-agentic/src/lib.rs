@@ -111,6 +111,8 @@ mod protocol;
 #[cfg(feature = "provider-transport")]
 mod provider_transport;
 #[cfg(feature = "provider-transport")]
+pub use provider_transport::lead;
+#[cfg(feature = "provider-transport")]
 pub mod public_asset;
 mod semantic;
 mod semantic_action;
