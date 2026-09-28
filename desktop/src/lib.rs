@@ -5070,6 +5070,8 @@ pub fn run() {
                 #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
                 navigation_probe::validate_data_root(&data_dir)?;
                 std::fs::create_dir_all(&data_dir)?;
+                #[cfg(feature = "work-product")]
+                zephium_app::work_lead::skills::install_root(data_dir.clone());
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
