@@ -16,7 +16,7 @@ describe("settings discovery", () => {
 
 it("finds the reserved agent destinations without exposing unimplemented controls", async () => {
   const { searchSettings, searchSections, emptySections } = await import("../lib/settings-model");
-  for (const id of ["plugins", "mcp", "skills", "memory"] as const)
+  for (const id of ["plugins", "mcp"] as const)
     expect(emptySections.has(id)).toBe(true);
   expect(emptySections.has("ai")).toBe(false);
   expect(searchSections("models").some((section) => section.id === "ai")).toBe(true);

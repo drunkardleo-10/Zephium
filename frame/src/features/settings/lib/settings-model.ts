@@ -140,6 +140,13 @@ export const sections = [
     icon: InformationCircleIcon,
   },
   {
+    id: "sites",
+    group: "intelligence",
+    title: m.section_sites,
+    description: m.section_sites_description,
+    icon: Globe02Icon,
+  },
+  {
     id: "focus",
     group: "intelligence",
     title: m.section_focus,
@@ -189,7 +196,7 @@ export const groups = [
   { id: "intelligence", label: m.settings_intelligence },
   { id: "application", label: m.settings_application },
 ] as const;
-export const emptySections = new Set<SettingsSection>(["plugins", "mcp", "skills", "memory"]);
+export const emptySections = new Set<SettingsSection>(["plugins", "mcp"]);
 export function searchSettings(query: string) {
   const words = query.trim().toLocaleLowerCase().split(/\s+/u);
   const matches = (text: string) => words.every((word) => text.toLocaleLowerCase().includes(word));
