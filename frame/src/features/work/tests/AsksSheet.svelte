@@ -13,6 +13,9 @@
       <div class="canvas"><AskCard ask={row.ask} {actions} seed={3} /></div>
       {#if row.ask.state === "open"}<div class="island">
           <AskCard ask={row.ask} {actions} placement="island" seed={3} />
+        </div>
+        <div class="far" style:zoom={0.5}>
+          <AskCard ask={row.ask} {actions} detail="overview" seed={3} />
         </div>{/if}
     </div>
   {/each}
@@ -38,6 +41,11 @@
 
   .canvas {
     inline-size: 360px;
+  }
+
+  /* How the canvas shows it at 50%: the pill, drawn at the zoom it is seen at. */
+  .far {
+    align-self: center;
   }
 
   /* The island's own material, as AgentLine draws it. */

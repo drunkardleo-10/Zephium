@@ -57,7 +57,7 @@ test("Settings → Sites", async () => {
   await page.viewport(1000, 900);
   const screen = await render(WorkContextStage, {
     title: "Sites",
-    description: "Where the agent works in your own session.",
+    description: "Where the agent works in your own signed-in session.",
     page: SitesPage,
   });
   await shoot("sites");
@@ -68,7 +68,7 @@ test("Settings → Memory, at rest and editing a fact", async () => {
   await page.viewport(1000, 1100);
   const screen = await render(WorkContextStage, {
     title: "Memory",
-    description: "What the agent knows about you.",
+    description: "What the agent remembers about you, and where it learned it.",
     page: MemoryPage,
   });
   await shoot("memory");
@@ -81,7 +81,7 @@ test("Settings → Skills, the list, a built-in and the person's own skill open"
   await page.viewport(1000, 1500);
   const screen = await render(WorkContextStage, {
     title: "Skills",
-    description: "What the agent knows how to do.",
+    description: "What the agent knows how to do, built in and your own.",
     page: SkillsPage,
   });
   await shoot("skills");

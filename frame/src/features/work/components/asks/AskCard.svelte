@@ -8,6 +8,8 @@
   import EntryCard from "./EntryCard.svelte";
   import QuestionCard from "./QuestionCard.svelte";
   import SignInCard from "./SignInCard.svelte";
+  import AskPill from "./AskPill.svelte";
+  import type { Detail } from "../../lib/board/types";
 
   /**
    * Any question a run puts to the person, on the thing it concerns or in the
@@ -19,12 +21,18 @@
     actions,
     placement = "canvas",
     seed = 0,
+    detail = "full",
+    onfocus,
   }: {
     ask: Ask;
     actions: AskActions;
     placement?: "canvas" | "island";
     /** The asking agent's orb, for its own questions. */
     seed?: number;
+    /** The canvas's level of detail: from afar an open ask is one large line. */
+    detail?: Detail;
+    /** Brings the card up close, from its far view. */
+    onfocus?: () => void;
   } = $props();
 
   let sending = $state<string | null>(null);
@@ -49,7 +57,9 @@
 </script>
 
 <div class="ask-card" data-ask={ask.kind} data-step={ask.step}>
-  {#if ask.kind === "confirm"}
+  {#if detail !== "full" && placement === "canvas"}
+    {#if ask.state === "open"}<AskPill {ask} {detail} {seed} onopen={onfocus} />{/if}
+  {:else if ask.kind === "confirm"}
     <ConfirmCard
       {ask}
       {placement}

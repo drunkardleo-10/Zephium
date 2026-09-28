@@ -52,7 +52,7 @@ const noop = {
 };
 
 test("every ask, open and decided, on the canvas and in the island, in both themes", async () => {
-  await page.viewport(1100, 900);
+  await page.viewport(1500, 900);
   const execution = f.runWith([
     f.slackTask,
     f.slackEntry,
