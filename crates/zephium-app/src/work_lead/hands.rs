@@ -154,10 +154,20 @@ where
             });
             *charged = used;
         }
+        // A page whose outcome is unknown is one lost page, not the end of
+        // the run: its step says so and the run's usage becomes a ceiling.
         let terminal = match outcome {
+            Ok(Some(WorkAttemptStatus::OutcomeUnknown)) | Err(WorkError::OutcomeUnknown) => {
+                self.run.charge(WorkUsage {
+                    model_tokens: 0,
+                    cost_micro_usd: 0,
+                    operations: 0,
+                    accounting: WorkUsageAccounting::ConservativeReservation,
+                });
+                None
+            }
             Ok(Some(status)) => Some(status),
             Ok(None) => None,
-            Err(WorkError::OutcomeUnknown) => Some(WorkAttemptStatus::OutcomeUnknown),
             Err(_) => Some(WorkAttemptStatus::Failed),
         };
         let execution = self.run.execution().await.ok();

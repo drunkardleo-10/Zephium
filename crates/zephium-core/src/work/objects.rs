@@ -416,26 +416,60 @@ pub struct WorkObjectFault {
     pub field: F,
     /// Zero-based position of the item, row, step, series or hunk.
     pub index: Option<u16>,
+    /// What the refused text measured: its characters, or a line break.
+    pub found: Option<WorkTextFound>,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkTextFound {
+    Characters(u32),
+    LineBreak,
+    Empty,
 }
 impl WorkObjectFault {
-    /// Closed words for the model: the rule and where it broke.
+    /// Closed words for the model: the rule, where it broke and by how much.
     pub fn describe(&self) -> String {
-        match self.index {
-            Some(index) => format!("{} (at position {})", self.field.phrase(), index + 1),
-            None => self.field.phrase().to_owned(),
+        let mut out = self.field.phrase().to_owned();
+        let found = match self.found {
+            Some(WorkTextFound::Characters(n)) => Some(format!("it has {n} characters")),
+            Some(WorkTextFound::LineBreak) => Some("it has a line break".to_owned()),
+            Some(WorkTextFound::Empty) => Some("it is empty".to_owned()),
+            None => None,
+        };
+        match (self.index, found) {
+            (Some(index), Some(found)) => {
+                out.push_str(&format!(" (at position {}: {found})", index + 1))
+            }
+            (Some(index), None) => out.push_str(&format!(" (at position {})", index + 1)),
+            (None, Some(found)) => out.push_str(&format!(" ({found})")),
+            (None, None) => {}
         }
+        out
     }
 }
 
 pub(super) type Checked = Result<(), WorkObjectFault>;
 
 fn fault(field: F) -> WorkObjectFault {
-    WorkObjectFault { field, index: None }
+    WorkObjectFault {
+        field,
+        index: None,
+        found: None,
+    }
 }
 fn at(field: F, index: usize) -> WorkObjectFault {
     WorkObjectFault {
         field,
         index: Some(u16::try_from(index).unwrap_or(u16::MAX)),
+        found: None,
+    }
+}
+fn measured(value: &str) -> WorkTextFound {
+    if value.trim().is_empty() {
+        WorkTextFound::Empty
+    } else if value.contains('\n') {
+        WorkTextFound::LineBreak
+    } else {
+        WorkTextFound::Characters(u32::try_from(value.chars().count()).unwrap_or(u32::MAX))
     }
 }
 
@@ -461,10 +495,12 @@ fn line_ok(value: &str, max: usize) -> bool {
 }
 fn line(budget: &mut Budget, value: &str, max: usize, field: F, index: Option<usize>) -> Checked {
     if !line_ok(value, max) {
-        return Err(match index {
+        let mut refused = match index {
             Some(index) => at(field, index),
             None => fault(field),
-        });
+        };
+        refused.found = Some(measured(value));
+        return Err(refused);
     }
     budget.add(value)
 }

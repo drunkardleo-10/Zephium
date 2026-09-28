@@ -890,7 +890,11 @@ impl WorkArtifactDataV1 {
     /// `evidence_len` is the artifact's evidence array length; claim-level
     /// indices must address it.
     pub fn validate(&self, evidence_len: usize) -> Result<(), WorkError> {
-        self.check(evidence_len, &mut WorkArtifactField::Content, &mut None)
+        self.check(
+            evidence_len,
+            &mut WorkArtifactField::Content,
+            &mut (None, None),
+        )
     }
     /// The first part that fails `validate`, for a notice the model can act on.
     pub fn fault(&self, evidence_len: usize) -> Option<WorkArtifactField> {
@@ -899,21 +903,32 @@ impl WorkArtifactDataV1 {
     /// The first part that fails `validate` and the item it sits in.
     pub fn fault_at(&self, evidence_len: usize) -> Option<WorkObjectFault> {
         let mut at = WorkArtifactField::Content;
-        let mut index = None;
-        match self.check(evidence_len, &mut at, &mut index) {
+        let mut detail = (None, None);
+        match self.check(evidence_len, &mut at, &mut detail) {
             Ok(()) => None,
             Err(WorkError::Capacity) => Some(WorkObjectFault {
                 field: WorkArtifactField::Text,
                 index: None,
+                found: None,
             }),
-            Err(_) => Some(WorkObjectFault { field: at, index }),
+            Err(_) => Some(WorkObjectFault {
+                field: at,
+                index: detail.0,
+                found: detail.1,
+            }),
         }
     }
     /// What a lead run may make: the current kinds only, diagrams within
     /// their tighter limits, and everything `validate` holds.
     pub fn lead_fault(&self, evidence_len: usize) -> Option<WorkObjectFault> {
         use WorkArtifactField as F;
-        let whole = |field| Some(WorkObjectFault { field, index: None });
+        let whole = |field| {
+            Some(WorkObjectFault {
+                field,
+                index: None,
+                found: None,
+            })
+        };
         match self {
             Self::Table { .. }
             | Self::Comparison { .. }
@@ -943,6 +958,7 @@ impl WorkArtifactDataV1 {
                         return Some(WorkObjectFault {
                             field: F::LeadDiagramNode,
                             index: u16::try_from(index).ok(),
+                            found: None,
                         });
                     }
                 }
@@ -951,6 +967,7 @@ impl WorkArtifactDataV1 {
                         return Some(WorkObjectFault {
                             field: F::LeadDiagramEdgeLabel,
                             index: u16::try_from(index).ok(),
+                            found: None,
                         });
                     }
                 }
@@ -991,7 +1008,7 @@ impl WorkArtifactDataV1 {
         &self,
         evidence_len: usize,
         at: &mut WorkArtifactField,
-        index: &mut Option<u16>,
+        detail: &mut (Option<u16>, Option<WorkTextFound>),
     ) -> Result<(), WorkError> {
         use WorkArtifactField as F;
         let mut budget = TextBudget(0);
@@ -1001,7 +1018,7 @@ impl WorkArtifactDataV1 {
             Ok(()) => Ok(()),
             Err(fault) => {
                 *at = fault.field;
-                *index = fault.index;
+                *detail = (fault.index, fault.found);
                 Err(if fault.field == F::Text {
                     WorkError::Capacity
                 } else {

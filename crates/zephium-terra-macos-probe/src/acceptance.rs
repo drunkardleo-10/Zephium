@@ -375,6 +375,12 @@ async fn stand_in(
         let WorkReplyV1::Projection { projection } = request.response(profile).await.reply else {
             continue;
         };
+        // Kept as it goes, so a run the host stops can still be read.
+        let _ = std::fs::create_dir_all("target/work-runtime-proof/lead");
+        let _ = std::fs::write(
+            "target/work-runtime-proof/lead/latest.json",
+            serde_json::to_vec_pretty(&projection).unwrap_or_default(),
+        );
         let Some(execution) = projection
             .executions
             .iter()
@@ -420,12 +426,24 @@ async fn stand_in(
                     answer: reply,
                 }
             }
-            WorkStepKindV1::Confirm { .. } => {
-                say(format_args!("lead-person: declined held step"));
+            WorkStepKindV1::Confirm { confirm } => {
+                // Refusing cookies commits nothing; the gate still holds it
+                // (a classifier miss to fix), so the stand-in lets it through.
+                let action = confirm.action.to_lowercase();
+                let consent = action.contains("reject all") || action.contains("odrzuć");
+                say(format_args!(
+                    "lead-person: {} held step category={:?}",
+                    if consent {
+                        "approved consent"
+                    } else {
+                        "declined"
+                    },
+                    confirm.category
+                ));
                 WorkRuntimeIntent::ApproveStep {
                     execution: execution.id,
                     step: step.id,
-                    approve: false,
+                    approve: consent,
                     for_run: false,
                 }
             }

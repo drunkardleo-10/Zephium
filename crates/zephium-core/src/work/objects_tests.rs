@@ -73,6 +73,11 @@ fn limits_come_back_as_the_field_and_the_item() {
     assert_eq!(picks.index, Some(1));
     assert!(picks.describe().contains("60 characters"));
     assert!(picks.describe().contains("position 2"));
+    assert!(
+        picks.describe().contains("it has 61 characters"),
+        "{}",
+        picks.describe()
+    );
     assert_eq!(
         field(
             json!({"kind":"picks","facet":"stay","items":[{"name":"A","recommended":true},{"name":"B","recommended":true}]})
