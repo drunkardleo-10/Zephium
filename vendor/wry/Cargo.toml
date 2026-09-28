@@ -165,6 +165,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSURLProtectionSpace",
   "NSURLCredential",
   "NSURLSession",
+  "NSURLError",
 ] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
