@@ -230,6 +230,16 @@ fn make_view(
             Ok(())
         };
     let mut builder = WebViewBuilder::new_with_web_context(&mut context)
+        .with_ipc_handler(|request| {
+            let mut payload: Value = serde_json::from_str(request.body()).unwrap_or(Value::Null);
+            if let Some(icon) = payload["icon"].as_array() {
+                payload["icon"] = json!({"rgba_bytes":icon.len()});
+            }
+            emit(
+                "ipc",
+                json!({"source":request.uri().to_string(),"payload":payload}),
+            );
+        })
         .with_profile_name(name.to_owned())
         .with_visible(visible)
         .with_focused(false)
@@ -426,6 +436,7 @@ pub fn run() -> Result<()> {
     let mut views = BTreeMap::from([("tab1".to_owned(), first)]);
     let mut last_id = String::new();
     let mut last_popup = String::new();
+    let mut last_extension: Option<ICoreWebView2BrowserExtension> = None;
     let started = Instant::now();
     for (index, step) in steps.iter().enumerate() {
         let operation = (|| -> Result<Value> {
@@ -442,6 +453,16 @@ pub fn run() -> Result<()> {
             }
             if let Some(source) = step["load"].as_str() {
                 let folder = prepare(Path::new(source), &packages)?;
+                if step["prepare_windows"] == true {
+                    if Path::new(source).is_dir() {
+                        return Err("prepared lab loads require a fresh extracted CRX".into());
+                    }
+                    let sites: Option<Vec<String>> = step
+                        .get("sites")
+                        .map(|sites| serde_json::from_value(sites.clone()))
+                        .transpose()?;
+                    zephium_webext::windows::prepare(&folder, sites.as_deref())?;
+                }
                 let manifest: Value =
                     serde_json::from_slice(&std::fs::read(folder.join("manifest.json"))?)?;
                 last_popup = manifest
@@ -453,7 +474,7 @@ pub fn run() -> Result<()> {
                 let (tx, rx) = mpsc::channel();
                 let handler = ProfileAddBrowserExtensionCompletedHandler::create(Box::new(
                     move |status, item| {
-                        let result = (|| -> windows::core::Result<String> {
+                        let result = (|| -> windows::core::Result<(String, ICoreWebView2BrowserExtension)> {
                             status?;
                             let item =
                                 item.ok_or_else(|| windows::core::Error::from(E_ACCESSDENIED))?;
@@ -462,7 +483,7 @@ pub fn run() -> Result<()> {
                             unsafe {
                                 item.Id(&mut id)?;
                             }
-                            Ok(take_pwstr(id))
+                            Ok((take_pwstr(id), item))
                         })();
                         let _ = tx.send(result);
                         Ok(())
@@ -475,7 +496,9 @@ pub fn run() -> Result<()> {
                         &handler,
                     )?;
                 }
-                last_id = wait(rx)??;
+                let (native_id, item) = wait(rx)??;
+                last_id = native_id;
+                last_extension = Some(item);
                 if !Path::new(source).is_dir()
                     && folder.file_name().and_then(|s| s.to_str()) != Some(last_id.as_str())
                 {
@@ -504,7 +527,7 @@ pub fn run() -> Result<()> {
                         .as_ref()
                         .ok_or("no authenticated human binding")?;
                     Some(
-                        include_str!("../fixtures/popup-target.js")
+                        zephium_webext::windows::POPUP_TARGET_SCRIPT
                             .replace("__ZEPHIUM_BINDING__", &binding.to_string()),
                     )
                 } else {
@@ -529,8 +552,48 @@ pub fn run() -> Result<()> {
                 return Ok(json!({"view":new_name,"profile":p}));
             }
             let view = views.get(name).ok_or("unknown view")?;
+            if let Some(enabled) = step["enabled"].as_bool() {
+                let item = last_extension.as_ref().ok_or("no native extension")?;
+                let (tx, rx) = mpsc::channel();
+                let handler = webview2_com::BrowserExtensionEnableCompletedHandler::create(
+                    Box::new(move |status| {
+                        let _ = tx.send(status);
+                        Ok(())
+                    }),
+                );
+                // SAFETY: the lab retains the native extension on its owning STA.
+                unsafe {
+                    item.Enable(enabled, &handler)?;
+                }
+                wait(rx)??;
+                return extensions(view);
+            }
+            if step["remove"] == true {
+                let item = last_extension.as_ref().ok_or("no native extension")?;
+                let (tx, rx) = mpsc::channel();
+                let handler = webview2_com::BrowserExtensionRemoveCompletedHandler::create(
+                    Box::new(move |status| {
+                        let _ = tx.send(status);
+                        Ok(())
+                    }),
+                );
+                // SAFETY: the lab retains the native extension on its owning STA.
+                unsafe {
+                    item.Remove(&handler)?;
+                }
+                wait(rx)??;
+                return extensions(view);
+            }
             if step["capture_human"] == true {
-                let script = format!("const tabs=await chrome.tabs.query({{}});const matches=tabs.filter(t=>t.url==={});if(matches.length!==1)throw new Error('ambiguous human tab');return {{extensionId:chrome.runtime.id,tabId:matches[0].id,windowId:matches[0].windowId}}", serde_json::to_string(&format!("{}/first", fixture.origin))?);
+                let identity = cdp(
+                    views.get("tab1").ok_or("missing human view")?,
+                    "Browser.getWindowForTarget",
+                    json!({}),
+                )?;
+                let window = identity["windowId"]
+                    .as_i64()
+                    .ok_or("missing native human window")?;
+                let script = format!("const matches=await chrome.tabs.query({{windowId:{window}}});if(matches.length!==1)throw new Error('ambiguous human tab');return {{extensionId:chrome.runtime.id,tabId:matches[0].id,windowId:matches[0].windowId}}");
                 let result = eval(view, &script)?;
                 let binding = result
                     .pointer("/result/value")
@@ -545,6 +608,14 @@ pub fn run() -> Result<()> {
                 s.replace("$ID", &last_id)
                     .replace("$ORIGIN", &fixture.origin)
                     .replace("$DENIED", &fixture.denied)
+                    .replace(
+                        "$HUMAN_WINDOW",
+                        &human_binding
+                            .as_ref()
+                            .and_then(|value| value["windowId"].as_i64())
+                            .map(|id| id.to_string())
+                            .unwrap_or_else(|| "null".into()),
+                    )
             };
             if let Some(url) = step["navigate"].as_str() {
                 view.load_url(&substitute(url))?;
