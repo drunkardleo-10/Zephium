@@ -27,7 +27,22 @@ fn main() {
         eprintln!("Tauri privileged-window ownership check failed: {error}");
         std::process::exit(1);
     }
-    tauri_build::build()
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        // Tauri's default manifest is this Common Controls dependency, but its
+        // resource library only reaches bin targets. Emit it through the linker
+        // for standalone unit tests too, without embedding a duplicate in bins.
+        tauri_build::try_build(
+            tauri_build::Attributes::new()
+                .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest()),
+        )
+        .expect("Tauri Windows build configuration");
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'");
+    } else {
+        tauri_build::build();
+    }
 }
 
 fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {

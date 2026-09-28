@@ -490,7 +490,7 @@ pub(crate) fn dropped_package(paths: &[PathBuf]) -> Option<String> {
 mod imp;
 mod store_icon;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
