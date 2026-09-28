@@ -5,6 +5,7 @@ import type {
   WorkExecutionFact,
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
+import { pickName } from "../lib/board/objects";
 import { environmentStages } from "../lib/project-environment-board";
 import { environmentRequests } from "../lib/project-environment-thread";
 import { projection, snapshot } from "./environment-fixtures";
@@ -143,5 +144,44 @@ test("a revision shows where its first version stands, updated, and its request 
   expect(links.find((link) => link.id === `revise:${stages[1]!.card}:homes-card`)).toMatchObject({
     source: stages[1]!.card,
     target: "homes-card",
+  });
+});
+
+test("a pick named by its page title drops the site's tail and keeps the place", () => {
+  expect(
+    pickName(
+      "San Francisco Sublets, Short Term Rentals & Rooms for Rent - Airbnb San Francisco - California",
+      "https://www.airbnb.com/s/homes",
+      "Apartment in San Francisco",
+    ),
+  ).toEqual({
+    name: "San Francisco Sublets, Short Term Rentals & Rooms for Rent",
+    place: "San Francisco, California",
+  });
+  expect(
+    pickName(
+      "Lux 2br/2ba Next to Y-Combi - Avail Fall or Winter - Flats for Rent in San Francisco, California, United States - Airbnb",
+      "https://www.airbnb.co.uk/rooms/1",
+      "Apartment in San Francisco",
+    ),
+  ).toEqual({
+    name: "Lux 2br/2ba Next to Y-Combi - Avail Fall or Winter",
+    place: "San Francisco, California, United States",
+  });
+  // A listing's own words stay, and a place nobody said stays in the name.
+  expect(
+    pickName(
+      "Lux 2br/2ba Next to Y-Combi - Avail Fall or Winter",
+      "https://airbnb.com/rooms/1",
+      "",
+    ),
+  ).toEqual({ name: "Lux 2br/2ba Next to Y-Combi - Avail Fall or Winter" });
+  expect(
+    pickName("Loft - Oakland", "https://airbnb.com/rooms/2", "Apartment in San Francisco"),
+  ).toEqual({
+    name: "Loft - Oakland",
+  });
+  expect(pickName("Apply to YC | Y Combinator", "https://www.ycombinator.com/apply", "")).toEqual({
+    name: "Apply to YC",
   });
 });

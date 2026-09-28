@@ -5,6 +5,7 @@ import { workChartSpec } from "$shared/ui/data/Artifact/work-chart";
 import { mediaUrl } from "$domain/resources";
 import { artifactView } from "../project-work";
 import { plain } from "./text";
+import { siteKey, siteName } from "../run/site";
 import type {
   Block,
   Board,
@@ -99,15 +100,84 @@ const FACETS: Record<EntityFacet, PicksView["facet"]> = {
   job: "job",
 };
 
-function pickOf(entity: Entity): PickView {
+const TITLE_BREAK = /\s+[-|•·–—]\s+/u;
+const lower = (text: string) => text.toLocaleLowerCase();
+/** "San Francisco, California": a comma list of names, each one capitalised. */
+const PLACE =
+  /^(?:\p{Lu}[\p{L}\p{M}.'’]*(?:\s+\p{Lu}[\p{L}\p{M}.'’]*)*)(?:,\s*\p{Lu}[\p{L}\p{M}.'’]*(?:\s+\p{Lu}[\p{L}\p{M}.'’]*)*)*$/u;
+
+/**
+ * A page title given as a pick's name, without the tail the page adds: the
+ * site's own name ("- Airbnb San Francisco - California") and a place already
+ * said elsewhere ("- Flats for Rent in San Francisco, California"). The place
+ * it drops can stand as the pick's subtitle; the page keeps its whole title.
+ */
+export function pickName(
+  name: string,
+  url: string | undefined,
+  context: string,
+): { name: string; place?: string } {
+  const parts = name.split(TITLE_BREAK);
+  if (parts.length < 2) return { name };
+  const host = hostOf(url);
+  const key = host ? siteKey(host) : "";
+  const brand = host ? lower(siteName(host)) : "";
+  const names = (part: string) => {
+    const words = lower(part);
+    return (
+      (!!key && words.replace(/[^\p{L}\p{N}]/gu, "").includes(key)) ||
+      (!!brand && words.includes(brand))
+    );
+  };
+  const places: string[] = [];
+  let kept = parts.length;
+  const cut = parts.findIndex((part, index) => index > 0 && names(part));
+  if (cut > 0) {
+    for (const part of parts.slice(cut)) {
+      const rest = brand
+        ? part.replace(new RegExp(brand.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "iu"), "").trim()
+        : part;
+      if (rest && PLACE.test(rest)) places.push(rest);
+    }
+    kept = cut;
+  }
+  const said = lower(context);
+  while (kept > 1) {
+    const place = /(?:^|\s)in\s+(.+)$/u.exec(parts[kept - 1] ?? "")?.[1] ?? parts[kept - 1] ?? "";
+    const first = place.split(",")[0]?.trim() ?? "";
+    const others = lower(parts.slice(0, kept - 1).join(" "));
+    if (
+      !PLACE.test(place) ||
+      !first ||
+      !(said.includes(lower(first)) || others.includes(lower(first)))
+    )
+      break;
+    places.unshift(place);
+    kept -= 1;
+  }
+  if (kept === parts.length) return { name };
+  const seen = new Set<string>();
+  const place = places
+    .flatMap((text) => text.split(",").map((part) => part.trim()))
+    .filter((part) => part && !seen.has(lower(part)) && seen.add(lower(part)))
+    .join(", ");
+  return { name: parts.slice(0, kept).join(" - "), ...(place ? { place } : {}) };
+}
+
+function pickOf(entity: Entity, context: string): PickView {
   const src = entity.image ? mediaUrl(entity.image.profile, entity.image.digest) : null;
   const labelled = entity.facts.filter((fact) => fact.label.trim());
   const said = entity.facts.find((fact) => !fact.label.trim());
   const logo = hostOf(entity.homepage);
+  const named = pickName(entity.name, entity.homepage, context);
   return {
     ...(entity.element ? { element: entity.element } : {}),
-    name: entity.name,
-    ...(entity.descriptor ? { subtitle: entity.descriptor } : {}),
+    name: named.name,
+    ...(entity.descriptor
+      ? { subtitle: entity.descriptor }
+      : named.place
+        ? { subtitle: named.place }
+        : {}),
     ...(src ? { picture: { src } } : logo ? { logo } : {}),
     ...(entity.homepage ? { url: entity.homepage } : {}),
     ...(entity.price ? { price: { display: entity.price } } : {}),
@@ -135,6 +205,17 @@ const COLUMN_KIND: Record<string, SheetColumn["kind"]> = {
   link: "link",
 };
 
+/** What the rest of a set says, where a name's trailing place may already stand. */
+const othersText = (
+  items: readonly { name: string; descriptor?: string | null }[],
+  index: number,
+  title?: string,
+) =>
+  [
+    title ?? "",
+    ...items.filter((_, at) => at !== index).map((item) => `${item.name} ${item.descriptor ?? ""}`),
+  ].join(" ");
+
 /** A legacy block as the object it is now: an answer's prose is never one (it is the reply). */
 function legacyView(block: Block, board: Board): ObjectView | null {
   const base = {
@@ -149,14 +230,16 @@ function legacyView(block: Block, board: Board): ObjectView | null {
         ...base,
         kind: "picks",
         facet: FACETS[block.facet],
-        items: block.entities.map(pickOf),
+        items: block.entities.map((entity, index) =>
+          pickOf(entity, othersText(block.entities, index, block.title)),
+        ),
       };
     case "entity":
       return {
         ...base,
         kind: "picks",
         facet: FACETS[block.entity.facet],
-        items: [pickOf(block.entity)],
+        items: [pickOf(block.entity, block.title ?? "")],
       };
     case "comparison": {
       const content = block.content;
@@ -181,7 +264,11 @@ function legacyView(block: Block, board: Board): ObjectView | null {
             const logo = hostOf(subject.homepage);
             return {
               cells: [
-                subject.name,
+                pickName(
+                  subject.name,
+                  subject.homepage,
+                  othersText(content.subjects, row, block.title),
+                ).name,
                 ...content.criteria.map((criterion, column) =>
                   cellText(content.cells[row]?.[column]?.value, criterion.scaleMax),
                 ),

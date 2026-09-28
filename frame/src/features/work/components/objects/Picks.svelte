@@ -23,8 +23,15 @@
     !!pick.route;
   const flights = $derived(object.facet === "flight" && object.items.every(routed));
   const pictured = $derived(object.items.some((item) => item.picture));
-  /** Only a set of pictured cards shares one height; words alone keep their own. */
-  const mixed = $derived(!object.items.every((item) => item.picture));
+  /** What a card holds under its name: a set shares one height only when its cards hold alike. */
+  const holds = (pick: PickView) =>
+    pick.facts.length || pick.price || pick.why ? `${pick.facts.length}|${!!pick.price}` : "";
+  /** Only a set of pictured, alike cards shares one height; the rest keep their own. */
+  const mixed = $derived(
+    !object.items.every((item) => item.picture) ||
+      object.items.some((item) => !holds(item)) ||
+      new Set(object.items.map(holds)).size > 1,
+  );
   /** At a distance a set shows its first few; the rest wait for a closer look. */
   const shown = $derived(
     detail !== "tile" || flights
