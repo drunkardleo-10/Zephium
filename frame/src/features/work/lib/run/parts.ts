@@ -44,6 +44,8 @@ export type RunPart = {
   sources: SourceRow[];
   /** Where the part began in its run, for its row's order. */
   order: number;
+  /** The connection a connection part works through: "github". */
+  connection?: string;
   /** What the part came to, in its helper's words: "3 homes". */
   summary?: string;
   /** The sites a row of pages that wouldn't open stands for. */
@@ -134,6 +136,7 @@ function factParts(
             : [],
         order: parts.length,
         ...(fact.summary ? { summary: fact.summary } : {}),
+        ...(fact.service?.connection ? { connection: fact.service.connection } : {}),
         ...(fact.helper === "computer" || fact.helper === "connection"
           ? { steps: [...ids], lines: [] }
           : {}),

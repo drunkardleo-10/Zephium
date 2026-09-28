@@ -108,6 +108,7 @@
     viewport,
   }}
   {board}
+  work={(objective) => scene.objectives.get(objective)}
   ondetail={(next) => (detail = next)}
   oninspect={() => {}}
   onopen={(id) => board.toggle(id)}

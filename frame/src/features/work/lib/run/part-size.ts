@@ -30,12 +30,14 @@ export const PART = {
 
 /** Where a part's ask card reports its height. */
 export const askKey = (part: string) => `${part}:ask`;
+/** Where a helper's own view of its part reports its height. */
+export const contentKey = (part: string) => `${part}:content`;
 
 export type PartShape =
   | { kind: "frames"; count: number }
   | { kind: "stack"; count: number }
   | { kind: "sources"; rows: number; more: boolean }
-  | { kind: "helper"; lines: number }
+  | { kind: "helper"; rows: number; height?: number }
   | { kind: "ask"; height: number }
   | { kind: "label" };
 
@@ -65,10 +67,10 @@ export function partSize(shape: PartShape): { width: number; height: number } {
         ),
       };
     case "helper":
-      // A helper's own view stands 400 wide; until it exists, a line per thing it touched.
+      // A helper's own view stands 400 wide, a 24 px row per thing it did, until it measures itself.
       return {
         width: lead + PART.helper,
-        height: Math.max(PART.labelHeight, Math.min(PART.helperLines, shape.lines) * 24 + 8),
+        height: Math.max(PART.labelHeight, shape.height ?? shape.rows * 24 + 8),
       };
     case "ask":
       return { width: lead + PART.ask, height: Math.max(PART.labelHeight, shape.height) };

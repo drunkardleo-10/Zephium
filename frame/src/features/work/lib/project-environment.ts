@@ -503,7 +503,8 @@ function standFor(doing: AgentDoing, stage: WorkStage): CanvasPosition {
   if (rect && doing !== "writing" && doing !== "done") {
     if (working!.helper === "browser" && working!.pages.length)
       return { x: rect.x + PART.label + PART.gap + PART.tile - MARK / 2, y: rect.y - MARK / 2 };
-    return { x: rect.x + rect.width - MARK / 2, y: rect.y - MARK / 2 };
+    // Beside a row that shows its own work, off its end on the row's line.
+    return { x: rect.x + rect.width + 8, y: rect.y + RUN.labelMid - MARK / 2 };
   }
   if (doing === "writing" || doing === "done")
     return { x: stage.lane.corner.x - RUN.air - MARK, y: spine };
@@ -579,7 +580,11 @@ function partSummary(part: RunPart, stage: WorkStage): string | undefined {
   if (part.summary && part.state !== "running") return part.summary;
   if (part.state === "failed") return m.work_part_failed();
   if (part.state === "running")
-    return part.helper === "research" ? m.work_line_searching() : m.work_part_reading();
+    return part.helper === "research"
+      ? m.work_line_searching()
+      : part.helper === "browser"
+        ? m.work_part_reading()
+        : m.work_env_working();
   let things = 0;
   for (const block of stage.board.blocks) {
     if (stage.found.get(block.id) !== part.id) continue;
@@ -713,6 +718,7 @@ export function environmentParts(
           objective: stage.objective,
           ...(part.steps ? { steps: part.steps } : {}),
           ...(part.lines ? { lines: part.lines } : {}),
+          ...(part.connection ? { connection: part.connection } : {}),
           ...(part.ask ? { ask: part.ask } : {}),
           ...(helper ? { presence: agentSeed(stage.objective) } : {}),
           ...(part.helper === "research"

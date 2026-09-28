@@ -16,7 +16,6 @@
     WorkHumanRegionV1,
     WorkEnvironmentReference,
     WorkFileEvidenceV1,
-    WorkEnvironmentSnapshot,
     WorkExecutionFact,
     WorkRuntimeProjection,
   } from "$shared/ipc/bindings";
@@ -98,7 +97,8 @@
   import { failureLine, humanPage, regionOf, sameRegion } from "../lib/work-human";
   import { openOver, type PaneRect } from "../lib/pane-geometry";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
-  import { subjectImageCandidates, subjectsOf } from "../lib/subjects";
+  import { CanvasPlacing } from "../lib/workspace/placing.svelte";
+  import { PictureQueue } from "../lib/workspace/pictures.svelte";
   import { environmentResults, type ResultReference } from "../lib/project-environment-results";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import type { CanvasView, CanvasItem, CanvasPosition } from "../lib/canvas-model";
@@ -306,7 +306,7 @@
     liftRecord = null;
     lifted = { id, origin: canvasRef?.screenRect(id) ?? null };
     if (snapshot?.elements.find((element) => element.id === id)?.reference.kind === "subject")
-      void admitGallery(id);
+      void pictureQueue.gallery(id, picturesOf(id));
   }
   // The floating browser pane: Rust owns the native hole, this owns the frame.
   let pane = $state.raw<{
@@ -619,145 +619,21 @@
     observer.observe(element);
     return () => observer.disconnect();
   });
-  let folderPending = $state(false);
-  let folderRefused = $state(false);
-  let folderNotice: ReturnType<typeof setTimeout> | undefined;
-  /** One quiet line, and it goes away on its own. */
-  function refuseFolder() {
-    folderRefused = true;
-    clearTimeout(folderNotice);
-    folderNotice = setTimeout(() => (folderRefused = false), 6000);
-  }
-  /** A folder becomes a card only after the application admits its path. A file
-   * among dropped paths is not a refusal a person needs to hear about. */
-  async function addFolder(path: string, at?: CanvasPosition | null, dropped = false) {
-    if (folderPending || busy) return false;
-    folderPending = true;
-    try {
-      const admitted = await commands.workAdmitFolder(session.profile, path).catch(() => null);
-      if (admitted?.status !== "ok" || admitted.data.kind !== "admitted") {
-        const file =
-          admitted?.status === "ok" &&
-          admitted.data.kind === "refused" &&
-          admitted.data.not_a_folder;
-        if (!(dropped && file)) refuseFolder();
-        return false;
-      }
-      return await placeFolder(admitted.data, at ?? null);
-    } finally {
-      folderPending = false;
-    }
-  }
-  function placeFolder(folder: { path: string; name: string }, at: CanvasPosition | null) {
-    return place({ kind: "folder", path: folder.path, name: folder.name }, "folder", at);
-  }
-  /** The native folder picker; a cancelled choice says nothing. */
-  async function chooseFolder() {
-    if (folderPending || busy) return;
-    folderPending = true;
-    try {
-      const chosen = await commands.workPickFolder(session.profile).catch(() => null);
-      if (chosen?.status !== "ok" || !chosen.data) return;
-      if (chosen.data.kind !== "admitted") {
-        refuseFolder();
-        return;
-      }
-      if (await placeFolder(chosen.data, null)) panel = null;
-    } finally {
-      folderPending = false;
-    }
-  }
-  /** Shows an admitted folder, or a file inside one, where it lives. */
-  function reveal(path: string) {
-    void commands.workRevealPath(session.profile, path).catch(() => null);
-  }
-  /** Adds an element and stands it where the person put it, or in the middle. */
-  async function place(
-    reference: WorkEnvironmentReference,
-    type: CanvasItem["type"],
-    at: CanvasPosition | null,
-  ) {
-    if (session.snapshot && elementFor(session.snapshot, reference)) return true;
-    if (!(await session.flushView())) return false;
-    if (!(await session.edit({ kind: "add", reference, area: null }))) return false;
-    const current = session.snapshot;
-    const element = current ? elementFor(current, reference) : undefined;
-    const point = at ?? canvasCentre();
-    if (!current || !element || !point) return true;
-    const size = defaultSize({ id: element.id, title: "", kind: "", detail: "", status: "", type });
-    session.checkpoint({
-      ...current.view,
-      placements: [
-        ...current.view.placements.filter((place) => place.element !== element.id),
-        {
-          element: element.id,
-          x: Math.round(point.x - size.width / 2),
-          y: Math.round(point.y - size.height / 2),
-          ...size,
-        },
-      ],
-    });
-    return true;
-  }
-  function canvasCentre(): CanvasPosition | null {
-    const bounds = cardBounds;
-    return bounds
-      ? (canvasRef?.flowPosition(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2) ??
-          null)
-      : null;
-  }
-  // Finder drops: the application hands the frame the dropped paths and the drop
-  // point in CSS pixels. Granted folders land where they were dropped; a file
-  // among them is simply not a folder, and says nothing.
-  onMount(() => {
-    const dropped = (event: Event) => {
-      const detail = (event as CustomEvent<{ paths?: unknown; x?: unknown; y?: unknown }>).detail;
-      const paths = Array.isArray(detail?.paths)
-        ? detail.paths.filter((path): path is string => typeof path === "string")
-        : [];
-      if (!paths.length) return;
-      const at =
-        typeof detail?.x === "number" && typeof detail?.y === "number"
-          ? canvasRef?.flowPosition(detail.x, detail.y)
-          : null;
-      void dropFolders(paths.slice(0, 8), at ?? null);
-    };
-    window.addEventListener("zephium:work-paths-dropped", dropped);
-    return () => {
-      window.removeEventListener("zephium:work-paths-dropped", dropped);
-      clearTimeout(folderNotice);
-    };
+  const placing = new CanvasPlacing({
+    session: () => session,
+    busy: () => busy,
+    centre: () => {
+      const bounds = cardBounds;
+      return bounds
+        ? (canvasRef?.flowPosition(
+            bounds.left + bounds.width / 2,
+            bounds.top + bounds.height / 2,
+          ) ?? null)
+        : null;
+    },
+    at: (x, y) => canvasRef?.flowPosition(x, y) ?? null,
   });
-  async function dropFolders(paths: readonly string[], at: CanvasPosition | null) {
-    let index = 0;
-    for (const path of paths) {
-      const placed = await addFolder(
-        path,
-        at ? { x: at.x + index * 24, y: at.y + index * 24 } : null,
-        true,
-      );
-      if (placed) index += 1;
-    }
-  }
-  /** Only an explicit https or http address; anything else is not a link. */
-  function linkUrl(raw: string): string | null {
-    const text = raw.trim();
-    if (!text) return null;
-    try {
-      const url = new URL(/^[a-z][a-z0-9+.-]*:/iu.test(text) ? text : `https://${text}`);
-      return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : null;
-    } catch {
-      return null;
-    }
-  }
-  /** A pasted link becomes a card of its own; it opens in the pane, like a source. */
-  async function addLink(raw: string) {
-    const url = linkUrl(raw);
-    if (!url || busy) return false;
-    if (!(await place({ kind: "link", url, title: host(url) }, "link", null))) return false;
-    panel = null;
-    return true;
-  }
+  onMount(() => placing.listen());
   function host(url: string): string {
     try {
       return new URL(url).host.replace(/^www\./u, "");
@@ -1084,140 +960,22 @@
         ...placements,
       ],
     });
-    void pictureSubjects();
+    void pictureQueue.run();
   }
-  // Subjects may name public image candidates from their cited sources. Rust
-  // fetches, bounds, decodes, and stores an admitted copy; the canvas only ever
-  // renders that copy. One admission per candidate URL per environment.
-  const imageAdmissions = new SvelteSet<string>();
-  function canonicalImageUrl(url: string): string {
-    try {
-      return new URL(url).toString();
-    } catch {
-      return url;
-    }
-  }
-  /** The media element on this canvas that already holds one candidate. */
-  function placedPicture(snapshot: WorkEnvironmentSnapshot, canonical: string): string | undefined {
-    for (const element of snapshot.elements) {
-      if (element.reference.kind !== "resource") continue;
-      const origin = context.media.get(element.reference.resource)?.origin;
-      if (origin?.kind === "fetched" && canonicalImageUrl(origin.url) === canonical)
-        return element.id;
-    }
-    return undefined;
-  }
-  /** A subject shows a picture once any "uses" relation leaves it. */
-  function pictured(current: WorkEnvironmentSnapshot, element: string): boolean {
-    return (current.relations ?? []).some(
-      (relation) => relation.from === element && relation.kind === "uses",
-    );
-  }
-  /** Subjects and video links on this canvas still without a picture, with their candidates in order. */
-  function unpictured(current: WorkEnvironmentSnapshot) {
-    return current.elements.flatMap((element) => {
-      const reference = element.reference;
-      if (reference.kind === "link") {
-        // A video link's picture is its thumbnail, admitted like a subject's.
-        const thumbnail = youtubeThumbnail(reference.url);
-        if (!thumbnail || pictured(current, element.id)) return [];
-        if (admittedFor.has(`${current.id} ${element.id}`)) return [];
-        return [{ element: element.id, candidates: [thumbnail] }];
-      }
-      if (reference.kind !== "subject" || pictured(current, element.id)) return [];
-      if (admittedFor.has(`${current.id} ${element.id}`)) return [];
-      const run = context.objectives
-        .get(reference.objective)
-        ?.executions.find((entry) => entry.id === reference.execution);
-      const artifact = run?.artifacts.find((entry) => entry.id === reference.artifact);
-      const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
-      const candidates = subject && run ? subjectImageCandidates(run, subject) : [];
-      return candidates.length ? [{ element: element.id, candidates }] : [];
-    });
-  }
-  // One queue per canvas, not a per-pass budget: it runs until every pictured
-  // subject has one picture, falls back to the next candidate when Rust
-  // refuses one, and retries a refused candidate once after a pause.
-  const PICTURE_RETRY_MS = 5000;
-  const refusals = new SvelteMap<string, { count: number; after: number }>();
-  const admittedFor = new SvelteSet<string>();
-  let picturing = false;
-  let pictureAgain = false;
-  let pictureTimer: ReturnType<typeof setTimeout> | undefined;
+  const pictureQueue = new PictureQueue({
+    session: () => session,
+    media: () => context.media,
+    objectives: () => context.objectives,
+  });
   $effect(() => {
     const current = snapshot;
     // A projection update can bring candidates for subjects already placed.
     const runs = [...context.objectives.values()];
     const links = current?.elements.some((element) => element.reference.kind === "link");
     if (!current || (!runs.length && !links) || session.pending || session.loading) return;
-    untrack(() => void pictureSubjects());
+    untrack(() => void pictureQueue.run());
   });
-  $effect(() => () => clearTimeout(pictureTimer));
-  async function admitPicture(environment: string, element: string, candidate: string) {
-    try {
-      const result = await commands.mediaAdmitRemote(
-        session.profile,
-        environment,
-        element,
-        candidate,
-      );
-      return result.status === "ok" && result.data.kind === "admitted";
-    } catch {
-      return false;
-    }
-  }
-  async function pictureSubjects() {
-    if (picturing) {
-      pictureAgain = true;
-      return;
-    }
-    picturing = true;
-    try {
-      do {
-        pictureAgain = false;
-        const current = session.snapshot;
-        if (!current) break;
-        let retry = Infinity;
-        for (const { element, candidates } of unpictured(current)) {
-          for (const candidate of candidates) {
-            const latest = session.snapshot ?? current;
-            if (latest.id !== current.id || pictured(latest, element)) break;
-            const canonical = canonicalImageUrl(candidate);
-            const known = placedPicture(latest, canonical);
-            if (known) {
-              // The picture is already here: point at it instead of fetching it twice.
-              if (
-                await session.edit({ kind: "relate", from: element, to: known, relation: "uses" })
-              )
-                break;
-              continue;
-            }
-            const key = `${current.id} ${canonical}`;
-            const refused = refusals.get(key) ?? { count: 0, after: 0 };
-            if (refused.count >= 2) continue;
-            if (Date.now() < refused.after) {
-              retry = Math.min(retry, refused.after);
-              continue;
-            }
-            imageAdmissions.add(key);
-            if (await admitPicture(current.id, element, candidate)) {
-              admittedFor.add(`${current.id} ${element}`);
-              break;
-            }
-            const after = Date.now() + PICTURE_RETRY_MS;
-            refusals.set(key, { count: refused.count + 1, after });
-            if (!refused.count) retry = Math.min(retry, after);
-          }
-        }
-        if (retry !== Infinity) {
-          clearTimeout(pictureTimer);
-          pictureTimer = setTimeout(() => void pictureSubjects(), Math.max(0, retry - Date.now()));
-        }
-      } while (pictureAgain);
-    } finally {
-      picturing = false;
-    }
-  }
+  $effect(() => () => pictureQueue.dispose());
   const liftedItem = $derived(items.find((item) => item.id === lifted?.id));
   /** Every result with steps, as tasks would carry them. */
   const stepPlans = $derived(
@@ -1494,42 +1252,6 @@
     const origin = asset.origin.kind === "fetched" ? host(asset.origin.url) : "";
     return [asset.mime, mediaSize(asset.bytes), origin].filter(Boolean).join(" · ");
   }
-  // Opening a product view is an explicit act: it is worth admitting the other
-  // pictures the run observed for that subject, and only then.
-  const gallery = new SvelteSet<string>();
-  async function admitGallery(element: string) {
-    const current = snapshot;
-    const reference = current?.elements.find((entry) => entry.id === element)?.reference;
-    if (!current || reference?.kind !== "subject" || gallery.has(element)) return;
-    gallery.add(element);
-    const run = context.objectives
-      .get(reference.objective)
-      ?.executions.find((execution) => execution.id === reference.execution);
-    const artifact = run?.artifacts.find((artifact) => artifact.id === reference.artifact);
-    const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
-    if (!run || !subject) return;
-    const known = picturesOf(element).flatMap((picture) => {
-      const origin = [...context.media.values()].find(
-        (asset) => asset.digest === picture.digest,
-      )?.origin;
-      return origin?.kind === "fetched" ? [canonicalImageUrl(origin.url)] : [];
-    });
-    for (const candidate of subjectImageCandidates(run, subject).slice(0, 3)) {
-      if (known.length >= 3) break;
-      const canonical = canonicalImageUrl(candidate);
-      if (known.includes(canonical)) continue;
-      known.push(canonical);
-      const key = `${current.id} ${canonical}`;
-      if (imageAdmissions.has(key)) continue;
-      imageAdmissions.add(key);
-      try {
-        await commands.mediaAdmitRemote(session.profile, current.id, element, candidate);
-      } catch {
-        /* The other pictures are a nicety; the first one already stands. */
-      }
-    }
-  }
-
   const authoritative = $derived(new Set(snapshot?.elements.map((element) => element.id) ?? []));
   let liftSource = $state.raw<EvidenceReference | null>(null);
   const loadResult = () => import("./WorkResultInspector.svelte");
@@ -1737,7 +1459,7 @@
     const id = current.note?.id;
     if (!id || !(await current.flush()) || environment !== session.snapshot?.id) return;
     const reference = { kind: "resource" as const, resource: id };
-    if (!(await place(reference, "link", null))) return;
+    if (!(await placing.place(reference, "link", null))) return;
     const element = session.snapshot ? elementFor(session.snapshot, reference) : undefined;
     if (element) lift(element.id);
   }
@@ -1759,7 +1481,7 @@
   /** One of the person's own notes, placed on the canvas as it is. */
   async function placeNote(id: string) {
     const reference = { kind: "resource" as const, resource: id };
-    if (await place(reference, "link", null)) panel = null;
+    if (await placing.place(reference, "link", null)) panel = null;
   }
   /** The work this canvas is already talking to, if its request card is here. */
   const runningObjective = $derived(
@@ -2003,7 +1725,7 @@
   // Saving is silent; only a write that did not land says so.
   const troubled = $derived(
     !!session.failure ||
-      folderRefused ||
+      placing.folderRefused ||
       session.delivery === "unknown" ||
       session.delivery === "conflict" ||
       session.delivery === "rejected",
@@ -2033,14 +1755,21 @@
 {#snippet attachPanel()}<AttachPanel
     bind:kind={attachKind}
     {busy}
-    {folderPending}
-    onaddlink={addLink}
-    onaddfolder={(path: string) =>
-      addFolder(path).then((placed) => {
+    folderPending={placing.folderPending}
+    onaddlink={(raw: string) =>
+      placing.addLink(raw).then((placed) => {
         if (placed) panel = null;
         return placed;
       })}
-    onchoosefolder={() => void chooseFolder()}
+    onaddfolder={(path: string) =>
+      placing.addFolder(path).then((placed) => {
+        if (placed) panel = null;
+        return placed;
+      })}
+    onchoosefolder={() =>
+      void placing.chooseFolder().then((placed) => {
+        if (placed) panel = null;
+      })}
     >{#snippet picker()}<WorkTabPicker
         {tabs}
         {openTabs}
@@ -2300,7 +2029,7 @@
           <span
             >{session.failure
               ? m.work_request_failed()
-              : folderRefused
+              : placing.folderRefused
                 ? m.work_env_folder_refused()
                 : m.work_env_view_unsaved()}</span
           >{#if session.delivery === "unknown"}<Button
@@ -2351,7 +2080,7 @@
           retryLabel={m.surface_retry()}
           >{#snippet children(FileView)}<FileView
               file={liftFile!}
-              onreveal={reveal}
+              onreveal={(path: string) => placing.reveal(path)}
               onback={() => (liftFile = null)}
             />{/snippet}</LazyView
         >
@@ -2452,7 +2181,7 @@
             meta={homePath(folder)}
             icon={FolderAddIcon}
           >
-            {#snippet actions()}<Button size="compact" onclick={() => reveal(folder)}
+            {#snippet actions()}<Button size="compact" onclick={() => placing.reveal(folder)}
                 >{m.work_env_reveal()}</Button
               >{/snippet}
           </LiftHeader>

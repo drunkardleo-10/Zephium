@@ -19,7 +19,9 @@ import { runTrail } from "./board/trail";
 import type { Detail, Picture } from "./board/types";
 import { RUN, placeRun } from "./run/layout";
 import { runParts, type PartAsk, type RunInputView, type RunPart } from "./run/parts";
-import { PART, askKey, partSize, type PartShape } from "./run/part-size";
+import { PART, askKey, contentKey, partSize, type PartShape } from "./run/part-size";
+import { computerRows, computerView } from "./parts/computer";
+import { connectionRows, connectionView } from "./parts/connection";
 import { foundByPart } from "./run/found";
 import * as m from "$shared/i18n/messages";
 
@@ -186,7 +188,11 @@ function leadEntries(
 }
 
 /** How a part's own node stands: frames while it works, a stack once done. */
-export function partShape(part: RunPart, measured?: number): PartShape {
+export function partShape(
+  part: RunPart,
+  measured?: number,
+  projection?: WorkRuntimeProjection,
+): PartShape {
   if (part.ask) {
     const ask = part.ask.props["ask"] as { kind?: string } | undefined;
     return {
@@ -194,8 +200,23 @@ export function partShape(part: RunPart, measured?: number): PartShape {
       height: measured ?? (ask?.kind === "confirm" ? PART.askConfirm : PART.askHeight),
     };
   }
-  if (part.helper === "computer" || part.helper === "connection")
-    return { kind: "helper", lines: part.lines?.length ?? 0 };
+  if (part.helper === "computer" || part.helper === "connection") {
+    const steps = part.steps ?? [];
+    const rows =
+      part.helper === "computer"
+        ? computerRows(computerView(projection, steps))
+        : connectionRows(
+            connectionView(projection, steps, {
+              title: part.title,
+              ...(part.host ? { host: part.host } : {}),
+            }),
+          );
+    return {
+      kind: "helper",
+      rows: Math.max(rows, Math.min(PART.helperLines, part.lines?.length ?? 0)),
+      ...(measured ? { height: measured } : {}),
+    };
+  }
   if (part.helper === "research")
     return {
       kind: "sources",
@@ -268,6 +289,10 @@ export function environmentStages(
           const ask = asked.find((entry) => [part.id, part.key, part.host].includes(entry.part));
           if (ask) part.ask = { props: ask.props };
         }
+      /** A slot's own height at this detail, or in full. */
+      const seen = (key: string, width: number) =>
+        (detail !== "full" ? measured.get(measureKey(key, width, false, detail)) : undefined) ??
+        measured.get(measureKey(key, width, false));
       const inputs = (options.inputs?.(runs) ?? []).map((input, index) => ({
         id: `input:${draft.card}:${index}`,
         input,
@@ -334,9 +359,11 @@ export function environmentStages(
           ...partSize(
             partShape(
               part,
-              (detail !== "full"
-                ? measured.get(measureKey(askKey(part.id), PART.ask, false, detail))
-                : undefined) ?? measured.get(measureKey(askKey(part.id), PART.ask, false)),
+              seen(
+                part.ask ? askKey(part.id) : contentKey(part.id),
+                part.ask ? PART.ask : PART.helper,
+              ),
+              projection,
             ),
           ),
         },

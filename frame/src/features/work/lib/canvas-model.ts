@@ -153,6 +153,8 @@ export type PartView = {
   cited?: readonly { key: string; url: string; where: string; title: string }[];
   /** Everything it cited, for the count past the first few. */
   citedCount?: number;
+  /** The connection a connection part works through, for its mark. */
+  connection?: string;
   /** The work the part belongs to and its steps, for a helper's own view. */
   objective?: string;
   steps?: readonly string[];

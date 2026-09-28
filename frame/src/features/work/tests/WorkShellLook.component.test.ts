@@ -85,6 +85,8 @@ test("the Work screen's own chrome, at rest and in use, in both themes", async (
     .poll(() => screen.container.querySelector<HTMLButtonElement>(".model-trigger")?.disabled)
     .toBe(false);
   await shoot("typing");
+  await screen.getByRole("button", { name: "Private run", exact: true }).click();
+  await shoot("private");
   await field.fill("");
   (document.activeElement as HTMLElement | null)?.blur();
   await screen.getByRole("button", { name: "Works" }).click();

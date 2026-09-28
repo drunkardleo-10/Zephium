@@ -9,13 +9,13 @@
     ComputerTerminal01Icon,
     FileEditIcon,
     File01Icon,
-    Plug01Icon,
     Search01Icon,
   } from "../../lib/icons";
   import { askCard, partContent } from "./slots";
+  import { serviceKey, serviceMark } from "$domain/connections";
   import { getContext, untrack } from "svelte";
   import { canvasBoard, canvasFocusResult, type BoardActions } from "../../lib/canvas-context";
-  import { askKey } from "../../lib/run/part-size";
+  import { askKey, contentKey } from "../../lib/run/part-size";
   import HostGlyph from "../cards/HostGlyph.svelte";
   import PageFace from "./PageFace.svelte";
   import AgentOrb from "../cards/AgentOrb.svelte";
@@ -76,10 +76,10 @@
   const lines = $derived(part.lines ?? []);
   const board = getContext<BoardActions | undefined>(canvasBoard);
   const focus = getContext<((id: string) => void) | undefined>(canvasFocusResult);
-  // The ask card's own height, so its row makes the room it needs at each detail.
+  // An ask card's or a helper view's own height, so its row makes the room it needs.
   let askBody = $state<HTMLElement>();
-  $effect(() => {
-    const element = askBody;
+  let contentBody = $state<HTMLElement>();
+  function measured(element: HTMLElement | undefined, key: string, width: number) {
     const level = detail;
     if (!element) return;
     let reported = 0;
@@ -87,13 +87,15 @@
       const height = Math.ceil(element.offsetHeight);
       if (!height || height === reported) return;
       reported = height;
-      untrack(() => board?.measure(askKey(item.id), PART.ask, false, height, level));
+      untrack(() => board?.measure(key, width, false, height, level));
     };
     report();
     const observer = new ResizeObserver(() => requestAnimationFrame(report));
     observer.observe(element);
     return () => observer.disconnect();
-  });
+  }
+  $effect(() => measured(askBody, askKey(item.id), PART.ask));
+  $effect(() => measured(contentBody, contentKey(item.id), PART.helper));
   /** A one-word name longer than its column is set smaller rather than cut. */
   const fitted = $derived.by(() => {
     const longest = Math.max(...part.title.split(/\s+/u).map((word) => word.length), 1);
@@ -134,8 +136,8 @@
           ><Icon icon={Search01Icon} size={14} /></span
         >{:else if part.helper === "computer"}<span class="glyph"
           ><Icon icon={ComputerTerminal01Icon} size={14} /></span
-        >{:else if part.helper === "connection" && !part.host}<span class="glyph"
-          ><Icon icon={Plug01Icon} size={14} /></span
+        >{:else if part.helper === "connection"}<span class="glyph"
+          ><Icon icon={serviceMark(serviceKey(part.connection, part.title))} size={14} /></span
         >{:else}<span class="mark"
           ><HostGlyph host={part.host ?? ""} size={16} loading={working} initial={false} /></span
         >{/if}
@@ -161,13 +163,15 @@
     </div>
   {:else if shape === "helper"}
     <div class="slot" style:inset-inline-start="{lead}px">
-      {#if content}{#await content() then view}<view.default
-            id={item.id}
-            {part}
-            {detail}
-            objective={part.objective ?? ""}
-            steps={part.steps ?? []}
-          />{/await}
+      {#if content}<div bind:this={contentBody}>
+          {#await content() then view}<view.default
+              id={item.id}
+              {part}
+              {detail}
+              objective={part.objective ?? ""}
+              steps={part.steps ?? []}
+            />{/await}
+        </div>
       {:else}<ul class="lines">
           {#each lines.slice(0, PART.helperLines) as line, index (index)}<li class={line.kind}>
               <Icon icon={LINE[line.kind]} size={13} /><span>{line.text}</span>
