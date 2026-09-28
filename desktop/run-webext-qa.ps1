@@ -29,6 +29,12 @@ if (-not (Test-Path -LiteralPath $qaExe)) { throw 'Run this script with -Build f
 if ((Get-Item -LiteralPath $qaExe).VersionInfo.ProductName -ne 'Zephium Extensions QA') {
     throw 'Refusing a binary without the QA identity.'
 }
-$process = Start-Process -FilePath $qaExe -WorkingDirectory $repo -PassThru
+$process = Start-Process -FilePath $qaExe -WorkingDirectory $repo -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $qaDir 'stdout.log') -RedirectStandardError (Join-Path $qaDir 'stderr.log')
+$processHandle = $process.Handle
+Start-Sleep -Seconds 2
+if ($process.HasExited) {
+    Get-Content -LiteralPath (Join-Path $qaDir 'stderr.log') -Tail 20
+    throw "QA exited during startup (code $($process.ExitCode))."
+}
 Write-Output "Started Zephium Extensions QA (PID $($process.Id))."
 Write-Output 'Data: %APPDATA%\app.zephium.webext-qa'

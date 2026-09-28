@@ -488,6 +488,7 @@ impl super::EngineHost {
             .with_permission_handler(|_| wry::PermissionResponse::Deny)
             .with_download_policy(wry::DownloadPolicy::DenyWithoutMetadata)
             .with_page_close_policy(wry::PageClosePolicy::Ignore)
+            .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
             .with_navigation_handler(move |target| {
                 target == navigation_url || target == "about:blank"
             })
@@ -816,6 +817,7 @@ impl super::EngineHost {
             .with_picture_in_picture_enabled(false)
             .with_general_autofill_enabled(false)
             .with_browser_accelerator_keys(false)
+            .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
             .with_permission_handler(|_| wry::PermissionResponse::Deny)
             .with_download_policy(wry::DownloadPolicy::DenyWithoutMetadata)
             .with_navigation_handler(move |target| {
