@@ -379,6 +379,37 @@ pub struct WorkDiffLineV1 {
     pub text: String,
 }
 
+// Content types print no content: a log line never carries page or model text.
+macro_rules! redacted {
+    ($($name:ident),+ $(,)?) => { $(impl std::fmt::Debug for $name {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(concat!(stringify!($name), "([content redacted])"))
+        }
+    })+ };
+}
+redacted!(
+    WorkFigureV1,
+    WorkPickV1,
+    WorkPriceV1,
+    WorkPickFactV1,
+    WorkRatingV1,
+    WorkRouteV1,
+    WorkPlanStepV1,
+    WorkPickRefV1,
+    WorkLabelledV1,
+    WorkListItemV1,
+    WorkListFromV1,
+    WorkSheetColumnV1,
+    WorkSheetRowV1,
+    WorkSheetEntityV1,
+    WorkPlotXV1,
+    WorkPlotYV1,
+    WorkPlotSeriesV1,
+    WorkPlotPointV1,
+    WorkDiffHunkV1,
+    WorkDiffLineV1,
+);
+
 /// The first part of an object that failed, and the item it sits in.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkObjectFault {
