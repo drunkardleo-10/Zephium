@@ -9,6 +9,7 @@
   import PreviewToggle from "../PreviewToggle.svelte";
   import PreviewSelect from "../PreviewSelect.svelte";
   import CollectionEditor from "../CollectionEditor.svelte";
+  import LauncherShortcut from "../LauncherShortcut.svelte";
   const shortcuts = [
     { title: m.settings_shortcut_newtab, key: "T" },
     { title: m.settings_shortcut_search, key: "L" },
@@ -17,6 +18,7 @@
   ];
 </script>
 
+<LauncherShortcut />
 <SettingsGroup title={m.settings_keyboard()}
   >{#each shortcuts as shortcut (shortcut.key)}<SettingsRow title={shortcut.title()}
       ><kbd>{IS_MAC ? "⌘" : "Ctrl +"} {shortcut.key}</kbd></SettingsRow
