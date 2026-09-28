@@ -105,6 +105,7 @@ mod work_product;
 mod work_provider;
 mod work_personal;
 mod work_sites;
+mod work_connections;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -1662,6 +1663,11 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_models::work_more_models,
             work_sites::work_sites,
             work_sites::work_set_site,
+            work_connections::work_connections,
+            work_connections::work_save_connection,
+            work_connections::work_remove_connection,
+            work_connections::work_check_connection,
+            work_connections::work_sign_in_connection,
             work_personal::work_memories,
             work_personal::work_change_memory,
             work_personal::work_skills,
@@ -5095,6 +5101,8 @@ pub fn run() {
                     data_dir.join("media"),
                 )));
                 #[cfg(feature = "work-product")]
+                zephium_app::work_connections::store::install(&data_dir);
+                #[cfg(feature = "work-product")]
                 app.manage(work_product::WorkFrames(Arc::new(
                     zephium_store::WorkFrameStore::new(data_dir.join("work-frames")),
                 )));
@@ -7953,10 +7961,11 @@ mod tests {
         assert_eq!(directive("font-src"), "'self' data:");
         // Same-origin workers only: the diagram layout engine runs off the page thread.
         assert_eq!(directive("worker-src"), "'self'");
+        // Only the YouTube player, embedded on play and sandboxed without popups.
+        assert_eq!(directive("frame-src"), "https://www.youtube-nocookie.com");
 
         for name in [
             "child-src",
-            "frame-src",
             "media-src",
             "object-src",
             "base-uri",
