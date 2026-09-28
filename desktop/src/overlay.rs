@@ -11,6 +11,7 @@ use zephium_ipc::{
 };
 pub const PANEL_LABEL: &str = "panel";
 pub const PANEL_SIZE: (f64, f64) = geometry::DEFAULT;
+#[cfg(target_os = "macos")]
 pub const PANEL_RADIUS: u16 = model::RADIUS;
 pub const EVENT_STATE: &str = "zephium:panel-state";
 #[derive(Default)]

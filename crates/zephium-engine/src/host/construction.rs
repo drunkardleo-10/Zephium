@@ -724,9 +724,7 @@ impl EngineHost {
                     return None;
                 }
                 extension_startup = self.windows_extension_startup(profile, &path).ok();
-                if extension_startup.is_none() {
-                    return None;
-                }
+                extension_startup.as_ref()?;
                 cached_environment = self.environments.get(&profile).cloned();
             }
             let builder = WebViewBuilder::new_with_web_context(
