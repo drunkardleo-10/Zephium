@@ -24,16 +24,20 @@ const RECORD_LINES: usize = 32;
 const FILE_TEXT_BYTES: usize = 6 * 1024;
 
 /// The browser closure the host gives the run, shared by every part, with
-/// the gate that keeps at most two pages live.
+/// its gates: at most two pages live, and a page task (a page worked in the
+/// person's session toward a goal) alone, because the host holds one such
+/// page at a time and none beside reads.
 pub(crate) struct SharedBrowser<B> {
     browser: Mutex<B>,
     pages: tokio::sync::Semaphore,
+    tasks: tokio::sync::RwLock<()>,
 }
 impl<B> SharedBrowser<B> {
     pub(crate) fn new(browser: B) -> Self {
         Self {
             browser: Mutex::new(browser),
             pages: tokio::sync::Semaphore::new(LIVE_PAGES),
+            tasks: tokio::sync::RwLock::new(()),
         }
     }
 }
@@ -114,6 +118,7 @@ where
         let started = std::time::Instant::now();
         let mut driver = self.driver.lock().await;
         let mut gate = |probe: WorkAttemptProbe, request: WorkAgentBrowseRequest| {
+            let task = matches!(request.step, WorkStepKindV1::Read { goal: Some(_), .. });
             let future = {
                 let mut browser = self
                     .browser
@@ -123,9 +128,17 @@ where
                 (browser)(probe, request)
             };
             let pages = &self.browser.pages;
+            let tasks = &self.browser.tasks;
             async move {
-                let _page = pages.acquire().await.ok();
-                future.await
+                if task {
+                    let _alone = tasks.write().await;
+                    let _page = pages.acquire().await.ok();
+                    future.await
+                } else {
+                    let _beside = tasks.read().await;
+                    let _page = pages.acquire().await.ok();
+                    future.await
+                }
             }
         };
         let kinds: Vec<WorkStepKindV1> = requests.iter().map(|r| r.kind.clone()).collect();

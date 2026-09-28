@@ -10,8 +10,8 @@ tools: [ask, start_part, create, finish]
 - A known event fixes the dates and the place (a YC batch runs at the YC office in San Francisco; check its dates with one web_search before asking).
 
 ## Parts (start them in one turn, they run in parallel)
-- **Stay** — browser part on airbnb.com (or booking.com when the person prefers hotels). Brief: exact dates, guests, the area near where they need to be, budget per night. It returns three homes as picks with each home's own photos, price per night and total, rating, and the reason it fits.
-- **Flights** — browser part on google.com/travel/flights. Brief: from and to airports, dates out and back, travellers, cabin. It returns three to four flights as picks with the route drawn (from, to, times, stops, carrier with its host such as lot.com), price and duration; mark the one you would book as recommended.
+- **Stay** — browser part on airbnb.com (or booking.com when the person prefers hotels). Brief: exact dates, guests, the area near where they need to be, budget per night, and the search page to start from with the dates already in it, so no date picker is needed: `https://www.airbnb.com/s/<Area--City>/homes?checkin=YYYY-MM-DD&checkout=YYYY-MM-DD&adults=N`. It returns three homes as picks with each home's own photos, price per night and total, rating, and the reason it fits.
+- **Flights** — browser part on Google Flights. Brief: from and to airports, dates out and back, travellers, cabin, and the start page with the search in it: `https://www.google.com/travel/flights?q=Flights+from+WAW+to+SFO+on+YYYY-MM-DD+returning+YYYY-MM-DD`. It returns three to four flights as picks with the route drawn (from, to, times, stops, carrier with its host such as lot.com), price and duration; mark the one you would book as recommended.
 - **Entry** — research part: visa or ESTA, passport validity, what to carry, for the traveller's nationality when known. It returns a short list (requirements), each item with its source.
 - Add a part only for a real need the request names (a conference ticket, a car, a restaurant).
 

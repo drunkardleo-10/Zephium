@@ -23,13 +23,17 @@ use crate::work_runtime::WorkAttemptProbe;
 pub(crate) const PARALLEL_PARTS: usize = 4;
 /// One part's ceiling, inside the run's remaining budget.
 const PART_MAX: WorkExecutionLimits = WorkExecutionLimits {
-    model_tokens: 400_000,
+    model_tokens: 450_000,
     cost_micro_usd: 900_000,
     operations: 96,
     timeout_seconds: 1800,
     max_workers: 3,
 };
 const PART_TURNS: u8 = 10;
+/// The least a part starts with when the run has it: one search's
+/// reservation and one page task's cost.
+const PART_MIN_TOKENS: u32 = zephium_core::work::search::PUBLIC_SEARCH_TOKEN_RESERVATION + 16_384;
+const PART_MIN_COST: u32 = 150_000;
 /// Searches one part may run; past them it reports what it has.
 const PART_SEARCHES: usize = 6;
 
@@ -555,8 +559,15 @@ where
         let left = self.run.remaining();
         let ways = (self.parts_running() as u32 + 1).max(2);
         WorkExecutionLimits {
-            model_tokens: (left.model_tokens / ways).clamp(1, PART_MAX.model_tokens),
-            cost_micro_usd: (left.cost_micro_usd / ways).clamp(1, PART_MAX.cost_micro_usd),
+            // A search reserves its whole context: a part holds room for one.
+            model_tokens: (left.model_tokens / ways)
+                .max(PART_MIN_TOKENS)
+                .clamp(1, PART_MAX.model_tokens)
+                .min(left.model_tokens),
+            cost_micro_usd: (left.cost_micro_usd / ways)
+                .max(PART_MIN_COST)
+                .clamp(1, PART_MAX.cost_micro_usd)
+                .min(left.cost_micro_usd),
             operations: (left.operations / ways).clamp(1, PART_MAX.operations),
             timeout_seconds: left.timeout_seconds,
             max_workers: PART_MAX.max_workers.min(left.max_workers).max(1),
