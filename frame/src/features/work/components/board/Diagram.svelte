@@ -115,6 +115,46 @@
       return xs.length ? [{ name: layer.name, x: Math.min(...xs), y: Math.max(0, top - 24) }] : [];
     });
   });
+  /** A tier's heading wraps within its own lane: up to the next tier, or the picture's edge. */
+  const tierRoom = (index: number) =>
+    Math.max(W, (tiers[index + 1]?.x ?? bounds.width) - (tiers[index]?.x ?? 0) - 16);
+  /** Lines a text takes at a measure, words kept whole; Infinity when a word is wider than it. */
+  function lineCount(text: string, perLine: number): number {
+    let lines = 1;
+    let used = 0;
+    for (const word of text.split(/\s+/u).filter(Boolean)) {
+      if (word.length > perLine) return Infinity;
+      const next = used ? used + 1 + word.length : word.length;
+      if (next <= perLine) used = next;
+      else {
+        lines += 1;
+        used = word.length;
+      }
+    }
+    return lines;
+  }
+  const GLYPH = 0.56;
+  /**
+   * A part's words at full size: its name whole, its note only in the lines the
+   * name leaves (a longer note waits in the popover). Never an ellipsis.
+   */
+  function words(node: { name: string; note?: string; kind: string }, marked: boolean) {
+    const inner = W - 24 - (marked ? 32 : 0);
+    const nameLines = lineCount(node.name, Math.floor(inner / (13 * GLYPH)));
+    const note = node.note || diagramKindLabel(node.kind);
+    const room = nameLines <= 1 ? 2 : nameLines === 2 ? 1 : 0;
+    return { note: lineCount(note, Math.floor(inner / (12 * 0.56))) <= room ? note : "" };
+  }
+  /** From afar a name takes the largest size, up to its grown overview size, that keeps it whole. */
+  function farSize(name: string, marked: boolean): number {
+    const inner = W - 28 - (marked ? 38 : 0);
+    const top = 22 * Math.min(1.4, 1 / Math.max(scale, 0.01));
+    for (let size = top; size >= 14; size -= 0.5)
+      if (lineCount(name, Math.floor(inner / (size * GLYPH))) <= 2) return size;
+    for (let size = Math.min(top, (H - 8) / 3 / 1.12); size >= 12; size -= 0.5)
+      if (lineCount(name, Math.floor(inner / (size * GLYPH))) <= 3) return size;
+    return 12;
+  }
   const shift = (points: readonly { x: number; y: number }[]) =>
     points.map((point) => ({ x: point.x - bounds.x, y: point.y - bounds.y }));
   /** From afar a mark keeps its place only where the name still fits two lines beside it. */
@@ -167,8 +207,9 @@
     style:block-size={`${bounds.height}px`}
     style:transform={scale < 1 ? `scale(${scale})` : undefined}
   >
-    {#each detail === "tile" ? [] : tiers as tier (tier.name)}<span
+    {#each detail === "tile" ? [] : tiers as tier, index (tier.name)}<span
         class="tier"
+        style:max-inline-size={`${tierRoom(index)}px`}
         style:inset-inline-start={`${tier.x}px`}
         style:inset-block-start={`${tier.y}px`}>{tier.name}</span
       >{/each}
@@ -187,7 +228,8 @@
           style:inset-block-start={`${plate.y + plate.h / 2}px`}
           title={plate.label}>{plate.label}</span
         >{/if}{/each}
-    {#each nodes as node (node.id)}{@const logo = mark(node.vendor)}
+    {#each nodes as node (node.id)}{@const logo = mark(node.vendor)}{@const marked =
+        !!logo && (detail !== "overview" || roomy(node.name))}
       <div
         class="part"
         class:dim={!near.has(node.id)}
@@ -208,7 +250,7 @@
           onkeydown={(event) => keys(event, node.id)}
           onclick={() => (opened = opened === node.id ? null : node.id)}
         >
-          {#if logo && (detail !== "overview" || roomy(node.name))}<span class="mark"
+          {#if logo && marked}<span class="mark"
               ><FavIcon
                 image={logo.image}
                 tone={logo.tone}
@@ -216,9 +258,14 @@
               /></span
             >{/if}
           <span class="words">
-            <strong class="name">{node.name}</strong>
-            {#if detail === "full"}<span class="line"
-                >{node.note || diagramKindLabel(node.kind)}</span
+            <strong
+              class="name"
+              style:font-size={detail === "overview"
+                ? `${farSize(node.name, marked)}px`
+                : undefined}>{node.name}</strong
+            >
+            {#if detail === "full" && words(node, marked).note}<span class="line"
+                >{words(node, marked).note}</span
               >{/if}
           </span>
         </button>
@@ -272,7 +319,7 @@
     letter-spacing: 0.04em;
     line-height: 16px;
     text-transform: uppercase;
-    white-space: nowrap;
+    text-wrap: balance;
   }
 
   .flows {
@@ -400,16 +447,10 @@
     text-wrap: balance;
   }
 
-  /* A note within its limit fits two lines; only an older, longer one is clipped. */
   .line {
-    display: -webkit-box;
-    overflow: hidden;
     color: var(--color-muted);
     font-size: var(--text-label);
     line-height: 15px;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
     text-wrap: pretty;
   }
 
@@ -422,14 +463,8 @@
 
   /* Drawn smaller to fit, the words grow back by as much as a part can hold (up to 1.4x). */
   .overview .name {
-    display: -webkit-box;
-    overflow: hidden;
     overflow-wrap: normal;
-    font-size: calc(var(--text-overview-label) * var(--grow, 1));
-    line-height: 1.2;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
+    line-height: 1.12;
   }
 
   .overview .tier {

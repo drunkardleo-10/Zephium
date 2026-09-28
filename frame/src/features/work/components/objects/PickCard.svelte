@@ -38,6 +38,8 @@
       ? { figure: display.slice(0, at), period: display.slice(at) }
       : { figure: display, period: "" };
   });
+  /** The name's longest word, so a single long word shrinks the title rather than clipping. */
+  const longest = $derived(Math.max(6, ...pick.name.split(/\s+/u).map((word) => word.length)));
   const lead = $derived(pick.facts[0]);
   /** A yes or no says itself with its mark; a value reads after its label. */
   const leadText = $derived(
@@ -91,7 +93,7 @@
       <header>
         {#if logo}<Mark address={logo} size={detail === "full" ? 20 : 36} />{/if}
         <div class="names">
-          <h4>
+          <h4 style:--longest={longest}>
             {#if pick.url && detail === "full"}<a
                 class="nodrag"
                 href={pick.url}
@@ -292,14 +294,17 @@
 
   .names {
     display: flex;
+    flex: 1;
     flex-direction: column;
     gap: 3px;
     min-inline-size: 0;
+    container-type: inline-size;
   }
 
   h4 {
     margin: 0;
-    font-size: var(--text-page-title);
+    font-size: clamp(12px, 100cqi / (var(--longest) * 0.58), var(--text-page-title));
+    hyphens: auto;
     font-weight: 600;
     line-height: 19px;
     letter-spacing: -0.005em;
@@ -475,7 +480,11 @@
   }
 
   .overview h4 {
-    font-size: var(--text-overview-title);
+    font-size: clamp(
+      var(--text-overview-label),
+      100cqi / (var(--longest) * 0.58),
+      var(--text-overview-title)
+    );
     line-height: 1.2;
   }
 

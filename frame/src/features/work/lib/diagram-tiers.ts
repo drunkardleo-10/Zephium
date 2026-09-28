@@ -168,14 +168,52 @@ export function tierLayout(shape: DiagramShape): DiagramLayout {
   const at: Record<string, CanvasPosition> = {};
   for (const [id, column] of col) at[id] = { x: left[column]!, y: y.get(id)! };
 
-  // A track per flow in each gap it turns in, in order of where it lands.
+  /**
+   * Flows between neighbouring tiers that leave one part (or reach one part)
+   * through the same gap are one bus: a shared trunk, one exit (or entry), a
+   * branch to each end. What remains runs on a track of its own.
+   */
+  const bundle = new Map<number, string>();
+  const firstGap = (flow: Flow) => {
+    const a = col.get(flow.from)!;
+    return a < col.get(flow.to)! ? a : a - 1;
+  };
+  const candidates = across.filter((flow) => !twins.has(flow.index));
+  const count = (key: (flow: Flow) => string) => {
+    const sizes = new Map<string, number>();
+    for (const flow of candidates) sizes.set(key(flow), (sizes.get(key(flow)) ?? 0) + 1);
+    return sizes;
+  };
+  const outKey = (flow: Flow) => `out:${flow.from}:${firstGap(flow)}`;
+  const inKey = (flow: Flow) => `in:${flow.to}:${target(flow)}`;
+  const outs = count(outKey);
+  const ins = count(inKey);
+  for (const flow of candidates)
+    if (outs.get(outKey(flow))! > 1) bundle.set(flow.index, outKey(flow));
+    else if (ins.get(inKey(flow))! > 1) bundle.set(flow.index, inKey(flow));
+  /** A bus shares its trunk only in the gap it gathers in: out of its source, or into its target. */
+  const unit = (flow: Flow, gap: number) => {
+    const group = bundle.get(flow.index);
+    if (group?.startsWith("out:") && gap === firstGap(flow)) return group;
+    if (group?.startsWith("in:") && gap === target(flow)) return group;
+    return `f:${flow.index}`;
+  };
+
+  // A track per bus or lone flow in each gap it turns in, in order of where it lands.
   const tracks = new Map<string, number>();
   columns.forEach((_, index) => {
     const through = [...new Map(gapFlows[index]!.map((flow) => [flow.index, flow])).values()];
-    through.sort((a, b) => at[a.to]!.y - at[b.to]!.y || at[a.from]!.y - at[b.from]!.y);
-    through.forEach((flow, row) =>
-      tracks.set(`${index}:${flow.index}`, left[index]! + W + AIR + row * TRACK),
-    );
+    const units = new Map<string, Flow[]>();
+    for (const flow of through)
+      units.set(unit(flow, index), [...(units.get(unit(flow, index)) ?? []), flow]);
+    const mean = (flows: Flow[], end: "to" | "from") =>
+      flows.reduce((sum, flow) => sum + at[flow[end]]!.y, 0) / flows.length;
+    [...units.values()]
+      .sort((a, b) => mean(a, "to") - mean(b, "to") || mean(a, "from") - mean(b, "from"))
+      .forEach((flows, row) => {
+        for (const flow of flows)
+          tracks.set(`${index}:${flow.index}`, left[index]! + W + AIR + row * TRACK);
+      });
   });
   /** Rows already taken by a flow passing over tiers, so no two run on one line. */
   const passes: { y: number; from: number; to: number }[] = [];
@@ -208,29 +246,40 @@ export function tierLayout(shape: DiagramShape): DiagramLayout {
    * its middle, ordered by where their other end stands, so no two share a run.
    */
   const ports = new Map<string, number>();
-  const sides = new Map<string, { flow: Flow; other: number }[]>();
+  const sides = new Map<string, Map<string, number[]>>();
+  const portKey = (flow: Flow, end: "from" | "to") => {
+    const group = bundle.get(flow.index);
+    return group && group.startsWith(end === "from" ? "out:" : "in:") ? group : `f:${flow.index}`;
+  };
   for (const flow of across) {
     if (twins.has(flow.index)) continue;
     const forward = col.get(flow.from)! < col.get(flow.to)!;
     const ends = [
-      [`${flow.from}:${forward ? "right" : "left"}`, at[flow.to]!.y],
-      [`${flow.to}:${forward ? "left" : "right"}`, at[flow.from]!.y],
+      [`${flow.from}:${forward ? "right" : "left"}`, portKey(flow, "from"), at[flow.to]!.y],
+      [`${flow.to}:${forward ? "left" : "right"}`, portKey(flow, "to"), at[flow.from]!.y],
     ] as const;
-    for (const [side, other] of ends) {
-      const list = sides.get(side) ?? [];
-      list.push({ flow, other });
-      sides.set(side, list);
+    for (const [side, key, other] of ends) {
+      const entries = sides.get(side) ?? new Map<string, number[]>();
+      entries.set(key, [...(entries.get(key) ?? []), other]);
+      sides.set(side, entries);
     }
   }
-  for (const [side, list] of sides) {
-    list.sort((a, b) => a.other - b.other || a.flow.index - b.flow.index);
+  for (const [side, entries] of sides) {
+    const list = [...entries].map(([key, others]) => ({
+      key,
+      other: others.reduce((a, b) => a + b, 0) / others.length,
+    }));
+    list.sort((a, b) => a.other - b.other || a.key.localeCompare(b.key));
     const step = Math.min(PORT, (H - 2 * PORT_EDGE) / Math.max(1, list.length - 1));
     list.forEach((entry, index) =>
-      ports.set(`${side}:${entry.flow.index}`, (index - (list.length - 1) / 2) * step),
+      ports.set(`${side}:${entry.key}`, (index - (list.length - 1) / 2) * step),
     );
   }
-  const port = (id: string, side: "left" | "right", flow: Flow) =>
-    ports.get(`${id}:${side}:${flow.index}`) ?? 0;
+  const port = (id: string, side: "left" | "right", flow: Flow) => {
+    const forward = col.get(flow.from)! < col.get(flow.to)!;
+    const end = id === flow.from && side === (forward ? "right" : "left") ? "from" : "to";
+    return ports.get(`${id}:${side}:${portKey(flow, end)}`) ?? 0;
+  };
 
   const primary = primaryFlows(shape);
   const flows: Record<number, DiagramFlow> = {};
