@@ -1827,6 +1827,12 @@ fn validate_engine_windows_agent_context_boundary(
         "pub(crate)fnclose(&mutself)->Result<(),wry::WebView2CleanupDebt>",
         "ContextConstructionProof::WindowsOwnedSelectedProfileEmptyInventory",
         "ContextConstructionProof::WindowsOwnedAutomationSubprofileEmptyInventory",
+        "ifextensions_enabled{if!matches!(&profile,AgentOwnedProfile::Automation{..}){returnErr(AgentOwnedViewConstructionError::ExtensionIsolation);}",
+        "builder.with_browser_extension_startup_gate(move|environment,core|{",
+        "if!super::same_environment(&expected_environment,environment){returnErr(windows::Win32::Foundation::E_ACCESSDENIED.into());}",
+        "attest_profile(&expected_profile,environment,core,storage_class,&expected_path,)",
+        "letitems=super::extensions::list(&profile)",
+        "if!super::extensions::is_runtime_component(&id){returnErr(windows::Win32::Foundation::E_ACCESSDENIED.into());}",
     ] {
         if !adapter.contains(required) {
             return Err(format!(
@@ -1940,6 +1946,19 @@ fn validate_engine_windows_agent_context_boundary(
         ("navigation gate", navigation.as_str()),
         ("host", host.as_str()),
     ] {
+        // Extension-enabled environments require Wry's pre-navigation gate even
+        // for Work's separate, extension-free automation subprofile. Admit only
+        // this adapter's one attestation hook; never extension loading or enablement.
+        let expected_gates = usize::from(label == "adapter");
+        if source
+            .matches("with_browser_extension_startup_gate")
+            .count()
+            != expected_gates
+        {
+            return Err(format!(
+                "production Windows agent-context {label} changed its startup gate authority"
+            ));
+        }
         for forbidden in [
             "with_ipc_handler",
             "with_initialization_script",
@@ -1951,8 +1970,11 @@ fn validate_engine_windows_agent_context_boundary(
             "keybd_event",
             "CGEvent",
             "native-agentic-input-probe",
-            "with_browser_extension_startup_gate",
             "with_browser_extensions_enabled",
+            "extensions::add(",
+            "extensions::enable(",
+            "extensions::remove(",
+            "AddBrowserExtension",
         ] {
             if source.contains(forbidden) {
                 return Err(format!(
@@ -13820,6 +13842,23 @@ mod tests {
             include_str!("../../crates/zephium-engine/src/host/agent_cookie_source.rs");
         validate_engine_windows_agent_context_boundary(module, adapter, timeout, navigation, host)
             .expect("closed Windows production owner");
+        for mutation in [
+            adapter.replace(
+                "if !super::extensions::is_runtime_component(&id)",
+                "if false",
+            ),
+            adapter.replace(
+                "if !matches!(&profile, AgentOwnedProfile::Automation { .. })",
+                "if false",
+            ),
+            format!("{adapter}\nsuper::extensions::add();"),
+            format!("{adapter}\nwith_browser_extension_startup_gate();"),
+        ] {
+            assert!(validate_engine_windows_agent_context_boundary(
+                module, &mutation, timeout, navigation, host,
+            )
+            .is_err());
+        }
         validate_engine_windows_agent_suspension_boundary(
             platform_module,
             adapter,
