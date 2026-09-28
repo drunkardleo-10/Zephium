@@ -123,7 +123,14 @@ first (step 1 below); WebView2 has changed quickly.
 - Agent (Work) contexts now reuse the profile's ordinary WebView2 environment;
   verify that enabling extensions on it does not expose extensions to agent
   contexts.
-- Two clippy lints in the engine download code fail on Windows.
+- Windows clippy fails on four lints (CI run 36418895001):
+  `crates/zephium-notes/src/folder.rs:87` and `:131` (needless `mut`),
+  `crates/zephium-engine/src/host/download_files_windows.rs:332` (useless
+  conversion) and `crates/zephium-engine/src/host/downloads/platform_windows.rs:711`
+  (large `Err` variant). Fix these first; they block the Windows CI job.
+- The Windows frontend component job fails in the Notes panel tests (also on
+  macOS) and in the sidebar shape, dock and tab-plate motion tests; the same
+  set failed on main before the extension work.
 - `cargo xtask check-engine-floors` fails because the WebView2 review date
   (2026-09-18) expired; update the floor after reviewing the runtime.
 - `aws-lc-sys` does not cross-build the desktop for Windows from macOS; build
