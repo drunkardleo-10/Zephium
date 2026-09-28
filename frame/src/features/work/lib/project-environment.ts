@@ -382,7 +382,10 @@ export function viewPlacements(
   moved: ReadonlySet<string> = new Set(),
 ): WorkElementPlacement[] {
   const boards = new Map<string, WorkStage>();
-  for (const stage of stages) for (const block of stage.board.blocks) boards.set(block.id, stage);
+  for (const stage of stages) {
+    for (const block of stage.board.blocks) boards.set(block.id, stage);
+    for (const object of stage.objects) boards.set(object.id, stage);
+  }
   return snapshot.elements.map((element) => {
     const previous = snapshot.view.placements.find((place) => place.element === element.id);
     const point = view.positions[element.id];

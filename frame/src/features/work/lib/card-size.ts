@@ -198,15 +198,6 @@ export function resultSize(
   }
 }
 
-/** The count, then up to six rows of mark, host and title. */
-export const SOURCE_ROWS = 6;
-function sourcesSize(rows: number): CanvasSize {
-  const shown = Math.min(SOURCE_ROWS, rows);
-  // Each row is 20 px, 4 apart, under the count.
-  const body = shown * 20 + Math.max(0, shown - 1) * 4 + 4;
-  return { width: 300, height: clamp(header("", 276, true) + body + FRAME.end, 96, 300) };
-}
-
 /** A fact whose label and value fit one line stands on one; the rest put the label above. */
 export const factBeside = (fact: { label: string; value: string }) =>
   (fact.label.length + fact.value.length) * ADVANCE.label + 12 <= 220 - 24;
@@ -255,8 +246,6 @@ export function defaultSize(item: CanvasItem): CanvasSize {
         item.facts,
         item.detail,
       );
-    case "sources":
-      return sourcesSize(item.sources?.length ?? 0);
     case "folder":
       return { width: 248, height: 96 };
     case "note":

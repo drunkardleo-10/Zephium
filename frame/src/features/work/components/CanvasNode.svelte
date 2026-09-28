@@ -23,7 +23,6 @@
   import ResponsibilityCard from "./cards/ResponsibilityCard.svelte";
   import ResultCard from "./cards/ResultCard.svelte";
   import SubjectCard from "./cards/SubjectCard.svelte";
-  import SourcesCard from "./cards/SourcesCard.svelte";
   import CompareCard from "./cards/CompareCard.svelte";
   import FolderCard from "./cards/FolderCard.svelte";
   import PageCard from "./cards/PageCard.svelte";
@@ -155,7 +154,6 @@
       onplay={() => action(id, "play")}
     />
   {:else if type === "subject"}<SubjectCard item={data} {selected} />
-  {:else if type === "sources"}<SourcesCard item={data} {selected} />
   {:else if type === "folder"}<FolderCard item={data} {selected} />
   {:else if type === "page"}<PageCard item={data} {selected} onhelp={() => action(id, "help")} />
   {:else if type === "note"}<NoteCard item={data} {selected} />

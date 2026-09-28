@@ -5,7 +5,6 @@ import { page } from "vitest/browser";
 import { favicons } from "$domain/favicons";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import SubjectCard from "../components/cards/SubjectCard.svelte";
-import SourcesCard from "../components/cards/SourcesCard.svelte";
 import PageCard from "../components/cards/PageCard.svelte";
 import ResultCard from "../components/cards/ResultCard.svelte";
 import CompareCard from "../components/cards/CompareCard.svelte";
@@ -62,35 +61,6 @@ test("a subject shows its hero picture, or else its site's mark beside the name,
   expect(pictured.container.querySelector("header .leading")).toBeNull();
   await expect.element(pictured.getByText("airbnb.com")).toBeVisible();
   await pictured.unmount();
-});
-
-test("a sources card heads with its count only, then six rows of mark, host and title", async () => {
-  await page.viewport(1200, 800);
-  await marks("https://a.example", "https://b.example");
-  const hosts = ["a.example", "b.example", "c.example", "a.example", "b.example", "c.example"];
-  const item: CanvasItem = {
-    ...base,
-    id: "sources",
-    type: "sources",
-    title: "7 sources",
-    sources: [...hosts, "d.example"].map((where, index) => ({
-      key: `source-${index}`,
-      url: `https://${where}/page-${index}`,
-      where,
-      title: `Page ${index + 1}`,
-    })),
-  };
-  const screen = await render(SourcesCard, { item, selected: false });
-  // The rows already show each site's mark: the header repeats none of them.
-  expect(screen.container.querySelector(".strip")).toBeNull();
-  expect(screen.container.querySelector("header .favicon")).toBeNull();
-  const rows = [...screen.container.querySelectorAll(".rows li")];
-  expect(rows).toHaveLength(6);
-  expect(rows[0]!.querySelector(".favicon canvas")).not.toBeNull();
-  expect(rows[0]!.querySelector(".where")?.textContent).toBe("a.example");
-  expect(rows[0]!.querySelector(".title")?.textContent).toBe("Page 1");
-  await expect.element(screen.getByText("7 sources")).toBeVisible();
-  await screen.unmount();
 });
 
 test("a page being read shows the loading arc in place of its mark, and the mark once read", async () => {
