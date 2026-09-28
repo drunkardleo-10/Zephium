@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use zephium_webext::archive::{self, Limits};
+use zephium_webext::crx;
 use zephium_webext::manifest::Manifest;
 use zephium_webext::prepare::{prepare, CompatLayer};
-use zephium_webext::crx;
 
 /// Verifies, extracts and prepares every package in `ZEPHIUM_WEBEXT_CORPUS`,
 /// or else in the packages `cargo xtask webext-suite` downloaded.

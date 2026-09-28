@@ -21,6 +21,12 @@ impl ExtensionId {
         Self::from_hash_prefix(digest[..16].try_into().expect("SHA-256 is 32 bytes"))
     }
 
+    /// The ID Chrome gives an unpacked extension that has no `key`: derived
+    /// from where it was loaded from, so reloading it keeps the same ID.
+    pub fn from_source_path(path: &str) -> Self {
+        Self::from_public_key(path.as_bytes())
+    }
+
     pub(crate) fn from_hash_prefix(prefix: &[u8; 16]) -> Self {
         let id = prefix
             .iter()

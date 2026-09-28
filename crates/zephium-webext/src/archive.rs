@@ -66,6 +66,63 @@ pub enum ArchiveError {
     TooLarge,
 }
 
+/// Copies an unpacked extension from `src` into `dest`, which must not exist
+/// yet, under the same limits as extraction. Symbolic links are refused, so
+/// nothing outside `src` is copied. On failure nothing is left at `dest`.
+pub fn copy_dir(src: &Path, dest: &Path, limits: &Limits) -> Result<ExtractStats, ArchiveError> {
+    if dest.exists() {
+        return Err(ArchiveError::DestinationExists);
+    }
+    let mut stats = ExtractStats { files: 0, bytes: 0 };
+    let result = copy_level(src, dest, src, limits, &mut stats);
+    if result.is_err() {
+        let _ = fs::remove_dir_all(dest);
+    }
+    result.map(|()| stats)
+}
+
+fn copy_level(
+    root: &Path,
+    dest: &Path,
+    dir: &Path,
+    limits: &Limits,
+    stats: &mut ExtractStats,
+) -> Result<(), ArchiveError> {
+    fs::create_dir_all(dest.join(dir.strip_prefix(root).unwrap_or(Path::new(""))))?;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        let kind = entry.file_type()?;
+        stats.files += 1;
+        if stats.files > limits.entries {
+            return Err(ArchiveError::TooManyEntries(limits.entries));
+        }
+        if kind.is_symlink() {
+            return Err(ArchiveError::Symlink(relative));
+        } else if kind.is_dir() {
+            copy_level(root, dest, &path, limits, stats)?;
+        } else if kind.is_file() {
+            let size = entry.metadata()?.len();
+            if size > limits.file {
+                return Err(ArchiveError::FileTooLarge(relative));
+            }
+            stats.bytes += size;
+            if stats.bytes > limits.total {
+                return Err(ArchiveError::TooLarge);
+            }
+            fs::copy(&path, dest.join(&relative))?;
+        } else {
+            return Err(ArchiveError::UnsupportedEntry(relative));
+        }
+    }
+    Ok(())
+}
+
 struct Entry {
     index: usize,
     path: String,
@@ -303,6 +360,29 @@ mod tests {
         let (_temp, dest, result) = extract_to_temp(&zip, &Limits::default());
         assert!(matches!(result, Err(ArchiveError::Symlink(_))));
         assert!(!dest.exists());
+    }
+
+    #[test]
+    fn copies_unpacked_folders_and_refuses_links() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        fs::create_dir_all(src.join("js")).unwrap();
+        fs::write(src.join("manifest.json"), b"{}").unwrap();
+        fs::write(src.join("js/bg.js"), b"x").unwrap();
+        let stats = copy_dir(&src, &temp.path().join("copy"), &Limits::default()).unwrap();
+        assert_eq!(stats.bytes, 3);
+        assert_eq!(fs::read(temp.path().join("copy/js/bg.js")).unwrap(), b"x");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc/hosts", src.join("hosts")).unwrap();
+            let dest = temp.path().join("linked");
+            assert!(matches!(
+                copy_dir(&src, &dest, &Limits::default()),
+                Err(ArchiveError::Symlink(_))
+            ));
+            assert!(!dest.exists());
+        }
     }
 
     #[test]
