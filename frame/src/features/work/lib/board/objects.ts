@@ -52,6 +52,22 @@ const NEW_KINDS = new Set([
 /** Whether an artifact is one of the lead's objects rather than a legacy result. */
 export const leadObject = (artifact: WorkArtifactV1) => NEW_KINDS.has(artifact.data.kind);
 
+/**
+ * Whether an artifact stands on the canvas. A lead run shows only what its
+ * Publish steps made; what its reads made are source records, drawn in their
+ * part's fold and sources. The earlier runtime showed every result.
+ */
+export function onCanvas(artifact: WorkArtifactV1, execution: WorkExecutionFact): boolean {
+  const lead = execution.spec.nodes.some(
+    // Runs recorded before the grant was carried have none.
+    (node) => node.capability.kind === "agent" && !!node.capability.grant?.lead,
+  );
+  if (!lead) return true;
+  return (execution.steps ?? []).some(
+    (step) => step.kind.kind === "publish" && !!step.artifacts?.includes(artifact.id),
+  );
+}
+
 const REPLY = { text: 480, point: 110, points: 5, figures: 4, why: 120 } as const;
 
 /** Text cut at the last sentence, or word, that fits; never mid-word. */

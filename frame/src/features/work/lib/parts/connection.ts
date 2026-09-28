@@ -43,7 +43,8 @@ export function connectionView(
         run.parts?.find((fact) => fact.id === step.part)?.service?.connection ?? undefined;
     if (step.status === "running") working = true;
     const kind = step.kind;
-    if (kind.kind === "read" && step.note) {
+    // A call is its own step with its row in the note; earlier runs said it on a read.
+    if ((kind.kind === "call" || kind.kind === "read") && step.note) {
       const [text, detail] = split(step.note);
       calls.push({
         key: step.id,
@@ -51,7 +52,7 @@ export function connectionView(
         detail,
         state:
           step.status === "succeeded" ? "done" : step.status === "running" ? "waiting" : "failed",
-        url: kind.url,
+        url: kind.kind === "call" ? (kind.call.url ?? null) : kind.url,
       });
     } else if (kind.kind === "confirm") {
       const decision = kind.confirm.decision;

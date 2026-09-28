@@ -12,7 +12,7 @@ import { clipText, type CanvasPosition } from "./canvas-model";
 import { threadOf, type WorkStage } from "./project-environment-thread";
 import { boardOf } from "./board/adapter";
 import { boardLayout, type LayoutBlock } from "./board/layout";
-import { leadObject, runObjects, type RunObject } from "./board/objects";
+import { leadObject, onCanvas, runObjects, type RunObject } from "./board/objects";
 import { objectHeight, objectWidth } from "./board/object-size";
 import { ulidTime } from "./ulid-time";
 import { runTrail } from "./board/trail";
@@ -167,7 +167,7 @@ function leadEntries(
     )
       continue;
     const own = all.get(reference.artifact);
-    if (!own || !leadObject(own.artifact)) continue;
+    if (!own || !leadObject(own.artifact) || !onCanvas(own.artifact, own.execution)) continue;
     const root = rootOf(reference.artifact);
     const holder = root !== reference.artifact ? placed.get(root) : undefined;
     if (holder) {

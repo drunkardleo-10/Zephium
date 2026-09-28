@@ -10,7 +10,7 @@ import { workChartSpec } from "$shared/ui/data/Artifact/work-chart";
 import { artifactView } from "../project-work";
 import { subjectFacts, subjectKey, subjectMatrixRows, subjectsOf } from "../subjects";
 import { entityOf } from "./entities";
-import { leadObject } from "./objects";
+import { leadObject, onCanvas } from "./objects";
 import { columnTypes, labelKey, timelineOf } from "./tabular";
 import { overlap, plain, splitLead, terms } from "./text";
 import type {
@@ -63,7 +63,7 @@ export function boardOf(input: BoardInput): Board {
     if (reference.kind !== "artifact" && reference.kind !== "subject") continue;
     const execution = input.executions.find((entry) => entry.id === reference.execution);
     const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
-    if (!execution || !artifact) continue;
+    if (!execution || !artifact || !onCanvas(artifact, execution)) continue;
     if (reference.kind === "artifact") {
       // The lead's objects are drawn as themselves, not through a legacy block.
       if (leadObject(artifact)) continue;

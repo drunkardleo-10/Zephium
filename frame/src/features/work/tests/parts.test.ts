@@ -79,4 +79,27 @@ describe("a connection part's view", () => {
       state: "waiting",
     });
   });
+
+  test("a call arrives as its own step, its row in the note", () => {
+    const scene = projection("done");
+    const run = scene.executions[0]!;
+    const steps = (run.steps ?? []).map((step) =>
+      step.part === "github" && step.kind.kind === "read"
+        ? {
+            ...step,
+            kind: {
+              kind: "call" as const,
+              call: { service: "github", tool: "github_issue", verb: "issue", url: step.kind.url },
+            },
+          }
+        : step,
+    );
+    const called = { ...scene, executions: [{ ...run, steps }] };
+    const view = connectionView(called, ids("done", "github"), { title: "GitHub" });
+    expect(view.calls.map((c) => [c.text, c.state])).toEqual([
+      ["Read issue #10000", "done"],
+      ["Listed 4 pull requests", "done"],
+      ["Read checks on #14543", "done"],
+    ]);
+  });
 });

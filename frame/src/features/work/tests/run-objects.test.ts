@@ -5,7 +5,7 @@ import type {
   WorkExecutionFact,
   WorkRuntimeProjection,
 } from "$shared/ipc/bindings";
-import { pickName } from "../lib/board/objects";
+import { onCanvas, pickName } from "../lib/board/objects";
 import { environmentStages } from "../lib/project-environment-board";
 import { environmentRequests } from "../lib/project-environment-thread";
 import { projection, snapshot } from "./environment-fixtures";
@@ -184,4 +184,39 @@ test("a pick named by its page title drops the site's tail and keeps the place",
   expect(pickName("Apply to YC | Y Combinator", "https://www.ycombinator.com/apply", "")).toEqual({
     name: "Apply to YC",
   });
+});
+
+test("a lead run shows what it published; what its reads made are source records", () => {
+  const base = structuredClone(projection.executions[0]!);
+  const artifact = (id: string) => ({ ...base.artifacts[0]!, id }) as WorkArtifactV1;
+  const run = (lead: boolean) =>
+    ({
+      ...base,
+      spec: {
+        ...base.spec,
+        nodes: [
+          {
+            ...base.spec.nodes[0]!,
+            capability: {
+              kind: "agent",
+              grant: { lead: lead ? { provider: "p", model: "m" } : null },
+            },
+          },
+        ],
+      },
+      steps: [
+        {
+          id: "r",
+          turn: 1,
+          kind: { kind: "read", url: "https://a.com" },
+          status: "succeeded",
+          artifacts: ["read"],
+        },
+        { id: "p", turn: 2, kind: { kind: "publish" }, status: "succeeded", artifacts: ["made"] },
+      ],
+    }) as unknown as WorkExecutionFact;
+  expect(onCanvas(artifact("made"), run(true))).toBe(true);
+  expect(onCanvas(artifact("read"), run(true))).toBe(false);
+  // The earlier runtime showed every result.
+  expect(onCanvas(artifact("read"), run(false))).toBe(true);
 });

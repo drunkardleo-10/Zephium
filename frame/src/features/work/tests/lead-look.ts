@@ -264,6 +264,31 @@ export function leadTrip(scene: BoardScene, live: boolean): BoardScene {
     ...run.artifacts.filter((artifact) => artifact.data.kind === "evidence_collection"),
     ...made,
   ];
+  // A lead run: what it shows is what its Publish steps made.
+  run.spec.nodes = run.spec.nodes.map((node) =>
+    node.capability.kind === "agent"
+      ? {
+          ...node,
+          capability: {
+            ...node.capability,
+            grant: {
+              ...node.capability.grant,
+              lead: { provider: "open_ai", wire: "open_ai_responses", model: "gpt-5" },
+            },
+          },
+        }
+      : node,
+  ) as typeof run.spec.nodes;
+  run.steps = [
+    ...(run.steps ?? []),
+    ...made.map((artifact, index) => ({
+      id: `publish-${index}`,
+      turn: 90 + index,
+      kind: { kind: "publish" as const },
+      status: "succeeded" as const,
+      artifacts: [artifact.id],
+    })),
+  ];
   const snapshot: WorkEnvironmentSnapshot = {
     ...scene.snapshot,
     elements: [

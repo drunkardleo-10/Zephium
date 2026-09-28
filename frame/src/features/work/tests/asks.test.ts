@@ -66,6 +66,31 @@ describe("asks", () => {
     expect(asks[4]).toMatchObject({ service: "GitHub", tool: "gh", host: "github.com" });
   });
 
+  test("the runtime's purpose decides the card; words only for runs from before it", () => {
+    const said = (step: typeof f.slackEntry, purpose: string, patch: object = {}) =>
+      f.settled(step, { kind: { ...step.kind, ...patch, purpose } } as never);
+    const asks = asksOf(
+      f.runWith([
+        f.slackTask,
+        said(f.slackEntry, "entry", { options: ["Allow", "Not now"] }),
+        said(f.historyAsk, "context", { prompt: "May I look at your browsing history for it?" }),
+        said(f.githubAsk, "connection"),
+        said(f.budgetAsk, "budget"),
+        // Words that read like a site's entry, from the agent's own question.
+        said(f.slackEntry, "question"),
+      ]),
+    );
+    expect(asks.map((ask) => ask.kind)).toEqual([
+      "entry",
+      "context",
+      "connection",
+      "question",
+      "question",
+    ]);
+    expect(asks[0]).toMatchObject({ name: "Slack", always: "Always for Slack" });
+    expect(asks[1]).toMatchObject({ source: "history" });
+  });
+
   test("a sign-in wall on a page task is an ask on that page's host", () => {
     const asks = asksOf(f.runWith([f.notionTask]), [], [f.notionWall]);
     expect(asks).toMatchObject([{ kind: "sign_in", host: "notion.so", state: "open" }]);

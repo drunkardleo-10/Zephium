@@ -166,62 +166,103 @@ function entryHost(steps: readonly WorkStepFact[], name: string): string | null 
   );
 }
 
+type AskBase = Pick<Base, "step" | "part" | "state">;
+type Words = { prompt: string; options: readonly string[]; answer: string | null };
+
+/** "Work in your Slack?": a site's entry question, named by its "Always for" option or its words. */
+function entryOf(
+  base: AskBase,
+  { prompt, options, answer }: Words,
+  steps: readonly WorkStepFact[],
+): EntryAsk | null {
+  const always = options.find((option) => option.startsWith(ASK_WORDS.alwaysFor));
+  const name =
+    always?.slice(ASK_WORDS.alwaysFor.length) ?? /^Work in your (.+?)\?/u.exec(prompt)?.[1];
+  if (!name) return null;
+  const lead = `Work in your ${name}?`;
+  const plan = prompt.startsWith(lead) ? prompt.slice(lead.length).trim() : prompt;
+  return {
+    ...base,
+    kind: "entry",
+    name,
+    host: entryHost(steps, name),
+    plan: plan.replace(/\.$/u, ""),
+    always: always ?? `${ASK_WORDS.alwaysFor}${name}`,
+    answer,
+  };
+}
+
+/** "Use your history?": which of the person's things, by its fixed words or, failing them, its noun. */
+function contextOf(base: AskBase, { prompt, answer }: Words, loose: boolean): ContextAsk | null {
+  for (const source of Object.keys(CONTEXT_PROMPTS) as ContextSource[]) {
+    const lead = CONTEXT_PROMPTS[source];
+    if (prompt.startsWith(lead))
+      return { ...base, kind: "context", source, reason: prompt.slice(lead.length).trim(), answer };
+  }
+  if (!loose) return null;
+  const source = /\b(history|notes|tabs)\b/iu.exec(prompt)?.[1]?.toLocaleLowerCase() as
+    ContextSource | undefined;
+  return source ? { ...base, kind: "context", source, reason: prompt, answer } : null;
+}
+
+/** "Use GitHub (gh)? …": a connected service or its tool, instead of the website. */
+function connectionOf(base: AskBase, { prompt, options, answer }: Words): ConnectionAsk | null {
+  const service = /^Use (.+?)(?: \(([a-z0-9-]+)\))?\?(?:\s+(.*))?$/su.exec(prompt);
+  const [first, second] = options;
+  if (!service || !first) return null;
+  const name = service[1]!;
+  return {
+    ...base,
+    kind: "connection",
+    service: name,
+    tool: service[2] ?? null,
+    host: vendorHost(undefined, name),
+    use: first,
+    web: second ?? ASK_WORDS.web,
+    answer,
+  };
+}
+
 function fromAsk(
   step: WorkStepFact,
   steps: readonly WorkStepFact[],
 ): EntryAsk | ContextAsk | ConnectionAsk | QuestionAsk | null {
   if (step.kind.kind !== "ask") return null;
-  const { prompt, options } = step.kind;
+  const { prompt, options, purpose } = step.kind;
   const answer = step.kind.answer ?? null;
   const base = { step: step.id, part: step.part ?? null, state: stateOf(step, !!answer) };
+  const words = { prompt, options, answer };
+  const question: QuestionAsk = { ...base, kind: "question", prompt, options, answer };
+  // The runtime says what it asks; the words decide only for runs from before it did.
+  switch (purpose) {
+    case "entry":
+      return entryOf(base, words, steps) ?? question;
+    case "context":
+      return contextOf(base, words, true) ?? question;
+    case "connection":
+      return connectionOf(base, words) ?? question;
+    case "question":
+    case "budget":
+    case "confirm":
+      return question;
+  }
   const [first, second, third] = options;
   if (
     options.length === 3 &&
     first === ASK_WORDS.allow &&
     third === ASK_WORDS.notNow &&
     second?.startsWith(ASK_WORDS.alwaysFor)
-  ) {
-    const name = second.slice(ASK_WORDS.alwaysFor.length);
-    const lead = `Work in your ${name}?`;
-    const plan = prompt.startsWith(lead) ? prompt.slice(lead.length).trim() : prompt;
-    return {
-      ...base,
-      kind: "entry",
-      name,
-      host: entryHost(steps, name),
-      plan: plan.replace(/\.$/u, ""),
-      always: second,
-      answer,
-    };
-  }
+  )
+    return entryOf(base, words, steps);
   if (options.length === 2 && first === ASK_WORDS.allow && second === ASK_WORDS.notNow) {
-    for (const source of Object.keys(CONTEXT_PROMPTS) as ContextSource[]) {
-      const lead = CONTEXT_PROMPTS[source];
-      if (prompt.startsWith(lead))
-        return {
-          ...base,
-          kind: "context",
-          source,
-          reason: prompt.slice(lead.length).trim(),
-          answer,
-        };
-    }
+    const context = contextOf(base, words, false);
+    if (context) return context;
   }
-  const service = /^Use (.+?)(?: \(([a-z0-9-]+)\))?\?(?:\s+(.*))?$/su.exec(prompt);
-  if (options.length === 2 && second === ASK_WORDS.web && first && service) {
-    const name = service[1]!;
-    return {
-      ...base,
-      kind: "connection",
-      service: name,
-      tool: service[2] ?? null,
-      host: vendorHost(undefined, name),
-      use: first,
-      web: second,
-      answer,
-    };
+  if (options.length === 2 && second === ASK_WORDS.web) {
+    const connection = connectionOf(base, words);
+    if (connection) return connection;
   }
-  return { ...base, kind: "question", prompt, options, answer };
+  return question;
 }
 
 function fromConfirm(step: WorkStepFact, pages: readonly WorkPageV1[]): ConfirmAsk | null {

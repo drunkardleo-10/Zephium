@@ -97,6 +97,11 @@ function addLine(part: RunPart, kind: Step["kind"]) {
     part.lines!.push(line);
 }
 
+/** A step a connection part draws as a row: a call (a read, before calls were their own) or a confirmation. */
+const callRow = (step: Step) =>
+  step.kind.kind === "confirm" ||
+  ((step.kind.kind === "call" || step.kind.kind === "read") && !!step.note);
+
 /**
  * A lead run's parts as its facts name them: each with the pages, sources
  * or files and commands of the steps that carry its id.
@@ -137,9 +142,12 @@ function factParts(
         order: parts.length,
         ...(fact.summary ? { summary: fact.summary } : {}),
         ...(fact.service?.connection ? { connection: fact.service.connection } : {}),
-        ...(fact.helper === "computer" || fact.helper === "connection"
+        ...(fact.helper === "computer"
           ? { steps: [...ids], lines: [] }
-          : {}),
+          : fact.helper === "connection"
+            ? // Its rows: each call, and each held confirmation.
+              { steps: steps.filter(callRow).map((step) => step.id), lines: [] }
+            : {}),
       };
       if (part.lines) for (const step of steps) addLine(part, step.kind);
       parts.push(part);
