@@ -1,4 +1,8 @@
-param([ValidateRange(60, 600)][int]$IdleSeconds = 120)
+param(
+    [ValidateRange(60, 600)][int]$IdleSeconds = 120,
+    [ValidateSet(1, 3, 5)][int[]]$Counts = @(1, 3, 5),
+    [ValidateSet('persistent', 'shared')][string[]]$Modes = @('persistent', 'shared')
+)
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $binary = Join-Path $repo 'target\debug\webext-lab-windows.exe'
@@ -12,8 +16,8 @@ $packages = @($names | ForEach-Object {
     if (-not (Test-Path -LiteralPath $path)) { throw "Missing package: $path" }
     $path
 })
-foreach ($count in @(1, 3, 5)) {
-    foreach ($mode in @('persistent', 'shared')) {
+foreach ($count in $Counts) {
+    foreach ($mode in $Modes) {
         $label = "$count-$mode"
         $steps = [Collections.Generic.List[object]]::new()
         $steps.Add(@{navigate='$ORIGIN/first'})
@@ -36,6 +40,8 @@ foreach ($count in @(1, 3, 5)) {
         $process = Start-Process -FilePath $binary -ArgumentList @("`"$scenario`"", "`"$(Join-Path $results "$label.data")`"") -WorkingDirectory $repo -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError (Join-Path $results "$label.stderr.log")
         $processHandle = $process.Handle
         $clock = [Diagnostics.Stopwatch]::StartNew()
+        $lastSample = 0.0
+        $longestGap = 0.0
         while (-not $process.HasExited) {
             if ($clock.Elapsed.TotalSeconds -gt $IdleSeconds + 150) { throw "Lab exceeded its deadline: $label (PID $($process.Id))" }
             $inventory = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId)
@@ -52,13 +58,17 @@ foreach ($count in @(1, 3, 5)) {
                 $child = Get-Process -Id $processId -ErrorAction SilentlyContinue
                 if ($child) { $memory += $child.PrivateMemorySize64; $cpu += $child.CPU; $processCount++ }
             }
-            [pscustomobject]@{seconds=$clock.Elapsed.TotalSeconds; privateMiB=($memory / 1MB); processes=$processCount; cpuSeconds=$cpu} | Export-Csv (Join-Path $results "$label.csv") -NoTypeInformation -Append
+            $now = $clock.Elapsed.TotalSeconds
+            $longestGap = [Math]::Max($longestGap, $now - $lastSample)
+            $lastSample = $now
+            [pscustomobject]@{seconds=$now; privateMiB=($memory / 1MB); processes=$processCount; cpuSeconds=$cpu} | Export-Csv (Join-Path $results "$label.csv") -NoTypeInformation -Append
             Start-Sleep -Seconds 5
         }
         $process.WaitForExit()
         if ($process.ExitCode -ne 0) { throw "Lab failed: $label" }
         $records = @(Get-Content $stdout | ForEach-Object { $_ | ConvertFrom-Json })
         if (@($records | Where-Object { $_.kind -eq 'step' -and -not $_.value.ok }).Count) { throw "A native step failed: $label" }
+        if ($longestGap -gt 15) { Write-Warning "$label had a $([Math]::Round($longestGap, 1))-second sampling gap." }
         Write-Output "Completed $label"
     }
 }
