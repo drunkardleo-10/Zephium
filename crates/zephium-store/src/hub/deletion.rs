@@ -678,6 +678,9 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     tx.execute_batch(
         "INSERT INTO history_fts(history_fts, rank) VALUES('secure-delete', 1);
+         INSERT INTO work_memories_fts(work_memories_fts, rank) VALUES('secure-delete', 1);
+         DELETE FROM work_memories;
+         DELETE FROM work_context_consent;
          DELETE FROM work_environment_checkpoints;
          DELETE FROM work_environment_commands;
          DELETE FROM work_environment_selection;
@@ -938,6 +941,8 @@ mod tests {
         conn.execute("INSERT INTO work_environment_selection(space_id,environment_id) VALUES ('00000000000000000000000008','00000000000000000000000007')", []).unwrap();
         conn.execute("INSERT INTO work_environment_checkpoints(environment_id,expected_revision,digest,applied_revision) VALUES ('00000000000000000000000007',1,zeroblob(32),2)", []).unwrap();
         conn.execute("INSERT INTO work_environment_commands(command_id,digest,environment_id,revision,view_revision) VALUES ('00000000000000000000000009',zeroblob(32),'00000000000000000000000007',1,1)", []).unwrap();
+        conn.execute("INSERT INTO work_memories(id,text,kind,work,execution,created_ms) VALUES ('0000000000000000000000000A',?1,'fact','00000000000000000000000001',NULL,1)", [PROFILE_SCRUB_MARKER]).unwrap();
+        conn.execute("INSERT INTO work_context_consent(work,source,allowed) VALUES ('00000000000000000000000001','history',1)", []).unwrap();
         let body = serde_json::to_string(&zephium_core::resources::ResourceDraft {
             title: PROFILE_SCRUB_MARKER.into(),
             pinned: false,
@@ -1019,12 +1024,19 @@ mod tests {
             "userscripts",
             "work_authoring_commands",
             "work_commands",
+            "work_context_consent",
             "work_environment_checkpoints",
             "work_environment_commands",
             "work_environment_selection",
             "work_environments",
             "work_events",
             "work_executions",
+            "work_memories",
+            "work_memories_fts",
+            "work_memories_fts_config",
+            "work_memories_fts_data",
+            "work_memories_fts_docsize",
+            "work_memories_fts_idx",
             "work_payload_usage",
             "work_plan_nodes",
             "work_plans",
@@ -1078,6 +1090,8 @@ mod tests {
             "work_environment_commands",
             "work_environment_selection",
             "work_environments",
+            "work_memories",
+            "work_context_consent",
         ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
@@ -1094,6 +1108,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(retained_fts_terms, 0, "profile scrub retained FTS terms");
+        let retained_memory_terms: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM work_memories_fts WHERE work_memories_fts MATCH ?1",
+                [PROFILE_SCRUB_MARKER],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained_memory_terms, 0, "profile scrub retained memory terms");
         let history_sequence: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_sequence WHERE name = 'history'",
