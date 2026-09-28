@@ -1,0 +1,25 @@
+[package]
+name = "zephium-webext-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Qualification only: no product crate depends on this feature or binary.
+lab = ["dep:wry", "dep:webview2-com", "dep:windows", "dep:raw-window-handle", "dep:serde_json", "dep:base64", "dep:sha2", "dep:zephium-webext"]
+
+[[bin]]
+name = "webext-lab-windows"
+path = "src/bin/webext-lab-windows.rs"
+required-features = ["lab"]
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wry = { workspace = true, optional = true }
+webview2-com = { version = "0.38", optional = true }
+windows = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
+raw-window-handle = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+sha2 = { version = "=0.10.9", optional = true }
+zephium-webext = { path = "../zephium-webext", version = "=0.1.0", optional = true }

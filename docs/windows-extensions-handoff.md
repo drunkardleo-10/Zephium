@@ -153,3 +153,111 @@ review sheet; enable/disable; site access "on click" (Grammarly only works
 after clicking its button); options page; popups for Bitwarden, Dark Reader,
 SponsorBlock; remove erases data and the extension's process ends; a held
 update asks again for new access; 30 idle minutes with memory flat.
+
+## Windows probe work record — 2026-09-28
+
+**Step 1 is incomplete: execution under the normal Windows account is pending.**
+The observations below are from the restricted agent account, not production
+qualification. No extension integration or desktop neutralization was started.
+
+### Approved scope adjustments
+
+- Keep a reusable lab binary in `crates/zephium-webext-windows`, behind the
+  `lab` feature, separate from product builds. Respect the existing Wry gate.
+- Prioritize load/worker/content scripts, host-opened popup and active-tab/on-click
+  behavior, action state, site access, Work isolation, then resource baselines
+  and a **10-minute** idle run. The later full-product 30-minute QA remains a
+  separate release qualification requirement.
+- A roughly 200-line action-reporting/click-relay script is the workaround
+  ceiling. Do not reimplement tabs, action dispatch or permissions. No such
+  workaround has been implemented in this probe.
+- Native messaging and removal-residue checks are optional within the timebox;
+  both are currently **not tested**.
+- The archive branch is unavailable and is not a dependency. The four baseline
+  Windows lints are isolated in commit `41c2404f`, not mixed with lab work.
+
+### Prepared harness and inputs
+
+`webext-lab-windows` uses the existing `webview2-com` 0.38/Wry adapter, a fresh
+data directory, explicit profile names and the authenticated Wry startup gate.
+The gate checks the actual user data directory, profile name, private-mode bit
+and identity of a reused COM environment. The binary is feature-gated and refuses
+release builds. It has a loopback fixture, a diagnostic MV3 extension, JSON
+scenarios, JSONL observations, popup screenshots and process-failure reporting.
+`run-probe.ps1` starts with an extension-free renderer check and stops if that
+baseline fails; it must not produce resource conclusions from a broken renderer.
+See the crate README for commands and interpretation.
+
+All five official CRXs were downloaded, signature-verified with
+`zephium_webext::crx::verify`, matched to their expected IDs and extracted using
+the existing bounded extractor. The signed developer public key is added to
+the unpacked manifest to preserve the extension ID; original CRXs are unchanged.
+
+| Extension | Version | Manifest | SHA-256 |
+| --- | --- | --- | --- |
+| Dark Reader | 4.9.133 | MV3 | `ee38f20d1d50789f4b482c9a1a5dadab599b8682fd2a7dfb7de21fae8561b918` |
+| Bitwarden | 2026.9.2 | MV3 | `6d3087dab30d2154948058dae8e4c7e41420d2ac816851e7c68caa932416c930` |
+| Vimium | 2.4.2 | MV3 | `3198c26aa719be462dea585050fbed9b8b80628d57ea88a113babf5334c5517c` |
+| Grammarly | 14.1332.0 | MV3 | `450aefeaa91b08ddf8129ae64bc86da0a0a24b1666599447edb4d955942b9a2a` |
+| SponsorBlock | 6.1.6 | MV3 | `5587fe2b6a9946101ca0dde7c6efe76a755c5ee5b6d6e63dfc48c7f736cdb4ff` |
+
+Packages are in `target/webext-suite`; extracted verification copies are in
+`target/webext-verified-<id>/<id>`. These are local evidence, not tracked source.
+
+### Observed native results and limitations
+
+Machine: Windows x64 build 26200; installed SDK 10.0.26100.0; Rust 1.95.0 MSVC.
+The created WebView2 environment reported **154.0.4258.37**. Execution account:
+`DESKTOP-157E6GB/CodexSandboxOffline`.
+
+| Probe question | Evidence/status |
+| --- | --- |
+| Environment enablement and startup gate | **Observed working in sandbox.** An extension-enabled environment and named profile were created through the unchanged Wry gate. |
+| Add/list diagnostic extension | **Observed working in sandbox.** `AddBrowserExtension` returned ID `agkefboimiopkbcpdhgojemijgnljcaj`; enumeration reported it enabled. This fixture ID is path-derived, not a store ID. |
+| Basic page execution without extensions | **Failed in sandbox.** GPU process failures reported kind 6, reason 3, exit `-1073741790` (`0xC0000022`, access denied); render process failures reported kind 1, reason 4 (launch failed), exit 49. The browser subsequently exited. |
+| Workers/content effects, popup/active tab, action state, access enforcement and Work isolation | **Blocked by baseline process failures.** Evaluation returned `0x8007139F` or timed out. These are not evidence that WebView2 lacks the extension features. |
+| Five real extensions' runtime behavior | **Not tested.** Package verification/extraction succeeded; load and runtime compatibility are separate questions. |
+| Memory/CPU baselines and 10-minute idle | **Not tested.** Measuring repeatedly failed processes would not establish extension overhead. |
+| Native messaging and removal residue | **Not tested**, lower priority by approved scope. |
+
+Diagnostic scenario output is in `target/webext-windows-sandbox-02.jsonl` and
+the adjacent stderr log. The extension-free control was run with
+`scenarios/baseline.json` into `target/webext-windows-baseline-01`; its process
+failure events were captured in terminal output. All views were hidden; even a
+successful hidden run would not prove real foreground action-click semantics.
+
+An initial standalone launch failed before `main` with `0xC0000139` because the
+lab lacked Common Controls v6 activation. The lab now embeds that dependency;
+the executable starts, verifies packages and creates WebView2 environments.
+This was a harness defect, not an extension-runtime finding.
+
+### Build/check status and next execution
+
+The sandbox's Cargo TLS backend fails with `SEC_E_NO_CREDENTIALS`; an offline
+full-workspace resolution also lacks the index entry for
+`objc2-authentication-services`. Normal-account execution from the agent was
+rejected by the session permission policy. A standalone scratch manifest using
+the actual lab source, vendored Wry and neutral package crate built successfully
+offline after official crate downloads were checked against their lockfile
+SHA-256 values. Lab-only Clippy passed with `--no-deps -- -D warnings`; vendored
+Wry reports three existing unused-constructor warnings. This is **not** a
+successful locked full-workspace build. Full lint/test validation of the
+separate lint commit is pending dependency resolution.
+
+Repository Rust version matches the machine. Frontend checks also require
+aligning Node 24.15.0 to the pinned 24.18.0 and pnpm 11.19.0 to 11.17.0. Those
+changes are not required to execute this Rust-only probe and have not been made.
+
+Resume from a normal, non-elevated PowerShell in the repository:
+
+```powershell
+cargo build -p zephium-webext-windows --features lab --bin webext-lab-windows
+if ($LASTEXITCODE -eq 0) {
+    powershell -NoProfile -File crates\zephium-webext-windows\run-probe.ps1
+}
+```
+
+Review the first workspace lockfile update, then use `--locked` on subsequent
+builds. Review actual observations, resolve only lab defects or bounded probe
+questions, append the normal-account findings here, and **stop after step 1**.
+Do not infer extension parity or proceed to step 2 from this blocked run.
