@@ -52,7 +52,17 @@ pub fn user_dir(profile: ProfileId) -> Option<PathBuf> {
     Some(root.join("skills").join(profile.to_string()))
 }
 
-const BUILTIN: &[&str] = &[];
+const BUILTIN: &[&str] = &[
+    include_str!("../../skills/trip-planning/SKILL.md"),
+    include_str!("../../skills/system-design/SKILL.md"),
+    include_str!("../../skills/compare-and-choose/SKILL.md"),
+    include_str!("../../skills/research/SKILL.md"),
+    include_str!("../../skills/explain-a-subject/SKILL.md"),
+    include_str!("../../skills/today-from-my-messages/SKILL.md"),
+    include_str!("../../skills/fix-a-bug/SKILL.md"),
+    include_str!("../../skills/job-search/SKILL.md"),
+    include_str!("../../skills/learning-path/SKILL.md"),
+];
 
 pub fn builtins() -> Vec<Skill> {
     BUILTIN
@@ -213,6 +223,15 @@ mod tests {
             ),
         ] {
             assert_eq!(parse(text), Err(fault), "{text}");
+        }
+    }
+
+    #[test]
+    fn every_builtin_parses_and_fits() {
+        let builtins = builtins();
+        assert_eq!(builtins.len(), BUILTIN.len());
+        for skill in &builtins {
+            assert!(skill.body.len() < 6_000, "{} is long", skill.name);
         }
     }
 

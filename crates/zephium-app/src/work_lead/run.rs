@@ -21,7 +21,6 @@ pub(crate) const MAX_SOURCES: usize = 160;
 pub(crate) struct LeadSource {
     pub key: String,
     pub link: WorkEvidenceLink,
-    pub title: String,
     pub url: Option<String>,
 }
 
@@ -31,6 +30,9 @@ struct State {
     used: WorkUsage,
     sources: Vec<LeadSource>,
     next_source: u32,
+    /// Links the run was given outside its sources: the request, context,
+    /// and addresses pages showed.
+    allowed: Vec<String>,
     waits: usize,
     waiting_since: Option<Instant>,
     stopped: Option<WorkCancelCause>,
@@ -83,6 +85,7 @@ impl LeadRun {
                 used: WorkUsage::default(),
                 sources: Vec::new(),
                 next_source: 0,
+                allowed: Vec::new(),
                 waits: 0,
                 waiting_since: None,
                 stopped: None,
@@ -412,7 +415,7 @@ impl LeadRun {
 
     /// Registers a citable source and returns its key; a source already
     /// registered keeps its key.
-    pub(crate) fn cite(&self, link: WorkEvidenceLink, title: &str, url: Option<&str>) -> String {
+    pub(crate) fn cite(&self, link: WorkEvidenceLink, _title: &str, url: Option<&str>) -> String {
         let mut state = self.state();
         if let Some(known) = state.sources.iter().find(|s| s.link == link) {
             return known.key.clone();
@@ -425,7 +428,6 @@ impl LeadRun {
         state.sources.push(LeadSource {
             key: key.clone(),
             link,
-            title: title.chars().take(160).collect(),
             url: url.map(str::to_owned),
         });
         key
@@ -451,6 +453,35 @@ impl LeadRun {
             .cloned()
     }
     pub(crate) fn known_url(&self, url: &str) -> bool {
+        let wanted = url.trim_end_matches('/');
         self.source_by_url(url).is_some()
+            || self
+                .state()
+                .allowed
+                .iter()
+                .any(|allowed| allowed.trim_end_matches('/') == wanted)
+    }
+    /// Admits a link the run was given for a later read.
+    pub(crate) fn allow_url(&self, url: &str) {
+        if url::Url::parse(url).is_ok_and(|u| u.scheme() == "https") {
+            let mut state = self.state();
+            if !state.allowed.iter().any(|known| known == url) {
+                if state.allowed.len() >= MAX_SOURCES * 2 {
+                    state.allowed.remove(0);
+                }
+                state.allowed.push(url.to_owned());
+            }
+        }
+    }
+    /// Admits every https link in a text the person gave.
+    pub(crate) fn allow_links_in(&self, text: &str) {
+        for word in
+            text.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '(' | ')'))
+        {
+            let word = word.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+            if word.starts_with("https://") {
+                self.allow_url(word);
+            }
+        }
     }
 }

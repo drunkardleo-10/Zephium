@@ -436,6 +436,9 @@ impl WorkAgentService {
             handle: self.handle.clone(),
             profile,
             tabs,
+            part: None,
+            lead: false,
+            extends: true,
         };
         if !driver.tabs.is_empty() {
             driver.report(WorkAgentDiagnostic::TabsListed {
@@ -526,6 +529,12 @@ struct Driver {
     profile: ProfileId,
     /// The person's open tabs, listed with their consent.
     tabs: Vec<context::WorkContextTabV1>,
+    /// A lead run's part this driver works for: its steps and records carry it.
+    part: Option<WorkPartId>,
+    /// A lead run: searches keep their record and place no sources object.
+    lead: bool,
+    /// Whether this driver may ask the person to grow the run's budget.
+    extends: bool,
 }
 
 enum Fetched {
@@ -601,7 +610,7 @@ impl Driver {
     }
     fn step(&self, kind: WorkStepKindV1, status: WorkStepStatus) -> WorkStepFact {
         WorkStepFact {
-            part: None,
+            part: self.part,
             id: WorkStepId::generate(),
             turn: self.turn.max(1),
             kind,
@@ -1160,7 +1169,9 @@ impl Driver {
                     }
                     continue;
                 }
-                let status = self.fetch(attempt, providers, browser, turn.fetch).await?;
+                let status = self
+                    .fetch(attempt, providers.search, browser, turn.fetch)
+                    .await?;
                 if let Some(status) = status {
                     return Ok(status);
                 }
@@ -1202,7 +1213,7 @@ impl Driver {
     async fn fetch<B, Fut>(
         &mut self,
         attempt: &WorkNodeAttempt,
-        providers: &WorkAgentProviders<'_>,
+        search: &dyn WorkPublicSearchProvider,
         browser: &mut B,
         fetches: Vec<WorkStepKindV1>,
     ) -> Result<Option<WorkAttemptStatus>, WorkError>
@@ -1246,8 +1257,7 @@ impl Driver {
                                 model: self.grant.model.clone(),
                                 query: query.clone(),
                             };
-                            providers
-                                .search
+                            search
                                 .minimum_reservation(&scope, &[])
                                 .is_none_or(|usage| usage.within(*limits))
                         },
@@ -1283,7 +1293,6 @@ impl Driver {
                 .into_iter()
                 .map(|(id, scope, limits)| {
                     let probe = self.probe.clone();
-                    let search = providers.search;
                     Box::pin(async move {
                         let outcome = probe.run_search(search, &scope, &[], limits).await;
                         Fetched::Search(
@@ -1585,7 +1594,7 @@ impl Driver {
                     }
                     match (outcome.status, outcome.record) {
                         (WorkAttemptStatus::Succeeded, Some(record)) => {
-                            let artifacts = if record.evidence.citations.is_empty() {
+                            let artifacts = if record.evidence.citations.is_empty() || self.lead {
                                 vec![]
                             } else {
                                 match attempt.mint_artifact(sources_draft(&self.output, &record)) {
@@ -1678,6 +1687,10 @@ impl Driver {
                             .artifacts
                             .into_iter()
                             .filter_map(|draft| attempt.mint_artifact(draft).ok())
+                            .map(|artifact| WorkArtifactV1 {
+                                part: self.part,
+                                ..artifact
+                            })
                             .collect();
                         if artifacts.len() < drafted {
                             self.report(WorkAgentDiagnostic::ArtifactsDropped {
@@ -1888,6 +1901,9 @@ impl Driver {
     /// The run spent its budget: the person decides whether it keeps going
     /// with the same amount again. False when they stop it or it cannot grow.
     async fn keep_going(&mut self) -> Result<Result<bool, WorkAttemptStatus>, WorkError> {
+        if !self.extends {
+            return Ok(Ok(false));
+        }
         let grown = WorkExecutionLimits {
             model_tokens: self
                 .limits
@@ -2130,6 +2146,101 @@ impl Driver {
             self.previews.remove(0);
         }
         self.previews.push(preview);
+    }
+}
+
+/// A lead part's hands on the page and file machinery: searches, page
+/// reads and tasks with their entry questions, sign-in waits and Confirm
+/// steps, and file and command steps, each carrying the part. It works
+/// within its own budget share and never grows the run's budget.
+pub(crate) struct WorkPartDriver(Driver);
+impl WorkPartDriver {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn new(
+        handle: crate::Handle,
+        profile: ProfileId,
+        probe: WorkAttemptProbe,
+        grant: WorkAgentGrantV1,
+        limits: WorkExecutionLimits,
+        output: String,
+        objective: String,
+        part: Option<WorkPartId>,
+    ) -> Self {
+        let standing = crate::work_sites::standing(&handle, profile)
+            .await
+            .unwrap_or_default();
+        let sites = crate::work_sites::RunSites::new(grant.private, standing);
+        let (files, _) = crate::work_files::WorkFileGrant::admit(&grant.folders);
+        Self(Driver {
+            probe,
+            files: (!files.is_empty()).then_some(files),
+            grant,
+            limits,
+            output,
+            objective,
+            decisions: Vec::new(),
+            bodies: Vec::new(),
+            private: Vec::new(),
+            inherited: Vec::new(),
+            kept: Vec::new(),
+            thread: Vec::new(),
+            unreadable_polls: std::sync::atomic::AtomicU8::new(0),
+            stopped: std::sync::Mutex::new(None),
+            waiting: false,
+            previews: Vec::new(),
+            used: WorkUsage::default(),
+            steps: 0,
+            turn: 1,
+            failed_turns: 0,
+            intervention: None,
+            diagnostic: None,
+            notices: Vec::new(),
+            published: 0,
+            finish_refusals: 0,
+            pending_output_repair: false,
+            sites,
+            session_steps: Vec::new(),
+            page_sites: Vec::new(),
+            private_sites: Vec::new(),
+            base_limits: limits,
+            handle,
+            profile,
+            tabs: Vec::new(),
+            part,
+            lead: true,
+            extends: false,
+        })
+    }
+    /// Runs searches, page reads and tasks, and file and command steps. A
+    /// terminal status means the run cannot go on (stopped, lost outcome).
+    pub(crate) async fn run<B, Fut>(
+        &mut self,
+        attempt: &WorkNodeAttempt,
+        search: &dyn WorkPublicSearchProvider,
+        browser: &mut B,
+        turn: u8,
+        steps: usize,
+        kinds: Vec<WorkStepKindV1>,
+    ) -> Result<Option<WorkAttemptStatus>, WorkError>
+    where
+        B: FnMut(WorkAttemptProbe, WorkAgentBrowseRequest) -> Fut,
+        Fut: Future<Output = Result<WorkBrowserOutcome, WorkError>>,
+    {
+        self.0.turn = turn.max(1);
+        self.0.steps = u32::try_from(steps).unwrap_or(u32::MAX);
+        self.0.fetch(attempt, search, browser, kinds).await
+    }
+    /// What the driver refused or learned since it was last asked, in
+    /// closed words.
+    pub(crate) fn take_notices(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.0.notices)
+    }
+    pub(crate) fn used(&self) -> WorkUsage {
+        self.0.used
+    }
+    /// Source text the driver kept for a link, clipped for a digest.
+    pub(crate) fn preview(&self, link: &WorkEvidenceLink) -> Option<&WorkEvidencePreviewV1> {
+        self.0.previews.iter().find(|preview| preview.link == *link)
     }
 }
 
