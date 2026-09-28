@@ -14,7 +14,7 @@ use objc2_web_kit::{
 };
 
 use crate::runtime::Shared;
-use crate::{access, bridge, error, keepalive, native, socket, TabRequest};
+use crate::{access, bridge, error, native, socket, TabRequest};
 
 pub(crate) struct Ivars {
     shared: RcWeak<Shared>,
@@ -319,10 +319,6 @@ define_class!(
                 Some(shared) if application == socket::APPLICATION => {
                     socket::connect(&shared, context, port);
                     completion.call((std::ptr::null_mut(),));
-                }
-                Some(_) if application == keepalive::APPLICATION => {
-                    completion.call((std::ptr::null_mut(),));
-                    keepalive::connect(context, port);
                 }
                 Some(shared) => match native::connect(&shared, context, port, &application) {
                     Ok(()) => completion.call((std::ptr::null_mut(),)),

@@ -20,9 +20,9 @@ use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::Message;
-use objc2_foundation::{NSError, NSTimer};
+use objc2_foundation::NSError;
 use objc2_web_kit::{WKWebExtensionContext, WKWebExtensionMessagePort};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::runtime::Shared;
 use crate::{json, LogLevel};
@@ -35,13 +35,6 @@ const MAX_HOSTS_PER_EXTENSION: usize = 8;
 /// How long a host may take to exit once its input closes before it is
 /// killed.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
-/// Chrome keeps a worker running while it has a native port open; WebKit
-/// ends quiet workers regardless. The compatibility layer answers these
-/// beats and hides them from the extension.
-const KEEPALIVE_SECONDS: f64 = 20.0;
-const ALIVE: &str = "alive";
-const BEAT: &str = "beat";
-const MARKER: &str = "__zephium";
 
 type Reply = RcBlock<dyn Fn(*mut AnyObject, *mut NSError)>;
 
@@ -63,7 +56,6 @@ struct Connection {
     port: Option<Retained<WKWebExtensionMessagePort>>,
     reply: RefCell<Option<Reply>>,
     outbound: RefCell<Option<mpsc::Sender<Vec<u8>>>>,
-    keepalive: RefCell<Option<Retained<NSTimer>>>,
     shared: RcWeak<Shared>,
 }
 
@@ -78,10 +70,7 @@ pub(crate) fn connect(
     let weak = Rc::downgrade(&connection);
     let on_message = RcBlock::new(move |message: *mut AnyObject, _error: *mut NSError| {
         if let Some(connection) = weak.upgrade() {
-            let message = json::from_object(unsafe { message.as_ref() });
-            if message.get(MARKER).and_then(Value::as_str) != Some(BEAT) {
-                connection.forward(&message);
-            }
+            connection.forward(&json::from_object(unsafe { message.as_ref() }));
         }
     });
     let weak = Rc::downgrade(&connection);
@@ -94,16 +83,6 @@ pub(crate) fn connect(
         port.setMessageHandler(Some(&on_message));
         port.setDisconnectHandler(Some(&on_disconnect));
     }
-    let weak = Rc::downgrade(&connection);
-    let beat = RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
-        if let Some(connection) = weak.upgrade() {
-            connection.post(&json!({ MARKER: ALIVE }));
-        }
-    });
-    let timer = unsafe {
-        NSTimer::scheduledTimerWithTimeInterval_repeats_block(KEEPALIVE_SECONDS, true, &beat)
-    };
-    *connection.keepalive.borrow_mut() = Some(timer);
     Ok(())
 }
 
@@ -161,7 +140,6 @@ fn open(
         port,
         reply: RefCell::new(reply),
         outbound: RefCell::new(Some(outbound)),
-        keepalive: RefCell::new(None),
         shared: Rc::downgrade(shared),
     });
     CONNECTIONS.with(|connections| connections.borrow_mut().insert(key, connection.clone()));
@@ -214,9 +192,6 @@ impl Connection {
         }
         // Dropping the sender closes the host's input, which ends it.
         self.outbound.borrow_mut().take();
-        if let Some(timer) = self.keepalive.borrow_mut().take() {
-            timer.invalidate();
-        }
         let message = error.unwrap_or_else(|| "Native host has exited.".into());
         if let Some(reply) = self.reply.borrow_mut().take() {
             let error = crate::error(&message);
@@ -233,6 +208,21 @@ impl Connection {
                 &format!("native messaging host {} closed", self.host),
             );
         }
+    }
+}
+
+/// Ends every host an extension started.
+pub(crate) fn close_extension(extension: &str) {
+    let open: Vec<_> = CONNECTIONS.with(|connections| {
+        connections
+            .borrow()
+            .values()
+            .filter(|connection| connection.extension == extension)
+            .cloned()
+            .collect()
+    });
+    for connection in open {
+        connection.close(None);
     }
 }
 
@@ -441,6 +431,7 @@ fn valid_host_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     const EXTENSION: &str = "aeblfdkhhhdcdjpifhhbdiojplfjncoa";
 

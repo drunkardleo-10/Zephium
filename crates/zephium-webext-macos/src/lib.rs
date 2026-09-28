@@ -11,7 +11,6 @@ mod bridge;
 pub mod compat;
 mod delegate;
 mod json;
-mod keepalive;
 mod native;
 mod offscreen;
 mod runtime;
@@ -125,6 +124,16 @@ pub trait Host {
         let _ = request;
         done(false);
     }
+}
+
+/// Closes the bridges an extension's worker opened. WebKit numbers message
+/// ports per web process and never reports that a worker ended, so a port
+/// left open from a previous worker ends up carrying messages into an
+/// unrelated port of the next one (the next WebSocket's first message was an
+/// old connection's ping).
+pub(crate) fn worker_gone(extension: &str) {
+    socket::close_extension(extension);
+    native::close_extension(extension);
 }
 
 /// Diagnostics for development builds: `ZEPHIUM_WEBEXT_TRACE=1` prints how

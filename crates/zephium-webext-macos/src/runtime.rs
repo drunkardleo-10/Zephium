@@ -438,6 +438,26 @@ impl Runtime {
         }
     }
 
+    /// Tabs showing one of an extension's own pages, which keep its process
+    /// running until they close.
+    pub fn tabs_showing(&self, id: &str) -> Vec<u64> {
+        let graph = self.shared.graph.borrow();
+        graph
+            .windows
+            .iter()
+            .flat_map(|window| window.tabs())
+            .filter(|tab| {
+                tab.webview()
+                    .and_then(|view| unsafe { view.URL() })
+                    .is_some_and(|url| {
+                        url.scheme().is_some_and(|scheme| scheme.to_string() == SCHEME)
+                            && url.host().is_some_and(|host| host.to_string() == id)
+                    })
+            })
+            .map(|tab| tab.id())
+            .collect()
+    }
+
     pub fn tab_object(
         &self,
         tab: u64,
@@ -601,7 +621,7 @@ fn unload(shared: &Shared, controller: &WKWebExtensionController, id: &str) -> b
         return false;
     };
     crate::offscreen::close(id);
-    crate::keepalive::release(id);
+    crate::worker_gone(id);
     unsafe { controller.unloadExtensionContext_error(&loaded.context) }.is_ok()
 }
 

@@ -30,6 +30,14 @@
       throw new Error(String((error && error.message) || error).replace(/^Invalid call to runtime\.sendNativeMessage\(\)\. /, ""));
     });
 
+  // A new worker means the previous one is gone, along with whatever it had
+  // open through the browser; this is the first thing it sends.
+  if (isWorker && typeof runtime.sendNativeMessage === "function") {
+    try {
+      native("worker.started").catch(() => {});
+    } catch {}
+  }
+
   // ---- Diagnostics ---------------------------------------------------------
   // Errors inside workers and extension pages are otherwise invisible to the
   // browser; development builds report them, bounded, so failures have a
@@ -819,63 +827,6 @@
     }
   }
 
-  // ---- Native messaging ----------------------------------------------------
-  // Chrome keeps a worker with an open native port running; here the browser
-  // does it with periodic beats, answered below and hidden from the extension.
-  if (!isContent && chromeRuntime && typeof chromeRuntime.connectNative === "function") {
-    const connectNative = chromeRuntime.connectNative;
-    const isBeat = (message) => message !== null && typeof message === "object" && message.__zephium === "alive";
-    pin(chromeRuntime, "connectNative", function (application, ...rest) {
-      const port = connectNative.call(this, application, ...rest);
-      if (String(application).startsWith("app.zephium.") || !port || !port.onMessage) return port;
-      const onMessage = port.onMessage;
-      kept.push(port, onMessage);
-      pin(port, "onMessage", onMessage);
-      const add = onMessage.addListener;
-      const remove = onMessage.removeListener;
-      const has = onMessage.hasListener;
-      add.call(onMessage, (message) => {
-        if (isBeat(message)) port.postMessage({ __zephium: "beat" });
-      });
-      const wrappers = new WeakMap();
-      pin(onMessage, "addListener", function (listener, ...more) {
-        if (typeof listener !== "function") return add.call(this, listener, ...more);
-        let wrapper = wrappers.get(listener);
-        if (!wrapper) {
-          wrapper = function (message, ...args) {
-            if (!isBeat(message)) return listener.call(this, message, ...args);
-          };
-          wrappers.set(listener, wrapper);
-        }
-        return add.call(this, wrapper, ...more);
-      });
-      pin(onMessage, "removeListener", function (listener) {
-        return remove.call(this, wrappers.get(listener) || listener);
-      });
-      pin(onMessage, "hasListener", function (listener) {
-        return has.call(this, wrappers.get(listener) || listener);
-      });
-      return port;
-    });
-  }
-
-  // ---- Worker lifetime -----------------------------------------------------
-  // Each start is reported on a port the browser keeps, and beats on, only
-  // for a worker that keeps being woken within a minute or so of sleeping.
-  if (isWorker && typeof runtime.connectNative === "function") {
-    try {
-      const port = runtime.connectNative("app.zephium.keepalive");
-      port.onMessage.addListener((message) => {
-        if (message && message.op === "alive") {
-          try {
-            port.postMessage({ op: "beat" });
-          } catch {}
-        }
-      });
-      port.onDisconnect.addListener(() => void (chromeRuntime && chromeRuntime.lastError));
-    } catch {}
-  }
-
   // ---- Worker WebSockets ---------------------------------------------------
   // A WebSocket opened in an extension worker deadlocks it in WebKit; connect
   // through the browser instead.
@@ -992,9 +943,6 @@
             this.#fire(new MessageEvent("message", { data, origin: new URL(this.url).origin }));
             break;
           }
-          case "alive":
-            this.#port.postMessage({ op: "beat" });
-            break;
           case "error":
             this.#fire(new Event("error"));
             break;

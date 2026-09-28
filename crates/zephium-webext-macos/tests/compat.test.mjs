@@ -13,7 +13,11 @@ function context(kind) {
   const chrome = {
     runtime: {
       id: "abcdefghijklmnopabcdefghijklmnop",
-      sendNativeMessage: async (_app, message) => (message.api === "trace" ? false : null),
+      sent: [],
+      async sendNativeMessage(_app, message) {
+        this.sent.push(message.api);
+        return message.api === "trace" ? false : null;
+      },
       connectNative: (application) => {
         const listeners = new Set();
         const port = {
@@ -174,17 +178,8 @@ test("pages and workers get every API fix", async () => {
     await chrome.storage.local.set(new State());
     assert.equal(JSON.stringify(chrome.storage.local.saved), JSON.stringify({ vault: { locked: true } }), kind);
 
-    const port = chrome.runtime.connectNative("com.1password.1password");
-    const received = [];
-    const listener = (message) => received.push(message);
-    port.onMessage.addListener(listener);
-    port.deliver({ __zephium: "alive" });
-    port.deliver({ hello: 1 });
-    assert.equal(JSON.stringify(received), JSON.stringify([{ hello: 1 }]), kind);
-    assert.equal(JSON.stringify(port.posted), JSON.stringify([{ __zephium: "beat" }]), kind);
-    assert.equal(port.onMessage.hasListener(listener), true, kind);
-    port.onMessage.removeListener(listener);
-    assert.equal(port.onMessage.hasListener(listener), false, kind);
+    // A worker's first word to the browser is that it started.
+    assert.equal(chrome.runtime.sent[0] === "worker.started", kind === "worker", kind);
 
     assert.equal(chrome.offscreen.Reason.CLIPBOARD, "CLIPBOARD", kind);
     assert.equal(await chrome.offscreen.hasDocument(), false, kind);

@@ -86,6 +86,14 @@ pub(crate) fn handle(
             Ok(Value::Null)
         }
         Some("trace") => Ok(Value::Bool(crate::tracing())),
+        Some("worker.started") => {
+            let id = extension(context);
+            if crate::tracing() {
+                eprintln!("webext-trace: worker of {id} started");
+            }
+            crate::worker_gone(&id);
+            Ok(Value::Null)
+        }
         Some("offscreen.close") => Ok(Value::Bool(offscreen::close(&extension(context)))),
         Some("offscreen.has") => Ok(Value::Bool(offscreen::has(&extension(context)))),
         Some("clipboard.write")
