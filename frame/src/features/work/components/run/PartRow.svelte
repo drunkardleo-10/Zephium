@@ -15,7 +15,7 @@
   import { serviceKey, serviceMark } from "$domain/connections";
   import { getContext, untrack } from "svelte";
   import { canvasBoard, canvasFocusResult, type BoardActions } from "../../lib/canvas-context";
-  import { askKey, contentKey } from "../../lib/run/part-size";
+  import { askKey, contentKey, labelWidth } from "../../lib/run/part-size";
   import HostGlyph from "../cards/HostGlyph.svelte";
   import PageFace from "./PageFace.svelte";
   import AgentOrb from "../cards/AgentOrb.svelte";
@@ -58,11 +58,33 @@
     if (shape === "frames") return `translate(${index * (PART.tile + PART.tileGap)}px, 0)`;
     return `translate(${index * PART.stackStep}px, ${index * 11}px) scale(${SCALE})`;
   }
-  const lead = PART.label + PART.gap;
+  const lead = $derived(labelWidth(detail) + PART.gap);
+  /**
+   * A frame's caption: its title without the site's own name after it, cut at
+   * a word that still fits two lines, never mid-word and never with an ellipsis.
+   */
+  function caption(title: string): string {
+    const own = title
+      .split(/\s+[|·–—-]\s+/u)
+      .filter((segment) => segment.trim() && segment.trim() !== part.title);
+    const text = (own.join(" – ") || title).trim();
+    if (text.length <= 52) return text;
+    const words = text.split(/\s+/u);
+    let out = "";
+    for (const word of words) {
+      if ((out ? out.length + 1 : 0) + word.length > 52) break;
+      out = out ? `${out} ${word}` : word;
+    }
+    return out.replace(/[,;:–—-]$/u, "") || words[0]!;
+  }
   /** Surveyed, a name is set as large as its column lets it stand without breaking a word. */
   const survey = $derived.by(() => {
+    const room = 192;
+    const whole = room / (part.title.length * 0.58);
+    // One line when the whole name reads at its survey size; else two, at word boundaries.
+    if (whole >= 22) return Math.round(Math.min(26, whole));
     const longest = Math.max(...part.title.split(/\s+/u).map((word) => word.length), 1);
-    return Math.round(Math.max(16, Math.min(26, 128 / (longest * 0.58))));
+    return Math.round(Math.max(16, Math.min(26, room / (longest * 0.58))));
   });
   /** A helper's own view of its work, when its stream has built one. */
   const content = $derived(shape === "helper" ? partContent(part.helper) : null);
@@ -101,8 +123,6 @@
     const longest = Math.max(...part.title.split(/\s+/u).map((word) => word.length), 1);
     return Math.max(11, Math.min(13, Math.floor(97 / (longest * 0.56))));
   });
-  /** Surveyed, a search part shows the sites it drew on, each once. */
-  const sites = $derived([...new Map(cited.map((row) => [row.where, row])).values()]);
 </script>
 
 {#snippet face(page: PartPage)}
@@ -131,12 +151,7 @@
       onlist();
     }}
   >
-    <span
-      class="name"
-      class:unbroken={part.title.split(/\s+/u).some((word) => word.length * 0.58 * 16 > 128)}
-      style:--survey="{survey}px"
-      style:--fitted="{fitted}px"
-    >
+    <span class="name" style:--survey="{survey}px" style:--fitted="{fitted}px">
       {#if part.helper === "research"}<span class="glyph"
           ><Icon icon={Search01Icon} size={14} /></span
         >{:else if part.helper === "computer"}<span class="glyph"
@@ -204,7 +219,7 @@
           }}
         >
           <span class="glass">{@render face(page)}</span>
-          <span class="caption">{page.tab ? page.status : page.title}</span>
+          <span class="caption">{page.tab ? page.status : caption(page.title)}</span>
         </button>
       {/each}
       {#if shape === "stack" && part.pages.length > 1}<span class="count">{part.pages.length}</span
@@ -217,7 +232,7 @@
     </div>
   {:else if shape === "sources"}
     <ul class="cited" style:inset-inline-start="{lead}px">
-      {#each detail === "full" ? cited : sites as row (row.key)}<li>
+      {#each cited as row (row.key)}<li>
           <button
             type="button"
             class="nodrag"
@@ -228,8 +243,7 @@
             }}
           >
             <HostGlyph host={row.where} url={row.url} size={14} initial={false} />
-            <span class="site">{row.where}</span>
-            <span class="title">{row.title}</span>
+            <span class="site">{row.title}</span>
           </button>
         </li>{/each}
       {#if more}<li class="rest">{m.work_part_more_cited({ count: more })}</li>{/if}
@@ -384,12 +398,15 @@
   }
 
   .caption {
+    display: -webkit-box;
     overflow: hidden;
     color: var(--color-muted);
     font-size: var(--text-label);
     line-height: 16px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    text-wrap: pretty;
     transition: opacity var(--motion-fast) var(--ease-out);
   }
 
@@ -524,16 +541,8 @@
   }
 
   .site {
-    flex: none;
-    color: var(--color-muted);
-    font-size: var(--text-label);
-  }
-
-  .title {
-    overflow: hidden;
-    font-size: var(--text-label);
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    color: var(--color-text);
+    font-size: var(--text-body);
   }
 
   .cited .rest {
@@ -567,7 +576,6 @@
   .tile .summary,
   .overview .caption,
   .tile .caption,
-  .overview .title,
   .tile .cited,
   .tile strong,
   .overview .rest,
@@ -578,7 +586,7 @@
 
   .overview .label,
   .tile .label {
-    inline-size: 128px;
+    inline-size: 200px;
   }
 
   .overview .name {
@@ -638,11 +646,5 @@
 
   .stack .pages:hover .count {
     opacity: 0;
-  }
-
-  /* A single word wider than the column at its least size breaks rather than hides. */
-  .overview .unbroken strong {
-    overflow-wrap: anywhere;
-    word-break: normal;
   }
 </style>

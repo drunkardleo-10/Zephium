@@ -83,23 +83,54 @@ const KNOWN: Record<string, string> = {
   lever: "Lever",
   google: "Google",
   reddit: "Reddit",
+  lot: "LOT",
+  lufthansa: "Lufthansa",
+  amazon: "Amazon",
+  apple: "Apple",
+  microsoft: "Microsoft",
+  notion: "Notion",
+  slack: "Slack",
+  figma: "Figma",
+  stripe: "Stripe",
+  cloudflare: "Cloudflare",
+  vercel: "Vercel",
+  hetzner: "Hetzner",
+  skyscanner: "Skyscanner",
+  kayak: "Kayak",
+  expedia: "Expedia",
+  lego: "LEGO",
+  epam: "EPAM",
+  mit: "MIT",
+  stanford: "Stanford",
+  cmu: "Carnegie Mellon",
+  berkeley: "UC Berkeley",
+  harvard: "Harvard",
+  coursera: "Coursera",
+  edx: "edX",
+  udemy: "Udemy",
+  medium: "Medium",
+  substack: "Substack",
 };
 
 const squash = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 
 /**
- * The name a person calls a site by. A page title usually carries it with its
- * own casing ("Apply to YC | Y Combinator", "Remote Work With EPAM"); a few
- * well-known names are known; otherwise the site's name, capitalised.
+ * The name a person calls a site by: a well-known name, or the site's own
+ * name as its page titles set it ("Apply to YC | Y Combinator", "Remote Work
+ * With EPAM"). Failing both, the site's address as written: a name is never
+ * made up from a fragment of a host.
  */
 export function siteName(host: string, titles: readonly string[] = []): string {
+  const site = registrableSite(host);
   const key = siteKey(host);
   if (!key) return host;
   if (KNOWN[key]) return KNOWN[key];
+  const whole = squash(site);
   for (const title of titles)
     for (const segment of title.split(/\s+[|·–—-]\s+|\s*[|·]\s*/u)) {
       const part = segment.trim();
-      if (part && part.length <= 32 && squash(part) === key) return part;
+      if (part && part.length <= 32 && (squash(part) === key || squash(part) === whole))
+        return part;
     }
   const word = new RegExp(
     `(?:^|[^\\p{L}\\p{N}])(${key.replace(/[^a-z0-9]/gu, "")})(?![\\p{L}\\p{N}])`,
@@ -109,7 +140,5 @@ export function siteName(host: string, titles: readonly string[] = []): string {
     const found = word.exec(title)?.[1];
     if (found && found !== found.toLowerCase()) return found;
   }
-  // A three-letter site is an initialism: CMU, MIT, LOT.
-  if (key.length <= 3) return key.toUpperCase();
-  return key.charAt(0).toUpperCase() + key.slice(1);
+  return site;
 }

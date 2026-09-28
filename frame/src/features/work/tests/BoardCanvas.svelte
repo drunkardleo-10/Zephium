@@ -49,7 +49,7 @@
     environmentAgents(scene.snapshot, scene.objectives, () => undefined, stages),
   );
   const items = $derived([
-    ...environmentItems(scene.snapshot, [], [], scene.objectives),
+    ...environmentItems(scene.snapshot, [], [], scene.objectives, scene.media),
     ...requests.items,
     ...environmentBoards(stages),
     ...environmentParts(scene.objectives, stages, recorded),
@@ -97,7 +97,7 @@
         own.positions,
         own.sizes ?? {},
         stages,
-        environmentItems(scene.snapshot, [], [], scene.objectives).flatMap((item) =>
+        environmentItems(scene.snapshot, [], [], scene.objectives, scene.media).flatMap((item) =>
           item.type === "objective" ? [] : [item.id],
         ),
       ),

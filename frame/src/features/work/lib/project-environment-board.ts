@@ -374,6 +374,7 @@ export function environmentStages(
               ),
               projection,
             ),
+            detail,
           ),
         },
         found: set.objects.flatMap((object) => {
@@ -416,6 +417,7 @@ export function environmentStages(
         parts,
         inputs,
         found,
+        detail,
         targets: Object.fromEntries(
           Object.entries(lane.rects).map(([id, rect]) => [id, { x: rect.x, y: rect.y }]),
         ),

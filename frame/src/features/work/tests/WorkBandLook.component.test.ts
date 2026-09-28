@@ -5,16 +5,45 @@ import { page } from "vitest/browser";
 import type { WorkRuntimeProjection } from "$shared/ipc/bindings";
 import BoardCanvas from "./BoardCanvas.svelte";
 import type { BoardScene } from "./board-fixtures";
+import type { MediaAssetV1 } from "$domain/resources";
+import { elementPictures } from "../lib/project-environment-board";
 import { askingTrip, leadTrip } from "./lead-look";
 
 // Real runs exported read-only from the QA profile into node_modules/.work-look;
 // without them there is nothing to look at and the test only renders nothing.
 const LOOK = "/node_modules/.work-look";
 let shown = "";
+/** Each admitted picture's file extension, by digest, for the scene on show. */
+const pictureFiles = new Map<string, string>();
+const EXTENSION: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+  "image/gif": "gif",
+};
 vi.mock("$domain/resources", async (original) => ({
   ...(await original<typeof import("$domain/resources")>()),
   pageFrameUrl: (attempt: string, step: string) => `${LOOK}/${shown}/frames/${attempt}-${step}.png`,
+  mediaUrl: (_profile: string, digest: string) =>
+    `${LOOK}/${shown}/media/${digest}.${pictureFiles.get(digest) ?? "png"}`,
 }));
+// The QA profile's cached site icons, so marks draw as they do in the app.
+vi.mock("$domain/favicons", async (original) => {
+  const actual = await original<typeof import("$domain/favicons")>();
+  const response = await fetch("/node_modules/.work-look/objects/favicons.json");
+  const icons = response.ok ? ((await response.json()) as Record<string, string>) : {};
+  const images = new Map<string, ImageData>();
+  for (const [origin, rgba] of Object.entries(icons)) {
+    const bytes = Uint8ClampedArray.from(atob(rgba), (char) => char.charCodeAt(0));
+    if (bytes.length === 4096) images.set(origin, new ImageData(bytes, 32, 32));
+  }
+  const forPage = (url: string) => {
+    const origin = /^https?:\/\/[^/?#]+/iu.exec(url)?.[0]?.toLowerCase();
+    const image = origin ? images.get(origin) : undefined;
+    return image ? { image, tone: "mid" as const } : null;
+  };
+  return { ...actual, favicons: { ...actual.favicons, forPage } };
+});
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({ faviconProbe: async () => true });
@@ -29,13 +58,19 @@ async function scene(name: string): Promise<BoardScene | null> {
     snapshot: BoardScene["snapshot"];
     objectives: Record<string, WorkRuntimeProjection>;
     pages: BoardScene["pages"];
+    media?: Record<string, MediaAssetV1>;
   };
+  const media = new Map(Object.entries(raw.media ?? {}));
+  pictureFiles.clear();
+  for (const asset of media.values())
+    pictureFiles.set(asset.digest, EXTENSION[asset.mime] ?? "png");
   return {
     name,
     snapshot: raw.snapshot,
     objectives: new Map(Object.entries(raw.objectives)),
-    pictures: new Map(),
+    pictures: elementPictures(raw.snapshot, media),
     pages: raw.pages,
+    media,
   };
 }
 

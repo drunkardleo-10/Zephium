@@ -1,3 +1,4 @@
+import type { MediaAssetV1 } from "$domain/resources";
 import type {
   WorkArtifactDataV1,
   WorkArtifactV1,
@@ -195,6 +196,8 @@ export type BoardScene = {
   objectives: Map<string, WorkRuntimeProjection>;
   pictures: Map<string, { profile: string; digest: string }>;
   pages: WorkPageV1[];
+  /** The admitted media the canvas's resource elements stand for. */
+  media?: Map<string, MediaAssetV1>;
 };
 
 /** A work whose runs placed what organize places, element by element, pictures where a subject has one. */

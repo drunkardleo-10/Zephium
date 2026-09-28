@@ -16,8 +16,10 @@ import { firstRequest, type WorkStage } from "./project-environment-thread";
 import { host, observedTitle } from "./project-environment-stage";
 import { BOARD_PIN, laneElement, partShape } from "./project-environment-board";
 import type { RunPart } from "./run/parts";
+import { hostOf, siteKey, siteName } from "./run/site";
+import type { SourceRow } from "./project-environment-stage";
 import { RUN } from "./run/layout";
-import { PART } from "./run/part-size";
+import { PART, labelWidth } from "./run/part-size";
 import { fileName } from "./work-files";
 import { linkVideo } from "./link-media";
 import { heldPage, humanPage, phaseLabel } from "./work-human";
@@ -151,9 +153,11 @@ function elementItems(
     if (element.reference.kind === "browser") {
       const tabId = element.reference.tab;
       const tab = tabs.find((tab) => tab.id === tabId);
+      // A tab the work held that has since closed says nothing: it drops out, never a blank card.
+      if (!tab) return [];
       let origin = "";
       try {
-        if (tab?.url) {
+        if (tab.url) {
           const parsed = new URL(tab.url);
           if (parsed.origin !== "null") origin = parsed.origin;
         }
@@ -165,11 +169,10 @@ function elementItems(
         type: "tab",
         area: element.area,
         kind: m.work_env_browser_resource(),
-        title: tab?.title || m.work_env_unavailable_tab(),
+        title: tab.title || host(tab.url ?? undefined) || m.work_env_browser_resource(),
         detail: origin,
-        status: tab ? area : m.work_env_tab_unavailable(),
-        icon: tab?.icon ?? null,
-        unavailable: !tab,
+        status: area,
+        icon: tab.icon ?? null,
       };
     }
     if (element.reference.kind === "resource") {
@@ -505,7 +508,10 @@ function standFor(doing: AgentDoing, stage: WorkStage): CanvasPosition {
   const rect = working ? stage.lane.rects[working.id] : undefined;
   if (rect && doing !== "writing" && doing !== "done") {
     if (working!.helper === "browser" && working!.pages.length)
-      return { x: rect.x + PART.label + PART.gap + PART.tile - MARK / 2, y: rect.y - MARK / 2 };
+      return {
+        x: rect.x + labelWidth(stage.detail) + PART.gap + PART.tile - MARK / 2,
+        y: rect.y - MARK / 2,
+      };
     // Beside a row that shows its own work, off its end on the row's line.
     return { x: rect.x + rect.width + 8, y: rect.y + RUN.labelMid - MARK / 2 };
   }
@@ -575,6 +581,21 @@ export function environmentAgents(
     items.push(item);
   }
   return { items, positions };
+}
+
+/** What a search part drew on, one row per site: its mark and the name it goes by. */
+function citedSites(rows: readonly SourceRow[]) {
+  const sites = new Map<string, { key: string; url: string; where: string; title: string }>();
+  for (const row of rows) {
+    const host = hostOf(row.url);
+    const key = siteKey(host);
+    if (!host || sites.has(key)) continue;
+    const titles = rows.flatMap((other) =>
+      siteKey(hostOf(other.url)) === key ? [other.title] : [],
+    );
+    sites.set(key, { key: row.key, url: row.url, where: host, title: siteName(host, titles) });
+  }
+  return [...sites.values()];
 }
 
 /** Found things a part names in its summary, by the kind of thing. */
@@ -726,13 +747,8 @@ export function environmentParts(
           ...(helper ? { presence: agentSeed(stage.objective) } : {}),
           ...(part.helper === "research"
             ? {
-                cited: rows.slice(0, PART.sourceRows).map(({ key, url, where, title }) => ({
-                  key,
-                  url,
-                  where,
-                  title,
-                })),
-                citedCount: part.sources.length,
+                cited: citedSites(part.sources).slice(0, PART.sourceRows),
+                citedCount: citedSites(part.sources).length,
               }
             : {}),
         },

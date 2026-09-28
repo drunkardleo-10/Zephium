@@ -1326,8 +1326,6 @@
   "work_env_add_tabs": "Add to Work ({count})",
   "work_env_open_browse": "Open in Browse",
   "work_env_browser_resource": "Browser resource",
-  "work_env_unavailable_tab": "Unavailable tab",
-  "work_env_tab_unavailable": "Closed or outside the current Space",
   "work_env_saved_resource": "Saved resource",
   "work_env_resource_reference": "A reference to a saved note",
   "work_env_objective": "Request",

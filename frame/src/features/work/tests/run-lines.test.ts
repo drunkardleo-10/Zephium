@@ -62,6 +62,12 @@ test("a site's parts across its countries are one, named as people call it", () 
   expect(siteName("careers.epam.com", ["Senior Rust Engineer | Remote Work With EPAM"])).toBe(
     "EPAM",
   );
-  expect(siteName("cmu.edu")).toBe("CMU");
-  expect(siteName("rublon.com")).toBe("Rublon");
+  expect(siteName("cmu.edu")).toBe("Carnegie Mellon");
+  // Without a real name, the address as written: never a name made from a fragment.
+  expect(siteName("dthain.github.io")).toBe("dthain.github.io");
+  expect(siteName("www.cl.cam.ac.uk")).toBe("cam.ac.uk");
+  expect(siteName("craftinginterpreters.com", ["Scanning · Crafting Interpreters"])).toBe(
+    "Crafting Interpreters",
+  );
+  expect(siteName("rublon.com", ["Careers – Rublon"])).toBe("Rublon");
 });

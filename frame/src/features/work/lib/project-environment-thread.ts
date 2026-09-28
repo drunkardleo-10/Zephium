@@ -2,6 +2,7 @@ import type { WorkRuntimeProjection } from "$shared/ipc/bindings";
 import { clipText, type CanvasItem, type CanvasLink, type CanvasPosition } from "./canvas-model";
 import type { Board } from "./board/types";
 import type { Rect } from "./board/layout";
+import type { Detail } from "./board/types";
 import type { TrailLine } from "./board/trail";
 import { RUN, type RunPlace } from "./run/layout";
 import type { RunInputView, RunPart } from "./run/parts";
@@ -49,6 +50,8 @@ export type WorkStage = {
   pinned: ReadonlySet<string>;
   /** Where every node of the run stands. */
   targets: Record<string, CanvasPosition>;
+  /** The detail the run was laid out for. */
+  detail: Detail;
 };
 const REQUEST_TEXT = 512;
 

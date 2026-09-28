@@ -278,9 +278,13 @@ export function runParts(
   const list = [...parts.values()].sort((a, b) => before(a.at, b.at));
   for (const part of list)
     if (part.helper === "browser") {
-      const titles = part.pages.flatMap((page) =>
-        page.steps.flatMap((step) => (step.local?.page_title ? [step.local.page_title] : [])),
-      );
+      // The site's own name, as its pages and what search cited from it title themselves.
+      const titles = [
+        ...part.pages.flatMap((page) =>
+          page.steps.flatMap((step) => (step.local?.page_title ? [step.local.page_title] : [])),
+        ),
+        ...cited.flatMap((row) => (siteKey(hostOf(row.url)) === part.key ? [row.title] : [])),
+      ];
       part.title = siteName(part.host ?? part.key, titles);
     }
   // Sites that never opened are one quiet row at the end, not a row each.

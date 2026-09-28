@@ -1,3 +1,4 @@
+import { diagramLayout, diagramWidth } from "../diagram";
 import type { ObjectView, SheetColumn } from "./types";
 
 type Range = { min: number; ideal: number; max: number };
@@ -64,8 +65,11 @@ export function objectWidth(view: ObjectView): Range {
       return { min: 460, ideal: 600, max: 720 };
     case "document":
       return { min: 360, ideal: 480, max: 560 };
-    case "diagram":
-      return { min: 640, ideal: 880, max: 1600 };
+    case "diagram": {
+      // A diagram stands at its own drawn width, so its parts read at their size.
+      const ideal = Math.min(1600, diagramWidth(view.diagram) + 40);
+      return { min: Math.min(ideal, 720), ideal, max: 1600 };
+    }
   }
 }
 
@@ -128,6 +132,6 @@ export function objectHeight(view: ObjectView, width: number): number {
     case "document":
       return 320;
     case "diagram":
-      return 520;
+      return Math.ceil(diagramLayout(view.diagram).bounds.height) + 80;
   }
 }

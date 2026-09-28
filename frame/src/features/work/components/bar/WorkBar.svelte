@@ -69,7 +69,11 @@
   <div
     class="surface"
     role="presentation"
-    onfocusin={() => (focused = true)}
+    onfocusin={(event) => {
+      // A tool's own panel is the tools at work, not the field: the bar stays as it is.
+      if (event.target instanceof Element && event.target.closest(".tools")) return;
+      focused = true;
+    }}
     onfocusout={(event) => {
       const next = event.relatedTarget;
       if (next instanceof Node && event.currentTarget.contains(next)) return;

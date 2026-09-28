@@ -1,3 +1,4 @@
+import type { Detail } from "../board/types";
 /**
  * A part's own node: its name in a 120 px column, then its pages. While the
  * part works they stand as frames, up to three, the live one first; once it
@@ -8,8 +9,8 @@ export const PART = {
   gap: 16,
   tile: 176,
   tileGap: 12,
-  /** A frame at 16:10 with its caption under it. */
-  tileHeight: 110 + 26,
+  /** A frame at 16:10 with its caption, up to two lines, under it. */
+  tileHeight: 110 + 6 + 32,
   shown: 3,
   /** Folded pages: 144 × 90 thumbnails, each one behind 12 across and 11 down. */
   thumb: 144,
@@ -41,8 +42,14 @@ export type PartShape =
   | { kind: "ask"; height: number }
   | { kind: "label" };
 
-export function partSize(shape: PartShape): { width: number; height: number } {
-  const lead = PART.label + PART.gap;
+/** The name's column: surveyed from afar it widens, so a name reads whole at its large size. */
+export const labelWidth = (detail: Detail = "full") => (detail === "full" ? PART.label : 200);
+
+export function partSize(
+  shape: PartShape,
+  detail: Detail = "full",
+): { width: number; height: number } {
+  const lead = labelWidth(detail) + PART.gap;
   switch (shape.kind) {
     case "frames": {
       const count = Math.max(1, Math.min(PART.shown, shape.count));
@@ -75,6 +82,6 @@ export function partSize(shape: PartShape): { width: number; height: number } {
     case "ask":
       return { width: lead + PART.ask, height: Math.max(PART.labelHeight, shape.height) };
     case "label":
-      return { width: 320, height: 56 };
+      return { width: Math.max(320, lead + 200), height: 56 };
   }
 }

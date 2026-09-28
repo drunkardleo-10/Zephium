@@ -1116,14 +1116,10 @@
   /** The lift's one action for a result: Make tasks for a plan, Save as note for a document. */
   function resultAction(id: string): LiftAction | undefined {
     const state = workTasks.state(id);
-    if (state === "none") return noteAction(id);
+    // Once the steps are tasks, the result's action is its note, never a spent "made" label.
+    if (state === "none" || state === "made") return noteAction(id);
     return {
-      label:
-        state === "made"
-          ? m.work_tasks_made()
-          : state === "making"
-            ? m.work_making_tasks()
-            : m.work_make_tasks(),
+      label: state === "making" ? m.work_making_tasks() : m.work_make_tasks(),
       title: m.work_make_tasks_hint(),
       disabled: state !== "ready",
       onclick: () => void workTasks.make(id),
@@ -1379,7 +1375,12 @@
     const folders = grantedFolders;
     if (current) current.folders = folders;
   });
-  const busy = $derived(!!session.pending || session.loading || objectivePending);
+  // A quiet save of the arrangement is not the person waiting on anything: it never disables a control.
+  const busy = $derived(
+    (!!session.pending && session.pending.kind !== "checkpoint") ||
+      session.loading ||
+      objectivePending,
+  );
   const attachedTabs = $derived(
     snapshot?.elements.flatMap((element) =>
       element.reference.kind === "browser" ? [element.reference.tab] : [],
@@ -1555,6 +1556,8 @@
           (element) =>
             element.reference.kind === "objective" && element.reference.objective === objectiveId,
         );
+        // A quiet save of the arrangement may be in flight: it lands first.
+        if (!attached && !(await session.flushView())) return;
         if (
           !attached &&
           !(await session.edit({
@@ -1777,7 +1780,7 @@
         {spaceName}
         {currentTabId}
         attachedTabIds={attachedTabs}
-        pending={busy}
+        pending={objectivePending || session.pending?.kind === "command"}
         onattach={(ids) => void attach(ids)}
         onopen={(id) => openPane({ kind: "tab", id }, null)}
         {onnewtab}
