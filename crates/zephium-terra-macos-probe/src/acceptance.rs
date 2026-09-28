@@ -271,6 +271,96 @@ pub(super) struct LeadScenario {
     pub answer: &'static str,
     /// A throwaway folder the person grants, for code work.
     pub folder: bool,
+    /// A page check: the start page a scripted helper browses, whose goal
+    /// is the one request. Only the page agent calls a model.
+    pub site: Option<&'static str>,
+}
+
+pub(super) fn site_scenario(start: &str, goal: &str) -> &'static LeadScenario {
+    let start: &'static str = Box::leak(start.to_owned().into_boxed_str());
+    let goal: &'static str = Box::leak(goal.to_owned().into_boxed_str());
+    Box::leak(Box::new(LeadScenario {
+        name: "site",
+        requests: Box::leak(vec![goal].into_boxed_slice()),
+        answer: "Allow",
+        folder: false,
+        site: Some(start),
+    }))
+}
+
+/// The lead and helper turns of a page check: start one browser part, browse
+/// the start page toward the goal with records, then finish.
+struct Scripted {
+    start: &'static str,
+}
+
+impl zephium_core::work::model::WorkModelClient for Scripted {
+    fn call<'a>(
+        &'a self,
+        request: zephium_core::work::model::WorkModelRequest,
+        _: &'a (dyn Fn(zephium_core::work::model::WorkModelEvent) + Send + Sync),
+    ) -> zephium_core::work::model::WorkModelFuture<'a> {
+        use zephium_core::work::model::*;
+        let answered = request
+            .messages
+            .iter()
+            .any(|message| matches!(message, WorkModelMessage::ToolResults(_)));
+        let lead = request.tools.iter().any(|tool| tool.name == "start_part");
+        let goal = request
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                WorkModelMessage::User(parts) => parts.iter().find_map(|part| match part {
+                    WorkModelPart::Text(text) => text
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("Request: ")
+                                .or_else(|| line.strip_prefix("Goal: "))
+                        })
+                        .map(str::to_owned),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let (name, arguments) = match (lead, answered) {
+            (true, false) => (
+                "start_part",
+                serde_json::json!({"title": "Site", "helper": "browser",
+                    "goal": goal.chars().take(200).collect::<String>(), "brief": goal}),
+            ),
+            (true, true) => ("finish", serde_json::json!({"say": "Checked the page."})),
+            (false, false) => (
+                "browse",
+                serde_json::json!({"start": self.start, "goal": goal, "records": {
+                    "title": "Results", "max_items": 8, "columns": [
+                        {"name": "price", "value": {"kind": "text"}, "required": false, "extraction": "verbatim"},
+                        {"name": "rating", "value": {"kind": "text"}, "required": false, "extraction": "verbatim"},
+                        {"name": "details", "value": {"kind": "text"}, "required": false, "extraction": "generate"},
+                        {"name": "url", "value": {"kind": "url"}, "required": false, "extraction": "generate"},
+                        {"name": "photo", "value": {"kind": "image_url"}, "required": false, "extraction": "generate"}
+                    ]}}),
+            ),
+            (false, true) => (
+                "finish",
+                serde_json::json!({"summary": "Checked", "digest": "Checked the page."}),
+            ),
+        };
+        Box::pin(async move {
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    cost_micros: Some(0),
+                    ..WorkModelUsage::default()
+                },
+                assistant: vec![WorkModelPart::ToolCall(WorkModelToolCall {
+                    id: "scripted".into(),
+                    name: name.into(),
+                    arguments,
+                })],
+            })
+        })
+    }
 }
 
 pub(super) const LEAD_SCENARIOS: [LeadScenario; 8] = [
@@ -279,6 +369,7 @@ pub(super) const LEAD_SCENARIOS: [LeadScenario; 8] = [
         requests: &["Plan my YC batch trip from Warsaw"],
         answer: "The Winter 2027 batch, 5 January to 20 March 2027. One traveller with a Polish passport. Budget up to $9,000 for flights and stay together.",
         folder: false,
+        site: None,
     },
     LeadScenario {
         name: "architecture",
@@ -288,42 +379,49 @@ pub(super) const LEAD_SCENARIOS: [LeadScenario; 8] = [
         ],
         answer: "A B2B SaaS with chat over the customer's documents, about 5,000 users in the first year.",
         folder: false,
+        site: None,
     },
     LeadScenario {
         name: "today",
         requests: &["What do I need to do today? Check my Slack and Gmail."],
         answer: "Allow",
         folder: false,
+        site: None,
     },
     LeadScenario {
         name: "bug",
         requests: &["The tests fail in my granted folder: fix the bug and show the tests passing"],
         answer: "Go ahead",
         folder: true,
+        site: None,
     },
     LeadScenario {
         name: "compilers",
         requests: &["Learn compilers from free university material"],
         answer: "A software engineer, about 6 hours a week, 12 weeks.",
         folder: false,
+        site: None,
     },
     LeadScenario {
         name: "products",
         requests: &["Compare three LEGO Star Wars sets from lego.com and pick one for a 10-year-old"],
         answer: "Up to $100.",
         folder: false,
+        site: None,
     },
     LeadScenario {
         name: "question",
         requests: &["Who wrote Dune?"],
         answer: "",
         folder: false,
+        site: None,
     },
     LeadScenario {
         name: "conversion",
         requests: &["30 EUR in PLN"],
         answer: "",
         folder: false,
+        site: None,
     },
 ];
 
@@ -472,6 +570,62 @@ async fn stand_in(
     }
 }
 
+/// One closed row per page a run opened: its host, outcome, closed note,
+/// cost and what it gave (records, and records with a picture).
+fn page_rows(execution: &zephium_core::work::runtime::WorkExecutionFact) {
+    use zephium_core::work::{artifact::WorkArtifactDataV1 as Data, runtime::*};
+    for step in &execution.steps {
+        let WorkStepKindV1::Read { url, goal, .. } = &step.kind else {
+            continue;
+        };
+        let host = url
+            .split_once("://")
+            .map_or("", |(_, rest)| rest.split(['/', '?']).next().unwrap_or(""));
+        let (mut records, mut pictured, mut priced) = (0, 0, 0);
+        for artifact in execution
+            .artifacts
+            .iter()
+            .filter(|artifact| step.artifacts.contains(&artifact.id))
+        {
+            match &artifact.data {
+                Data::ComparisonMatrix { subjects, .. } | Data::Findings { subjects, .. } => {
+                    records += subjects.len();
+                    pictured += subjects
+                        .iter()
+                        .filter(|subject| !subject.image_candidates.is_empty())
+                        .count();
+                }
+                _ => {}
+            }
+            if let Data::ComparisonMatrix { cells, .. } = &artifact.data {
+                priced += cells
+                    .iter()
+                    .filter(|row| {
+                        row.iter().any(|cell| {
+                            matches!(&cell.value,
+                                zephium_core::work::artifact::WorkCellValue::Money { .. })
+                                || matches!(&cell.value,
+                                    zephium_core::work::artifact::WorkCellValue::Text { text }
+                                        if text.chars().any(|c| "$€£¥".contains(c)) || text.contains("zł"))
+                        })
+                    })
+                    .count();
+            }
+        }
+        say(format_args!(
+            "lead-page: host={host} task={} status={:?} note={:?} wall_ms={} planner_calls={} actions={} tokens={} cost_micro_usd={} records={records} pictured={pictured} priced={priced}",
+            goal.is_some(),
+            step.status,
+            step.note,
+            step.measurements.as_ref().map_or(0, |m| m.wall_millis),
+            step.measurements.as_ref().map_or(0, |m| m.planner_calls),
+            step.measurements.as_ref().map_or(0, |m| m.native_actions),
+            step.measurements.as_ref().map_or(0, |m| m.model_tokens),
+            step.measurements.as_ref().map_or(0, |m| m.cost_micro_usd),
+        ));
+    }
+}
+
 fn needs_person(kind: &zephium_core::work::runtime::WorkStepKindV1) -> bool {
     use zephium_core::work::runtime::WorkStepKindV1 as K;
     match kind {
@@ -515,7 +669,20 @@ pub(super) async fn lead_workflow(
         "lead-run: models lead={} page={} light={}",
         lead.entry.id, page.entry.id, light.entry.id
     ));
-    let models = WorkLeadModels { lead, page, light };
+    let models = match scenario.site {
+        Some(start) => {
+            let scripted = LeadModel {
+                entry: lead.entry.clone(),
+                client: Arc::new(Scripted { start }),
+            };
+            WorkLeadModels {
+                lead: scripted.clone(),
+                page: scripted.clone(),
+                light: scripted,
+            }
+        }
+        None => WorkLeadModels { lead, page, light },
+    };
     let folder = if scenario.folder {
         Some(bug_folder()?)
     } else {
@@ -702,6 +869,7 @@ pub(super) async fn lead_workflow(
             usage.map_or(0, |u| u.cost_micro_usd),
             usage.map(|u| u.accounting),
         ));
+        page_rows(execution);
         if !matches!(
             execution.status,
             WorkExecutionStatus::Completed | WorkExecutionStatus::NeedsReview

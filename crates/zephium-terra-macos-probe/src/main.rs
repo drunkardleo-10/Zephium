@@ -186,6 +186,8 @@ fn main() {
         #[cfg(feature = "durable-runtime")]
         [argument, scenario] if argument == "--live-lead" => work_durable::run_lead(scenario),
         #[cfg(feature = "durable-runtime")]
+        [argument, start, goal] if argument == "--live-site" => work_durable::run_site(start, goal),
+        #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-airbnb-work" => work_durable::run_agent_airbnb(),
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--live-agent-airbnb-listing-work" => work_durable::run_agent_listing(),

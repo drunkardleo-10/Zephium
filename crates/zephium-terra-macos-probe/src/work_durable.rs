@@ -181,6 +181,23 @@ pub(super) fn run_lead(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure
     run_mode(Mode::Lead)
 }
 
+/// One page task on a named start page through the lead's Browser helper,
+/// with scripted lead and helper turns: only the page agent calls a model.
+pub(super) fn run_site(
+    start: &std::ffi::OsStr,
+    goal: &std::ffi::OsStr,
+) -> Result<(), super::ProbeFailure> {
+    let (Some(start), Some(goal)) = (start.to_str(), goal.to_str()) else {
+        return Err(super::ProbeFailure::Authority);
+    };
+    if !start.starts_with("https://") || start.len() > 512 || goal.is_empty() || goal.len() > 600 {
+        return Err(super::ProbeFailure::Authority);
+    }
+    let scenario = super::acceptance::site_scenario(start, goal);
+    let _ = LEAD_SCENARIO.set(scenario);
+    run_mode(Mode::Lead)
+}
+
 pub(super) fn run_loopback_site() -> Result<(), super::ProbeFailure> {
     run_mode(Mode::LoopbackSite)
 }
