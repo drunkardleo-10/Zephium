@@ -1,6 +1,8 @@
 //! `cargo xtask webext-suite`: runs real Chrome Web Store extensions through
 //! the WebKit runtime's lab harness and checks each still starts, and still
 //! renders its popup, as `crates/zephium-webext-macos/suite.json` expects.
+//! An entry's `check` loads a page and asks whether the extension did its
+//! job there, for extensions the browser recommends.
 //! Packages are downloaded into `target/webext-suite/` and refreshed weekly.
 
 use std::collections::VecDeque;
@@ -34,6 +36,23 @@ struct Expectation {
     allow: Vec<String>,
     #[serde(default)]
     known: Option<String>,
+    #[serde(default)]
+    check: Option<Check>,
+}
+
+#[derive(Deserialize)]
+struct Check {
+    url: String,
+    /// Body of an async function run in the page; truthy means it worked.
+    eval: String,
+    #[serde(default = "Check::default_wait")]
+    wait: u64,
+}
+
+impl Check {
+    fn default_wait() -> u64 {
+        5000
+    }
 }
 
 struct Outcome {
@@ -189,6 +208,15 @@ fn run_lab(lab: &Path, cache: &Path, entry: &Expectation) -> Result<String, Stri
             "eval": "const roots = [document.body, ...[...document.querySelectorAll('*')].map((e) => e.shadowRoot)].filter(Boolean); return roots.map((root) => root.innerText ?? root.textContent ?? '').join('').trim().length;"
         }));
     }
+    if let Some(check) = &entry.check {
+        steps.push(serde_json::json!({ "tab": check.url }));
+        steps.push(serde_json::json!({ "sleep": check.wait }));
+        steps.push(serde_json::json!({
+            "eval": format!("return 'CHECK ' + Boolean(await (async () => {{ {} }})());", check.eval),
+            "in": "tab",
+            "timeout": 10000
+        }));
+    }
     let scenario = cache.join(format!("{}.scenario.json", entry.id));
     std::fs::write(&scenario, serde_json::to_vec(&steps).unwrap_or_default())
         .map_err(|e| e.to_string())?;
@@ -248,12 +276,16 @@ fn evaluate(entry: &Expectation, output: &str) -> Vec<String> {
     if entry.popup {
         let rendered = output
             .lines()
-            .rev()
             .find_map(|line| line.strip_prefix("RESULT "))
             .and_then(|value| value.trim().parse::<u64>().ok())
             .is_some_and(|length| length > 0);
         if !rendered {
             problems.push("popup rendered nothing".to_string());
+        }
+    }
+    if let Some(check) = &entry.check {
+        if !output.lines().any(|line| line.contains("CHECK true")) {
+            problems.push(format!("did nothing on {}", check.url));
         }
     }
     let tag = format!("[{} ERROR]", entry.id);
@@ -287,6 +319,7 @@ mod tests {
             popup,
             allow: allow.iter().map(|entry| entry.to_string()).collect(),
             known: None,
+            check: None,
         }
     }
 
@@ -300,6 +333,20 @@ mod tests {
         let problems = evaluate(&expectation(true, &["connectNative"]), output);
         assert_eq!(problems, ["[worker] TypeError: x is undefined"]);
         assert!(evaluate(&expectation(true, &["connectNative", "TypeError"]), output).is_empty());
+    }
+
+    #[test]
+    fn a_check_passes_only_when_the_page_changed() {
+        let mut entry = expectation(true, &[]);
+        entry.check = Some(Check {
+            url: "https://example.com/".into(),
+            eval: "return true".into(),
+            wait: 0,
+        });
+        let passed = "LOADED Ok(..)\nRESULT 12\nRESULT CHECK true\nDONE\n";
+        assert!(evaluate(&entry, passed).is_empty());
+        let failed = "LOADED Ok(..)\nRESULT 12\nRESULT CHECK false\nDONE\n";
+        assert_eq!(evaluate(&entry, failed), ["did nothing on https://example.com/"]);
     }
 
     #[test]

@@ -27,7 +27,11 @@
   {
     "name": "Dark Reader",
     "id": "eimadpbcbfnmbkopoojfekhnkhdbieeh",
-    "popup": true
+    "popup": true,
+    "check": {
+      "url": "https://example.com/",
+      "eval": "return document.querySelector('style.darkreader') !== null"
+    }
   },
   {
     "name": "Dashlane",
@@ -64,7 +68,12 @@
   {
     "name": "Enhancer for YouTube",
     "id": "ponfpcnoihfmfllpaingbgckeeldkhle",
-    "popup": false
+    "popup": false,
+    "check": {
+      "url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+      "wait": 10000,
+      "eval": "return document.querySelector('[id^=\"efyt\"], [class*=\"efyt\"]') !== null"
+    }
   },
   {
     "name": "Evernote Web Clipper",
@@ -99,7 +108,11 @@
     "allow": [
       "executeScript",
       "CSRFToken"
-    ]
+    ],
+    "check": {
+      "url": "https://example.com/",
+      "eval": "return document.querySelector('grammarly-desktop-integration') !== null"
+    }
   },
   {
     "name": "Honey",
@@ -148,7 +161,12 @@
   {
     "name": "Octotree",
     "id": "bkhaagjahfmjljalopjnoealnfndnagc",
-    "popup": false
+    "popup": false,
+    "check": {
+      "url": "https://github.com/refined-github/refined-github",
+      "wait": 8000,
+      "eval": "return document.querySelector('.octotree-sidebar, [class*=\"octotree\"]') !== null"
+    }
   },
   {
     "name": "OneTab",
@@ -185,7 +203,12 @@
     "popup": false,
     "allow": [
       "tab.id"
-    ]
+    ],
+    "check": {
+      "url": "https://github.com/refined-github/refined-github",
+      "wait": 8000,
+      "eval": "return document.querySelector('[class*=\"rgh-\"]') !== null"
+    }
   },
   {
     "name": "Return YouTube Dislike",
