@@ -7,9 +7,10 @@
 
 use std::panic::AssertUnwindSafe;
 
+use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo,
-    CGInterpolationQuality,
+    CGBitmapContextCreate, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
+    CGImageByteOrderInfo, CGInterpolationQuality,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use objc2_web_kit::WKWebExtensionAction;
@@ -32,9 +33,12 @@ fn rasterize_action_icon_inner(action: &WKWebExtensionAction) -> Option<Extensio
     let image = unsafe { action.iconForSize(size) }?;
     let mut proposed = NSRect::new(NSPoint::new(0.0, 0.0), size);
     let image = unsafe { image.CGImageForProposedRect_context_hints(&mut proposed, None, None) }?;
+    rasterize(&image)
+}
+
+fn bitmap(rgba: &mut [u8]) -> Option<CFRetained<CGContext>> {
     let color_space = CGColorSpace::new_device_rgb()?;
-    let mut rgba = vec![0_u8; EXTENSION_ACTION_ICON_RGBA_BYTES];
-    let context = unsafe {
+    unsafe {
         CGBitmapContextCreate(
             rgba.as_mut_ptr().cast(),
             EXTENSION_ACTION_ICON_WIDTH,
@@ -44,16 +48,25 @@ fn rasterize_action_icon_inner(action: &WKWebExtensionAction) -> Option<Extensio
             Some(&color_space),
             CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0,
         )
-    }?;
+    }
+}
+
+/// A bitmap context's memory already starts with the image's top row, which
+/// is the order `ImageData` reads, so the image is drawn untransformed.
+fn rasterize(image: &CGImage) -> Option<ExtensionActionIcon> {
+    let mut rgba = vec![0_u8; EXTENSION_ACTION_ICON_RGBA_BYTES];
+    let context = bitmap(&mut rgba)?;
     CGContext::set_interpolation_quality(Some(&context), CGInterpolationQuality::High);
-    // Bitmap rows are consumed top-to-bottom by ImageData, while CoreGraphics
-    // draws from a lower-left origin. Flip only the destination transform.
-    CGContext::translate_ctm(Some(&context), 0.0, EXTENSION_ACTION_ICON_HEIGHT as f64);
-    CGContext::scale_ctm(Some(&context), 1.0, -1.0);
     CGContext::draw_image(
         Some(&context),
-        NSRect::new(NSPoint::new(0.0, 0.0), size),
-        Some(&image),
+        NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(
+                EXTENSION_ACTION_ICON_WIDTH as f64,
+                EXTENSION_ACTION_ICON_HEIGHT as f64,
+            ),
+        ),
+        Some(image),
     );
     // The bitmap context retains the raw destination pointer. Release that
     // native alias before Rust reads or mutates the backing allocation.
@@ -82,6 +95,27 @@ fn unpremultiply_rgba(rgba: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icons_keep_their_top_row_first() {
+        use objc2_core_graphics::CGBitmapContextCreateImage;
+
+        let mut source = vec![0_u8; EXTENSION_ACTION_ICON_RGBA_BYTES];
+        let context = bitmap(&mut source).expect("bitmap");
+        CGContext::set_rgb_fill_color(Some(&context), 1.0, 0.0, 0.0, 1.0);
+        // CoreGraphics' origin is the lower left, so this is the top half.
+        CGContext::fill_rect(
+            Some(&context),
+            NSRect::new(NSPoint::new(0.0, 16.0), NSSize::new(32.0, 16.0)),
+        );
+        let image = CGBitmapContextCreateImage(Some(&context)).expect("image");
+        drop(context);
+
+        let icon = rasterize(&image).expect("icon");
+        let rgba = icon.rgba();
+        assert_eq!(&rgba[..4], &[255, 0, 0, 255]);
+        assert_eq!(rgba[rgba.len() - 1], 0);
+    }
 
     #[test]
     fn rgba_unpremultiplication_is_bounded_and_preserves_alpha() {
