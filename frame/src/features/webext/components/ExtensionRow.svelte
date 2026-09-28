@@ -1,6 +1,7 @@
 <script lang="ts">
   import { MoreHorizontalIcon, PuzzleIcon } from "@hugeicons/core-free-icons";
   import type { WebExtensionView } from "$shared/ipc/bindings";
+  import { IS_WINDOWS } from "$shared/platform";
   import { webext } from "$domain/webext";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
@@ -36,12 +37,16 @@
             label: m.webext_access_all(),
             checked: extension.access === "all",
           },
-          {
-            kind: "item" as const,
-            id: "click",
-            label: m.webext_access_click(),
-            checked: extension.access === "click",
-          },
+          ...(!IS_WINDOWS
+            ? [
+                {
+                  kind: "item" as const,
+                  id: "click",
+                  label: m.webext_access_click(),
+                  checked: extension.access === "click",
+                },
+              ]
+            : []),
           {
             kind: "item" as const,
             id: "sites",
