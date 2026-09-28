@@ -967,6 +967,12 @@ impl super::EngineHost {
         self.webext.unload(profile, install, &sink);
     }
 
+    pub(crate) fn open_web_extension_options(&mut self, profile: ProfileId, extension_id: &str) {
+        if let Some(entry) = self.webext.profiles.get(&profile) {
+            entry.runtime.open_options(extension_id);
+        }
+    }
+
     pub(crate) fn answer_web_extension_access(
         &mut self,
         profile: ProfileId,

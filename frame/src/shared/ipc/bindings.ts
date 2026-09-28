@@ -33,6 +33,35 @@ export const commands = {
 	 */
 	webExtensionAnswerAccess: (request: WebExtensionAccessRequestView, allowed: boolean) => typedError<null, string>(__TAURI_INVOKE("web_extension_answer_access", { request, allowed })),
 	/**
+	 *  Chooses which sites an extension may use: `all` it asked for, only on
+	 *  `click`, or the listed `sites`.
+	 */
+	webExtensionSetAccess: (id: string, mode: string, sites: string[]) => typedError<null, string>(__TAURI_INVOKE("web_extension_set_access", { id, mode, sites })),
+	webExtensionOpenOptions: (id: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_open_options", { id })),
+	/**
+	 *  Lets the user pick a `.crx` or `.zip` file, or with `folder` an unpacked
+	 *  extension, and returns what they are asked to approve; `None` when they
+	 *  cancel the picker.
+	 */
+	webExtensionChooseFile: (folder: boolean) => typedError<{
+	id: string,
+	name: string,
+	version: string,
+	description: string,
+	warnings: string[],
+	icon: string | null,
+	update: boolean,
+	/**  Installed from a file, so not checked against the Web Store. */
+	from_file: boolean,
+} | null, string>(__TAURI_INVOKE("web_extension_choose_file", { folder })),
+	/**  Reviews an extension file dropped on the browser. */
+	webExtensionPrepareFile: (path: string) => typedError<WebExtensionReview, string>(__TAURI_INVOKE("web_extension_prepare_file", { path })),
+	/**
+	 *  Reviews the newest store version of an extension whose update waits for
+	 *  the user's approval.
+	 */
+	webExtensionReviewUpdate: (id: string) => typedError<WebExtensionReview, string>(__TAURI_INVOKE("web_extension_review_update", { id })),
+	/**
 	 *  Reads only platform capability state. It never enumerates credentials,
 	 *  relying parties, or extension-owned vault data and never opens native UI.
 	 */
@@ -1274,6 +1303,8 @@ export type WebExtensionReview = {
 	warnings: string[],
 	icon: string | null,
 	update: boolean,
+	/**  Installed from a file, so not checked against the Web Store. */
+	from_file: boolean,
 };
 
 export type WebExtensionView = {
@@ -1287,6 +1318,14 @@ export type WebExtensionView = {
 	state: string,
 	error: string | null,
 	warnings: string[],
+	/**  `all`, `click` or `sites`; meaningful only when `site_scoped`. */
+	access: string,
+	sites: string[],
+	/**  Whether the extension asked for access to websites at all. */
+	site_scoped: boolean,
+	has_options: boolean,
+	held_update: string | null,
+	sideloaded: boolean,
 };
 
 /* Tauri Specta runtime */

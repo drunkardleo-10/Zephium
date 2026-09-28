@@ -1726,6 +1726,19 @@ impl Engine for WebviewEngine {
     }
 
     #[cfg(target_os = "macos")]
+    fn open_web_extension_options(
+        &self,
+        profile: ProfileId,
+        extension_id: String,
+    ) -> NativeDispatch {
+        NativeDispatch::from_scheduled(self.run(move || {
+            host::best_effort_with(move |host| {
+                host.open_web_extension_options(profile, &extension_id)
+            });
+        }))
+    }
+
+    #[cfg(target_os = "macos")]
     fn answer_web_extension_access(
         &self,
         profile: ProfileId,

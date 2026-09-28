@@ -4,7 +4,7 @@
 mod install;
 mod updates;
 
-pub(in crate::webext) use install::{confirm, prepare};
+pub(in crate::webext) use install::{choose_file, confirm, prepare, prepare_file, review_update};
 pub(in crate::webext) use updates::start_updates;
 
 use std::collections::HashMap;
@@ -17,9 +17,15 @@ use zephium_core::ports::engine::WebExtensionLoad;
 use zephium_webext::manifest::Manifest;
 use zephium_webext::{archive, crx, permissions, prepare, ExtensionId};
 
-use super::{Entry, Registry, WebExtensionView, WebExtensions};
+use super::{Access, Entry, Registry, WebExtensionView, WebExtensions};
 
 const MAX_PACKAGE_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Added to every package: `nativeMessaging` for the browser's own bridges,
+/// and `activeTab`, which grants nothing until the user clicks the
+/// extension, so "on click" site access works for every extension, as it
+/// does in Chrome.
+const ADDED_PERMISSIONS: &[&str] = &["nativeMessaging", "activeTab"];
 
 fn compat_revision() -> String {
     // FNV-1a over the layer and the Chrome identity it presents; changing
@@ -28,6 +34,7 @@ fn compat_revision() -> String {
     for byte in zephium_webext_macos::compat::SCRIPT
         .bytes()
         .chain(zephium_webext_macos::compat::CHROME_VERSION.bytes())
+        .chain(ADDED_PERMISSIONS.concat().bytes())
     {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
@@ -37,7 +44,7 @@ fn compat_revision() -> String {
 
 fn compat_layer() -> prepare::CompatLayer {
     prepare::CompatLayer::new(zephium_webext_macos::compat::SCRIPT)
-        .with_permissions(&["nativeMessaging"])
+        .with_permissions(ADDED_PERMISSIONS)
 }
 
 impl WebExtensions {
@@ -91,7 +98,7 @@ impl WebExtensions {
             extension_id: entry.id.clone(),
             root: self.packages(&entry.id).join(&entry.package),
             permissions: entry.permissions.clone(),
-            match_patterns: entry.hosts.clone(),
+            match_patterns: granted_sites(entry),
             start_background,
         }
     }
@@ -105,7 +112,9 @@ impl WebExtensions {
             for entry in self.registry(profile).extensions {
                 let files = kept.entry(entry.id.clone()).or_default();
                 files.push(entry.package.clone());
-                files.push(format!("{}.crx", entry.version));
+                for original in ["crx", "zip", "src"] {
+                    files.push(format!("{}.{original}", entry.version));
+                }
             }
         }
         let packages = self.root.join("packages");
@@ -150,15 +159,22 @@ impl WebExtensions {
 
     fn rebuild(&self, entry: &mut Entry, revision: &str) -> Result<(), String> {
         let packages = self.packages(&entry.id);
-        let bytes = std::fs::read(packages.join(format!("{}.crx", entry.version)))
-            .map_err(|e| e.to_string())?;
-        let expected = ExtensionId::parse(&entry.id).ok_or("invalid extension id")?;
-        let verified = crx::verify(&bytes, Some(&expected)).map_err(|e| e.to_string())?;
         let package = format!("{}-{revision}", entry.version);
         let target = packages.join(&package);
         let _ = std::fs::remove_dir_all(&target);
-        archive::extract(verified.zip, &target, &archive::Limits::default())
-            .map_err(|e| e.to_string())?;
+        let limits = archive::Limits::default();
+        let original = |kind: &str| packages.join(format!("{}.{kind}", entry.version));
+        if original("crx").is_file() {
+            let bytes = std::fs::read(original("crx")).map_err(|e| e.to_string())?;
+            let expected = ExtensionId::parse(&entry.id).ok_or("invalid extension id")?;
+            let verified = crx::verify(&bytes, Some(&expected)).map_err(|e| e.to_string())?;
+            archive::extract(verified.zip, &target, &limits).map_err(|e| e.to_string())?;
+        } else if original("zip").is_file() {
+            let bytes = std::fs::read(original("zip")).map_err(|e| e.to_string())?;
+            archive::extract(&bytes, &target, &limits).map_err(|e| e.to_string())?;
+        } else {
+            archive::copy_dir(&original("src"), &target, &limits).map_err(|e| e.to_string())?;
+        }
         if let Err(error) = prepare::prepare(&target, &compat_layer()) {
             let _ = std::fs::remove_dir_all(&target);
             return Err(error.to_string());
@@ -170,6 +186,45 @@ impl WebExtensions {
         entry.compat = revision.to_owned();
         Ok(())
     }
+}
+
+/// The sites an extension is granted under the user's access choice.
+fn granted_sites(entry: &Entry) -> Vec<String> {
+    match &entry.access {
+        Access::All => entry.hosts.clone(),
+        Access::Click => Vec::new(),
+        Access::Sites { sites } => sites
+            .iter()
+            .flat_map(|site| [format!("*://{site}/*"), format!("*://*.{site}/*")])
+            .collect(),
+    }
+}
+
+/// A site as the user typed it, reduced to its host: `https://www.x.com/a`
+/// becomes `www.x.com`.
+fn site_host(site: &str) -> Option<String> {
+    let site = site.trim();
+    let site = site.split_once("://").map_or(site, |(_, rest)| rest);
+    let host = site.split(['/', '?', '#']).next()?.split(':').next()?;
+    let host = host.trim_start_matches("*.").to_ascii_lowercase();
+    let valid = !host.is_empty()
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-');
+    valid.then_some(host)
+}
+
+#[cfg(test)]
+#[test]
+fn sites_reduce_to_hosts() {
+    assert_eq!(
+        site_host("https://www.github.com/a?b").as_deref(),
+        Some("www.github.com")
+    );
+    assert_eq!(site_host("*.example.com").as_deref(), Some("example.com"));
+    assert_eq!(site_host("localhost:8080").as_deref(), Some("localhost"));
+    assert_eq!(site_host("  "), None);
+    assert_eq!(site_host("a b.com"), None);
 }
 
 fn prune_packages(packages: &Path, kept: &HashMap<String, Vec<String>>) {
@@ -272,10 +327,25 @@ pub(in crate::webext) async fn list(
                 (true, Some(WebExtensionStatus::Failed(error))) => ("failed", Some(error.clone())),
                 (true, _) => ("starting", None),
             };
-            let warnings =
-                Manifest::load(&root.join("packages").join(&entry.id).join(&entry.package))
-                    .map(|manifest| permissions::warnings(&manifest))
-                    .unwrap_or_default();
+            let manifest =
+                Manifest::load(&root.join("packages").join(&entry.id).join(&entry.package)).ok();
+            let warnings = manifest
+                .as_ref()
+                .map(permissions::warnings)
+                .unwrap_or_default();
+            let has_options = manifest.as_ref().is_some_and(|manifest| {
+                let raw = manifest.raw();
+                raw.get("options_page").is_some()
+                    || raw
+                        .get("options_ui")
+                        .and_then(|ui| ui.get("page"))
+                        .is_some()
+            });
+            let (access, sites) = match &entry.access {
+                Access::All => ("all", Vec::new()),
+                Access::Click => ("click", Vec::new()),
+                Access::Sites { sites } => ("sites", sites.clone()),
+            };
             WebExtensionView {
                 id: entry.id,
                 name: entry.name,
@@ -286,6 +356,12 @@ pub(in crate::webext) async fn list(
                 state: state.to_owned(),
                 error,
                 warnings,
+                access: access.to_owned(),
+                sites,
+                site_scoped: !entry.hosts.is_empty(),
+                has_options,
+                held_update: entry.held_update,
+                sideloaded: entry.sideloaded,
             }
         })
         .collect())
@@ -307,6 +383,46 @@ pub(in crate::webext) async fn set_enabled(
     entry.enabled = enabled;
     extensions.save(profile, &registry)?;
     extensions.apply(shell, profile, &mut registry);
+    Ok(())
+}
+
+pub(in crate::webext) async fn set_access(
+    shell: &Handle,
+    extensions: &WebExtensions,
+    id: &str,
+    mode: &str,
+    sites: Vec<String>,
+) -> Result<(), String> {
+    let access = match mode {
+        "all" => Access::All,
+        "click" => Access::Click,
+        "sites" => {
+            let mut sites: Vec<String> = sites.iter().filter_map(|site| site_host(site)).collect();
+            sites.sort();
+            sites.dedup();
+            Access::Sites { sites }
+        }
+        _ => return Err("Unknown site access.".into()),
+    };
+    let profile = target(shell, None).await?.profile;
+    let mut registry = extensions.registry(profile);
+    let entry = registry
+        .extensions
+        .iter_mut()
+        .find(|entry| entry.id == id)
+        .ok_or("That extension isn't installed.")?;
+    entry.access = access;
+    extensions.save(profile, &registry)?;
+    extensions.apply(shell, profile, &mut registry);
+    Ok(())
+}
+
+pub(in crate::webext) async fn open_options(shell: &Handle, id: &str) -> Result<(), String> {
+    let profile = target(shell, None).await?.profile;
+    shell.dispatch(zephium_app::Command::OpenWebExtensionOptions {
+        profile,
+        extension_id: id.to_owned(),
+    });
     Ok(())
 }
 

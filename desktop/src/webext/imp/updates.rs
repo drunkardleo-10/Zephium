@@ -7,7 +7,7 @@ use zephium_app::Handle;
 use zephium_core::ids::ProfileId;
 use zephium_webext::{store, ExtensionId};
 
-use super::install::{download, stage, store_client};
+use super::install::{download, keep_original, stage, store_client, Source};
 use crate::webext::{Entry, WebExtensions};
 
 /// The first check waits so launch stays free of network work.
@@ -37,7 +37,9 @@ async fn check_updates(extensions: &WebExtensions, shell: &Handle) -> Result<(),
     let mut installed: std::collections::BTreeMap<String, String> = Default::default();
     for profile in extensions.profiles() {
         for entry in extensions.registry(profile).extensions {
-            installed.entry(entry.id).or_insert(entry.version);
+            if !entry.sideloaded {
+                installed.entry(entry.id).or_insert(entry.version);
+            }
         }
     }
     let entries: Vec<(ExtensionId, String)> = installed
@@ -112,12 +114,11 @@ async fn update(
         return Ok(());
     };
     let root = extensions.root.clone();
-    let id = info.id.clone();
-    let staged = tauri::async_runtime::spawn_blocking(move || {
-        stage(&root, &id, bytes, profile, Some(existing))
-    })
-    .await
-    .map_err(|_| "staging failed")??;
+    let source = Source::Store(info.id.clone(), bytes);
+    let staged =
+        tauri::async_runtime::spawn_blocking(move || stage(&root, source, profile, &[existing]))
+            .await
+            .map_err(|_| "staging failed")??;
     let pending = staged.pending;
     let fresh = &pending.entry;
     let asks_more = |old: &Entry| {
@@ -145,11 +146,7 @@ async fn update(
 
     let packages = extensions.packages(&fresh.id);
     std::fs::create_dir_all(&packages).map_err(|e| e.to_string())?;
-    std::fs::write(
-        packages.join(format!("{}.crx", fresh.version)),
-        &pending.crx,
-    )
-    .map_err(|e| e.to_string())?;
+    keep_original(&packages, &fresh.version, &pending.original)?;
     let target = packages.join(&fresh.package);
     let _ = std::fs::remove_dir_all(&target);
     std::fs::rename(&pending.staged, &target).map_err(|e| e.to_string())?;
@@ -163,6 +160,7 @@ async fn update(
             *entry = Entry {
                 install: entry.install.clone(),
                 enabled: entry.enabled,
+                access: entry.access.clone(),
                 ..fresh.clone()
             };
         }

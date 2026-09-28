@@ -2,7 +2,8 @@
 //! registry on disk, and handing enabled extensions to the shell.
 //!
 //! Layout under the app data directory:
-//! `webext/packages/<id>/<version>.crx` keeps the signed original, and
+//! `webext/packages/<id>/<version>.crx` keeps the signed original (or
+//! `.zip`, or a `.src/` folder, for an extension installed from a file), and
 //! `webext/packages/<id>/<version>-<compat>/` is the tree WebKit loads,
 //! rebuilt from the original whenever the compatibility layer changes.
 //! `webext/profiles/<profile>.json` records what a profile installed.
@@ -29,7 +30,28 @@ struct Pending {
     profile: ProfileId,
     entry: Entry,
     staged: PathBuf,
-    crx: Vec<u8>,
+    original: Original,
+}
+
+/// What a package was installed from, kept to rebuild it later.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+enum Original {
+    Crx(Vec<u8>),
+    Zip(Vec<u8>),
+    Folder(PathBuf),
+}
+
+/// Which sites an extension may read and change.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase")]
+enum Access {
+    /// Every site it asked for.
+    #[default]
+    All,
+    /// Only a tab where the user clicked its button.
+    Click,
+    /// Only these sites, among those it asked for.
+    Sites { sites: Vec<String> },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -60,6 +82,12 @@ struct Entry {
     /// A newer version held back because it asks for more access.
     #[serde(default)]
     held_update: Option<String>,
+    #[serde(default)]
+    access: Access,
+    /// Installed from a file rather than the Web Store; never updated from
+    /// the store, so a developer's own build stays as it is.
+    #[serde(default)]
+    sideloaded: bool,
 }
 
 #[derive(Clone, Debug, Serialize, specta::Type)]
@@ -71,6 +99,8 @@ pub(crate) struct WebExtensionReview {
     warnings: Vec<String>,
     icon: Option<String>,
     update: bool,
+    /// Installed from a file, so not checked against the Web Store.
+    from_file: bool,
 }
 
 #[derive(Clone, Debug, Serialize, specta::Type)]
@@ -85,6 +115,14 @@ pub(crate) struct WebExtensionView {
     state: String,
     error: Option<String>,
     warnings: Vec<String>,
+    /// `all`, `click` or `sites`; meaningful only when `site_scoped`.
+    access: String,
+    sites: Vec<String>,
+    /// Whether the extension asked for access to websites at all.
+    site_scoped: bool,
+    has_options: bool,
+    held_update: Option<String>,
+    sideloaded: bool,
 }
 
 impl WebExtensions {
@@ -303,6 +341,134 @@ pub(crate) async fn web_extension_uninstall(
         let _ = (shell, extensions, id);
         Err(UNAVAILABLE.into())
     }
+}
+
+/// Chooses which sites an extension may use: `all` it asked for, only on
+/// `click`, or the listed `sites`.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn web_extension_set_access(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    extensions: State<'_, WebExtensions>,
+    id: String,
+    mode: String,
+    sites: Vec<String>,
+) -> Result<(), String> {
+    if !authorize(&caller, CallerPolicy::Main, "web_extension_set_access") {
+        return Err(UNAVAILABLE.into());
+    }
+    #[cfg(target_os = "macos")]
+    return imp::set_access(&shell, &extensions, &id, &mode, sites).await;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (shell, extensions, id, mode, sites);
+        Err(UNAVAILABLE.into())
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn web_extension_open_options(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    id: String,
+) -> Result<(), String> {
+    if !authorize(&caller, CallerPolicy::Main, "web_extension_open_options") {
+        return Err(UNAVAILABLE.into());
+    }
+    #[cfg(target_os = "macos")]
+    return imp::open_options(&shell, &id).await;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (shell, id);
+        Err(UNAVAILABLE.into())
+    }
+}
+
+/// Lets the user pick a `.crx` or `.zip` file, or with `folder` an unpacked
+/// extension, and returns what they are asked to approve; `None` when they
+/// cancel the picker.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn web_extension_choose_file(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    extensions: State<'_, WebExtensions>,
+    folder: bool,
+) -> Result<Option<WebExtensionReview>, String> {
+    if !authorize(&caller, CallerPolicy::Main, "web_extension_choose_file")
+        || shutdown_started(caller.app_handle())
+    {
+        return Err(UNAVAILABLE.into());
+    }
+    #[cfg(target_os = "macos")]
+    return imp::choose_file(caller.app_handle(), &shell, &extensions, folder).await;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (shell, extensions, folder);
+        Err(UNAVAILABLE.into())
+    }
+}
+
+/// Reviews an extension file dropped on the browser.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn web_extension_prepare_file(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    extensions: State<'_, WebExtensions>,
+    path: String,
+) -> Result<WebExtensionReview, String> {
+    if !authorize(&caller, CallerPolicy::Main, "web_extension_prepare_file")
+        || shutdown_started(caller.app_handle())
+    {
+        return Err(UNAVAILABLE.into());
+    }
+    #[cfg(target_os = "macos")]
+    return imp::prepare_file(&shell, &extensions, PathBuf::from(path)).await;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (shell, extensions, path);
+        Err(UNAVAILABLE.into())
+    }
+}
+
+/// Reviews the newest store version of an extension whose update waits for
+/// the user's approval.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn web_extension_review_update(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    extensions: State<'_, WebExtensions>,
+    id: String,
+) -> Result<WebExtensionReview, String> {
+    if !authorize(&caller, CallerPolicy::Main, "web_extension_review_update")
+        || shutdown_started(caller.app_handle())
+    {
+        return Err(UNAVAILABLE.into());
+    }
+    #[cfg(target_os = "macos")]
+    return imp::review_update(&shell, &extensions, &id).await;
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (shell, extensions, id);
+        Err(UNAVAILABLE.into())
+    }
+}
+
+/// An extension package among files dropped on the browser: one `.crx` or
+/// `.zip` file, or one folder with a manifest.
+pub(crate) fn dropped_package(paths: &[PathBuf]) -> Option<String> {
+    let [path] = paths else {
+        return None;
+    };
+    let package = match path.extension().and_then(|extension| extension.to_str()) {
+        Some("crx" | "zip") => path.is_file(),
+        _ => path.join("manifest.json").is_file(),
+    };
+    package.then(|| path.to_string_lossy().into_owned())
 }
 
 #[cfg(target_os = "macos")]

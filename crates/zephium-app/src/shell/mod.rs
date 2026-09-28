@@ -569,6 +569,14 @@ impl Shell {
                 profile,
                 extensions,
             } => self.set_web_extensions(profile, extensions),
+            Command::OpenWebExtensionOptions {
+                profile,
+                extension_id,
+            } => {
+                let _ = self
+                    .engine
+                    .open_web_extension_options(profile, extension_id);
+            }
             Command::AnswerWebExtensionAccess {
                 profile,
                 request,

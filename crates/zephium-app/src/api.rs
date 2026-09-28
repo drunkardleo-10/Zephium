@@ -307,6 +307,11 @@ pub enum Command {
         profile: ProfileId,
         extensions: Vec<zephium_core::ports::engine::WebExtensionLoad>,
     },
+    /// Opens an extension's options page in a tab.
+    OpenWebExtensionOptions {
+        profile: ProfileId,
+        extension_id: String,
+    },
     /// The user's answer to an extension's run-time access request.
     AnswerWebExtensionAccess {
         profile: ProfileId,

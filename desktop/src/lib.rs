@@ -123,6 +123,7 @@ const EVENT_FAVICONS: &str = "zephium:favicons";
 const EVENT_EXTENSION_ACTIONS: &str = "zephium:extension-actions";
 const EVENT_EXTENSION_ACTION_FAILED: &str = "zephium:extension-action-failed";
 const EVENT_WEB_EXTENSION_ACCESS: &str = "zephium:web-extension-access";
+const EVENT_WEB_EXTENSION_DROPPED: &str = "zephium:web-extension-dropped";
 const EVENT_EXTENSION_ACTION_SHORTCUT: &str = "zephium:extension-action-shortcut";
 const EVENT_PAGE_PERMISSION_PROMPT: &str = "zephium:page-permission-prompt";
 const EVENT_PRESENTATION_TAB: &str = "zephium:presentation-tab";
@@ -1229,6 +1230,11 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             webext::web_extension_set_enabled,
             webext::web_extension_uninstall,
             webext::web_extension_answer_access,
+            webext::web_extension_set_access,
+            webext::web_extension_open_options,
+            webext::web_extension_choose_file,
+            webext::web_extension_prepare_file,
+            webext::web_extension_review_update,
             browser_credentials::browser_credential_capability,
             browser_credentials::browser_passkey_authorization_request,
             page_permission_respond,
@@ -4591,6 +4597,17 @@ pub fn run() {
                         }
                     }
                     // Losing focus alone does not make a browser tab
+                    // A dropped extension package is offered for review.
+                    tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
+                        if let Some(path) = webext::dropped_package(paths) {
+                            emit_to_privileged(
+                                &exit_handle,
+                                MAIN_LABEL,
+                                EVENT_WEB_EXTENSION_DROPPED,
+                                &path,
+                            );
+                        }
+                    }
                     // background work: audio and timers must continue. Only
                     // an OS-minimized window hides all content views.
                     tauri::WindowEvent::Focused(false)

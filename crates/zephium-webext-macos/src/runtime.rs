@@ -227,6 +227,22 @@ impl Runtime {
         }
     }
 
+    /// Opens an extension's options page through the host; false when it
+    /// has none or isn't loaded.
+    pub fn open_options(&self, id: &str) -> bool {
+        let url = self
+            .context(id)
+            .and_then(|context| unsafe { context.optionsPageURL() })
+            .and_then(|url| url.absoluteString());
+        match url {
+            Some(url) => {
+                self.shared.host.open_options(id, &url.to_string());
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Starts an extension's background now rather than on its first event.
     pub fn start_background(&self, id: &str, done: impl FnOnce(Result<(), String>) + 'static) {
         let Some(context) = self.context(id) else {

@@ -658,6 +658,14 @@ pub trait Engine {
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Opens an extension's options page in a tab.
+    fn open_web_extension_options(
+        &self,
+        _profile: ProfileId,
+        _extension_id: String,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Settles a [`EngineEvent::WebExtensionAccessRequested`].
     fn answer_web_extension_access(
         &self,
