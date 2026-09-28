@@ -13,7 +13,7 @@
   import { DownloadStatus } from "$features/downloads";
   import { EssentialsRail } from "$features/essentials";
   import { ExtensionActions, ManageExtensions } from "$features/extensions";
-  import { loadWebExtensionManager } from "$features/webext";
+  import { loadWebExtensionManager, StoreInstallRail } from "$features/webext";
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
@@ -169,6 +169,7 @@
     >{#snippet browserBody(compact)}
       {#if compact}
         <AddressField {compact} />
+        <StoreInstallRail />
         {#if toolHost.activeTool() !== null}<ModePicker standalone />{/if}
         <TabRail entries={railTabs} onSelect={selectTab} />
       {:else}

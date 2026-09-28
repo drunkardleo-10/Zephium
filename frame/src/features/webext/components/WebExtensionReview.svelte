@@ -12,6 +12,11 @@
   let cancelButton = $state<HTMLButtonElement>();
   let busy = $derived(webext.isConfirming());
   let failure = $derived(webext.error());
+  let detailed = $state(false);
+  // The broadest access leads; the rest waits behind "more", which is where
+  // a list of every permission belongs in a sheet this narrow.
+  let lead = $derived(review.warnings[0] ?? null);
+  let rest = $derived(review.warnings.slice(1));
 
   onMount(() => queueMicrotask(() => cancelButton?.focus()));
 
@@ -27,63 +32,142 @@
 <svelte:window {onkeydown} />
 
 <PromptSheet labelledby="web-extension-review-title" describedby="web-extension-review-access">
-  <div class="flex items-start gap-3">
-    <span
-      class="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-control-compact bg-fill"
-    >
-      {#if review.icon}
-        <img src={review.icon} alt="" class="h-8 w-8" />
-      {:else}
-        <Icon icon={PuzzleIcon} size={20} />
-      {/if}
+  <div class="head">
+    <span class="badge" aria-hidden="true">
+      {#if review.icon}<img src={review.icon} alt="" />{:else}<Icon
+          icon={PuzzleIcon}
+          size={20}
+        />{/if}
     </span>
-    <div class="min-w-0 flex-1">
-      <h1 id="web-extension-review-title" class="text-[14px] leading-5 font-semibold text-text">
-        {review.update ? "Update" : "Add"} “{review.name}”?
-      </h1>
-      <p class="mt-0.5 text-[11.5px] leading-4 text-muted">Version {review.version}</p>
+    <div class="title">
+      <h1 id="web-extension-review-title">{review.name}</h1>
+      <p>{m.webext_review_version({ version: review.version })}</p>
     </div>
   </div>
 
-  {#if review.description}
-    <p class="mt-3 text-[11.5px] leading-4 text-muted">{review.description}</p>
-  {/if}
-
-  {#if review.from_file}
-    <p class="mt-3 text-[11.5px] leading-4 text-warning">{m.webext_from_file()}</p>
-  {/if}
-
-  <div id="web-extension-review-access" class="mt-3 rounded-row bg-fill px-3 py-2.5">
-    <p class="text-[10.5px] leading-4 font-medium tracking-wide text-faint uppercase">It can</p>
-    {#if review.warnings.length === 0}
-      <p class="mt-1.5 text-[11.5px] leading-4 text-text">Run without special access.</p>
+  <div id="web-extension-review-access" class="access">
+    {#if lead === null}
+      <p>{m.webext_review_no_access()}</p>
     {:else}
-      <ul class="mt-1.5 space-y-1.5 text-[11.5px] leading-4 text-text">
-        {#each review.warnings as warning (warning)}
-          <li class="flex items-start gap-2">
-            <span class="mt-[6px] h-1 w-1 shrink-0 rounded-full bg-accent"></span>
-            <span>{warning}</span>
-          </li>
-        {/each}
-      </ul>
+      <p>{lead}</p>
+      {#if detailed}
+        <ul>
+          {#each rest as warning (warning)}<li>{warning}</li>{/each}
+        </ul>
+      {/if}
+      {#if rest.length > 0}
+        <button type="button" class="more" onclick={() => (detailed = !detailed)}>
+          {detailed ? m.webext_review_less() : m.webext_review_more({ count: rest.length })}
+        </button>
+      {/if}
     {/if}
+    {#if review.from_file}<p class="warning">{m.webext_from_file()}</p>{/if}
   </div>
 
-  {#if failure !== null}
-    <p role="alert" class="mt-2.5 text-[10.5px] leading-4 text-danger">{failure}</p>
-  {/if}
+  {#if failure !== null}<p role="alert" class="failure">{failure}</p>{/if}
 
-  <div class="mt-4 flex justify-end gap-2">
+  <div class="actions">
     <Button
       bind:ref={cancelButton}
       variant="secondary"
       disabled={busy}
-      onclick={() => webext.cancel()}
+      onclick={() => webext.cancel()}>{m.webext_review_cancel()}</Button
     >
-      Cancel
-    </Button>
-    <Button variant="primary" pending={busy} onclick={() => void webext.confirm()}>
-      {review.update ? "Update" : "Add extension"}
-    </Button>
+    <Button variant="primary" pending={busy} onclick={() => void webext.confirm()}
+      >{review.update ? m.webext_review_update() : m.webext_review_add()}</Button
+    >
   </div>
 </PromptSheet>
+
+<style>
+  .head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .badge {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-control);
+    background: var(--color-fill);
+    color: var(--color-muted);
+  }
+
+  .badge img {
+    width: 32px;
+    height: 32px;
+  }
+
+  .title {
+    min-width: 0;
+  }
+
+  h1 {
+    margin: 0;
+    overflow: hidden;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 20px;
+    color: var(--color-text);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .title p {
+    margin: 0;
+    font-size: var(--text-label);
+    color: var(--color-muted);
+  }
+
+  .access {
+    margin-block-start: 14px;
+    font-size: var(--text-label);
+    line-height: 1.45;
+    color: var(--color-label-secondary);
+  }
+
+  .access p {
+    margin: 0;
+  }
+
+  .access ul {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 6px 0 0;
+    padding-inline-start: 16px;
+    color: var(--color-muted);
+  }
+
+  .more {
+    margin-block-start: 4px;
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: var(--color-accent);
+    cursor: pointer;
+  }
+
+  .warning {
+    margin-block-start: 8px !important;
+    color: var(--color-warning);
+  }
+
+  .failure {
+    margin: 10px 0 0;
+    font-size: var(--text-label);
+    color: var(--color-danger);
+  }
+
+  .actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-block-start: 16px;
+  }
+</style>

@@ -1172,5 +1172,13 @@
   "webext_catalog_octotree": "Code tree for GitHub",
   "webext_catalog_wappalyzer": "See what sites are built with",
   "webext_action": "Extension action",
-  "webext_manage": "Manage extensions"
+  "webext_manage": "Manage extensions",
+  "webext_review_version": "Version {version}",
+  "webext_review_no_access": "Needs no special access.",
+  "webext_review_more": "and {count} more",
+  "webext_review_less": "Show less",
+  "webext_review_cancel": "Cancel",
+  "webext_review_add": "Add",
+  "webext_review_update": "Update",
+  "webext_store_install": "Add to Zephium"
 }
