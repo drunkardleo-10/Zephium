@@ -4,12 +4,12 @@ use raw_window_handle::{
 };
 use std::num::NonZeroIsize;
 use windows::core::w;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     ClientToScreen, GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use zephium_core::geometry::Rect;
 
@@ -27,7 +27,8 @@ impl PopupWindow {
                 ..Default::default()
             };
             RegisterClassW(&class);
-            let scale = f64::from(GetDpiForWindow(parent)).max(96.0) / 96.0;
+            let dpi = GetDpiForWindow(parent).max(96);
+            let scale = f64::from(dpi) / 96.0;
             let mut point = POINT {
                 x: (anchor.x * scale) as i32,
                 y: ((anchor.y + anchor.height) * scale) as i32,
@@ -35,8 +36,17 @@ impl PopupWindow {
             if !ClientToScreen(parent, &mut point).as_bool() {
                 return Err("Cannot anchor the extension popup.".into());
             }
-            let width = (400.0 * scale) as i32;
-            let height = (600.0 * scale) as i32;
+            let style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+            let mut frame = RECT {
+                left: 0,
+                top: 0,
+                right: (400.0 * scale) as i32,
+                bottom: (600.0 * scale) as i32,
+            };
+            AdjustWindowRectExForDpi(&mut frame, style, false, WS_EX_TOOLWINDOW, dpi)
+                .map_err(|error| error.to_string())?;
+            let width = frame.right - frame.left;
+            let height = frame.bottom - frame.top;
             let mut monitor = MONITORINFO {
                 cbSize: std::mem::size_of::<MONITORINFO>() as u32,
                 ..Default::default()
@@ -60,7 +70,7 @@ impl PopupWindow {
                 WS_EX_TOOLWINDOW,
                 class.lpszClassName,
                 w!("Extension — Zephium"),
-                WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                style,
                 point.x,
                 point.y,
                 width,

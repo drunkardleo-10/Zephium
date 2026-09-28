@@ -202,6 +202,16 @@ impl super::EngineHost {
             .collect();
         for key in keys {
             if let Some(install) = self.windows_extensions.installs.remove(&key) {
+                install.bridge.alive.set(false);
+                // Persisted enabled workers can keep WebView2's process group
+                // alive after its last content controller closes. The desktop
+                // registry restores the requested state on the next startup.
+                if let Err(error) = native::enable(&install.native, false) {
+                    eprintln!(
+                        "extensions: retirement could not disable its native worker: {error}"
+                    );
+                    self.unverifiable_browser_processes.insert(profile);
+                }
                 self.close_extension_view(profile, install.bridge);
             }
         }
@@ -814,7 +824,7 @@ impl super::EngineHost {
             })
             .with_bounds(wry::Rect {
                 position: wry::dpi::LogicalPosition::new(0, 0).into(),
-                size: wry::dpi::LogicalSize::new(400, 568).into(),
+                size: wry::dpi::LogicalSize::new(400, 600).into(),
             })
             .build_as_child(&window);
         let view = match built {
@@ -848,7 +858,7 @@ impl super::EngineHost {
         Ok(ExtensionActionSettlement::PopupPresented(
             zephium_core::geometry::Size {
                 width: 400.0,
-                height: 568.0,
+                height: 600.0,
             },
         ))
     }
