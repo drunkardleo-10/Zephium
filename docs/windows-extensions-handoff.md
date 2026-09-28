@@ -14,8 +14,10 @@ makes lastFocusedWindow return the human page; currentWindow remains the popup.
 A 15-line popup-only query wrapper, given a native tab/window binding by the
 host, redirects active-tab queries correctly in both extensions, including
 callback/promise calls through the original native query. The lab obtains its
-binding from a unique fixture URL; production must authenticate the exact human
-controller instead of relying on potentially duplicated URLs.
+binding from the exact human controller using native `Browser.getWindowForTarget`.
+Its window ID agrees with `chrome.tabs.query({windowId})`; no URL-based lookup is
+needed. Native identity evidence: `target/popup-identity.jsonl`, with the same
+binding also exercised by the prepared-package probe below.
 
 Bitwarden's onboarding page executes. Dark Reader's UI still says protected
 `about:` even though direct popup queries are corrected; its background-side
@@ -24,9 +26,109 @@ or permission replacement was added. This is a targeting feasibility result,
 not a claim that Dark Reader's full popup workflow works. Continue integration
 as requested, retaining this limitation for QA.
 
-Status: 2026-09-28. Extension support is finished for macOS (WebKit). Windows
-(WebView2) has a step-1 lab probe; product integration has not started. This
-document is the brief for that work: what
+Implementation is now underway. Desktop registry, store downloads, staging,
+updates and management are shared with Windows. Signed CRX identity is retained
+in the unpacked manifest. Windows preparation produces immutable access-specific
+packages; an end-of-preparation marker prevents reusing a partially written tree.
+Specific sites intersects required/optional hosts and content-script matches,
+retains original scheme/path constraints, removes `activeTab`, and replaces
+`declarativeNetRequest` with Chromium's host-access-required variant. The latter
+is covered by a manifest test and a native network-rule qualifier described below.
+On click is hidden on Windows and rejected by the desktop command.
+
+Prepared Dark Reader 4.9.133 evidence:
+`target/webext-prepared/20260928-174640/results.jsonl` (runtime 154.0.4258.37).
+The allowed `127.0.0.1` page receives Dark Reader styles; denied `localhost`
+does not, and native `scripting.executeScript` is refused there. The automation
+subprofile has only the two runtime components and receives no Dark Reader
+content. An owned extension page reports native title, badge, popup, enabled
+state and a 4096-byte RGBA icon. Native disable stops injection on a new document,
+enable restores it, and remove stops it again. Reinstalling the same ID finds
+neither the test `chrome.storage.local` value nor the DOM localStorage value.
+This is not a complete disk-residue or signed-in storage qualification.
+
+The native engine integration is being qualified in the distinct
+`app.zephium.webext-qa` / **Zephium Extensions QA** app, whose Windows data is
+under `%APPDATA%\\app.zephium.webext-qa`. The default WebView2 profile reports an
+empty API profile name on this runtime, despite using a `Default` storage folder;
+the startup attestation uses that observed identity. Native controllers remain
+subject to environment/path/private-mode checks and cleanup-debt accounting.
+Native load now obtains its Profile7 interface from an owned, live management
+controller. A bootstrap controller's interface becomes invalid after close
+(`0x8007139F`); keeping that COM reference alone was insufficient. Enable, disable
+and remove run before closing their owning controller. Removal of a disabled
+install uses a temporary accounted controller. The Wry startup gate remains in
+place. Work selects the extension-free automation subprofile.
+
+The actual QA app passed store download/review/install for Dark Reader and
+Bitwarden, native enable/disable, Dark Reader removal, action icon/title
+presentation, and host popup opening. Bitwarden reaches its welcome screen;
+no account was used. Dark Reader retains the documented background-selection
+limitation. Popup queries use the lab's exact native controller binding. Popups
+use the owning browser window, fit a 400-by-600 client area, clamp to the monitor
+work area and dismiss when their human tab navigates or loses active ownership.
+Helper views deny unmanaged child windows. Shutdown disables native workers
+before closing their controllers; the desktop registry restores requested
+enablement on the next launch.
+
+During qualification an earlier QA process failed full WebView2 group shutdown
+and retained its storage lock. Only that disposable QA process tree was stopped;
+the installed browser was left untouched. The corrected build subsequently
+closed with an extension popup open: its app process and every QA WebView2 child
+disappeared, with no shutdown failure. Reopening the same QA directory succeeded
+and restored enabled Bitwarden.
+
+The lab's reproducible network-rule qualifier is
+`crates/zephium-webext-windows/run-host-rules.ps1`, using the gated lab binary and
+the same neutral package preparation. Evidence:
+`target/webext-host-rules/20260928-192313/results.jsonl`. Before installation a
+loopback fetch succeeds. A prepared declarative blocking rule then blocks the
+granted `127.0.0.1` host; the identical fetch succeeds on denied `localhost`.
+All three results passed on runtime 154.0.4258.37.
+
+Use [the Windows QA guide](windows-extension-qa.md) for the isolated launcher,
+acceptance checklist and explicit limits. First QA supports signed store/CRX
+packages and keyed ZIP/folders; keyless unsigned packages are rejected before
+native loading. Options UI, on-click access and non-popup dispatch are withheld.
+The existing Windows catalog no longer claims all listed extensions are verified.
+
+Checks completed so far: 53 shared extension tests, five focused Windows shell
+extension-browser tests, frontend check (295 unit tests), six ExtensionRow
+Chromium component tests, frontend build, and the 39-file emitted-style audit.
+Engine unit tests now execute after the separate activation-manifest fix. All
+276 engine tests with Work enabled passed. Two saturation tests now fill the
+Windows Work-terminal reserve, matching production's unchanged queue limits.
+The existing download file-identity test failed in an earlier 199-pass/1-fail
+run and passed in the full Work-enabled run; that earlier failure remains
+recorded rather than being hidden by weakening its assertion.
+Enabling the dormant Work feature exposed missing `Cancelled` event arms;
+a separate fix settles only the exact native navigation, once, and its focused
+regression test passes. Desktop unit tests also needed the Common Controls
+activation manifest; all 106 tests then passed, with one existing ignored test.
+Desktop/engine QA clippy passes with `-D warnings`; the vendored Wry dependency
+still emits its three existing dead-code warnings. Node 24.18.0 and pnpm 11.17.0 are installed under ignored
+`target/windows-tools` and the frozen frontend lockfile installs successfully.
+
+Product resource evidence (debug build, one Example Domain page plus the
+Extensions manager, popup closed):
+`target/webext-qa-resources/20260928-191849-disabled-baseline/samples.csv` and
+`target/webext-qa-resources/20260928-191953-bitwarden-idle/samples.csv`.
+The disabled baseline ended at 604.84 MiB private memory and 21 processes.
+With Bitwarden enabled, minute 2 through minute 8 samples were 685.71–694.66 MiB
+and 22 processes, with a 696.99 MiB final sample. The requested 600-second run
+actually spanned 1214.8 seconds and had a 731.5-second sampling gap; its continuous
+ten-minute CPU qualification is therefore incomplete. The uninterrupted late
+samples averaged about 5.1% of one core, but the short disabled CPU baseline and
+sampling gap prevent a reliable CPU-overhead comparison. These include the
+entire QA process tree, not the installed browser or the lab. Summed working
+sets double-count shared pages; private bytes are the comparison above.
+The earlier lab's ten-minute run remains separate evidence. The sampler now
+warns explicitly on long gaps. No debugger was attached during these idle runs.
+
+The remaining sections preserve the original handoff and step-1 observations.
+Their descriptions of macOS-only product code are historical; the implementation
+status above supersedes them. The archive branch mentioned below is unavailable
+on GitHub and was not used. This document is the brief for that work: what
 exists, what can be reused, what WebView2 gives and lacks, and how to verify.
 
 ## Goal and rules

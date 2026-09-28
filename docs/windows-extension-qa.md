@@ -60,9 +60,11 @@ checkout, verifies the binary's QA product identity, and launches
 - Native messaging, signed-in password-manager workflows, complete disk-residue
   removal, optional-permission UI, and the full extension catalog remain
   unqualified. The Windows catalog does not claim that every listed item works.
-- Specific-sites manifest narrowing is covered by unit tests and native
-  content-script/injection checks. A native network-rule enforcement qualifier
-  is still pending.
+- Specific-sites manifest narrowing is covered by unit tests, native
+  content-script/injection checks, and a native network-rule qualifier: blocking
+  applies on the allowed loopback host and does not apply on the denied host.
+  Reproduce the latter with `crates\zephium-webext-windows\run-host-rules.ps1`
+  after building the lab feature.
 
 ## Resource sampling
 
