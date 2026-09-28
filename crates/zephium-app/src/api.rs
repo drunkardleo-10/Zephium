@@ -627,6 +627,9 @@ pub enum Command {
     RunSearchAction {
         context: Box<zephium_ipc::SearchContext>,
         action: zephium_ipc::SearchAction,
+        /// Open an address in a new tab behind the current one and keep the
+        /// search alive. Ignored by every other action.
+        background: bool,
     },
     OpenUrl {
         input: String,

@@ -23,9 +23,11 @@ impl Shell {
             Command::DropTab { id, x, y } => self.operation_drop_tab(id, x, y),
             Command::DividerRelease { x, y } => self.operation_divider_release(x.zip(y)),
             Command::Run(id) => self.operation_run_command(&id),
-            Command::RunSearchAction { context, action } => {
-                self.operation_run_search_action(*context, action)
-            }
+            Command::RunSearchAction {
+                context,
+                action,
+                background,
+            } => self.operation_run_search_action(*context, action, background),
             Command::InvokeExtensionAction {
                 runtime,
                 revision,
@@ -180,6 +182,43 @@ impl Shell {
             );
         };
         effects.extend(self.items.navigate(id, &input));
+        mutation_result(self.commit(effects))
+    }
+
+    /// Opens an address in a new tab of the focused window without selecting
+    /// it, as a modified click on a link does.
+    pub(super) fn operation_open_url_background(&mut self, input: String) -> OperationDisposition {
+        let Some(input) = self
+            .search
+            .engine
+            .configured_classify(&input, &self.search.custom_url)
+            .map(|url| url.to_string())
+        else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+        };
+        let Some((profile, space)) = self
+            .windows
+            .focused()
+            .map(|window| (window.profile, window.space))
+        else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
+        };
+        let id = ItemId::generate();
+        if self.profile_deletion_quarantines(profile)
+            || !self.items.insert_tab(
+                id,
+                Placement::Space {
+                    space,
+                    section: SpaceSection::Today,
+                },
+            )
+        {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::ItemLimitReached,
+            );
+        }
+        let effects = self.items.navigate(id, &input);
         mutation_result(self.commit(effects))
     }
 

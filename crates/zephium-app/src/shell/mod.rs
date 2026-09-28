@@ -981,8 +981,12 @@ impl Shell {
             } => self.search_additional(*context, query, results),
             Command::SearchScoped { query, context } => self.search_scoped(&query, *context),
             Command::CancelSearch { session_id } => self.cancel_scoped_search(&session_id),
-            Command::RunSearchAction { context, action } => {
-                let _ = self.operation_run_search_action(*context, action);
+            Command::RunSearchAction {
+                context,
+                action,
+                background,
+            } => {
+                let _ = self.operation_run_search_action(*context, action, background);
             }
             Command::OpenUrl { input, new_tab } => {
                 let _ = self.operation_open_url(input, new_tab);

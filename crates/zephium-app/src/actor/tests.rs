@@ -1038,14 +1038,15 @@ fn scoped_launcher_actions_cross_the_real_operation_admission_boundary() {
         "0000000000000001".into(),
         Command::RunSearchAction {
             context: Box::new(context.clone()),
-            action: action.clone()
+            action: action.clone(),
+            background: false,
         }
     ));
     let Command::Operation { command, .. } = queue.try_recv().unwrap() else {
         panic!("tracked command required");
     };
     assert!(
-        matches!(*command,Command::RunSearchAction{context:actual,action:actual_action} if *actual==context&&actual_action==action)
+        matches!(*command,Command::RunSearchAction{context:actual,action:actual_action,..} if *actual==context&&actual_action==action)
     );
     assert!(!handle.dispatch_operation(
         "0000000000000002".into(),

@@ -224,6 +224,7 @@ impl Shell {
         &mut self,
         context: zephium_ipc::SearchContext,
         action: SearchAction,
+        background: bool,
     ) -> OperationDisposition {
         if !self.search_context_current(&context)
             || self.search.context.as_ref() != Some(&context)
@@ -262,6 +263,14 @@ impl Shell {
                         }
                     }
                 }
+            }
+        }
+        let newtab = context.session_id.starts_with("newtab:");
+        if background && !newtab {
+            if let SearchAction::OpenUrl { url } = action {
+                // The search stays alive: the launcher remains open on these
+                // results, and the next row the user sends must still admit.
+                return self.operation_open_url_background(url);
             }
         }
         self.cancel_scoped_search(&context.session_id);

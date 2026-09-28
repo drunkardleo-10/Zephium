@@ -407,6 +407,7 @@ fn scoped_launcher_actions_reject_stale_requests_and_unoffered_actions() {
         action: SearchAction::OpenUrl {
             url: "https://not-in-results.example/".into(),
         },
+        background: false,
     });
     assert_eq!(forged.reason, OperationReason::InvalidScope);
     shell.handle(Command::CancelSearch {
@@ -415,8 +416,52 @@ fn scoped_launcher_actions_reject_stale_requests_and_unoffered_actions() {
     let stale = shell.handle_operation(Command::RunSearchAction {
         context: Box::new(context),
         action: SearchAction::ActivateTab { id: id.to_string() },
+        background: false,
     });
     assert_eq!(stale.reason, OperationReason::InvalidScope);
+}
+
+#[test]
+fn a_background_launcher_open_keeps_the_current_tab_and_the_search() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let active = active_id(&screen);
+    let window = shell.windows.focused().unwrap();
+    let context = zephium_ipc::SearchContext {
+        window_id: window.id.to_string(),
+        session_id: "0000000000000001".into(),
+        request_id: "one".into(),
+        profile_id: window.profile.to_string(),
+        space_id: window.space.to_string(),
+    };
+    shell.handle(Command::SearchScoped {
+        query: "example.com".into(),
+        context: Box::new(context.clone()),
+    });
+    let action = shell
+        .search
+        .results
+        .iter()
+        .find(|result| matches!(result.action, SearchAction::OpenUrl { .. }))
+        .map(|result| result.action.clone())
+        .expect("the typed address is offered");
+    let before = shell.items.view_ids().len();
+    for _ in 0..2 {
+        let opened = shell.handle_operation(Command::RunSearchAction {
+            context: Box::new(context.clone()),
+            action: action.clone(),
+            background: true,
+        });
+        // Deferred: the new view settles once native has created it.
+        assert!(matches!(
+            opened.outcome,
+            OperationOutcome::Applied | OperationOutcome::Deferred
+        ));
+    }
+    assert_eq!(shell.windows.focused().unwrap().active, Some(active));
+    assert_eq!(shell.items.view_ids().len(), before + 2);
+    // The launcher is still showing these rows, so they must still admit.
+    assert_eq!(shell.search.context.as_ref(), Some(&context));
 }
 
 #[test]
