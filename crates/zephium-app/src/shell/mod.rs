@@ -1970,6 +1970,8 @@ mod work_context_tests;
 mod work_coordination_tests;
 #[cfg(all(test, feature = "work-runtime"))]
 mod work_lead_tests;
+#[cfg(all(test, feature = "work-runtime"))]
+mod work_personal_tests;
 #[cfg(all(test, feature = "work-planning"))]
 mod work_planning_tests;
 #[cfg(all(test, feature = "work-runtime"))]
