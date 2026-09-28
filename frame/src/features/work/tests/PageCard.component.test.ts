@@ -35,7 +35,9 @@ test("a settled page shows its frame on first mount and follows it when it chang
   // a stock globe or an initial.
   await screen.rerender({ item: card(null), selected: false });
   expect(screen.container.querySelector(".frame img")).toBeNull();
-  expect(screen.container.querySelector(".placeholder [data-favicon] .favicon-fallback")).toBeNull();
+  expect(
+    screen.container.querySelector(".placeholder [data-favicon] .favicon-fallback"),
+  ).toBeNull();
   expect(screen.container.querySelector(".placeholder")?.textContent?.trim()).toBe("");
   await screen.unmount();
 });

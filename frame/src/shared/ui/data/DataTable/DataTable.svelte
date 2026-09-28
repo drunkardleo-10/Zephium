@@ -108,7 +108,9 @@
             <th scope="row"
               >{#if head}{@render head(row)}{:else}{row.label}{/if}</th
             >
-            {#each columns as column (column.key)}<td class:numeric={column.numeric} class:centered={column.centered}
+            {#each columns as column (column.key)}<td
+                class:numeric={column.numeric}
+                class:centered={column.centered}
                 >{#if cell}{@render cell(row, column)}{:else}{row.cells[column.key] ??
                     labels.missing}{/if}</td
               >{/each}

@@ -43,8 +43,22 @@ export const commands = {
 	workHumanRelease: (expectedProfile: string, work: WorkId, page: WorkHumanPageIdV1) => __TAURI_INVOKE<WorkHumanResponseV1>("work_human_release", { expectedProfile, work, page }),
 	workDecisionPreference: (expectedProfile: string) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_decision_preference", { expectedProfile }),
 	workSetDecisionPreference: (expectedProfile: string, choice: WorkDecisionChoiceV1) => __TAURI_INVOKE<WorkDecisionPreferenceV1>("work_set_decision_preference", { expectedProfile, choice }),
+	workModels: (expectedProfile: string) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_models", { expectedProfile }),
+	workChooseModel: (expectedProfile: string, role: WorkModelRole, id: string | null) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_choose_model", { expectedProfile, role, id }),
+	workSetProviderKey: (expectedProfile: string, provider: WorkModelProvider, key: string) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_set_provider_key", { expectedProfile, provider, key }),
+	workTestProviderKey: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_test_provider_key", { expectedProfile, provider }),
+	workClearProviderKey: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_clear_provider_key", { expectedProfile, provider }),
+	workSetModelEndpoint: (expectedProfile: string, base: string | null) => __TAURI_INVOKE<WorkModelsV1_Serialize>("work_set_model_endpoint", { expectedProfile, base }),
+	workMoreModels: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkMoreModelsV1_Serialize>("work_more_models", { expectedProfile, provider }),
 	workSites: (expectedProfile: string) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_sites", { expectedProfile }),
 	workSetSite: (expectedProfile: string, change: WorkSiteChangeV1) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_set_site", { expectedProfile, change }),
+	workMemories: (expectedProfile: string, query: WorkMemoryQueryV1) => __TAURI_INVOKE<WorkMemoryResponseV1_Serialize>("work_memories", { expectedProfile, query }),
+	/**  Changes one memory, or all of them, and returns the list for `query`. */
+	workChangeMemory: (expectedProfile: string, query: WorkMemoryQueryV1, change: WorkMemoryChangeV1) => __TAURI_INVOKE<WorkMemoryResponseV1_Serialize>("work_change_memory", { expectedProfile, query, change }),
+	workSkills: (expectedProfile: string) => __TAURI_INVOKE<WorkSkillsResponseV1>("work_skills", { expectedProfile }),
+	/**  A skill's `SKILL.md`, built-in or the person's, with the list. */
+	workSkillText: (expectedProfile: string, name: string) => __TAURI_INVOKE<WorkSkillsResponseV1>("work_skill_text", { expectedProfile, name }),
+	workChangeSkill: (expectedProfile: string, change: WorkSkillChangeV1) => __TAURI_INVOKE<WorkSkillsResponseV1>("work_change_skill", { expectedProfile, change }),
 	tabsBootstrap: () => __TAURI_INVOKE<void>("tabs_bootstrap"),
 	tabsOpen: () => __TAURI_INVOKE<OperationAdmission>("tabs_open"),
 	tabsActivate: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_activate", { id }),
@@ -221,6 +235,7 @@ export const events = {
 	workEnvironmentChanged: makeEvent<WorkEnvironmentChanged>("work-environment-changed"),
 	zephiumWorkDecisionPreferenceChanged: makeEvent<WorkDecisionPreferenceChanged>("zephium:work-decision-preference-changed"),
 	zephiumWorkHumanChanged: makeEvent<WorkHumanChanged>("zephium:work-human-changed"),
+	zephiumWorkModelsChanged: makeEvent<WorkModelsChanged>("zephium:work-models-changed"),
 };
 
 /* Types */
@@ -2300,6 +2315,11 @@ export type WorkChecklistItem = {
 	completed: boolean,
 };
 
+export type WorkCloudStatusV1 = {
+	signed_in: boolean,
+	plan: string | null,
+};
+
 /**  Lines `from..=to` of the code text, counted from 1. */
 export type WorkCodeNote = {
 	from: number,
@@ -3333,6 +3353,8 @@ export type WorkInterventionV1_Serialize = {
 	origin?: string | null,
 };
 
+export type WorkKeyStateV1 = "missing" | "set" | "valid" | "invalid";
+
 export type WorkLabelledV1 = {
 	label: string,
 	value: string,
@@ -3427,6 +3449,125 @@ export type WorkMediaKindV1 = "image" | "video" | "audio";
 
 export type WorkMediaProviderV1 = "youtube" | "vimeo" | "file";
 
+export type WorkMemoryChangeV1 = 
+/**  A fact the person writes themselves. */
+{ kind: "add"; text: string; memory: WorkMemoryKindV1 } | { kind: "edit"; id: string; text: string; memory: WorkMemoryKindV1 } | { kind: "forget"; id: string } | { kind: "forget_all" };
+
+/**  What kind of thing a memory is; the canvas and Settings group by it. */
+export type WorkMemoryKindV1 = 
+/**  "Prefers aisle seats", "Writes in British English". */
+"preference" | 
+/**  "Anna is the design lead", "My manager is Tom". */
+"person" | 
+/**  "Zephium ships from the work-mode-integration branch". */
+"project" | "fact";
+
+/**  Which memories to list: the words to look for, or one work's. */
+export type WorkMemoryQueryV1 = {
+	query: string | null,
+	work: WorkId | null,
+};
+
+export type WorkMemoryRefusalV1 = "empty" | "too_long" | "lines" | "secret";
+
+export type WorkMemoryResponseV1 = WorkMemoryResponseV1_Serialize | WorkMemoryResponseV1_Deserialize;
+
+export type WorkMemoryResponseV1_Deserialize = {
+	version: number,
+	profile: string,
+	memories: WorkMemoryV1_Deserialize[],
+	/**  Why a fact was refused: it looks like a secret, or is too long. */
+	refused: WorkMemoryRefusalV1 | null,
+	error: WorkFailureV1 | null,
+};
+
+export type WorkMemoryResponseV1_Serialize = {
+	version: number,
+	profile: string,
+	memories: WorkMemoryV1_Serialize[],
+	/**  Why a fact was refused: it looks like a secret, or is too long. */
+	refused: WorkMemoryRefusalV1 | null,
+	error: WorkFailureV1 | null,
+};
+
+/**  One remembered fact. */
+export type WorkMemoryV1 = WorkMemoryV1_Serialize | WorkMemoryV1_Deserialize;
+
+/**  One remembered fact. */
+export type WorkMemoryV1_Deserialize = {
+	/**  A ULID. */
+	id: string,
+	text: string,
+	kind: WorkMemoryKindV1,
+	/**
+	 *  The work whose run remembered it; absent when the person wrote it or
+	 *  the work is gone.
+	 */
+	work?: WorkId | null,
+	execution?: WorkExecutionId | null,
+	/**  What that work was asked, clipped, so the person knows where it came from. */
+	source?: string | null,
+	/**  Unix epoch milliseconds as decimal text. */
+	created_ms: string,
+	/**  When a run last drew on it. */
+	used_ms?: string | null,
+};
+
+/**  One remembered fact. */
+export type WorkMemoryV1_Serialize = {
+	/**  A ULID. */
+	id: string,
+	text: string,
+	kind: WorkMemoryKindV1,
+	/**
+	 *  The work whose run remembered it; absent when the person wrote it or
+	 *  the work is gone.
+	 */
+	work?: WorkId | null,
+	execution?: WorkExecutionId | null,
+	/**  What that work was asked, clipped, so the person knows where it came from. */
+	source?: string | null,
+	/**  Unix epoch milliseconds as decimal text. */
+	created_ms: string,
+	/**  When a run last drew on it. */
+	used_ms?: string | null,
+};
+
+export type WorkModelEntry = WorkModelEntry_Serialize | WorkModelEntry_Deserialize;
+
+export type WorkModelEntry_Deserialize = {
+	/**  Stable catalog id, such as `anthropic/claude-sonnet-5`. */
+	id: string,
+	model: WorkModelRef,
+	display_name: string,
+	roles: WorkModelRole[],
+	recommended: boolean,
+	context_window: number,
+	max_output: number,
+	supports: WorkModelSupports,
+	price?: WorkModelPrice | null,
+};
+
+export type WorkModelEntry_Serialize = {
+	/**  Stable catalog id, such as `anthropic/claude-sonnet-5`. */
+	id: string,
+	model: WorkModelRef,
+	display_name: string,
+	roles: WorkModelRole[],
+	recommended: boolean,
+	context_window: number,
+	max_output: number,
+	supports: WorkModelSupports,
+	price?: WorkModelPrice | null,
+};
+
+/**  Per million tokens, in millionths of a US dollar. */
+export type WorkModelPrice = {
+	input: number,
+	cached_input: number,
+	output: number,
+};
+
 export type WorkModelProvider = "open_ai" | "anthropic" | "google" | "deep_seek" | "open_router" | 
 /**  Any OpenAI-compatible chat endpoint the person configured. */
 "compatible" | 
@@ -3440,8 +3581,84 @@ export type WorkModelRef = {
 	model: string,
 };
 
+export type WorkModelRole = "lead" | "page" | "light" | "decision";
+
+export type WorkModelRolesV1 = {
+	lead: string | null,
+	page: string | null,
+	light: string | null,
+};
+
+export type WorkModelSupports = {
+	tools: boolean,
+	vision: boolean,
+	prompt_cache: boolean,
+	reasoning: boolean,
+	native_search: boolean,
+};
+
 /**  The wire family a model speaks; Cloud models name their upstream's. */
 export type WorkModelWire = "open_ai_responses" | "anthropic_messages" | "gemini" | "chat_completions";
+
+/**  Something in the picker or Settings → AI changed; read it again. */
+export type WorkModelsChanged = {
+	version: number,
+};
+
+/**  Why the last action did not do what was asked. Closed; no provider text. */
+export type WorkModelsFaultV1 = 
+/**  The provider refused the key; nothing was stored. */
+"key_refused" | 
+/**  The provider could not be reached. */
+"unreachable" | 
+/**  The Keychain refused. */
+"keychain" | 
+/**  The request was malformed (an unknown model, a bad address). */
+"invalid" | 
+/**  Models are unavailable in this build or profile. */
+"unavailable";
+
+export type WorkModelsV1 = WorkModelsV1_Serialize | WorkModelsV1_Deserialize;
+
+export type WorkModelsV1_Deserialize = {
+	version: number,
+	profile: string,
+	entries: WorkModelEntry_Deserialize[],
+	/**  What the person chose per role. */
+	chosen: WorkModelRolesV1,
+	/**  What each role runs with now; null when no provider is usable. */
+	effective: WorkModelRolesV1,
+	providers: WorkProviderStatusV1[],
+	cloud: WorkCloudStatusV1,
+	fault: WorkModelsFaultV1 | null,
+};
+
+export type WorkModelsV1_Serialize = {
+	version: number,
+	profile: string,
+	entries: WorkModelEntry_Serialize[],
+	/**  What the person chose per role. */
+	chosen: WorkModelRolesV1,
+	/**  What each role runs with now; null when no provider is usable. */
+	effective: WorkModelRolesV1,
+	providers: WorkProviderStatusV1[],
+	cloud: WorkCloudStatusV1,
+	fault: WorkModelsFaultV1 | null,
+};
+
+export type WorkMoreModelsV1 = WorkMoreModelsV1_Serialize | WorkMoreModelsV1_Deserialize;
+
+export type WorkMoreModelsV1_Deserialize = {
+	provider: WorkModelProvider,
+	entries: WorkModelEntry_Deserialize[],
+	fault: WorkModelsFaultV1 | null,
+};
+
+export type WorkMoreModelsV1_Serialize = {
+	provider: WorkModelProvider,
+	entries: WorkModelEntry_Serialize[],
+	fault: WorkModelsFaultV1 | null,
+};
 
 export type WorkNodeExecutionSpec = WorkNodeExecutionSpec_Serialize | WorkNodeExecutionSpec_Deserialize;
 
@@ -3998,6 +4215,13 @@ export type WorkProviderSearchRecordV1_Serialize = {
 	ranking?: WorkPublicSearchRanking | null,
 };
 
+export type WorkProviderStatusV1 = {
+	provider: WorkModelProvider,
+	key: WorkKeyStateV1,
+	/**  The OpenAI-compatible endpoint's base URL. */
+	base: string | null,
+};
+
 export type WorkPublicDiscoveryScope = {
 	/**  Exact initial public search disclosure reviewed before execution. */
 	search_query: string,
@@ -4348,6 +4572,40 @@ export type WorkSiteRowV1 = {
 	access: WorkSiteAccessV1,
 	/**  Banks, password managers and health or tax portals: Always is refused. */
 	sensitive: boolean,
+};
+
+export type WorkSkillChangeV1 = 
+/**
+ *  Writes the person's skill from its `SKILL.md` text; `previous` is the
+ *  name it had when it is renamed.
+ */
+{ kind: "save"; previous: string | null; text: string } | { kind: "delete"; name: string } | { kind: "set_enabled"; name: string; enabled: boolean };
+
+/**  Why a skill change was refused, in closed words. */
+export type WorkSkillFaultV1 = "no_frontmatter" | "name" | "description" | "role" | "too_large" | "empty" | "not_found" | "built_in" | "taken" | "full";
+
+/**  One skill as Settings lists it. */
+export type WorkSkillRowV1 = {
+	name: string,
+	description: string,
+	/**  Ships with the app, unchanged. */
+	builtin: boolean,
+	/**  The person's own version of a built-in. */
+	customized: boolean,
+	enabled: boolean,
+	tools: string[],
+	/**  lead, page or light. */
+	role: string | null,
+};
+
+export type WorkSkillsResponseV1 = {
+	version: number,
+	profile: string,
+	skills: WorkSkillRowV1[],
+	/**  A skill's `SKILL.md`, when one was read. */
+	text: string | null,
+	fault: WorkSkillFaultV1 | null,
+	error: WorkFailureV1 | null,
 };
 
 /**  Bounded full-resynchronization projection. Serialized facts grant nothing. */

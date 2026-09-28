@@ -95,6 +95,7 @@ mod startup_styles;
 #[cfg(feature = "work-product")]
 mod work_activity;
 mod work_decision;
+mod work_models;
 #[cfg(feature = "work-development-traces")]
 mod work_diagnostics;
 #[cfg(any(feature = "work-product", test))]
@@ -1651,6 +1652,13 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_product::human::work_human_release,
             work_decision::work_decision_preference,
             work_decision::work_set_decision_preference,
+            work_models::work_models,
+            work_models::work_choose_model,
+            work_models::work_set_provider_key,
+            work_models::work_test_provider_key,
+            work_models::work_clear_provider_key,
+            work_models::work_set_model_endpoint,
+            work_models::work_more_models,
             work_sites::work_sites,
             work_sites::work_set_site,
             tabs_bootstrap,
@@ -1730,6 +1738,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             WorkChanged,
             WorkHumanChanged,
             WorkDecisionPreferenceChanged,
+            work_models::WorkModelsChanged,
             ItemsChanged,
             FaviconsChanged,
             ResourceChanged,
@@ -5099,6 +5108,7 @@ pub fn run() {
                 APP_STORE.set(store.clone()).map_err(|_| {
                     std::io::Error::other("process-global application store is already installed")
                 })?;
+                work_models::install(app.handle());
 
                 #[cfg(target_os = "windows")]
                 let privileged_runtime = prepare_privileged_runtime_directories(&data_dir)?;
