@@ -209,6 +209,9 @@
      panel from the page; the drop only has to say which one is in front. */
   --shadow-menu: 0 0 0 1px rgb(255 255 255 / 0.08), 0 14px 44px -10px rgb(0 0 0 / 0.34);
 
+  /* A sheet standing on the bottom edge: its rim, and height cast upward. */
+  --shadow-sheet: 0 0 0 0.5px rgb(255 255 255 / 0.08), 0 -10px 40px -20px rgb(0 0 0 / 0.4);
+
   /* The platform face, and only the platform face. Native menus, alerts and
      file dialogs open out of this chrome in SF and cannot be told otherwise,
      so a webfont here changes typeface under the user's cursor. SF also
@@ -475,6 +478,7 @@
   --shadow-overlay: 0 12px 36px rgb(24 24 27 / 0.14), 0 0 0 0.5px rgb(24 24 27 / 0.1);
   --shadow-popover: var(--shadow-float);
   --shadow-menu: 0 0 0 1px rgb(24 24 27 / 0.09), 0 14px 44px -10px rgb(24 24 27 / 0.16);
+  --shadow-sheet: 0 0 0 0.5px rgb(24 24 27 / 0.08), 0 -10px 40px -20px rgb(24 24 27 / 0.14);
 
   --favicon-rest-opacity: 0.9;
   --favicon-rest-saturation: 0.92;

@@ -19,6 +19,7 @@
   import { TabRail } from "$features/tabs";
   import { selectionGlide } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
+  import { requestTab } from "$session/work-tab.svelte";
   import { expanded as sidebarWidth } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { untrack } from "svelte";
@@ -89,14 +90,7 @@
     });
   });
   let splitting = $state(false);
-  // Work's entry stays out of browser startup: the list loads when Work is chosen.
-  const loadWorkSidebar = () => import("$features/work").then((work) => work.loadWorkSidebar());
   let inWork = $derived(browserPage.currentPage() === "work");
-  let workScope = $derived.by(() => {
-    const profile = tabs.profile();
-    const space = tabs.activeSpaceId();
-    return profile && profile.kind !== "incognito" && space ? { profile: profile.id, space } : null;
-  });
   // The column's body settles in only when the environment changes, never on launch.
   let modeSwitched = $state(false);
   let shownMode: boolean | null = null;
@@ -171,15 +165,16 @@
       splitting = false;
       return;
     }
-    tabs.activate(id);
-    // A kept site chosen from Work is a page to look at: Browse shows it.
-    if (inWork) void browserPage.open(null);
+    // In Work a tab opens over the canvas; the work stays where it is.
+    if (inWork) requestTab(id);
+    else tabs.activate(id);
   }
 </script>
 
 <div
   class="shell flex h-screen w-screen"
-  class:p-2={!IS_MAC}
+  class:p-2={!IS_MAC || inWork}
+  class:pb-0={inWork}
   data-zephium-active-tab={tabs.activeId() ?? ""}
   data-zephium-surface={browserPage.currentPage() === "settings" ? "settings" : "browse"}
 >
@@ -193,19 +188,7 @@
       <!-- One column in both environments: only what it lists changes, and the
            new list settles in where the old one was. -->
       {#key inWork}<div class="sidebar-mode-body" data-arriving={modeSwitched}>
-          {#if inWork}
-            {#if workScope}{#key `${workScope.profile}:${workScope.space}`}<LazyView
-                  loader={loadWorkSidebar}
-                  loadingLabel=""
-                  failureLabel={m.surface_render_failed()}
-                  retryLabel={m.surface_retry()}
-                  >{#snippet children(Projects)}<Projects
-                      profile={workScope.profile}
-                      space={workScope.space}
-                      {compact}
-                    />{/snippet}</LazyView
-                >{/key}{/if}
-          {:else if compact}
+          {#if compact}
             <TabRail entries={railTabs} onSelect={selectTab} />
           {:else}
             <!--
@@ -233,7 +216,7 @@
             <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
           {/if}
         </div>{/key}
-    {/snippet}{#snippet dock(compact)}{#if compact}<Dock compact>
+    {/snippet}{#snippet dock(compact)}{#if compact}<Dock compact tools={!inWork}>
           {#snippet sites()}<EssentialsRail
               entries={railEssentials}
               onSelect={selectTab}

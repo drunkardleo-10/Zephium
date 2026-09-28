@@ -26,6 +26,7 @@
     entries,
     trigger,
     triggerClass = "",
+    contentClass = "",
     side = "bottom",
     align = "start",
     returnFocus,
@@ -35,6 +36,8 @@
     entries: MenuEntry[];
     trigger: Snippet;
     triggerClass?: string;
+    /** Added to the floating panel, for a surface that needs its own material. */
+    contentClass?: string;
     side?: "top" | "bottom" | "left" | "right";
     align?: "start" | "center" | "end";
     /** Asked as the menu closes; false leaves focus where the chosen action put
@@ -53,7 +56,7 @@
   </DropdownMenu.Trigger>
   <DropdownMenu.Portal>
     <DropdownMenu.Content
-      class="ui-menu ui-menu-scroll"
+      class={["ui-menu ui-menu-scroll", contentClass].filter(Boolean).join(" ")}
       {side}
       {align}
       sideOffset={6}

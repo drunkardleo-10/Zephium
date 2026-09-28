@@ -46,15 +46,17 @@ test("re-selecting the side already showing asks native for nothing", async () =
   expect(native.run).not.toHaveBeenCalled();
 });
 
-test("the rail carries the same switch as glyphs, each still named", async () => {
+test("the rail names the environment in a word and opens the other beneath it", async () => {
   await surface.init();
   const screen = await render(ModeTabs, { compact: true });
-  const work = screen.getByRole("radio", { name: "Work", exact: true });
-  await expect.element(work).toHaveAttribute("title", "Work");
-  expect(screen.container.querySelector(".segmented")?.getAttribute("data-icon-only")).toBe("true");
-
-  await work.click();
+  const current = screen.getByRole("button", { name: "Browse", exact: true });
+  await expect.element(current).toHaveAttribute("aria-expanded", "false");
+  await current.click();
+  await expect.element(current).toHaveAttribute("aria-expanded", "true");
+  await screen.getByRole("button", { name: "Work", exact: true }).click();
   expect(native.run).toHaveBeenCalledWith("browser.work");
   emitNativeEvent("uiCommand", "browser.work");
-  await expect.element(work).toHaveAttribute("aria-checked", "true");
+  await expect
+    .element(screen.getByRole("button", { name: "Work", exact: true }).first())
+    .toHaveAttribute("aria-expanded", "false");
 });

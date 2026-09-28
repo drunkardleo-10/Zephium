@@ -32,11 +32,14 @@
   let taskPage = $derived(
     browserPage.currentPage() === "tasks" || browserPage.currentPage() === "notes",
   );
+  // Work gives the window to its canvas: the column is always the rail there.
+  let inWork = $derived(browserPage.currentPage() === "work");
+  let railPage = $derived(taskPage || inWork);
   // Settings takes the column for its own navigation. Tasks and Notes are part
   // of browsing, so the column stays as the tab rail: a tab is one click away
   // and choosing it returns to that page.
   let navigating = $derived(settings);
-  let compact = $derived(!navigating && (taskPage || isCompact() || tools.activeTool() !== null));
+  let compact = $derived(!navigating && (railPage || isCompact() || tools.activeTool() !== null));
 
   // A change of shape is one continuous change: every mark travels from the
   // old shape into the new one while native slides the page to match. Not
@@ -85,7 +88,7 @@
     });
   });
   let width = $derived(
-    navigating ? 240 : taskPage && tools.activeTool() === null ? COMPACT_WIDTH : effectiveWidth(),
+    navigating ? 240 : railPage && tools.activeTool() === null ? COMPACT_WIDTH : effectiveWidth(),
   );
 
   // Dispatch runs untracked and behind a sequence guard. Handlers read the
@@ -119,13 +122,13 @@
   data-header-fresh={headerFresh}
   class="browser-sidebar relative flex shrink-0 flex-col text-text select-none"
 >
-  {#if !navigating && !taskPage && tools.activeTool() === null}<SidebarResizeHandle {width} />{/if}
+  {#if !navigating && !railPage && tools.activeTool() === null}<SidebarResizeHandle {width} />{/if}
   <SidebarHeader
     compact={headerCompact}
     launcher={!navigating && tools.activeTool() !== null}
     ontoggle={toggleShape}
     navigation={!navigating}
-    pageControls={browserPage.currentPage() !== "work"}
+    pageControls={!inWork}
   />
   {#if settings}
     {@render settingsNavigation()}

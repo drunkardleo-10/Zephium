@@ -1,10 +1,11 @@
+import "$styles/global.css";
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
+import { page, userEvent } from "vitest/browser";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import { tabFixture, revision } from "$shared/testing/fixtures";
 import { tabs } from "$domain/tabs";
 import { surface } from "$domain/surface";
-import { environmentSession } from "$domain/work-environment";
 import Shell from "../Shell.svelte";
 
 vi.mock("../WorkWorkspace.svelte", async () => await import("./StageStub.svelte"));
@@ -45,7 +46,7 @@ test("Settings return restores the active browser identity synchronously", async
   );
 });
 
-test("Work keeps the sidebar and lists the space's projects where the tabs were", async () => {
+test("Work keeps the column as the rail of tabs, and a tab chosen there opens over the canvas", async () => {
   await surface.init();
   await tabs.init();
   const tab = tabFixture();
@@ -59,31 +60,34 @@ test("Work keeps the sidebar and lists the space's projects where the tabs were"
     active: tab.id,
     split_group: null,
   });
-  const work = environmentSession("profile", "space")!;
-  work.works = [
-    { id: "trip", space: "space", title: "YC trip", lifecycle: "active", revision: "1" },
-    { id: "saas", space: "space", title: "SaaS design", lifecycle: "active", revision: "1" },
-  ];
-  work.selected = "trip";
-  work.running = "trip";
   const screen = await render(Shell);
   const column = screen.container.querySelector("aside")!;
-  expect(screen.container.querySelector("[data-zephium-address]")).not.toBeNull();
+  expect(screen.container.querySelector(".shelf")).not.toBeNull();
 
   emitNativeEvent("uiCommand", "browser.work");
-  const projects = screen.getByRole("list", { name: "Projects" });
-  await expect.element(projects).toBeVisible();
-  // The same column, not a new one: only its body changed.
+  await expect.poll(() => column.style.width).toBe("56px");
+  await expect.poll(() => screen.container.querySelector("[data-work-stage-stub]")).not.toBeNull();
+  await page.viewport(900, 640);
+  const rail = page.elementLocator(column);
+  await rail.screenshot({ path: "../../../../../target/work-shell/rail-work.png" });
+  await screen.getByRole("button", { name: "Work", exact: true }).click();
+  await expect.element(screen.getByRole("button", { name: "Browse", exact: true })).toBeVisible();
+  await new Promise((done) => setTimeout(done, 400));
+  await rail.screenshot({ path: "../../../../../target/work-shell/rail-work-open.png" });
+  await userEvent.keyboard("{Escape}");
+  // The same column, not a new one: the rail, its tabs, no tool case.
   expect(screen.container.querySelector("aside")).toBe(column);
-  expect(screen.container.querySelector("[data-zephium-address]")).toBeNull();
-  expect(screen.container.querySelector(`[data-zephium-tab-id="${tab.id}"]`)).toBeNull();
-  await expect
-    .element(projects.getByRole("button", { name: "YC trip, working" }))
-    .toHaveAttribute("aria-current", "page");
-  await expect.element(screen.getByRole("button", { name: "New project" })).toBeVisible();
-  await expect.element(screen.getByRole("radio", { name: "Work" })).toBeChecked();
+  expect(screen.container.querySelector(".shelf")).toBeNull();
+  const row = screen.container.querySelector<HTMLElement>(
+    `[data-zephium-tab-id="${tab.id}"] button`,
+  )!;
+  expect(row).not.toBeNull();
+  const { tabRequest } = await import("$session/work-tab.svelte");
+  row.click();
+  await expect.poll(() => tabRequest()?.tab).toBe(tab.id);
+  expect(surface.currentPage()).toBe("work");
 
   emitNativeEvent("uiCommand", "browser.return");
-  await expect.poll(() => screen.container.querySelector("[data-zephium-address]")).not.toBeNull();
+  await expect.poll(() => screen.container.querySelector(".shelf")).not.toBeNull();
   expect(screen.container.querySelector("aside")).toBe(column);
 });

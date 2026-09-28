@@ -59,14 +59,15 @@
     {/if}
     <ModeTabs compact />
     <div class="flex items-center gap-0.5">
-      <IconButton
-        icon={EllipsisIcon}
-        label={m.ui_sidebar_options()}
-        size={15}
-        buttonSize={26}
-        haspopup
-        onclick={openSidebarMenu}
-      />
+      <!-- Its menu acts on the page and the column's shape; Work has neither. -->
+      {#if pageControls}<IconButton
+          icon={EllipsisIcon}
+          label={m.ui_sidebar_options()}
+          size={15}
+          buttonSize={26}
+          haspopup
+          onclick={openSidebarMenu}
+        />{/if}
       <IconButton
         icon={Search01Icon}
         label={m.ui_search_or_enter_an_address()}
