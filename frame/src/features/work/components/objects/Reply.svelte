@@ -79,23 +79,22 @@
 
   .figures div {
     display: flex;
-    flex-direction: column-reverse;
-    gap: 4px;
+    flex-direction: column;
+    gap: 3px;
   }
 
   dt {
+    order: 2;
     color: var(--color-muted);
     font-size: var(--text-label);
   }
 
   dd {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin: 0;
+    display: contents;
   }
 
   .value {
+    order: 1;
     font-size: var(--text-headline);
     font-weight: 650;
     font-variant-numeric: tabular-nums;
@@ -104,7 +103,7 @@
   }
 
   .note {
-    order: 2;
+    order: 3;
     color: var(--color-faint);
     font-size: var(--text-caption);
   }
