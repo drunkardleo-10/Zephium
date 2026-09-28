@@ -7,9 +7,9 @@ use zephium_app::work_lead::{LeadModel, WorkLeadModels, WorkLeadService};
 use zephium_core::work::model::WorkModelRole;
 
 const SETTING_PREFIX: &str = "work.runtime.";
-/// Until the lead passes its acceptance runs, a profile without a choice
-/// keeps the earlier runtime.
-const DEFAULT: WorkRuntimeChoice = WorkRuntimeChoice::Classic;
+/// A profile without a choice runs the lead; the earlier runtime stays
+/// reachable for one release through the setting or the environment.
+const DEFAULT: WorkRuntimeChoice = WorkRuntimeChoice::Lead;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WorkRuntimeChoice {
