@@ -1799,7 +1799,10 @@ mod tests {
                 queued(HostTaskPriority::AgentContext)
             ));
         }
-        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        #[cfg(all(
+            feature = "agentic-browser",
+            any(target_os = "macos", target_os = "windows")
+        ))]
         for _ in 0..AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY {
             assert!(enqueue_pending(
                 &mut pending,
@@ -1868,7 +1871,10 @@ mod tests {
                 queued(HostTaskPriority::AgentContext)
             ));
         }
-        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        #[cfg(all(
+            feature = "agentic-browser",
+            any(target_os = "macos", target_os = "windows")
+        ))]
         for _ in 0..AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY {
             assert!(enqueue_pending(
                 &mut pending,
