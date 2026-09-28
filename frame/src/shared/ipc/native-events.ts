@@ -3,6 +3,7 @@ import type {
   WorkChanged,
   WorkHumanChanged,
   WorkDecisionPreferenceChanged,
+  WorkModelsChanged,
   PanelState,
   FaviconsView,
   NoteOpenRequested,
@@ -50,6 +51,7 @@ export const nativeEventNames = {
   workChanged: "zephium:work-changed",
   workHumanChanged: "zephium:work-human-changed",
   workDecisionPreferenceChanged: "zephium:work-decision-preference-changed",
+  workModelsChanged: "zephium:work-models-changed",
   panelState: "zephium:panel-state",
   favicons: "zephium:favicons",
   noteOpenRequested: "zephium:note-open-requested",
@@ -88,6 +90,7 @@ export const events = {
   workDecisionPreferenceChanged: scopedEvent<WorkDecisionPreferenceChanged>(
     nativeEventNames.workDecisionPreferenceChanged,
   ),
+  workModelsChanged: scopedEvent<WorkModelsChanged>(nativeEventNames.workModelsChanged),
   favicons: scopedEvent<FaviconsView>(nativeEventNames.favicons),
   noteOpenRequested: scopedEvent<NoteOpenRequested>(nativeEventNames.noteOpenRequested),
   resourceClose: scopedEvent<string>(nativeEventNames.resourceClose),

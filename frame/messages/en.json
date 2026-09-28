@@ -2016,5 +2016,9 @@
   "settings_skills_fault_gone": "That skill isn't there anymore.",
   "settings_skills_fault_builtin": "A built-in skill can be turned off, not deleted.",
   "settings_skills_fault_taken": "You already have a skill with this name.",
-  "settings_skills_fault_full": "You have 64 skills, the most Zephium keeps."
+  "settings_skills_fault_full": "You have 64 skills, the most Zephium keeps.",
+  "settings_skills_instructions_placeholder": "# What this skill is for\n\n## First\n- What to find out before starting\n\n## Result\n- What to make, and how it should look",
+  "work_remembered_label": "What this run remembered",
+  "work_remembered": "Remembered",
+  "work_remembered_undo": "Undo"
 }
