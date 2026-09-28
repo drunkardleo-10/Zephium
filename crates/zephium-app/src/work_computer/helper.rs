@@ -93,13 +93,40 @@ impl LeadHelper for ComputerHelper {
         40
     }
     /// The files the part changed, as exact diffs on its row.
-    fn objects<'a>(&'a self, context: LeadToolContext<'a>) -> LeadObjectsFuture<'a> {
+    fn objects<'a>(
+        &'a self,
+        context: LeadToolContext<'a>,
+        digest: &'a str,
+    ) -> LeadObjectsFuture<'a> {
         Box::pin(async move {
             let Ok(tools) = self.tools.session(&context) else {
                 return Vec::new();
             };
-            tools
+            // Each file's summary is the helper's own line about it.
+            let summaries = tools
                 .diffs(&Default::default())
+                .into_iter()
+                .filter_map(|diff| {
+                    let name = diff
+                        .path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&diff.path)
+                        .to_owned();
+                    let line = digest.lines().find(|line| line.contains(&name))?;
+                    let said = line
+                        .split_once(':')
+                        .map_or(line, |(_, said)| said)
+                        .trim()
+                        .trim_start_matches(['-', '*', ' '])
+                        .chars()
+                        .take(118)
+                        .collect::<String>();
+                    (!said.is_empty()).then_some((diff.path, said))
+                })
+                .collect();
+            tools
+                .diffs(&summaries)
                 .into_iter()
                 .map(|diff| {
                     let name = diff

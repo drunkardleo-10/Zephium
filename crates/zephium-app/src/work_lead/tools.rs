@@ -79,8 +79,13 @@ pub trait LeadHelper: Send + Sync {
     }
     /// Objects the part leaves when it ends, placed on its row by the lead:
     /// what the helper made exactly (a diff of the files it changed), never
-    /// something the model wrote.
-    fn objects<'a>(&'a self, _context: LeadToolContext<'a>) -> LeadObjectsFuture<'a> {
+    /// something the model wrote. `digest` is what the helper reported, for
+    /// naming them.
+    fn objects<'a>(
+        &'a self,
+        _context: LeadToolContext<'a>,
+        _digest: &'a str,
+    ) -> LeadObjectsFuture<'a> {
         Box::pin(async { Vec::new() })
     }
 }

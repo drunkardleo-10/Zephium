@@ -216,7 +216,10 @@ fn normalize(kind: &str, data: &mut Value) {
             _ => {}
         }
     }
-    trim(data);
+    // Code and diff lines keep their indentation.
+    if !matches!(kind, "code" | "diff") {
+        trim(data);
+    }
     // Headlines, names and labels are set as type: no Markdown marks.
     for field in ["headline"] {
         if let Some(Value::String(text)) = data.get_mut(field) {

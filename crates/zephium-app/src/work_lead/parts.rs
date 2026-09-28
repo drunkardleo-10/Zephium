@@ -174,7 +174,7 @@ where
                 run: self.run,
                 part: Some(fact.id),
             };
-            for (title, data) in helper.objects(context).await {
+            for (title, data) in helper.objects(context, &report.digest).await {
                 match context.publish(&title, data).await {
                     Ok(id) => report.objects.push(id),
                     Err(_) => self

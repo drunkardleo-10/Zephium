@@ -575,6 +575,12 @@ where
             return ("id names no object on this canvas".into(), true);
         };
         let kind = target.artifact.data.kind_name();
+        if kind == "diff" && target.artifact.part.is_some() {
+            return (
+                "A diff a part placed is the exact change to the file and stays as it is".into(),
+                true,
+            );
+        }
         if kind == "reply" && !target.in_this_run {
             return (
                 "A reply belongs to its own request: make a new reply for this one with create"
