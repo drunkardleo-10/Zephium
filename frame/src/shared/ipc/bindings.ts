@@ -52,6 +52,16 @@ export const commands = {
 	workMoreModels: (expectedProfile: string, provider: WorkModelProvider) => __TAURI_INVOKE<WorkMoreModelsV1_Serialize>("work_more_models", { expectedProfile, provider }),
 	workSites: (expectedProfile: string) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_sites", { expectedProfile }),
 	workSetSite: (expectedProfile: string, change: WorkSiteChangeV1) => __TAURI_INVOKE<WorkSiteAccessResponseV1>("work_set_site", { expectedProfile, change }),
+	/**  The tools found on this Mac and the servers this profile added. */
+	workConnections: (expectedProfile: string) => __TAURI_INVOKE<WorkConnectionsResponseV1>("work_connections", { expectedProfile }),
+	/**  Adds or replaces a server; new secrets go to the Keychain. */
+	workSaveConnection: (expectedProfile: string, draft: WorkServerDraftV1) => __TAURI_INVOKE<WorkConnectionsResponseV1>("work_save_connection", { expectedProfile, draft }),
+	/**  Removes a server and forgets its secrets. */
+	workRemoveConnection: (expectedProfile: string, id: string) => __TAURI_INVOKE<WorkConnectionsResponseV1>("work_remove_connection", { expectedProfile, id }),
+	/**  Connects to a server once and lists its tools. */
+	workCheckConnection: (expectedProfile: string, id: string) => __TAURI_INVOKE<WorkServerCheckV1>("work_check_connection", { expectedProfile, id }),
+	/**  Signs in to an HTTP server in a new tab, then checks it. */
+	workSignInConnection: (expectedProfile: string, id: string) => __TAURI_INVOKE<WorkServerCheckV1>("work_sign_in_connection", { expectedProfile, id }),
 	workMemories: (expectedProfile: string, query: WorkMemoryQueryV1) => __TAURI_INVOKE<WorkMemoryResponseV1_Serialize>("work_memories", { expectedProfile, query }),
 	/**  Changes one memory, or all of them, and returns the list for `query`. */
 	workChangeMemory: (expectedProfile: string, query: WorkMemoryQueryV1, change: WorkMemoryChangeV1) => __TAURI_INVOKE<WorkMemoryResponseV1_Serialize>("work_change_memory", { expectedProfile, query, change }),
@@ -2315,6 +2325,20 @@ export type WorkChecklistItem = {
 	completed: boolean,
 };
 
+/**  A command-line tool as Settings shows it. */
+export type WorkCliRowV1 = {
+	/**  `gh`, `git`, `codex` or `claude`. */
+	id: string,
+	status: WorkCliStatusV1,
+	version: string | null,
+	/**  The account the tool says it uses: a login, an email, "ChatGPT". */
+	account: string | null,
+};
+
+export type WorkCliStatusV1 = "signed_in" | "signed_out" | 
+/**  Installed and needs no account (git). */
+"ready" | "missing" | "unknown";
+
 export type WorkCloudStatusV1 = {
 	signed_in: boolean,
 	plan: string | null,
@@ -2484,6 +2508,14 @@ export type WorkConfirmV1_Serialize = {
 	/**  "Allow edits on <site> for this run" is offered. */
 	run_option?: boolean,
 	decision?: WorkConfirmDecisionV1 | null,
+};
+
+export type WorkConnectionsResponseV1 = {
+	version: number,
+	profile: string,
+	clis: WorkCliRowV1[],
+	servers: WorkServerRowV1[],
+	error: WorkFailureV1 | null,
 };
 
 /**
@@ -4457,6 +4489,86 @@ export type WorkRuntimeProjection_Serialize = {
 export type WorkRuntimeSessionId = string;
 
 export type WorkSearchProvider = "open_ai";
+
+export type WorkServerAuthV1 = "none" | 
+/**  A token the person pasted, sent as `Authorization: Bearer`. */
+"bearer" | 
+/**  Sign in with the service in the browser. */
+"oauth";
+
+/**  What testing a server found. */
+export type WorkServerCheckV1 = {
+	version: number,
+	profile: string,
+	id: string,
+	outcome: WorkServerOutcomeV1,
+	/**  The name the server gives itself. */
+	server_name: string | null,
+	tools: WorkServerToolV1[],
+	error: WorkFailureV1 | null,
+};
+
+/**  Adds a server, or replaces the one with the same id. */
+export type WorkServerDraftV1 = {
+	server: WorkServerV1,
+	secrets: WorkServerSecretV1[],
+	/**  The id it had before an edit renamed it. */
+	previous: string | null,
+};
+
+/**  One environment variable a stdio server gets. */
+export type WorkServerEnvV1 = {
+	name: string,
+	/**  Kept in the Keychain; `value` is then always absent. */
+	secret: boolean,
+	value: string | null,
+};
+
+export type WorkServerOutcomeV1 = "ready" | 
+/**  The server wants the person to sign in. */
+"sign_in" | 
+/**  The program was not found or could not start. */
+"not_found" | 
+/**  It did not answer in time. */
+"timeout" | 
+/**  It answered outside the protocol or closed. */
+"failed";
+
+export type WorkServerRowV1 = {
+	server: WorkServerV1,
+	/**  Secret names the Keychain holds: `bearer`, `env.NAME`. */
+	secrets: string[],
+	/**  OAuth credentials are held. */
+	signed_in: boolean,
+};
+
+/**  A new secret for a server; an absent one keeps what the Keychain holds. */
+export type WorkServerSecretV1 = {
+	/**  `bearer` or `env.NAME`. */
+	account: string,
+	value: string,
+};
+
+export type WorkServerToolV1 = {
+	name: string,
+	title: string | null,
+	/**  Calls stop for a Confirm. */
+	asks: boolean,
+};
+
+export type WorkServerTransportV1 = { kind: "stdio"; 
+/**  A program name found on the login shell's PATH, or an absolute path. */
+command: string; args: string[]; env: WorkServerEnvV1[] } | { kind: "http"; url: string; auth: WorkServerAuthV1 };
+
+/**  An MCP server the person added, as stored per profile. */
+export type WorkServerV1 = {
+	/**  Lowercase letters, digits and dashes; namespaces its tools. */
+	id: string,
+	/**  "Linear", "Notion". */
+	name: string,
+	transport: WorkServerTransportV1,
+	enabled: boolean,
+};
 
 export type WorkSheetBestV1 = "max" | "min";
 

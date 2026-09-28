@@ -107,6 +107,8 @@ pub mod work_computer;
 pub mod work_connections;
 #[cfg(feature = "work-planning")]
 pub mod work_models;
+#[cfg(feature = "work-runtime")]
+pub mod work_personal;
 #[cfg(feature = "work-planning")]
 pub mod work_planning;
 #[cfg(feature = "work-runtime")]

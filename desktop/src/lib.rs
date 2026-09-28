@@ -103,6 +103,7 @@ mod work_operations;
 mod work_product;
 #[cfg(feature = "work-product")]
 mod work_provider;
+mod work_personal;
 mod work_sites;
 
 use std::collections::{HashMap, VecDeque};
@@ -1661,6 +1662,11 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_models::work_more_models,
             work_sites::work_sites,
             work_sites::work_set_site,
+            work_personal::work_memories,
+            work_personal::work_change_memory,
+            work_personal::work_skills,
+            work_personal::work_skill_text,
+            work_personal::work_change_skill,
             tabs_bootstrap,
             tabs_open,
             tabs_activate,
