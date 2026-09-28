@@ -316,8 +316,8 @@ impl WebextHost {
             let Some(action) = (unsafe { context.actionForTab(tab_object.as_deref()) }) else {
                 continue;
             };
-            let label = unsafe { action.label() }.to_string();
-            let badge = unsafe { action.badgeText() }.to_string();
+            let label = first_line(&unsafe { action.label() }.to_string());
+            let badge = first_line(&unsafe { action.badgeText() }.to_string());
             let icon = crate::platform::imp::rasterize_action_icon(&action);
             let revision = presentation_revision(&label, &badge, icon.as_ref().map(|i| i.rgba()));
             let runtime = ExtensionRuntimeInstance::new(profile, *install_id, install.generation);
@@ -553,6 +553,17 @@ fn presentation_revision(label: &str, badge: &str, icon: Option<&[u8]>) -> Exten
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (label, badge, icon).hash(&mut hasher);
     ExtensionActionRevision::new(hasher.finish().max(1)).expect("nonzero")
+}
+
+/// Chrome shows a multi-line title as a tooltip; a button's name is its first
+/// line (Google Translate's title goes on to explain its clicks).
+fn first_line(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    line.chars().filter(|c| !c.is_control()).collect()
 }
 
 fn truncate(text: &str, max: usize) -> &str {
@@ -1137,5 +1148,21 @@ impl PageDelegate {
             can_go_back: unsafe { view.canGoBack() },
             can_go_forward: unsafe { view.canGoForward() },
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_action_is_named_by_the_first_line_of_its_title() {
+        assert_eq!(
+            first_line("Google Translate\n\nLeft-click to translate!"),
+            "Google Translate"
+        );
+        assert_eq!(first_line("\n  Dark Reader \t"), "Dark Reader");
+        assert_eq!(first_line("a\u{7}b"), "ab");
+        assert_eq!(first_line(""), "");
     }
 }
