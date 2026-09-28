@@ -82,6 +82,13 @@ impl Drop for Fixture {
 
 struct Host(HWND);
 impl Host {
+    fn show(&self) {
+        // SAFETY: this owner retains the live UI-thread window.
+        unsafe {
+            let _ = ShowWindow(self.0, SW_SHOW);
+            let _ = SetForegroundWindow(self.0);
+        }
+    }
     fn new() -> Result<Self> {
         // SAFETY: class and callback live for the process; this owner destroys
         // the HWND after every child view has been dropped.
@@ -184,6 +191,8 @@ fn make_view(
     name: &str,
     environment: Option<&ICoreWebView2Environment>,
     enabled: bool,
+    visible: bool,
+    initialization: Option<&str>,
 ) -> Result<WebView> {
     let mut context = wry::WebContext::new(Some(root.to_path_buf()));
     let expected_root = root.canonicalize()?;
@@ -222,7 +231,7 @@ fn make_view(
         };
     let mut builder = WebViewBuilder::new_with_web_context(&mut context)
         .with_profile_name(name.to_owned())
-        .with_visible(false)
+        .with_visible(visible)
         .with_focused(false)
         .with_devtools(false)
         .with_autoplay(false)
@@ -233,6 +242,9 @@ fn make_view(
         });
     if enabled {
         builder = builder.with_browser_extension_startup_gate(gate);
+    }
+    if let Some(script) = initialization {
+        builder = builder.with_initialization_script(script);
     }
     if let Some(environment) = environment {
         builder = builder.with_environment(environment.clone());
@@ -375,6 +387,9 @@ pub fn run() -> Result<()> {
     std::fs::create_dir(&packages)?;
     let fixture = Fixture::start()?;
     let host = Host::new()?;
+    let visible = steps.iter().any(|step| step["human_visible"] == true);
+    let mut popup_hosts = Vec::new();
+    let mut human_binding: Option<Value> = None;
     let enabled = !steps.iter().any(|step| step["extensions_enabled"] == false);
     // Wry pumps construction callbacks without a deadline. Bound startup in
     // this standalone process so an unavailable desktop cannot hang the lab.
@@ -389,7 +404,11 @@ pub fn run() -> Result<()> {
         "Creating WebView2 environment for disposable data at {}",
         udf.display()
     );
-    let first = make_view(&host, &udf, "LabHuman", None, enabled)?;
+    let first = make_view(&host, &udf, "LabHuman", None, enabled, visible, None)?;
+    if visible {
+        host.show();
+        first.focus()?;
+    }
     startup_tx.send(())?;
     let _ = startup_watchdog.join();
     let environment = first.environment();
@@ -414,6 +433,12 @@ pub fn run() -> Result<()> {
             if let Some(ms) = step["sleep"].as_u64() {
                 sleep(ms);
                 return Ok(json!({"slept_ms":ms}));
+            }
+            if step["focus_human"] == true {
+                host.show();
+                views.get("tab1").ok_or("missing human view")?.focus()?;
+                // SAFETY: compare the foreground HWND with this live owner.
+                return Ok(json!({"foreground_human":unsafe { GetForegroundWindow() == host.0 }}));
             }
             if let Some(source) = step["load"].as_str() {
                 let folder = prepare(Path::new(source), &packages)?;
@@ -465,13 +490,57 @@ pub fn run() -> Result<()> {
                     return Err("view already exists".into());
                 }
                 let p = step["profile"].as_str().unwrap_or("LabHuman");
+                let window = step["window"] == true;
+                if window {
+                    popup_hosts.push(Host::new()?);
+                }
+                let owner = if window {
+                    popup_hosts.last().ok_or("missing popup host")?
+                } else {
+                    &host
+                };
+                let initialization = if step["target_human"] == true {
+                    let binding = human_binding
+                        .as_ref()
+                        .ok_or("no authenticated human binding")?;
+                    Some(
+                        include_str!("../fixtures/popup-target.js")
+                            .replace("__ZEPHIUM_BINDING__", &binding.to_string()),
+                    )
+                } else {
+                    None
+                };
                 views.insert(
                     new_name.to_owned(),
-                    make_view(&host, &udf, p, Some(&environment), enabled)?,
+                    make_view(
+                        owner,
+                        &udf,
+                        p,
+                        Some(&environment),
+                        enabled,
+                        window,
+                        initialization.as_deref(),
+                    )?,
                 );
+                if window {
+                    owner.show();
+                    views.get(new_name).ok_or("missing view")?.focus()?;
+                }
                 return Ok(json!({"view":new_name,"profile":p}));
             }
             let view = views.get(name).ok_or("unknown view")?;
+            if step["capture_human"] == true {
+                let script = format!("const tabs=await chrome.tabs.query({{}});const matches=tabs.filter(t=>t.url==={});if(matches.length!==1)throw new Error('ambiguous human tab');return {{extensionId:chrome.runtime.id,tabId:matches[0].id,windowId:matches[0].windowId}}", serde_json::to_string(&format!("{}/first", fixture.origin))?);
+                let result = eval(view, &script)?;
+                let binding = result
+                    .pointer("/result/value")
+                    .ok_or("no native tab binding")?;
+                if binding["tabId"].as_i64().is_none() || binding["windowId"].as_i64().is_none() {
+                    return Err("invalid native tab binding".into());
+                }
+                human_binding = Some(binding.clone());
+                return Ok(binding.clone());
+            }
             let substitute = |s: &str| {
                 s.replace("$ID", &last_id)
                     .replace("$ORIGIN", &fixture.origin)
@@ -514,6 +583,9 @@ pub fn run() -> Result<()> {
             }
             if step.get("extensions_enabled").is_some() {
                 return Ok(json!({"extensions_enabled":enabled}));
+            }
+            if step.get("human_visible").is_some() {
+                return Ok(json!({"human_visible":visible}));
             }
             Err("unknown step".into())
         })();

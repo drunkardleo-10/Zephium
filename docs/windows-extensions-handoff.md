@@ -1,5 +1,29 @@
 # Chrome extensions on Windows: handoff
 
+## Implementation follow-up — 2026-09-28
+
+The owner approved proceeding past step 1 toward an isolated Windows QA build,
+with local commits and a branch push only when QA is ready or a bounded blocker
+is reached. Windows initially offers All sites and Specific sites; On click is
+withheld. Work must use the automation subprofile in extension-enabled environments.
+
+Visible popup lab evidence: `target/webext-visible-popup/20260928-170807`.
+With a focused host-opened popup, both currentWindow and lastFocusedWindow return
+the popup in Bitwarden and Dark Reader. Explicitly focusing the human controller
+makes lastFocusedWindow return the human page; currentWindow remains the popup.
+A 15-line popup-only query wrapper, given a native tab/window binding by the
+host, redirects active-tab queries correctly in both extensions, including
+callback/promise calls through the original native query. The lab obtains its
+binding from a unique fixture URL; production must authenticate the exact human
+controller instead of relying on potentially duplicated URLs.
+
+Bitwarden's onboarding page executes. Dark Reader's UI still says protected
+`about:` even though direct popup queries are corrected; its background-side
+selection is not repaired by this popup-only wrapper. No worker tab dispatcher
+or permission replacement was added. This is a targeting feasibility result,
+not a claim that Dark Reader's full popup workflow works. Continue integration
+as requested, retaining this limitation for QA.
+
 Status: 2026-09-28. Extension support is finished for macOS (WebKit). Windows
 (WebView2) has a step-1 lab probe; product integration has not started. This
 document is the brief for that work: what
