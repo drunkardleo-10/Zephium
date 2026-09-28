@@ -228,10 +228,13 @@ impl McpConnection {
     }
 
     async fn allowed(&self, host: &dyn ConnectionHost) -> Result<(), ToolReply> {
-        let prompt = format!("Use {}?", self.server.name);
+        let prompt = format!(
+            "Use {}? To use its tools in this work with your account.",
+            self.server.name
+        );
         let yes = format!("Use {}", self.server.name);
         let answer = host
-            .ask(&prompt, &[yes.as_str(), "Not now"])
+            .ask(&prompt, &[yes.as_str(), super::gh::DECLINE])
             .await
             .map_err(|_| fault("The run stopped."))?;
         if answer.as_deref() == Some(yes.as_str()) {

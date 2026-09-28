@@ -12,10 +12,28 @@ use super::{bounded, CallFact, ConnectionHost, Decision};
 use crate::work_computer::ToolReply;
 
 pub const SERVICE: &str = "github";
-/// The question the first use in a work asks, with GitHub's mark.
+/// The question the first use in a work asks, with GitHub's mark; the ask
+/// card reads the service and tool from it.
 pub const ASK: &str = "Use GitHub (gh)?";
-pub const USE: &str = "Use gh";
-pub const DECLINE: &str = "Use github.com";
+pub const USE: &str = "Use GitHub";
+pub const DECLINE: &str = "Use the website instead";
+
+/// Why the first call wants gh, in a sentence the ask card shows.
+fn reason(name: &str, args: &Value) -> String {
+    let number = args["number"].as_u64().map(|n| format!("#{n}"));
+    match (name, number) {
+        ("github_issue", Some(n)) => {
+            format!("To read issue {n} and its comments with your account.")
+        }
+        ("github_pr", Some(n)) => format!("To read pull request {n} with your account."),
+        ("github_checks", Some(n)) => format!("To read the checks on {n}."),
+        ("github_pr_diff", Some(n)) => format!("To read the changes in {n}."),
+        ("github_comment", Some(n)) => format!("To comment on {n}; you'll see the text first."),
+        ("github_issues", _) => "To list the repository's issues with your account.".into(),
+        ("github_prs", _) => "To list the repository's pull requests with your account.".into(),
+        _ => "To work on GitHub with your account instead of opening github.com.".into(),
+    }
+}
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_BODY_CHARS: usize = 3000;
@@ -363,9 +381,15 @@ impl GitHub {
         }
     }
 
-    async fn allowed(&self, host: &dyn ConnectionHost) -> Result<(), ToolReply> {
+    async fn allowed(
+        &self,
+        host: &dyn ConnectionHost,
+        name: &str,
+        args: &Value,
+    ) -> Result<(), ToolReply> {
+        let prompt = format!("{ASK} {}", reason(name, args));
         let answer = host
-            .ask(ASK, &[USE, DECLINE])
+            .ask(&prompt, &[USE, DECLINE])
             .await
             .map_err(|_| stopped())?;
         if answer.as_deref() == Some(USE) {
@@ -422,7 +446,7 @@ impl GitHub {
     }
 
     pub async fn call(&self, host: &dyn ConnectionHost, name: &str, args: &Value) -> ToolReply {
-        if let Err(reply) = self.allowed(host).await {
+        if let Err(reply) = self.allowed(host, name, args).await {
             return reply;
         }
         match self.dispatch(host, name, args).await {

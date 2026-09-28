@@ -388,7 +388,13 @@ impl ConnectionHost for Bridge<'_> {
         options: &'a [&'a str],
     ) -> HostFuture<'a, Result<Option<String>, WorkError>> {
         Box::pin(async move {
-            let key = (self.context.work(), prompt.to_owned());
+            // The question up to its mark is the service; the reason after it varies.
+            let question = prompt
+                .split_inclusive('?')
+                .next()
+                .unwrap_or(prompt)
+                .to_owned();
+            let key = (self.context.work(), question.clone());
             if let Some(answer) = self.answers.lock().ok().and_then(|a| a.get(&key).cloned()) {
                 return Ok(answer);
             }
