@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Zephium native host-rule qualifier",
+  "version": "1.0",
+  "permissions": ["declarativeNetRequest"],
+  "host_permissions": ["<all_urls>"],
+  "declarative_net_request": {
+    "rule_resources": [{"id": "host_rules", "enabled": true, "path": "rules.json"}]
+  }
+}

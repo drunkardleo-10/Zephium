@@ -374,6 +374,11 @@ fn prepare(source: &Path, root: &Path) -> Result<PathBuf> {
 
 pub fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.len() == 3 && args[0] == "--prepare-windows" {
+        zephium_webext::windows::prepare(Path::new(&args[1]), Some(&[args[2].clone()]))?;
+        emit("prepared-windows", json!({"folder":args[1],"site":args[2]}));
+        return Ok(());
+    }
     if args.len() == 3 && args[0] == "--prepare" {
         let root = PathBuf::from(&args[2]);
         std::fs::create_dir(&root)?;
