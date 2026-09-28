@@ -92,6 +92,7 @@ pub(crate) fn handle(
                 eprintln!("webext-trace: worker of {id} started");
             }
             crate::worker_gone(&id);
+            crate::lifetime::started(shared, &id);
             Ok(Value::Null)
         }
         Some("offscreen.close") => Ok(Value::Bool(offscreen::close(&extension(context)))),

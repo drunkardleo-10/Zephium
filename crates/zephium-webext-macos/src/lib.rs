@@ -11,6 +11,7 @@ mod bridge;
 pub mod compat;
 mod delegate;
 mod json;
+mod lifetime;
 mod native;
 mod offscreen;
 mod runtime;

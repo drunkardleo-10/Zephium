@@ -71,19 +71,7 @@ define_class!(
 
         #[unsafe(method_id(webViewForWebExtensionContext:))]
         fn webview_for(&self, _context: &WKWebExtensionContext) -> Option<Retained<WKWebView>> {
-            let view = self.webview();
-            if view.is_none() && crate::tracing() {
-                let snapshot = self.ivars().snapshot.borrow();
-                eprintln!(
-                    "webext-trace: tab {} has no view (url {:?})",
-                    self.id(),
-                    snapshot
-                        .url
-                        .as_deref()
-                        .map(|u| u.split('?').next().unwrap_or(u))
-                );
-            }
-            view
+            self.webview()
         }
 
         #[unsafe(method_id(titleForWebExtensionContext:))]

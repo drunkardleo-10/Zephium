@@ -622,6 +622,7 @@ fn unload(shared: &Shared, controller: &WKWebExtensionController, id: &str) -> b
     };
     crate::offscreen::close(id);
     crate::worker_gone(id);
+    crate::lifetime::forget(id);
     unsafe { controller.unloadExtensionContext_error(&loaded.context) }.is_ok()
 }
 
