@@ -338,7 +338,7 @@ fn member_dot(src: &[u8], pos: usize) -> Option<usize> {
 /// workers keep their directive prologue so `"use strict"` still applies, and
 /// the call is guarded because packages also list the worker file under
 /// `background.scripts`, where it may run in a page.
-fn inject_worker(src: &[u8], module: bool, url: &str) -> Vec<u8> {
+pub(crate) fn inject_worker(src: &[u8], module: bool, url: &str) -> Vec<u8> {
     let mut start = if src.starts_with(b"\xef\xbb\xbf") {
         3
     } else {

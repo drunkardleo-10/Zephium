@@ -99,10 +99,10 @@ impl WebExtensions {
     }
 
     fn apply(&self, shell: &Handle, profile: ProfileId, registry: &mut Registry) {
-        let revision = compat_revision();
         let mut changed = false;
         let mut loads = Vec::new();
         for entry in registry.extensions.iter_mut() {
+            let revision = compat_revision(&entry.access);
             if entry.compat != revision {
                 match self.rebuild(entry, &revision) {
                     Ok(()) => changed = true,
@@ -138,6 +138,12 @@ impl WebExtensions {
         let packages = self.packages(&entry.id);
         let package = format!("{}-{revision}", entry.version);
         let target = packages.join(&package);
+        #[cfg(target_os = "windows")]
+        if zephium_webext::windows::is_prepared(&target, revision) {
+            entry.package = package;
+            entry.compat = revision.to_owned();
+            return Ok(());
+        }
         let _ = std::fs::remove_dir_all(&target);
         let limits = archive::Limits::default();
         let original = |kind: &str| packages.join(format!("{}.{kind}", entry.version));
@@ -153,12 +159,12 @@ impl WebExtensions {
         } else {
             archive::copy_dir(&original("src"), &target, &limits).map_err(|e| e.to_string())?;
         }
-        if let Err(error) = prepare_package(&target) {
+        if let Err(error) = prepare_package(&target, &entry.access) {
             let _ = std::fs::remove_dir_all(&target);
             return Err(error.to_string());
         }
         let old = std::mem::replace(&mut entry.package, package);
-        if old != entry.package {
+        if cfg!(target_os = "macos") && old != entry.package {
             let _ = std::fs::remove_dir_all(packages.join(old));
         }
         entry.compat = revision.to_owned();
@@ -373,7 +379,7 @@ pub(in crate::webext) async fn set_access(
 ) -> Result<(), String> {
     let access = match mode {
         "all" => Access::All,
-        "click" => Access::Click,
+        "click" if !cfg!(target_os = "windows") => Access::Click,
         "sites" => {
             let mut sites: Vec<String> = sites.iter().filter_map(|site| site_host(site)).collect();
             sites.sort();

@@ -14,7 +14,7 @@ const ADDED_PERMISSIONS: &[&str] = &["nativeMessaging", "activeTab"];
 const DIAGNOSTICS: bool = cfg!(any(debug_assertions, feature = "webext-qa"));
 
 #[cfg(target_os = "macos")]
-pub(super) fn compat_revision() -> String {
+pub(super) fn compat_revision(_access: &super::Access) -> String {
     // FNV-1a over the layer and the Chrome identity it presents; changing
     // either rebuilds every package from its original.
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -38,18 +38,33 @@ fn compat_layer() -> prepare::CompatLayer {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn compat_revision() -> String {
-    "windows-native-v1".into()
+pub(super) fn compat_revision(access: &super::Access) -> String {
+    zephium_webext::windows::access_revision(match access {
+        super::Access::All => None,
+        super::Access::Sites { sites } => Some(sites),
+        super::Access::Click => Some(&[]),
+    })
 }
 
-pub(super) fn prepare_package(dir: &Path) -> Result<prepare::PrepareReport, prepare::PrepareError> {
+pub(super) fn prepare_package(
+    dir: &Path,
+    access: &super::Access,
+) -> Result<prepare::PrepareReport, String> {
     #[cfg(target_os = "macos")]
     {
-        prepare::prepare(dir, &compat_layer())
+        let _ = access;
+        prepare::prepare(dir, &compat_layer()).map_err(|error| error.to_string())
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = dir;
+        let sites = match access {
+            super::Access::All => None,
+            super::Access::Sites { sites } => Some(sites.as_slice()),
+            super::Access::Click => {
+                return Err("On click site access is not available on Windows yet.".into())
+            }
+        };
+        zephium_webext::windows::prepare(dir, sites)?;
         Ok(prepare::PrepareReport::default())
     }
 }

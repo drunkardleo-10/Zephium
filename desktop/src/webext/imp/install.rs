@@ -219,11 +219,14 @@ pub(super) fn stage(
             .to_owned();
         let name = manifest.name().unwrap_or_else(|| id.to_string());
         let description = manifest.description().unwrap_or_default().to_owned();
-        let report = prepare_package(&dir)
+        let access = existing
+            .map(|entry| entry.access.clone())
+            .unwrap_or_default();
+        let report = prepare_package(&dir, &access)
             .map_err(|error| format!("The extension can't be prepared ({error})."))?;
         let mut permissions = manifest.permissions();
         permissions.extend(report.added_permissions);
-        let revision = compat_revision();
+        let revision = compat_revision(&access);
         let entry = Entry {
             install: existing
                 .map(|entry| entry.install.clone())
@@ -240,9 +243,7 @@ pub(super) fn stage(
             hosts,
             icon: icon.clone(),
             held_update: None,
-            access: existing
-                .map(|entry| entry.access.clone())
-                .unwrap_or_default(),
+            access,
             sideloaded: from_file,
         };
         Ok(Staged {
