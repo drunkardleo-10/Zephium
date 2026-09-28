@@ -131,7 +131,12 @@
       onlist();
     }}
   >
-    <span class="name" style:--survey="{survey}px" style:--fitted="{fitted}px">
+    <span
+      class="name"
+      class:unbroken={part.title.split(/\s+/u).some((word) => word.length * 0.58 * 16 > 128)}
+      style:--survey="{survey}px"
+      style:--fitted="{fitted}px"
+    >
       {#if part.helper === "research"}<span class="glyph"
           ><Icon icon={Search01Icon} size={14} /></span
         >{:else if part.helper === "computer"}<span class="glyph"
@@ -633,5 +638,11 @@
 
   .stack .pages:hover .count {
     opacity: 0;
+  }
+
+  /* A single word wider than the column at its least size breaks rather than hides. */
+  .overview .unbroken strong {
+    overflow-wrap: anywhere;
+    word-break: normal;
   }
 </style>
