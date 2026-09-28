@@ -42,7 +42,9 @@
   });
 
   let pagePermissionPrompt = $derived(pagePermissions.prompt());
-  let consentActive = $derived(pagePermissionPrompt !== null);
+  let consentActive = $derived(
+    pagePermissionPrompt !== null || webext.review() !== null || webext.accessRequest() !== null,
+  );
 
   type ChromeShortcut = {
     matches: (event: KeyboardEvent) => boolean;

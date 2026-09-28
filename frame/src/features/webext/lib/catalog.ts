@@ -56,12 +56,6 @@ export const catalog: CatalogGroup[] = [
         icon: "iXeQzL_4icUm7QIqYFHfpm13HKecoVh8mbaop8_kqEnUiETbYf4wK0C2haqLYAjePlhOxKLjIHpxhH7ufB4KIcKVrA",
       },
       {
-        id: "aapbdbdomjkkjkaonfhkkikfgjllcleb",
-        name: "Google Translate",
-        blurb: m.webext_catalog_google_translate,
-        icon: "3ZU5aHnsnQUl9ySPrGBqe5LXz_z9DK05DEfk10tpKHv5cvG19elbOr0BdW_k8GjLMFDexT2QHlDwAmW62iLVdek--Q",
-      },
-      {
         id: "mgijmajocgfcbeboacabfgobmjgjcoja",
         name: "Google Dictionary",
         blurb: m.webext_catalog_google_dictionary,

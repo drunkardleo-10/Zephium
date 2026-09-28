@@ -34,6 +34,8 @@ export const effectiveWidth = () =>
       ? COMPACT_WIDTH
       : expandedWidth;
 
+export const hasPanel = () => panelExtent > 0;
+
 /** A utility panel borrows width beside the rail without changing the persisted mode. */
 export function setPanelExtent(extent: number) {
   const next = Math.max(0, Math.min(MAX_EXPANDED_WIDTH - COMPACT_WIDTH - PANEL_GAP, extent));
