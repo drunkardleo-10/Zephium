@@ -9,7 +9,6 @@ const defaults = {
   "search.custom-url": "",
   "search.suggestions": "true",
   "sidebar.mode": "default",
-  "tools.presentation": "follow_layout",
   "ui.accent": "graphite",
   "ui.reduce-motion": "false",
   "ui.newtab-logo": "true",

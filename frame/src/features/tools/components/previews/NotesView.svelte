@@ -32,12 +32,11 @@
 
   // The host owns the session so the frame's header, search and body all read
   // the one it draws.
-  let session = $state.raw(untrack(() => noteSession(props.profile, props.host)));
+  let session = $state.raw(untrack(() => noteSession(props.profile, "sidebar")));
   $effect(() => {
     const owner = props.profile;
-    const host = props.host;
     return untrack(() => {
-      const current = noteSession(owner, host);
+      const current = noteSession(owner, "sidebar");
       session = current;
       if (!current) return;
       if (props.state.query) current.search(props.state.query);
@@ -52,14 +51,6 @@
   });
 
   let note = $derived(session?.note ?? null);
-  let floating = $derived(props.host === "floating");
-
-  /** Out of the open note, then out of Recently Deleted, then out of notes. */
-  function back() {
-    if (session?.note) void session.close();
-    else if (session?.trash) void session.showTrash(false);
-    else props.onback?.();
-  }
   const reveal = IS_MAC
     ? m.note_reveal()
     : IS_WINDOWS
@@ -82,14 +73,8 @@
       icon: session?.trash ? ArrowLeft01Icon : Delete02Icon,
     },
     { kind: "item", id: "folder", label: m.note_reveal_folder(), icon: FolderOpenIcon },
-    // The launcher closes with Escape or a click outside; only the sidebar
-    // panel needs saying so.
-    ...(props.host === "sidebar"
-      ? [
-          { kind: "separator" as const },
-          { kind: "item" as const, id: "close", label: m.note_close(), icon: Cancel01Icon },
-        ]
-      : []),
+    { kind: "separator" },
+    { kind: "item", id: "close", label: m.note_close(), icon: Cancel01Icon },
   ]);
 
   let noteEntries: MenuEntry[] = $derived(
@@ -161,15 +146,9 @@
     searchOpen={!note}
     searchFocus={false}
     onsearchdismiss={() => props.edit({ query: "" })}
-    onback={floating ? back : props.onback}
-    backLabel={note ? m.note_back_to_list() : session.trash ? m.note_all() : undefined}
   >
     {#snippet heading()}
-      {#if floating}
-        <!-- The launcher's own back control leads out of wherever notes are,
-             one level at a time, so the title stays a title. -->
-        <h2 class="notes-title">{session?.trash ? m.note_trash() : m.tool_notes()}</h2>
-      {:else if note || session?.trash}
+      {#if note || session?.trash}
         <button
           type="button"
           class="notes-back"
@@ -205,26 +184,13 @@
         {#snippet trigger()}<Icon icon={MoreHorizontalIcon} size={16} />{/snippet}
       </Menu>
     {/snippet}
-    <!-- In the launcher, Escape steps back out of a note before it leaves
-         notes altogether. -->
-    <div
-      class="notes-host"
-      role="presentation"
-      onkeydown={(event) => {
-        if (!floating || event.key !== "Escape" || event.defaultPrevented) return;
-        if (!session?.note && !session?.trash) return;
-        event.preventDefault();
-        back();
-      }}
+    <LazyView
+      loader={loadNotes}
+      loadingLabel={m.panel_loading()}
+      failureLabel={m.panel_load_failed()}
+      retryLabel={m.panel_retry()}
+      >{#snippet children(Notes)}<Notes session={session!} />{/snippet}</LazyView
     >
-      <LazyView
-        loader={loadNotes}
-        loadingLabel={m.panel_loading()}
-        failureLabel={m.panel_load_failed()}
-        retryLabel={m.panel_retry()}
-        >{#snippet children(Notes)}<Notes session={session!} />{/snippet}</LazyView
-      >
-    </div>
   </ToolFrame>
 {:else}<p role="alert">{m.note_unavailable()}</p>{/if}
 
@@ -234,16 +200,8 @@
     padding-inline: 18px 12px;
   }
 
-  :global(.shared-tool[data-host="floating"][data-tool="notes"] .shared-tool-header) {
-    padding-inline: 10px 12px;
-  }
-
   :global(.shared-tool[data-tool="notes"] .shared-tool-controls) {
     padding: 0 8px 6px;
-  }
-
-  :global(.shared-tool[data-host="floating"][data-tool="notes"] .shared-tool-controls) {
-    padding-block-start: 12px;
   }
 
   :global(.shared-tool[data-tool="notes"] .shared-tool-search) {
@@ -251,10 +209,6 @@
     height: 32px;
     box-sizing: border-box;
     padding: 0 10px 0 11px;
-  }
-
-  .notes-host {
-    display: contents;
   }
 
   .notes-title {

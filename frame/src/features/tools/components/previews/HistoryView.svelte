@@ -7,7 +7,7 @@
   let props: ToolHostProps = $props();
 </script>
 
-<ToolFrame {...props} searchLabel={m.history_search()} scrolls={false}>
+<ToolFrame {...props} caption={false} searchLabel={m.history_search()} scrolls={false}>
   <LazyView
     loader={loadHistoryPanel}
     loadingLabel={m.panel_loading()}
@@ -15,7 +15,6 @@
     retryLabel={m.panel_retry()}
     >{#snippet children(Panel)}<Panel
         profile={props.profile}
-        host={props.host}
         query={props.state.query}
       />{/snippet}</LazyView
   >

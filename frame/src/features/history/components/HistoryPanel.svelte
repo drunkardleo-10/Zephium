@@ -10,15 +10,13 @@
 
   let {
     profile,
-    host,
     query,
   }: {
     profile: string;
-    host: "sidebar" | "floating";
     query: string;
   } = $props();
 
-  let session = $state.raw(untrack(() => historySession(profile, host)));
+  let session = $state.raw(untrack(() => historySession(profile, "sidebar")));
 
   // Only the owning profile decides which session this is. Starting one reads
   // its own state, so a tracked body would restart the session on every change
@@ -26,7 +24,7 @@
   $effect(() => {
     const owner = profile;
     return untrack(() => {
-      const current = historySession(owner, host);
+      const current = historySession(owner, "sidebar");
       session = current;
       void current.start(query);
       return () => current.stop();

@@ -254,7 +254,6 @@
         >{#snippet children(View)}<View
             tool={kind}
             profile={tabs.profile()?.id ?? "unbound"}
-            host="sidebar"
             onclose={toolHost.close}
           />{/snippet}</LazyView
       >{/snippet}</Sidebar

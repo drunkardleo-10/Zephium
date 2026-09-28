@@ -14,17 +14,21 @@ export type ToolHostProps = {
   tool: ToolKind;
   state: Readonly<ToolViewState>;
   edit: (patch: Partial<ToolViewState>) => void;
-  host: "sidebar" | "floating";
   profileName?: string;
   onclose: () => void;
-  onback?: () => void;
-  ondrag?: () => void;
 };
+const LIMIT = 24;
 const sessions = new SvelteMap<string, ToolViewState>();
-export function toolSession(host: string, profile: string, tool: ToolKind): ToolViewState {
-  const key = `${host}:${profile}:${tool}`;
+export function toolSession(profile: string, tool: ToolKind): ToolViewState {
+  const key = `${profile}:${tool}`;
   const existing = sessions.get(key);
-  if (existing) return existing;
+  if (existing) {
+    // Reinserted on every read, so the bound evicts the least recently used
+    // draft rather than the oldest one, which may belong to the open view.
+    sessions.delete(key);
+    sessions.set(key, existing);
+    return existing;
+  }
   const state = $state<ToolViewState>({
     query: "",
     // Tasks opens on what is due now; a list that opens on everything is a
@@ -36,7 +40,7 @@ export function toolSession(host: string, profile: string, tool: ToolKind): Tool
     submitted: false,
     scrollTop: 0,
   });
-  if (sessions.size >= 24) {
+  if (sessions.size >= LIMIT) {
     const oldest = sessions.keys().next().value;
     if (oldest) sessions.delete(oldest);
   }

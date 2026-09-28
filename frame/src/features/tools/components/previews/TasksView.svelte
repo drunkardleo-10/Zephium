@@ -22,12 +22,11 @@
 
   // The host owns the session's lifetime so the frame's search field, filters
   // and footer read the same state the list is drawn from.
-  let session = $state.raw(untrack(() => taskSession(props.profile, props.host)));
+  let session = $state.raw(untrack(() => taskSession(props.profile, "sidebar")));
   $effect(() => {
     const owner = props.profile;
-    const host = props.host;
     return untrack(() => {
-      const current = taskSession(owner, host);
+      const current = taskSession(owner, "sidebar");
       session = current;
       void current.start(props.state.query);
       return () => current.stop();
@@ -78,14 +77,8 @@
       label: session.trash ? m.resource_show_active() : m.resource_show_trash(),
       icon: Delete02Icon,
     },
-    // The launcher closes with Escape or a click outside; only the sidebar
-    // panel needs saying so.
-    ...(props.host === "sidebar"
-      ? [
-          { kind: "separator" as const },
-          { kind: "item" as const, id: "close", label: m.task_page_close(), icon: Cancel01Icon },
-        ]
-      : []),
+    { kind: "separator" },
+    { kind: "item", id: "close", label: m.task_page_close(), icon: Cancel01Icon },
   ]);
 
   async function act(id: string) {
@@ -162,7 +155,7 @@
         {session}
         {scope}
         page={session.trash ? null : capturable}
-        compact={props.host === "sidebar"}
+        compact
         query={props.state.query}
         composing={props.state.composing}
         oncomposed={() => props.edit({ composing: false })}
@@ -180,16 +173,6 @@
 
   :global(.shared-tool[data-tool="tasks"] .shared-tool-controls) {
     padding: 0 8px 6px;
-  }
-
-  /* The launcher's header carries a rule beneath it, which the field keeps
-     clear of rather than sitting on. */
-  :global(.shared-tool[data-host="floating"][data-tool="tasks"] .shared-tool-controls) {
-    padding-block-start: 12px;
-  }
-
-  :global(.shared-tool[data-host="floating"][data-tool="tasks"] .shared-tool-header) {
-    padding-inline: 10px 12px;
   }
 
   :global(.shared-tool[data-tool="tasks"] .shared-tool-search) {
@@ -223,10 +206,6 @@
     cursor: default;
     outline: none;
     transition: background-color var(--motion-instant) var(--ease-smooth);
-  }
-
-  :global(.shared-tool[data-host="floating"] .task-scope) {
-    margin-inline: 0 auto;
   }
 
   :global(.task-scope span) {

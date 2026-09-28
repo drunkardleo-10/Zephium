@@ -1,19 +1,15 @@
 <script lang="ts">
   import ToolSlot from "../components/ToolSlot.svelte";
-  let { profile, host }: { profile: string; host: "sidebar" | "floating" } = $props();
+  let { profile }: { profile: string } = $props();
 </script>
 
-<div class="host" style:width={host === "sidebar" ? "384px" : "760px"}>
-  {#if host === "sidebar"}
-    <div class="sidebar-columns">
-      <div class="sidebar-browser-column sidebar-tool-rail"></div>
-      <div class="sidebar-tool-host">
-        <ToolSlot tool="history" {profile} {host} onclose={() => {}} />
-      </div>
+<div class="host" style:width="384px">
+  <div class="sidebar-columns">
+    <div class="sidebar-browser-column sidebar-tool-rail"></div>
+    <div class="sidebar-tool-host">
+      <ToolSlot tool="history" {profile} onclose={() => {}} />
     </div>
-  {:else}
-    <ToolSlot tool="history" {profile} {host} onclose={() => {}} />
-  {/if}
+  </div>
 </div>
 
 <style>

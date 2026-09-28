@@ -46,7 +46,7 @@ function serve(all: HistoryVisitView[]) {
 test("lists recent pages in the sidebar", async () => {
   serve([visit("Rust Book", 60), visit("Release Notes", 120)]);
 
-  render(HistoryPanel, { profile: "profile", host: "sidebar", query: "" });
+  render(HistoryPanel, { profile: "profile", query: "" });
 
   await expect.element(page.getByText("Rust Book")).toBeVisible();
   await expect.element(page.getByText("Today")).toBeVisible();
@@ -57,7 +57,7 @@ test("takes its query from the frame that owns the field", async () => {
 
   // ToolFrame owns the search input and persists its value per tool; the panel
   // only mirrors it into the session.
-  render(HistoryPanel, { profile: "profile", host: "sidebar", query: "rust" });
+  render(HistoryPanel, { profile: "profile", query: "rust" });
 
   await expect.element(page.getByText("Rust Book")).toBeVisible();
   // The first request already carries the query, so the unfiltered list never
@@ -69,7 +69,7 @@ test("takes its query from the frame that owns the field", async () => {
 test("opens a page in the window the panel belongs to, not a tab it names", async () => {
   const only = visit("Rust Book", 60);
   serve([only]);
-  render(HistoryPanel, { profile: "profile", host: "floating", query: "" });
+  render(HistoryPanel, { profile: "profile", query: "" });
   await expect.element(page.getByText("Rust Book")).toBeVisible();
 
   await page.getByText("Rust Book").click();
@@ -80,7 +80,7 @@ test("opens a page in the window the panel belongs to, not a tab it names", asyn
 test("says so when a profile has nothing recorded", async () => {
   serve([]);
 
-  render(HistoryPanel, { profile: "empty", host: "sidebar", query: "" });
+  render(HistoryPanel, { profile: "empty", query: "" });
 
   await expect.element(page.getByText("Your browsing history belongs here")).toBeVisible();
 });

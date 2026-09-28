@@ -5,7 +5,6 @@ pub const KEYS: &[&str] = &[
     "search.custom-url",
     "search.suggestions",
     "sidebar.mode",
-    "tools.presentation",
     "ui.accent",
     "ui.reduce-motion",
     "ui.newtab-logo",
@@ -18,7 +17,6 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "search.engine" => crate::search::SearchEngine::from_id(value).is_some(),
         "search.suggestions" => matches!(value, "true" | "false"),
         "appearance" => matches!(value, "system" | "light" | "dark"),
-        "tools.presentation" => matches!(value, "follow_layout" | "floating"),
         "sidebar.mode" => matches!(value, "default" | "compact"),
         "ui.accent" => matches!(value, "graphite" | "sky" | "sage" | "rose"),
         "ui.reduce-motion" | "ui.newtab-logo" | "ui.newtab-shortcuts" => {

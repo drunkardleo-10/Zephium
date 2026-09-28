@@ -138,19 +138,3 @@
 <PreviewNotice /><SettingsGroup title={m.settings_layout()}
   ><PreviewSelect id="appearance.density" /><PreviewToggle id="appearance.icons" /></SettingsGroup
 >
-
-<SettingsGroup title={m.panel_tools()}
-  ><SettingsRow title={m.panel_placement()} description={m.panel_placement_description()}
-    ><Select
-      label={m.panel_placement()}
-      labelHidden
-      value={preferences.value("tools.presentation")}
-      disabled={preferences.saving()}
-      options={[
-        { value: "follow_layout", label: m.panel_follow_layout() },
-        { value: "floating", label: m.panel_always_floating() },
-      ]}
-      onchange={(value) => void preferences.set("tools.presentation", value)}
-    /></SettingsRow
-  ></SettingsGroup
->

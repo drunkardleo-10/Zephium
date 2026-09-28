@@ -38,41 +38,39 @@ function visits(count: number): HistoryVisitView[] {
   }));
 }
 
-for (const host of ["sidebar", "floating"] as const) {
-  test(`history fills the ${host} tool host and scrolls inside it`, async () => {
-    await page.viewport(1000, 800);
-    document.head.append(style);
-    const all = visits(60);
-    native.history.mockImplementation(async (_profile: string, call: HistoryCall) => {
-      if (call.kind !== "page") return { kind: "removed", count: 0 } satisfies HistoryResponse;
-      return { kind: "page", visits: all, next: null } satisfies HistoryResponse;
-    });
-
-    const screen = await render(HistoryHost, { profile: "profile", host });
-    await expect.element(page.getByText("Visited page number 0")).toBeVisible();
-
-    const frame = screen.container.querySelector<HTMLElement>(".shared-tool")!;
-    const content = screen.container.querySelector<HTMLElement>(".shared-tool-content")!;
-    const scroller = screen.container.querySelector<HTMLElement>("[role='listbox']")!;
-
-    // The frame must hand its height to the list rather than nesting a second
-    // scroller around it, which collapsed the list to its content height.
-    expect(content.scrollHeight).toBe(content.clientHeight);
-    expect(scroller.clientHeight).toBeGreaterThan(200);
-    expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight);
-
-    const bounds = frame.getBoundingClientRect();
-    const box = scroller.getBoundingClientRect();
-    expect(box.left).toBeGreaterThanOrEqual(bounds.left - 1);
-    expect(box.right).toBeLessThanOrEqual(bounds.right + 1);
-    expect(box.bottom).toBeLessThanOrEqual(bounds.bottom + 1);
-
-    // Rows stay inside the panel rather than spilling past its edge.
-    for (const row of scroller.querySelectorAll<HTMLElement>("[role='option']")) {
-      const rect = row.getBoundingClientRect();
-      if (!row.getClientRects().length) continue;
-      expect(rect.right).toBeLessThanOrEqual(box.right + 1);
-      expect(rect.left).toBeGreaterThanOrEqual(box.left - 1);
-    }
+test("history fills the sidebar tool host and scrolls inside it", async () => {
+  await page.viewport(1000, 800);
+  document.head.append(style);
+  const all = visits(60);
+  native.history.mockImplementation(async (_profile: string, call: HistoryCall) => {
+    if (call.kind !== "page") return { kind: "removed", count: 0 } satisfies HistoryResponse;
+    return { kind: "page", visits: all, next: null } satisfies HistoryResponse;
   });
-}
+
+  const screen = await render(HistoryHost, { profile: "profile" });
+  await expect.element(page.getByText("Visited page number 0")).toBeVisible();
+
+  const frame = screen.container.querySelector<HTMLElement>(".shared-tool")!;
+  const content = screen.container.querySelector<HTMLElement>(".shared-tool-content")!;
+  const scroller = screen.container.querySelector<HTMLElement>("[role='listbox']")!;
+
+  // The frame must hand its height to the list rather than nesting a second
+  // scroller around it, which collapsed the list to its content height.
+  expect(content.scrollHeight).toBe(content.clientHeight);
+  expect(scroller.clientHeight).toBeGreaterThan(200);
+  expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight);
+
+  const bounds = frame.getBoundingClientRect();
+  const box = scroller.getBoundingClientRect();
+  expect(box.left).toBeGreaterThanOrEqual(bounds.left - 1);
+  expect(box.right).toBeLessThanOrEqual(bounds.right + 1);
+  expect(box.bottom).toBeLessThanOrEqual(bounds.bottom + 1);
+
+  // Rows stay inside the panel rather than spilling past its edge.
+  for (const row of scroller.querySelectorAll<HTMLElement>("[role='option']")) {
+    const rect = row.getBoundingClientRect();
+    if (!row.getClientRects().length) continue;
+    expect(rect.right).toBeLessThanOrEqual(box.right + 1);
+    expect(rect.left).toBeGreaterThanOrEqual(box.left - 1);
+  }
+});

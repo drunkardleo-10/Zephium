@@ -48,53 +48,43 @@ function server() {
   return { profile, notes };
 }
 
-for (const host of ["sidebar", "floating"] as const) {
-  test(`notes read, open and come back in the ${host} panel`, async () => {
-    await page.viewport(1000, 800);
-    document.documentElement.dataset.theme = "dark";
-    const { profile, notes } = server();
-    const onback = vi.fn();
-    const screen = await render(ResourceHost, { profile, host, tool: "notes", onback });
-    await expect.element(screen.getByRole("option", { name: /^Trip to Lisbon/u })).toBeVisible();
-    await shot(`panel-${host}-list-dark`);
-    // Long previews never widen the panel past its host.
-    const tool = screen.container.querySelector<HTMLElement>(".shared-tool")!;
-    expect(tool.scrollWidth).toBeLessThanOrEqual(tool.clientWidth + 1);
-    if (host === "sidebar") expect(tool.offsetWidth).toBeLessThanOrEqual(384 - 56);
+test("notes read, open and come back in the sidebar panel", async () => {
+  await page.viewport(1000, 800);
+  document.documentElement.dataset.theme = "dark";
+  const { profile, notes } = server();
+  const screen = await render(ResourceHost, { profile, tool: "notes" });
+  await expect.element(screen.getByRole("option", { name: /^Trip to Lisbon/u })).toBeVisible();
+  await shot("panel-sidebar-list-dark");
+  // Long previews never widen the panel past its host.
+  const tool = screen.container.querySelector<HTMLElement>(".shared-tool")!;
+  expect(tool.scrollWidth).toBeLessThanOrEqual(tool.clientWidth + 1);
+  expect(tool.offsetWidth).toBeLessThanOrEqual(384 - 56);
 
-    await screen.getByRole("option", { name: /^Trip to Lisbon/u }).click();
-    const text = screen.getByRole("textbox", { name: "Note" });
-    await expect.element(text).toBeVisible();
-    // Search gives way to the note; the header becomes the way back.
-    expect(screen.container.querySelector("input[type=search]")).toBeNull();
-    await new Promise((resolve) => setTimeout(resolve, 450));
-    await shot(`panel-${host}-note-dark`);
+  await screen.getByRole("option", { name: /^Trip to Lisbon/u }).click();
+  const text = screen.getByRole("textbox", { name: "Note" });
+  await expect.element(text).toBeVisible();
+  // Search gives way to the note; the header becomes the way back.
+  expect(screen.container.querySelector("input[type=search]")).toBeNull();
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  await shot("panel-sidebar-note-dark");
 
-    await text.getByText("Pack the adapter").click();
-    await userEvent.keyboard("{End} and cables");
-    const id = [...notes.notes.values()].find((note) => note.summary.title === "Trip to Lisbon")!
-      .summary.id;
-    await expect
-      .poll(() => notes.notes.get(id)?.markdown, { timeout: 4000 })
-      .toContain("- [ ] Pack the adapter and cables\n- [x] Buy tickets");
+  await text.getByText("Pack the adapter").click();
+  await userEvent.keyboard("{End} and cables");
+  const id = [...notes.notes.values()].find((note) => note.summary.title === "Trip to Lisbon")!
+    .summary.id;
+  await expect
+    .poll(() => notes.notes.get(id)?.markdown, { timeout: 4000 })
+    .toContain("- [ ] Pack the adapter and cables\n- [x] Buy tickets");
 
-    // One way back in either host: the sidebar's title, or the launcher's
-    // own back control, which leaves the note before it leaves notes.
-    if (host === "sidebar")
-      await screen.getByRole("button", { name: "Notes", exact: true }).click();
-    else {
-      expect(screen.container.querySelector(".notes-back")).toBeNull();
-      await screen.getByRole("button", { name: "Back to Notes", exact: true }).click();
-      expect(onback).not.toHaveBeenCalled();
-    }
-    await expect.element(screen.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
-    // The note just edited leads its day.
-    const titles = [...screen.container.querySelectorAll(".note-row-title")].map(
-      (row) => row.textContent,
-    );
-    expect(titles.slice(0, 2)).toEqual(["Reading list", "Trip to Lisbon"]);
-  });
-}
+  // The title is the way back.
+  await screen.getByRole("button", { name: "Notes", exact: true }).click();
+  await expect.element(screen.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
+  // The note just edited leads its day.
+  const titles = [...screen.container.querySelectorAll(".note-row-title")].map(
+    (row) => row.textContent,
+  );
+  expect(titles.slice(0, 2)).toEqual(["Reading list", "Trip to Lisbon"]);
+});
 
 test("a new note in the panel is saved once it has a title", async () => {
   await page.viewport(1000, 800);
@@ -102,9 +92,7 @@ test("a new note in the panel is saved once it has a title", async () => {
   const { profile, notes } = server();
   const screen = await render(ResourceHost, {
     profile,
-    host: "sidebar",
     tool: "notes",
-    onback: vi.fn(),
   });
   await screen.getByRole("button", { name: "New note", exact: true }).click();
   await expect.element(screen.getByRole("textbox", { name: "Note" })).toHaveFocus();
@@ -129,9 +117,7 @@ test("an empty panel invites the first note", async () => {
   native.call.mockImplementation(notesTestServer(profile).call);
   const screen = await render(ResourceHost, {
     profile,
-    host: "sidebar",
     tool: "notes",
-    onback: vi.fn(),
   });
   await expect.element(screen.getByText("No notes yet")).toBeVisible();
   await shot("panel-sidebar-empty-dark");
@@ -143,9 +129,7 @@ test("formatting stays inside the sidebar, clear of the page beside it", async (
   const { profile } = server();
   const screen = await render(ResourceHost, {
     profile,
-    host: "sidebar",
     tool: "notes",
-    onback: vi.fn(),
   });
   await screen.getByRole("option", { name: /^Trip to Lisbon/u }).click();
   const text = screen.getByRole("textbox", { name: "Note" });

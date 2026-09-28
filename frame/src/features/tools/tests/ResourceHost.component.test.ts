@@ -41,38 +41,36 @@ function fitted(container: HTMLElement, root: string, parts: string) {
   );
 }
 
-for (const host of ["sidebar", "floating"] as const) {
-  test(`tasks fit the ${host} ToolSlot while capturing and completing in place`, async () => {
-    await page.viewport(1000, 800);
-    document.head.append(style);
-    const profile = "00000000000000000000000004";
-    const server = resourceTestServer(profile);
-    native.call.mockImplementation(server.call);
-    const screen = await render(ResourceHost, { profile, host, tool: "tasks", onback: vi.fn() });
-    await expect.element(screen.getByRole("region", { name: "Tasks", exact: true })).toBeVisible();
-    const fits = () => fitted(screen.container, ".shared-tool", ".task-scroller, .capture, .task");
-    await expect.poll(fits).toBe(true);
-    await page.screenshot({ path: `../../../../../target/tasks-qa/tool-${host}.png` });
+test("tasks fit the sidebar ToolSlot while capturing and completing in place", async () => {
+  await page.viewport(1000, 800);
+  document.head.append(style);
+  const profile = "00000000000000000000000004";
+  const server = resourceTestServer(profile);
+  native.call.mockImplementation(server.call);
+  const screen = await render(ResourceHost, { profile, tool: "tasks" });
+  await expect.element(screen.getByRole("region", { name: "Tasks", exact: true })).toBeVisible();
+  const fits = () => fitted(screen.container, ".shared-tool", ".task-scroller, .capture, .task");
+  await expect.poll(fits).toBe(true);
+  await page.screenshot({ path: "../../../../../target/tasks-qa/tool-sidebar.png" });
 
-    const field = screen.getByRole("textbox", { name: "New task", exact: true });
-    await field.fill(LONG);
-    await field.click();
-    await userEvent.keyboard("{Enter}");
-    await expect.poll(() => [...server.records.values()][0]?.draft.title).toBe(LONG);
-    // A title far wider than the panel still leaves the row inside the tool.
-    await expect.poll(fits).toBe(true);
+  const field = screen.getByRole("textbox", { name: "New task", exact: true });
+  await field.fill(LONG);
+  await field.click();
+  await userEvent.keyboard("{Enter}");
+  await expect.poll(() => [...server.records.values()][0]?.draft.title).toBe(LONG);
+  // A title far wider than the panel still leaves the row inside the tool.
+  await expect.poll(fits).toBe(true);
 
-    await screen.getByRole("checkbox", { name: new RegExp(LONG, "u") }).click();
-    await expect
-      .poll(() => {
-        const content = [...server.records.values()][0]?.draft.content;
-        return content?.kind === "task" ? content.status : null;
-      })
-      .toBe("done");
-    // Completing never navigated: the capture field is still the one in view.
-    await expect.element(field).toBeVisible();
-  });
-}
+  await screen.getByRole("checkbox", { name: new RegExp(LONG, "u") }).click();
+  await expect
+    .poll(() => {
+      const content = [...server.records.values()][0]?.draft.content;
+      return content?.kind === "task" ? content.status : null;
+    })
+    .toBe("done");
+  // Completing never navigated: the capture field is still the one in view.
+  await expect.element(field).toBeVisible();
+});
 
 test("the tasks panel keeps search in view without taking focus from the page", async () => {
   await page.viewport(1000, 800);
@@ -82,9 +80,7 @@ test("the tasks panel keeps search in view without taking focus from the page", 
   native.call.mockImplementation(server.call);
   const screen = await render(ResourceHost, {
     profile,
-    host: "sidebar",
     tool: "tasks",
-    onback: vi.fn(),
   });
   await expect.element(screen.getByRole("region", { name: "Tasks", exact: true })).toBeVisible();
 
@@ -120,9 +116,7 @@ test("the scope menu changes what the panel is showing", async () => {
   native.call.mockImplementation(server.call);
   const screen = await render(ResourceHost, {
     profile,
-    host: "sidebar",
     tool: "tasks",
-    onback: vi.fn(),
   });
 
   const scope = screen.getByRole("button", { name: /Show/u });

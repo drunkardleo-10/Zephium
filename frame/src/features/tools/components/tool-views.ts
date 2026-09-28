@@ -52,4 +52,3 @@ export const tools = {
     load: () => import("./previews/TimeView.svelte"),
   },
 } satisfies Record<ToolKind, unknown>;
-export const toolKinds = Object.keys(tools) as ToolKind[];

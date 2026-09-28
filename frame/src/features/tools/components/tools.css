@@ -173,16 +173,6 @@
   font-size: 13px;
 }
 
-.shared-tool[data-host="floating"] .shared-tool-header {
-  min-height: 58px;
-  padding-inline: 16px;
-  border-bottom: 1px solid var(--color-border);
-}
-
-.shared-tool[data-host="floating"] .shared-tool-controls {
-  padding-top: 16px;
-}
-
 .shared-tool-icon {
   display: grid;
   place-items: center;
