@@ -601,6 +601,27 @@
     });
   }
 
+  // WebKit declares tabs.detectLanguage but reports it unimplemented; the
+  // page's own declared language answers most of what translators ask.
+  if (tabsApi && chromeApi.scripting && typeof chromeApi.scripting.executeScript === "function") {
+    const detect = async (tabId) => {
+      if (typeof tabId !== "number") {
+        const [active] = await tabsApi.query({ active: true, currentWindow: true });
+        tabId = active && active.id;
+      }
+      const [frame] = await chromeApi.scripting.executeScript({
+        target: { tabId },
+        func: () => document.documentElement.lang || (document.querySelector('meta[http-equiv="content-language" i]') || {}).content || "",
+      });
+      const tag = String((frame && frame.result) || "").split(",")[0].trim();
+      return tag ? tag.split(/[-_]/)[0].toLowerCase() : "und";
+    };
+    pin(tabsApi, "detectLanguage", function (tabId, callback) {
+      if (typeof tabId === "function") [tabId, callback] = [undefined, tabId];
+      return withCallback(detect(tabId).catch(() => "und"), callback);
+    });
+  }
+
   // Extensions check how they were installed and read their own details.
   if (!isContent) {
     const management = namespace("management") || {};
