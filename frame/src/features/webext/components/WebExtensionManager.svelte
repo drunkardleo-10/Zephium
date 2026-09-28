@@ -1,29 +1,23 @@
 <script lang="ts">
-  import { ArrowLeft02Icon, Key01Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
-  import { onDestroy, onMount } from "svelte";
-  import { browserCredentials, browserPasskeyStatus } from "$domain/credentials";
+  import { ArrowLeft02Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
+  import { onMount } from "svelte";
   import { surface as browser } from "$domain/surface";
   import { webext } from "$domain/webext";
   import { commands } from "$shared/ipc/bindings";
-  import Button from "$shared/ui/Button";
   import EmptyState from "$shared/ui/EmptyState";
   import Icon from "$shared/ui/Icon";
   import IconButton from "$shared/ui/IconButton";
   import Menu from "$shared/ui/Menu";
   import * as m from "$shared/i18n/messages";
   import { catalog, storeListing } from "../lib/catalog";
+  import CatalogCard from "./CatalogCard.svelte";
   import ExtensionRow from "./ExtensionRow.svelte";
 
   let extensions = $derived(webext.list());
   let failure = $derived(webext.error());
-  let credentials = $derived(browserCredentials.current());
   let installedIds = $derived(new Set(extensions.map((extension) => extension.id)));
 
-  onMount(() => {
-    void webext.refresh();
-    void browserCredentials.activate();
-  });
-  onDestroy(() => browserCredentials.deactivate());
+  onMount(() => void webext.refresh());
 
   const openInTab = (url: string) => void commands.browserOpenUrl(url, true);
 </script>
@@ -78,57 +72,19 @@
       </ul>
     {/if}
 
-    {#if credentials !== null && (credentials.system_password_autofill || credentials.passkey_authorization !== "unsupported")}
-      <div class="group passwords">
-        <span class="badge" aria-hidden="true"><Icon icon={Key01Icon} size={16} /></span>
-        <div class="text">
-          <span class="name">{m.webext_system_passwords()}</span>
-          <span
-            class="status"
-            class:warning={credentials.passkey_authorization === "denied" ||
-              credentials.passkey_authorization === "entitlement_required" ||
-              credentials.passkey_authorization === "unknown" ||
-              credentials.passkey_authorization === "unavailable"}
-            role="status"
-          >
-            {#if credentials.system_password_autofill}{m.webext_system_autofill()}
-            {/if}{browserPasskeyStatus(credentials.passkey_authorization)}
-          </span>
-        </div>
-        {#if credentials.can_request_passkey_authorization}
-          <Button
-            size="compact"
-            variant="secondary"
-            pending={browserCredentials.busy()}
-            onclick={() => void browserCredentials.requestPasskeyAuthorization()}
-            >{m.webext_enable_passkeys()}</Button
-          >
-        {/if}
-      </div>
-    {/if}
-
     <h2 class="heading">{m.webext_recommended()}</h2>
-    <ul class="catalog">
-      {#each catalog as entry (entry.id)}
-        <li class="card">
-          <span class="badge monogram" aria-hidden="true">{entry.name.charAt(0)}</span>
-          <span class="text">
-            <span class="name">{entry.name}</span>
-            <span class="status">{entry.blurb()}</span>
-          </span>
-          {#if installedIds.has(entry.id)}
-            <span class="installed">{m.webext_already_installed()}</span>
-          {:else}
-            <Button
-              size="compact"
-              variant="secondary"
-              aria-label={m.webext_get_named({ name: entry.name })}
-              onclick={() => openInTab(storeListing(entry.id))}>{m.webext_get()}</Button
-            >
-          {/if}
-        </li>
-      {/each}
-    </ul>
+    {#each catalog as group (group.title)}
+      <h3 class="group-title">{group.title()}</h3>
+      <ul class="catalog">
+        {#each group.entries as entry (entry.id)}
+          <CatalogCard
+            {entry}
+            installed={installedIds.has(entry.id)}
+            onget={() => openInTab(storeListing(entry.id))}
+          />
+        {/each}
+      </ul>
+    {/each}
 
     <p class="note">{m.webext_blocker_note()}</p>
   </div>
@@ -211,14 +167,6 @@
     background: var(--color-raised);
   }
 
-  .passwords {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-block-start: 10px;
-    padding: 10px 12px;
-  }
-
   .catalog {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -228,59 +176,16 @@
     list-style: none;
   }
 
-  .card {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-width: 0;
-    padding: 10px 10px 10px 12px;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-panel);
-    background: var(--color-raised);
-  }
-
-  .badge {
-    display: grid;
-    flex: none;
-    place-items: center;
-    width: 28px;
-    height: 28px;
-    border-radius: var(--radius-control-compact);
-    background: var(--color-fill);
-    color: var(--color-muted);
-  }
-
-  .text {
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    min-width: 0;
-  }
-
-  .name {
-    overflow: hidden;
-    font-size: var(--text-body);
-    color: var(--color-text);
-    white-space: nowrap;
-    text-overflow: ellipsis;
-  }
-
-  .status {
-    overflow: hidden;
+  .group-title {
+    margin: 14px 0 6px;
+    padding-inline: 10px;
     font-size: var(--text-label);
-    color: var(--color-muted);
-    white-space: nowrap;
-    text-overflow: ellipsis;
-  }
-
-  .status.warning {
-    color: var(--color-warning);
-  }
-
-  .installed {
-    flex: none;
-    font-size: var(--text-label);
+    font-weight: 450;
     color: var(--color-faint);
+  }
+
+  .heading + .group-title {
+    margin-block-start: 0;
   }
 
   .note {
@@ -289,12 +194,6 @@
     font-size: var(--text-label);
     line-height: 1.45;
     color: var(--color-faint);
-  }
-
-  .monogram {
-    font-size: var(--text-body);
-    font-weight: 550;
-    color: var(--color-text);
   }
 
   .empty {
