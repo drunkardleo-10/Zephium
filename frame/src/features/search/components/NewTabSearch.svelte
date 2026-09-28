@@ -14,7 +14,6 @@
   // remount, never a reassignment underneath a live session.
   const surface = createSearchSurface({
     tabId: untrack(() => tabId),
-    context: null,
     destinations: [],
     onTool: () => {},
   });
@@ -112,7 +111,7 @@
     value={surface.query}
     bind:ref={input}
     oninput={surface.changed}
-    onsubmit={surface.submit}
+    onsubmit={() => surface.submit()}
     inputProps={{
       role: "combobox",
       "aria-controls": "newtab-search-results",

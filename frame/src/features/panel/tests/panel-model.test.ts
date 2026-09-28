@@ -6,13 +6,11 @@ const snapshot = (revision: string): PanelState => ({
   revision,
   session_id: revision,
   visible: true,
-  route: { type: "search" },
   profile_id: "p",
   profile_name: "Personal",
   space_id: "s",
   error: false,
   corner_radius: 20,
-  position_restorable: true,
 });
 describe("panel presentation and search identity", () => {
   it("rejects stale and malformed panel presentations", () => {

@@ -7,17 +7,45 @@
     Note01Icon,
   } from "@hugeicons/core-free-icons";
   import type { IconSvgElement } from "@hugeicons/svelte";
+  import * as m from "$shared/i18n/messages";
   import type { SearchResult } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
   import FavIcon from "$shared/ui/FavIcon";
   import { favicons } from "$domain/favicons";
   import { IS_MAC } from "$shared/platform";
+  import { acceleratorKeys } from "$shared/lib/accelerator";
   import { matchRange, resultDetail } from "../lib/search-model";
+  import type { Calculation } from "../lib/calculator";
+
+  const line = (d: string, key: string) =>
+    [
+      "path",
+      {
+        d,
+        stroke: "currentColor",
+        strokeLinecap: "round",
+        strokeLinejoin: "round",
+        strokeWidth: "1.5",
+        key,
+      },
+    ] as const;
+  // The package's Calculator glyph, held here: every icon imported from the
+  // package lands in one chunk that the note editor's graph also counts.
+  const CALCULATOR = [
+    line("M5.5 3V8M8 5.5L3 5.5", "0"),
+    line("M8 16L6 18M6 18L4 20M6 18L8 20M6 18L4 16", "1"),
+    line("M20 6L16 6", "2"),
+    line("M20 18.5L16 18.5M20 15.5L16 15.5", "3"),
+    line("M22 12L2 12", "4"),
+    line("M12 22L12 2", "5"),
+  ] as unknown as IconSvgElement;
 
   let {
     result = null,
     title,
     icon = null,
+    keys = [],
+    calculation,
     id,
     index,
     setsize,
@@ -25,20 +53,29 @@
     query,
     onhover,
     onrun,
+    variant = "compact",
   }: {
     result?: SearchResult | null;
     title: string;
     /** Set for a tool destination, which has no native result behind it. */
     icon?: IconSvgElement | null;
+    /** A shortcut that runs this row, shown in place of its kind. */
+    keys?: string[];
+    calculation?: Calculation;
     id: string;
     index: number;
     setsize: number;
     selected: boolean;
     query: string;
     onhover: () => void;
-    onrun: () => void;
+    onrun: (event: MouseEvent) => void;
+    /** The launcher is a place to read a list, not a dropdown under a field:
+     *  its rows are taller, name what kind of thing each one is at the far
+     *  edge, and leave selection to the list's own moving highlight. */
+    variant?: "compact" | "launcher";
   } = $props();
 
+  let launcher = $derived(variant === "launcher");
   let detail = $derived(result ? resultDetail(result) : "");
   let range = $derived(matchRange(title, query));
   // A site the user has reached is shown by its own mark. The clock belongs to
@@ -49,6 +86,7 @@
   let image = $derived(sited ? favicons.image(result?.icon) : null);
   let glyph = $derived.by(() => {
     if (icon) return icon;
+    if (calculation) return CALCULATOR;
     switch (result?.kind) {
       case "search":
       case "suggestion":
@@ -64,24 +102,46 @@
     }
   });
   let shortcut = $derived(
-    result?.kind === "command" && result.detail
-      ? result.detail
-          .replace("CmdOrCtrl+", IS_MAC ? "⌘" : "Ctrl+")
-          .replace("Shift+", IS_MAC ? "⇧" : "Shift+")
-      : "",
+    keys.length ? keys : result?.kind === "command" ? acceleratorKeys(result.detail, IS_MAC) : [],
   );
+  // The search row already names its engine inline; everything else says what
+  // it is, so a mixed list needs no section headings.
+  let kind = $derived.by(() => {
+    if (calculation) return m.launcher_kind_calculator();
+    switch (result?.kind) {
+      case "tab":
+        return m.launcher_kind_tab();
+      case "history":
+        return m.launcher_kind_history();
+      case "search_history":
+        return m.launcher_kind_recent();
+      case "suggestion":
+        return m.launcher_kind_suggestion();
+      case "note":
+        return m.launcher_kind_note();
+      case "url":
+        return m.launcher_kind_address();
+      case "command":
+        return m.launcher_kind_command();
+      default:
+        return "";
+    }
+  });
 </script>
 
 <button
   type="button"
   {id}
   class="row"
+  class:launcher
+  class:calculation={!!calculation}
   class:selected
   tabindex="-1"
   role="option"
   aria-selected={selected}
   aria-posinset={index + 1}
   aria-setsize={setsize}
+  aria-keyshortcuts={shortcut.length ? shortcut.join("+") : undefined}
   onpointermove={onhover}
   onpointerdown={(event) => {
     // Keep the field focused so the list does not dismiss itself out from
@@ -98,14 +158,22 @@
         lit
         fallback={Globe02Icon}
       />
-    {:else}<Icon icon={glyph} size={16} />{/if}
+    {:else}<Icon icon={glyph} size={launcher ? 18 : 16} />{/if}
   </span>
-  <span class="title"
-    >{#if range}{title.slice(0, range[0])}<mark>{title.slice(range[0], range[1])}</mark
-      >{title.slice(range[1])}{:else}{title}{/if}</span
-  >
-  {#if detail}<span class="detail">{detail}</span>{/if}
-  {#if shortcut}<kbd>{shortcut}</kbd>{/if}
+  {#if calculation}<span class="text sum"
+      ><span class="expression">{calculation.expression}</span><span
+        class="equals"
+        aria-hidden="true">=</span
+      ><span class="answer">{calculation.text}</span></span
+    >{:else}<span class="text"
+      ><span class="title"
+        >{#if range}{title.slice(0, range[0])}<mark>{title.slice(range[0], range[1])}</mark
+          >{title.slice(range[1])}{:else}{title}{/if}</span
+      >{#if detail}<span class="detail">{detail}</span>{/if}</span
+    >{/if}
+  {#if shortcut.length}<span class="keys" aria-hidden="true"
+      >{#each shortcut as key, i (i)}<kbd>{key}</kbd>{/each}</span
+    >{:else if launcher && kind}<span class="kind">{kind}</span>{/if}
 </button>
 
 <style>
@@ -157,8 +225,16 @@
     color: var(--color-text);
   }
 
-  .title {
+  .text {
+    display: flex;
     flex: 1;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .title {
+    flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
     white-space: nowrap;
@@ -182,22 +258,115 @@
 
   .detail {
     flex: none;
+    min-width: 0;
     max-width: 38%;
+    margin-inline-start: auto;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
+    text-align: end;
     font-size: 11.5px;
     color: var(--color-faint);
   }
 
-  kbd {
+  .keys {
+    display: inline-flex;
     flex: none;
-    max-width: 130px;
+    gap: 3px;
+  }
+
+  kbd {
+    display: inline-grid;
+    place-items: center;
+    box-sizing: border-box;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 4px;
+    border-radius: 5px;
+    background: var(--color-fill);
+    color: var(--color-faint);
+    font-family: var(--font-sans);
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  /* Launcher rows. The selection is drawn once by the list and glides between
+     rows, so a row itself never fills; positioned so it paints above that
+     highlight. The detail follows the title rather than being pushed to the
+     far edge, which belongs to the row's kind. */
+  .row.launcher {
+    position: relative;
+    gap: 12px;
+    height: 44px;
+    padding: 0 16px 0 15px;
+    border-radius: var(--row-radius, var(--radius-card));
+    transition: none;
+  }
+
+  .row.launcher.selected {
+    background: transparent;
+  }
+
+  .row.launcher .glyph {
+    width: 20px;
+    height: 20px;
+  }
+
+  .row.launcher .title {
+    color: var(--color-text);
+    font-size: 14px;
+    font-weight: 450;
+    letter-spacing: -0.005em;
+  }
+
+  .row.launcher .detail {
+    flex: 0 100 auto;
+    max-width: none;
+    margin-inline-start: 0;
+    text-align: start;
+    font-size: 13px;
+  }
+
+  /* An answer reads as a result, not a link: the sum steps back and what it
+     comes to is set larger, with room for its figures. */
+  .row.launcher.calculation {
+    height: 56px;
+  }
+
+  .sum {
+    align-items: baseline;
+    gap: 12px;
+  }
+
+  .expression {
+    min-width: 0;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    font-family: var(--font-sans);
-    font-size: 11px;
+    font-size: 14px;
+    color: var(--color-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .equals {
+    flex: none;
+    font-size: 16px;
+    color: var(--color-faint);
+  }
+
+  .answer {
+    flex: none;
+    font-size: 21px;
+    font-weight: 500;
+    letter-spacing: -0.012em;
+    color: var(--color-text);
+    font-variant-numeric: tabular-nums;
+    user-select: text;
+  }
+
+  .kind {
+    flex: none;
+    font-size: 12.5px;
     color: var(--color-faint);
   }
 

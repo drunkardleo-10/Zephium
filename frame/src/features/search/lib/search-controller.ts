@@ -25,6 +25,7 @@ const COALESCE_MS = 60;
 /** Failsafe only. Native carries real provider progress in `pending`; this
  *  exists so a native that never answers at all cannot wait forever. */
 const RESPONSE_DEADLINE_MS = 5000;
+const RETRY_MS = 150;
 
 export function createSearchController(options: {
   owner: Omit<SearchContext, "request_id"> | null;
@@ -45,6 +46,10 @@ export function createSearchController(options: {
   let completion: string | null = null;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let deadline: ReturnType<typeof setTimeout> | undefined;
+  /** A request for this query has already been sent again after failing. A
+   *  refused or unanswered search is almost always transient, and saying so
+   *  on the first miss turns a hiccup into an error the user has to handle. */
+  let retried = false;
 
   const publish = (snapshot: SearchSnapshot) => {
     if (!disposed) options.update(snapshot);
@@ -69,6 +74,11 @@ export function createSearchController(options: {
     if (disposed || !sameSearch(active, request) || received) return;
     clearTimeout(deadline);
     active = null;
+    if (!retried) {
+      retried = true;
+      debounce = setTimeout(() => void send(), RETRY_MS);
+      return;
+    }
     publish({
       results: [],
       completion: null,
@@ -134,6 +144,7 @@ export function createSearchController(options: {
   function change(value: string) {
     const first = query === "" || value === "";
     query = value;
+    retried = false;
     clear();
     active = null;
     settledContext = null;

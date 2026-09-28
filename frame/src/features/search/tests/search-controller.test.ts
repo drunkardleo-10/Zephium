@@ -198,6 +198,28 @@ describe("search request lifecycle", () => {
     controller.dispose();
   });
 
+  it("asks again once before reporting a refused search", async () => {
+    const snapshots: SearchSnapshot[] = [];
+    const send = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+    const controller = createSearchController({
+      owner,
+      send,
+      update: (state) => snapshots.push(state),
+      id: () => "request",
+    });
+    controller.change("g");
+    await vi.advanceTimersByTimeAsync(200);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(snapshots.some((state) => state.error === "failed")).toBe(false);
+
+    send.mockResolvedValue(false);
+    controller.change("go");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(send).toHaveBeenCalledTimes(4);
+    expect(snapshots.at(-1)?.error).toBe("failed");
+    controller.dispose();
+  });
+
   it("bounds the UTF-8 request before crossing IPC", () => {
     const send = vi.fn(async () => true);
     const update = vi.fn();

@@ -50,6 +50,25 @@ export function bootstrapReport(): Plugin {
           surface: false,
         });
       }
+      const panel = roots.find((root) => root.name === "panel")!;
+      // The launcher's WebView is resident all day. Anything it can load
+      // at all, not just at startup, is paid again on top of the browser's
+      // copy, so an editor or a tool view must be unreachable from it.
+      const reachable = new Set<string>();
+      const reach = (file: string) => {
+        if (reachable.has(file)) return;
+        reachable.add(file);
+        const item = bundle[file];
+        if (!item || item.type !== "chunk") return;
+        for (const id of Object.keys(item.modules))
+          if (
+            /\/(?:@tiptap|prosemirror-[a-z]+|@xyflow|layerchart)\//u.test(id) ||
+            /\/src\/features\/(?:notes|tools|work|history|downloads)\//u.test(id)
+          )
+            this.error(`Panel can load ${id}, which the browser already hosts`);
+        for (const child of [...item.imports, ...item.dynamicImports]) reach(child);
+      };
+      reach(panel.file);
       for (const root of roots) {
         const name = root.name;
         const visited = new Set<string>();
@@ -100,6 +119,7 @@ export function bootstrapReport(): Plugin {
         );
         if (name === "panel" && forbidden.length)
           this.error(`Panel eagerly loads browser/tool code: ${forbidden.join(", ")}`);
+
         reports[name] = {
           entry: root.file,
           staticJsBytes: [...visited].reduce((sum, file) => {

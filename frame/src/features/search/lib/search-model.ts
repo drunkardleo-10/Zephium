@@ -22,7 +22,16 @@ export function sameSearch(expected: SearchContext | null, actual: SearchContext
   );
 }
 
-export type ResultSection = "search" | "tabs" | "history" | "notes" | "commands";
+export type ResultSection =
+  | "search"
+  | "tabs"
+  | "history"
+  | "notes"
+  | "commands"
+  /** Browser destinations the launcher hands over, such as Notes or Tasks. */
+  | "destinations"
+  /** Arithmetic typed into the field, answered locally. */
+  | "calculator";
 
 /** Mirrors `zephium_core::search::result_section`. Native already emits results
  *  in section order, so this only names the run a row belongs to. */
@@ -48,9 +57,10 @@ export function groupRows<T extends { section: ResultSection }>(rows: readonly T
 }
 
 /** Secondary text: the host, never the whole address. Search rows carry the
- *  engine name instead and notes are named by their section. */
+ *  engine name instead, and a note the line that explains why it matched. */
 export function resultDetail(result: SearchResult): string {
-  if (result.kind === "search" || result.kind === "suggestion") return result.detail;
+  if (result.kind === "search" || result.kind === "suggestion" || result.kind === "note")
+    return result.detail;
   if (result.kind !== "tab" && result.kind !== "history" && result.kind !== "search_history")
     return "";
   return hostOf(result.detail);

@@ -1,8 +1,6 @@
 <script lang="ts">
   import { installCloseService } from "$shared/lib/close";
-  import LazyView from "$shared/ui/LazyView";
   import RenderBoundary from "$shared/ui/RenderBoundary";
-  import { loadToolSlot } from "$features/tools";
   import "$styles/panel.css";
   import { onMount, flushSync } from "svelte";
   import type { PanelState, PanelIntent, ToolKind } from "$shared/ipc/bindings";
@@ -11,16 +9,12 @@
   import { theme } from "$domain/appearance";
   import { favicons } from "$domain/favicons";
   import { acceptPanelState } from "$features/panel";
-  import { tools as toolManifest, toolKinds } from "$features/tools";
   import { loadLauncherPanel } from "$features/search";
   import { loadCapture } from "$features/tasks";
   import * as m from "$shared/i18n/messages";
-  const destinations = toolKinds.map((kind) => ({
-    kind,
-    label: toolManifest[kind].title(),
-    icon: toolManifest[kind].icon,
-  }));
+
   let presentation = $state<PanelState | null>(null);
+  let Launcher = $state<Awaited<ReturnType<typeof loadLauncherPanel>>["default"] | null>(null);
   let failed = $state(false);
   function apply(next: PanelState) {
     if (acceptPanelState(presentation, next))
@@ -35,18 +29,6 @@
     } catch {
       failed = true;
     }
-  }
-  async function drag() {
-    try {
-      if (!(await commands.panelDrag())) failed = true;
-    } catch {
-      failed = true;
-    }
-  }
-  function keydown(event: KeyboardEvent) {
-    if (event.defaultPrevented || event.key !== "Escape") return;
-    event.preventDefault();
-    void intent({ type: presentation?.route.type === "tool" ? "back" : "dismiss" });
   }
   onMount(installCloseService);
   onMount(() => {
@@ -74,8 +56,11 @@
       try {
         stop = await listener;
         stopMotion = await motionListener;
-        await Promise.all([theme.init(), faviconsReady]);
+        // The launcher is loaded while the window is still hidden, and native
+        // shows nothing before `panelReady`, so the first frame is never empty.
+        const [launcher] = await Promise.all([loadLauncherPanel(), theme.init(), faviconsReady]);
         if (disposed) return;
+        Launcher = launcher.default;
         const motion = await commands.settingGet("ui.reduce-motion").catch(() => null);
         if (disposed) return;
         if (!liveMotion) theme.setReducedMotion(motion === "true");
@@ -97,8 +82,8 @@
       theme.dispose();
     };
   });
-  function tool(kind: ToolKind) {
-    void intent({ type: "tool", tool: kind });
+  function open(kind: ToolKind) {
+    void intent({ type: "open", tool: kind });
   }
   /** Long enough to read that it landed, short enough not to wait on. */
   const CAPTURED_MS = 700;
@@ -112,44 +97,18 @@
   }
 </script>
 
-<svelte:window onkeydown={keydown} />
 <div
   class="panel-root"
   style:--panel-radius={`${presentation?.corner_radius ?? 20}px`}
   data-visible={presentation?.visible ?? false}
 >
-  {#if presentation?.visible}
-    {#if failed}<div class="panel-error" role="alert">{m.panel_action_failed()}</div>{/if}
-    <RenderBoundary title={m.surface_render_failed()} retryLabel={m.surface_retry()}>
-      {#if presentation.route.type === "search"}{#key presentation.session_id}{@const owner =
-            presentation}<LazyView
-            loader={loadLauncherPanel}
-            loadingLabel={m.surface_loading()}
-            failureLabel={m.surface_render_failed()}
-            retryLabel={m.surface_retry()}
-            >{#snippet children(Launcher)}<Launcher
-                context={owner}
-                {destinations}
-                onTool={tool}
-                onCapture={capture}
-                onDrag={() => void drag()}
-              />{/snippet}</LazyView
-          >{/key}
-      {:else}{@const tool = presentation.route.tool}{@const owner = presentation}<LazyView
-          loader={loadToolSlot}
-          loadingLabel={m.surface_loading()}
-          failureLabel={m.surface_render_failed()}
-          retryLabel={m.surface_retry()}
-          >{#snippet children(View)}<View
-              {tool}
-              profile={owner.profile_id ?? "unbound"}
-              profileName={owner.profile_name ?? undefined}
-              host="floating"
-              onclose={() => void intent({ type: "dismiss" })}
-              onback={() => void intent({ type: "back" })}
-              ondrag={() => void drag()}
-            />{/snippet}</LazyView
-        >{/if}
-    </RenderBoundary>
-  {/if}
+  {#if failed}<div class="panel-error" role="alert">{m.panel_action_failed()}</div>{/if}
+  <RenderBoundary title={m.surface_render_failed()} retryLabel={m.surface_retry()}>
+    {#if Launcher}<Launcher
+        context={presentation}
+        onTool={open}
+        onCapture={capture}
+        onDismiss={() => void intent({ type: "dismiss" })}
+      />{/if}
+  </RenderBoundary>
 </div>

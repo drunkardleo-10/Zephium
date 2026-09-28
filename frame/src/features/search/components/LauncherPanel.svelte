@@ -1,41 +1,180 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import { Search01Icon, Cancel01Icon, ArrowRight01Icon } from "@hugeicons/core-free-icons";
+  import { Globe02Icon, Search01Icon } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import type { PanelState, ToolKind } from "$shared/ipc/bindings";
+  import { commands } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
-  import IconButton from "$shared/ui/IconButton";
+  import FavIcon from "$shared/ui/FavIcon";
+  import { favicons } from "$domain/favicons";
   import { IS_MAC } from "$shared/platform";
   import ResultList from "./ResultList.svelte";
-  import { createSearchSurface, type Destination } from "../lib/search-surface.svelte";
+  import LauncherActions, { type LauncherAction } from "./LauncherActions.svelte";
+  import { launcherDestinations } from "../lib/destinations";
+  import {
+    createSearchSurface,
+    type Destination,
+    type SurfaceRow,
+  } from "../lib/search-surface.svelte";
 
   let {
     context = null,
     onTool = () => {},
-    onDrag = () => {},
+    onDismiss = () => {},
     onCapture,
-    destinations = [],
+    destinations = launcherDestinations(),
   }: {
+    /** The current presentation. The launcher stays mounted while hidden and
+     *  binds each new session as it is shown. */
     context?: PanelState | null;
     onTool?: (tool: ToolKind) => void;
-    onDrag?: () => void;
+    onDismiss?: () => void;
     /** Saves the typed line as a task; resolves to the saved title, or null. */
     onCapture?: (text: string) => Promise<string | null>;
     destinations?: Destination[];
   } = $props();
 
-  // Keyed on the panel session by its host, so the bound context is captured
-  // once rather than tracked into a live request.
+  const MOD = IS_MAC ? "⌘" : "Ctrl";
+  const keys = {
+    open: ["↵"],
+    background: [MOD, "↵"],
+    copy: IS_MAC ? ["⇧", "⌘", "C"] : ["Ctrl", "Shift", "C"],
+    capture: IS_MAC ? ["⌥", "↵"] : ["Alt", "↵"],
+  };
+
   const surface = createSearchSurface({
     tabId: null,
-    context: untrack(() => context),
     destinations: untrack(() => destinations),
     onTool: (tool) => onTool(tool),
     onCapture: untrack(() => onCapture),
+    captureKeys: keys.capture,
   });
+
+  // Geometry the native shapes are placed from. Kept as numbers rather than
+  // read back from the DOM, so a report never depends on a frame mid-motion.
+  const FIELD = 60;
+  const GAP = 10;
+  /** The shapes' width. Native widens the window around it to leave room for
+   *  their shadow, so the margin is whatever it left. */
+  const WIDTH = 680;
+  const FOOTER = 52;
+  /** Mirrors the native ceiling on the launcher window. */
+  const WINDOW_MAX = 600;
 
   let input = $state<HTMLInputElement>();
   let list = $state<HTMLElement>();
+  let content = $state<HTMLElement>();
+  let contentHeight = $state(0);
+  let windowWidth = $state(0);
+  let menu = $state(false);
+  let menuHeight = $state(0);
+  let commandHeld = $state(false);
+  /** The launcher is arriving; its content settles in with the glass. */
+  let entering = $state(false);
+  let arrival: ReturnType<typeof setTimeout> | undefined;
+  /** Matches the native arrival, which is the longest thing moving. */
+  const ARRIVAL_MS = 460;
+  let material = $state(document.documentElement.dataset.material ?? "none");
+
+  // Native draws glass or vibrancy as two shapes behind the content. Anything
+  // else, including reduced transparency, is one card the page draws itself.
+  let detached = $derived(material === "liquid_glass" || material === "vibrancy");
+  let inset = $derived(detached ? Math.max(0, (windowWidth - WIDTH) / 2) : 0);
+  let gap = $derived(detached ? GAP : 0);
+  let sheetMax = $derived(WINDOW_MAX - 2 * inset - FIELD - gap);
+  let sheetHeight = $derived(
+    Math.min(sheetMax, Math.max(contentHeight + FOOTER, menu ? menuHeight + FOOTER + 8 : 0)),
+  );
+
+  let home = $derived(!surface.query.trim());
+  let row = $derived(surface.selectedRow);
+  let primary = $derived(primaryLabel(row));
+  let lead = $derived.by(() => {
+    const completed = surface.completedRow?.result;
+    const image = completed ? favicons.image(completed.icon) : null;
+    if (image) return { image, tone: favicons.tone(completed?.icon) };
+    return { icon: surface.rows[0]?.result?.kind === "url" ? Globe02Icon : Search01Icon };
+  });
+  let actions = $derived.by<LauncherAction[]>(() => {
+    const available: LauncherAction[] = [];
+    if (row)
+      available.push({ id: "open", label: primary, keys: keys.open, run: () => surface.submit() });
+    if (surface.addressable) {
+      available.push({
+        id: "background",
+        label: m.launcher_open_background(),
+        keys: keys.background,
+        run: () => surface.submit(true),
+      });
+      available.push({
+        id: "copy",
+        label: m.launcher_copy_link(),
+        keys: keys.copy,
+        run: () => void surface.copy(),
+      });
+    }
+    if (surface.capturable && row?.id !== "capture:task")
+      available.push({
+        id: "capture",
+        label: m.launcher_add_task(),
+        keys: keys.capture,
+        run: () => void surface.capture(),
+      });
+    return available;
+  });
+
+  function primaryLabel(target: SurfaceRow | null) {
+    if (!target) return m.launcher_open();
+    if (target.id === "capture:task") return m.launcher_add_task();
+    if (target.calculation) return m.launcher_copy_answer();
+    switch (target.result?.kind) {
+      case "tab":
+        return m.launcher_switch_tab();
+      case "search":
+      case "suggestion":
+      case "search_history":
+        return m.launcher_search();
+      case "note":
+        return m.launcher_open_note();
+      case "command":
+        return m.launcher_run();
+      default:
+        return m.launcher_open();
+    }
+  }
+
+  function failure() {
+    if (surface.error === "too_long") return m.panel_query_too_long();
+    if (context?.error || surface.failed) return m.panel_action_failed();
+    if (surface.error === "failed") return m.launcher_search_failed();
+    return null;
+  }
+
+  // One session per presentation. Binding happens while the window is being
+  // ordered in, so the field is focused and the list is already the right one
+  // on the first frame the user sees.
+  let bound: string | null = null;
+  $effect(() => {
+    const next = context;
+    untrack(() => {
+      if (next?.visible) {
+        if (bound === next.session_id) return;
+        bound = next.session_id;
+        menu = false;
+        entering = true;
+        clearTimeout(arrival);
+        arrival = setTimeout(() => (entering = false), ARRIVAL_MS);
+        surface.begin(next);
+        input?.focus();
+        input?.select();
+      } else if (bound !== null) {
+        bound = null;
+        menu = false;
+        commandHeld = false;
+        surface.end();
+      }
+    });
+  });
 
   $effect(() => {
     surface.setList(list);
@@ -44,51 +183,139 @@
     void surface.query;
     surface.applyCompletion(input);
   });
+  $effect(() => {
+    const element = content;
+    if (!element) return;
+    const observer = new ResizeObserver(([entry]) => {
+      contentHeight = entry!.borderBoxSize[0]!.blockSize;
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  });
+
+  // Native sizes the window and places its shapes from this. The field sits
+  // `inset` from the top, the sheet `gap` below it; both run the full width
+  // between the insets.
+  let reported = "";
+  $effect(() => {
+    const width = windowWidth - 2 * inset;
+    if (width <= 0) return;
+    const top = inset + FIELD + gap;
+    const layout = {
+      height: Math.ceil(top + sheetHeight + inset),
+      field: { x: inset, y: inset, width, height: FIELD },
+      sheet: { x: inset, y: top, width, height: Math.ceil(sheetHeight) },
+    };
+    const key = JSON.stringify(layout);
+    if (key === reported) return;
+    reported = key;
+    void commands.panelLayout(layout).catch(() => {});
+  });
+
+  function runAction(action: LauncherAction) {
+    menu = false;
+    action.run();
+  }
 
   function keydown(event: KeyboardEvent) {
-    if (surface.composing || event.isComposing) return;
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    commandHeld = IS_MAC ? event.metaKey : event.ctrlKey;
+    if (event.defaultPrevented || surface.composing || event.isComposing) return;
+    const mod = IS_MAC ? event.metaKey : event.ctrlKey;
+    const key = event.key.toLowerCase();
+    if (mod && key === "k") {
       event.preventDefault();
-      void surface.move(event.key === "ArrowDown" ? 1 : -1);
-    } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-      // The secondary action, from anywhere in the list: keep the words as a task.
+      menu = !menu && actions.length > 0;
+      return;
+    }
+    if (menu) {
+      // The sheet owns navigation while it is open; anything else puts it
+      // away and falls through to the field.
+      if (event.key === "Escape") {
+        event.preventDefault();
+        menu = false;
+        return;
+      }
+      if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter") return;
+      menu = false;
+    }
+    const numbered = mod && !event.shiftKey && !event.altKey ? Number(key) : NaN;
+    if (numbered >= 1 && numbered <= destinations.length) {
+      event.preventDefault();
+      onTool(destinations[numbered - 1]!.kind);
+      return;
+    }
+    const down = event.key === "ArrowDown" || (IS_MAC && event.ctrlKey && key === "n");
+    const up = event.key === "ArrowUp" || (IS_MAC && event.ctrlKey && key === "p");
+    if (down || up) {
+      event.preventDefault();
+      void surface.move(down ? 1 : -1);
+    } else if (event.key === "Enter" && event.altKey) {
       event.preventDefault();
       void surface.capture();
     } else if (event.key === "Enter") {
       event.preventDefault();
-      surface.submit();
+      surface.submit(mod);
+    } else if (mod && event.shiftKey && key === "c") {
+      event.preventDefault();
+      void surface.copy();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      // Spotlight's order: the first press clears what was typed, the second
+      // puts the launcher away.
+      if (surface.query) {
+        surface.changed("");
+        input?.focus();
+      } else onDismiss();
     }
   }
 
   onMount(() => {
-    input?.focus();
-    return surface.mount();
+    const refocus = () => input?.focus();
+    window.addEventListener("focus", refocus);
+    const materials = new MutationObserver(() => {
+      material = document.documentElement.dataset.material ?? "none";
+    });
+    materials.observe(document.documentElement, { attributeFilter: ["data-material"] });
+    const unmount = surface.mount();
+    return () => {
+      clearTimeout(arrival);
+      window.removeEventListener("focus", refocus);
+      materials.disconnect();
+      unmount();
+    };
   });
 </script>
 
-<div class="launcher">
-  <header
-    role="group"
-    aria-label={m.panel_search_mode()}
-    class="dragbar"
-    onpointerdown={(event) => {
-      if (event.button === 0 && !(event.target as HTMLElement).closest("button,input,a")) onDrag();
-    }}
-  >
-    <span class="context">{context?.profile_name ?? m.panel_context_unavailable()}</span><span
-      class="grip"
-      aria-hidden="true"
-    ></span><span class="context">{m.panel_search_mode()}</span>
-  </header>
+<svelte:window
+  bind:innerWidth={windowWidth}
+  onkeydown={keydown}
+  onkeyup={(event) => (commandHeld = IS_MAC ? event.metaKey : event.ctrlKey)}
+/>
 
-  <div class="field">
-    <Icon icon={Search01Icon} size={20} /><input
+<!-- The margin around the shapes is empty window. A click there is a click
+     outside the launcher, and puts it away as one would. -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="launcher"
+  class:entering
+  onpointerdown={(event) => {
+    if (event.target === event.currentTarget) onDismiss();
+  }}
+  data-layout={detached ? "detached" : "fused"}
+  style:--inset={`${inset}px`}
+>
+  <div class="capsule">
+    <span class="lead" aria-hidden="true"
+      >{#if lead.image}<FavIcon image={lead.image} tone={lead.tone} size={16} lit />{:else}<Icon
+          icon={lead.icon}
+          size={20}
+        />{/if}</span
+    ><input
       bind:this={input}
       value={surface.query}
       oninput={(event) => surface.changed(event.currentTarget.value)}
       oncompositionstart={surface.compositionStart}
       oncompositionend={(event) => surface.compositionEnd(event.currentTarget.value)}
-      onkeydown={keydown}
       maxlength={2048}
       autocomplete="off"
       autocapitalize="off"
@@ -102,173 +329,311 @@
       aria-activedescendant={surface.selectedIndex >= 0
         ? `launcher-results-option-${surface.selectedIndex}`
         : undefined}
-    />{#if surface.query}<IconButton
-        icon={Cancel01Icon}
-        label={m.panel_clear_search()}
-        onclick={() => {
-          surface.changed("");
-          input?.focus();
-        }}
+    />
+  </div>
+
+  <div class="sheet" style:height={`${sheetHeight}px`} style:margin-top={`${gap}px`}>
+    <div class="scroll" style:max-height={`${sheetMax - FOOTER}px`}>
+      <div class="content" bind:this={content}>
+        {#if failure()}
+          <div class="failure" role="alert">
+            <span>{failure()}</span>
+            <button type="button" onclick={surface.retry}>{m.panel_retry()}</button>
+          </div>
+        {/if}
+        <ResultList
+          rows={surface.rows}
+          selected={surface.selectedId}
+          query={surface.answered}
+          listId="launcher-results"
+          busy={surface.pending}
+          variant="launcher"
+          bind:ref={list}
+          onhover={surface.hover}
+          onrun={surface.activate}
+        />
+        {#if surface.empty}<p class="empty">{m.panel_no_results()}</p>{/if}
+      </div>
+    </div>
+
+    <footer>
+      <div class="start" aria-live="polite">
+        {#if surface.captured}<span class="status"
+            >{m.launcher_captured({ title: surface.captured })}</span
+          >{:else if surface.notice === "opened"}<span class="status">{m.launcher_opened()}</span
+          >{:else if surface.notice === "copied"}<span class="status">{m.launcher_copied()}</span
+          >{:else if surface.notice === "answer"}<span class="status"
+            >{m.launcher_answer_copied()}</span
+          >{:else if surface.running}<span class="status">{m.panel_opening()}</span>{:else if home}
+          <div class="destinations" role="group" aria-label={m.launcher_destinations()}>
+            {#each destinations as destination (destination.kind)}
+              <button
+                type="button"
+                class="chip"
+                aria-keyshortcuts={destination.keys?.join("+")}
+                onpointerdown={(event) => event.preventDefault()}
+                onclick={() => onTool(destination.kind)}
+                ><Icon icon={destination.icon} size={15} /><span>{destination.label}</span
+                >{#if commandHeld && destination.keys}<kbd>{destination.keys.at(-1)}</kbd
+                  >{/if}</button
+              >
+            {/each}
+          </div>
+        {/if}
+      </div>
+      {#if row}<div class="actions">
+          <span class="primary">{primary}<kbd>↵</kbd></span>
+          {#if actions.length > 1}<span class="rule" aria-hidden="true"></span><button
+              type="button"
+              class="more"
+              aria-label={m.launcher_actions()}
+              aria-expanded={menu}
+              aria-haspopup="menu"
+              onpointerdown={(event) => event.preventDefault()}
+              onclick={() => (menu = !menu)}
+              >{m.launcher_actions()}<kbd>{MOD}</kbd><kbd>K</kbd></button
+            >{/if}
+        </div>{/if}
+    </footer>
+
+    {#if menu}<LauncherActions
+        {actions}
+        bind:height={menuHeight}
+        onrun={runAction}
+        onclose={() => (menu = false)}
       />{/if}
   </div>
-
-  <div class="scroll">
-    {#if !surface.query.trim()}
-      <section class="tools" aria-label={m.panel_tools()}>
-        <h2>{m.panel_tools()}</h2>
-        <div class="tool-grid">
-          {#each destinations as destination (destination.kind)}
-            {@const kind = destination.kind}<button type="button" onclick={() => onTool(kind)}
-              ><span><Icon icon={destination.icon} size={18} /></span>{destination.label}<Icon
-                icon={ArrowRight01Icon}
-                size={13}
-              /></button
-            >
-          {/each}
-        </div>
-      </section>
-    {/if}
-
-    {#if surface.failed || context?.error || surface.error !== "none"}
-      <div class="failure" role="alert">
-        {surface.error === "too_long" ? m.panel_query_too_long() : m.panel_action_failed()}
-        <button type="button" onclick={surface.retry}>{m.panel_retry()}</button>
-      </div>
-    {/if}
-
-    <ResultList
-      rows={surface.rows}
-      selected={surface.selectedId}
-      query={surface.answered}
-      listId="launcher-results"
-      busy={surface.pending}
-      bind:ref={list}
-      onhover={surface.hover}
-      onrun={surface.activate}
-    />
-
-    {#if surface.empty}<p class="empty">{m.panel_no_results()}</p>{/if}
-  </div>
-
-  <footer>
-    <span aria-live="polite"
-      >{surface.captured
-        ? m.launcher_captured({ title: surface.captured })
-        : surface.running
-          ? m.panel_opening()
-          : m.panel_search_hint()}</span
-    ><span><kbd>↑↓</kbd> {m.panel_navigate()}</span><span><kbd>↵</kbd> {m.panel_open()}</span
-    >{#if surface.capturable}<span
-        ><kbd>{IS_MAC ? "⌘↵" : "Ctrl ↵"}</kbd> {m.launcher_capture_hint()}</span
-      >{/if}<span><kbd>esc</kbd> {m.panel_close()}</span>
-  </footer>
 </div>
 
 <style>
+  /* Rows sit six points inside the glass sheet, so their corner is its 24
+     less six. Inside a drawn card they follow the card's own corner, which
+     on Windows lands on the system's 4-point list radius. */
   .launcher {
-    height: 100%;
+    --row-radius: var(--radius-card);
+
     display: flex;
     flex-direction: column;
-    min-height: 0;
-  }
-
-  .dragbar {
-    flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    height: 28px;
-    padding: 5px 20px 0;
+    box-sizing: border-box;
+    padding: var(--inset);
     /* stylelint-disable-next-line property-no-vendor-prefix */
     -webkit-user-select: none;
     user-select: none;
   }
 
-  .context {
-    font-size: 10px;
-    color: var(--color-faint);
-    max-width: 40%;
+  /* Without native shapes the page draws the launcher as one card, and the
+     window supplies its shadow. On Windows the system also draws the rim at
+     its own radius, which the card takes from the host. */
+  .launcher[data-layout="fused"] {
+    --row-radius: calc(var(--panel-radius, var(--radius-panel)) - 4px);
+
+    height: 100vh;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    border-radius: var(--panel-radius, var(--radius-panel));
+    background: color-mix(in srgb, var(--color-chrome) var(--wash-launcher), transparent);
+    box-shadow: inset 0 0 0 1px var(--color-border-strong);
   }
 
-  .grip {
-    width: 28px;
-    height: 3px;
-    border-radius: 2px;
-    background: var(--color-border-strong);
+  :global(:root:is([data-material="acrylic"], [data-material="mica"]))
+    .launcher[data-layout="fused"] {
+    box-shadow: none;
   }
 
-  .field {
+  .capsule {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 14px;
     flex: none;
-    padding: 9px 20px 16px;
-    border-bottom: 1px solid var(--color-border);
-    color: var(--color-faint);
+    height: 60px;
+    padding: 0 24px 0 22px;
+    color: var(--color-muted);
   }
 
-  .field input {
+  .lead {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 22px;
+    height: 22px;
+  }
+
+  input {
     min-width: 0;
     flex: 1;
-    height: 32px;
+    height: 100%;
     border: 0;
     background: transparent;
     color: var(--color-text);
-    font-size: 18px;
-    letter-spacing: -0.02em;
+    font-size: 21px;
+    letter-spacing: -0.016em;
     outline: none;
+    caret-color: var(--color-text);
+    user-select: text;
   }
 
-  .field input::placeholder {
+  input::placeholder {
     color: var(--color-faint);
     opacity: 1;
   }
 
+  input::selection {
+    background: var(--color-fill-strong);
+  }
+
+  .sheet {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    overflow: hidden;
+  }
+
+  /* Native moves the glass over this same interval and curve, so the content
+     and its material settle together. */
+  .launcher[data-layout="detached"] .sheet {
+    transition: height 260ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  .launcher[data-layout="fused"] .sheet {
+    border-top: 1px solid var(--color-border);
+  }
+
   .scroll {
+    flex: 1 1 auto;
     min-height: 0;
-    flex: 1;
     overflow-y: auto;
-    padding: 8px 10px 12px;
     overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+
+  /* Six points in from a 24-point sheet, so a row's 18-point corner is
+     concentric with the glass around it. */
+  .content {
+    padding: 6px 6px 0;
   }
 
   footer {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
-    gap: 14px;
+    gap: 12px;
     flex: none;
-    height: 36px;
-    padding: 0 18px;
-    border-top: 1px solid var(--color-border);
-    font-size: 10px;
-    color: var(--color-faint);
+    height: 52px;
+    padding: 0 10px 0 12px;
+    font-size: 12.5px;
+    color: var(--color-muted);
   }
 
-  footer > span {
+  .start {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .status {
+    display: block;
+    padding-inline-start: 6px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .destinations {
     display: flex;
-    gap: 5px;
-    align-items: center;
+    gap: 4px;
   }
 
-  footer > span:first-child {
-    margin-inline-end: auto;
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    height: 30px;
+    padding: 0 10px 0 9px;
+    border: 0;
+    border-radius: var(--radius-capsule);
+    background: transparent;
+    color: var(--color-muted);
+    font-size: 12.5px;
+    transition:
+      background-color var(--motion-instant) var(--ease-smooth),
+      color var(--motion-instant) var(--ease-smooth);
+  }
+
+  .chip:hover {
+    background: var(--color-fill-hover);
+    color: var(--color-text);
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex: none;
+    height: 34px;
+    padding: 0 4px 0 14px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill);
+    color: var(--color-text);
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+
+  .primary,
+  .more {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 26px;
+  }
+
+  .primary {
+    padding-inline-end: 6px;
+  }
+
+  .more {
+    padding: 0 6px 0 8px;
+    border: 0;
+    border-radius: var(--radius-capsule);
+    background: transparent;
+    color: var(--color-muted);
+    font-weight: 500;
+    transition: background-color var(--motion-instant) var(--ease-smooth);
+  }
+
+  .more:hover,
+  .more[aria-expanded="true"] {
+    background: var(--color-fill-hover);
+    color: var(--color-text);
+  }
+
+  .rule {
+    width: 1px;
+    height: 14px;
+    background: var(--color-border-strong);
   }
 
   kbd {
+    display: inline-grid;
+    place-items: center;
+    box-sizing: border-box;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 4px;
+    border-radius: 5px;
+    background: var(--color-fill);
+    color: var(--color-muted);
     font-family: var(--font-sans);
-    font-size: 10px;
-    color: var(--color-faint);
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .primary > kbd:first-of-type,
+  .more > kbd:first-of-type {
+    margin-inline-start: 4px;
   }
 
   .empty {
-    text-align: center;
-    padding: 26px;
     margin: 0;
-    font-size: 13px;
+    padding: 18px 14px 10px;
+    font-size: 13.5px;
     color: var(--color-faint);
   }
 
@@ -277,76 +642,86 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 8px 10px;
-    font-size: 12px;
-    color: var(--color-danger);
+    padding: 6px 6px 6px 14px;
+    font-size: 13px;
+    color: var(--color-muted);
   }
 
   .failure button {
-    padding: 5px 10px;
+    height: 28px;
+    padding: 0 12px;
     border: 0;
-    border-radius: var(--radius-inset);
+    border-radius: var(--radius-capsule);
     background: var(--color-fill);
     color: var(--color-text);
-    cursor: default;
   }
 
-  .tools {
-    margin-bottom: 14px;
+  /* Arrival. The native glass grows the sheet out of the capsule; the content
+     is revealed from the top at the same pace and its rows drift down into
+     place a moment behind, so the list reads as poured rather than switched
+     on. Where the page draws the card itself it simply scales in. */
+  .launcher.entering .capsule > * {
+    animation: arrive-fade 200ms var(--ease-out) both;
   }
 
-  .tools h2 {
-    font-size: 11px;
-    font-weight: 550;
-    letter-spacing: 0.02em;
-    color: var(--color-faint);
-    margin: 8px 10px 6px;
+  .launcher.entering[data-layout="detached"] .sheet {
+    animation: arrive-reveal 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
-  .tool-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 2px 12px;
+  .launcher.entering .scroll,
+  .launcher.entering footer {
+    animation: arrive-drift 360ms var(--ease-out) 60ms both;
   }
 
-  .tool-grid button {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-width: 0;
-    height: 40px;
-    text-align: start;
-    padding: 6px 10px;
-    border: 0;
-    border-radius: var(--radius-row);
-    background: transparent;
-    color: var(--color-text);
-    font-size: 13px;
-    cursor: default;
-    transition: background-color var(--motion-instant) var(--ease-smooth);
+  .launcher.entering[data-layout="fused"] {
+    animation: arrive-scale 220ms var(--ease-out) both;
   }
 
-  .tool-grid button > span {
-    display: grid;
-    place-items: center;
-    width: 26px;
-    height: 26px;
-    border-radius: var(--radius-inset);
-    background: var(--color-fill);
+  @keyframes arrive-fade {
+    from {
+      opacity: 0;
+    }
   }
 
-  .tool-grid button > :global(svg:last-child) {
-    margin-inline-start: auto;
-    color: var(--color-faint);
+  @keyframes arrive-reveal {
+    from {
+      clip-path: inset(0 0 100% 0 round 24px);
+    }
+
+    to {
+      clip-path: inset(0 0 0 0 round 24px);
+    }
   }
 
-  .tool-grid button:hover {
-    background: var(--color-fill-active);
+  @keyframes arrive-drift {
+    from {
+      opacity: 0;
+      transform: translateY(-8px);
+    }
+  }
+
+  @keyframes arrive-scale {
+    from {
+      opacity: 0;
+      transform: scale(0.97);
+    }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .tool-grid button {
+    .launcher[data-layout="detached"] .sheet,
+    .chip,
+    .more {
       transition: none;
+    }
+  }
+
+  @media (forced-colors: active) {
+    .launcher[data-layout="fused"] {
+      border: 1px solid CanvasText;
+    }
+
+    .actions {
+      border: 1px solid CanvasText;
     }
   }
 </style>

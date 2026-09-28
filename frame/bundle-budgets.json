@@ -4,8 +4,8 @@
     "css": 270090
   },
   "panel": {
-    "js": 400500,
-    "css": 79035
+    "js": 110000,
+    "css": 30000
   },
   "lazy:features/settings/components/sections/AboutPage.svelte": {
     "js": 1276581,
@@ -32,8 +32,8 @@
     "css": 298728
   },
   "lazy:features/tools/components/previews/DownloadsView.svelte": {
-    "js": 292458,
-    "css": 19800
+    "js": 343000,
+    "css": 90500
   },
   "lazy:features/settings/components/sections/FocusPage.svelte": {
     "js": 1262430,
@@ -44,8 +44,8 @@
     "css": 309003
   },
   "lazy:features/tools/components/previews/HistoryView.svelte": {
-    "js": 301071,
-    "css": 22500
+    "js": 343500,
+    "css": 90500
   },
   "lazy:features/settings/components/sections/KeyboardPage.svelte": {
     "js": 1267323,
@@ -124,8 +124,8 @@
     "css": 4200
   },
   "lazy:features/search/components/LauncherPanel.svelte": {
-    "js": 376593,
-    "css": 18000
+    "js": 175000,
+    "css": 14000
   },
   "lazy:features/search/components/NewTabSearch.svelte": {
     "js": 375492,
@@ -140,8 +140,8 @@
     "css": 12600
   },
   "lazy:features/library/components/LibraryPage.svelte": {
-    "js": 318567,
-    "css": 9000
+    "js": 336500,
+    "css": 88000
   },
   "lazy:features/tasks/components/TasksPage.svelte": {
     "js": 371000,
@@ -160,8 +160,8 @@
     "css": 4200
   },
   "lazy:features/downloads/components/DownloadsList.svelte": {
-    "js": 155000,
-    "css": 7000
+    "js": 342000,
+    "css": 89000
   },
   "lazy:features/notes/components/editor/NoteEditor.svelte": {
     "js": 539000,

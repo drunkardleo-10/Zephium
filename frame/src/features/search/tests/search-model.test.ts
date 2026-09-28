@@ -70,7 +70,9 @@ describe("result presentation", () => {
     expect(resultDetail({ ...tab("a"), detail: "https://www.example.com/x" })).toBe("example.com");
     expect(resultDetail({ ...tab("a"), detail: "www.example.com" })).toBe("example.com");
     expect(resultDetail({ ...tab("a"), kind: "search", detail: "DuckDuckGo" })).toBe("DuckDuckGo");
-    expect(resultDetail({ ...tab("a"), kind: "note", detail: "Note" })).toBe("");
+    expect(resultDetail({ ...tab("a"), kind: "note", detail: "Pack the adapter" })).toBe(
+      "Pack the adapter",
+    );
   });
   it("emphasises one contiguous match and never fragments a title", () => {
     expect(matchRange("Rust Book", "rust")).toEqual([0, 4]);
