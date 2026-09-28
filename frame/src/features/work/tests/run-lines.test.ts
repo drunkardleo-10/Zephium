@@ -70,4 +70,7 @@ test("a site's parts across its countries are one, named as people call it", () 
     "Crafting Interpreters",
   );
   expect(siteName("rublon.com", ["Careers – Rublon"])).toBe("Rublon");
+  expect(siteName("www.justonecookbook.com", ["Rice Bowl (Video) • Just One Cookbook"])).toBe(
+    "Just One Cookbook",
+  );
 });

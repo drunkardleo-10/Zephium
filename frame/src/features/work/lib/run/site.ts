@@ -127,7 +127,7 @@ export function siteName(host: string, titles: readonly string[] = []): string {
   if (KNOWN[key]) return KNOWN[key];
   const whole = squash(site);
   for (const title of titles)
-    for (const segment of title.split(/\s+[|·–—-]\s+|\s*[|·]\s*/u)) {
+    for (const segment of title.split(/\s+[|·•–—-]\s+|\s*[|·•]\s*/u)) {
       const part = segment.trim();
       if (part && part.length <= 32 && (squash(part) === key || squash(part) === whole))
         return part;

@@ -242,7 +242,9 @@
               onlist();
             }}
           >
-            <HostGlyph host={row.where} url={row.url} size={14} initial={false} />
+            <span class="site-mark"
+              ><HostGlyph host={row.where} url={row.url} size={14} initial={false} /></span
+            >
             <span class="site">{row.title}</span>
           </button>
         </li>{/each}
@@ -538,6 +540,14 @@
 
   .cited button:hover {
     background: var(--color-control-hover);
+  }
+
+  .site-mark {
+    display: grid;
+    flex: none;
+    place-items: center;
+    inline-size: 16px;
+    block-size: 16px;
   }
 
   .site {
