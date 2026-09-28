@@ -317,14 +317,15 @@ pub(in crate::webext) async fn list(
                 .as_ref()
                 .map(permissions::warnings)
                 .unwrap_or_default();
-            let has_options = manifest.as_ref().is_some_and(|manifest| {
-                let raw = manifest.raw();
-                raw.get("options_page").is_some()
-                    || raw
-                        .get("options_ui")
-                        .and_then(|ui| ui.get("page"))
-                        .is_some()
-            });
+            let has_options = cfg!(target_os = "macos")
+                && manifest.as_ref().is_some_and(|manifest| {
+                    let raw = manifest.raw();
+                    raw.get("options_page").is_some()
+                        || raw
+                            .get("options_ui")
+                            .and_then(|ui| ui.get("page"))
+                            .is_some()
+                });
             let (access, sites) = match &entry.access {
                 Access::All => ("all", Vec::new()),
                 Access::Click => ("click", Vec::new()),

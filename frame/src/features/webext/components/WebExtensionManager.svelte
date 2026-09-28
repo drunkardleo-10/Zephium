@@ -4,6 +4,7 @@
   import { surface as browser } from "$domain/surface";
   import { webext } from "$domain/webext";
   import { commands } from "$shared/ipc/bindings";
+  import { IS_WINDOWS } from "$shared/platform";
   import EmptyState from "$shared/ui/EmptyState";
   import Icon from "$shared/ui/Icon";
   import IconButton from "$shared/ui/IconButton";
@@ -72,7 +73,7 @@
       </ul>
     {/if}
 
-    <h2 class="heading">{m.webext_recommended()}</h2>
+    <h2 class="heading">{IS_WINDOWS ? m.webext_page_title() : m.webext_recommended()}</h2>
     {#each catalog as group (group.title)}
       <h3 class="group-title">{group.title()}</h3>
       <ul class="catalog">

@@ -335,6 +335,7 @@ fn unsigned_id(dir: &Path, source: &Path) -> Result<ExtensionId, String> {
         });
     Ok(match key {
         Some(key) => ExtensionId::from_public_key(&key),
+        None if cfg!(target_os = "windows") => return Err("On Windows, use a signed CRX or an unpacked extension with a manifest key. A stable native identity is required.".into()),
         None => ExtensionId::from_source_path(&source.to_string_lossy()),
     })
 }
