@@ -26,7 +26,7 @@ or permission replacement was added. This is a targeting feasibility result,
 not a claim that Dark Reader's full popup workflow works. Continue integration
 as requested, retaining this limitation for QA.
 
-Implementation is now underway. Desktop registry, store downloads, staging,
+The first Windows QA implementation is complete. Desktop registry, store downloads, staging,
 updates and management are shared with Windows. Signed CRX identity is retained
 in the unpacked manifest. Windows preparation produces immutable access-specific
 packages; an end-of-preparation marker prevents reusing a partially written tree.
@@ -47,7 +47,7 @@ enable restores it, and remove stops it again. Reinstalling the same ID finds
 neither the test `chrome.storage.local` value nor the DOM localStorage value.
 This is not a complete disk-residue or signed-in storage qualification.
 
-The native engine integration is being qualified in the distinct
+The native engine integration was qualified for this first QA slice in the distinct
 `app.zephium.webext-qa` / **Zephium Extensions QA** app, whose Windows data is
 under `%APPDATA%\\app.zephium.webext-qa`. The default WebView2 profile reports an
 empty API profile name on this runtime, despite using a `Default` storage folder;
@@ -76,7 +76,15 @@ and retained its storage lock. Only that disposable QA process tree was stopped;
 the installed browser was left untouched. The corrected build subsequently
 closed with an extension popup open: its app process and every QA WebView2 child
 disappeared, with no shutdown failure. Reopening the same QA directory succeeded
-and restored enabled Bitwarden.
+and restored enabled Bitwarden. Disabling that restored install and then removing
+it also passed in the actual QA app, exercising the temporary-controller removal
+path. The manager settled to its empty state without a removal error.
+
+The QA log still records occasional action-refresh rejections while navigating
+the internal manager; the shell retains prior presentation state. The tested
+human-page tiles and popup work, but this diagnostic remains follow-up work.
+Running beside the installed browser also reports the already-registered global
+shortcut; the QA window remains usable without taking over that shortcut.
 
 The lab's reproducible network-rule qualifier is
 `crates/zephium-webext-windows/run-host-rules.ps1`, using the gated lab binary and
