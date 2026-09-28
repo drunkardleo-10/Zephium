@@ -11,5 +11,8 @@ pub(crate) fn tool_sets() -> Vec<Arc<dyn LeadToolSet>> {
 /// Helpers for `computer` and `connection` parts. A kind without one here
 /// runs the built-in fallback.
 pub(crate) fn helpers() -> Vec<Arc<dyn LeadHelper>> {
-    vec![]
+    vec![
+        crate::work_computer::helper::shared(),
+        crate::work_connections::helper::shared(),
+    ]
 }

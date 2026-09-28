@@ -101,6 +101,10 @@ pub mod work_files;
 pub mod work_lead;
 #[cfg(feature = "work-runtime")]
 pub mod work_commands;
+#[cfg(feature = "work-runtime")]
+pub mod work_computer;
+#[cfg(feature = "work-runtime")]
+pub mod work_connections;
 #[cfg(feature = "work-planning")]
 pub mod work_models;
 #[cfg(feature = "work-planning")]
