@@ -259,7 +259,9 @@ fn make_view(
     if let Some(environment) = environment {
         builder = builder.with_environment(environment.clone());
     }
-    let view = builder.build_as_child(host)?;
+    let view = builder
+        .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
+        .build_as_child(host)?;
     let label = name.to_owned();
     let handler = webview2_com::ProcessFailedEventHandler::create(Box::new(move |_, args| {
         if let Some(args) = args {
