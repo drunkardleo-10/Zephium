@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { youtubeId, youtubeThumbnail } from "../lib/link-media";
+import { linkVideo, youtubeId, youtubeThumbnail } from "../lib/link-media";
 import { environmentItems } from "../lib/project-environment";
 import type { WorkEnvironmentSnapshot } from "$shared/ipc/bindings";
 import type { MediaAssetV1 } from "$domain/resources";
@@ -51,4 +51,21 @@ test("a link's admitted picture is its image, never a media card of its own", ()
   const items = environmentItems(snapshot, [], [], new Map(), new Map([["r", asset]]));
   expect(items.map((item) => item.id)).toEqual(["link"]);
   expect(items[0]!.image).toEqual({ profile: "p", digest: "f".repeat(64) });
+});
+
+test("a pasted YouTube link becomes the video it is, starting where it points", () => {
+  const poster = { src: "zephium-media://p/d", width: 480, height: 360 };
+  expect(
+    linkVideo("e1", "https://youtu.be/dQw4w9WgXcQ?t=1m30s", { title: "Talk", poster }),
+  ).toEqual({
+    kind: "media",
+    id: "e1",
+    media: "video",
+    url: "https://youtu.be/dQw4w9WgXcQ?t=1m30s",
+    provider: "youtube",
+    title: "Talk",
+    poster,
+    startSecs: 90,
+  });
+  expect(linkVideo("e2", "https://example.com/watch?v=dQw4w9WgXcQ")).toBeNull();
 });

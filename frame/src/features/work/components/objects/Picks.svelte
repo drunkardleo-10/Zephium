@@ -23,6 +23,8 @@
     !!pick.route;
   const flights = $derived(object.facet === "flight" && object.items.every(routed));
   const pictured = $derived(object.items.some((item) => item.picture));
+  /** Some with pictures and some without: each card keeps its own height. */
+  const mixed = $derived(pictured && object.items.some((item) => !item.picture));
   /** At a distance a set shows its first few; the rest wait for a closer look. */
   const shown = $derived(
     detail !== "tile" || flights
@@ -37,6 +39,7 @@
   class="picks {detail}"
   class:flights
   class:pictured
+  class:mixed
   aria-label={object.title}
   style:--across={Math.min(object.items.length, flights ? 3 : 4)}
 >
@@ -108,8 +111,12 @@
   .set {
     display: grid;
     grid-template-columns: repeat(var(--across), minmax(0, 1fr));
-    align-items: start;
+    align-items: stretch;
     gap: 16px;
+  }
+
+  .mixed .set {
+    align-items: start;
   }
 
   .flights .set {
