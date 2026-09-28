@@ -103,6 +103,16 @@ export function testsIn(text: string): Tests | null {
       passed: go.filter((m) => m[1] === "PASS").length,
       failed: go.filter((m) => m[1] === "FAIL").length,
     };
+  const ran = [...text.matchAll(/^Ran (\d+) tests? in [\d.]+s/gmu)].at(-1);
+  const end = [
+    ...text.matchAll(
+      /^(?:OK|FAILED)(?: \((?:failures=(\d+))?(?:, )?(?:errors=(\d+))?(?:, )?(?:skipped=(\d+))?[^)]*\))?\s*$/gmu,
+    ),
+  ].at(-1);
+  if (ran && end) {
+    const failed = Number(end[1] ?? 0) + Number(end[2] ?? 0);
+    return { passed: Number(ran[1]) - failed - Number(end[3] ?? 0), failed };
+  }
   const mocha = /^\s+(\d+) passing[^\n]*(?:\n\s+\d+ pending)?(?:\n\s+(\d+) failing)?/mu.exec(text);
   if (mocha) return { passed: Number(mocha[1]), failed: Number(mocha[2] ?? 0) };
   return null;

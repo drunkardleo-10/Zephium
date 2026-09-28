@@ -51,6 +51,11 @@ describe("a computer part's view", () => {
     expect(testsIn("Tests:       1 failed, 7 passed, 8 total")).toEqual({ passed: 7, failed: 1 });
     expect(testsIn("      Tests  40 passed (40)")).toEqual({ passed: 40, failed: 0 });
     expect(testsIn("--- PASS: TestA\n--- FAIL: TestB")).toEqual({ passed: 1, failed: 1 });
+    expect(testsIn("Ran 2 tests in 0.001s\n\nFAILED (failures=1)\n")).toEqual({
+      passed: 1,
+      failed: 1,
+    });
+    expect(testsIn("Ran 3 tests in 0.002s\n\nOK\n")).toEqual({ passed: 3, failed: 0 });
     expect(testsIn("Compiling")).toBeNull();
   });
 });

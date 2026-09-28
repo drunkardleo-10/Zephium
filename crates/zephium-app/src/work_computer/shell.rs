@@ -70,6 +70,9 @@ pub fn tests(output: &str) -> Option<TestSummary> {
     static GO: OnceLock<Regex> = OnceLock::new();
     static MOCHA: OnceLock<Regex> = OnceLock::new();
     static XCTEST: OnceLock<Regex> = OnceLock::new();
+    static UNITTEST: OnceLock<Regex> = OnceLock::new();
+    static UNITTEST_END: OnceLock<Regex> = OnceLock::new();
+    static UNITTEST_FAIL: OnceLock<Regex> = OnceLock::new();
     let mut summary = TestSummary::default();
     let mut seen = false;
 
@@ -167,6 +170,28 @@ pub fn tests(output: &str) -> Option<TestSummary> {
         summary.skipped = number(&c, "skipped");
         summary.failed = number(&c, "failed");
         return Some(summary);
+    }
+
+    if let Some(ran) = re(&UNITTEST, r"(?m)^Ran (?P<total>\d+) tests? in [\d.]+s")
+        .captures_iter(output)
+        .last()
+    {
+        let total = number(&ran, "total");
+        if let Some(end) = re(
+            &UNITTEST_END,
+            r"(?m)^(?:OK|FAILED)(?: \((?:failures=(?P<failures>\d+))?(?:, )?(?:errors=(?P<errors>\d+))?(?:, )?(?:skipped=(?P<skipped>\d+))?[^)]*\))?\s*$",
+        )
+        .captures_iter(output)
+        .last()
+        {
+            summary.failed = number(&end, "failures") + number(&end, "errors");
+            summary.skipped = number(&end, "skipped");
+            summary.passed = total.saturating_sub(summary.failed + summary.skipped);
+            for c in re(&UNITTEST_FAIL, r"(?m)^(?:FAIL|ERROR): (?P<name>\S+)").captures_iter(output) {
+                failure(&mut summary, &c["name"]);
+            }
+            return Some(summary);
+        }
     }
 
     if let Some(c) = re(
@@ -280,6 +305,13 @@ mod tests {
             (summary.passed, summary.skipped, summary.failed),
             (12, 1, 2)
         );
+
+        let unittest = "test_a (test_p.T) ... ok\ntest_b (test_p.T) ... FAIL\n\n======\nFAIL: test_b (test_p.T)\n------\nRan 2 tests in 0.001s\n\nFAILED (failures=1)\n";
+        let summary = tests(unittest).unwrap();
+        assert_eq!((summary.passed, summary.failed), (1, 1));
+        assert_eq!(summary.failures, ["test_b"]);
+        let summary = tests("Ran 3 tests in 0.002s\n\nOK (skipped=1)\n").unwrap();
+        assert_eq!((summary.passed, summary.failed, summary.skipped), (2, 0, 1));
 
         assert!(tests("Compiling zephium v0.1.0\nFinished dev").is_none());
     }
