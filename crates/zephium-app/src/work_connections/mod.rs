@@ -9,6 +9,9 @@ pub mod helper;
 pub mod mcp;
 pub mod store;
 
+/// The MCP client, for the app's Settings commands.
+pub use zephium_mcp as client;
+
 use zephium_core::work::runtime::WorkConfirmV1;
 use zephium_core::work::WorkError;
 
