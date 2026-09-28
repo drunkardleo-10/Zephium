@@ -1,4 +1,4 @@
-//! The macOS implementation: the registry on disk and handing extensions
+//! The shared desktop implementation: the registry on disk and handing extensions
 //! to the shell.
 
 mod install;
@@ -15,43 +15,14 @@ use zephium_app::{Handle, WebExtensionStatus};
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
 use zephium_core::ports::engine::WebExtensionLoad;
 use zephium_webext::manifest::Manifest;
-use zephium_webext::{archive, crx, permissions, prepare, ExtensionId};
+use zephium_webext::{archive, crx, permissions, ExtensionId};
 
 use super::{Access, Entry, Registry, WebExtensionView, WebExtensions};
 
 const MAX_PACKAGE_BYTES: u64 = 128 * 1024 * 1024;
 
-/// Added to every package: `nativeMessaging` for the browser's own bridges,
-/// and `activeTab`, which grants nothing until the user clicks the
-/// extension, so "on click" site access works for every extension, as it
-/// does in Chrome.
-const ADDED_PERMISSIONS: &[&str] = &["nativeMessaging", "activeTab"];
-
-/// Extensions' own console errors are for whoever is building the browser;
-/// in a release they would cost a message to the browser each and help no one.
-const DIAGNOSTICS: bool = cfg!(any(debug_assertions, feature = "webext-qa"));
-
-fn compat_revision() -> String {
-    // FNV-1a over the layer and the Chrome identity it presents; changing
-    // either rebuilds every package from its original.
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in zephium_webext_macos::compat::SCRIPT
-        .bytes()
-        .chain(zephium_webext_macos::compat::CHROME_VERSION.bytes())
-        .chain(ADDED_PERMISSIONS.concat().bytes())
-        .chain([u8::from(DIAGNOSTICS)])
-    {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    format!("{hash:016x}")[..12].to_owned()
-}
-
-fn compat_layer() -> prepare::CompatLayer {
-    prepare::CompatLayer::new(zephium_webext_macos::compat::SCRIPT)
-        .with_permissions(ADDED_PERMISSIONS)
-        .with_diagnostics(DIAGNOSTICS)
-}
+mod platform;
+use platform::{compat_revision, prepare_package};
 
 impl WebExtensions {
     fn packages(&self, id: &str) -> PathBuf {
@@ -175,13 +146,14 @@ impl WebExtensions {
             let expected = ExtensionId::parse(&entry.id).ok_or("invalid extension id")?;
             let verified = crx::verify(&bytes, Some(&expected)).map_err(|e| e.to_string())?;
             archive::extract(verified.zip, &target, &limits).map_err(|e| e.to_string())?;
+            platform::record_signed_key(&target, verified.public_key)?;
         } else if original("zip").is_file() {
             let bytes = std::fs::read(original("zip")).map_err(|e| e.to_string())?;
             archive::extract(&bytes, &target, &limits).map_err(|e| e.to_string())?;
         } else {
             archive::copy_dir(&original("src"), &target, &limits).map_err(|e| e.to_string())?;
         }
-        if let Err(error) = prepare::prepare(&target, &compat_layer()) {
+        if let Err(error) = prepare_package(&target) {
             let _ = std::fs::remove_dir_all(&target);
             return Err(error.to_string());
         }

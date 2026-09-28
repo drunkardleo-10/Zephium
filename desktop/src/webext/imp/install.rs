@@ -7,9 +7,9 @@ use std::time::Duration;
 use zephium_app::Handle;
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
 use zephium_webext::manifest::Manifest;
-use zephium_webext::{archive, crx, permissions, prepare, store, ExtensionId};
+use zephium_webext::{archive, crx, permissions, store, ExtensionId};
 
-use super::{compat_layer, compat_revision, target, MAX_PACKAGE_BYTES};
+use super::{compat_revision, prepare_package, target, MAX_PACKAGE_BYTES};
 use crate::webext::{Entry, Original, Pending, WebExtensionReview, WebExtensions};
 
 /// A client that talks only to Google's update and download hosts, where
@@ -38,7 +38,7 @@ pub(super) fn store_client() -> Result<reqwest::Client, String> {
 
 pub(super) async fn download(id: &ExtensionId) -> Result<Vec<u8>, String> {
     let client = store_client()?;
-    let url = store::download_url(id, zephium_webext_macos::compat::CHROME_VERSION);
+    let url = store::download_url(id, store::CHROME_VERSION);
     let mut response = client
         .get(url)
         .send()
@@ -219,7 +219,7 @@ pub(super) fn stage(
             .to_owned();
         let name = manifest.name().unwrap_or_else(|| id.to_string());
         let description = manifest.description().unwrap_or_default().to_owned();
-        let report = prepare::prepare(&dir, &compat_layer())
+        let report = prepare_package(&dir)
             .map_err(|error| format!("The extension can't be prepared ({error})."))?;
         let mut permissions = manifest.permissions();
         permissions.extend(report.added_permissions);
@@ -282,6 +282,7 @@ fn unpack(source: Source, dir: &Path) -> Result<(ExtensionId, Original), String>
             let verified = crx::verify(&bytes, Some(&id))
                 .map_err(|_| "The package isn't correctly signed by its publisher.")?;
             archive::extract(verified.zip, dir, &limits).map_err(unsafe_package)?;
+            super::platform::record_signed_key(dir, verified.public_key)?;
             Ok((id, Original::Crx(bytes)))
         }
         Source::File(path) => {
@@ -298,6 +299,7 @@ fn unpack(source: Source, dir: &Path) -> Result<(ExtensionId, Original), String>
                     crx::verify(&bytes, None).map_err(|_| "The package isn't correctly signed.")?;
                 let id = verified.id.clone();
                 archive::extract(verified.zip, dir, &limits).map_err(unsafe_package)?;
+                super::platform::record_signed_key(dir, verified.public_key)?;
                 Ok((id, Original::Crx(bytes)))
             } else {
                 archive::extract(&bytes, dir, &limits).map_err(unsafe_package)?;

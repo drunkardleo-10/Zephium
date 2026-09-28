@@ -19,13 +19,13 @@ use zephium_core::ids::ProfileId;
 use crate::{authorize, shutdown_started, CallerPolicy};
 
 pub(crate) struct WebExtensions {
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     root: PathBuf,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     state: Mutex<Option<Pending>>,
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 struct Pending {
     profile: ProfileId,
     entry: Entry,
@@ -34,7 +34,7 @@ struct Pending {
 }
 
 /// What a package was installed from, kept to rebuild it later.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 enum Original {
     Crx(Vec<u8>),
     Zip(Vec<u8>),
@@ -59,7 +59,7 @@ struct Registry {
     extensions: Vec<Entry>,
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Entry {
     install: String,
@@ -138,12 +138,12 @@ impl WebExtensions {
         if let Some(data_dir) = self.root.parent() {
             remove_previous_repository(data_dir);
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             imp::restore(self, shell);
             imp::start_updates(&self.root, shell);
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let _ = shell;
     }
 }
@@ -231,9 +231,9 @@ pub(crate) async fn web_extension_prepare(
     {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     return imp::prepare(&shell, &extensions, &tab_id).await;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (shell, extensions, tab_id);
         Err(UNAVAILABLE.into())
@@ -253,9 +253,9 @@ pub(crate) async fn web_extension_confirm(
     {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     return imp::confirm(&shell, &extensions, &id);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (shell, extensions, id);
         Err(UNAVAILABLE.into())
@@ -285,9 +285,9 @@ pub(crate) async fn web_extension_list(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_list") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     return imp::list(&shell, &extensions).await;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (shell, extensions);
         Err(UNAVAILABLE.into())
@@ -306,9 +306,9 @@ pub(crate) async fn web_extension_set_enabled(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_set_enabled") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     return imp::set_enabled(&shell, &extensions, &id, enabled).await;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (shell, extensions, id, enabled);
         Err(UNAVAILABLE.into())
@@ -329,9 +329,9 @@ pub(crate) fn web_extension_answer_access(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_answer_access") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     return imp::answer_access(&shell, &extensions, request, allowed);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (shell, extensions, request, allowed);
         Err(UNAVAILABLE.into())
@@ -349,9 +349,9 @@ pub(crate) async fn web_extension_uninstall(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_uninstall") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     return imp::uninstall(&shell, &extensions, &id).await;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (shell, extensions, id);
         Err(UNAVAILABLE.into())
@@ -373,9 +373,9 @@ pub(crate) async fn web_extension_set_access(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_set_access") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     return imp::set_access(&shell, &extensions, &id, &mode, sites).await;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (shell, extensions, id, mode, sites);
         Err(UNAVAILABLE.into())
@@ -392,9 +392,9 @@ pub(crate) async fn web_extension_open_options(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_open_options") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     return imp::open_options(&shell, &id).await;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (shell, id);
         Err(UNAVAILABLE.into())
@@ -417,9 +417,9 @@ pub(crate) async fn web_extension_choose_file(
     {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     return imp::choose_file(caller.app_handle(), &shell, &extensions, folder).await;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (shell, extensions, folder);
         Err(UNAVAILABLE.into())
@@ -440,9 +440,9 @@ pub(crate) async fn web_extension_prepare_file(
     {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     return imp::prepare_file(&shell, &extensions, PathBuf::from(path)).await;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (shell, extensions, path);
         Err(UNAVAILABLE.into())
@@ -464,9 +464,9 @@ pub(crate) async fn web_extension_review_update(
     {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     return imp::review_update(&shell, &extensions, &id).await;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (shell, extensions, id);
         Err(UNAVAILABLE.into())
@@ -486,7 +486,7 @@ pub(crate) fn dropped_package(paths: &[PathBuf]) -> Option<String> {
     package.then(|| path.to_string_lossy().into_owned())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod imp;
 mod store_icon;
 

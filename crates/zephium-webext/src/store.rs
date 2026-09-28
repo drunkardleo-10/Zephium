@@ -1,5 +1,8 @@
 //! Chrome Web Store URLs and update-protocol parsing. No networking.
 
+/// Chrome compatibility version used when requesting store packages.
+pub const CHROME_VERSION: &str = "152.0.0.0";
+
 use std::cmp::Ordering;
 
 use url::{form_urlencoded, Url};

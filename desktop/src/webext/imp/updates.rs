@@ -49,7 +49,7 @@ async fn check_updates(extensions: &WebExtensions, shell: &Handle) -> Result<(),
     if entries.is_empty() {
         return Ok(());
     }
-    let url = store::update_check_url(&entries, zephium_webext_macos::compat::CHROME_VERSION);
+    let url = store::update_check_url(&entries, store::CHROME_VERSION);
     let response = store_client()?
         .get(url)
         .send()
