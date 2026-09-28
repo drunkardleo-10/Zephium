@@ -15,7 +15,7 @@ New-Item -ItemType Directory -Path $results -Force | Out-Null
 $previous = @{}
 $clock = [Diagnostics.Stopwatch]::StartNew()
 $lastSample = 0.0
-while ($clock.Elapsed.TotalSeconds -le $Seconds) {
+while ($true) {
     $owner.Refresh()
     if ($owner.HasExited) { throw 'QA exited during measurement.' }
     $inventory = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId)
