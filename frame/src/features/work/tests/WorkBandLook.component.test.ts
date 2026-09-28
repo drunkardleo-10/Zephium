@@ -115,7 +115,12 @@ test.each(LOOKS)("%s at %d%%", async (name, percent) => {
   const screen = await render(BoardCanvas, {
     scene: loaded,
     ...(asking ? { asks: asking.asks } : {}),
-    viewport: { x: zoom === 1 ? 120 : zoom < 0.4 ? 120 : 200, y: 72, zoom },
+    // A lead run draws what it drew on left of its request: the view makes room for it.
+    viewport: {
+      x: (zoom === 1 ? 120 : zoom < 0.4 ? 120 : 200) + (base !== name ? 280 * zoom : 0),
+      y: 72,
+      zoom,
+    },
   });
   screen.container.style.width = "1440px";
   screen.container.style.height = "900px";

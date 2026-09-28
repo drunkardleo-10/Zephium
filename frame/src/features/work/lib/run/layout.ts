@@ -84,13 +84,13 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
   let inputsBottom = top;
   const inputs = run.inputs ?? [];
   if (inputs.length) {
-    let y = spine - RUN.labelMid;
     const x = -(RUN.inputs + RUN.gutter);
+    let y = spine - (inputs[0]?.height ?? 0) / 2;
     const ends: Point[] = [];
     for (const input of inputs) {
       rects[input.id] = { x, y, width: input.width, height: input.height };
-      ends.push({ x: x + input.width + RUN.air, y: y + RUN.labelMid });
-      y = snap(y + input.height + 8);
+      ends.push({ x: x + input.width + RUN.air, y: y + input.height / 2 });
+      y += input.height + 12;
     }
     inputsBottom = y;
     const into = { x: -RUN.air, y: spine };
@@ -103,7 +103,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
         source: input.id,
         target: run.request.id,
         points,
-        from: { x: rect.width + RUN.air, y: RUN.labelMid },
+        from: { x: rect.width + RUN.air, y: rect.height / 2 },
         to: { x: -RUN.air, y: RUN.spine },
         laid: ORIGIN,
       });

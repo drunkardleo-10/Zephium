@@ -86,6 +86,11 @@ export function leadTrip(scene: BoardScene, live: boolean): BoardScene {
       summary: "ESTA",
     },
   ];
+  run.inputs = [
+    { kind: "skill", label: "Trip planning" },
+    { kind: "memory", label: "Flies from Warsaw" },
+    { kind: "notes", label: "YC batch notes", count: 2 },
+  ];
   run.status = live ? "running" : "completed";
   const base = run.artifacts[0]!;
   const object = (id: string, title: string, data: Data, part?: string): WorkArtifactV1 => ({

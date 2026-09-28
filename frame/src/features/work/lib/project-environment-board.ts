@@ -293,7 +293,16 @@ export function environmentStages(
       const seen = (key: string, width: number) =>
         (detail !== "full" ? measured.get(measureKey(key, width, false, detail)) : undefined) ??
         measured.get(measureKey(key, width, false));
-      const inputs = (options.inputs?.(runs) ?? []).map((input, index) => ({
+      // What the run drew on: the lead records it as facts; a caller may add its own.
+      const recordedInputs = runs.flatMap((run) =>
+        (run.inputs ?? []).map((fact): RunInputView => ({
+          kind: fact.kind,
+          label: fact.label,
+          ...(fact.count ? { count: fact.count } : {}),
+          lit: true,
+        })),
+      );
+      const inputs = (options.inputs?.(runs) ?? recordedInputs).map((input, index) => ({
         id: `input:${draft.card}:${index}`,
         input,
       }));
