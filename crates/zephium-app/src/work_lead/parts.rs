@@ -168,7 +168,21 @@ where
         fact.started_ms = Some(now_ms());
         let _ = self.run.part(fact.clone()).await;
         self.run.activity(WorkActivityV1::Delegating);
-        let report = self.helper(fact.id, &spec).await;
+        let mut report = self.helper(fact.id, &spec).await;
+        if let Kit::Registered(helper) = self.kit(spec.helper) {
+            let context = LeadToolContext {
+                run: self.run,
+                part: Some(fact.id),
+            };
+            for (title, data) in helper.objects(context).await {
+                match context.publish(&title, data).await {
+                    Ok(id) => report.objects.push(id),
+                    Err(_) => self
+                        .run
+                        .report(super::WorkLeadDiagnostic::ObjectRefused { reason: None }),
+                }
+            }
+        }
         self.release_part();
         fact.state = report.state;
         fact.ended_ms = Some(now_ms());
@@ -270,7 +284,10 @@ where
             Kit::Files => prompt::file_tools(),
             Kit::Registered(helper) => helper.tools().tools(
                 LeadScope::Helper(spec.helper),
-                &super::tools::LeadRunView { run: self.run },
+                &super::tools::LeadRunView {
+                    run: self.run,
+                    service: spec.service.as_ref(),
+                },
             ),
         };
         tools.extend(prompt::helper_tools());

@@ -45,6 +45,8 @@ pub(crate) struct LeadRun {
     pub profile: ProfileId,
     pub grant: WorkAgentGrantV1,
     pub files: Option<crate::work_files::WorkFileGrant>,
+    /// The run's one output: every object it places is minted under it.
+    pub output: WorkExpectedOutput,
     state: Mutex<State>,
     diagnostic: Option<fn(super::WorkLeadDiagnostic)>,
 }
@@ -64,6 +66,7 @@ impl Drop for Waiting<'_> {
 }
 
 impl LeadRun {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         probe: WorkAttemptProbe,
         handle: crate::Handle,
@@ -71,6 +74,7 @@ impl LeadRun {
         grant: WorkAgentGrantV1,
         limits: WorkExecutionLimits,
         files: Option<crate::work_files::WorkFileGrant>,
+        output: WorkExpectedOutput,
         diagnostic: Option<fn(super::WorkLeadDiagnostic)>,
     ) -> Self {
         Self {
@@ -79,6 +83,7 @@ impl LeadRun {
             profile,
             grant,
             files,
+            output,
             state: Mutex::new(State {
                 turn: 0,
                 limits,
@@ -368,6 +373,65 @@ impl LeadRun {
                 drop(waiting);
                 let note = if expired {
                     "Waiting for your answer"
+                } else {
+                    self.stop_note()
+                };
+                self.settle(id, WorkStepStatus::Cancelled, None, Some(note.into()), None)
+                    .await?;
+                return Ok(None);
+            }
+        }
+    }
+    /// Holds a committing step for the person; see `LeadToolContext::confirm`.
+    pub(crate) async fn confirm(
+        &self,
+        confirm: WorkConfirmV1,
+        part: Option<WorkPartId>,
+    ) -> Result<Option<bool>, WorkError> {
+        self.activity(WorkActivityV1::WaitingForHuman);
+        let step = self.step(
+            WorkStepKindV1::Confirm {
+                confirm: Box::new(confirm),
+            },
+            WorkStepStatus::Running,
+            part,
+        );
+        let id = self.begin(step, vec![]).await?;
+        let waiting = self.wait();
+        let since = Instant::now();
+        loop {
+            tokio::time::sleep(POLL).await;
+            let execution = self.execution().await?;
+            let decision =
+                execution
+                    .steps
+                    .iter()
+                    .find(|s| s.id == id)
+                    .and_then(|s| match &s.kind {
+                        WorkStepKindV1::Confirm { confirm } => confirm.decision,
+                        _ => None,
+                    });
+            let settled = match decision {
+                Some(WorkConfirmDecisionV1::Declined) => {
+                    Some((false, WorkStepStatus::Cancelled, Some("Declined")))
+                }
+                Some(_) => Some((true, WorkStepStatus::Succeeded, None)),
+                None => None,
+            };
+            if let Some((approved, status, note)) = settled {
+                drop(waiting);
+                self.settle(id, status, None, note.map(str::to_owned), None)
+                    .await?;
+                return Ok(Some(approved));
+            }
+            let expired = since.elapsed() >= WAIT_PATIENCE;
+            if expired {
+                self.suspend().await;
+            }
+            if expired || self.cancelled().await {
+                drop(waiting);
+                let note = if expired {
+                    "Waiting for your decision"
                 } else {
                     self.stop_note()
                 };

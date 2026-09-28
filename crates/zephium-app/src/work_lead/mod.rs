@@ -6,7 +6,7 @@
 mod call;
 mod hands;
 mod lead;
-mod objects;
+pub mod objects;
 mod parts;
 mod prompt;
 pub mod registry;
@@ -55,7 +55,9 @@ pub enum WorkLeadDiagnostic {
         state: WorkPartStateV1,
         objects: usize,
     },
-    ObjectRefused,
+    ObjectRefused {
+        reason: Option<objects::ObjectRefusal>,
+    },
     /// A batch of searches, page reads or file steps settled.
     Fetched {
         part: bool,
@@ -216,6 +218,7 @@ impl WorkLeadService {
             grant.clone(),
             limits,
             (!files.is_empty()).then_some(files),
+            attempt.node().outputs[0].clone(),
             self.diagnostic,
         );
         let objective = attempt.disclosure_objective()?;

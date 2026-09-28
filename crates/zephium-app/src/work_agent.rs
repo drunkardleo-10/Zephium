@@ -2502,6 +2502,7 @@ fn step_kind_label(kind: &WorkStepKindV1) -> &'static str {
         WorkStepKindV1::Publish => "publish",
         WorkStepKindV1::Ask { .. } => "ask",
         WorkStepKindV1::Confirm { confirm: _ } => "confirm",
+        WorkStepKindV1::Call { .. } => "call",
         WorkStepKindV1::Steer { .. } => "person",
         WorkStepKindV1::List { .. } => "list",
         WorkStepKindV1::ReadFile { .. } => "read_file",

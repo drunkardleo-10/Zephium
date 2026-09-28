@@ -451,3 +451,41 @@ fn saved_artifacts_without_the_new_fields_still_load() {
     artifact.validate().unwrap();
     assert_eq!(serde_json::to_value(&artifact).unwrap(), saved);
 }
+
+#[test]
+fn a_connection_call_is_a_settled_step_with_closed_fields() {
+    let call = |url: Option<&str>| WorkStepFact {
+        id: 1.into(),
+        turn: 1,
+        kind: WorkStepKindV1::Call {
+            call: Box::new(WorkConnectionCallV1 {
+                service: "github".into(),
+                tool: "github_issue".into(),
+                verb: "issue".into(),
+                target: Some("#123".into()),
+                title: Some("Totals skip a night".into()),
+                count: None,
+                url: url.map(str::to_owned),
+            }),
+        },
+        status: WorkStepStatus::Succeeded,
+        usage: None,
+        artifacts: vec![],
+        evidence: None,
+        note: Some("Read issue #123".into()),
+        measurements: None,
+        local: None,
+        account: None,
+        part: None,
+    };
+    call(Some("https://github.com/octo/app/issues/123"))
+        .validate()
+        .unwrap();
+    assert!(call(Some("http://github.com/x")).validate().is_err());
+    let mut running = call(None);
+    running.status = WorkStepStatus::Running;
+    assert!(running.validate().is_err());
+    let wire = serde_json::to_value(call(None).kind).unwrap();
+    assert_eq!(wire["kind"], "call");
+    assert_eq!(wire["call"]["verb"], "issue");
+}

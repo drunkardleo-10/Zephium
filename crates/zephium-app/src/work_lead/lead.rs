@@ -36,6 +36,10 @@ const MAX_FAILED_CALLS: u8 = 3;
 /// Conversation text past which older tool results are shortened.
 const CONVERSATION_CHARS: usize = 360_000;
 const KEEP_GOING: &str = "Keep going";
+/// The lead's own searches and page reads in one request; wide research
+/// goes to parts, which keep page text out of the lead's view.
+const LEAD_SEARCHES: usize = 12;
+const LEAD_READS: usize = 6;
 
 #[derive(Default)]
 struct LeadState {
@@ -45,6 +49,8 @@ struct LeadState {
     finish_refusals: u8,
     skills: Vec<String>,
     steers: BTreeSet<WorkStepId>,
+    searches: usize,
+    reads: usize,
 }
 
 pub(crate) struct Lead<'a, B> {
@@ -119,6 +125,17 @@ where
         state.parts_running += 1;
         true
     }
+    /// Counts one of the lead's own searches or reads; false past the cap.
+    fn spend(&self, search: bool) -> bool {
+        let mut state = self.state();
+        let (used, cap) = if search {
+            (&mut state.searches, LEAD_SEARCHES)
+        } else {
+            (&mut state.reads, LEAD_READS)
+        };
+        *used += 1;
+        *used <= cap
+    }
     pub(crate) fn release_part(&self) {
         let mut state = self.state();
         state.parts_running = state.parts_running.saturating_sub(1);
@@ -154,7 +171,10 @@ where
     }
     fn tools(&self) -> Vec<WorkModelTool> {
         let mut tools = prompt::lead_tools();
-        let view = LeadRunView { run: self.run };
+        let view = LeadRunView {
+            run: self.run,
+            service: None,
+        };
         for set in &self.extra {
             for tool in set.tools(LeadScope::Lead, &view) {
                 if !tools.iter().any(|t| t.name == tool.name) {
@@ -310,6 +330,12 @@ where
                         args["query"] = Value::String(format!("{query}{suffix}"));
                     }
                     match parts::step_request("web_search", &args, self.run) {
+                        Ok(_) if !self.spend(true) => {
+                            answers[index] = Some((
+                                "You have searched enough for this request: build the result from what you have, or start a research part for a new thread.".into(),
+                                true,
+                            ))
+                        }
                         Ok(kind) => requests.push((
                             index,
                             Request {
@@ -321,6 +347,12 @@ where
                     }
                 }
                 "web_fetch" => match parts::step_request("read", args, self.run) {
+                    Ok(_) if !self.spend(false) => {
+                        answers[index] = Some((
+                            "You have read enough pages yourself for this request: build the result, or start a part for the pages that remain.".into(),
+                            true,
+                        ))
+                    }
                     Ok(kind) => requests.push((
                         index,
                         Request {
@@ -369,7 +401,13 @@ where
                     .extra
                     .iter()
                     .find(|set| {
-                        set.tools(LeadScope::Lead, &LeadRunView { run: self.run })
+                        set.tools(
+                            LeadScope::Lead,
+                            &LeadRunView {
+                                run: self.run,
+                                service: None,
+                            },
+                        )
                             .iter()
                             .any(|tool| tool.name == name)
                     })
@@ -501,12 +539,14 @@ where
         let sources = strings(args.get("sources"));
         let proposed = match objects::propose(self.run, &canvas, kind, title, data, &sources, &[]) {
             Ok(proposed) => proposed,
-            Err(fault) => {
-                self.run.report(super::WorkLeadDiagnostic::ObjectRefused);
+            Err((fault, reason)) => {
+                self.run.report(super::WorkLeadDiagnostic::ObjectRefused {
+                    reason: Some(reason),
+                });
                 return (fault, true);
             }
         };
-        match objects::publish(self.run, self.attempt, proposed, part, None).await {
+        match objects::publish(self.run, proposed, part, None).await {
             Ok(id) => {
                 if kind == "reply" {
                     self.state().reply = Some(id);
@@ -535,9 +575,10 @@ where
             return ("id names no object on this canvas".into(), true);
         };
         let kind = target.artifact.data.kind_name();
-        if matches!(kind, "reply") && self.state().reply.is_some_and(|r| r != target.artifact.id) {
+        if kind == "reply" && !target.in_this_run {
             return (
-                "This request already has its reply; revise that one".into(),
+                "A reply belongs to its own request: make a new reply for this one with create"
+                    .into(),
                 true,
             );
         }
@@ -559,21 +600,15 @@ where
             &target.artifact.evidence,
         ) {
             Ok(proposed) => proposed,
-            Err(fault) => {
-                self.run.report(super::WorkLeadDiagnostic::ObjectRefused);
+            Err((fault, reason)) => {
+                self.run.report(super::WorkLeadDiagnostic::ObjectRefused {
+                    reason: Some(reason),
+                });
                 return (fault, true);
             }
         };
         let part = target.in_this_run.then_some(target.artifact.part).flatten();
-        match objects::publish(
-            self.run,
-            self.attempt,
-            proposed,
-            part,
-            Some(target.artifact.id),
-        )
-        .await
-        {
+        match objects::publish(self.run, proposed, part, Some(target.artifact.id)).await {
             Ok(new) => {
                 if kind == "reply" {
                     self.state().reply = Some(new);

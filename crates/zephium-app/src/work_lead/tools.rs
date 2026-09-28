@@ -77,13 +77,37 @@ pub trait LeadHelper: Send + Sync {
     fn max_turns(&self) -> u8 {
         12
     }
+    /// Objects the part leaves when it ends, placed on its row by the lead:
+    /// what the helper made exactly (a diff of the files it changed), never
+    /// something the model wrote.
+    fn objects<'a>(&'a self, _context: LeadToolContext<'a>) -> LeadObjectsFuture<'a> {
+        Box::pin(async { Vec::new() })
+    }
 }
+
+/// Titled objects a helper leaves on its part's row.
+pub type LeadObjectsFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Vec<(String, zephium_core::work::artifact::WorkArtifactDataV1)>>
+            + Send
+            + 'a,
+    >,
+>;
 
 /// What a tool set may know about the run when it lists its tools.
 pub struct LeadRunView<'a> {
     pub(crate) run: &'a LeadRun,
+    pub(crate) service: Option<&'a zephium_core::work::parts::WorkPartServiceV1>,
 }
 impl LeadRunView<'_> {
+    pub fn profile(&self) -> ProfileId {
+        self.run.profile
+    }
+    /// The site or connection the part works with, when the lead named one;
+    /// `None` for the lead's own tools.
+    pub fn service(&self) -> Option<&zephium_core::work::parts::WorkPartServiceV1> {
+        self.service
+    }
     /// Folders the person granted for this run.
     pub fn folders(&self) -> &[String] {
         &self.run.grant.folders
@@ -228,6 +252,37 @@ impl<'a> LeadToolContext<'a> {
         options: Vec<String>,
     ) -> Result<Option<String>, WorkError> {
         self.run.ask(purpose, prompt, options, self.part).await
+    }
+    /// Places an object the tool made exactly (not the model) on this
+    /// call's part, validated like any other object. Its sources are none:
+    /// it stands for what the tool did.
+    pub async fn publish(
+        &self,
+        title: &str,
+        data: zephium_core::work::artifact::WorkArtifactDataV1,
+    ) -> Result<WorkArtifactId, WorkError> {
+        let title = super::call::clip(title.trim(), super::objects::MAX_TITLE_CHARS);
+        if title.is_empty() || data.lead_fault(0).is_some() {
+            return Err(WorkError::Invalid);
+        }
+        super::objects::publish(
+            self.run,
+            super::objects::Proposed {
+                title,
+                data,
+                evidence: vec![],
+            },
+            self.part,
+            None,
+        )
+        .await
+    }
+    /// Holds a step that would commit something for the person's decision,
+    /// with the deadline standing still. `Some(true)`: approved and recorded
+    /// as done; `Some(false)`: declined; `None`: the run stopped or nobody
+    /// answered in time.
+    pub async fn confirm(&self, confirm: WorkConfirmV1) -> Result<Option<bool>, WorkError> {
+        self.run.confirm(confirm, self.part).await
     }
     /// Makes a durable record citable by objects: returns the key the model
     /// names in `sources` (a file record's link is `{record id, 1}`).

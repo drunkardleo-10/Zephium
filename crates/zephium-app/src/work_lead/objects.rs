@@ -6,9 +6,8 @@ use zephium_core::work::{artifact::*, runtime::*, *};
 
 use super::call::clip;
 use super::run::LeadRun;
-use crate::work_runtime::{WorkArtifactDraft, WorkNodeAttempt};
 
-pub(crate) const MAX_TITLE_CHARS: usize = 60;
+pub const MAX_TITLE_CHARS: usize = 60;
 const MAX_CANVAS_LINES: usize = 60;
 const MAX_READ_BYTES: usize = 24 * 1024;
 
@@ -276,10 +275,21 @@ fn normalize(kind: &str, data: &mut Value) {
 }
 
 /// What a create or revise asks for, parsed and validated.
-pub(crate) struct Proposed {
+pub struct Proposed {
     pub title: String,
     pub data: WorkArtifactDataV1,
     pub evidence: Vec<WorkEvidenceLink>,
+}
+
+/// Why an object was refused, as a closed fact for development logs.
+#[derive(Clone, Copy, Debug)]
+pub enum ObjectRefusal {
+    Title,
+    Shape,
+    Source,
+    Links,
+    Pick,
+    Field(WorkArtifactField),
 }
 
 /// Turns a model's object into validated data, or a fault naming the field.
@@ -291,16 +301,20 @@ pub(crate) fn propose(
     data: Value,
     sources: &[String],
     inherited: &[WorkEvidenceLink],
-) -> Result<Proposed, String> {
+) -> Result<Proposed, (String, ObjectRefusal)> {
     let title = super::call::plain(title);
     let title = title.as_str();
     if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS || title.contains('\n') {
-        return Err(format!(
-            "title is one line of 1 to {MAX_TITLE_CHARS} characters"
+        return Err((
+            format!("title is one line of 1 to {MAX_TITLE_CHARS} characters"),
+            ObjectRefusal::Title,
         ));
     }
     let Value::Object(mut map) = data else {
-        return Err("data must be an object with the kind's fields".into());
+        return Err((
+            "data must be an object with the kind's fields".into(),
+            ObjectRefusal::Shape,
+        ));
     };
     map.remove("kind");
     let mut data = Value::Object(map);
@@ -335,29 +349,39 @@ pub(crate) fn propose(
         }
     }
     if let Some(key) = unknown {
-        return Err(format!(
-            "sources: {key} is not a source of this run; use the keys search, reads and parts returned"
+        return Err((
+            format!("sources: {key} is not a source of this run; use the keys search, reads and parts returned"),
+            ObjectRefusal::Source,
         ));
     }
     if evidence.is_empty() {
         evidence = inherited.to_vec();
     }
     if evidence.len() > MAX_ARTIFACT_EVIDENCE {
-        return Err(format!(
-            "sources: at most {MAX_ARTIFACT_EVIDENCE} per object"
+        return Err((
+            format!("sources: at most {MAX_ARTIFACT_EVIDENCE} per object"),
+            ObjectRefusal::Source,
         ));
     }
     if let Value::Object(map) = &mut data {
         map.insert("kind".into(), Value::String(kind.to_owned()));
     }
-    let data: WorkArtifactDataV1 = serde_json::from_value(data)
-        .map_err(|error| format!("data does not match the {kind} shape: {error}"))?;
+    let data: WorkArtifactDataV1 = serde_json::from_value(data).map_err(|error| {
+        (
+            format!("data does not match the {kind} shape: {error}"),
+            ObjectRefusal::Shape,
+        )
+    })?;
     if let Some(fault) = data.lead_fault(evidence.len()) {
-        return Err(format!("{kind}: {}", fault.describe()));
+        return Err((
+            format!("{kind}: {}", fault.describe()),
+            ObjectRefusal::Field(fault.field),
+        ));
     }
     if evidence.is_empty() && data.claims_observed_links() {
-        return Err(format!(
-            "{kind}: pictures and links must come from sources; list the keys they came from in sources"
+        return Err((
+            format!("{kind}: pictures and links must come from sources; list the keys they came from in sources"),
+            ObjectRefusal::Links,
         ));
     }
     if let WorkArtifactDataV1::Plan { steps, .. } = &data {
@@ -368,9 +392,12 @@ pub(crate) fn propose(
                     && matches!(&o.artifact.data, WorkArtifactDataV1::Picks { items, .. } if usize::from(pick.index) < items.len())
             });
             if !ok {
-                return Err(format!(
-                    "plan: step {} names a pick that is not on the canvas; use a picks object id and an item index from it",
-                    index + 1
+                return Err((
+                    format!(
+                        "plan: step {} names a pick that is not on the canvas; use a picks object id and an item index from it",
+                        index + 1
+                    ),
+                    ObjectRefusal::Pick,
                 ));
             }
         }
@@ -385,25 +412,27 @@ pub(crate) fn propose(
 /// Places a new object or a revision, durably, as one Publish step.
 pub(crate) async fn publish(
     run: &LeadRun,
-    attempt: &WorkNodeAttempt,
     proposed: Proposed,
     part: Option<WorkPartId>,
     revises: Option<WorkArtifactId>,
 ) -> Result<WorkArtifactId, WorkError> {
-    let output = attempt.node().outputs[0].name.clone();
-    let general_knowledge = proposed.evidence.is_empty();
     let kind = proposed.data.kind_name();
-    let mut artifact = attempt.mint_marked_artifact(
-        WorkArtifactDraft {
-            output,
-            title: proposed.title,
-            data: proposed.data,
-            evidence: proposed.evidence,
-        },
-        general_knowledge,
-    )?;
-    artifact.part = part;
-    artifact.revises = revises;
+    let artifact = WorkArtifactV1 {
+        version: 1,
+        id: WorkArtifactId::generate(),
+        execution: run.probe.execution(),
+        node: run.probe.node(),
+        attempt: run.probe.attempt(),
+        output: run.output.name.clone(),
+        title: proposed.title,
+        general_knowledge: proposed.evidence.is_empty(),
+        data: proposed.data,
+        evidence: proposed.evidence,
+        review: run.output.review,
+        presentation: WorkArtifactPresentationV1::Automatic,
+        revises,
+        part,
+    };
     artifact.validate()?;
     let id = artifact.id;
     let mut step = run.step(WorkStepKindV1::Publish, WorkStepStatus::Succeeded, part);

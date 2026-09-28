@@ -111,7 +111,7 @@ impl ConnectionToolSet {
     }
 
     fn profile(view: &LeadRunView<'_>) -> String {
-        view.run.profile.to_string()
+        view.profile().to_string()
     }
 
     async fn connection(&self, profile: &str, id: &str) -> Result<Arc<McpConnection>, String> {
@@ -172,15 +172,33 @@ impl LeadToolSet for ConnectionToolSet {
         if scope != LeadScope::Helper(WorkHelperV1::Connection) || run.private() {
             return Vec::new();
         }
+        // A part names its service: a GitHub part gets gh, a Linear part
+        // that server's tools; a part without one gets every connection.
+        let wanted = run
+            .service()
+            .and_then(|s| s.connection.clone().or_else(|| s.host.clone()))
+            .map(|w| w.to_ascii_lowercase());
+        let github = wanted
+            .as_deref()
+            .is_some_and(|w| w.contains("github") || w == "gh");
         let mut tools = Vec::new();
-        if self.gh().is_some() {
+        if self.gh().is_some() && (wanted.is_none() || github) {
             tools.extend(gh::definitions());
         }
-        if let Some(store) = super::store::shared() {
+        if let (Some(store), false) = (super::store::shared(), github) {
             let profile = Self::profile(run);
             let servers = store.servers(&profile).unwrap_or_default();
+            let named = |server: &zephium_ipc::work::WorkServerV1| {
+                wanted.as_deref().is_none_or(|w| {
+                    w.contains(&server.id) || w.contains(&server.name.to_ascii_lowercase())
+                })
+            };
+            let any_named = servers.iter().any(|s| s.enabled && named(s));
             for (id, offered) in store.tools(&profile) {
-                if let Some(server) = servers.iter().find(|s| s.id == id && s.enabled) {
+                if let Some(server) = servers
+                    .iter()
+                    .find(|s| s.id == id && s.enabled && (!any_named || named(s)))
+                {
                     tools.extend(mcp::definitions(server, &offered));
                 }
             }
@@ -291,29 +309,30 @@ impl ConnectionHost for Bridge<'_> {
         _source: Option<String>,
     ) -> HostFuture<'_, Result<(), WorkError>> {
         Box::pin(async move {
-            // Until a connection call has its own step kind, a call about a
-            // page is recorded as a read of that page, with its row as note.
-            let Some(url) = fact
-                .url
-                .clone()
-                .filter(|u| u.starts_with("https://") && u.len() <= 2048)
-            else {
-                return Ok(());
-            };
             let status = if ok {
                 WorkStepStatus::Succeeded
             } else {
                 WorkStepStatus::Failed
             };
+            let note = row(&fact);
+            let call = WorkConnectionCallV1 {
+                service: fact.service,
+                tool: fact.tool,
+                verb: fact.verb,
+                target: fact.target,
+                title: fact.title,
+                count: fact.count,
+                url: fact
+                    .url
+                    .filter(|u| u.starts_with("https://") && u.len() <= 2048),
+            };
             self.context
                 .begin_step(
-                    WorkStepKindV1::Read {
-                        url,
-                        collection: None,
-                        goal: None,
+                    WorkStepKindV1::Call {
+                        call: Box::new(call),
                     },
                     status,
-                    Some(row(&fact)),
+                    Some(note),
                     None,
                 )
                 .await
@@ -323,62 +342,11 @@ impl ConnectionHost for Bridge<'_> {
 
     fn confirm(&self, confirm: WorkConfirmV1) -> HostFuture<'_, Result<Decision, WorkError>> {
         Box::pin(async move {
-            let context = self.context;
-            let step = context
-                .begin_step(
-                    WorkStepKindV1::Confirm {
-                        confirm: Box::new(confirm),
-                    },
-                    WorkStepStatus::Running,
-                    None,
-                    None,
-                )
-                .await?;
-            let since = Instant::now();
-            loop {
-                let projection = context.probe().runtime_projection().await?;
-                let decision = projection
-                    .executions
-                    .iter()
-                    .find(|e| e.id == context.execution())
-                    .and_then(|e| e.steps.iter().find(|s| s.id == step))
-                    .and_then(|s| match &s.kind {
-                        WorkStepKindV1::Confirm { confirm } => confirm.decision,
-                        _ => None,
-                    });
-                match decision {
-                    Some(WorkConfirmDecisionV1::Declined) => {
-                        context
-                            .settle_step(
-                                step,
-                                WorkStepStatus::Failed,
-                                Some("Declined".into()),
-                                None,
-                            )
-                            .await?;
-                        return Ok(Decision::Declined);
-                    }
-                    Some(_) => {
-                        context
-                            .settle_step(step, WorkStepStatus::Succeeded, None, None)
-                            .await?;
-                        return Ok(Decision::Approved);
-                    }
-                    None => {}
-                }
-                if context.cancelled().await || since.elapsed() > Duration::from_secs(600) {
-                    let _ = context
-                        .settle_step(
-                            step,
-                            WorkStepStatus::Cancelled,
-                            Some("Stopped".into()),
-                            None,
-                        )
-                        .await;
-                    return Ok(Decision::Stopped);
-                }
-                tokio::time::sleep(Duration::from_millis(400)).await;
-            }
+            Ok(match self.context.confirm(confirm).await? {
+                Some(true) => Decision::Approved,
+                Some(false) => Decision::Declined,
+                None => Decision::Stopped,
+            })
         })
     }
 

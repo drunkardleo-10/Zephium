@@ -1145,6 +1145,61 @@ pub enum WorkStepKindV1 {
     Confirm {
         confirm: Box<WorkConfirmV1>,
     },
+    /// A call to an installed tool or connected service, settled as it is
+    /// recorded; the note is its row for people.
+    Call {
+        call: Box<WorkConnectionCallV1>,
+    },
+}
+
+/// What one connection call touched, in closed fields the frame writes its
+/// row from.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkConnectionCallV1 {
+    /// "github", or an MCP server's id.
+    pub service: String,
+    /// The namespaced tool: `github_issue`, `notion__search`.
+    pub tool: String,
+    /// What kind of call it was: `issue`, `issues`, `pr`, `comment`.
+    pub verb: String,
+    /// What it touched: "#123", "octo/app".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// A title it read, such as the issue's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Items it listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+    /// The page the call is about, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+impl WorkConnectionCallV1 {
+    fn validate(&self) -> Result<(), WorkError> {
+        let word = |value: &str, max: usize| {
+            validate_text(value, max)?;
+            if value.contains('\n') {
+                return Err(WorkError::Invalid);
+            }
+            Ok(())
+        };
+        word(&self.service, 64)?;
+        word(&self.tool, 128)?;
+        word(&self.verb, 32)?;
+        if let Some(target) = &self.target {
+            word(target, 256)?;
+        }
+        if let Some(title) = &self.title {
+            word(title, 512)?;
+        }
+        if let Some(url) = &self.url {
+            validate_public_reference_url(url)?;
+        }
+        Ok(())
+    }
 }
 
 /// Why a step asks the person.
@@ -1429,6 +1484,7 @@ impl WorkStepKindV1 {
                 Ok(())
             }
             Self::Confirm { confirm } => confirm.validate(),
+            Self::Call { call } => call.validate(),
             Self::Turn | Self::Publish => Ok(()),
         }
     }
@@ -1538,6 +1594,7 @@ impl WorkStepFact {
             WorkStepKindV1::Publish
             | WorkStepKindV1::Finish { .. }
             | WorkStepKindV1::Steer { .. } => succeeded,
+            WorkStepKindV1::Call { .. } => !running,
             WorkStepKindV1::Turn => !running,
             _ => true,
         };

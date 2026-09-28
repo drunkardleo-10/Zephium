@@ -251,6 +251,10 @@ impl WorkAgentTurnDisclosure {
                     }
                     WorkStepKindV1::DeleteFile { path, .. } => ("delete_file", path.clone()),
                     WorkStepKindV1::Finish { .. } => ("finish", String::new()),
+                    WorkStepKindV1::Call { call } => (
+                        "call",
+                        format!("{} {}", call.service, call.target.as_deref().unwrap_or("")),
+                    ),
                     WorkStepKindV1::Confirm { confirm } => (
                         "confirm",
                         match confirm.decision {

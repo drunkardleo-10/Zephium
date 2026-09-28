@@ -11,8 +11,8 @@ use zephium_core::work::{WorkArtifactId, WorkError, WorkExecutionId, WorkPartId,
 use super::delegate::{self, Delegate};
 use super::{ComputerHost, ComputerTools, Decision, HostFuture, Settled};
 use crate::work_lead::tools::{
-    LeadHelper, LeadRunView, LeadScope, LeadToolContext, LeadToolFuture, LeadToolOutcome,
-    LeadToolSet,
+    LeadHelper, LeadObjectsFuture, LeadRunView, LeadScope, LeadToolContext, LeadToolFuture,
+    LeadToolOutcome, LeadToolSet,
 };
 
 /// The helper's own instructions, after the lead's shared helper rules.
@@ -91,6 +91,35 @@ impl LeadHelper for ComputerHelper {
     }
     fn max_turns(&self) -> u8 {
         40
+    }
+    /// The files the part changed, as exact diffs on its row.
+    fn objects<'a>(&'a self, context: LeadToolContext<'a>) -> LeadObjectsFuture<'a> {
+        Box::pin(async move {
+            let Ok(tools) = self.tools.session(&context) else {
+                return Vec::new();
+            };
+            tools
+                .diffs(&Default::default())
+                .into_iter()
+                .map(|diff| {
+                    let name = diff
+                        .path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&diff.path)
+                        .to_owned();
+                    (
+                        format!("Change to {name}"),
+                        zephium_core::work::artifact::WorkArtifactDataV1::Diff {
+                            path: diff.path,
+                            language: diff.language.to_owned(),
+                            summary: diff.summary,
+                            hunks: diff.hunks,
+                        },
+                    )
+                })
+                .collect()
+        })
     }
 }
 
