@@ -107,9 +107,10 @@ security boundary, not a rendering optimization.
 - `browser.html` and `panel.html` load their own `src/entries/` modules. Each
   validates its native window label, mounts its composition root and calls
   `flushSync()` synchronously. The panel uses `panelReady()`, never `uiReady()`.
-- See `design/launcher.md` for the shared floating host, lazy tool boundary,
-  native lifecycle, and verification status. Production builds emit and enforce
-  `dist/bootstrap-report.json`; do not add browser features to panel startup.
+- See `design/launcher.md` for the launcher: search-only host, native glass
+  shapes, trigger settings, lifecycle and verification status. Production builds
+  emit and enforce `dist/bootstrap-report.json`, which also fails if the panel can
+  reach an editor or tool view at all; do not add browser features to the panel.
 - Theme initialization applies the system mode and subscribes to theme commands
   before its first native query. The main surface installs projection listeners,
   resolves theme/material, synchronously forces style/layout, and only then

@@ -1,78 +1,114 @@
-# Launcher and shared floating tools
+# Launcher
 
-The existing `panel` window is the single floating host. This change adds no
-window or WebView. Search remains backed by the browser actor; Notes, Tasks,
-AI Chat, History, Downloads, and Time tool views are session-only layouts.
-Tool previews do not implement their corresponding services. Horizontal tabs
-are a later consumer of the placement interface.
+The existing `panel` window is the single floating host, and it hosts search
+only. It adds no window or WebView. Search is backed by the browser actor;
+Notes, Tasks, History and Downloads are destinations the launcher hands to the
+browser, which already has their views loaded.
+
+## Why the launcher hosts no tools
+
+The panel is its own WebContent process on macOS and its own WebView2 tree on
+Windows. Nothing parsed or allocated in one is shared with the other, so a tool
+opened in both is paid twice for as long as both stay alive — for Notes that is
+the ~430 KB Tiptap editor and ProseMirror state, for Tasks a second copy of the
+task lists and their subscriptions. Earlier revisions rendered full tool views
+in the panel (`tools.presentation = floating`); that route, its preference and
+the floating tool host are removed.
+
+The launcher offers the same things without the cost: notes are search results
+with the line that matched, anything typed can be captured as a task, and the
+destinations open the browser's own page for them. The build enforces it:
+`bootstrap-report.ts` fails if Tiptap, ProseMirror, or any notes, tools, work,
+history or downloads module is reachable from the panel entry, statically or
+through a dynamic import. Native no longer sends task or note change events to
+the panel.
 
 ## Ownership and routing
 
-`desktop/src/overlay.rs` owns presentation, focus reconciliation, geometry, and
-operation settlement. Its pure `overlay/model.rs` separates publication revision
-from search session identity. Rust publishes `PanelState`; the frontend sends
-bounded `PanelIntent` values and never positions the window itself.
+`desktop/src/overlay.rs` owns presentation, focus, placement and operation
+settlement; `overlay/model.rs` separates publication revision from search
+session identity. Rust publishes `PanelState`; the frontend sends `PanelIntent`
+(`search`, `dismiss`, `open { tool }`) and reports its content height through
+`panel_fit`. It never positions the window itself.
 
-The shortcut opens search from hidden, hides visible search, and returns a tool
-to search. Back returns to search; close hides. Search loses presentation when
-focus leaves Zephium or moves to its browser. An owned native surface does not
-count as another application. Tools stay available within Zephium, suppress
-while another application is active, and return unless explicitly dismissed.
-Native focus observations are coalesced before reconciliation.
+The shortcut toggles the launcher. It goes away when focus moves to the browser
+or another application; an owned native surface such as a menu keeps Zephium
+active and does not dismiss it. On macOS the launcher is made key and main
+before activating, so activation brings the launcher forward rather than a
+browser window behind the user's current app, and an explicit dismissal hands
+activation back to that app.
 
-The existing caller policy limits panel ready, drag, and search commands to the
-panel. Main and panel can issue bounded route intents; neither grants page
-WebViews trusted command access. `panel.json` retains its empty generic Tauri
-permission list. Search operations pass through the actual actor command queue
-and disposition ledger before the host hides on success. Failed admission stays
-visible. The window, profile, space, session, and request all scope an action;
-the action must also belong to the actor's offered results.
+Every accepted open hides the launcher and raises the browser, un-minimizing it
+first (Tao's `set_focus` ignores a miniaturized window). `launcher_run` takes a
+`background` flag, honoured only for an address: the actor inserts a tab behind
+the current one, keeps the search alive so further rows still admit, and the
+launcher stays open. The caller policy, operation ledger and scoped admission
+are unchanged.
 
-Browser tool entries use the `tools.presentation` preference (`follow_layout`
-or `floating`). The current vertical layout uses its sidebar unless floating
-is selected. Launcher destinations always use the panel. No horizontal-tab
-implementation is included.
+## Opening it
 
-## Loading and shared views
+`desktop/src/launcher_trigger.rs` owns what opens the launcher. The default
+is ⌘⇧Space (Ctrl+Shift+Space elsewhere). Every quick combination is claimed
+by something — ⌘Space by Spotlight, ⌥Space by Raycast, ChatGPT and Claude,
+the other Space chords by input sources, emoji and Finder — so the shortcut
+is recorded in Settings → Keyboard rather than guessed. A recorded shortcut is
+refused before the working one is touched when it needs a real modifier, is
+the system's own, or is an app command such as ⌘⇧Z (Redo): a global shortcut
+is taken before any app sees it, so that would break Redo everywhere. If
+registration fails, the previous shortcut is put back and the page says the
+combination is taken; a shortcut that is not active is shown as such instead
+of only being logged. The current shortcut is silenced while recording, so it
+can be recorded again.
 
-`frame/src/main.ts` chooses the surface before loading either app graph. Main
-mount and presentation flushing remain synchronous after its import. The panel
-root includes search, metadata, theme/material, and shared visual foundations;
-it does not import Settings or browser domains at startup.
+On macOS, double-tapping ⌘ or ⌥ can open it too. It collides with no
+combination but needs Accessibility permission to see another app's modifier
+changes, so it is opt-in: enabling it shows the system prompt, and the
+observers are installed only once permission is granted, which the settings
+page notices by asking again while it waits. A tap is a lone press released
+within 250 ms and the second must follow within 300 ms; any key or other
+modifier in between starts over, so ⌘C then ⌘V never counts.
 
-`features/tools/manifest.ts` contains lightweight metadata and explicit dynamic
-imports. `ToolSlot.svelte` mounts only the current feature and ignores obsolete
-import completions. Both the sidebar and panel use that component, composed at
-the app layer. Features receive state and callbacks, not native-window access.
+## Loading and presentation
 
-Hiding the panel removes its search/tool subtree. Search listeners and its
-single debounce/deadline are disposed; tools currently own no polling or service
-workers. Drafts live outside mounted views, keyed by host/profile/tool, capped
-at 24 entries per WebView with bounded strings. Sidebar and floating drafts are
-independent. Module caching is normal: unmounting does not promise a return to
-cold-process memory usage. Future data services must explicitly dispose their
-subscriptions and consume committed Rust domain state.
-
-Search waits for its listener before the first request. It coalesces typing,
-suppresses requests during IME composition, rejects stale contextual results,
-and retains selection by canonical action identity during result updates.
-Native results are bounded and deduplicated; home shows six tools and at most
-four recent browser items. Tool failures expose retry/back controls.
+The panel loads the launcher while hidden, before `panel_ready`, and keeps it
+mounted. Each presentation binds a new search session; putting it away disposes
+the controller and native work. What was typed is kept for 30 seconds so a
+launcher reopened a moment later resumes, and the reset to the home list happens
+while hidden, so the window is never resized on the frame it appears. A
+fulfilled action or capture resets at once.
 
 ## Geometry and materials
 
-Both routes keep one geometry: default 720 × 520, nominal minimum 560 × 360,
-maximum 960 × 760, further bounded by usable monitor area and margins. Small
-screens take priority over nominal minimums. Versioned geometry uses the
-existing Rust store (`panel.geometry.v1`), bounded decoding, debounced writes,
-and final hide/shutdown updates. Monitor-relative logical coordinates are
-revalidated at restoration. Wayland restores size and leaves position to the
-compositor; `position_restorable` reports this distinction.
+The launcher is two objects: a 60-point field capsule and a result sheet 10
+points below it, both 680 points wide. Where the platform has a material,
+`desktop/src/panel/shapes.rs` draws them natively behind the WebView — Liquid
+Glass shapes inside an `NSGlassEffectContainerView`, or two vibrancy views on
+older macOS — at the rectangles the content reports through `panel_layout`.
+The container merges shapes closer than 8 points, so a sheet appearing grows
+out of the capsule and separates from it. Shape changes animate on the
+compositor over 260 ms, and the page moves its sheet over the same interval
+and curve. The window is transparent around the shapes, 40 points on each
+side — the reach of the glass's own shadow, which a narrower margin clipped
+into a visible rectangle — and has no shadow of its own. A click in that
+margin, or between the two shapes, dismisses the launcher as a click outside
+it would.
 
-Native material, clipping, and CSS consume the same 20 px radius. The window
-owns the exterior shadow. No CSS blur or geometry animation is introduced.
-Route content uses short opacity/translation transitions and respects reduced
-motion; material handling retains reduced-transparency support.
+Everywhere else — Reduce Transparency, Windows, Linux — the page draws one
+card with the same contents and the window supplies the shadow. On Windows
+the card sits on Acrylic, and DWM draws its corners and rim at the system's
+8-point radius, which the card adopts; rows and their highlight take the
+system's 4-point list radius inside it. Two separate glass objects would need
+two windows, and so two WebView2 instances, for a look; they are not worth
+that memory.
+
+The window keeps a fixed width and a height that follows the content, between
+the field alone and 560 points, bounded by the display. It grows at once and
+shrinks only after the shapes have settled, so nothing is cut off mid-motion;
+the shapes sit on a canvas pinned to the window's top edge, so a resize never
+moves them. It opens on the display under the pointer with its top edge at a
+fifth of the work area. It is not resizable or draggable, so no geometry is
+persisted. AppKit's utility-window animation fades it in and out, and the
+shapes are reinstalled when the appearance changes.
 
 ## Verification record — 2026-09-11
 
@@ -202,13 +238,13 @@ Native search requests for typing "rust language" (13 characters), driving the
 real controller under fake timers:
 
 | Keystroke interval | Before | After |
-| --- | --- | --- |
-| 30–50 ms | 13 | 2 |
-| 60 ms and slower | 13 | 13 |
+| ------------------ | ------ | ----- |
+| 30–50 ms           | 13     | 2     |
+| 60 ms and slower   | 13     | 13    |
 
 The previous scheduling was `setTimeout(…, 0)`, which is one request per
 character at any speed. The 60 ms coalescing window therefore bounds the request
-*rate* at roughly 16/s rather than removing per-keystroke requests for ordinary
+_rate_ at roughly 16/s rather than removing per-keystroke requests for ordinary
 typing; deliberate typing still queries per keystroke, as shipping browsers do.
 Expensive supplementary work is bounded separately: the note index and the
 network are reached only after a 140 ms quiet window, so a burst aborts the task
@@ -293,3 +329,108 @@ next keystroke replace the offer.
   latency measurement. The table above counts requests, not latency.
 - Clippy still reports the pre-existing `ResourceCall` `large_enum_variant` and
   `api.rs` `type_complexity` warnings. The repository release gate is not clean.
+
+## Calculator — 2026-09-28
+
+Arithmetic typed into the field is answered on the page as it is typed, in a
+result card above the search row, and Enter copies the answer. It is a small
+recursive-descent parser (`features/search/lib/calculator.ts`): no `eval`,
+which the CSP forbids, no dependency and no native round trip. It reads
+precedence, grouping, powers (tighter than a leading sign), implicit
+multiplication ("2pi", "3(4+5)"), decimal commas, common functions and
+constants, and percentages as people mean them: "80 + 15%" is 92. A bare
+number, a word or anything that does not compute is left to search, and New
+Tab never asks.
+
+It adds about 4 KB to the launcher graph, whose JS limit went from 170 KB to
+175 KB for it. Its glyph is defined in the search feature rather than imported:
+every icon taken from the icon package lands in one shared chunk, and the note
+editor's and Notes view's graphs, each within a kilobyte of their limits,
+count that chunk.
+
+## Arrival — 2026-09-28
+
+The window fades in over 180 ms, so the field takes typing on its first frame,
+while the glass carries the motion: the capsule grows in from 96% and the
+sheet flows out of it over 420 ms on a curve that overshoots by a hair. The
+page reveals the list from the top at the same pace and lets its rows drift
+8 points into place 60 ms behind. Leaving is a 120 ms fade. AppKit's own
+window animation is off so the two never stack. Reduce Motion — the system's
+or Zephium's — leaves only a short fade.
+
+## Measured — 2026-09-28
+
+Development build (Vite dev server, unminified modules, so both figures are
+above production), launcher hidden and never opened, measured with
+`footprint` and `top` against the content processes the debug build logs by
+label:
+
+| Process                | Footprint | CPU      | Idle wake-ups over 10 s |
+| ---------------------- | --------- | -------- | ----------------------- |
+| Launcher WebView       | 47 MB     | 0.0%     | 0                       |
+| Browser chrome WebView | 92 MB     | 0.0–1.2% | 4                       |
+
+The launcher's material costs nothing while hidden: the window is ordered
+out, and the glass is composited by the window server only while visible.
+The hidden WebView receives no task, note or resource events, and only the
+UI commands it acts on — appearance and Reduce Motion. Open and repeated
+open/close cycles, and a release build, remain to be measured.
+
+## Glass redesign — 2026-09-28
+
+Rows are 44 points, carry a bare glyph and name their kind at the far edge
+("Tab", "History", "Note"), so the list has no section headings. One
+highlight is drawn by the list and moves between rows with a transform. At
+rest the sheet shows up to three recent tabs and the destinations as chips;
+`⌘1`–`⌘4` open them from anywhere, and holding `⌘` shows the numbers. The
+action capsule floats at the sheet's bottom edge. Every modifier in a command
+accelerator is translated, so `Ctrl+Shift+Tab` no longer renders
+half-converted on a Mac.
+
+Some queries, such as "h", took the whole launcher down to its render-error
+state. Groups of adjacent rows were keyed by section, and a section can recur:
+typed commands, then a destination, then the capture row, which is a command
+again. The duplicate key threw inside Svelte. Groups are now keyed by position,
+with a regression test for that exact sequence.
+
+A refused or unanswered search is retried once after 150 ms before the
+launcher says anything, and then it says the search is not responding rather
+than that an action failed. `launcher_search` records why it refused a
+request. A new presentation clears any action still awaiting settlement: a
+disposition that never reached the launcher previously refused every later
+action.
+
+The launcher graph is 165 KB JS and 12.2 KB CSS; its CSS limit was raised from
+12 KB to 14 KB for the capsule, the destination chips and the action capsule.
+The panel entry is unchanged at 96 KB.
+
+## Redesign — 2026-09-25
+
+Field, list and action bar, with nothing else: the drag bar, the fixed
+720 × 520 sheet and the hint footer are gone. The action bar names what Enter
+does to the selected row and opens an actions sheet (`⌘K`): Open, Open in
+Background (`⌘↵`, also `⌘`-click), Copy Link (`⇧⌘C`) and Add to Tasks (`⌥↵`).
+Escape clears the field, then dismisses. Rows are 40 points with a plated glyph
+and the detail following the title; note rows show their matching line, which
+native now sends without a placeholder and reads at most three of.
+
+Budgets: panel entry 96 KB JS (was ~137 KB), launcher graph 160 KB. The panel
+and launcher limits were lowered to hold that. DownloadsList, LibraryPage,
+DownloadsView and HistoryView limits were raised: with the panel no longer
+sharing `$domain/downloads` and the downloads/history loaders, Rolldown hoists
+them into the browser entry, so those graphs now count the whole entry. The
+bytes the browser loads for them are unchanged.
+
+### Not verified
+
+- Windows was reviewed by reading only: the desktop crate cannot be
+  type-checked for Windows from macOS, because a crypto dependency needs the
+  Windows SDK's C headers. The card was checked in a WebKit render.
+- No native interaction was qualified: activation from another application,
+  return of activation on dismissal, content-height resizing, utility-window
+  fade, placement under the pointer, and background opens need a hands-on run.
+- No process-memory measurement yet. The structural change removes the second
+  editor and task session from the panel; RSS for hidden, first-open and after
+  20 cycles should be recorded before and after.
+- Windows still runs a separate WebView2 user-data folder, and so a separate
+  browser-process tree, for the panel.

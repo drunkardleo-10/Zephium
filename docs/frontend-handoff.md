@@ -123,9 +123,8 @@ the record; everything else describes them and can be rebuilt from them.
   `request_id`) never duplicates it. `NoteChanges` (`zephium:notes-changed`)
   names changed notes with their new revisions; `reset` is set only when titles,
   names or the folder changed, since those move where links lead. A session
-  ignores events for its own saves. The main window always
-  receives it; the launcher only while it is showing Notes, so a hidden
-  launcher is never woken by a save. A surface that holds notes while hidden
+  ignores events for its own saves. Only the main window
+  receives it; the launcher hosts no notes view, so a save never wakes it. A surface that holds notes while hidden
   must list them again when shown rather than rely on events it missed.
 - **Titles and names.** A note's title is its leading heading, else its file
   name. A file's name follows its title only while it still matches the title it

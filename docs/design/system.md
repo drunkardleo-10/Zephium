@@ -219,7 +219,7 @@ The material is installed below the existing Tao content-view children, with
 no `content_view()` reparenting. WKWebView parent bounds, coordinate translation,
 page sibling order and the chrome rectangle remain unchanged. Native theme
 changes update AppKit, rather than merely retinting HTML. The launcher retains
-its existing 16 px radius and the main window its existing 12 px radius.
+its existing 20 px radius and the main window its existing 12 px radius.
 Windows keeps its Acrylic policy with per-window reporting; Linux stays solid.
 The enum includes Mica for truthful platform reporting, not a new Windows policy.
 
