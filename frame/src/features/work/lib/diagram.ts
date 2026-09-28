@@ -9,7 +9,7 @@ type Rect = CanvasPosition & CanvasSize;
 
 /** A part's card, the air between columns and rows, and the band a layer's caption takes. */
 export const DIAGRAM = {
-  node: { width: 196, height: 64 },
+  node: { width: 212, height: 72 },
   column: 32,
   row: 12,
   layer: 20,
@@ -58,11 +58,16 @@ function shapeOf(
   edges: { index: number; from: string; to: string; label?: string }[],
 ): DiagramShape {
   const known = new Set(parts.map((part) => part.id));
+  // Two flows between the same parts the same way are one line; the popover names both.
+  const drawn = new Set<string>();
   return {
     lanes,
     parts,
     flows: edges
       .filter((edge) => edge.from !== edge.to && known.has(edge.from) && known.has(edge.to))
+      .filter(
+        (edge) => !drawn.has(`${edge.from}>${edge.to}`) && !!drawn.add(`${edge.from}>${edge.to}`),
+      )
       .map((edge) => ({
         index: edge.index,
         from: edge.from,

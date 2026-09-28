@@ -1,7 +1,6 @@
 <script lang="ts">
   import { getContext, onMount } from "svelte";
   import FavIcon from "$shared/ui/FavIcon";
-  import Icon from "$shared/ui/Icon";
   import { siteMark } from "../cards/HostGlyph.svelte";
   import Popover from "./Popover.svelte";
   import {
@@ -14,23 +13,29 @@
     plateHeight,
     plateWidth,
   } from "../../lib/diagram";
-  import { diagramGlyph } from "../../lib/diagram-glyphs";
   import { vendorHost } from "../../lib/vendors";
   import { canvasProbe, type BoardActions } from "../../lib/canvas-context";
-  import type { DiagramBlock } from "../../lib/board/types";
+  import type { Detail, DiagramBlock } from "../../lib/board/types";
   import * as m from "$shared/i18n/messages";
   let {
     block,
+    diagram: given,
     width,
     actions,
+    ask: asking,
+    detail = "full",
   }: {
-    block: DiagramBlock;
+    block?: DiagramBlock;
+    diagram?: DiagramBlock["diagram"];
     /** The room the picture has; a wider picture is drawn smaller to fit. */
     width: number;
     actions?: BoardActions;
+    ask?: (subject: string) => void;
+    detail?: Detail;
   } = $props();
   const probe = getContext<((origin: string) => void) | undefined>(canvasProbe);
-  const diagram = $derived(block.diagram);
+  const diagram = $derived(given ?? block!.diagram);
+  const ask = $derived(asking ?? actions?.ask);
   const layout = $derived(diagramLayout(diagram));
   const bounds = $derived(layout.bounds);
   const scale = $derived(Math.min(1, width / Math.max(1, bounds.width)));
@@ -119,11 +124,11 @@
   });
   type Link = { way: "out" | "in"; other: string; label: string };
   const joined = (id: string): Link[] =>
-    flows.flatMap((flow): Link[] =>
-      flow.from === id
-        ? [{ way: "out", other: flow.to, label: flow.label }]
-        : flow.to === id
-          ? [{ way: "in", other: flow.from, label: flow.label }]
+    diagram.edges.flatMap((edge): Link[] =>
+      edge.from === id && edge.to !== id
+        ? [{ way: "out", other: edge.to, label: edge.label?.trim() ?? "" }]
+        : edge.to === id && edge.from !== id
+          ? [{ way: "in", other: edge.from, label: edge.label?.trim() ?? "" }]
           : [],
     );
   let host = $state<HTMLElement>();
@@ -147,7 +152,7 @@
 </script>
 
 <div
-  class="diagram"
+  class="diagram {detail}"
   style:inline-size={`${bounds.width * scale}px`}
   style:block-size={`${bounds.height * scale}px`}
 >
@@ -158,7 +163,7 @@
     style:block-size={`${bounds.height}px`}
     style:transform={scale < 1 ? `scale(${scale})` : undefined}
   >
-    {#each tiers as tier (tier.name)}<span
+    {#each detail === "tile" ? [] : tiers as tier (tier.name)}<span
         class="tier"
         style:inset-inline-start={`${tier.x}px`}
         style:inset-block-start={`${tier.y}px`}>{tier.name}</span
@@ -172,7 +177,7 @@
           ><path d={flowPath(points, 5)} /><path class="head" d={arrowHead(points)} /></g
         >{/each}
     </svg>
-    {#each plates as plate (plate.index)}{#if shown(plate)}<span
+    {#each plates as plate (plate.index)}{#if shown(plate) && detail === "full"}<span
           class="plate"
           style:inset-inline-start={`${plate.x + plate.w / 2}px`}
           style:inset-block-start={`${plate.y + plate.h / 2}px`}
@@ -199,15 +204,18 @@
           onkeydown={(event) => keys(event, node.id)}
           onclick={() => (opened = opened === node.id ? null : node.id)}
         >
-          <span class="mark" class:logo={!!logo}
-            >{#if logo}<FavIcon image={logo.image} tone={logo.tone} size={20} />{:else}<Icon
-                icon={diagramGlyph(node.kind)}
-                size={14}
-              />{/if}</span
-          >
+          {#if logo}<span class="mark"
+              ><FavIcon
+                image={logo.image}
+                tone={logo.tone}
+                size={detail === "full" ? 22 : 28}
+              /></span
+            >{/if}
           <span class="words">
             <strong class="name">{node.name}</strong>
-            <span class="line">{node.note || diagramKindLabel(node.kind)}</span>
+            {#if detail === "full"}<span class="line"
+                >{node.note || diagramKindLabel(node.kind)}</span
+              >{/if}
           </span>
         </button>
         {#if opened === node.id}
@@ -224,12 +232,12 @@
                     {#if link.label}<span class="via">{link.label}</span>{/if}
                   </li>{/each}
               </ul>{/if}
-            {#if actions}<button
+            {#if ask}<button
                 type="button"
                 class="ask"
                 onclick={() => {
                   opened = null;
-                  actions.ask(node.name);
+                  ask(node.name);
                 }}>{m.work_board_ask()}</button
               >{/if}
           </Popover>
@@ -285,7 +293,7 @@
   }
 
   .flow:not(.primary) {
-    opacity: 0.55;
+    opacity: 0.35;
   }
 
   .flow.lit {
@@ -371,15 +379,6 @@
     display: grid;
     flex: none;
     place-items: center;
-    inline-size: 28px;
-    block-size: 28px;
-    border-radius: var(--radius-inset);
-    background: var(--color-fill);
-    color: var(--color-label-secondary);
-  }
-
-  .mark.logo {
-    background: transparent;
   }
 
   .words {
@@ -390,21 +389,60 @@
   }
 
   .name {
-    overflow: hidden;
     font-size: var(--text-body);
     font-weight: 600;
     line-height: 17px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
+    text-wrap: balance;
   }
 
+  /* A note within its limit fits two lines; only an older, longer one is clipped. */
   .line {
+    display: -webkit-box;
     overflow: hidden;
     color: var(--color-muted);
     font-size: var(--text-label);
     line-height: 15px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    text-wrap: pretty;
+  }
+
+  .overview .face {
+    gap: 10px;
+    padding: 0 14px;
+    border-radius: var(--radius-card);
+    box-shadow: inset 0 0 0 2px var(--color-border-strong);
+  }
+
+  .overview .name {
+    display: -webkit-box;
+    overflow: hidden;
+    overflow-wrap: normal;
+    font-size: var(--text-overview-label);
+    line-height: 1.2;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+
+  .overview .tier {
+    font-size: var(--text-overview-label);
+  }
+
+  .overview .flow path,
+  .tile .flow path {
+    stroke-width: 2.5;
+  }
+
+  .tile .face {
+    justify-content: center;
+    border-radius: var(--radius-card);
+  }
+
+  .tile .words {
+    display: none;
   }
 
   .pop-kind {

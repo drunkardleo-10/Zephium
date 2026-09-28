@@ -18,12 +18,25 @@ test("common aliases find the same host", () => {
   expect(vendorHost(undefined, "Analytics", "BigQuery on GCP")).toBe("cloud.google.com");
 });
 
-test("the stated vendor wins; a note names only when the name does not", () => {
-  expect(vendorHost("PlanetScale.com ", "MySQL")).toBe("planetscale.com");
+test("a stated vendor counts when the part names it; a note names only when the name does not", () => {
+  expect(vendorHost("PlanetScale.com ", "PlanetScale MySQL")).toBe("planetscale.com");
+  expect(vendorHost("aws.amazon.com", "Amazon Cognito")).toBe("aws.amazon.com");
+  expect(vendorHost("aws.amazon.com", "Queue", "SQS with a dead-letter queue")).toBe(
+    "aws.amazon.com",
+  );
+  // Run on a platform is not made by it.
+  expect(vendorHost("aws.amazon.com", "API service", "FastAPI; tenant checks")).toBeNull();
+  expect(vendorHost("PlanetScale.com", "MySQL")).toBe("mysql.com");
   expect(vendorHost(undefined, "Primary database", "Postgres 16 with replicas")).toBe(
     "postgresql.org",
   );
   expect(vendorHost(undefined, "Redis", "fronts Postgres")).toBe("redis.io");
+});
+
+test("a code host stands for a part only when the part is that host", () => {
+  expect(vendorHost("github.com", "PostgreSQL pgvector")).toBe("postgresql.org");
+  expect(vendorHost("github.com", "Vector search")).toBeNull();
+  expect(vendorHost("github.com", "GitHub Actions")).toBe("github.com");
 });
 
 test("plain words find nothing", () => {

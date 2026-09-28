@@ -164,12 +164,23 @@ function named(text: string, name: boolean): string | null {
   return match ? (HOSTS.get(match[1]!) ?? null) : null;
 }
 
+/** The words that name a host's maker: its products here, and its own name ("amazon"). */
+function brand(host: string): string[] {
+  const labels = host.split(".");
+  const own = labels.length >= 2 ? labels[labels.length - 2]! : host;
+  return [own, ...(VENDORS[host] ?? []).map((name) => name.toLowerCase())];
+}
+const mentions = (text: string, word: string) =>
+  new RegExp(`(?<![\\p{L}\\p{N}])${escape(word)}(?![\\p{L}\\p{N}])`, "iu").test(text);
+
 /**
- * The host whose icon a diagram part shows: its stated vendor, otherwise a
- * well-known product its name, then its note, names as a whole word.
+ * The host whose mark a part shows, only when the part is that maker's product:
+ * a stated vendor its name or note names ("Amazon Cognito" on aws.amazon.com),
+ * else a well-known product its name, then its note, names as a whole word.
+ * A part merely run on a platform ("API service" on AWS) shows no mark.
  */
 export function vendorHost(vendor: string | undefined, name: string, note = ""): string | null {
   const stated = vendor?.trim().toLowerCase();
-  if (stated) return stated;
+  if (stated && brand(stated).some((word) => mentions(`${name} ${note}`, word))) return stated;
   return named(name, true) ?? named(note, false);
 }

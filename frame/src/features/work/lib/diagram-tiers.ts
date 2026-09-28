@@ -16,8 +16,11 @@ import {
 /** Room a tiered picture keeps: between parts of a column, around a channel, beside a name. */
 const ROW = 20;
 const TRACK = 8;
-const AIR = 16;
+const AIR = 14;
 const TWIN = 6;
+/** Flows sharing a side of a part stand this far apart, clear of its corners. */
+const PORT = 14;
+const PORT_EDGE = 14;
 
 type Flow = DiagramShape["flows"][number];
 
@@ -112,7 +115,10 @@ export function tierLayout(shape: DiagramShape): DiagramLayout {
       });
       let floor = band;
       column.forEach((id, row) => {
-        const next = Math.max(floor, Math.round(want[row]!));
+        // A part drifts from the one above it by at most a part's height: bends cost less
+        // than a column of empty canvas.
+        const ceiling = row ? floor + H : Infinity;
+        const next = Math.max(floor, Math.min(ceiling, Math.round(want[row]!)));
         y.set(id, next);
         floor = next + H + (column[row + 1] ? under(id, column[row + 1]!) : 0);
       });
@@ -171,18 +177,60 @@ export function tierLayout(shape: DiagramShape): DiagramLayout {
       tracks.set(`${index}:${flow.index}`, left[index]! + W + AIR + row * TRACK),
     );
   });
-  /** A row across the columns between two, clear of their parts. */
+  /** Rows already taken by a flow passing over tiers, so no two run on one line. */
+  const passes: { y: number; from: number; to: number }[] = [];
+  /** A row across the columns between two, clear of their parts and of other passing flows. */
   const clearRow = (from: number, to: number, near: number) => {
+    const low = Math.min(from, to);
+    const high = Math.max(from, to);
     const blocked = (value: number) =>
       columns
-        .slice(Math.min(from, to) + 1, Math.max(from, to))
-        .some((column) => column.some((id) => value > at[id]!.y - 6 && value < at[id]!.y + H + 6));
-    if (!blocked(near)) return near;
+        .slice(low + 1, high)
+        .some((column) =>
+          column.some((id) => value > at[id]!.y - 10 && value < at[id]!.y + H + 10),
+        ) ||
+      passes.some(
+        (pass) => pass.from < high && low < pass.to && Math.abs(pass.y - value) < TRACK + 4,
+      );
+    const take = (value: number) => {
+      passes.push({ y: value, from: low, to: high });
+      return value;
+    };
+    if (!blocked(near)) return take(near);
     for (let step = 1; step < 80; step += 1)
       for (const value of [near + step * 8, near - step * 8])
-        if (value >= 4 && !blocked(value)) return value;
-    return near;
+        if (value >= 4 && !blocked(value)) return take(value);
+    return take(near);
   };
+
+  /**
+   * Where each flow meets its part: flows sharing a side of a part spread over
+   * its middle, ordered by where their other end stands, so no two share a run.
+   */
+  const ports = new Map<string, number>();
+  const sides = new Map<string, { flow: Flow; other: number }[]>();
+  for (const flow of across) {
+    if (twins.has(flow.index)) continue;
+    const forward = col.get(flow.from)! < col.get(flow.to)!;
+    const ends = [
+      [`${flow.from}:${forward ? "right" : "left"}`, at[flow.to]!.y],
+      [`${flow.to}:${forward ? "left" : "right"}`, at[flow.from]!.y],
+    ] as const;
+    for (const [side, other] of ends) {
+      const list = sides.get(side) ?? [];
+      list.push({ flow, other });
+      sides.set(side, list);
+    }
+  }
+  for (const [side, list] of sides) {
+    list.sort((a, b) => a.other - b.other || a.flow.index - b.flow.index);
+    const step = Math.min(PORT, (H - 2 * PORT_EDGE) / Math.max(1, list.length - 1));
+    list.forEach((entry, index) =>
+      ports.set(`${side}:${entry.flow.index}`, (index - (list.length - 1) / 2) * step),
+    );
+  }
+  const port = (id: string, side: "left" | "right", flow: Flow) =>
+    ports.get(`${id}:${side}:${flow.index}`) ?? 0;
 
   const primary = primaryFlows(shape);
   const flows: Record<number, DiagramFlow> = {};
@@ -191,8 +239,9 @@ export function tierLayout(shape: DiagramShape): DiagramLayout {
     const b = col.get(flow.to)!;
     const forward = a < b;
     const shiftY = twins.has(flow.index) ? (forward ? -TWIN : TWIN) : 0;
-    const sy = at[flow.from]!.y + H / 2 + shiftY;
-    const ty = at[flow.to]!.y + H / 2 + shiftY;
+    const sy =
+      at[flow.from]!.y + H / 2 + shiftY + port(flow.from, forward ? "right" : "left", flow);
+    const ty = at[flow.to]!.y + H / 2 + shiftY + port(flow.to, forward ? "left" : "right", flow);
     const sx = forward ? at[flow.from]!.x + W : at[flow.from]!.x;
     const tx = forward ? at[flow.to]!.x : at[flow.to]!.x + W;
     const last = target(flow);

@@ -6,6 +6,7 @@
   import Picks from "./Picks.svelte";
   import Plan from "./Plan.svelte";
   import List from "./List.svelte";
+  import Diagram from "./Diagram.svelte";
   /** One canvas object at the detail its on-screen size allows. */
   let {
     object,
@@ -19,4 +20,5 @@
 {:else if object.kind === "reply"}<Reply {object} {detail} />
 {:else if object.kind === "picks"}<Picks {object} {detail} {actions} />
 {:else if object.kind === "plan"}<Plan {object} {detail} {actions} />
-{:else if object.kind === "list"}<List {object} {detail} {actions} />{/if}
+{:else if object.kind === "list"}<List {object} {detail} {actions} />
+{:else if object.kind === "diagram"}<Diagram {object} {detail} {actions} />{/if}

@@ -16,7 +16,7 @@
 
 <div class="sheet">
   {#each rows as row (row.object.id)}
-    <div class="row" data-id={row.object.id}>
+    <div class="row" class:stacked={row.width > 900} data-id={row.object.id}>
       {#each levels as level (level)}
         <div class="cell" style:zoom={ZOOM[level]} style:inline-size={`${row.width}px`}>
           <ObjectView object={row.object} detail={level} {actions} />
@@ -43,6 +43,10 @@
     background: var(--color-canvas);
     align-items: flex-start;
     gap: 48px;
+  }
+
+  .row.stacked {
+    flex-direction: column;
   }
 
   .cell {
