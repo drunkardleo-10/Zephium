@@ -48,19 +48,20 @@
   };
 
   let body = $state<HTMLElement>();
-  // The object's height at its width, as it draws in full: the run keeps that
-  // box at every detail, so a zoom never moves anything.
+  // The object's height at its width and detail: surveyed from afar it may
+  // take more room, and the run makes it when the detail changes.
   let reported = "";
   $effect(() => {
     const element = body;
     const across = width;
-    if (!element || detail !== "full" || view.state === "pending") return;
+    const level = detail;
+    if (!element || view.state === "pending") return;
     const report = () => {
       const height = Math.ceil(element.offsetHeight);
-      const key = `${across}|${height}`;
+      const key = `${across}|${height}|${level}`;
       if (!height || key === reported) return;
       reported = key;
-      untrack(() => board?.measure(id, across, false, height));
+      untrack(() => board?.measure(id, across, false, height, level));
     };
     report();
     let frame = 0;

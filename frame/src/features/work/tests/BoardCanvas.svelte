@@ -12,6 +12,7 @@
   } from "../lib/project-environment";
   import { environmentRequests } from "../lib/project-environment-thread";
   import type { BoardActions } from "../lib/canvas-context";
+  import type { Detail } from "../lib/board/types";
   import type { BoardScene } from "./board-fixtures";
   let {
     scene,
@@ -24,6 +25,9 @@
   } = $props();
   const measured = new SvelteMap<string, number>();
   let open = $state<string | null>(null);
+  let detail = $state<Detail>(
+    viewport.zoom >= 0.75 ? "full" : viewport.zoom >= 0.4 ? "overview" : "tile",
+  );
   const recorded = () => scene.pages;
   const stages = $derived(
     environmentStages(scene.snapshot, scene.objectives, {
@@ -31,6 +35,7 @@
       pictures: scene.pictures,
       measured,
       open,
+      detail,
     }),
   );
   const requests = $derived(environmentRequests(stages));
@@ -61,8 +66,8 @@
     ),
   );
   const board: BoardActions = {
-    measure(id, width, opened, height) {
-      const key = measureKey(id, width, opened);
+    measure(id, width, opened, height, level) {
+      const key = measureKey(id, width, opened, level);
       if (measured.get(key) !== height) measured.set(key, height);
     },
     toggle: (id) => (open = open === id ? null : id),
@@ -83,7 +88,14 @@
   authoritative={new Set()}
   initialView={{
     positions: {
-      ...clearOfBands(own.positions, own.sizes ?? {}, stages),
+      ...clearOfBands(
+        own.positions,
+        own.sizes ?? {},
+        stages,
+        environmentItems(scene.snapshot, [], [], scene.objectives).flatMap((item) =>
+          item.type === "objective" ? [] : [item.id],
+        ),
+      ),
       ...requests.positions,
       ...agents.positions,
     },
@@ -91,6 +103,7 @@
     viewport,
   }}
   {board}
+  ondetail={(next) => (detail = next)}
   oninspect={() => {}}
   onopen={(id) => board.toggle(id)}
 />

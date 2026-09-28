@@ -17,7 +17,7 @@ import { objectHeight, objectWidth } from "./board/object-size";
 import { ulidTime } from "./ulid-time";
 import { estimate, widthRange } from "./board/size";
 import { runTrail } from "./board/trail";
-import type { Picture } from "./board/types";
+import type { Detail, Picture } from "./board/types";
 import { RUN, placeRun } from "./run/layout";
 import { runParts, type PartAsk, type RunInputView, type RunPart } from "./run/parts";
 import { PART, partSize, type PartShape } from "./run/part-size";
@@ -90,8 +90,8 @@ export function requestTextSize(text: string, open: boolean) {
 }
 
 /** A block's height as it last measured itself at this width, open or not. */
-export const measureKey = (id: string, width: number, open: boolean) =>
-  `${id}|${Math.round(width)}|${open ? 1 : 0}`;
+export const measureKey = (id: string, width: number, open: boolean, detail: Detail = "full") =>
+  `${id}|${Math.round(width)}|${open ? 1 : 0}${detail === "full" ? "" : `|${detail}`}`;
 
 export type StageOptions = {
   recorded?: (objective: string) => readonly WorkPageV1[];
@@ -103,6 +103,8 @@ export type StageOptions = {
   open?: string | null;
   /** Requests whose words the person opened to read whole. */
   requests?: ReadonlySet<string>;
+  /** The canvas's detail: an object surveyed from afar takes the room it draws at that detail. */
+  detail?: Detail;
   /** Questions waiting on the person, by the work they belong to. */
   asks?: (objective: string) => readonly PartAsk[];
   /** What a run drew on before it began. */
@@ -213,6 +215,7 @@ export function environmentStages(
 ): WorkStage[] {
   const pins = boardPins(snapshot);
   const measured = options.measured ?? new Map<string, number>();
+  const detail = options.detail ?? "full";
   const stages: WorkStage[] = [];
   let top = 0;
   for (const element of snapshot.elements) {
@@ -287,6 +290,9 @@ export function environmentStages(
           ? widthRange(object.block)
           : objectWidth(object.view);
       const sized = (object: RunObject, width: number, opened: boolean) =>
+        (detail !== "full"
+          ? measured.get(measureKey(object.id, width, opened, detail))
+          : undefined) ??
         measured.get(measureKey(object.id, width, opened)) ??
         (object.block && !DRAWN.has(object.view.kind)
           ? estimate(object.block, width, opened)
@@ -387,8 +393,18 @@ export function clearOfBands(
   positions: Readonly<Record<string, CanvasPosition>>,
   sizes: Readonly<Record<string, { width: number; height: number }>>,
   stages: readonly WorkStage[],
+  /** The person's things with no place yet: they stand in a column right of every run. */
+  loose: readonly string[] = [],
 ): Record<string, CanvasPosition> {
   const moved: Record<string, CanvasPosition> = {};
+  const right = Math.max(0, ...stages.map((stage) => stage.lane.box.x + stage.lane.box.width));
+  const x = stages.length ? right + RUN.gutter * 2 : 80;
+  let below = 120;
+  for (const id of loose) {
+    if (positions[id]) continue;
+    moved[id] = { x, y: below };
+    below += (sizes[id]?.height ?? 160) + RUN.rowGap;
+  }
   for (const [id, at] of Object.entries(positions)) {
     const size = sizes[id] ?? { width: 280, height: 160 };
     const hit = stages.find((stage) => overlaps(stage.lane.box, { ...at, ...size }));

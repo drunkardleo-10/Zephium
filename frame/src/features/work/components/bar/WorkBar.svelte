@@ -15,6 +15,7 @@
     attach,
     context,
     above,
+    trailing,
     onsubmit,
     ref = $bindable(),
   }: {
@@ -30,6 +31,8 @@
     attach?: Snippet;
     context?: Snippet;
     above?: Snippet;
+    /** What stands before the mic, such as the model the runs use; it replaces the model's name. */
+    trailing?: Snippet;
     onsubmit: () => void;
     ref?: HTMLElement;
   } = $props();
@@ -104,7 +107,9 @@
           onkeydown={keydown}
           oninput={grow}></textarea>
         <div class="trail">
-          {#if model && engaged}<span class="model" title={m.work_bar_model()}>{model}</span>{/if}
+          {#if trailing}{@render trailing()}
+          {:else if model && engaged}<span class="model" title={m.work_bar_model()}>{model}</span
+            >{/if}
           {#if value.trim()}<button
               type="submit"
               class="send"

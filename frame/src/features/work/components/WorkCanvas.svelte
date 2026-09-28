@@ -95,6 +95,7 @@
     onmoved,
     board,
     work,
+    ondetail,
     onprobe,
     expose,
   }: {
@@ -134,14 +135,16 @@
     board?: BoardActions;
     /** The runs behind the canvas, by objective, for a helper's own view of its part. */
     work?: (objective: string) => WorkRuntimeProjection | undefined;
+    /** The canvas's detail changed: its owner lays runs out for the new one. */
+    ondetail?: (detail: Detail) => void;
     /** Asks native for the icon of an origin no tab has shown. */
     onprobe?: (origin: string) => void;
     expose?: (api: CanvasApi) => void;
   } = $props();
   setContext(canvasWork, (objective: string) => work?.(objective));
   setContext(canvasBoard, {
-    measure: (id: string, width: number, open: boolean, height: number) =>
-      board?.measure(id, width, open, height),
+    measure: (id: string, width: number, open: boolean, height: number, level?: Detail) =>
+      board?.measure(id, width, open, height, level),
     toggle: (id: string) => board?.toggle(id),
     ask: (name: string) => board?.ask(name),
     choose: (element: string, chosen: boolean) => board?.choose(element, chosen),
@@ -227,7 +230,10 @@
       viewport.zoom,
       untrack(() => detail),
     );
-    if (next !== untrack(() => detail)) detail = next;
+    if (next !== untrack(() => detail)) {
+      detail = next;
+      untrack(() => ondetail?.(next));
+    }
   });
   setContext(canvasDetail, {
     get level() {

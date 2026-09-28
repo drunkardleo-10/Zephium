@@ -5,7 +5,7 @@
 </script>
 
 <script lang="ts">
-  import { tick, untrack } from "svelte";
+  import { tick, untrack, type Snippet } from "svelte";
   import type { WorkSession } from "$domain/work";
   import type { WorkHumanReasonV1 } from "$shared/ipc/bindings";
   import { currentActivity } from "$domain/work";
@@ -52,6 +52,7 @@
     onsignin,
     retry = null,
     onretry,
+    ask,
   }: {
     session: WorkSession;
     /** The run's agent presences, as the canvas already projects them. */
@@ -84,6 +85,8 @@
     /** The site the person went to sign in to; the same request can go again as them. */
     retry?: { host: string } | null;
     onretry?: () => void;
+    /** A question waiting on the person (the ask card), set above the line until it is answered. */
+    ask?: Snippet;
   } = $props();
   const id = $props.id();
   const runtime = $derived(session.projection);
@@ -509,6 +512,7 @@
           {/if}
         </div>
       </div>
+      {#if ask}<div class="ask" role="group">{@render ask()}</div>{/if}
       <div class="line">
         <button
           type="button"
@@ -638,6 +642,10 @@
 {/if}
 
 <style>
+  .ask {
+    padding: 8px 8px 0;
+  }
+
   .agent-line {
     display: flex;
     flex-direction: column;

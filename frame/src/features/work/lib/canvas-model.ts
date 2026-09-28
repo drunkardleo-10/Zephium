@@ -156,6 +156,8 @@ export type PartView = {
   steps?: readonly string[];
   /** What a computer part touched, for the view that stands in until the helper's own. */
   lines?: readonly { kind: "read" | "write" | "command" | "search"; text: string }[];
+  /** A helper at work here besides the one the orb follows: its small orb's seed. */
+  presence?: number;
   /** A question on this part waiting on the person: the ask card's props. */
   ask?: { props: Record<string, unknown> };
 };

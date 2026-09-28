@@ -1,4 +1,5 @@
 import type { EvidenceReference } from "$shared/ui/data/Artifact";
+import type { Detail } from "./board/types";
 
 /** Instance-local UI callbacks; never part of a saved canvas node or runtime projection. */
 export const canvasInspection = Symbol("canvas-inspection");
@@ -28,7 +29,7 @@ export const canvasBoard = Symbol("canvas-board");
 /** A board's blocks report their size, open in place, and act through the canvas's owner. */
 export type BoardActions = {
   /** A block's natural height at the width it stands at, open or not. */
-  measure: (id: string, width: number, open: boolean, height: number) => void;
+  measure: (id: string, width: number, open: boolean, height: number, detail?: Detail) => void;
   /** Opens a block in place, or closes the one that is open. */
   toggle: (id: string) => void;
   /** The composer takes a question about something on the board. */

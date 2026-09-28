@@ -15,6 +15,7 @@
   import { askCard, partContent } from "./slots";
   import HostGlyph from "../cards/HostGlyph.svelte";
   import PageFace from "./PageFace.svelte";
+  import AgentOrb from "../cards/AgentOrb.svelte";
   import * as m from "$shared/i18n/messages";
 
   let {
@@ -117,6 +118,9 @@
         >{/if}
       <strong>{part.title}</strong>
     </span>
+    {#if part.presence !== undefined}<span class="presence" aria-hidden="true"
+        ><AgentOrb seed={part.presence} size={14} ring /></span
+      >{/if}
     {#if part.summary}<span class="summary" class:turn={part.state === "waiting"}
         >{part.summary}</span
       >{/if}
@@ -260,6 +264,21 @@
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
     line-clamp: 2;
+  }
+
+  /* Another helper at work: its own small orb at the corner of its row's name. */
+  .presence {
+    position: absolute;
+    inset-block-start: -6px;
+    inset-inline-start: -8px;
+    animation: presence-in var(--motion-base) var(--ease-spring);
+  }
+
+  @keyframes presence-in {
+    from {
+      scale: 0.4;
+      opacity: 0;
+    }
   }
 
   .summary {

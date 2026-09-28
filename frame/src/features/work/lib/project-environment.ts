@@ -489,6 +489,13 @@ function standFor(doing: AgentDoing, stage: WorkStage): CanvasPosition {
 }
 const MARK = 24;
 
+/** The orb's colour for a work, the same wherever it shows. */
+function agentSeed(work: string): number {
+  let seed = 0;
+  for (const char of work) seed = (seed * 31 + char.charCodeAt(0)) % 9973;
+  return seed;
+}
+
 /** Transient agent presence for objectives with live executions; never persisted. */
 export function environmentAgents(
   snapshot: WorkEnvironmentSnapshot,
@@ -506,8 +513,7 @@ export function environmentAgents(
     if (!projection || !execution || !isLive(projection, execution)) continue;
     const signal = activity(projection.work.id);
     const label = signal ? activityLabel(signal) : undefined;
-    let seed = 0;
-    for (const char of projection.work.id) seed = (seed * 31 + char.charCodeAt(0)) % 9973;
+    const seed = agentSeed(projection.work.id);
     const id = `agent:${element.id}`;
     const doing = agentDoing(execution);
     const caption = agentCaption(execution, doing, signal);
@@ -637,6 +643,10 @@ export function environmentParts(
       });
       const rect = stage.lane.rects[part.id]!;
       const needs = entries.some((page) => page.human?.phase === "waiting_for_human");
+      // The orb stands at the first part at work; every other part at work has its own small one.
+      const helper =
+        part.state === "running" &&
+        stage.parts.find((candidate) => candidate.state === "running") !== part;
       const state = needs ? "waiting" : part.state;
       const summary = needs ? m.work_line_waiting_for_you() : partSummary(part, stage);
       const rows: NonNullable<CanvasItem["sources"]> =
@@ -682,6 +692,7 @@ export function environmentParts(
           ...(part.steps ? { steps: part.steps } : {}),
           ...(part.lines ? { lines: part.lines } : {}),
           ...(part.ask ? { ask: part.ask } : {}),
+          ...(helper ? { presence: agentSeed(stage.objective) } : {}),
           ...(part.helper === "research"
             ? {
                 cited: rows.slice(0, PART.sourceRows).map(({ key, url, where, title }) => ({

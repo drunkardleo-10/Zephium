@@ -69,6 +69,7 @@
     measureKey,
   } from "../lib/project-environment-board";
   import type { BoardActions } from "../lib/canvas-context";
+  import type { Detail } from "../lib/board/types";
   import HostGlyph from "./cards/HostGlyph.svelte";
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
@@ -783,6 +784,8 @@
   /** The block opened in place, and every block's height as it measured itself. */
   let openBlock = $state<string | null>(null);
   const measured = new SvelteMap<string, number>();
+  /** The canvas's detail, so runs make room for objects surveyed from afar. */
+  let canvasDetail = $state<Detail>("full");
   /** Blocks the person dragged: only those can leave their board's flow. */
   const moved = new SvelteSet<string>();
   function toggleBlock(id: string) {
@@ -817,6 +820,7 @@
           chosen,
           measured,
           open: openBlock,
+          detail: canvasDetail,
           requests: openRequests,
         })
       : [],
@@ -1319,8 +1323,8 @@
     return execution && artifact ? artifactView(artifact, execution) : undefined;
   }
   const boardActions: BoardActions = {
-    measure(id, width, open, height) {
-      const key = measureKey(id, width, open);
+    measure(id, width, open, height, level) {
+      const key = measureKey(id, width, open, level);
       if (measured.get(key) !== height) measured.set(key, height);
     },
     toggle: toggleBlock,
@@ -1473,32 +1477,39 @@
       }) ?? [],
     ),
   );
-  const canvasView = $derived(
-    snapshot
-      ? {
-          ...environmentView(snapshot),
-          positions: {
-            ...scene.positions,
-            ...plannedGeometry.positions,
-            ...planGeometry.positions,
-            ...savedResultPositions,
-            ...clearOfBands(
-              environmentView(snapshot).positions,
-              environmentView(snapshot).sizes ?? {},
-              stages,
-            ),
-            ...requests.positions,
-            ...agents.positions,
-          },
-          sizes: {
-            ...plannedGeometry.sizes,
-            ...planGeometry.sizes,
-            ...savedResultSizes,
-            ...environmentView(snapshot).sizes,
-          },
-        }
-      : undefined,
-  );
+  const canvasView = $derived.by(() => {
+    if (!snapshot) return undefined;
+    const own = environmentView(snapshot);
+    const placed = {
+      ...scene.positions,
+      ...plannedGeometry.positions,
+      ...planGeometry.positions,
+      ...savedResultPositions,
+      ...own.positions,
+    };
+    // Something of the person's with no place yet stands clear of the runs, not on them.
+    const loose = results.items.flatMap((item) =>
+      item.type === "objective" || item.type === "request" || placed[item.id] ? [] : [item.id],
+    );
+    return {
+      ...own,
+      positions: {
+        ...scene.positions,
+        ...plannedGeometry.positions,
+        ...planGeometry.positions,
+        ...savedResultPositions,
+        ...clearOfBands(own.positions, own.sizes ?? {}, stages, loose),
+        ...requests.positions,
+        ...agents.positions,
+      },
+      sizes: {
+        ...plannedGeometry.sizes,
+        ...planGeometry.sizes,
+        ...savedResultSizes,
+        ...own.sizes,
+      },
+    };
+  });
   const remoteView = $derived(
     session.remoteView
       ? {
@@ -2225,6 +2236,7 @@
               {authoritative}
               expose={(api) => (canvasRef = api)}
               board={boardActions}
+              ondetail={(next: Detail) => (canvasDetail = next)}
               work={(objective: string) =>
                 objectiveSession?.projection?.work.id === objective
                   ? objectiveSession.projection
