@@ -4,7 +4,7 @@ import type { ArtifactView, EvidenceReference, SubjectView } from "$shared/ui/da
 import type { Node } from "@xyflow/svelte";
 import type { HumanPage } from "./work-human";
 import { defaultSize as cardSize } from "./card-size";
-import type { Block } from "./board/types";
+import type { Block, ObjectView } from "./board/types";
 import type { TrailLine } from "./board/trail";
 
 /** The Sources card's line for pages that could not be read. */
@@ -34,7 +34,8 @@ type CanvasKind =
   | "head"
   | "trail"
   | "part"
-  | "input";
+  | "input"
+  | "object";
 type RelationKind = "supports" | "uses" | "depends_on" | "same_as" | "contradicts";
 /** Display values only; deliberately independent from the generated Work wire contract. */
 export type CanvasItem = {
@@ -110,6 +111,8 @@ export type CanvasItem = {
   expanded?: boolean;
   /** When the person asked, as a short clock time. */
   when?: string;
+  /** One of a run's objects, drawn at the canvas's detail. */
+  object?: { view: ObjectView; live: boolean };
   /** A part of a run: its name and mark, and the pages it worked on. */
   part?: PartView;
   /** Something a run drew on before it began: memory, a skill, notes, tabs, files. */
@@ -153,8 +156,8 @@ export type PartView = {
   steps?: readonly string[];
   /** What a computer part touched, for the view that stands in until the helper's own. */
   lines?: readonly { kind: "read" | "write" | "command" | "search"; text: string }[];
-  /** A question on this part waiting on the person: its card and the card's props. */
-  ask?: { view: string; props: Record<string, unknown> };
+  /** A question on this part waiting on the person: the ask card's props. */
+  ask?: { props: Record<string, unknown> };
 };
 /** One page of a part, as its row shows it. */
 export type PartPage = {
@@ -203,6 +206,7 @@ const QUIET = new Set<CanvasKind | undefined>([
   "block",
   "head",
   "trail",
+  "object",
 ]);
 /** Drawn at rest: the thread, a band's flow, and a plan's own structure. */
 export const restLink = (link: CanvasLink) =>
@@ -456,6 +460,7 @@ export function reconcileNodes(
         JSON.stringify(node.data.page) === JSON.stringify(item.page) &&
         JSON.stringify(node.data.part) === JSON.stringify(item.part) &&
         JSON.stringify(node.data.input) === JSON.stringify(item.input) &&
+        JSON.stringify(node.data.object) === JSON.stringify(item.object) &&
         JSON.stringify(node.data.facts) === JSON.stringify(item.facts) &&
         JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility) &&
         JSON.stringify(node.data.block) === JSON.stringify(item.block) &&
@@ -553,7 +558,10 @@ export function reconcileNodes(
       position,
       ...(parent ? { parentId } : {}),
       // A run's nodes glide when the run makes room.
-      ...(item.type === "block" || item.type === "part" || item.type === "head"
+      ...(item.type === "block" ||
+      item.type === "part" ||
+      item.type === "head" ||
+      item.type === "object"
         ? { class: "board-block" }
         : {}),
       data: item,

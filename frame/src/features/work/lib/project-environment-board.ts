@@ -1,6 +1,7 @@
 import type {
   WorkEnvironmentElement,
   WorkEnvironmentSnapshot,
+  WorkArtifactV1,
   WorkExecutionFact,
   WorkPageV1,
   WorkRuntimeProjection,
@@ -10,11 +11,13 @@ import { isLive } from "./agent-steps";
 import { clipText, type CanvasPosition } from "./canvas-model";
 import { threadOf, type WorkStage } from "./project-environment-thread";
 import { boardOf } from "./board/adapter";
-import { BOARD, boardLayout, type LayoutBlock } from "./board/layout";
+import { boardLayout, type LayoutBlock } from "./board/layout";
+import { DRAWN, leadObject, runObjects, type RunObject } from "./board/objects";
+import { objectHeight, objectWidth } from "./board/object-size";
+import { ulidTime } from "./ulid-time";
 import { estimate, widthRange } from "./board/size";
 import { runTrail } from "./board/trail";
-import { plain } from "./board/text";
-import type { Block, Picture } from "./board/types";
+import type { Picture } from "./board/types";
 import { RUN, placeRun } from "./run/layout";
 import { runParts, type PartAsk, type RunInputView, type RunPart } from "./run/parts";
 import { PART, partSize, type PartShape } from "./run/part-size";
@@ -86,15 +89,6 @@ export function requestTextSize(text: string, open: boolean) {
   return { width: RUN.request, height: Math.max(80, 20 + shown * 24 + (lines > 2 ? 24 : 0)) };
 }
 
-/** The board's title on up to two lines, its lead at the reading size under it. */
-const HEAD = { width: 680 } as const;
-function headHeight(title: string, lead: string, more: number, width: number) {
-  const titleLines = title ? Math.min(2, Math.ceil((title.length * 12.5) / width)) : 0;
-  const leadLines = lead ? Math.ceil((lead.length * 8) / width) : 0;
-  const moreLines = more ? Math.ceil((more * 8) / width) + 1 : 0;
-  return titleLines * 28 + (title && lead ? 8 : 0) + leadLines * 24 + moreLines * 25;
-}
-
 /** A block's height as it last measured itself at this width, open or not. */
 export const measureKey = (id: string, width: number, open: boolean) =>
   `${id}|${Math.round(width)}|${open ? 1 : 0}`;
@@ -117,6 +111,78 @@ export type StageOptions = {
 
 /** An input's mark: its glyph and its words on one line. */
 const INPUT = { width: 200, height: 28 } as const;
+
+const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+
+/**
+ * The lead's objects a run placed, each showing the newest version of its
+ * chain; an object that revises one already on the canvas shows there
+ * instead, and the run names it as what it changed.
+ */
+function leadEntries(
+  snapshot: WorkEnvironmentSnapshot,
+  projection: WorkRuntimeProjection,
+  executions: readonly string[],
+) {
+  const all = new Map(
+    projection.executions.flatMap((execution) =>
+      execution.artifacts.map((artifact) => [artifact.id, { artifact, execution }] as const),
+    ),
+  );
+  const newer = new Map<string, string>();
+  for (const [id, { artifact }] of all) if (artifact.revises) newer.set(artifact.revises, id);
+  const placed = new Map<string, string>();
+  for (const element of snapshot.elements)
+    if (element.reference.kind === "artifact" && element.reference.objective === projection.work.id)
+      placed.set(element.reference.artifact, element.id);
+  const rootOf = (id: string) => {
+    let at = id;
+    for (let hop = 0; hop < 64; hop++) {
+      const previous = all.get(at)?.artifact.revises;
+      if (!previous || !all.has(previous)) break;
+      at = previous;
+    }
+    return at;
+  };
+  const newestOf = (id: string) => {
+    let at = id;
+    for (let hop = 0; hop < 64 && newer.has(at); hop++) at = newer.get(at)!;
+    return at;
+  };
+  const entries: {
+    element: string;
+    artifact: WorkArtifactV1;
+    execution: WorkExecutionFact;
+    updated?: string;
+  }[] = [];
+  const revised: string[] = [];
+  for (const element of snapshot.elements) {
+    const reference = element.reference;
+    if (
+      reference.kind !== "artifact" ||
+      reference.objective !== projection.work.id ||
+      !executions.includes(reference.execution)
+    )
+      continue;
+    const own = all.get(reference.artifact);
+    if (!own || !leadObject(own.artifact)) continue;
+    const root = rootOf(reference.artifact);
+    const holder = root !== reference.artifact ? placed.get(root) : undefined;
+    if (holder) {
+      if (!revised.includes(holder)) revised.push(holder);
+      continue;
+    }
+    const newest = all.get(newestOf(reference.artifact))!;
+    const at = newest.artifact.id !== reference.artifact ? ulidTime(newest.execution.id) : null;
+    entries.push({
+      element: element.id,
+      artifact: newest.artifact,
+      execution: newest.execution,
+      ...(at ? { updated: m.work_object_updated({ time: clock.format(at) }) } : {}),
+    });
+  }
+  return { entries, revised };
+}
 
 /** How a part's own node stands: frames while it works, a stack once done. */
 export function partShape(part: RunPart): PartShape {
@@ -192,65 +258,80 @@ export function environmentStages(
       if (live)
         for (const part of parts) {
           const ask = asked.find((entry) => [part.id, part.key, part.host].includes(entry.part));
-          if (ask) part.ask = { view: ask.view, props: ask.props };
+          if (ask) part.ask = { props: ask.props };
         }
       const inputs = (options.inputs?.(runs) ?? []).map((input, index) => ({
         id: `input:${draft.card}:${index}`,
         input,
       }));
-      const found = foundByPart(board, parts);
+      const headId = `head:${draft.card}`;
+      const lead = leadEntries(snapshot, projection, draft.executions);
+      const set = runObjects({
+        board,
+        head: headId,
+        live,
+        pending: m.work_board_pending(),
+        lead: lead.entries,
+      });
+      const legacyFound = foundByPart(board, parts);
+      const found = new Map<string, string>();
+      for (const object of set.objects) {
+        const part = object.part
+          ? parts.find((candidate) => candidate.key === object.part)?.id
+          : legacyFound.get(object.id);
+        if (part) found.set(object.id, part);
+      }
       const open = options.open ?? undefined;
-      const sized = (block: Block, width: number, opened: boolean) =>
-        measured.get(measureKey(block.id, width, opened)) ?? estimate(block, width, opened);
+      const range = (object: RunObject) =>
+        object.block && !DRAWN.has(object.view.kind)
+          ? widthRange(object.block)
+          : objectWidth(object.view);
+      const sized = (object: RunObject, width: number, opened: boolean) =>
+        measured.get(measureKey(object.id, width, opened)) ??
+        (object.block && !DRAWN.has(object.view.kind)
+          ? estimate(object.block, width, opened)
+          : objectHeight(object.view, width));
       const pinned = new Set(
-        board.blocks.flatMap((block) => (pins.has(block.id) ? [block.id] : [])),
-      );
-      const resultBlocks = board.blocks.filter(
-        (block) => !found.has(block.id) && !pinned.has(block.id),
+        set.objects.flatMap((object) => (pins.has(object.id) ? [object.id] : [])),
       );
       const layout = boardLayout(
-        resultBlocks.map((block): LayoutBlock => ({
-          id: block.id,
-          kind: block.kind,
-          emphasis: block.emphasis,
-          ...(block.group ? { group: block.group } : {}),
-          width: widthRange(block),
-          height: (width) => sized(block, width, block.id === open),
-        })),
+        set.objects
+          .filter((object) => !found.has(object.id) && !pinned.has(object.id))
+          .map((object): LayoutBlock => ({
+            id: object.id,
+            kind: object.view.kind,
+            emphasis: object.emphasis,
+            ...(object.block?.group ? { group: object.block.group } : {}),
+            width: range(object),
+            height: (width) => sized(object, width, object.id === open),
+          })),
         open ? { open } : {},
       );
-      const headId = board.title || board.lead || board.more ? `head:${draft.card}` : undefined;
-      const headWidth = Math.min(Math.max(layout.width, BOARD.min), HEAD.width);
-      const head = headId
-        ? {
-            id: headId,
-            width: headWidth,
-            height:
-              measured.get(measureKey(headId, headWidth, false)) ??
-              headHeight(
-                board.title,
-                board.lead,
-                board.more?.blocks.reduce((sum, node) => sum + plain(node).length, 0) ?? 0,
-                headWidth,
-              ),
-          }
+      const reply = set.reply;
+      const headWidth = reply
+        ? Math.max(objectWidth(reply.view).min, Math.min(layout.width, objectWidth(reply.view).max))
+        : 0;
+      const head = reply
+        ? { id: reply.id, width: headWidth, height: sized(reply, headWidth, false) }
         : undefined;
       const pinSizes = new Map(
-        board.blocks.flatMap((block) => {
-          const pin = pins.get(block.id);
+        set.objects.flatMap((object) => {
+          const pin = pins.get(object.id);
           if (!pin) return [];
-          const width = widthRange(block).ideal;
-          return [[block.id, { ...pin, width, height: sized(block, width, false) }] as const];
+          const width = range(object).ideal;
+          return [[object.id, { ...pin, width, height: sized(object, width, false) }] as const];
         }),
       );
       const rows = parts.map((part) => ({
         part: { id: part.id, ...partSize(partShape(part)) },
-        found: board.blocks.flatMap((block) => {
-          if (found.get(block.id) !== part.id || pinned.has(block.id)) return [];
-          const width = Math.round(widthRange(block).ideal);
-          return [{ id: block.id, width, height: sized(block, width, block.id === open) }];
+        found: set.objects.flatMap((object) => {
+          if (found.get(object.id) !== part.id || pinned.has(object.id)) return [];
+          const width = Math.round(range(object).ideal);
+          return [{ id: object.id, width, height: sized(object, width, object.id === open) }];
         }),
-        feeds: part.state === "done" && (part.pages.length > 0 || part.sources.length > 0),
+        feeds:
+          part.state === "done" &&
+          (part.pages.length > 0 || part.sources.length > 0 || !!part.lines?.length),
       }));
       const lane = placeRun(top, {
         request: requestPart,
@@ -275,8 +356,11 @@ export function environmentStages(
         pinned,
         column: {
           parts: parts.map((part) => part.id),
-          ...(headId ? { head: headId } : {}),
+          ...(head ? { head: head.id } : {}),
         },
+        objects: set.objects,
+        ...(reply ? { reply } : {}),
+        revised: lead.revised,
         parts,
         inputs,
         found,

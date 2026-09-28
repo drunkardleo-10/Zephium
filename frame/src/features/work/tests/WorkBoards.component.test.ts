@@ -177,7 +177,7 @@ async function board(
     const screen = await render(BoardCanvas, { scene });
     screen.container.style.width = `${size.width}px`;
     screen.container.style.height = `${size.height}px`;
-    await expect.poll(() => screen.container.querySelectorAll(".block").length).toBeGreaterThan(0);
+    await expect.poll(() => screen.container.querySelectorAll(".block, .object").length).toBeGreaterThan(0);
     await settle(screen.container);
     expect(overlaps(screen.container)).toEqual([]);
     await page.screenshot({ path: `${SHOTS}/${name}-${theme}.png` });

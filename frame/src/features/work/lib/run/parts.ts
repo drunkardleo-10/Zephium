@@ -10,8 +10,8 @@ import {
 import { fileName } from "../work-files";
 import { hostOf, registrableSite, siteKey, siteName } from "./site";
 
-/** A question waiting on the person about one part: which part (its id, key or site), its card, its props. */
-export type PartAsk = { part: string; view: string; props: Record<string, unknown> };
+/** A question waiting on the person about one part: which part (its id, key or site) and the ask card's props. */
+export type PartAsk = { part: string; props: Record<string, unknown> };
 
 /** What the agent drew on before it began: memory, a skill, history, notes, tabs, files, a connection, a past work. */
 export type RunInputView = {
@@ -44,12 +44,14 @@ export type RunPart = {
   sources: SourceRow[];
   /** Where the part began in its run, for its row's order. */
   order: number;
+  /** What the part came to, in its helper's words: "3 homes". */
+  summary?: string;
   /** The sites a row of pages that wouldn't open stands for. */
   names?: string[];
   /** The steps a computer part took, in order, for its own view. */
   steps?: string[];
   /** A question waiting on the person about this part. */
-  ask?: { view: string; props: Record<string, unknown> };
+  ask?: { props: Record<string, unknown> };
   /** What a computer part touched, one line each: files read and written, commands run. */
   lines?: { kind: "read" | "write" | "command" | "search"; text: string }[];
 };
@@ -64,6 +66,84 @@ const COMPUTER = new Set([
   "delete_file",
   "run_command",
 ]);
+
+type Step = NonNullable<WorkExecutionFact["steps"]>[number];
+type Line = NonNullable<RunPart["lines"]>[number];
+/** What a computer step touched, as one line of its part. */
+function computerLine(kind: Step["kind"]): Line | null {
+  switch (kind.kind) {
+    case "run_command":
+      return { kind: "command", text: kind.command };
+    case "write_file":
+    case "edit_file":
+    case "delete_file":
+      return { kind: "write", text: fileName(kind.path) };
+    case "move_file":
+      return { kind: "write", text: fileName(kind.to) };
+    case "search_files":
+      return { kind: "search", text: kind.query };
+    case "read_file":
+    case "list":
+      return { kind: "read", text: fileName(kind.path) };
+    default:
+      return null;
+  }
+}
+function addLine(part: RunPart, kind: Step["kind"]) {
+  const line = computerLine(kind);
+  if (line && !part.lines!.some((known) => known.kind === line.kind && known.text === line.text))
+    part.lines!.push(line);
+}
+
+/**
+ * A lead run's parts as its facts name them: each with the pages, sources
+ * or files and commands of the steps that carry its id.
+ */
+function factParts(
+  card: string,
+  runs: readonly WorkExecutionFact[],
+  recorded: readonly WorkPageV1[],
+  live: (execution: WorkExecutionFact) => boolean,
+): RunPart[] {
+  const parts: RunPart[] = [];
+  for (const run of runs) {
+    const going = live(run);
+    for (const fact of run.parts ?? []) {
+      const mine = (step: Step) => step.part === fact.id;
+      const steps = (run.steps ?? []).filter(mine);
+      const ids = new Set(steps.map((step) => step.id));
+      const pages = pageGroups(run, recorded).filter((group) =>
+        group.steps.some((step) => ids.has(step.id)),
+      );
+      const unread = unreadPages(run).filter((page) => ids.has(page.key.split(":").at(-1)!));
+      const state =
+        !going && ["planned", "running", "waiting"].includes(fact.state) ? "stopped" : fact.state;
+      const host = fact.service?.host ? registrableSite(fact.service.host) : undefined;
+      const part: RunPart = {
+        id: `part:${card}:${fact.id}`,
+        key: fact.id,
+        title: fact.title,
+        ...(host ? { host } : {}),
+        helper: fact.helper,
+        state,
+        pages,
+        unread,
+        sources:
+          fact.helper === "research"
+            ? sourceRows({ ...run, steps }).filter((row) => !row.file && !!row.url)
+            : [],
+        order: parts.length,
+        ...(fact.summary ? { summary: fact.summary } : {}),
+        ...(fact.helper === "computer" || fact.helper === "connection"
+          ? { steps: [...ids], lines: [] }
+          : {}),
+      };
+      if (part.lines) for (const step of steps) addLine(part, step.kind);
+      parts.push(part);
+    }
+  }
+  return parts;
+}
 
 /** A search part appears once search cited this many sites; below it the answer's chips say it. */
 const SEARCH_SITES = 3;
@@ -80,6 +160,7 @@ export function runParts(
   live: (execution: WorkExecutionFact) => boolean,
   titles: { search: string; unread: string; computer: string },
 ): RunPart[] {
+  if (runs.some((run) => run.parts?.length)) return factParts(card, runs, recorded, live);
   const parts = new Map<string, RunPart & { at: Order }>();
   const partFor = (key: string, at: Order, seed: () => Omit<RunPart, "id" | "key" | "order">) => {
     let part = parts.get(key);
@@ -184,23 +265,7 @@ export function runParts(
         lines: [],
       }));
       part.steps!.push(step.id);
-      const line =
-        kind.kind === "run_command"
-          ? { kind: "command" as const, text: kind.command }
-          : kind.kind === "write_file" || kind.kind === "edit_file" || kind.kind === "delete_file"
-            ? { kind: "write" as const, text: fileName(kind.path) }
-            : kind.kind === "move_file"
-              ? { kind: "write" as const, text: fileName(kind.to) }
-              : kind.kind === "search_files"
-                ? { kind: "search" as const, text: kind.query }
-                : kind.kind === "read_file" || kind.kind === "list"
-                  ? { kind: "read" as const, text: fileName(kind.path) }
-                  : null;
-      if (
-        line &&
-        !part.lines!.some((known) => known.kind === line.kind && known.text === line.text)
-      )
-        part.lines!.push(line);
+      addLine(part, kind);
       if (live(run) && (!current || before([index, at], current.at) > 0))
         current = { key: "computer", at: [index, at] };
     }

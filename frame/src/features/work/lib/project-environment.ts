@@ -17,6 +17,7 @@ import { host, observedTitle } from "./project-environment-stage";
 import { BOARD_PIN, laneElement, partShape } from "./project-environment-board";
 import type { RunPart } from "./run/parts";
 import { RUN } from "./run/layout";
+import { DRAWN } from "./board/objects";
 import { PART } from "./run/part-size";
 import { fileName } from "./work-files";
 import { heldPage, humanPage, phaseLabel } from "./work-human";
@@ -547,6 +548,7 @@ export function environmentAgents(
 /** Found things a part names in its summary, by the kind of thing. */
 function partSummary(part: RunPart, stage: WorkStage): string | undefined {
   if (part.names?.length) return part.names.join(", ");
+  if (part.summary && part.state !== "running") return part.summary;
   if (part.state === "failed") return m.work_part_failed();
   if (part.state === "running")
     return part.helper === "research" ? m.work_line_searching() : m.work_part_reading();
@@ -719,7 +721,7 @@ export function environmentInputs(stages: readonly WorkStage[]): CanvasItem[] {
   );
 }
 
-/** Each band's result: its head and its blocks. */
+/** Each run's result and what its parts found: the reply at its head, then its objects. */
 export function environmentBoards(
   stages: readonly WorkStage[],
   open: string | null,
@@ -732,43 +734,46 @@ export function environmentBoards(
       const rect = stage.lane.rects[id]!;
       return { width: rect.width, height: rect.height };
     };
-    if (stage.column.head)
+    const reply = stage.reply;
+    const answer = reply ? artifactOf(reply.id) : undefined;
+    if (reply && stage.lane.rects[reply.id])
       items.push({
-        id: stage.column.head,
-        type: "head",
-        kind: "",
-        title: clipText(stage.board.title, TITLE_TEXT),
-        detail: clipText(stage.board.lead, DETAIL_TEXT),
-        status: "",
-        size: size(stage.column.head),
-        ...(stage.board.more
-          ? {
-              block: {
-                data: stage.board.more,
-                sources: stage.board.sources,
-                open: false,
-                live: stage.live,
-              },
-            }
-          : {}),
-      });
-    for (const block of stage.board.blocks)
-      items.push({
-        id: block.id,
-        type: "block",
-        kind: block.kind,
-        title: clipText(block.title ?? "", TITLE_TEXT),
+        ...(answer ? { artifact: answer } : {}),
+        id: reply.id,
+        type: "object",
+        kind: reply.view.kind,
+        title: clipText(reply.view.kind === "reply" ? reply.view.headline : "", TITLE_TEXT),
         detail: "",
         status: "",
-        size: size(block.id),
-        ...(artifactOf(block.id) ? { artifact: artifactOf(block.id) } : {}),
-        block: {
-          data: block,
-          sources: stage.board.sources,
-          open: block.id === open,
-          live: stage.live,
-        },
+        size: size(reply.id),
+        object: { view: reply.view, live: stage.live },
       });
+    for (const object of stage.objects) {
+      if (!stage.lane.rects[object.id]) continue;
+      const artifact = artifactOf(object.id);
+      const base = {
+        id: object.id,
+        kind: object.view.kind,
+        title: clipText(object.view.title ?? object.name ?? "", TITLE_TEXT),
+        detail: "",
+        status: "",
+        size: size(object.id),
+        ...(artifact ? { artifact } : {}),
+      };
+      if (object.block && !DRAWN.has(object.view.kind))
+        items.push({
+          ...base,
+          type: "block",
+          kind: object.block.kind,
+          block: {
+            data: object.block,
+            sources: stage.board.sources,
+            open: object.id === open,
+            live: stage.live,
+          },
+        });
+      else items.push({ ...base, type: "object", object: { view: object.view, live: stage.live } });
+    }
   }
   return items;
 }

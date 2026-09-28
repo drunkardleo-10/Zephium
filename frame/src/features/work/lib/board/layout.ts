@@ -1,10 +1,10 @@
-import type { BlockKind, Emphasis } from "./types";
+import type { Emphasis } from "./types";
 
 export type Rect = { x: number; y: number; width: number; height: number };
 /** A block as the layout sees it: how wide it may stand, how tall it is at a width. */
 export type LayoutBlock = {
   id: string;
-  kind: BlockKind;
+  kind: string;
   emphasis: Emphasis;
   group?: string;
   width: { min: number; ideal: number; max: number };

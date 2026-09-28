@@ -3,8 +3,9 @@ import { clipText, type CanvasItem, type CanvasLink, type CanvasPosition } from 
 import type { Board } from "./board/types";
 import type { Rect } from "./board/layout";
 import type { TrailLine } from "./board/trail";
-import type { RunPlace } from "./run/layout";
+import { RUN, type RunPlace } from "./run/layout";
 import type { RunInputView, RunPart } from "./run/parts";
+import type { RunObject } from "./board/objects";
 import * as m from "$shared/i18n/messages";
 
 /**
@@ -36,6 +37,12 @@ export type WorkStage = {
   parts: RunPart[];
   /** What the run drew on, left of its request. */
   inputs: { id: string; input: RunInputView }[];
+  /** Everything the run made, the reply apart. */
+  objects: RunObject[];
+  /** The answer at the head of the result. */
+  reply?: RunObject;
+  /** Objects of earlier runs this one revised: its request draws a line to each. */
+  revised: string[];
   /** The part each found block belongs to; the rest are the result's. */
   found: ReadonlyMap<string, string>;
   /** Blocks the person moved out of the run's flow. */
@@ -100,6 +107,7 @@ export function environmentRequests(stages: readonly WorkStage[]): {
   for (const [index, stage] of stages.entries()) {
     Object.assign(positions, stage.targets);
     links.push(...runLinks(stage));
+    links.push(...reviseLinks(stage, stages.slice(0, index)));
     const previous = stages[index - 1];
     if (!previous || previous.element !== stage.element) continue;
     items.push({
@@ -130,6 +138,38 @@ export function environmentRequests(stages: readonly WorkStage[]): {
     });
   }
   return { items, links, positions };
+}
+
+/**
+ * A follow-up's line to each object it revised in an earlier run: along its
+ * spine, up the gutter just left of the object, into its top-left corner.
+ */
+function reviseLinks(stage: WorkStage, earlier: readonly WorkStage[]): CanvasLink[] {
+  const spine = stage.place.y + RUN.spine;
+  return stage.revised.flatMap((target): CanvasLink[] => {
+    const rect = earlier.find((entry) => entry.lane.rects[target])?.lane.rects[target];
+    if (!rect) return [];
+    const start = { x: RUN.request + RUN.air, y: spine };
+    const x = rect.x - RUN.found / 2;
+    const end = { x: rect.x - RUN.air, y: rect.y + RUN.labelMid };
+    return [
+      {
+        id: `revise:${stage.card}:${target}`,
+        source: stage.card,
+        target,
+        kind: "thread",
+        route: {
+          points: [start, { x, y: spine }, { x, y: end.y }, end],
+          from: { x: start.x - stage.place.x, y: RUN.spine },
+          to: { x: -RUN.air, y: RUN.labelMid },
+          laid: {
+            source: { x: stage.place.x, y: stage.place.y },
+            target: { x: rect.x, y: rect.y },
+          },
+        },
+      },
+    ];
+  });
 }
 
 /** The thread runs down the request column's left edge, under the words. */

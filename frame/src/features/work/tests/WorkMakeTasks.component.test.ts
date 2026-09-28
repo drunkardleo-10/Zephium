@@ -62,14 +62,14 @@ test("a plan's steps become the person's tasks on request, and a task done in Ta
   });
   screen.container.style.width = "1400px";
   screen.container.style.height = "900px";
-  const cards = () => [...screen.container.querySelectorAll<HTMLElement>(".list li")];
+  const cards = () => [...screen.container.querySelectorAll<HTMLElement>(".plan .step")];
   await expect.poll(() => cards().length).toBe(4);
   // Nothing is made until the person asks.
   expect(server.records.size).toBe(0);
-  expect(screen.container.querySelectorAll(".list .task")).toHaveLength(0);
+  expect(tasks.tasks("plan-card").filter(Boolean)).toHaveLength(0);
 
   await screen.getByRole("button", { name: "Make tasks", exact: true }).click();
-  await expect.poll(() => screen.container.querySelectorAll(".list .task").length).toBe(4);
+  await expect.poll(() => tasks.tasks("plan-card").filter(Boolean).length).toBe(4);
   const made = [...server.records.values()]
     .map((record) => ({ title: record.draft.title, task: record.draft.content }))
     .toSorted((a, b) =>
@@ -107,11 +107,7 @@ test("a plan's steps become the person's tasks on request, and a task done in Ta
   });
   await expect.poll(() => cards()[0]!.classList.contains("done")).toBe(true);
   expect(cards()[1]!.classList.contains("done")).toBe(false);
-  expect(getComputedStyle(cards()[0]!.querySelector(".text")!).textDecorationLine).toBe(
-    "line-through",
-  );
-
-  cards()[0]!.querySelector<HTMLElement>(".task")!.click();
+  cards()[0]!.querySelector<HTMLElement>(".check")!.click();
   expect(open).toHaveBeenCalledExactlyOnceWith(first.id);
   await screen.unmount();
   session.stop();

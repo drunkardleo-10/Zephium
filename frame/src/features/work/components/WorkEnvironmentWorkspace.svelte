@@ -225,7 +225,7 @@
     const item = items.find((item) => item.id === id);
     if (!item) return;
     // A block opens where it stands; its board makes room.
-    if (item.type === "block") {
+    if (item.type === "block" || item.type === "object") {
       // A reviewed plan's result keeps its review: it opens in the lift, on its run.
       if (results.references.has(id) && !agentBlock(id)) void openResult(id);
       else toggleBlock(id);

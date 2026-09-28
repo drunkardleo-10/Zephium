@@ -29,6 +29,7 @@
   import PageCard from "./cards/PageCard.svelte";
   import PartRow from "./run/PartRow.svelte";
   import InputMark from "./run/InputMark.svelte";
+  import ObjectHost from "./run/ObjectHost.svelte";
   import RequestText from "./cards/RequestText.svelte";
   import BlockHost from "./board/BlockHost.svelte";
   import BoardHead from "./board/BoardHead.svelte";
@@ -167,6 +168,7 @@
       ontoggle={() => action(id, "expand-request")}
       onaction={() => action(id)}
     />
+  {:else if type === "object" && data.object}<ObjectHost {id} item={data} {selected} {detail} />
   {:else if type === "input"}<InputMark item={data} {detail} />
   {:else if type === "part"}<PartRow
       item={data}

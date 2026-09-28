@@ -58,7 +58,7 @@
   /** Surveyed, a name is set as large as its column lets it stand without breaking a word. */
   const survey = $derived.by(() => {
     const longest = Math.max(...part.title.split(/\s+/u).map((word) => word.length), 1);
-    return Math.round(Math.max(16, Math.min(26, 124 / (longest * 0.62))));
+    return Math.round(Math.max(16, Math.min(26, 128 / (longest * 0.58))));
   });
   /** A helper's own view of its work, when its stream has built one. */
   const content = $derived(shape === "helper" ? partContent(part.helper) : null);
@@ -70,6 +70,11 @@
     search: Search01Icon,
   } as const;
   const lines = $derived(part.lines ?? []);
+  /** A one-word name longer than its column is set smaller rather than cut. */
+  const fitted = $derived.by(() => {
+    const longest = Math.max(...part.title.split(/\s+/u).map((word) => word.length), 1);
+    return Math.max(11, Math.min(13, Math.floor(97 / (longest * 0.56))));
+  });
   /** Surveyed, a search part shows the sites it drew on, each once. */
   const sites = $derived([...new Map(cited.map((row) => [row.where, row])).values()]);
 </script>
@@ -100,7 +105,7 @@
       onlist();
     }}
   >
-    <span class="name" style:--survey="{survey}px">
+    <span class="name" style:--survey="{survey}px" style:--fitted="{fitted}px">
       {#if part.helper === "research"}<span class="glyph"
           ><Icon icon={Search01Icon} size={14} /></span
         >{:else if part.helper === "computer"}<span class="glyph"
@@ -248,7 +253,7 @@
   strong {
     display: -webkit-box;
     overflow: hidden;
-    font-size: var(--text-body);
+    font-size: var(--fitted, var(--text-body));
     font-weight: 600;
     line-height: 18px;
     letter-spacing: -0.005em;
@@ -533,11 +538,10 @@
     word-break: keep-all;
   }
 
+  /* Surveyed, the stack beside a name shows the site; the name takes the column. */
   .overview .mark,
   .overview .glyph {
-    inline-size: 24px;
-    block-size: 30px;
-    scale: 1.5;
+    display: none;
   }
 
   .overview .site {
