@@ -14,7 +14,7 @@ use objc2_web_kit::{
 };
 
 use crate::runtime::Shared;
-use crate::{bridge, error, socket, LogLevel, TabRequest};
+use crate::{bridge, error, native, socket, LogLevel, TabRequest};
 
 pub(crate) struct Ivars {
     shared: RcWeak<Shared>,
@@ -267,7 +267,15 @@ define_class!(
                 Some(shared) if application == bridge::APPLICATION => {
                     bridge::handle(&shared, context, message, reply);
                 }
-                _ => {
+                Some(shared) => {
+                    if let Err(message) =
+                        native::send(&shared, context, &application, message, reply)
+                    {
+                        let error = error(&message);
+                        reply.call((std::ptr::null_mut(), Retained::as_ptr(&error).cast_mut()));
+                    }
+                }
+                None => {
                     let error = error("Specified native messaging host not found.");
                     reply.call((std::ptr::null_mut(), Retained::as_ptr(&error).cast_mut()));
                 }
@@ -290,7 +298,14 @@ define_class!(
                     socket::connect(&shared, context, port);
                     completion.call((std::ptr::null_mut(),));
                 }
-                _ => {
+                Some(shared) => match native::connect(&shared, context, port, &application) {
+                    Ok(()) => completion.call((std::ptr::null_mut(),)),
+                    Err(message) => {
+                        let error = error(&message);
+                        completion.call((Retained::as_ptr(&error).cast_mut(),));
+                    }
+                },
+                None => {
                     let error = error("Specified native messaging host not found.");
                     completion.call((Retained::as_ptr(&error).cast_mut(),));
                 }

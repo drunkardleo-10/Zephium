@@ -53,5 +53,6 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKWebsiteDataStore",
 ] }
 base64.workspace = true
+dispatch2 = { version = "0.3.1", default-features = false, features = ["block2", "std"] }
 serde_json.workspace = true
 zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }

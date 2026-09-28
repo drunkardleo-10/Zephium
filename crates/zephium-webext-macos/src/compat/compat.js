@@ -730,6 +730,46 @@
     }
   }
 
+  // ---- Native messaging ----------------------------------------------------
+  // Chrome keeps a worker with an open native port running; here the browser
+  // does it with periodic beats, answered below and hidden from the extension.
+  if (!isContent && chromeRuntime && typeof chromeRuntime.connectNative === "function") {
+    const connectNative = chromeRuntime.connectNative;
+    const isBeat = (message) => message !== null && typeof message === "object" && message.__zephium === "alive";
+    pin(chromeRuntime, "connectNative", function (application, ...rest) {
+      const port = connectNative.call(this, application, ...rest);
+      if (String(application).startsWith("app.zephium.") || !port || !port.onMessage) return port;
+      const onMessage = port.onMessage;
+      kept.push(port, onMessage);
+      pin(port, "onMessage", onMessage);
+      const add = onMessage.addListener;
+      const remove = onMessage.removeListener;
+      const has = onMessage.hasListener;
+      add.call(onMessage, (message) => {
+        if (isBeat(message)) port.postMessage({ __zephium: "beat" });
+      });
+      const wrappers = new WeakMap();
+      pin(onMessage, "addListener", function (listener, ...more) {
+        if (typeof listener !== "function") return add.call(this, listener, ...more);
+        let wrapper = wrappers.get(listener);
+        if (!wrapper) {
+          wrapper = function (message, ...args) {
+            if (!isBeat(message)) return listener.call(this, message, ...args);
+          };
+          wrappers.set(listener, wrapper);
+        }
+        return add.call(this, wrapper, ...more);
+      });
+      pin(onMessage, "removeListener", function (listener) {
+        return remove.call(this, wrappers.get(listener) || listener);
+      });
+      pin(onMessage, "hasListener", function (listener) {
+        return has.call(this, wrappers.get(listener) || listener);
+      });
+      return port;
+    });
+  }
+
   // ---- Worker WebSockets ---------------------------------------------------
   // A WebSocket opened in an extension worker deadlocks it in WebKit; connect
   // through the browser instead.

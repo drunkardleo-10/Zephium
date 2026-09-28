@@ -6660,6 +6660,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "block2",
+ "dispatch2",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

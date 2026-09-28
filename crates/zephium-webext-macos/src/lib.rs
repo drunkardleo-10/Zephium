@@ -10,6 +10,7 @@ mod bridge;
 pub mod compat;
 mod delegate;
 mod json;
+mod native;
 mod runtime;
 mod socket;
 mod surface;

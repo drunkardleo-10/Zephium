@@ -14,7 +14,25 @@ function context(kind) {
     runtime: {
       id: "abcdefghijklmnopabcdefghijklmnop",
       sendNativeMessage: async (_app, message) => (message.api === "trace" ? false : null),
-      connectNative: () => ({ onMessage: event(), onDisconnect: event(), postMessage() {}, disconnect() {} }),
+      connectNative: (application) => {
+        const listeners = new Set();
+        const port = {
+          application,
+          posted: [],
+          onMessage: {
+            addListener: (listener) => void listeners.add(listener),
+            removeListener: (listener) => void listeners.delete(listener),
+            hasListener: (listener) => listeners.has(listener),
+          },
+          onDisconnect: event(),
+          postMessage(message) {
+            this.posted.push(message);
+          },
+          disconnect() {},
+          deliver: (message) => listeners.forEach((listener) => listener(message)),
+        };
+        return port;
+      },
       onMessage: event(),
       onConnect: event(),
       getManifest: () => ({ name: "__MSG_name__", version: "1.2", permissions: ["tabs", "https://a.test/*"], options_page: "options.html" }),
@@ -152,6 +170,18 @@ test("pages and workers get every API fix", async () => {
     }
     await chrome.storage.local.set(new State());
     assert.equal(JSON.stringify(chrome.storage.local.saved), JSON.stringify({ vault: { locked: true } }), kind);
+
+    const port = chrome.runtime.connectNative("com.1password.1password");
+    const received = [];
+    const listener = (message) => received.push(message);
+    port.onMessage.addListener(listener);
+    port.deliver({ __zephium: "alive" });
+    port.deliver({ hello: 1 });
+    assert.equal(JSON.stringify(received), JSON.stringify([{ hello: 1 }]), kind);
+    assert.equal(JSON.stringify(port.posted), JSON.stringify([{ __zephium: "beat" }]), kind);
+    assert.equal(port.onMessage.hasListener(listener), true, kind);
+    port.onMessage.removeListener(listener);
+    assert.equal(port.onMessage.hasListener(listener), false, kind);
 
     const self = await chrome.management.getSelf();
     assert.equal(self.name, "Probe", kind);
