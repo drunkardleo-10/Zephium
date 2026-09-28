@@ -7,7 +7,10 @@ fn compat_layer_applies_every_fix() {
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/compat.test.mjs");
     let output = match Command::new("node").args(["--test", script]).output() {
         Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        // CI must run it; elsewhere Node is optional.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound && std::env::var_os("CI").is_none() =>
+        {
             eprintln!("skipping: node is not installed");
             return;
         }

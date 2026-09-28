@@ -10,6 +10,7 @@ mod blocker_seed;
 mod foreground_rendering_boundary;
 mod macos_process_family;
 mod password_manager_qa;
+mod webext_suite;
 mod work_composition_boundary;
 mod work_persistence_boundary;
 mod work_resource_boundary;
@@ -56,6 +57,12 @@ fn main() {
             check_security_fork_locks()
         }
         Some("check-blocker-security-fork") => check_blocker_security_fork(),
+        Some("webext-suite") => {
+            if let Err(error) = webext_suite::run(&arguments[1..]) {
+                eprintln!("extension suite: {error}");
+                exit(1);
+            }
+        }
         Some("measure-macos-process-family") => {
             if let Err(error) = macos_process_family::run(&arguments[1..]) {
                 eprintln!("macOS process-family measurement failed: {error}");
@@ -106,7 +113,7 @@ fn main() {
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-frame-styles|check-engine-floors|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
+                "usage: cargo xtask <ci|webext-suite [--only NAME,...]|check-frame-styles|check-engine-floors|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
             );
             exit(2);
         }

@@ -1,0 +1,267 @@
+[
+  {
+    "name": "1Password",
+    "id": "aeblfdkhhhdcdjpifhhbdiojplfjncoa",
+    "popup": false,
+    "allow": [
+      "connectNative"
+    ]
+  },
+  {
+    "name": "Bitwarden",
+    "id": "nngceckbapebfimnlniiiahkandclblb",
+    "popup": true,
+    "allow": [
+      "connectNative"
+    ]
+  },
+  {
+    "name": "ColorZilla",
+    "id": "bhlhnicpbhignbdhedgjhgdocnmhomnp",
+    "popup": true,
+    "allow": [
+      "Can't find variable: document",
+      "browserPromise.runtime.sendMessage"
+    ]
+  },
+  {
+    "name": "Dark Reader",
+    "id": "eimadpbcbfnmbkopoojfekhnkhdbieeh",
+    "popup": true
+  },
+  {
+    "name": "Dashlane",
+    "id": "fdjamakpfbbddfjaooikfcpapjohcfmg",
+    "popup": true,
+    "allow": [
+      "is not a function"
+    ]
+  },
+  {
+    "name": "DeepL",
+    "id": "cofdbpoegempjloogbagkncekinflcnj",
+    "popup": true,
+    "allow": [
+      "Statsig",
+      "chrome.tabs",
+      "Menu item not found"
+    ]
+  },
+  {
+    "name": "Google Docs Offline",
+    "id": "ghbmnnjooekpmoecnnnilnnbdlolhkhi",
+    "popup": false
+  },
+  {
+    "name": "DuckDuckGo",
+    "id": "bkdgflcldnnnapblkhphbgpggdiikppg",
+    "popup": false,
+    "allow": [
+      "isSupported",
+      "current tab"
+    ]
+  },
+  {
+    "name": "Enhancer for YouTube",
+    "id": "ponfpcnoihfmfllpaingbgckeeldkhle",
+    "popup": false
+  },
+  {
+    "name": "Evernote Web Clipper",
+    "id": "pioclpoplcdbaefihamjohnefbikjilc",
+    "popup": false,
+    "allow": [
+      "t.url"
+    ]
+  },
+  {
+    "name": "Ghostery",
+    "id": "mlomiejdfkolichcflejclcbmpeaniij",
+    "popup": true,
+    "allow": [
+      "Menu item not found"
+    ]
+  },
+  {
+    "name": "Google Dictionary",
+    "id": "mgijmajocgfcbeboacabfgobmjgjcoja",
+    "popup": true
+  },
+  {
+    "name": "Google Translate",
+    "id": "aapbdbdomjkkjkaonfhkkikfgjllcleb",
+    "popup": true
+  },
+  {
+    "name": "Grammarly",
+    "id": "kbfnbcaeplbcioakkpcpgfkobkghlhen",
+    "popup": true,
+    "allow": [
+      "executeScript",
+      "CSRFToken"
+    ]
+  },
+  {
+    "name": "Honey",
+    "id": "bmnlcjabgnpnenekpadlanbbkooimhnj",
+    "popup": false,
+    "allow": [
+      "localStorage",
+      "NoMessageListenersError"
+    ]
+  },
+  {
+    "name": "Keeper",
+    "id": "bfogiafebfohielmmehodmfbbebbbpei",
+    "popup": false,
+    "allow": [
+      "runtime.connect"
+    ],
+    "known": "its popup never answers"
+  },
+  {
+    "name": "LastPass",
+    "id": "hdokiejnpimakedhajhdlcegeplioahd",
+    "popup": true
+  },
+  {
+    "name": "Loom",
+    "id": "liecbddmkiiihnedobmlmillhodjkdmb",
+    "popup": false,
+    "known": "needs screen capture WebKit lacks"
+  },
+  {
+    "name": "MetaMask",
+    "id": "nkbihfbeogaeaoehlefnkodbefgpgknn",
+    "popup": false
+  },
+  {
+    "name": "Momentum",
+    "id": "laookkfknpbbblfpciffpaejjkokdgca",
+    "popup": false
+  },
+  {
+    "name": "Notion Web Clipper",
+    "id": "knheggckgoiihginacbkhaalnibhilkk",
+    "popup": true
+  },
+  {
+    "name": "Octotree",
+    "id": "bkhaagjahfmjljalopjnoealnfndnagc",
+    "popup": false
+  },
+  {
+    "name": "OneTab",
+    "id": "chphlpgkkbolifaimnlloiipkdnihall",
+    "popup": false
+  },
+  {
+    "name": "Phantom",
+    "id": "bfnaelmomeimhlpmgjnjophhpkkoljpa",
+    "popup": false,
+    "allow": [
+      "no accounts"
+    ]
+  },
+  {
+    "name": "Proton Pass",
+    "id": "ghmbeldphafepmbegfdlkpapadhbakde",
+    "popup": false,
+    "known": "its background never finishes starting"
+  },
+  {
+    "name": "Raindrop",
+    "id": "ldgfbffkinooeloadekpmfoklnobpien",
+    "popup": true
+  },
+  {
+    "name": "React Developer Tools",
+    "id": "fmkadmapgofadopljbjfkapdkoienihi",
+    "popup": true
+  },
+  {
+    "name": "Refined GitHub",
+    "id": "hlepfoohegkhhmjieoechaddaejaokhf",
+    "popup": false,
+    "allow": [
+      "tab.id"
+    ]
+  },
+  {
+    "name": "Return YouTube Dislike",
+    "id": "gebbhagfogifgggkldgodflihgfeippi",
+    "popup": true
+  },
+  {
+    "name": "Session Buddy",
+    "id": "edacconmaakjimmfgnblocblbcdcpbko",
+    "popup": false
+  },
+  {
+    "name": "SponsorBlock",
+    "id": "mnjggcdmjocbbbhaepdhchncahnbgone",
+    "popup": true
+  },
+  {
+    "name": "Stylus",
+    "id": "clngdbkpkpeebahjckkjfobafhncgmne",
+    "popup": true,
+    "allow": [
+      "addRoutes",
+      "chrome.idle"
+    ]
+  },
+  {
+    "name": "Tampermonkey",
+    "id": "dhdgffkkebhmkfjojejmpbldmpobfkfo",
+    "popup": false,
+    "allow": [
+      "runtime.connect",
+      "during startup"
+    ],
+    "known": "needs chrome.userScripts, which WebKit lacks"
+  },
+  {
+    "name": "Todoist",
+    "id": "jldhpllghnbhlbpcmnajkpdmadaolakh",
+    "popup": false
+  },
+  {
+    "name": "uBlock Origin Lite",
+    "id": "ddkjiahejlhfcafbddmgiahcphecmpfh",
+    "popup": true
+  },
+  {
+    "name": "Video Speed Controller",
+    "id": "nffaoalbilbmmfgbnbgppjihopabppdk",
+    "popup": true
+  },
+  {
+    "name": "Vimium",
+    "id": "dbepggeogbaibhgnhhndojpepiihcmeb",
+    "popup": true,
+    "allow": [
+      "activeTab.url"
+    ]
+  },
+  {
+    "name": "Violentmonkey",
+    "id": "jinjaccalgkegednnccohejagnlnfdag",
+    "popup": true
+  },
+  {
+    "name": "Vue.js devtools",
+    "id": "nhdogjmejiglipccpnnnanhbledajbpd",
+    "popup": true
+  },
+  {
+    "name": "Wappalyzer",
+    "id": "gppongmhjkpfnbhagpmjfkannfbllamg",
+    "popup": true
+  },
+  {
+    "name": "Zotero Connector",
+    "id": "ekhagklcjbdpajgpjgmbionohlpdbjgc",
+    "popup": false
+  }
+]
