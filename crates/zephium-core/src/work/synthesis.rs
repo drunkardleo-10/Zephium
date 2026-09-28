@@ -383,6 +383,8 @@ mod tests {
             }],
         };
         let source = WorkArtifactV1 {
+            revises: None,
+            part: None,
             version: 1,
             id: 4.into(),
             execution: 5.into(),

@@ -271,6 +271,9 @@ function content(data: WorkArtifactDataV1, refs: Refs): ArtifactContent {
           text: note.text,
         })),
       };
+    default:
+      // Lead objects render through their own components, not this adapter.
+      return { kind: "document", paragraphs: [] };
   }
 }
 

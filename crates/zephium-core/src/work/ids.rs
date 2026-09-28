@@ -86,6 +86,10 @@ durable_id!(
 durable_id!(WorkAttemptId, "Exact durable worker attempt identity.");
 durable_id!(WorkArtifactId, "Immutable semantic artifact identity.");
 durable_id!(
+    WorkPartId,
+    "One helper's share of a run: a row of the canvas, never a capability."
+);
+durable_id!(
     WorkStepId,
     "One admitted agent operation inside an execution."
 );

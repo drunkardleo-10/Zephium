@@ -1,5 +1,6 @@
 //! Renderer-independent, immutable semantic results. Evidence is attribution,
 //! not proof that the model's interpretation or objective is correct.
+use super::objects::*;
 use super::*;
 
 pub const MAX_WORK_ARTIFACTS: usize = 64;
@@ -126,6 +127,13 @@ pub struct WorkArtifactV1 {
     /// the canvas; it never stands in for an observed source.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub general_knowledge: bool,
+    /// This object is the newer version of an earlier one in the same work;
+    /// the canvas shows it where that one stands. Chains are linear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revises: Option<WorkArtifactId>,
+    /// The part that made it: it sits at the end of that part's row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<WorkPartId>,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -334,6 +342,89 @@ pub enum WorkArtifactDataV1 {
     /// (see `answer_faults`); the other objects of its set stand beside it.
     Answer {
         markdown: String,
+    },
+    /// The answer, set on the canvas as typography above the result.
+    Reply {
+        headline: String,
+        /// Inline bold and code only.
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        figures: Vec<WorkFigureV1>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        points: Vec<String>,
+    },
+    /// Things to choose between, photo-led.
+    Picks {
+        facet: WorkPickFacetV1,
+        items: Vec<WorkPickV1>,
+    },
+    /// Time-ordered steps, drawn as a timeline.
+    Plan {
+        steps: Vec<WorkPlanStepV1>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total: Option<WorkLabelledV1>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        checkable: bool,
+    },
+    /// Items without time order.
+    List {
+        style: WorkListStyleV1,
+        items: Vec<WorkListItemV1>,
+    },
+    /// Real data in typed columns; no sentences.
+    Sheet {
+        columns: Vec<WorkSheetColumnV1>,
+        rows: Vec<WorkSheetRowV1>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// A chart in one of the catalogue's styles; maps onto the frame's ChartSpec.
+    Plot {
+        style: WorkPlotStyleV1,
+        x: WorkPlotXV1,
+        y: WorkPlotYV1,
+        series: Vec<WorkPlotSeriesV1>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        headline: Option<WorkLabelledV1>,
+        /// What the values are and where they come from.
+        basis: String,
+        /// The values are the model's knowledge, not observed.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        knowledge: bool,
+    },
+    /// A change to one file, read like a code review.
+    Diff {
+        path: String,
+        /// One of `CODE_LANGUAGES`.
+        language: String,
+        summary: String,
+        hunks: Vec<WorkDiffHunkV1>,
+    },
+    /// A message in the shape of its destination; sent only through Confirm.
+    Draft {
+        destination: WorkDraftDestinationV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject: Option<String>,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_url: Option<String>,
+    },
+    Media {
+        /// Image, video or audio; `kind` is the object's own tag.
+        medium: WorkMediaKindV1,
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<WorkMediaProviderV1>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        poster: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_secs: Option<u32>,
     },
 }
 
@@ -605,6 +696,73 @@ pub enum WorkArtifactField {
     AnswerTable,
     AnswerFence,
     AnswerNesting,
+    ReplyHeadline,
+    ReplyText,
+    ReplyMarkup,
+    ReplyFigures,
+    ReplyFigure,
+    ReplyPoints,
+    PicksItems,
+    PickName,
+    PickSubtitle,
+    PickImages,
+    PickLogo,
+    PickUrl,
+    PickPrice,
+    PickFacts,
+    PickRating,
+    PickWhy,
+    PickTags,
+    PickRecommended,
+    PickRoute,
+    PickWhen,
+    PlanSteps,
+    PlanStepWhen,
+    PlanStepTitle,
+    PlanStepDetail,
+    PlanStepCost,
+    PlanStepPlace,
+    PlanStepPick,
+    PlanTotal,
+    ListItems,
+    ListItemTitle,
+    ListItemDetail,
+    ListItemDue,
+    ListItemFrom,
+    SheetColumns,
+    SheetColumn,
+    SheetRows,
+    SheetCell,
+    SheetEntity,
+    SheetNote,
+    PlotAxis,
+    PlotSeries,
+    PlotShape,
+    PlotPoint,
+    PlotValues,
+    PlotHeadline,
+    PlotBasis,
+    LeadDiagramSize,
+    LeadDiagramNode,
+    LeadDiagramEdgeLabel,
+    DiffPath,
+    DiffLanguage,
+    DiffSummary,
+    DiffHunks,
+    DiffLines,
+    DraftTo,
+    DraftSubject,
+    DraftBody,
+    DraftMarkup,
+    DraftTarget,
+    MediaUrl,
+    MediaProvider,
+    MediaTitle,
+    MediaPoster,
+    MediaDuration,
+    ItemSource,
+    /// A kind kept so saved works open; the lead makes the current kinds.
+    LegacyKind,
 }
 impl WorkArtifactField {
     pub fn phrase(self) -> &'static str {
@@ -659,6 +817,72 @@ impl WorkArtifactField {
             Self::AnswerTable => "answer holds no tables; publish a table as its own table object and refer to it by title",
             Self::AnswerFence => "answer code fences open with ``` and a language from the code language list, and close",
             Self::AnswerNesting => "answer lists nest one level at most",
+            Self::ReplyHeadline => "reply headline is one line of 1 to 80 characters",
+            Self::ReplyText => "reply text is 1 to 480 characters (about 70 words)",
+            Self::ReplyMarkup => "reply text is plain sentences with **bold** or `code` only: no headings, lists, links, images or HTML; put lists in points",
+            Self::ReplyFigures => "reply has at most 4 figures",
+            Self::ReplyFigure => "each reply figure has a label of at most 24 characters, a value of at most 20 and an optional note of at most 40",
+            Self::ReplyPoints => "reply has at most 5 points of one line and at most 110 characters each",
+            Self::PicksItems => "picks has 1 to 12 items",
+            Self::PickName => "each pick's name is one line of 1 to 60 characters",
+            Self::PickSubtitle => "a pick's subtitle is one line of at most 60 characters",
+            Self::PickImages => "a pick has at most 3 image_candidates, each a public https URL of a picture of that subject from its sources",
+            Self::PickLogo => "a pick's logo_host is a bare lowercase host such as airbnb.com",
+            Self::PickUrl => "a pick's url is a public https URL",
+            Self::PickPrice => "a pick's price has a display of at most 24 characters, an optional plain decimal amount and an optional three-letter currency code",
+            Self::PickFacts => "a pick has at most 4 facts, each a label of at most 18 characters and a value of at most 32",
+            Self::PickRating => "a pick's rating is a plain decimal value between 0 and max, with max 5 or 10",
+            Self::PickWhy => "a pick's why is one line of at most 120 characters",
+            Self::PickTags => "a pick has at most 3 tags of at most 16 characters",
+            Self::PickRecommended => "at most one pick is recommended",
+            Self::PickRoute => "a pick's route has from and to of at most 40 characters, depart and arrive of at most 24, duration of at most 16, at most 5 stops, carrier of at most 40 and carrier_host a bare host",
+            Self::PickWhen => "a pick's when is at most 40 characters and its duration at most 16",
+            Self::PlanSteps => "plan has 1 to 40 steps",
+            Self::PlanStepWhen => "a plan step's when is one line of at most 32 characters",
+            Self::PlanStepTitle => "each plan step's title is one line of 1 to 70 characters",
+            Self::PlanStepDetail => "a plan step's detail is one line of at most 140 characters",
+            Self::PlanStepCost => "a plan step's cost is at most 24 characters",
+            Self::PlanStepPlace => "a plan step's place is at most 40 characters",
+            Self::PlanStepPick => "a plan step's pick names an existing picks object id and the 0-based index of one of its items",
+            Self::PlanTotal => "plan total has a label and a value of at most 24 characters each",
+            Self::ListItems => "list has 1 to 40 items",
+            Self::ListItemTitle => "each list item's title is one line of 1 to 90 characters",
+            Self::ListItemDetail => "a list item's detail is one line of at most 160 characters",
+            Self::ListItemDue => "a list item's due is at most 32 characters",
+            Self::ListItemFrom => "a list item's from has app of at most 24 characters, who of at most 40, when of at most 32, a quote of at most 200, host a bare host and url a public https URL",
+            Self::SheetColumns => "sheet has 1 to 10 columns",
+            Self::SheetColumn => "each sheet column has a unique label of at most 24 characters, a unit of at most 12, a three-letter currency (required for money) and best only on number, money, percent, rating, yes_no, duration or date columns",
+            Self::SheetRows => "sheet has 1 to 200 rows, each with exactly one cell per column",
+            Self::SheetCell => "a sheet cell matches its column: text at most 60 characters, number, money and percent plain decimals, yes_no one of yes, no, partial or unknown, rating like 4/5, link a public https URL, entity at most 40 characters, tag at most 16, date at most 32, duration at most 16, or empty when unknown; never sentences",
+            Self::SheetEntity => "a sheet row's entity has logo_host a bare host and image a public https URL",
+            Self::SheetNote => "sheet note is one line of at most 120 characters",
+            Self::PlotAxis => "plot axis labels are at most 24 characters, the y unit at most 12, and money needs a three-letter currency",
+            Self::PlotSeries => "plot has 1 to 8 series, each named in at most 24 characters with 1 to 60 points",
+            Self::PlotShape => "donut and radial plots have one series and radar plots at least 3 points per series",
+            Self::PlotPoint => "each plot point has x of at most 24 characters and y as a plain decimal or null; range plots give y and y2 together, other styles no y2",
+            Self::PlotValues => "a plot needs at least one value, and its values are never all equal; show such data as figures instead",
+            Self::PlotHeadline => "plot headline has a label of at most 24 characters and a value of at most 20",
+            Self::PlotBasis => "plot basis says what the values are and where they come from in 1 to 120 characters",
+            Self::LeadDiagramSize => "diagram has 1 to 24 nodes, at most 80 edges and at most 6 layers",
+            Self::LeadDiagramNode => "diagram node names are at most 28 characters and notes at most 60",
+            Self::LeadDiagramEdgeLabel => "diagram edge labels are at most 24 characters",
+            Self::DiffPath => "diff path is the file's path, at most 512 bytes",
+            Self::DiffLanguage => "diff language is one of the code languages",
+            Self::DiffSummary => "diff summary is one line of 1 to 120 characters",
+            Self::DiffHunks => "diff has 1 to 40 hunks of 1 to 400 lines each, with line numbers from 1",
+            Self::DiffLines => "a diff line's text is one line of at most 500 characters",
+            Self::DraftTo => "draft to is at most 80 characters",
+            Self::DraftSubject => "draft subject is at most 120 characters and only for email",
+            Self::DraftBody => "draft body is 1 to 4000 characters",
+            Self::DraftMarkup => "draft body uses plain Markdown: ## or ### headings, one list level, no images, HTML or tables",
+            Self::DraftTarget => "draft target_url is a public https URL",
+            Self::MediaUrl => "media url is a public https URL",
+            Self::MediaProvider => "a youtube or vimeo media is a video on that provider's own host",
+            Self::MediaTitle => "media title is one line of at most 80 characters",
+            Self::MediaPoster => "media poster is a public https URL",
+            Self::MediaDuration => "media duration is at most 16 characters and start_secs at most a day",
+            Self::ItemSource => "an item's source must be the 0-based index of one of the object's sources",
+            Self::LegacyKind => "this kind is kept only so saved works open; make reply, picks, plan, list, sheet, plot, diagram, code, diff, document, draft or media",
         }
     }
 }
@@ -666,23 +890,211 @@ impl WorkArtifactDataV1 {
     /// `evidence_len` is the artifact's evidence array length; claim-level
     /// indices must address it.
     pub fn validate(&self, evidence_len: usize) -> Result<(), WorkError> {
-        self.check(evidence_len, &mut WorkArtifactField::Content)
+        self.check(evidence_len, &mut WorkArtifactField::Content, &mut None)
     }
     /// The first part that fails `validate`, for a notice the model can act on.
     pub fn fault(&self, evidence_len: usize) -> Option<WorkArtifactField> {
+        self.fault_at(evidence_len).map(|fault| fault.field)
+    }
+    /// The first part that fails `validate` and the item it sits in.
+    pub fn fault_at(&self, evidence_len: usize) -> Option<WorkObjectFault> {
         let mut at = WorkArtifactField::Content;
-        match self.check(evidence_len, &mut at) {
+        let mut index = None;
+        match self.check(evidence_len, &mut at, &mut index) {
             Ok(()) => None,
-            Err(WorkError::Capacity) => Some(WorkArtifactField::Text),
-            Err(_) => Some(at),
+            Err(WorkError::Capacity) => Some(WorkObjectFault {
+                field: WorkArtifactField::Text,
+                index: None,
+            }),
+            Err(_) => Some(WorkObjectFault { field: at, index }),
         }
     }
-    /// `at` names the part under check when an error returns.
-    fn check(&self, evidence_len: usize, at: &mut WorkArtifactField) -> Result<(), WorkError> {
+    /// What a lead run may make: the current kinds only, diagrams within
+    /// their tighter limits, and everything `validate` holds.
+    pub fn lead_fault(&self, evidence_len: usize) -> Option<WorkObjectFault> {
+        use WorkArtifactField as F;
+        let whole = |field| Some(WorkObjectFault { field, index: None });
+        match self {
+            Self::Table { .. }
+            | Self::Comparison { .. }
+            | Self::Chart { .. }
+            | Self::Checklist { .. }
+            | Self::EvidenceCollection { .. }
+            | Self::ComparisonMatrix { .. }
+            | Self::Findings { .. }
+            | Self::BrowserResourcePreview { .. }
+            | Self::Answer { .. } => return whole(F::LegacyKind),
+            Self::Diagram {
+                nodes,
+                edges,
+                layers,
+            } => {
+                if nodes.is_empty()
+                    || nodes.len() > super::objects::MAX_LEAD_DIAGRAM_NODES
+                    || edges.len() > MAX_DIAGRAM_EDGES
+                    || layers.len() > super::objects::MAX_LEAD_DIAGRAM_LAYERS
+                {
+                    return whole(F::LeadDiagramSize);
+                }
+                for (index, node) in nodes.iter().enumerate() {
+                    if node.name.chars().count() > 28
+                        || node.note.as_ref().is_some_and(|n| n.chars().count() > 60)
+                    {
+                        return Some(WorkObjectFault {
+                            field: F::LeadDiagramNode,
+                            index: u16::try_from(index).ok(),
+                        });
+                    }
+                }
+                for (index, edge) in edges.iter().enumerate() {
+                    if edge.label.as_ref().is_some_and(|l| l.chars().count() > 24) {
+                        return Some(WorkObjectFault {
+                            field: F::LeadDiagramEdgeLabel,
+                            index: u16::try_from(index).ok(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.fault_at(evidence_len)
+    }
+    /// The wire name of this kind.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Document { .. } => "document",
+            Self::Table { .. } => "table",
+            Self::Comparison { .. } => "comparison",
+            Self::Chart { .. } => "chart",
+            Self::Checklist { .. } => "checklist",
+            Self::EvidenceCollection { .. } => "evidence_collection",
+            Self::ComparisonMatrix { .. } => "comparison_matrix",
+            Self::Findings { .. } => "findings",
+            Self::BrowserResourcePreview { .. } => "browser_resource_preview",
+            Self::Diagram { .. } => "diagram",
+            Self::Code { .. } => "code",
+            Self::Answer { .. } => "answer",
+            Self::Reply { .. } => "reply",
+            Self::Picks { .. } => "picks",
+            Self::Plan { .. } => "plan",
+            Self::List { .. } => "list",
+            Self::Sheet { .. } => "sheet",
+            Self::Plot { .. } => "plot",
+            Self::Diff { .. } => "diff",
+            Self::Draft { .. } => "draft",
+            Self::Media { .. } => "media",
+        }
+    }
+    /// `at` names the part under check when an error returns, `index` the
+    /// item inside it when the kind has items.
+    fn check(
+        &self,
+        evidence_len: usize,
+        at: &mut WorkArtifactField,
+        index: &mut Option<u16>,
+    ) -> Result<(), WorkError> {
         use WorkArtifactField as F;
         let mut budget = TextBudget(0);
         let subjects_ok = validate_subjects;
+        let mut object = super::objects::Budget::new();
+        let mut objects = |checked: Result<(), WorkObjectFault>| match checked {
+            Ok(()) => Ok(()),
+            Err(fault) => {
+                *at = fault.field;
+                *index = fault.index;
+                Err(if fault.field == F::Text {
+                    WorkError::Capacity
+                } else {
+                    WorkError::Invalid
+                })
+            }
+        };
         match self {
+            Self::Reply {
+                headline,
+                text,
+                figures,
+                points,
+            } => objects(check_reply(&mut object, headline, text, figures, points))?,
+            Self::Picks { items, .. } => objects(check_picks(&mut object, evidence_len, items))?,
+            Self::Plan { steps, total, .. } => {
+                objects(check_plan(&mut object, evidence_len, steps, total))?
+            }
+            Self::List { items, .. } => objects(check_list(&mut object, evidence_len, items))?,
+            Self::Sheet {
+                columns,
+                rows,
+                note,
+            } => objects(check_sheet(&mut object, evidence_len, columns, rows, note))?,
+            Self::Plot {
+                style,
+                x,
+                y,
+                series,
+                headline,
+                basis,
+                ..
+            } => objects(
+                Plot {
+                    style: *style,
+                    x,
+                    y,
+                    series,
+                    headline,
+                    basis,
+                }
+                .check(&mut object),
+            )?,
+            Self::Diff {
+                path,
+                language,
+                summary,
+                hunks,
+            } => objects(
+                Diff {
+                    path,
+                    language,
+                    summary,
+                    hunks,
+                }
+                .check(&mut object),
+            )?,
+            Self::Draft {
+                destination,
+                to,
+                subject,
+                body,
+                target_url,
+            } => objects(
+                Draft {
+                    destination: *destination,
+                    to,
+                    subject,
+                    body,
+                    target_url,
+                }
+                .check(&mut object),
+            )?,
+            Self::Media {
+                medium,
+                url,
+                title,
+                provider,
+                poster,
+                duration,
+                start_secs,
+            } => objects(
+                Media {
+                    medium: *medium,
+                    url,
+                    title,
+                    provider: *provider,
+                    poster,
+                    duration,
+                    start_secs: *start_secs,
+                }
+                .check(&mut object),
+            )?,
             Self::Document {
                 paragraphs,
                 formatted,
@@ -1115,6 +1527,10 @@ impl WorkArtifactDataV1 {
             Self::Answer { markdown } => {
                 return answer_faults(markdown).contains(&WorkArtifactField::AnswerLink)
             }
+            Self::Picks { items, .. } => return picks_link(items),
+            Self::List { items, .. } => return list_links(items),
+            Self::Sheet { columns, rows, .. } => return sheet_links(columns, rows),
+            Self::Media { .. } => return true,
             _ => &[],
         };
         subjects
@@ -1213,6 +1629,65 @@ impl WorkArtifactDataV1 {
                 notes.iter().for_each(|n| push(&n.text));
             }
             Self::Answer { markdown } => push(markdown),
+            Self::Reply {
+                headline,
+                text,
+                figures,
+                points,
+            } => {
+                push(headline);
+                push(text);
+                for figure in figures {
+                    push(&format!("{}: {}", figure.label, figure.value));
+                }
+                points.iter().for_each(|p| push(p));
+            }
+            Self::Picks { items, .. } => {
+                for item in items {
+                    push(&item.name);
+                    item.subtitle.as_deref().map(&mut push);
+                    if let Some(price) = item.price.as_ref() {
+                        push(&price.display)
+                    }
+                    item.why.as_deref().map(&mut push);
+                }
+            }
+            Self::Plan { steps, .. } => {
+                for step in steps {
+                    push(&step.title);
+                    step.detail.as_deref().map(&mut push);
+                }
+            }
+            Self::List { items, .. } => {
+                for item in items {
+                    push(&item.title);
+                    item.detail.as_deref().map(&mut push);
+                    if let Some(quote) = item.from.as_ref().and_then(|f| f.quote.as_deref()) {
+                        push(quote);
+                    }
+                }
+            }
+            Self::Sheet { columns, rows, .. } => {
+                columns.iter().for_each(|c| push(&c.label));
+                for row in rows {
+                    push(&row.cells.join(" · "));
+                }
+            }
+            Self::Plot { series, basis, .. } => {
+                series.iter().for_each(|s| push(&s.name));
+                push(basis);
+            }
+            Self::Diff { path, summary, .. } => {
+                push(path);
+                push(summary);
+            }
+            Self::Draft { subject, body, .. } => {
+                subject.as_deref().map(&mut push);
+                push(body);
+            }
+            Self::Media { title, .. } => {
+                title.as_deref().map(&mut push);
+            }
         }
         out
     }
@@ -1461,6 +1936,8 @@ mod tests {
     #[test]
     fn source_mapped_results_require_unique_evidence_without_claiming_verification() {
         let mut artifact = WorkArtifactV1 {
+            revises: None,
+            part: None,
             version: 1,
             id: 1.into(),
             execution: 2.into(),

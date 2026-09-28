@@ -601,6 +601,7 @@ impl Driver {
     }
     fn step(&self, kind: WorkStepKindV1, status: WorkStepStatus) -> WorkStepFact {
         WorkStepFact {
+            part: None,
             id: WorkStepId::generate(),
             turn: self.turn.max(1),
             kind,
@@ -2632,6 +2633,7 @@ mod tests {
             goal: None,
         };
         let mut step = WorkStepFact {
+            part: None,
             id: 1.into(),
             turn: 1,
             kind: request.clone(),
@@ -2689,6 +2691,8 @@ mod tests {
     #[test]
     fn browser_previews_cover_later_artifacts_and_deduplicate_within_the_budget() {
         let artifact = |id: u128| WorkArtifactV1 {
+            revises: None,
+            part: None,
             version: 1,
             id: id.into(),
             execution: 1.into(),
@@ -2734,6 +2738,8 @@ mod tests {
     #[test]
     fn a_long_work_still_discloses_a_turn_after_shedding() {
         let artifact = |execution: u128, index: u128, data: WorkArtifactDataV1| WorkArtifactV1 {
+            revises: None,
+            part: None,
             version: 1,
             id: (execution * 100 + index).into(),
             execution: execution.into(),

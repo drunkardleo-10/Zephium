@@ -650,6 +650,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         max_workers: 2,
     };
     let grant = WorkAgentGrantV1 {
+        lead: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
         max_turns: 8,
@@ -670,6 +671,8 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     let attempt = WorkAttemptId::from(500);
     let revision = WorkRevision::new(9).unwrap();
     let mut fact = WorkExecutionFact {
+        parts: vec![],
+        inputs: vec![],
         authorization: WorkExecutionAuthorization::UserDirectedAgent,
         id: WorkExecutionId::from(7),
         approved_revision: WorkRevision::new(3).unwrap(),
@@ -698,6 +701,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     });
     fact.status = WorkExecutionStatus::Running;
     let step = |id: u128, turn, kind, status| WorkStepFact {
+        part: None,
         id: id.into(),
         turn,
         kind,
@@ -754,6 +758,8 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         },
     };
     let sources = WorkArtifactV1 {
+        revises: None,
+        part: None,
         version: 1,
         id: WorkArtifactId::from(41),
         execution: fact.id,
@@ -1170,6 +1176,8 @@ fn agent_citations_round_trip_source_keys_without_model_renumbering() {
             ]
         );
         let stored = WorkArtifactV1 {
+            revises: None,
+            part: None,
             version: 1,
             id: 1.into(),
             execution: 2.into(),
@@ -1234,6 +1242,7 @@ fn agent_citations_round_trip_source_keys_without_model_renumbering() {
 fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
     use super::{agent::*, runtime::*};
     let step = |kind, status| WorkStepFact {
+        part: None,
         id: 9.into(),
         turn: 2,
         kind,
@@ -1312,6 +1321,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         ],
     };
     let file = |kind, status| WorkStepFact {
+        part: None,
         id: 10.into(),
         turn: 2,
         kind,
@@ -1363,6 +1373,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
     succeeded_read.evidence = Some(11.into());
     assert!(succeeded_read.validate().is_ok());
     let grant = |folders: Vec<&str>| WorkAgentGrantV1 {
+        lead: None,
         provider: super::search::WorkSearchProvider::OpenAi,
         model: "gpt-5.6-luna".into(),
         max_turns: 4,
@@ -1522,6 +1533,8 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
         .notice()
         .contains("the first answer stands"));
     let placed = WorkArtifactV1 {
+        revises: None,
+        part: None,
         version: 1,
         id: 7.into(),
         execution: 1.into(),
@@ -1536,6 +1549,7 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
         general_knowledge: true,
     };
     let publish = WorkStepFact {
+        part: None,
         id: 3.into(),
         turn: 1,
         kind: WorkStepKindV1::Publish,
@@ -1998,6 +2012,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         max_workers: 2,
     };
     let grant = WorkAgentGrantV1 {
+        lead: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
         max_turns: 8,
@@ -2029,6 +2044,8 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
     let spec = WorkExecutionSpec::agent(&plan, limits, grant).unwrap();
     let revision = WorkRevision::new(9).unwrap();
     let mut fact = WorkExecutionFact {
+        parts: vec![],
+        inputs: vec![],
         authorization: WorkExecutionAuthorization::UserDirectedAgent,
         id: WorkExecutionId::from(7),
         approved_revision: WorkRevision::new(3).unwrap(),
@@ -2063,6 +2080,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
     );
     fact.validate(&plan, revision).unwrap();
     let read = |id: u128, url: &str, host: Option<&str>| WorkStepFact {
+        part: None,
         id: id.into(),
         turn: 1,
         kind: WorkStepKindV1::Read {
@@ -2324,6 +2342,7 @@ fn a_held_site_step_round_trips_and_its_decision_matches_its_status() {
         decision: None,
     };
     let mut step = WorkStepFact {
+        part: None,
         id: 8u128.into(),
         turn: 1,
         kind: WorkStepKindV1::Confirm {

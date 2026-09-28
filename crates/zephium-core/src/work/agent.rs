@@ -578,6 +578,7 @@ impl WorkAgentTurnDisclosure {
                 },
             };
             let probe = WorkStepFact {
+                part: None,
                 id: WorkStepId::from(1),
                 turn: 1,
                 kind: kind.clone(),
@@ -613,6 +614,7 @@ impl WorkAgentTurnDisclosure {
                 options.push(option);
             }
             let probe = WorkStepFact {
+                part: None,
                 id: WorkStepId::from(1),
                 turn: 1,
                 kind: WorkStepKindV1::Ask {
@@ -1230,6 +1232,8 @@ fn drop_unknown_citations(data: &mut WorkArtifactDataV1, known: impl Fn(u16) -> 
         | WorkArtifactDataV1::Diagram { .. }
         | WorkArtifactDataV1::Code { .. }
         | WorkArtifactDataV1::Answer { .. } => {}
+        // Lead kinds cite through item indexes the lead maps itself.
+        _ => {}
     }
     dropped
 }
@@ -1273,6 +1277,8 @@ fn remap_citations(
         | WorkArtifactDataV1::Diagram { .. }
         | WorkArtifactDataV1::Code { .. }
         | WorkArtifactDataV1::Answer { .. } => {}
+        // Lead kinds cite through item indexes the lead maps itself.
+        _ => {}
     }
     Ok(())
 }
@@ -1284,20 +1290,7 @@ impl std::fmt::Debug for WorkAgentTurnDisclosure {
 }
 
 pub fn artifact_kind(data: &WorkArtifactDataV1) -> &'static str {
-    match data {
-        WorkArtifactDataV1::Document { .. } => "document",
-        WorkArtifactDataV1::Table { .. } => "table",
-        WorkArtifactDataV1::Comparison { .. } => "comparison",
-        WorkArtifactDataV1::Chart { .. } => "chart",
-        WorkArtifactDataV1::Checklist { .. } => "checklist",
-        WorkArtifactDataV1::EvidenceCollection { .. } => "evidence_collection",
-        WorkArtifactDataV1::ComparisonMatrix { .. } => "comparison_matrix",
-        WorkArtifactDataV1::Findings { .. } => "findings",
-        WorkArtifactDataV1::BrowserResourcePreview { .. } => "browser_resource_preview",
-        WorkArtifactDataV1::Diagram { .. } => "diagram",
-        WorkArtifactDataV1::Code { .. } => "code",
-        WorkArtifactDataV1::Answer { .. } => "answer",
-    }
+    data.kind_name()
 }
 
 #[derive(Serialize, Deserialize)]

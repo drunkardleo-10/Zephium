@@ -1,7 +1,11 @@
 //! Same actor, same profile transaction, same Work revision as authoring.
 use super::*;
 use sha2::{Digest, Sha256};
-use zephium_core::work::{artifact::WorkArtifactV1, runtime::*};
+use zephium_core::work::{
+    artifact::WorkArtifactV1,
+    parts::{MAX_WORK_INPUTS, MAX_WORK_PARTS},
+    runtime::*,
+};
 
 const MAX_EXECUTION_BYTES: usize = 524288;
 const MAX_RUNTIME_BYTES: usize = 2 * 1024 * 1024;
@@ -543,6 +547,7 @@ pub(super) fn command(
             }
             let turn = row.fact.steps.last().map_or(1, |step| step.turn);
             row.fact.steps.push(WorkStepFact {
+                part: None,
                 id: WorkStepId::generate(),
                 turn,
                 kind: WorkStepKindV1::Steer { text },
@@ -656,6 +661,8 @@ pub(super) fn command(
                 .checked_add(i64::from(spec.limits.timeout_seconds) * 1000)
                 .ok_or(WorkError::Capacity)?;
             let mut fact = WorkExecutionFact {
+                parts: vec![],
+                inputs: vec![],
                 authorization: if direct {
                     WorkExecutionAuthorization::UserDirectedPublicRead
                 } else if agent {
@@ -780,13 +787,15 @@ pub(super) fn update(
         | WorkRuntimeUpdate::PageTitle { execution, .. }
         | WorkRuntimeUpdate::ExtendLimits { execution, .. }
         | WorkRuntimeUpdate::SettleCommand { execution, .. }
+        | WorkRuntimeUpdate::Part { execution, .. }
+        | WorkRuntimeUpdate::Input { execution, .. }
         | WorkRuntimeUpdate::FinishCancellation { execution } => *execution,
         WorkRuntimeUpdate::SettleProviderSearch { .. } => return Err(WorkError::Invalid),
     };
-    let mut row = rows(tx, id)?
+    let (mut current_rows, others): (Vec<Row>, Vec<Row>) = rows(tx, id)?
         .into_iter()
-        .find(|r| r.fact.id == execution)
-        .ok_or(WorkError::NotFound)?;
+        .partition(|r| r.fact.id == execution);
+    let mut row = current_rows.pop().ok_or(WorkError::NotFound)?;
     if row.owner != session.session || row.fact.status.terminal() {
         return Err(WorkError::Conflict);
     }
@@ -1071,11 +1080,16 @@ pub(super) fn update(
             if fact.status != WorkAttemptStatus::Running
                 || !row.fact.is_agent()
                 || row.fact.steps.iter().any(|s| s.id == step.id)
-                || row.fact.steps.len() >= MAX_WORK_STEPS
+                || row.fact.steps.len()
+                    >= row
+                        .fact
+                        .agent_grant()
+                        .map_or(MAX_WORK_STEPS, WorkAgentGrantV1::step_limit)
             {
                 return Err(WorkError::Conflict);
             }
             step.validate()?;
+            revisions_admitted(&row.fact, &others, &artifacts)?;
             let node = fact.node;
             attach_step_payload(
                 &mut row.fact,
@@ -1212,6 +1226,7 @@ pub(super) fn update(
             if row.fact.steps[index].status != WorkStepStatus::Running {
                 return Err(WorkError::Conflict);
             }
+            revisions_admitted(&row.fact, &others, &artifacts)?;
             let ids: Vec<_> = artifacts.iter().map(|a| a.id).collect();
             let record = evidence
                 .as_ref()
@@ -1237,6 +1252,31 @@ pub(super) fn update(
             }
             if measurements.is_some() {
                 settled.measurements = measurements;
+            }
+        }
+        WorkRuntimeUpdate::Part { attempt, part, .. } => {
+            lead_attempt(&row.fact, attempt)?;
+            part.validate()?;
+            match row.fact.parts.iter().position(|p| p.id == part.id) {
+                Some(at) => {
+                    let existing = &mut row.fact.parts[at];
+                    if existing.helper != part.helper || existing.state.terminal() {
+                        return Err(WorkError::Conflict);
+                    }
+                    *existing = part;
+                }
+                None if row.fact.parts.len() < MAX_WORK_PARTS => row.fact.parts.push(part),
+                None => return Err(WorkError::Capacity),
+            }
+        }
+        WorkRuntimeUpdate::Input { attempt, input, .. } => {
+            lead_attempt(&row.fact, attempt)?;
+            input.validate()?;
+            if !row.fact.inputs.contains(&input) {
+                if row.fact.inputs.len() >= MAX_WORK_INPUTS {
+                    return Err(WorkError::Capacity);
+                }
+                row.fact.inputs.push(input);
             }
         }
         WorkRuntimeUpdate::FinishCancellation { .. } => {
@@ -1301,7 +1341,12 @@ fn attach_step_payload(
     {
         return Err(WorkError::Invalid);
     }
-    if fact.artifacts.len() + artifacts.len() > zephium_core::work::artifact::MAX_WORK_ARTIFACTS {
+    if fact.artifacts.len() + artifacts.len()
+        > fact.agent_grant().map_or(
+            zephium_core::work::artifact::MAX_WORK_ARTIFACTS,
+            WorkAgentGrantV1::artifact_limit,
+        )
+    {
         return Err(WorkError::Capacity);
     }
     if let Some(record) = evidence {
@@ -1324,6 +1369,52 @@ fn attach_step_payload(
         fact.file_evidence.push(*record);
     }
     fact.artifacts.extend(artifacts);
+    Ok(())
+}
+
+/// Parts and inputs are lead facts, written while the lead's attempt runs.
+fn lead_attempt(fact: &WorkExecutionFact, attempt: WorkAttemptId) -> Result<(), WorkError> {
+    if fact.agent_grant().is_none_or(|grant| grant.lead.is_none()) {
+        return Err(WorkError::Invalid);
+    }
+    if !fact
+        .attempts
+        .iter()
+        .any(|a| a.id == attempt && a.status == WorkAttemptStatus::Running)
+    {
+        return Err(WorkError::Conflict);
+    }
+    Ok(())
+}
+
+/// A revision names an object of the same kind in this work that nothing
+/// has revised yet, so every chain stays one line.
+fn revisions_admitted(
+    fact: &WorkExecutionFact,
+    others: &[Row],
+    artifacts: &[WorkArtifactV1],
+) -> Result<(), WorkError> {
+    let every = || {
+        others
+            .iter()
+            .flat_map(|row| row.fact.artifacts.iter())
+            .chain(fact.artifacts.iter())
+    };
+    for (index, artifact) in artifacts.iter().enumerate() {
+        let Some(earlier) = artifact.revises else {
+            continue;
+        };
+        let target = every()
+            .find(|a| a.id == earlier)
+            .ok_or(WorkError::NotFound)?;
+        if target.data.kind_name() != artifact.data.kind_name()
+            || every()
+                .chain(artifacts[..index].iter())
+                .any(|a| a.revises == Some(earlier))
+        {
+            return Err(WorkError::Conflict);
+        }
+    }
     Ok(())
 }
 

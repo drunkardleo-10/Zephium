@@ -143,6 +143,8 @@ impl WorkNodeAttempt {
             .find(|o| o.name == draft.output)
             .ok_or(WorkError::Invalid)?;
         let artifact = WorkArtifactV1 {
+            revises: None,
+            part: None,
             version: 1,
             id: WorkArtifactId::generate(),
             execution: self.execution,

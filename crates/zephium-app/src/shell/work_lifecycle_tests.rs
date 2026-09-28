@@ -12,6 +12,7 @@ use zephium_core::ids::ProfileId;
 use zephium_core::work::{agent::*, search::*, synthesis::*};
 
 const GRANT: WorkAgentGrantV1 = WorkAgentGrantV1 {
+    lead: None,
     provider: WorkSearchProvider::OpenAi,
     model: String::new(),
     max_turns: 8,

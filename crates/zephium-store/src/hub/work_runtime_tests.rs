@@ -104,6 +104,8 @@ fn coordination_requires_exact_live_parent_and_complete_children() {
         Err(WorkError::Unavailable)
     ));
     let artifact = |node, attempt| artifact::WorkArtifactV1 {
+        revises: None,
+        part: None,
         version: 1,
         id: WorkArtifactId::generate(),
         execution,
@@ -778,6 +780,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
     hub.save(&session()).unwrap();
     let initial = create(&mut hub);
     let grant = WorkAgentGrantV1 {
+        lead: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
         max_turns: 8,
@@ -846,6 +849,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         )
     };
     let step = |id: u128, turn, kind, status| WorkStepFact {
+        part: None,
         id: id.into(),
         turn,
         kind,
@@ -986,6 +990,8 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         },
     };
     let sources = artifact::WorkArtifactV1 {
+        revises: None,
+        part: None,
         version: 1,
         id: WorkArtifactId::from(41),
         execution,
@@ -1457,4 +1463,334 @@ fn site_access_is_a_bounded_sorted_profile_list() {
             }
         )
         .is_err());
+}
+
+#[test]
+fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
+    use zephium_core::work::{model::*, objects::*, parts::*, search::*};
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&session()).unwrap();
+    let initial = create(&mut hub);
+    let grant = WorkAgentGrantV1 {
+        provider: WorkSearchProvider::OpenAi,
+        model: PUBLIC_SEARCH_MODEL.into(),
+        max_turns: 200,
+        max_steps: 255,
+        browse_hops: 4,
+        folders: vec![],
+        accounts: vec![],
+        private: false,
+        lead: Some(WorkModelRef {
+            provider: WorkModelProvider::OpenAi,
+            wire: WorkModelWire::OpenAiResponses,
+            model: "gpt-6".into(),
+        }),
+    };
+    let limits = WorkExecutionLimits {
+        model_tokens: 1_000_000,
+        cost_micro_usd: 3_000_000,
+        operations: 256,
+        timeout_seconds: 1800,
+        max_workers: 4,
+    };
+    let usage = WorkUsage {
+        model_tokens: 1200,
+        cost_micro_usd: 300,
+        operations: 1,
+        accounting: WorkUsageAccounting::Exact,
+    };
+    let update = |hub: &mut Hub, update| {
+        let state = read_runtime(hub, &initial);
+        hub.work_document(
+            initial.profile,
+            WorkRequest::RuntimeUpdate {
+                id: initial.id,
+                expected: state.work.revision,
+                update,
+            },
+        )
+    };
+    let step = |id: u128, kind, status, part: Option<WorkPartId>| WorkStepFact {
+        id: id.into(),
+        turn: 1,
+        kind,
+        status,
+        usage: None,
+        artifacts: vec![],
+        evidence: None,
+        note: None,
+        measurements: None,
+        local: None,
+        account: None,
+        part,
+    };
+    let reply = |headline: &str| artifact::WorkArtifactDataV1::Reply {
+        headline: headline.into(),
+        text: "Six nights near the YC office.".into(),
+        figures: vec![],
+        points: vec![],
+    };
+    let run = |hub: &mut Hub, command: u128, attempt: u128| {
+        let state = read_runtime(hub, &initial);
+        let WorkReply::AgentAdmitted {
+            receipt,
+            projection,
+            ..
+        } = hub
+            .work_document(
+                initial.profile,
+                WorkRequest::RuntimeCommand {
+                    id: initial.id,
+                    expected: state.work.revision,
+                    command: command.into(),
+                    intent: WorkRuntimeIntent::BeginAgent {
+                        grant: grant.clone(),
+                        limits,
+                    },
+                },
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        let node = projection
+            .executions
+            .iter()
+            .find(|e| e.id == receipt.execution)
+            .unwrap()
+            .spec
+            .nodes[0]
+            .node;
+        (receipt.execution, node, WorkAttemptId::from(attempt))
+    };
+    let (first, node, attempt) = run(&mut hub, 100, 500);
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::Begin {
+            execution: first,
+            attempt,
+            node,
+        },
+    )
+    .unwrap();
+    let stay = WorkPartFactV1 {
+        id: 60.into(),
+        title: "Stay".into(),
+        helper: WorkHelperV1::Browser,
+        service: Some(WorkPartServiceV1 {
+            host: Some("airbnb.com".into()),
+            connection: None,
+        }),
+        goal: "Three homes near the YC office".into(),
+        state: WorkPartStateV1::Running,
+        started_ms: Some("1790000000000".into()),
+        ended_ms: None,
+        summary: None,
+    };
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::Part {
+            execution: first,
+            attempt,
+            part: stay.clone(),
+        },
+    )
+    .unwrap();
+    let skill = WorkInputFactV1 {
+        kind: WorkInputKindV1::Skill,
+        label: "Trip planning".into(),
+        count: None,
+        reference: Some("trip-planning".into()),
+    };
+    for _ in 0..2 {
+        update(
+            &mut hub,
+            WorkRuntimeUpdate::Input {
+                execution: first,
+                attempt,
+                input: skill.clone(),
+            },
+        )
+        .unwrap();
+    }
+    let object = |id: u128, execution, (node, attempt), data, revises: Option<u128>, part| {
+        artifact::WorkArtifactV1 {
+            version: 1,
+            id: id.into(),
+            execution,
+            node,
+            attempt,
+            output: "Result".into(),
+            title: "Your trip".into(),
+            data,
+            evidence: vec![],
+            review: WorkOutputReview::SourceMappedNeedsReview,
+            presentation: artifact::WorkArtifactPresentationV1::Automatic,
+            general_knowledge: true,
+            revises: revises.map(Into::into),
+            part,
+        }
+    };
+    let mut publish = step(
+        1,
+        WorkStepKindV1::Publish,
+        WorkStepStatus::Succeeded,
+        Some(stay.id),
+    );
+    publish.artifacts = vec![10.into()];
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::BeginStep {
+            execution: first,
+            attempt,
+            step: publish,
+            artifacts: vec![object(
+                10,
+                first,
+                (node, attempt),
+                reply("Your trip"),
+                None,
+                Some(stay.id),
+            )],
+            evidence: None,
+            file: None,
+        },
+    )
+    .unwrap();
+    let done = WorkPartFactV1 {
+        state: WorkPartStateV1::Done,
+        ended_ms: Some("1790000100000".into()),
+        summary: Some("3 homes".into()),
+        ..stay.clone()
+    };
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::Part {
+            execution: first,
+            attempt,
+            part: done.clone(),
+        },
+    )
+    .unwrap();
+    // A part that ended stays as it ended.
+    assert!(matches!(
+        update(
+            &mut hub,
+            WorkRuntimeUpdate::Part {
+                execution: first,
+                attempt,
+                part: stay.clone()
+            }
+        ),
+        Err(WorkError::Conflict)
+    ));
+    let mut finish = step(
+        2,
+        WorkStepKindV1::Finish { followups: vec![] },
+        WorkStepStatus::Succeeded,
+        None,
+    );
+    finish.note = Some("Your trip is ready".into());
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::BeginStep {
+            execution: first,
+            attempt,
+            step: finish,
+            artifacts: vec![],
+            evidence: None,
+            file: None,
+        },
+    )
+    .unwrap();
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::Settle {
+            execution: first,
+            attempt,
+            status: WorkAttemptStatus::Succeeded,
+            usage: Some(usage),
+            artifacts: vec![],
+            intervention: None,
+        },
+    )
+    .unwrap();
+    let state = read_runtime(&mut hub, &initial);
+    let settled = &state.executions[0];
+    assert_eq!(settled.parts, vec![done]);
+    assert_eq!(settled.inputs, vec![skill]);
+    assert_eq!(settled.artifacts[0].part, Some(stay.id));
+
+    // A follow-up revises the earlier object once, in its own kind.
+    let (second, node, attempt) = run(&mut hub, 101, 501);
+    update(
+        &mut hub,
+        WorkRuntimeUpdate::Begin {
+            execution: second,
+            attempt,
+            node,
+        },
+    )
+    .unwrap();
+    let revise = |hub: &mut Hub, step_id: u128, id: u128, data, revises| {
+        let mut publish = step(
+            step_id,
+            WorkStepKindV1::Publish,
+            WorkStepStatus::Succeeded,
+            None,
+        );
+        publish.artifacts = vec![id.into()];
+        update(
+            hub,
+            WorkRuntimeUpdate::BeginStep {
+                execution: second,
+                attempt,
+                step: publish,
+                artifacts: vec![object(
+                    id,
+                    second,
+                    (node, attempt),
+                    data,
+                    Some(revises),
+                    None,
+                )],
+                evidence: None,
+                file: None,
+            },
+        )
+    };
+    let plan = artifact::WorkArtifactDataV1::Plan {
+        steps: vec![WorkPlanStepV1 {
+            when: None,
+            title: "Fly".into(),
+            detail: None,
+            kind: WorkPlanStepKindV1::Travel,
+            cost: None,
+            place: None,
+            pick: None,
+            source: None,
+        }],
+        total: None,
+        checkable: false,
+    };
+    assert!(matches!(
+        revise(&mut hub, 3, 20, plan, 10),
+        Err(WorkError::Conflict)
+    ));
+    assert!(matches!(
+        revise(&mut hub, 3, 20, reply("Cheaper"), 99),
+        Err(WorkError::NotFound)
+    ));
+    revise(&mut hub, 3, 20, reply("Cheaper trip"), 10).unwrap();
+    assert!(matches!(
+        revise(&mut hub, 4, 21, reply("Cheapest trip"), 10),
+        Err(WorkError::Conflict)
+    ));
+    revise(&mut hub, 4, 21, reply("Cheapest trip"), 20).unwrap();
+    let state = read_runtime(&mut hub, &initial);
+    let run = state.executions.iter().find(|e| e.id == second).unwrap();
+    assert_eq!(
+        run.artifacts.iter().map(|a| a.revises).collect::<Vec<_>>(),
+        [Some(10.into()), Some(20.into())]
+    );
 }

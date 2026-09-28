@@ -114,6 +114,14 @@ impl WorkRequest {
                 update: runtime::WorkRuntimeUpdate::ExtendLimits { limits, .. },
                 ..
             } => limits.validate(),
+            Self::RuntimeUpdate {
+                update: runtime::WorkRuntimeUpdate::Part { part, .. },
+                ..
+            } => part.validate(),
+            Self::RuntimeUpdate {
+                update: runtime::WorkRuntimeUpdate::Input { input, .. },
+                ..
+            } => input.validate(),
             Self::ReadMediaContext { resource, revision } => {
                 validate_text(resource, 128)?;
                 validate_text(revision, 128)

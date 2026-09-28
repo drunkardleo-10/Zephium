@@ -723,6 +723,7 @@ impl Context<'_> {
                         command: WorkCommandId::generate(),
                         intent: WorkRuntimeIntent::BeginAgent {
                             grant: WorkAgentGrantV1 {
+                                lead: None,
                                 provider: WorkSearchProvider::OpenAi,
                                 model: PUBLIC_SEARCH_MODEL.into(),
                                 max_turns: 8,

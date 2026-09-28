@@ -10,6 +10,10 @@ pub const MAX_WORK_EXECUTIONS: usize = 16;
 pub const MAX_WORK_ATTEMPTS: usize = 128;
 pub const MAX_WORK_COMMANDS: usize = 256;
 pub const MAX_WORK_STEPS: usize = 48;
+/// A lead run's steps: its parts' pages and searches share one run.
+pub const MAX_LEAD_STEPS: usize = 255;
+/// A lead run's objects, their revisions and its pages' records.
+pub const MAX_LEAD_ARTIFACTS: usize = 128;
 pub const MAX_WORK_STEP_NOTE_BYTES: usize = 512;
 /// The note of a step that was running when the app closed.
 pub const WORK_STEP_INTERRUPTED: &str = "Zephium closed during this step";
@@ -186,6 +190,10 @@ pub struct WorkAgentGrantV1 {
     /// never in the person's sessions.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub private: bool,
+    /// The lead agent's model: this run is a lead run with tools, parts and
+    /// the current object kinds. Absent for the earlier runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead: Option<super::model::WorkModelRef>,
 }
 impl WorkAgentGrantV1 {
     pub fn validate(&self) -> Result<(), WorkError> {
@@ -206,17 +214,38 @@ impl WorkAgentGrantV1 {
         {
             return Err(WorkError::Invalid);
         }
+        if let Some(lead) = &self.lead {
+            validate_text(&lead.model, 128)?;
+            if lead.model.chars().any(char::is_whitespace) {
+                return Err(WorkError::Invalid);
+            }
+        }
+        let max_turns = if self.lead.is_some() { u8::MAX } else { 16 };
         if !super::search::supported_public_search_model(&self.model)
             || self.max_turns == 0
-            || self.max_turns > 16
+            || self.max_turns > max_turns
             || self.max_steps == 0
-            || usize::from(self.max_steps) > MAX_WORK_STEPS
+            || usize::from(self.max_steps) > self.step_limit()
             || self.browse_hops == 0
             || self.browse_hops > 8
         {
             return Err(WorkError::Invalid);
         }
         Ok(())
+    }
+    pub fn step_limit(&self) -> usize {
+        if self.lead.is_some() {
+            MAX_LEAD_STEPS
+        } else {
+            MAX_WORK_STEPS
+        }
+    }
+    pub fn artifact_limit(&self) -> usize {
+        if self.lead.is_some() {
+            MAX_LEAD_ARTIFACTS
+        } else {
+            MAX_WORK_ARTIFACTS
+        }
     }
     /// The approved origin a page URL lies inside, if any.
     pub fn account_for(&self, url: &str) -> Option<&WorkAccountGrantV1> {
@@ -1002,6 +1031,12 @@ pub struct WorkExecutionFact {
     /// grant and the steps; see `refresh_accounts`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accounts: Vec<WorkAccountUseV1>,
+    /// The parts a lead run split into, in the order they were started.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<super::parts::WorkPartFactV1>,
+    /// What a lead run pulled in: skills, notes, tabs, files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<super::parts::WorkInputFactV1>,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -1243,6 +1278,9 @@ pub struct WorkStepFact {
     /// A page opened in the person's own session on its site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<Box<WorkPageAccountV1>>,
+    /// The part of a lead run this step works for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<WorkPartId>,
 }
 impl WorkStepKindV1 {
     fn validate(&self) -> Result<(), WorkError> {
@@ -1724,7 +1762,10 @@ impl WorkExecutionFact {
         if self.approved_revision <= plan.revision
             || self.approved_revision > revision
             || self.attempts.len() > MAX_WORK_ATTEMPTS
-            || self.artifacts.len() > MAX_WORK_ARTIFACTS
+            || self.artifacts.len()
+                > self
+                    .agent_grant()
+                    .map_or(MAX_WORK_ARTIFACTS, WorkAgentGrantV1::artifact_limit)
         {
             return Err(WorkError::Invalid);
         }
@@ -1745,6 +1786,8 @@ impl WorkExecutionFact {
         if self.authorization == WorkExecutionAuthorization::UserDirectedAgent
             || !self.steps.is_empty()
             || !self.accounts.is_empty()
+            || !self.parts.is_empty()
+            || !self.inputs.is_empty()
         {
             return Err(WorkError::Invalid);
         }
@@ -2008,6 +2051,49 @@ impl WorkExecutionFact {
             _ => None,
         }
     }
+    /// Parts, inputs, and the part and revision marks of objects belong to
+    /// lead runs; a revision names an earlier object, at most once per run.
+    fn validate_parts(&self, grant: &WorkAgentGrantV1) -> Result<(), WorkError> {
+        use super::parts::{MAX_WORK_INPUTS, MAX_WORK_PARTS};
+        let lead = grant.lead.is_some();
+        if (!lead
+            && (!self.parts.is_empty()
+                || !self.inputs.is_empty()
+                || self.steps.iter().any(|s| s.part.is_some())
+                || self
+                    .artifacts
+                    .iter()
+                    .any(|a| a.part.is_some() || a.revises.is_some())))
+            || self.parts.len() > MAX_WORK_PARTS
+            || self.inputs.len() > MAX_WORK_INPUTS
+        {
+            return Err(WorkError::Invalid);
+        }
+        let mut parts = BTreeSet::new();
+        for part in &self.parts {
+            part.validate()?;
+            if !parts.insert(part.id) {
+                return Err(WorkError::Invalid);
+            }
+        }
+        for input in &self.inputs {
+            input.validate()?;
+        }
+        let mut revised = BTreeSet::new();
+        for (index, artifact) in self.artifacts.iter().enumerate() {
+            if artifact.part.is_some_and(|part| !parts.contains(&part)) {
+                return Err(WorkError::Invalid);
+            }
+            if let Some(earlier) = artifact.revises {
+                if !revised.insert(earlier)
+                    || self.artifacts[index..].iter().any(|a| a.id == earlier)
+                {
+                    return Err(WorkError::Invalid);
+                }
+            }
+        }
+        Ok(())
+    }
     /// One attempt, incremental steps. Artifacts and provider evidence belong
     /// to exactly one settled step; success ends with a Finish step.
     fn validate_agent(&self, plan: &WorkPlanRevision) -> Result<(), WorkError> {
@@ -2024,7 +2110,7 @@ impl WorkExecutionFact {
             || node.parent.is_some()
             || node.node != planned.id
             || !planned.dependencies.is_empty()
-            || self.steps.len() > MAX_WORK_STEPS
+            || self.steps.len() > grant.step_limit()
             || self.steps.len() > usize::from(grant.max_steps)
             || self.attempts.len() > 1
         {
@@ -2047,6 +2133,7 @@ impl WorkExecutionFact {
         {
             return Err(WorkError::Invalid);
         }
+        self.validate_parts(grant)?;
         // A signed-in read lies inside a granted origin, within its budget.
         let accounts = self.account_use();
         if self.accounts != accounts || accounts.iter().any(|use_| use_.pages_used > use_.pages) {
@@ -2063,7 +2150,13 @@ impl WorkExecutionFact {
         let mut finished = false;
         for step in &self.steps {
             step.validate()?;
-            if !ids.insert(step.id) || step.turn > grant.max_turns || finished {
+            if !ids.insert(step.id)
+                || step.turn > grant.max_turns
+                || finished
+                || step
+                    .part
+                    .is_some_and(|part| !self.parts.iter().any(|p| p.id == part))
+            {
                 return Err(WorkError::Invalid);
             }
             if matches!(step.kind, WorkStepKindV1::RunCommand { .. }) {
@@ -2399,6 +2492,18 @@ pub enum WorkRuntimeUpdate {
         execution: WorkExecutionId,
         attempt: WorkAttemptId,
         limits: WorkExecutionLimits,
+    },
+    /// A lead run's part as it stands now: added once, then replaced by id.
+    Part {
+        execution: WorkExecutionId,
+        attempt: WorkAttemptId,
+        part: super::parts::WorkPartFactV1,
+    },
+    /// Something a lead run pulled in.
+    Input {
+        execution: WorkExecutionId,
+        attempt: WorkAttemptId,
+        input: super::parts::WorkInputFactV1,
     },
 }
 
