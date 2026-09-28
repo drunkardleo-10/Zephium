@@ -246,10 +246,28 @@ impl Lab {
             ) {
                 Ok((id, root)) => {
                     *this.extension.borrow_mut() = Some(id.clone());
+                    // `"sites": [...]` (with `"permissions": [...]`) grants exactly
+                    // those, as the browser does for its site-access choices.
+                    let grants = match step.get("sites").and_then(Value::as_array) {
+                        Some(sites) => Grants::Explicit {
+                            permissions: step
+                                .get("permissions")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|name| name.as_str().map(str::to_owned))
+                                .collect(),
+                            match_patterns: sites
+                                .iter()
+                                .filter_map(|site| site.as_str().map(str::to_owned))
+                                .collect(),
+                        },
+                        None => Grants::Requested,
+                    };
                     let spec = ExtensionSpec {
                         id,
                         root,
-                        grants: Grants::Requested,
+                        grants,
                         inspectable: true,
                     };
                     this.runtime.load(spec, move |result| {
@@ -377,13 +395,16 @@ impl Lab {
                 .map_err(|e| e.to_string())?;
             verified.id.to_string()
         } else {
-            copy_dir(source, &target).map_err(|e| e.to_string())?;
+            zephium_webext::archive::copy_dir(source, &target, &Default::default())
+                .map_err(|e| e.to_string())?;
             id.unwrap_or("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").to_owned()
         };
         if compat {
             let report = zephium_webext::prepare::prepare(
                 &target,
-                &zephium_webext::prepare::CompatLayer::new(compat::SCRIPT.to_owned()),
+                // The permissions the browser adds to every package.
+                &zephium_webext::prepare::CompatLayer::new(compat::SCRIPT.to_owned())
+                    .with_permissions(&["nativeMessaging", "activeTab"]),
             )
             .map_err(|e| e.to_string())?;
             println!(
@@ -392,7 +413,6 @@ impl Lab {
                 report.html_injected,
                 report.events.len()
             );
-            ensure_native_messaging(&target)?;
         }
         Ok((id, target))
     }
@@ -627,37 +647,4 @@ fn evaluate(
             Some(&block),
         )
     };
-}
-
-fn ensure_native_messaging(root: &Path) -> Result<(), String> {
-    let path = root.join("manifest.json");
-    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut manifest: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    let permissions = manifest
-        .as_object_mut()
-        .ok_or("manifest is not an object")?
-        .entry("permissions")
-        .or_insert_with(|| Value::Array(Vec::new()));
-    if let Some(list) = permissions.as_array_mut() {
-        if !list.iter().any(|p| p == "nativeMessaging") {
-            list.push(Value::String("nativeMessaging".into()));
-            std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap())
-                .map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
-}
-
-fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
-        let target = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), target)?;
-        }
-    }
-    Ok(())
 }
