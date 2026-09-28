@@ -5,6 +5,9 @@
 //! key or through Zephium Cloud with a bearer. Every failure leaves as a closed
 //! [`WorkModelError`]; provider text never crosses.
 
+mod anthropic;
+mod chat;
+mod gemini;
 pub mod keys;
 mod listing;
 pub mod models;
@@ -369,7 +372,9 @@ impl LeadClient {
     fn body(&self, request: &WorkModelRequest) -> Result<Vec<u8>, WorkModelError> {
         let body = match self.target.wire {
             WorkModelWire::OpenAiResponses => openai::body(request, &self.target)?,
-            _ => return Err(WorkModelError::BadRequest),
+            WorkModelWire::AnthropicMessages => anthropic::body(request, &self.target)?,
+            WorkModelWire::Gemini => gemini::body(request)?,
+            WorkModelWire::ChatCompletions => chat::body(request, &self.target)?,
         };
         serde_json::to_vec(&body).map_err(|_| WorkModelError::BadRequest)
     }
@@ -715,12 +720,19 @@ impl Decoded {
 
 enum WireDecoder {
     OpenAi(openai::Decoder),
+    Anthropic(anthropic::Decoder),
+    Gemini(gemini::Decoder),
+    Chat(chat::Decoder),
 }
 
 impl WireDecoder {
     fn new(wire: WorkModelWire) -> Self {
-        let _ = wire;
-        Self::OpenAi(Default::default())
+        match wire {
+            WorkModelWire::OpenAiResponses => Self::OpenAi(Default::default()),
+            WorkModelWire::AnthropicMessages => Self::Anthropic(Default::default()),
+            WorkModelWire::Gemini => Self::Gemini(Default::default()),
+            WorkModelWire::ChatCompletions => Self::Chat(Default::default()),
+        }
     }
 
     fn event(
@@ -728,13 +740,21 @@ impl WireDecoder {
         frame: &sse::SseEvent,
         out: &mut Vec<WorkModelEvent>,
     ) -> Result<Flow, WorkModelError> {
-        let Self::OpenAi(decoder) = self;
-        decoder.event(frame, out)
+        match self {
+            Self::OpenAi(decoder) => decoder.event(frame, out),
+            Self::Anthropic(decoder) => decoder.event(frame, out),
+            Self::Gemini(decoder) => decoder.event(frame, out),
+            Self::Chat(decoder) => decoder.event(frame, out),
+        }
     }
 
     fn finish(self, out: &mut Vec<WorkModelEvent>) -> Result<Decoded, WorkModelError> {
-        let Self::OpenAi(decoder) = self;
-        decoder.finish(out)
+        match self {
+            Self::OpenAi(decoder) => decoder.finish(out),
+            Self::Anthropic(decoder) => decoder.finish(out),
+            Self::Gemini(decoder) => decoder.finish(out),
+            Self::Chat(decoder) => decoder.finish(out),
+        }
     }
 }
 
@@ -906,3 +926,5 @@ pub(crate) fn clip(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wire_tests;
