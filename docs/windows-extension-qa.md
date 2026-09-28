@@ -1,0 +1,83 @@
+# Windows Extensions QA
+
+Branch: `chore/windows-extension-probe`. This is an early Windows QA build,
+not a main-branch release. Use a normal, non-administrator PowerShell.
+
+From the repository root, with its pinned Node/pnpm tools and Rust installed:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File desktop\run-webext-qa.ps1 -Build
+```
+
+Subsequent launches of the existing build:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File desktop\run-webext-qa.ps1
+```
+
+The process-scoped execution-policy argument permits these local scripts without
+changing machine policy. The launcher refuses a second live instance from this
+checkout, verifies the binary's QA product identity, and launches
+`target\webext-qa\Zephium Extensions QA.exe`. Its data belongs exclusively to
+`%APPDATA%\app.zephium.webext-qa`; it does not import a normal Zephium profile.
+`revision.txt` alongside the executable records the build revision.
+
+## First acceptance pass
+
+1. Open a Chrome Web Store listing for Bitwarden or Dark Reader. Use the
+   browser's **Add to Zephium** button, review permissions, and add the extension.
+   Its row should settle to an enabled version without an error.
+2. Visit an ordinary HTTP(S) page. Open **Utilities**, then the extension tile.
+   Check its icon/title, the anchored popup, and close/reopen behavior. Bitwarden
+   should reach its welcome screen. Signed-in vault/autofill testing remains a
+   manual QA task; use a disposable test account.
+3. Disable the extension, reload the page, and check that new content scripts
+   stop running. Re-enable and reload. Dark Reader is a useful visible check.
+   Existing script effects can remain until reload.
+4. In the extension row's menu, select **On specific sites**, allow one test
+   hostname, and reload both that host and a different hostname. Only the
+   allowed host should receive content scripts. Switch back to **All sites**.
+5. Remove the extension, reload the page, and restart QA. Its row, action and
+   injection should stay absent. Reinstall and check a fresh extension state.
+6. Repeat with a second browser profile. Extension enablement and storage should
+   remain separate. Private profiles do not support extensions.
+
+## Current limits
+
+- Popup-only native active-tab query binding works in the lab for Bitwarden and
+  Dark Reader. Dark Reader's background logic still selects a protected `about:`
+  page; its per-site popup controls are not qualified. Its content scripts work.
+- On click access, non-popup action dispatch, extension options pages, and the
+  host runtime permission prompt are not offered in this Windows QA slice.
+- Store installs and signed CRX files retain their verified Chrome identity.
+  ZIP/folder installs require a manifest key; keyless packages are rejected
+  before native loading. Manifest V2 is not supported.
+- Up to eight extensions can run across this Windows process, with one popup.
+  Hidden observer pages use a separate bounded native-resource pool.
+- Work's native adapter uses the extension-free automation subprofile. Its
+  isolation was checked in the lab; the separately developing Work product is
+  not made available by this QA build.
+- Native messaging, signed-in password-manager workflows, complete disk-residue
+  removal, optional-permission UI, and the full extension catalog remain
+  unqualified. The Windows catalog does not claim that every listed item works.
+- Specific-sites manifest narrowing is covered by unit tests and native
+  content-script/injection checks. A native network-rule enforcement qualifier
+  is still pending.
+
+## Resource sampling
+
+Keep a fixed set of tabs, close the popup, and leave QA untouched. Use the PID
+printed by the launcher:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File desktop\measure-webext-qa.ps1 -QaProcessId 1234 -Seconds 600 -Label bitwarden-idle
+```
+
+Repeat with extensions disabled for a comparable baseline. Results are written
+under `target\webext-qa-resources`. The sampler includes only the QA process tree,
+uses no debugger, and reports private bytes, summed working sets, process count
+and CPU as a percentage of one core. Working sets can double-count shared pages;
+short-lived processes can make sampled CPU an underestimate. Debug-build numbers
+are qualification evidence, not release performance claims.
+
+Detailed probe findings and remaining work: [Windows handoff](windows-extensions-handoff.md).

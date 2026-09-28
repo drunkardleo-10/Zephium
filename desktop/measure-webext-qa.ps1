@@ -1,0 +1,59 @@
+param(
+    [Parameter(Mandatory = $true)][int]$QaProcessId,
+    [ValidateRange(10, 1800)][int]$Seconds = 600,
+    [ValidatePattern('^[a-z0-9-]+$')][string]$Label = 'idle'
+)
+$ErrorActionPreference = 'Stop'
+$repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$owner = Get-Process -Id $QaProcessId
+$allowed = @((Join-Path $repo 'target\webext-qa\Zephium Extensions QA.exe'), (Join-Path $repo 'target\debug\zephium-desktop.exe'))
+if ($owner.Path -notin $allowed -or $owner.MainWindowTitle -ne 'Zephium Extensions QA') {
+    throw 'The selected process is not this checkout''s isolated QA app.'
+}
+$results = Join-Path $repo ('target\webext-qa-resources\' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + $Label)
+New-Item -ItemType Directory -Path $results -Force | Out-Null
+$previous = @{}
+$clock = [Diagnostics.Stopwatch]::StartNew()
+$lastSample = 0.0
+while ($clock.Elapsed.TotalSeconds -le $Seconds) {
+    $owner.Refresh()
+    if ($owner.HasExited) { throw 'QA exited during measurement.' }
+    $inventory = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId)
+    $ids = [Collections.Generic.HashSet[int]]::new()
+    [void]$ids.Add($QaProcessId)
+    do {
+        $added = $false
+        foreach ($entry in $inventory) {
+            if ($ids.Contains([int]$entry.ParentProcessId) -and $ids.Add([int]$entry.ProcessId)) { $added = $true }
+        }
+    } while ($added)
+    $now = $clock.Elapsed.TotalSeconds
+    $privateBytes = 0L; $workingSet = 0L; $cpuDelta = 0.0; $count = 0
+    $current = @{}
+    foreach ($processId in $ids) {
+        $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if ($null -eq $process) { continue }
+        $key = "$processId/$($process.StartTime.Ticks)"
+        $cpu = $process.TotalProcessorTime.TotalSeconds
+        if ($previous.ContainsKey($key)) { $cpuDelta += [Math]::Max(0, $cpu - $previous[$key]) }
+        $current[$key] = $cpu
+        $privateBytes += $process.PrivateMemorySize64
+        $workingSet += $process.WorkingSet64
+        $count++
+    }
+    $percent = if ($previous.Count -and $now -gt $lastSample) { 100 * $cpuDelta / ($now - $lastSample) } else { $null }
+    [pscustomobject]@{
+        elapsedSeconds = [Math]::Round($now, 2)
+        processCount = $count
+        privateMiB = [Math]::Round($privateBytes / 1MB, 2)
+        workingSetMiB = [Math]::Round($workingSet / 1MB, 2)
+        cpuOneCorePercent = $percent
+    } | Export-Csv -LiteralPath (Join-Path $results 'samples.csv') -NoTypeInformation -Append
+    $previous = $current; $lastSample = $now
+    $remaining = $Seconds - $clock.Elapsed.TotalSeconds
+    if ($remaining -le 0) { break }
+    Start-Sleep -Milliseconds ([int]([Math]::Min(30, $remaining) * 1000))
+}
+# Working sets double-count shared pages. CPU is a sampled lower bound when
+# child processes exit between observations. No debugger is attached.
+Write-Output $results
