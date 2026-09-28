@@ -146,15 +146,14 @@
     return { note: lineCount(note, Math.floor(inner / (12 * 0.56))) <= room ? note : "" };
   }
   /** From afar a name takes the largest size, up to its grown overview size, that keeps it whole. */
-  function farSize(name: string, marked: boolean): number {
-    const inner = W - 28 - (marked ? 38 : 0);
-    const top = 22 * Math.min(1.4, 1 / Math.max(scale, 0.01));
-    for (let size = top; size >= 14; size -= 0.5)
-      if (lineCount(name, Math.floor(inner / (size * GLYPH))) <= 2) return size;
-    for (let size = Math.min(top, (H - 8) / 3 / 1.12); size >= 12; size -= 0.5)
-      if (lineCount(name, Math.floor(inner / (size * GLYPH))) <= 3) return size;
-    return 12;
-  }
+  /** From afar every name reads at 11 px on screen at 50%: its size grows back by the fit. */
+  const farSize = $derived(22 * Math.min(1.4, 1 / Math.max(scale, 0.01)));
+  /**
+   * A name that needs a third line at that size takes it, and its part grows
+   * down into the row's air: type never shrinks below what reads from afar.
+   */
+  const tall = (name: string, marked: boolean) =>
+    lineCount(name, Math.floor((W - 28 - (marked ? 38 : 0)) / (farSize * GLYPH))) > 2;
   const shift = (points: readonly { x: number; y: number }[]) =>
     points.map((point) => ({ x: point.x - bounds.x, y: point.y - bounds.y }));
   /** From afar a mark keeps its place only where the name still fits two lines beside it. */
@@ -232,6 +231,7 @@
         !!logo && (detail !== "overview" || roomy(node.name))}
       <div
         class="part"
+        class:tall={detail === "overview" && tall(node.name, marked)}
         class:dim={!near.has(node.id)}
         style:inset-inline-start={`${node.x}px`}
         style:inset-block-start={`${node.y}px`}
@@ -260,9 +260,8 @@
           <span class="words">
             <strong
               class="name"
-              style:font-size={detail === "overview"
-                ? `${farSize(node.name, marked)}px`
-                : undefined}>{node.name}</strong
+              style:font-size={detail === "overview" ? `${farSize}px` : undefined}
+              >{node.name}</strong
             >
             {#if detail === "full" && words(node, marked).note}<span class="line"
                 >{words(node, marked).note}</span
@@ -385,6 +384,10 @@
   .part {
     position: absolute;
     transition: opacity var(--motion-fast) var(--ease-out);
+  }
+
+  .part.tall {
+    z-index: 2;
   }
 
   .part.dim {
@@ -556,5 +559,11 @@
 
   .ask:hover {
     background: var(--color-control-hover);
+  }
+
+  .part.tall .face {
+    block-size: auto;
+    min-block-size: 100%;
+    padding-block: 6px;
   }
 </style>

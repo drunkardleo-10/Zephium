@@ -39,7 +39,21 @@
       : { figure: display, period: "" };
   });
   /** The name's longest word, so a single long word shrinks the title rather than clipping. */
-  const longest = $derived(Math.max(6, ...pick.name.split(/\s+/u).map((word) => word.length)));
+  const word = $derived(
+    pick.name.split(/\s+/u).reduce((a, b) => (b.length > a.length ? b : a), ""),
+  );
+  const longest = $derived(Math.max(6, word.length));
+  let room = $state(0);
+  /**
+   * Whole words first: the name shrinks (to its floor) so its longest word fits.
+   * Only a word that cannot fit even there breaks, with a hyphen, and never one
+   * a person reads as a name.
+   */
+  const hyphenate = $derived(
+    !!room &&
+      longest * 0.64 * (detail === "full" ? 12 : 22) > room &&
+      word[0] === word[0]?.toLowerCase(),
+  );
   const lead = $derived(pick.facts[0]);
   /** A yes or no says itself with its mark; a value reads after its label. */
   const leadText = $derived(
@@ -92,8 +106,8 @@
         >{/if}
       <header>
         {#if logo}<Mark address={logo} size={detail === "full" ? 20 : 36} />{/if}
-        <div class="names">
-          <h4 style:--longest={longest}>
+        <div class="names" bind:clientWidth={room}>
+          <h4 style:--longest={longest} class:hyphenate>
             {#if pick.url && detail === "full"}<a
                 class="nodrag"
                 href={pick.url}
@@ -303,12 +317,15 @@
 
   h4 {
     margin: 0;
-    font-size: clamp(12px, 100cqi / (var(--longest) * 0.58), var(--text-page-title));
-    hyphens: auto;
+    font-size: clamp(12px, 100cqi / (var(--longest) * 0.64), var(--text-page-title));
     font-weight: 600;
     line-height: 19px;
     letter-spacing: -0.005em;
     text-wrap: pretty;
+  }
+
+  h4.hyphenate {
+    hyphens: auto;
   }
 
   h4 a {
@@ -482,7 +499,7 @@
   .overview h4 {
     font-size: clamp(
       var(--text-overview-label),
-      100cqi / (var(--longest) * 0.58),
+      100cqi / (var(--longest) * 0.64),
       var(--text-overview-title)
     );
     line-height: 1.2;

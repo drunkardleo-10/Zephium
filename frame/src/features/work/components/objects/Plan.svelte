@@ -88,8 +88,8 @@
       </li>
     {/each}
   </ol>
-  {#if object.total && detail !== "tile"}
-    <p class="total">
+  {#if object.total?.value.trim() && detail !== "tile"}
+    <p class="total" class:loose={!priced}>
       <span class="label">{object.total.label}</span><span class="value">{object.total.value}</span>
     </p>
   {/if}
@@ -271,6 +271,14 @@
     margin-inline-start: calc(var(--when) + var(--node) + 28px);
     padding-block-start: 14px;
     border-block-start: 1px solid var(--color-border-strong);
+  }
+
+  /* With no cost column to line up under, the total stands as a figure over its label. */
+  .total.loose {
+    flex-direction: column-reverse;
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 2px;
   }
 
   .total .label {
