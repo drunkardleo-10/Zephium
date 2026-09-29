@@ -958,37 +958,70 @@
   function isStructuredData(element) {
     return lower(attribute(element, "type", 64) || "") === "application/ld+json";
   }
-  const FACT_TYPES = ["product", "hotel", "lodgingbusiness", "vacationrental", "event", "flight"];
+  const FACT_TYPES = ["product", "productgroup", "hotel", "lodgingbusiness", "vacationrental", "event", "flight",
+    "softwareapplication", "webapplication", "course", "book", "restaurant", "localbusiness", "touristattraction"];
+  const FACT_SKIP = ["@context", "@type", "@id", "name", "url", "image", "offers", "aggregaterating", "description",
+    "brand", "review", "mainentityofpage", "sameas", "potentialaction", "isrelatedto", "hasvariant"];
+  const MAX_FACT_BYTES = 3600;
   function fact(value, limit) {
     if (arrayIsArray(value)) value = value[0];
-    if (value !== null && typeof value === "object") value = value.url || value.contentUrl;
+    if (value !== null && typeof value === "object") value = value.url || value.contentUrl || value.name || value.value;
     return typeof value === "number" ? "" + value : typeof value === "string" ? apply(stringSlice, apply(stringTrim, value, []), [0, limit]) : "";
+  }
+  // One item as "type: name | key: value ...", items joined by " ;; ": its offer, rating, brand and
+  // the plain properties it states (piece count, age range, sku), then its
+  // picture and address when there is room.
+  function factPairs(item, type) {
+    const offer = (arrayIsArray(item.offers) ? item.offers[0] : item.offers) || {};
+    const rating = item.aggregateRating || {};
+    const pairs = [];
+    const add = (key, value) => { if (value !== "" && value !== "N/A" && pairs.length < 14) pairs.push(key + ": " + value); };
+    const price = fact(offer.price || offer.lowPrice, 24);
+    if (price !== "") add("price", apply(stringTrim, price + " " + fact(offer.priceCurrency, 8), []));
+    if (fact(rating.ratingValue, 8) !== "") add("rating", fact(rating.ratingValue, 8) + (fact(rating.reviewCount || rating.ratingCount, 12) !== "" ? " (" + fact(rating.reviewCount || rating.ratingCount, 12) + ")" : ""));
+    add("brand", fact(item.brand, 60));
+    const availability = fact(offer.availability, 80);
+    if (availability !== "") add("availability", apply(stringSplit, availability, ["/"]).pop());
+    for (const key of objectKeys(item).slice(0, 40)) {
+      if (FACT_SKIP.includes(lower(key))) continue;
+      const value = item[key];
+      const text = typeof value === "string" || typeof value === "number" ? fact(value, 60)
+        : value !== null && typeof value === "object" && !arrayIsArray(value) && value.value !== undefined ? fact(value.value, 60) : "";
+      if (text !== "" && !apply(stringIncludes, text, ["http"])) add(key, text);
+    }
+    const extra = arrayIsArray(item.additionalProperty) ? item.additionalProperty.slice(0, 8) : [];
+    for (const property of extra) {
+      if (property !== null && typeof property === "object") add(fact(property.name, 32), fact(property.value, 60));
+    }
+    return { head: type + ": " + fact(item.name, 160), pairs, image: fact(item.image, 600), url: fact(item.url || offer.url, 600) };
   }
   function structuredFacts(element) {
     if (!isStructuredData(element) || scriptTextGetter === null) return null;
-    const lines = [], pending = [];
+    const items = [], pending = [];
     try {
       const text = read(scriptTextGetter, element);
-      if (text.length > 65536) return null;
+      if (text.length > 262144) return null;
       pending.push(apply(jsonParse, JSON, [text]));
     } catch (_) { return null; }
-    for (let seen = 0; pending.length !== 0 && seen < 300 && lines.length < 12; seen += 1) {
+    for (let seen = 0; pending.length !== 0 && seen < 400 && items.length < 24; seen += 1) {
       const item = pending.shift();
       if (item === null || typeof item !== "object") continue;
       if (arrayIsArray(item)) { pending.push(...item.slice(0, 48)); continue; }
       const type = lower(fact(item["@type"], 40));
       if (!FACT_TYPES.includes(type)) {
-        for (const key of ["@graph", "itemListElement", "item", "mainEntity"]) if (item[key] !== undefined) pending.push(item[key]);
+        for (const key of ["@graph", "itemListElement", "item", "mainEntity", "hasVariant"]) if (item[key] !== undefined) pending.push(item[key]);
         continue;
       }
-      const offer = (arrayIsArray(item.offers) ? item.offers[0] : item.offers) || item;
-      const rating = item.aggregateRating || {};
-      const parts = [fact(item.name, 160), fact(offer.price || offer.lowPrice, 24) + " " + fact(offer.priceCurrency, 8),
-        fact(rating.ratingValue, 8) && "rated " + fact(rating.ratingValue, 8) + " (" + fact(rating.reviewCount || rating.ratingCount, 12) + ")",
-        fact(item.image, 600), fact(item.url, 600)].map(part => apply(stringTrim, part, [])).filter(part => part !== "" && part !== "()");
-      if (parts.length > 1) lines.push(type + ": " + parts.join(" | "));
+      if (fact(item.name, 160) !== "") items.push(factPairs(item, type));
     }
-    return lines.length === 0 ? null : lines.join("\n");
+    const render = (pictures) => items.map(item => [item.head, ...item.pairs,
+      ...(pictures && item.image !== "" ? ["image: " + item.image] : []),
+      ...(item.url !== "" ? ["url: " + item.url] : [])].join(" | "));
+    // Items stay apart as " ;; ": node text folds line breaks into spaces.
+    let lines = render(true);
+    if (lines.join(" ;; ").length > MAX_FACT_BYTES) lines = render(false);
+    while (lines.length > 1 && lines.join(" ;; ").length > MAX_FACT_BYTES) lines.pop();
+    return lines.length === 0 || lines[0].length > MAX_FACT_BYTES ? null : lines.join(" ;; ");
   }
 
   // The page's own title (og:title, or the document <title>), projected as a

@@ -399,7 +399,42 @@ impl DecisionRowDiscovery {
                     .collect()
             })
             .collect();
-        let all: BTreeSet<_> = targets.iter().flatten().flatten().copied().collect();
+        // A value the record does not show may still be in the page's own
+        // structured data for that record (a catalog's piece counts, ages,
+        // brands): it is taken from there, cited to the page facts.
+        let facts = page_facts(observation);
+        let mut from_facts: BTreeMap<(usize, usize), String> = BTreeMap::new();
+        if let Some((_, text)) = facts {
+            for (row_index, (row, row_targets)) in self.rows.iter().zip(&targets).enumerate() {
+                let link = row.link.and_then(|link| node_link(observation, link));
+                let name = node_copied(observation, row.name);
+                for (column, (field, source)) in self
+                    .projection
+                    .columns
+                    .iter()
+                    .zip(&self.sources)
+                    .enumerate()
+                {
+                    if row_targets[column].is_some()
+                        || *source != ColumnSource::Located
+                        || field.verbatim_text()
+                    {
+                        continue;
+                    }
+                    if let Some(value) =
+                        facts_value(text, link.as_deref(), name.as_deref(), field.name()).filter(
+                            |value| field.max_text_bytes().is_none_or(|max| value.len() <= max),
+                        )
+                    {
+                        from_facts.insert((row_index, column), value);
+                    }
+                }
+            }
+        }
+        let mut all: BTreeSet<_> = targets.iter().flatten().flatten().copied().collect();
+        if let (Some((reference, _)), false) = (facts, from_facts.is_empty()) {
+            all.insert(reference);
+        }
         let read = crate::semantic_read::read_located_semantic_observation_at(
             observation,
             &self.baseline,
@@ -409,11 +444,30 @@ impl DecisionRowDiscovery {
             None,
         )
         .map_err(|_| SemanticExtractionError::ReadNotDelivered)?;
+        let facts_token = facts.and_then(|(reference, _)| {
+            read.fragments()
+                .iter()
+                .find(|fragment| {
+                    fragment.provenance().reference() == reference
+                        && fragment.field() == SemanticReadField::VisibleText
+                        && fragment.provenance().fields_complete()
+                })
+                .map(|fragment| fragment.id().model_token().to_string())
+        });
         let mut rows = Vec::new();
-        'rows: for row_targets in &targets {
+        'rows: for (row_index, row_targets) in targets.iter().enumerate() {
             let mut fields = Vec::new();
-            for (field, target) in self.projection.columns.iter().zip(row_targets) {
-                match target.and_then(|target| copy(&read, field, target)) {
+            for (column, (field, target)) in
+                self.projection.columns.iter().zip(row_targets).enumerate()
+            {
+                let value = target
+                    .and_then(|target| copy(&read, field, target))
+                    .or_else(|| {
+                        let value = from_facts.get(&(row_index, column))?;
+                        let token = facts_token.as_ref()?;
+                        Some(json!({"k":"text","sources":[token],"value":value}))
+                    });
+                match value {
                     Some(value) => fields.push(json!({"name":field.name(),"value":value})),
                     None if field.required() => continue 'rows,
                     None => {}
@@ -746,6 +800,90 @@ fn row_pick(
     })
 }
 
+/// The page's structured-data node: each item its schema.org data names as
+/// "type: name | key: value | ... | url: address", items joined by " ;; ".
+fn page_facts(observation: &SemanticObservation) -> Option<(SemanticReferenceId, &str)> {
+    observation
+        .frames()
+        .first()?
+        .nodes()
+        .iter()
+        .find(|node| {
+            node.role() == SemanticRole::Paragraph
+                && node
+                    .name()
+                    .is_some_and(|name| name.as_str() == "Page facts")
+                && node.sensitivity() == SemanticSensitivity::Public
+        })
+        .and_then(|node| Some((node.reference(), node.text()?.as_str())))
+}
+
+/// One record's value for a column from the page facts: the line whose
+/// address or name is the record's, and the key the column names
+/// ("pieces" reads pieceCount, "age" reads ageRange).
+pub(super) fn facts_value(
+    facts: &str,
+    link: Option<&str>,
+    name: Option<&str>,
+    column: &str,
+) -> Option<String> {
+    let key = |text: &str| -> String {
+        text.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let path = |url: &str| {
+        url::Url::parse(url)
+            .ok()
+            .map(|url| url.path().trim_end_matches('/').to_ascii_lowercase())
+            .filter(|path| !path.is_empty())
+    };
+    let column = key(column);
+    let column = column
+        .strip_suffix('s')
+        .filter(|c| c.len() >= 3)
+        .unwrap_or(&column)
+        .to_owned();
+    if column.len() < 3 || matches!(column.as_str(), "name" | "url" | "link" | "image" | "photo") {
+        return None;
+    }
+    let link = link.and_then(path);
+    let name = name.map(|name| name.trim().to_lowercase());
+    for line in facts.split(" ;; ") {
+        let mut pairs = line.split(" | ");
+        let head = pairs.next()?;
+        let pairs: Vec<(&str, &str)> = pairs.filter_map(|pair| pair.split_once(": ")).collect();
+        let named = head
+            .split_once(": ")
+            .map(|(_, item)| item.trim().to_lowercase());
+        let address = pairs
+            .iter()
+            .find(|(k, _)| k.trim() == "url")
+            .and_then(|(_, url)| path(url));
+        let same = match (&link, &address) {
+            (Some(link), Some(address)) => link == address,
+            _ => named.is_some() && named == name,
+        };
+        if !same {
+            continue;
+        }
+        return pairs
+            .iter()
+            .find(|(k, _)| {
+                let k = key(k);
+                k != "url"
+                    && k != "image"
+                    && (k == column
+                        || k.starts_with(&column)
+                        || (k.len() >= 4 && column.starts_with(&k)))
+            })
+            .map(|(_, value)| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+    }
+    None
+}
+
 fn node_link(observation: &SemanticObservation, reference: SemanticReferenceId) -> Option<String> {
     observation
         .frames()
@@ -767,4 +905,39 @@ fn node_copied(
         .find(|node| node.reference() == reference)
         .and_then(copied_text)
         .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod facts_tests {
+    use super::facts_value;
+
+    const FACTS: &str = "product: Tower Bridge | price: 349.99 USD | ageRange: 18+ | pieceCount: 3745 | url: https://www.lego.com/en-us/product/tower-bridge-21067 ;; product: London | price: 39.99 USD | pieceCount: 468 | url: https://www.lego.com/en-us/product/london-21034";
+
+    #[test]
+    fn a_record_reads_what_the_page_facts_state_for_it() {
+        let london = Some("https://www.lego.com/en-us/product/london-21034/");
+        assert_eq!(
+            facts_value(FACTS, london, None, "pieces").as_deref(),
+            Some("468")
+        );
+        assert_eq!(
+            facts_value(FACTS, london, None, "price").as_deref(),
+            Some("39.99 USD")
+        );
+        assert_eq!(
+            facts_value(FACTS, None, Some("Tower Bridge"), "age").as_deref(),
+            Some("18+")
+        );
+        assert_eq!(facts_value(FACTS, london, None, "age"), None);
+        assert_eq!(facts_value(FACTS, london, None, "url"), None);
+        assert_eq!(
+            facts_value(
+                FACTS,
+                Some("https://www.lego.com/en-us/product/other-1"),
+                Some("London"),
+                "pieces"
+            ),
+            None
+        );
+    }
 }
