@@ -431,7 +431,7 @@ export type FolderView = ObjectBase & {
 };
 
 /** A member of a project's stack, from its manifests: a known product's host draws its mark. */
-type ProjectStackItem = { name: string; logo?: string; version?: string; role?: string };
+type ProjectStackItem = { name: string; host?: string; version?: string; role?: string };
 /** An entry of a project's structure; a folder holds its first entries and counts the rest. */
 export type ProjectEntry = {
   name: string;
@@ -446,8 +446,9 @@ export type ProjectView = ObjectBase & {
   kind: "project";
   name: string;
   /** One line: what the project is. */
-  summary?: string;
-  path?: string;
+  summary: string;
+  /** The folder, as an absolute path. */
+  root: string;
   stack: readonly ProjectStackItem[];
   /** The root's entries, depth ≤ 3. */
   tree: readonly ProjectEntry[];

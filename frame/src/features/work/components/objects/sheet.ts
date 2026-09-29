@@ -83,6 +83,15 @@ export function host(url: string): string {
   }
 }
 
+/** A column that says something in some row: one empty in every row is left out. */
+export function filled(sheet: Pick<SheetView, "columns" | "rows">, index: number): boolean {
+  const column = sheet.columns[index];
+  return sheet.rows.some((row) => {
+    const cell = (row.cells[index] ?? "").trim();
+    return !!cell && !(column?.kind === "yes_no" && yesNo(cell) === "unknown");
+  });
+}
+
 /** The room a typed column takes at reading size, padding included. */
 const ROOM: Partial<Record<SheetColumn["kind"], number>> = {
   money: 104,
@@ -137,6 +146,7 @@ export function fitColumns(sheet: Pick<SheetView, "columns" | "rows">, width: nu
   const candidates = sheet.columns
     .map((_, index) => index)
     .slice(1)
+    .filter((index) => filled(sheet, index))
     .sort((a, b) => rank(a) - rank(b) || a - b);
   let left = width - Math.min(220, longest(0) * CHAR + 40);
   const kept: number[] = [];

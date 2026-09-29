@@ -20,6 +20,8 @@
   const rows = $derived(treeRows(object.tree, object.more));
   const shown = $derived(centre ? rows : rows.slice(0, ROWS));
   const git = $derived(object.git);
+  /** The folder as a person reads it: their home as `~`. */
+  const where = $derived(object.root.replace(/^\/(?:Users|home)\/[^/]+/u, "~"));
 </script>
 
 <section class="project" aria-label={object.name}>
@@ -28,8 +30,8 @@
     <div class="head">
       <h3>{object.name}</h3>
       {#if object.summary}<p class="summary">{object.summary}</p>{/if}
-      {#if object.path || git}<p class="meta">
-          {#if object.path}<span class="path">{object.path}</span>{/if}
+      {#if object.root || git}<p class="meta">
+          {#if object.root}<span class="path" title={object.root}>{where}</span>{/if}
           {#if git}<span class="git">
               <Icon icon={GitBranchIcon} size={13} />
               {#if git.branch}<span class="branch">{git.branch}</span>{/if}
@@ -50,7 +52,7 @@
 
   {#if object.stack.length}<ul class="stack" aria-label={m.work_project_stack()}>
       {#each object.stack as item (item.name)}<li title={item.role}>
-          {#if item.logo}<Mark address={item.logo} size={16} />{/if}
+          {#if item.host}<Mark address={item.host} size={16} />{/if}
           <span class="name">{item.name}</span>
           {#if item.version}<span class="version">{item.version}</span>{/if}
         </li>{/each}

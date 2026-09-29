@@ -96,4 +96,10 @@ test("a sheet keeps its subject and the columns that say most in the width it ha
   // The check first, then the shorter text; the sentences give way until there is room.
   expect(fitColumns(stack, 420)).toEqual([1, 3]);
   expect(fitColumns(stack, 900)).toEqual([1, 2, 3]);
+  // A column empty in every row says nothing and is left out.
+  const blank = {
+    columns: [...costs.columns, { label: "Base price EUR", kind: "money" as const }],
+    rows: costs.rows.map((row) => ({ cells: [...row.cells, " "] })),
+  };
+  expect(fitColumns(blank, 900)).toEqual([1, 2]);
 });

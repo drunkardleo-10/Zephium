@@ -914,13 +914,13 @@ const project: ProjectView = {
   name: "Lunios",
   summary:
     "An AI writing studio: a SvelteKit web app over a Rust API, packaged for the desktop with Tauri.",
-  path: "~/Dev/Lunios",
+  root: "/Users/ada/Dev/Lunios",
   stack: [
-    { name: "SvelteKit", logo: "svelte.dev", version: "2.20", role: "Frontend" },
-    { name: "TypeScript", logo: "typescriptlang.org", version: "5.8" },
-    { name: "Rust", logo: "rust-lang.org", version: "1.89" },
-    { name: "Tauri", logo: "tauri.app", version: "2.4" },
-    { name: "PostgreSQL", logo: "postgresql.org" },
+    { name: "SvelteKit", host: "svelte.dev", version: "2.20", role: "Frontend" },
+    { name: "TypeScript", host: "typescriptlang.org", version: "5.8" },
+    { name: "Rust", host: "rust-lang.org", version: "1.89" },
+    { name: "Tauri", host: "tauri.app", version: "2.4" },
+    { name: "PostgreSQL", host: "postgresql.org" },
     { name: "Vitest" },
   ],
   tree: [
@@ -956,6 +956,29 @@ const project: ProjectView = {
     { name: "lint", command: "cargo clippy --all-targets -- -D warnings", source: "Makefile" },
   ],
   git: { branch: "editor-sync", changed: 3, ahead: 2 },
+};
+
+const roadmap: PlanView = {
+  kind: "plan",
+  id: "roadmap",
+  title: "Learn compilers",
+  checkable: false,
+  steps: [
+    {
+      when: "Jan 3–Feb 1, 2027",
+      title: "Lexing and parsing",
+      detail: "Crafting Interpreters, part one, and the Stanford CS143 lectures.",
+      kind: "task",
+    },
+    { when: "Feb 2–Mar 1, 2027", title: "Semantic analysis and types", kind: "task" },
+    {
+      when: "Mar 2–Apr 1, 2027",
+      title: "Code generation",
+      detail: "Write a backend that emits LLVM IR.",
+      kind: "task",
+    },
+    { when: "Apr 1, 2027", title: "A small language of your own", kind: "milestone" },
+  ],
 };
 
 /** Every object, in the order the look test lays them out. */
@@ -1252,7 +1275,10 @@ export const looks: Record<string, { object: ObjectView; width: number }[]> = {
     { object: videos, width: 860 },
   ],
   flights: [{ object: flights, width: 460 }],
-  plans: [{ object: trip, width: 720 }],
+  plans: [
+    { object: trip, width: 720 },
+    { object: roadmap, width: 560 },
+  ],
   documents: [{ object: guide, width: 520 }],
   media: [
     { object: photo, width: 360 },
@@ -1279,6 +1305,8 @@ export const looks: Record<string, { object: ObjectView; width: number }[]> = {
     { object: providers, width: 880 },
     { object: sets, width: 880 },
     { object: stack, width: 720 },
+    // Given less room than its columns want: the telling ones stay, the rest wait behind a control.
+    { object: { ...providers, id: "providers-narrow" }, width: 520 },
   ],
   "charts-bars": plots.slice(0, 4).map((object) => ({ object, width: 520 })),
   "charts-trends": plots.slice(4, 7).map((object) => ({ object, width: 520 })),

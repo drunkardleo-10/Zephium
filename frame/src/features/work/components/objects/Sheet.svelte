@@ -6,7 +6,17 @@
   } from "$shared/ui/data/DataTable";
   import * as m from "$shared/i18n/messages";
   import type { ObjectActions, SheetView } from "../../lib/board/types";
-  import { bests, cellOrder, figure, fitColumns, host, numeric, rating, yesNo } from "./sheet";
+  import {
+    bests,
+    cellOrder,
+    figure,
+    filled,
+    fitColumns,
+    host,
+    numeric,
+    rating,
+    yesNo,
+  } from "./sheet";
   import { vendorHost } from "../../lib/vendors";
   import Title from "./Title.svelte";
   import Mark, { hasMark } from "./Mark.svelte";
@@ -30,12 +40,14 @@
   let width = $state(0);
   /** Every column once the person asks for them; they scroll inside the sheet. */
   let wide = $state(false);
-  /** The columns that carry most in the width the sheet stands at. */
-  const fitted = $derived(
-    width ? fitColumns(object, width - 44) : object.columns.map((_, index) => index).slice(1),
+  /** The columns that say something; one empty in every row is left out. */
+  const said = $derived(
+    object.columns.map((_, index) => index).filter((index) => index > 0 && filled(object, index)),
   );
-  const kept = $derived(centre || wide ? object.columns.map((_, index) => index).slice(1) : fitted);
-  const hidden = $derived(object.columns.length - 1 - fitted.length);
+  /** Those that carry most in the width the sheet stands at. */
+  const fitted = $derived(width ? fitColumns(object, width - 44) : said);
+  const kept = $derived(centre || wide ? said : fitted);
+  const hidden = $derived(said.length - fitted.length);
   const columns = $derived<TableColumn[]>(
     kept.map((at) => {
       const column = object.columns[at]!;
