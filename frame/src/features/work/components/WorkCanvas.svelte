@@ -201,6 +201,7 @@
   }
   setContext(canvasFocusResult, center);
   const AIR = 64;
+  const HOME_SETTLE = 1500;
   /**
    * The view that holds a span of the canvas across its width: at 100% when
    * it fits, down to 50%; wider still, its right end stays in view, so a
@@ -235,6 +236,12 @@
     const target = home;
     if (!homed || !target || !canvasWidth) return;
     untrack(() => (viewport = framing(target)));
+  });
+  // Homing lasts while the opened run measures itself, never through a run that goes on growing.
+  $effect(() => {
+    if (!homed || !canvasWidth) return;
+    const settle = setTimeout(() => (homed = false), HOME_SETTLE);
+    return () => clearTimeout(settle);
   });
   // One bad card never hides the canvas: the scene is repaired, then guarded.
   const scene = $derived(sanitizeScene(items, links));
