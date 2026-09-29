@@ -167,6 +167,7 @@ where
             started_ms: None,
             ended_ms: None,
             summary: None,
+            need: None,
         };
         if self.run.part(fact.clone()).await.is_err() {
             return ("The part could not be recorded".into(), true);

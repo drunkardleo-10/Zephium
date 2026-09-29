@@ -34,6 +34,43 @@ impl WorkPartStateV1 {
     }
 }
 
+/// What a part that could not do its job needs from the person, with the
+/// thing it concerns. The fix sits on the part's row.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkPartNeedV1 {
+    /// Sign in on the site, then the part can run again.
+    SignIn { host: String },
+    /// Let the agent work on the site as the person.
+    AllowSite { host: String },
+    /// Let the agent read a folder on this Mac.
+    AllowFolder { path: String },
+    /// Use an installed tool or connected service: "gh", "Linear".
+    UseConnection { connection: String },
+    /// The site or service failed on its side; trying again may work.
+    Retry {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+    },
+}
+impl WorkPartNeedV1 {
+    pub fn validate(&self) -> Result<(), WorkError> {
+        let host_ok = |host: &str| super::artifact::public_host(host);
+        let ok = match self {
+            Self::SignIn { host } | Self::AllowSite { host } => host_ok(host),
+            Self::AllowFolder { path } => super::runtime::validate_file_path(path).is_ok(),
+            Self::UseConnection { connection } => words(connection, 40).is_ok(),
+            Self::Retry { host } => host.as_deref().is_none_or(host_ok),
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(WorkError::Invalid)
+        }
+    }
+}
+
 /// What the part's mark shows: a site's host or a connection's name.
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -65,6 +102,10 @@ pub struct WorkPartFactV1 {
     /// What it found, for people: "3 homes".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// What the person can do so the part can do its job. Only a part that
+    /// is waiting or ended without doing it carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub need: Option<WorkPartNeedV1>,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -133,6 +174,15 @@ impl WorkPartFactV1 {
             }
             if let Some(connection) = &service.connection {
                 words(connection, 40)?;
+            }
+        }
+        if let Some(need) = &self.need {
+            need.validate()?;
+            if matches!(
+                self.state,
+                WorkPartStateV1::Planned | WorkPartStateV1::Running | WorkPartStateV1::Done
+            ) {
+                return Err(WorkError::Invalid);
             }
         }
         let started = millis(&self.started_ms)?;

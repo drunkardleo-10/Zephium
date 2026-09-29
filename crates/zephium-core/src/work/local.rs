@@ -93,6 +93,9 @@ pub struct WorkLocalStepV1 {
     pub proposal: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_digest: Option<String>,
+    /// The folder a `folder` question asks to read, as an absolute path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 impl WorkLocalStepV1 {
     pub fn validate(&self, kind: &WorkStepKindV1) -> Result<(), WorkError> {
@@ -133,6 +136,18 @@ impl WorkLocalStepV1 {
         }
         if let Some(digest) = &self.before_digest {
             validate_digest(digest)?;
+        }
+        let folder_ask = matches!(
+            kind,
+            WorkStepKindV1::Ask {
+                purpose: Some(super::runtime::WorkAskPurposeV1::Folder),
+                ..
+            }
+        );
+        match &self.folder {
+            Some(folder) if folder_ask => validate_file_path(folder)?,
+            None if !folder_ask => {}
+            _ => return Err(WorkError::Invalid),
         }
         Ok(())
     }

@@ -51,6 +51,14 @@ fn every_kind_round_trips_its_wire_shape() {
         json!({"kind":"draft","destination":"email","to":"ana@example.com","subject":"The deck",
             "body":"Hi Ana,\n\nThe deck looks good. See [the notes](https://example.com/notes).",
             "target_url":"https://mail.google.com/"}),
+        json!({"kind":"project","name":"Lunios","summary":"A Tauri desktop app with a SvelteKit front end",
+            "root":"/Users/ana/Dev/Lunios",
+            "stack":[{"name":"SvelteKit","version":"2.8","role":"Frontend","host":"svelte.dev","manifest":"package.json"},
+            {"name":"Tauri","version":"2","role":"Desktop shell","host":"tauri.app","manifest":"src-tauri/Cargo.toml"}],
+            "tree":[{"path":"src","kind":"folder"},{"path":"src/routes","kind":"folder","more":3},
+            {"path":"src-tauri","kind":"folder","more":9},{"path":"package.json","kind":"file"}],
+            "scripts":[{"name":"dev","command":"vite dev","source":"package.json"}],
+            "git":{"branch":"main","changed":2,"ahead":1}}),
         json!({"kind":"media","medium":"video","url":"https://www.youtube.com/watch?v=abc","title":"Lecture 1",
             "provider":"youtube","poster":"https://i.ytimg.com/vi/abc/hqdefault.jpg","duration":"1:12:03","start_secs":30}),
     ];
@@ -318,6 +326,7 @@ fn part(id: u128, state: WorkPartStateV1) -> WorkPartFactV1 {
         started_ms: (state != WorkPartStateV1::Planned).then(|| "1790000000000".into()),
         ended_ms: state.terminal().then(|| "1790000100000".into()),
         summary: state.terminal().then(|| "3 homes".into()),
+        need: None,
     }
 }
 
@@ -493,4 +502,133 @@ fn a_connection_call_is_a_settled_step_with_closed_fields() {
     let wire = serde_json::to_value(call(None).kind).unwrap();
     assert_eq!(wire["kind"], "call");
     assert_eq!(wire["call"]["verb"], "issue");
+}
+
+#[test]
+fn a_project_keeps_its_tree_shallow_and_ordered() {
+    let project = |tree: serde_json::Value| {
+        json!({"kind":"project","name":"Lunios","summary":"A Tauri app","root":"/Users/ana/Dev/Lunios",
+            "tree": tree})
+    };
+    assert_eq!(
+        field(project(
+            json!([{"path":"src","kind":"folder"},{"path":"src/lib.rs","kind":"file"}])
+        )),
+        None
+    );
+    for broken in [
+        json!([]),
+        json!([{"path":"src/lib.rs","kind":"file"}]),
+        json!([{"path":"a","kind":"folder"},{"path":"a/b","kind":"folder"},{"path":"a/b/c","kind":"folder"},
+            {"path":"a/b/c/d","kind":"file"}]),
+        json!([{"path":"../etc","kind":"folder"}]),
+        json!([{"path":"/src","kind":"folder"}]),
+        json!([{"path":"README.md","kind":"file","more":3}]),
+        json!([{"path":"src","kind":"folder"},{"path":"src","kind":"folder"}]),
+        json!([{"path":"main.rs","kind":"file"},{"path":"main.rs/x","kind":"file"}]),
+    ] {
+        assert_eq!(field(project(broken)), Some(F::ProjectTree));
+    }
+    let mut relative_root = project(json!([{"path":"src","kind":"folder"}]));
+    relative_root["root"] = json!("Dev/Lunios");
+    assert_eq!(field(relative_root), Some(F::ProjectRoot));
+    let mut twice = project(json!([{"path":"src","kind":"folder"}]));
+    twice["stack"] = json!([{"name":"Rust"},{"name":"rust"}]);
+    assert_eq!(field(twice), Some(F::ProjectStack));
+    let mut url_host = project(json!([{"path":"src","kind":"folder"}]));
+    url_host["stack"] = json!([{"name":"Svelte","host":"https://svelte.dev"}]);
+    assert_eq!(field(url_host), Some(F::ProjectStack));
+}
+
+#[test]
+fn a_part_needs_something_only_once_it_cannot_go_on() {
+    let with = |state, need| WorkPartFactV1 {
+        need: Some(need),
+        ..part(70, state)
+    };
+    let sign_in = || WorkPartNeedV1::SignIn {
+        host: "slack.com".into(),
+    };
+    assert!(with(WorkPartStateV1::Failed, sign_in()).validate().is_ok());
+    assert!(with(WorkPartStateV1::Waiting, sign_in()).validate().is_ok());
+    assert!(with(
+        WorkPartStateV1::Stopped,
+        WorkPartNeedV1::Retry { host: None }
+    )
+    .validate()
+    .is_ok());
+    for state in [
+        WorkPartStateV1::Planned,
+        WorkPartStateV1::Running,
+        WorkPartStateV1::Done,
+    ] {
+        assert!(with(state, sign_in()).validate().is_err());
+    }
+    for need in [
+        WorkPartNeedV1::SignIn {
+            host: "https://slack.com".into(),
+        },
+        WorkPartNeedV1::AllowFolder {
+            path: "Dev/Lunios".into(),
+        },
+        WorkPartNeedV1::UseConnection {
+            connection: String::new(),
+        },
+        WorkPartNeedV1::Retry {
+            host: Some("localhost".into()),
+        },
+    ] {
+        assert!(with(WorkPartStateV1::Failed, need).validate().is_err());
+    }
+    let wire = serde_json::to_value(with(
+        WorkPartStateV1::Failed,
+        WorkPartNeedV1::AllowFolder {
+            path: "/Users/ana/Dev/Lunios".into(),
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        wire["need"],
+        json!({"kind": "allow_folder", "path": "/Users/ana/Dev/Lunios"})
+    );
+}
+
+#[test]
+fn a_folder_question_names_its_folder() {
+    let ask = |local: Option<WorkLocalStepV1>| WorkStepFact {
+        id: 1.into(),
+        turn: 1,
+        kind: WorkStepKindV1::Ask {
+            prompt: "Read Lunios?".into(),
+            options: vec!["Allow for this work".into(), "Not now".into()],
+            answer: None,
+            purpose: Some(WorkAskPurposeV1::Folder),
+        },
+        status: WorkStepStatus::Running,
+        usage: None,
+        artifacts: vec![],
+        evidence: None,
+        note: None,
+        measurements: None,
+        local: local.map(Box::new),
+        account: None,
+        part: None,
+    };
+    let folder = |path: &str| WorkLocalStepV1 {
+        folder: Some(path.into()),
+        ..Default::default()
+    };
+    assert!(ask(Some(folder("/Users/ana/Dev/Lunios")))
+        .validate()
+        .is_ok());
+    assert!(ask(None).validate().is_err());
+    assert!(ask(Some(folder("Dev/Lunios"))).validate().is_err());
+    let mut question = ask(Some(folder("/Users/ana/Dev/Lunios")));
+    question.kind = WorkStepKindV1::Ask {
+        prompt: "Which dates?".into(),
+        options: vec![],
+        answer: None,
+        purpose: Some(WorkAskPurposeV1::Question),
+    };
+    assert!(question.validate().is_err());
 }

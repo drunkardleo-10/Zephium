@@ -411,6 +411,22 @@ pub enum WorkArtifactDataV1 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_url: Option<String>,
     },
+    /// A folder's overview: what it is, its stack, its structure, its
+    /// scripts and its state.
+    Project {
+        name: String,
+        /// One line: what the project is.
+        summary: String,
+        /// The folder, as an absolute path.
+        root: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        stack: Vec<WorkProjectStackV1>,
+        tree: Vec<WorkProjectEntryV1>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        scripts: Vec<WorkProjectScriptV1>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        git: Option<WorkProjectGitV1>,
+    },
     Media {
         /// Image, video or audio; `kind` is the object's own tag.
         medium: WorkMediaKindV1,
@@ -760,6 +776,13 @@ pub enum WorkArtifactField {
     MediaTitle,
     MediaPoster,
     MediaDuration,
+    ProjectName,
+    ProjectSummary,
+    ProjectRoot,
+    ProjectStack,
+    ProjectTree,
+    ProjectScripts,
+    ProjectGit,
     ItemSource,
     /// A kind kept so saved works open; the lead makes the current kinds.
     LegacyKind,
@@ -881,8 +904,15 @@ impl WorkArtifactField {
             Self::MediaTitle => "media title is one line of at most 80 characters",
             Self::MediaPoster => "media poster is a public https URL",
             Self::MediaDuration => "media duration is at most 16 characters and start_secs at most a day",
+            Self::ProjectName => "project name is one line of 1 to 60 characters",
+            Self::ProjectSummary => "project summary is one line of 1 to 160 characters",
+            Self::ProjectRoot => "project root is the folder's absolute path",
+            Self::ProjectStack => "project stack has at most 16 uniquely named items: name at most 32 characters, version and role at most 24, host a bare host, manifest a relative path",
+            Self::ProjectTree => "project tree has 1 to 80 entries, each a relative path at most three names deep whose parent folder comes before it, listed once; only folders have more",
+            Self::ProjectScripts => "project has at most 16 scripts: name at most 32 characters, command at most 160, source at most 24",
+            Self::ProjectGit => "project git branch is one line of at most 80 characters",
             Self::ItemSource => "an item's source must be the 0-based index of one of the object's sources",
-            Self::LegacyKind => "this kind is kept only so saved works open; make reply, picks, plan, list, sheet, plot, diagram, code, diff, document, draft or media",
+            Self::LegacyKind => "this kind is kept only so saved works open; make reply, picks, plan, list, sheet, plot, diagram, code, diff, document, draft, media or project",
         }
     }
 }
@@ -1000,6 +1030,7 @@ impl WorkArtifactDataV1 {
             Self::Diff { .. } => "diff",
             Self::Draft { .. } => "draft",
             Self::Media { .. } => "media",
+            Self::Project { .. } => "project",
         }
     }
     /// `at` names the part under check when an error returns, `index` the
@@ -1109,6 +1140,26 @@ impl WorkArtifactDataV1 {
                     poster,
                     duration,
                     start_secs: *start_secs,
+                }
+                .check(&mut object),
+            )?,
+            Self::Project {
+                name,
+                summary,
+                root,
+                stack,
+                tree,
+                scripts,
+                git,
+            } => objects(
+                Project {
+                    name,
+                    summary,
+                    root,
+                    stack,
+                    tree,
+                    scripts,
+                    git,
                 }
                 .check(&mut object),
             )?,
@@ -1704,6 +1755,28 @@ impl WorkArtifactDataV1 {
             }
             Self::Media { title, .. } => {
                 title.as_deref().map(&mut push);
+            }
+            Self::Project {
+                name,
+                summary,
+                stack,
+                scripts,
+                ..
+            } => {
+                push(name);
+                push(summary);
+                if !stack.is_empty() {
+                    push(
+                        &stack
+                            .iter()
+                            .map(|item| item.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" · "),
+                    );
+                }
+                for script in scripts {
+                    push(&format!("{}: {}", script.name, script.command));
+                }
             }
         }
         out

@@ -1587,6 +1587,7 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
         started_ms: Some("1790000000000".into()),
         ended_ms: None,
         summary: None,
+        need: None,
     };
     update(
         &mut hub,

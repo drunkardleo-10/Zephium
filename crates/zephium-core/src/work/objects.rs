@@ -14,6 +14,10 @@ pub const MAX_PLOT_POINTS: usize = 60;
 pub const MAX_DIFF_HUNKS: usize = 40;
 pub const MAX_DIFF_HUNK_LINES: usize = 400;
 pub const MAX_DRAFT_BODY_CHARS: usize = 4000;
+pub const MAX_PROJECT_STACK: usize = 16;
+pub const MAX_PROJECT_TREE: usize = 80;
+pub const MAX_PROJECT_TREE_DEPTH: usize = 3;
+pub const MAX_PROJECT_SCRIPTS: usize = 16;
 /// Diagram limits for objects a lead run makes; saved diagrams keep theirs.
 pub const MAX_LEAD_DIAGRAM_NODES: usize = 24;
 pub const MAX_LEAD_DIAGRAM_LAYERS: usize = 6;
@@ -120,6 +124,7 @@ closed!(WorkMediaKindV1 {
     Video,
     Audio
 });
+closed!(WorkProjectEntryKindV1 { Folder, File });
 closed!(WorkMediaProviderV1 {
     Youtube,
     Vimeo,
@@ -379,6 +384,64 @@ pub struct WorkDiffLineV1 {
     pub text: String,
 }
 
+/// One technology the project uses, read from a manifest.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkProjectStackV1 {
+    /// "SvelteKit", "Rust", "Tauri".
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// What it is for here: "Frontend", "Desktop shell", "Language".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// A bare public host whose logo marks it: svelte.dev.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// The manifest it was read from, relative to the project root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
+}
+/// One folder or file of the project's structure, parents before children.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkProjectEntryV1 {
+    /// Relative to the root, `/`-separated, at most three names deep.
+    pub path: String,
+    pub kind: WorkProjectEntryKindV1,
+    /// A folder whose contents are not listed: how many entries it holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub more: Option<u32>,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkProjectScriptV1 {
+    /// "dev", "test", "build".
+    pub name: String,
+    /// What it runs, exactly as the project defines it.
+    pub command: String,
+    /// Where it is defined: "package.json", "Makefile".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkProjectGitV1 {
+    /// Absent on a detached head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Files changed, staged or untracked.
+    pub changed: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind: Option<u32>,
+}
+
 // Content types print no content: a log line never carries page or model text.
 macro_rules! redacted {
     ($($name:ident),+ $(,)?) => { $(impl std::fmt::Debug for $name {
@@ -408,6 +471,10 @@ redacted!(
     WorkPlotPointV1,
     WorkDiffHunkV1,
     WorkDiffLineV1,
+    WorkProjectStackV1,
+    WorkProjectEntryV1,
+    WorkProjectScriptV1,
+    WorkProjectGitV1,
 );
 
 /// The first part of an object that failed, and the item it sits in.
@@ -961,6 +1028,87 @@ impl Draft<'_> {
         budget.add(self.body)?;
         if self.target_url.as_deref().is_some_and(|url| !https(url)) {
             return Err(fault(F::DraftTarget));
+        }
+        Ok(())
+    }
+}
+
+pub(super) struct Project<'a> {
+    pub name: &'a str,
+    pub summary: &'a str,
+    pub root: &'a str,
+    pub stack: &'a [WorkProjectStackV1],
+    pub tree: &'a [WorkProjectEntryV1],
+    pub scripts: &'a [WorkProjectScriptV1],
+    pub git: &'a Option<WorkProjectGitV1>,
+}
+/// A relative path of 1..=`depth` plain names.
+fn relative(path: &str, depth: usize) -> bool {
+    let names: Vec<&str> = path.split('/').collect();
+    path.len() <= 512
+        && names.len() <= depth
+        && names.iter().all(|name| {
+            !name.is_empty()
+                && *name != "."
+                && *name != ".."
+                && name.chars().count() <= 120
+                && !name.chars().any(char::is_control)
+        })
+}
+impl Project<'_> {
+    pub(super) fn check(&self, budget: &mut Budget) -> Checked {
+        line(budget, self.name, 60, F::ProjectName, None)?;
+        line(budget, self.summary, 160, F::ProjectSummary, None)?;
+        if super::runtime::validate_file_path(self.root).is_err() {
+            return Err(fault(F::ProjectRoot));
+        }
+        budget.add(self.root)?;
+        if self.stack.len() > MAX_PROJECT_STACK {
+            return Err(fault(F::ProjectStack));
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for (index, item) in self.stack.iter().enumerate() {
+            let i = Some(index);
+            line(budget, &item.name, 32, F::ProjectStack, i)?;
+            optional(budget, &item.version, 24, F::ProjectStack, i)?;
+            optional(budget, &item.role, 24, F::ProjectStack, i)?;
+            if !names.insert(item.name.trim().to_lowercase())
+                || !host(&item.host)
+                || item.manifest.as_deref().is_some_and(|m| !relative(m, 8))
+            {
+                return Err(at(F::ProjectStack, index));
+            }
+        }
+        count(self.tree.len(), MAX_PROJECT_TREE, F::ProjectTree)?;
+        let mut seen: Vec<(&str, WorkProjectEntryKindV1)> = Vec::new();
+        for (index, entry) in self.tree.iter().enumerate() {
+            let parent_ok = match entry.path.rsplit_once('/') {
+                Some((parent, _)) => seen
+                    .iter()
+                    .any(|(path, kind)| *path == parent && *kind == WorkProjectEntryKindV1::Folder),
+                None => true,
+            };
+            if !relative(&entry.path, MAX_PROJECT_TREE_DEPTH)
+                || !parent_ok
+                || seen.iter().any(|(path, _)| *path == entry.path)
+                || (entry.more.is_some() && entry.kind != WorkProjectEntryKindV1::Folder)
+            {
+                return Err(at(F::ProjectTree, index));
+            }
+            budget.add(&entry.path)?;
+            seen.push((&entry.path, entry.kind));
+        }
+        if self.scripts.len() > MAX_PROJECT_SCRIPTS {
+            return Err(fault(F::ProjectScripts));
+        }
+        for (index, script) in self.scripts.iter().enumerate() {
+            let i = Some(index);
+            line(budget, &script.name, 32, F::ProjectScripts, i)?;
+            line(budget, &script.command, 160, F::ProjectScripts, i)?;
+            optional(budget, &script.source, 24, F::ProjectScripts, i)?;
+        }
+        if let Some(git) = self.git {
+            optional(budget, &git.branch, 80, F::ProjectGit, None)?;
         }
         Ok(())
     }

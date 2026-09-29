@@ -1219,6 +1219,9 @@ pub enum WorkAskPurposeV1 {
     Connection,
     /// Any other yes or no before the agent acts.
     Confirm,
+    /// Whether the agent may read a folder on this Mac the request named;
+    /// the step's local fact carries the folder.
+    Folder,
 }
 
 /// What a held step would commit.
@@ -1537,6 +1540,19 @@ impl WorkStepFact {
         self.kind.validate()?;
         if let Some(local) = &self.local {
             local.validate(&self.kind)?;
+        }
+        if let WorkStepKindV1::Ask {
+            purpose: Some(WorkAskPurposeV1::Folder),
+            ..
+        } = &self.kind
+        {
+            if self
+                .local
+                .as_ref()
+                .is_none_or(|local| local.folder.is_none())
+            {
+                return Err(WorkError::Invalid);
+            }
         }
         if let Some(note) = &self.note {
             validate_text(note, MAX_WORK_STEP_NOTE_BYTES)?;
