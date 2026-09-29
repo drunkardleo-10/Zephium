@@ -503,44 +503,40 @@ test("every run that ended early says why in Rust's words, never a generic failu
   full.dispose();
 });
 
-test("a finished run states what it did beneath its words, counted from its steps", async () => {
+test("a finished run says its own sentence, never a count, and the line speaks for the run in view", async () => {
   const session = new WorkSession("profile");
   session.selected = "objective";
   const done = agentRun("completed");
-  const read = (id: string, url: string, status: "succeeded" | "failed", note?: string) => ({
-    id,
-    turn: 2,
-    kind: { kind: "read" as const, url },
-    status,
-    ...(note ? { note } : {}),
+  const finish = (note: string) => ({
+    id: "finish",
+    turn: 3,
+    kind: { kind: "finish" as const, followups: [] },
+    status: "succeeded" as const,
+    note,
   });
   done.steps = [
     ...done.steps!,
     { ...done.steps![1]!, id: "search-2", kind: { kind: "search", query: "keyboard reviews" } },
-    read("read-1", "https://lego.com/sets", "succeeded"),
-    read("read-2", "https://jobs.ashbyhq.com/acme", "failed", "The page gave nothing"),
-    read("read-3", "https://jobs.ashbyhq.com/acme", "failed", "The page gave nothing"),
-    read("read-4", "https://rtings.com/keyboard", "succeeded"),
     {
-      id: "finish",
-      turn: 3,
-      kind: { kind: "finish", followups: [] },
-      status: "succeeded",
-      note: "Compared three keyboards.",
+      id: "read-2",
+      turn: 2,
+      kind: { kind: "read", url: "https://jobs.ashbyhq.com/acme" },
+      status: "failed",
+      note: "The page gave nothing",
     },
+    finish("Compared three keyboards."),
   ];
-  session.projection = { ...structuredClone(projection), executions: [done] };
-  const screen = await render(AgentLine, { session });
-  // The agent's own sentence stays the line; the facts are Rust's, not the model's.
+  const later = { ...structuredClone(done), id: "later" };
+  later.steps = [...later.steps!.slice(0, -1), finish("Booked nothing; the dates are open.")];
+  session.projection = { ...structuredClone(projection), executions: [done, later] };
+  const screen = await render(AgentLine, { session, viewed: done.id });
   await expect
     .element(screen.getByText("Compared three keyboards.", { exact: true }))
     .toBeVisible();
+  expect(screen.container.textContent).not.toMatch(/searched|could not be read|\bread \d/u);
+  await screen.rerender({ session, viewed: "later" });
   await expect
-    .element(
-      screen.getByText("searched the web 2 times · opened 3 pages · read 2 · 1 could not be read", {
-        exact: true,
-      }),
-    )
+    .element(screen.getByText("Booked nothing; the dates are open.", { exact: true }))
     .toBeVisible();
   await screen.unmount();
   session.dispose();

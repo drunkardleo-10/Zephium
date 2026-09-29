@@ -1,5 +1,4 @@
 import type { WorkExecutionFact, WorkRuntimeProjection } from "$domain/work";
-import * as m from "$shared/i18n/messages";
 
 /** Whether an execution is still going: not settled and not left by an earlier launch. */
 export function isLive(state: WorkRuntimeProjection, execution: WorkExecutionFact): boolean {
@@ -59,51 +58,4 @@ export function agentDoing(execution: WorkExecutionFact): AgentDoing {
   if (running.has("run_command") || FILE_STEPS.some((kind) => running.has(kind))) return "working";
   if (running.has("search")) return "searching";
   return "thinking";
-}
-
-/** What a run did, counted from its steps: closed facts, never model text. */
-export type RunFacts = { searched: number; opened: number; read: number; unread: number };
-export function runFacts(execution: WorkExecutionFact): RunFacts {
-  let searched = 0;
-  const pages = new Map<string, { read: boolean; settled: boolean }>();
-  for (const step of execution.steps ?? []) {
-    const kind = step.kind;
-    if (kind.kind === "search") {
-      if (step.status !== "cancelled") searched += 1;
-      continue;
-    }
-    if (kind.kind !== "read") continue;
-    const page = pages.get(kind.url) ?? { read: false, settled: true };
-    page.read ||= step.status === "succeeded";
-    page.settled &&= step.status !== "running";
-    pages.set(kind.url, page);
-  }
-  const all = [...pages.values()];
-  return {
-    searched,
-    opened: all.length,
-    read: all.filter((page) => page.read).length,
-    unread: all.filter((page) => !page.read && page.settled).length,
-  };
-}
-
-/** The quiet line under a finished run's words: "searched the web 2 times · opened 5 pages · read 3 · 2 could not be read". */
-export function runFactsLine(facts: RunFacts): string {
-  const parts: string[] = [];
-  if (facts.searched)
-    parts.push(
-      facts.searched === 1
-        ? m.work_line_did_searched_one()
-        : m.work_line_did_searched({ count: facts.searched }),
-    );
-  if (facts.opened) {
-    parts.push(
-      facts.opened === 1
-        ? m.work_line_did_opened_one()
-        : m.work_line_did_opened({ count: facts.opened }),
-    );
-    parts.push(m.work_line_did_read({ count: facts.read }));
-    if (facts.unread) parts.push(m.work_line_did_unread({ count: facts.unread }));
-  }
-  return parts.join(" · ");
 }

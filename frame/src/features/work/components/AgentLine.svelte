@@ -9,14 +9,7 @@
   import type { WorkSession } from "$domain/work";
   import type { WorkHumanReasonV1 } from "$shared/ipc/bindings";
   import { currentActivity } from "$domain/work";
-  import {
-    agentLine,
-    endingNote,
-    isAgentExecution,
-    isLive,
-    runFacts,
-    runFactsLine,
-  } from "../lib/agent-steps";
+  import { agentLine, endingNote, isLive } from "../lib/agent-steps";
   import { cardCountdown, reasonSentence } from "../lib/work-human";
   import type { WorkHumanSession } from "$domain/work-human";
   import RunAsks from "./asks/RunAsks.svelte";
@@ -36,6 +29,7 @@
   import * as m from "$shared/i18n/messages";
   let {
     session,
+    viewed,
     agents = [],
     draft = "",
     waiting = null,
@@ -51,6 +45,8 @@
     onopenstep,
   }: {
     session: WorkSession;
+    /** The run the person is looking at: the line speaks for it while nothing runs. */
+    viewed?: string | undefined;
     /** The run's agent presences, as the canvas already projects them. */
     agents?: readonly CanvasItem[];
     /** What the person is typing while the agent runs. */
@@ -85,7 +81,15 @@
   const runtime = $derived(session.projection);
   const work = $derived(runtime?.work);
   const run = $derived(work ? session.operations.latest(work.id, "run") : undefined);
-  const execution = $derived(runtime?.executions.at(-1));
+  const latest = $derived(runtime?.executions.at(-1));
+  /** The live run, else the one in view, else the newest: never another run's words. */
+  const execution = $derived(
+    latest && runtime && !isLive(runtime, latest) && viewed
+      ? (runtime.executions.find((entry) => entry.id === viewed) ?? latest)
+      : latest,
+  );
+  /** Follow-ups and the next step belong to the newest run only. */
+  const newest = $derived(execution === latest);
   const interrupted = $derived(!!execution && !!runtime?.interrupted.includes(execution.id));
   const live = $derived(!!runtime && !!execution && isLive(runtime, execution));
   const blocked = $derived(!!session.pending || !["ready", "rejected"].includes(session.delivery));
@@ -218,7 +222,15 @@
         return m.work_intervention_human_takeover();
     }
   });
-  const closing = $derived(execution ? agentLine(execution) : null);
+  /** A finished run's own closing sentence, else the headline of what it made. */
+  const closing = $derived.by(() => {
+    if (!execution) return null;
+    const said = agentLine(execution);
+    if (said) return said;
+    for (const artifact of execution.artifacts)
+      if (artifact.data.kind === "reply") return artifact.data.headline;
+    return execution.artifacts.find((artifact) => artifact.title.trim())?.title.trim() ?? null;
+  });
   /** Why the run ended early, in Rust's words: the note its last unfinished step left. */
   const ending = $derived(execution ? endingNote(execution) : null);
   /** A request refused before it ran says why, never an older run's words. */
@@ -285,15 +297,9 @@
     const seconds = Math.max(0, Math.floor((now - since) / 1000));
     return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
   });
-  /** Under a finished run's words, what it did, counted from its steps. */
-  const facts = $derived(
-    settled && !waiting && execution && isAgentExecution(execution)
-      ? runFactsLine(runFacts(execution))
-      : "",
-  );
   const signInWall = $derived(waiting?.reason === "sign_in" && !!onsignin);
-  const followups = $derived(settled ? session.followups.slice(0, 3) : []);
-  const writeupOffer = $derived(settled ? writeup : undefined);
+  const followups = $derived(settled && newest ? session.followups.slice(0, 3) : []);
+  const writeupOffer = $derived(settled && newest ? writeup : undefined);
   const nextRows = $derived(followups.length > 0 || !!writeupOffer);
   const preview = $derived(draft.trim().slice(0, 60));
 
@@ -497,7 +503,7 @@
         >
           <AgentOrb seed={agents[0]?.agent?.seed ?? 0} size={22} ring={live} />
         </button>
-        <div class="state" class:two={!!facts}>
+        <div class="state">
           {#if waiting}
             <button
               type="button"
@@ -537,7 +543,6 @@
           {/if}
           {#if elapsed && !waiting}<span class="elapsed">{elapsed}</span>{/if}
           {#if live && preview}<span class="draft">{preview}</span>{/if}
-          {#if facts}<span class="facts">{facts}</span>{/if}
         </div>
         <div class="controls">
           {#if live && preview}
@@ -698,25 +703,6 @@
     flex: 1;
     min-inline-size: 0;
     font-size: var(--text-label);
-  }
-
-  /* The finished run's words, then what it did, quieter, beneath them. */
-  .state.two {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 1px;
-    padding-block: 5px;
-  }
-
-  .facts {
-    max-inline-size: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--color-faint);
-    font-size: var(--text-caption);
-    font-variant-numeric: tabular-nums;
-    line-height: 14px;
   }
 
   .words {
