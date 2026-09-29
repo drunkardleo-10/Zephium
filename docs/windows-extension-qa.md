@@ -51,20 +51,25 @@ not copy, reset or delete profiles to work around this environment mismatch.
 
 ## Current limits
 
-- 1Password currently clears its popup and requires an extension-owned welcome
-  tab plus non-popup action handling. Those Windows paths are not implemented;
-  installation alone does not mean this extension is usable.
-- Grammarly's popup sign-in request now uses native tab adoption. Please verify
-  both arrival at sign-in and successful return to a signed-in extension. The
-  latter needs your account; the lab does not submit credentials.
+- The new worker compatibility wrapper supplies missing native tab-create
+  results and relays actions without a popup. Extension-owned pages and options
+  now use normal profile-checked tabs. These paths passed account-free lab
+  checks, including 1Password's setup action, but need the acceptance below.
+- Grammarly completed login and remained signed in after a full QA restart,
+  confirmed by the owner. Recheck this after subsequent compatibility changes.
+- 1Password must open setup, complete sign-in, fill a test login, and respond
+  correctly to another toolbar click. Desktop companion integration is separate
+  and remains unqualified. The owner reports it working in rebuilt QA; individual
+  sign-in/fill/repeat-click checks still need confirmation on the clean build.
+  Leave its extension tab open, restart QA, and check that the tab restores.
 - Native extension context-menu entries are now retained. For Bitwarden,
   right-click a login field and check its submenu. Menu availability alone does
   not establish that credential filling or inline suggestions work.
 - Popup-only native active-tab query binding works in the lab for Bitwarden and
   Dark Reader. Dark Reader's background logic still selects a protected `about:`
   page; its per-site popup controls are not qualified. Its content scripts work.
-- On click access, non-popup action dispatch, extension options pages, and the
-  host runtime permission prompt are not offered in this Windows QA slice.
+- On click site access and the host runtime permission prompt remain unavailable.
+  The action relay does not synthesize Chromium activeTab permission grants.
 - Store installs and signed CRX files retain their verified Chrome identity.
   ZIP/folder installs require a manifest key; keyless packages are rejected
   before native loading. Manifest V2 is not supported.
@@ -118,4 +123,6 @@ Detailed probe findings and remaining work: [Windows handoff](windows-extensions
   the documented targeting limitation. Use a disposable account for signed-in
   Bitwarden testing; native storage preservation alone does not qualify autofill.
 - Recheck profile separation and closing/reopening QA. No Work product behavior
-  was added by the boundary fix. Options pages remain withheld.
+  was added by the boundary fix. Open an extension's Options entry, then disable
+  that extension and check that navigating/reloading its URL is refused. A
+  different profile without the enabled install must also refuse that URL.

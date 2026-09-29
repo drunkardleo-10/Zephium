@@ -33,9 +33,10 @@ PowerShell process. See [the QA checklist](windows-extension-qa.md).
   through WebView2's original new-window request. The host validates the exact
   popup, runtime, profile environment, active human tab and foreground window,
   then uses the existing bounded native adoption path. It rechecks popup focus
-  after construction. Hidden observers still cannot open tabs through this path.
-  Grammarly 14.1333.0's real OAuth request reaches its sign-in document in the
-  disposable lab. **Completed sign-in fails in user QA**; see the limitation below.
+  after construction. Hidden observers require a recent explicit action/options
+  command.
+  Grammarly 14.1333.0 completes sign-in in QA. The owner confirmed its popup
+  recognizes the account and remains signed in after a full QA restart.
 - Native context-menu entries named `extension` are preserved, including their
   native submenus and command dispatch. The previous allowlist removed them.
   Ordinary unknown commands and custom host entries remain filtered. An
@@ -112,39 +113,40 @@ sample had a gap. Use `desktop\measure-webext-qa.ps1` for a fresh fixed-tab run.
 
 ## Limits and open acceptance items
 
-- **Grammarly 14.1333.0 sign-in is not usable yet.** The owner reaches its
-  `chromiumapp.org` callback as a normal page and gets a DNS error. Package
-  inspection shows interactive auth uses `tabs.create`, requires the returned
-  tab ID, then subscribes to `tabs.onUpdated`; `identity.launchWebAuthFlow` is
-  used for silent auth. Two fresh lab runs found native `tabs.create` creates
-  the child but returns `undefined` (both promise and callback; callback has
-  no `runtime.lastError`). Native query/update and URL-change events do work,
-  including a synthetic callback navigation. This reproduces the API contract
-  failure that would prevent Grammarly installing its login listeners; the
-  user's worker was not inspected. Evidence and scenarios:
-  `target/windows-auth-analysis/20260929-165247/`. Next isolate the native
-  adoption return contract before considering any bounded compatibility
-  adapter. A redirect-only identity fix cannot repair this interactive path.
-- **1Password 8.12.37.1 is not usable yet.** It declares a default popup but
-  clears the native popup URL during unsigned-in startup, then requests
-  `chrome-extension://.../app/app.html#/page/welcome`. That document renders
-  when explicitly opened in the lab; normal Windows tabs correctly reject its
-  extension scheme. Its non-popup action and extension-owned document lifecycle
-  need a separate implementation/review. `Extensions.triggerAction` and
-  `Extensions.getExtensions` returned `0x80070057` in this WebView2 runtime;
-  no native action path was qualified. Do not hardcode its internal welcome URL,
-  force the cleared manifest popup, or add a replacement action dispatcher.
-  This also explains some blocked-new-tab notices during installation/startup;
-  a notice on a web page does not identify that page as the request's cause.
+- Grammarly's interactive login requires a native tab ID. WebView2 returned
+  `undefined` from both forms of `tabs.create`, including with native `Allow`;
+  this was not specific to our deferred child adoption. A worker-only wrapper
+  now returns the FIFO native `tabs.onCreated` result, preserving native errors
+  and removing its temporary listener after settlement or a 15-second timeout.
+  Promise/callback same-URL concurrent creates passed in a disposable fixture.
+  Completed Grammarly login and persistence after restart passed owner QA.
+  No `identity.launchWebAuthFlow` replacement was added.
+- Buttons without a popup now relay an explicit toolbar click through the
+  extension's own host page to registered worker `action.onClicked` listeners.
+  Native listeners remain registered. This does not synthesize activeTab grants
+  or permission prompts. 1Password 8.12.37.1's cleared-popup action opened its
+  own setup document in visible- and hidden-manager lab runs. The owner now
+  reports it working in rebuilt QA; completed sign-in, filling and repeat-click
+  acceptance have not yet been confirmed individually. Temporary click tracing
+  was removed from the clean build. The earlier inert click did not reproduce
+  after rebuilding; no isolated cause for that transient failure is established.
+- Normal Windows tabs admit extension document URLs only with a live grant for
+  that enabled install in the same profile. Disable/removal revokes the grant;
+  stale view tokens and other profiles remain denied. Chromium enforces
+  web_accessible_resources: a web-initiated public fixture navigation passed,
+  while its private document was blocked. Options pages use the same native
+  tab path. Fresh/restored tab construction also checks the live profile grant,
+  including before warm-spare adoption. Full restart restoration of an active
+  extension tab remains an owner QA check. No separate document server or
+  extension-specific URL is used.
+- Hidden manager new-window requests require a recent explicit action/options
+  command (five seconds, up to eight requests) and the live foreground human
+  tab. Ordinary unprompted manager opens remain denied. Popup-origin requests
+  retain the exact focused-popup and environment checks.
 - Dark Reader content works, but its background chooses a protected about: page
-  for per-site popup controls despite the corrected popup query. No background
-  tabs/action/permissions emulator was added.
-- On click access, non-popup action dispatch, runtime optional-permission UI,
-  native messaging, and options pages remain withheld/unqualified. Normal tab
-  navigation intentionally admits only HTTP(S) and exact about:blank; macOS
-  owns a separate extension-document tab path. Options are therefore not a
-  cheap manifest-URL routing change on Windows. Do not broaden the ordinary
-  navigation gate just to expose them.
+  for per-site popup controls despite the corrected popup query. On click site
+  access, runtime optional-permission UI and native messaging remain withheld
+  or unqualified. The extension-count limit of eight remains a pre-release item.
 - Cross-profile acceptance, signed-in Bitwarden/autofill, full catalog behavior,
   complete disk-residue removal, update permission escalation, and sustained
   foreground/resource testing remain manual QA work. The separate Work product
@@ -156,9 +158,11 @@ sample had a gap. Use `desktop\measure-webext-qa.ps1` for a fresh fixed-tab run.
 ## Checks
 
 Whole xtask suite: **154 passed**, including the revised Work boundary and
-negative mutations. Engine with Work feature: **276 passed** under normal-user
+negative mutations. Engine with Work feature: **277 passed** under normal-user
 execution (the restricted sandbox run had three filesystem failures, retained
-in its separate log). Desktop: **106 passed, one existing ignored test**.
+in its separate log). Core: **211 passed**; webext: **53 passed**; app: **318 passed**;
+worker compatibility JavaScript: **5 passed**. Desktop's preceding run:
+**106 passed, one existing ignored test**.
 QA desktop clippy passes with `-D warnings` using its required configuration;
 three pre-existing vendored Wry dead-code warnings remain. The QA frontend
 production build passes. No frontend behavior changed in this review follow-up.
@@ -171,3 +175,6 @@ It requires cached signed Grammarly, Bitwarden and 1Password packages, uses
 fresh profiles, and submits no account credentials. Its DOM click is diagnostic,
 not evidence of physical user activation. Native document-load events establish
 arrival at the Grammarly sign-in page; they do not establish OAuth completion.
+`crates\zephium-webext-windows\run-worker-compat.ps1` checks native promise/callback
+tab IDs and action relay against an account-free fixture. Completed Grammarly
+authentication and restart persistence were checked separately by the owner.
