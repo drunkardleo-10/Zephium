@@ -1,201 +1,198 @@
-# Windows extensions: current QA handoff
+# Windows extensions: review handoff
 
-Branch: `chore/windows-extension-probe`. This is an isolated Windows QA build;
-main remains unchanged pending review and acceptance. Qualified on Windows 11,
-WebView2 154.0.4258.37, with debug binaries.
+Branch: `chore/windows-extension-probe`. **Zephium Extensions QA** now supports
+optimized release builds. Main remains unchanged pending review and acceptance.
+This is qualified Windows MV3 support, not compatibility with every Chrome extension.
 
 ## Run QA
 
-From the repository root in normal, non-administrator PowerShell:
+In ordinary, non-administrator PowerShell, from the repository root:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File desktop\run-webext-qa.ps1 -Build
+powershell -NoProfile -ExecutionPolicy Bypass -File desktop\run-webext-qa.ps1 -Build -Release
 ```
 
-Omit `-Build` for subsequent launches. Close this checkout's QA app first.
-The launcher verifies the **Zephium Extensions QA** identity and launches
-`target\webext-qa\Zephium Extensions QA.exe`. Data belongs exclusively to
-`%APPDATA%\app.zephium.webext-qa`. Execution policy is changed only for that
-PowerShell process. See [the QA checklist](windows-extension-qa.md).
+Close QA before building. Omit both switches for subsequent launches.
+The executable is `target\webext-qa\Zephium Extensions QA.exe`;
+`revision.txt` and `build-profile.txt` identify its source and build mode.
+Data stays in `%APPDATA%\app.zephium.webext-qa`, separate from real profiles.
+If packaged-parent AppData redirection triggers the Wry startup gate, launch
+through ordinary PowerShell or File Explorer. Never weaken the gate or move
+profile data to work around it. See [the QA checklist](windows-extension-qa.md).
 
-## What works
+## Implemented and checked
 
-- Shared desktop registry, store review/download/verification, prepared packages,
-  install, enable, disable and removal. Native WebView2 operations use the human
-  profile's exact environment and a live management controller. Signed CRX IDs
-  are preserved; keyed ZIP/folder packages work. MV2 and keyless packages fail
-  before native loading.
-- Native workers/content scripts; existing toolbar tiles observe title, badge
-  and icon without polling. Popups use a small anchored native window and the
-  15-line popup-only native-query binding. The owner confirmed Bitwarden's store
-  installation and popup usability; credential filling and the context-menu
-  workflow were not reported separately. Async action snapshots retain their
-  original native window binding, so a response delayed across a tab switch
-  cannot label the previous tab's action as belonging to the new tab.
-- On Windows, the Chrome Web Store's native install control is hidden; the
-  existing sidebar Add button remains the reviewed install entry point. The
-  presentation script is restricted to the exact HTTPS store origin and the
-  main document, with no polling or new page-to-host bridge. Live English and
-  Polish listing checks passed, as did an unrelated-page negative check.
-  Reproduce with `crates\zephium-webext-windows\run-store-ui.ps1`. The store's
-  install-controller selector must be requalified if Google changes its markup.
-  Extension action tiles remain absent on internal new-tab/management pages.
-- A focused, live Windows extension popup can open an ordinary browser tab
-  through WebView2's original new-window request. The host validates the exact
-  popup, runtime, profile environment, active human tab and foreground window,
-  then uses the existing bounded native adoption path. It rechecks popup focus
-  after construction. Hidden observers require a recent explicit action/options
-  command.
-  Grammarly 14.1333.0 completes sign-in in QA. The owner confirmed its popup
-  recognizes the account and remains signed in after a full QA restart.
-- Native context-menu entries named `extension` are preserved, including their
-  native submenus and command dispatch. The previous allowlist removed them.
-  Ordinary unknown commands and custom host entries remain filtered. An
-  account-free Bitwarden lab profile confirmed the native extension menu entry.
-- All sites and Specific sites use immutable prepared manifests, intersecting
-  original host permissions and content-script matches. Native content-script,
-  scripting and network-rule host restrictions were checked. A fixture's
-  `chrome.storage.local` value survived All sites -> Specific sites (`example.com`)
-  -> All sites in the actual QA UI. The owner clicked Save; subsequent values
-  were read from the popup. No account credentials were used or copied.
-- Same-ID replacement additionally passed a native lab test: the narrowed
-  manifest became active, stored data survived, the formerly allowed localhost
-  stopped receiving content scripts, and allowed 127.0.0.1 still received them.
-  Reproduce with `crates\zephium-webext-windows\run-access-transition.ps1`.
-  Evidence: `target/webext-access-transition/20260928-225337/results.jsonl`.
-  There is no native Remove in access changes and no storage-loss warning is
-  needed for this tested path. This does not establish every extension's own
-  migration or signed-in storage behavior.
-- A disposable two-profile fixture passed native disable/re-enable, storage
-  preservation, and removal checks. Disabling/removing stopped injection after
-  navigation; re-enabling restored it. Storage and install state stayed separate,
-  and removal in one profile left the other profile enabled and injecting.
-  WebView2's own component extensions remained intact. Reproduce with
-  `crates\zephium-webext-windows\run-lifecycle.ps1`. This qualifies the native
-  lifecycle, not every real extension's migration or full on-disk residue.
-- Ordinary package, identity and add/enable failures settle only that install
-  as Failed with Retry. The actual QA app rejected a deliberately invalid CSP
-  with AddBrowserExtension `0x80004005`. Retry repeated the local failure;
-  existing tabs/extensions remained usable, including a normal page reload.
-  Quarantine remains for failed native startup identity/isolation attestation
-  or inability to disable a partially loaded extension during rollback. Explicit
-  close failures retain cleanup debt; native disable/removal failures still
-  fail closed because revocation cannot be proven.
-- Clean close/reopen and enabled-install restoration were verified. Work's
-  adapter retains the extension-free automation subprofile. Its boundary now
-  deliberately admits exactly one pre-navigation attestation hook, requires
-  automation identity and absence of third-party extensions, and continues to
-  forbid loading/enabling extensions. Work behavior itself was not expanded.
+- Shared store review, signed download verification, registry, enable/disable,
+  removal and retry. Native operations use the exact human-profile environment.
+  Signed CRX identities are preserved; ZIP/folder installs require a manifest key.
+  MV2 and keyless packages are rejected before native loading. Update responses
+  and package downloads enforce size limits while streaming.
+- Native workers/content scripts. All sites / Specific sites intersect original
+  host permissions and content-script matches; content injection, scripting and
+  network-rule restrictions have qualifiers. Same-ID replacement preserves
+  `chrome.storage.local` in the lab and actual QA UI. Disabled packages skip
+  compatibility preparation at startup and prepare on enable.
+- Toolbar title, badge, icon and popup observation, with original-window binding
+  across asynchronous tab switches. The host caches only the last package icon
+  and active-tab raster; unchanged refreshes avoid worker messages and decoding.
+  Updates are event-driven, with drift repair on the existing maintenance
+  heartbeat, not a new polling timer.
+- Anchored native popups with a small popup-only active-tab query binding.
+  No-popup buttons relay explicit clicks to registered worker listeners without
+  granting activeTab. The worker `tabs.create` wrapper supplies WebView2's missing
+  result using FIFO native `tabs.onCreated` events, preserves native errors, and
+  removes its temporary listener on settlement or a 15-second timeout.
+  Promise/callback concurrent-create fixtures pass.
+- Focused popup requests use bounded native tab adoption with runtime, profile,
+  environment and focus checks. Hidden managers need an explicit action/options
+  command within five seconds, at most eight requests, and a live foreground
+  human tab. Unsolicited manager opens remain denied.
+- Extension documents/options use normal tabs only for an enabled install with
+  a live grant in that profile, including restored tabs and warm-spare adoption.
+  Disable/removal revokes the grant. Chromium enforces web_accessible_resources;
+  public/private fixture navigations were qualified.
+- Native extension context-menu entries/submenus are retained. The store's Add
+  to Chrome control is hidden on the exact HTTPS store origin, leaving Zephium's
+  reviewed sidebar installation. English, Polish and unrelated-page negative
+  checks passed. Internal pages intentionally omit action tiles.
+- Package/ID/add/enable failures affect only that install (Failed / Retry).
+  Native startup integrity failures, failed revocation, or failed disable during
+  partial-load rollback fail closed. Cleanup debt remains accounted for.
+  A deliberately invalid native package failed locally in QA without closing
+  existing tabs or disrupting other extensions.
+- Two-profile fixtures qualify native install/storage isolation and lifecycle.
+  Work retains its extension-free automation subprofile and one bounded
+  pre-navigation attestation hook; no Work product behavior is enabled here.
 
-## Management-view measurements and budget
+Owner acceptance: Grammarly completed login and stayed signed in after restart.
+1Password received an aggregate "Yes, it works" for setup/sign-in/fill/repeat
+click/tab restoration, not individual recorded results. Bitwarden installation
+and popup usability were confirmed; signed-in filling and context-menu use were
+not separately recorded. Vimium and Return YouTube Dislike worked in owner testing.
+Dark Reader changes page content; its per-site popup limitation remains below.
 
-Fresh disposable lab profiles, one fixed loopback human page, same cumulative
-packages: Bitwarden; + Dark Reader and Grammarly; + Vimium and SponsorBlock.
-Each case idles for 120 seconds. Values below are mean private memory in the
-last 30 seconds of sampling for the entire lab process tree, not the full QA
-shell. No worker debugger is attached; CDP target inventory runs only before
-and after idle. These are one-machine comparisons, not release CPU/battery
-benchmarks or guaranteed upper bounds.
+## Performance evidence and decisions
 
-| Installed extensions | Persistent page per extension | One shared page parked on about:blank | Processes (persistent/shared) |
+Machine: Intel i3-1115G4 (2 cores / 4 logical processors), about 12 GB RAM,
+Windows 11, WebView2 154.0.4258.37. Native lab binaries are debug; the release
+QA sample below uses the optimized app. Private bytes cover the owned process
+tree. Task Manager groupings and summed working sets are different metrics;
+working sets double-count shared pages.
+
+- Twenty steady action refreshes per extension fell from 20 icon fetches,
+  decodes and worker requests to **one each**. Three-extension runs fell from
+  roughly 168–169 ms to 29–37 ms per batch. This measures toolbar refresh work,
+  not popup-open or page-load speed. Evidence:
+  `target/webext-page-performance/20260929-195117-before-steady` and
+  `20260929-195449-after`.
+- Five warm local-page navigations (600 cards, roughly 3,600 nodes) with
+  Dark Reader, Grammarly and Bitwarden had median load 244.5 ms after the change,
+  versus 246.5–259.9 ms before. No reliable page-load improvement is established.
+  After-run no-extension median: 57.1 ms; one Dark Reader: 184.8 ms.
+  These measure extension work on a fixed fixture, not public-web performance.
+- Five-extension normal/low-memory-hint ABBA trials were 460.3 / 418.4 / 414.2 /
+  412.4 MiB at 60–80 seconds. The reduction did not reproduce against the second
+  normal run. Hidden managers retain the best-effort low-memory hint without
+  suspension, but **no RAM saving is attributed to it**.
+- A two-minute release QA observation had 25 processes, 846.0–848.6 MiB private
+  memory and zero sampled CPU in four intervals. Evidence:
+  `target/webext-qa-resources/20260929-201044-optimized-release`. The earlier
+  debug session was roughly 1 GiB, but tab residency differed after restart.
+  That is not a controlled memory-saving comparison, battery-life result, or
+  memory upper bound.
+- Final ten-minute observation: 25 processes, 992.1–1040.4 MiB private memory,
+  ending at 992.1 MiB; time-weighted CPU 3.83% of one core (about 0.96% of this
+  four-thread machine). All 21 samples were contiguous (largest gap 30.36 s).
+  The owner reported browsing with extensions disabled during this run, so it
+  is **not an extension-idle qualification** or a comparable baseline. No Rust
+  build/native lab ran during sampling. Evidence:
+  `target/webext-qa-resources/20260929-220426-final-review-observational`.
+
+The shared-management-view trial remains a design decision:
+
+| Extensions | Persistent manager per extension | Shared manager parked on about:blank | Processes |
 | --- | ---: | ---: | ---: |
 | 1 | 227.0 MiB | 233.2 MiB | 9 / 9 |
 | 3 | 352.8 MiB | 341.3 MiB | 11 / 11 |
 | 5 | 405.5 MiB | 361.7 MiB | 13 / 12 |
 
-Both five-extension cases ended with the same three workers: Bitwarden, Dark
-Reader and Grammarly. Vimium and SponsorBlock workers retired even with their
-management documents open. Persistent documents do retain renderer resources;
-sharing saved about 44 MiB (11%) and one process at five, not one process per
-extension. The shared trial loaded each host page then navigated the single
-controller to about:blank; it did not implement production action refresh.
+Means cover the final 30 seconds of 120-second minimal-lab trials, not the full
+browser. Both five-extension trials ended with the same three workers; idle
+Vimium/SponsorBlock workers retired even with persistent managers. Sharing saved
+about 44 MiB at five but loses asynchronous action notifications while parked.
+Keep persistent observers until a replacement preserves correctness. Evidence:
+`target/webext-management-resources/20260928-223433`; the interrupted one-extension
+shared sample was replaced by `20260928-225018`.
 
-Retain eight running extensions process-wide for this QA: this reserves eight
-observer resources and one popup without consuming browsing/Work/teardown pools.
-Five already cost about 406 MiB in the minimal lab (179 MiB above the one-extension
-case), so removing admission bounds is not justified by these measurements.
-Eight is a provisional capacity choice with headroom over the measured five,
-not a WebView2 limit or an experimentally proven safe maximum. The shared design
-has measurable savings but loses asynchronous action-change observation while
-parked; a production switch would need bounded refresh scheduling and stale-
-action qualification. That tradeoff is left for review rather than adding a
-second runtime to this QA patch.
+## Remaining release decisions and acceptance
 
-Reproduce with `crates\zephium-webext-windows\run-management-resources.ps1`.
-Raw comparisons: `target/webext-management-resources/20260928-223433`.
-The first one-extension shared run had a 91.5-second sampling gap and is replaced
-in the table by the uninterrupted repeat at `20260928-225018`. The runner reports
-long gaps and supports `-Counts 1 -Modes shared` for exact case repeats.
-Full-app ten-minute continuous CPU qualification remains open; the earlier QA
-sample had a gap. Use `desktop\measure-webext-qa.ps1` for a fresh fixed-tab run.
+- Resolve the **eight running extensions process-wide** budget before public
+  release: measure a higher supported count and adjust resource pools, or make
+  a deliberate product-limit decision. Eight is provisional QA capacity,
+  not a WebView2 limit or measured safe maximum. One popup is allowed at once.
+- Dark Reader's worker can select a protected about: page for per-site popup
+  controls despite the popup binding. Do not claim those controls work.
+- On-click site access and runtime optional-permission UI are withheld.
+  Native messaging / desktop companions are unqualified. MV2 is unsupported.
+  No identity.launchWebAuthFlow replacement was added.
+- Finish explicit signed-in Bitwarden filling/context-menu checks, whole-app
+  cross-profile acceptance and a real permission-escalating update. Fixture
+  storage preservation does not qualify every extension's migration. Full disk
+  removal residue and the full extension catalog remain unqualified.
+- Qualify sustained idle, repeated install/remove cycles, realistic page loads
+  and cold/warm startup with fixed tabs/packages and release binaries.
+  Battery savings require a controlled power measurement. A single Task Manager
+  screenshot, or lower memory after lazy restoration, is insufficient evidence.
+- Requalify the store selector when its markup changes and native paths when
+  WebView2 changes. Rejected action reads retain prior presentation.
 
-## Limits and open acceptance items
+## Final review validation (2026-09-29)
 
-- Grammarly's interactive login requires a native tab ID. WebView2 returned
-  `undefined` from both forms of `tabs.create`, including with native `Allow`;
-  this was not specific to our deferred child adoption. A worker-only wrapper
-  now returns the FIFO native `tabs.onCreated` result, preserving native errors
-  and removing its temporary listener after settlement or a 15-second timeout.
-  Promise/callback same-URL concurrent creates passed in a disposable fixture.
-  Completed Grammarly login and persistence after restart passed owner QA.
-  No `identity.launchWebAuthFlow` replacement was added.
-- Buttons without a popup now relay an explicit toolbar click through the
-  extension's own host page to registered worker `action.onClicked` listeners.
-  Native listeners remain registered. This does not synthesize activeTab grants
-  or permission prompts. 1Password 8.12.37.1's cleared-popup action opened its
-  own setup document in visible- and hidden-manager lab runs. The owner answered
-  "Yes, it works" to the clean-build 1Password checklist covering sign-in, fill,
-  repeat click and extension-tab restoration. This is an aggregate manual
-  confirmation, not separately recorded results for each step. Bitwarden's later
-  installation/popup confirmation is recorded above. Temporary click tracing was removed from the
-  clean build. The earlier inert click did not reproduce
-  after rebuilding; no isolated cause for that transient failure is established.
-- Normal Windows tabs admit extension document URLs only with a live grant for
-  that enabled install in the same profile. Disable/removal revokes the grant;
-  stale view tokens and other profiles remain denied. Chromium enforces
-  web_accessible_resources: a web-initiated public fixture navigation passed,
-  while its private document was blocked. Options pages use the same native
-  tab path. Fresh/restored tab construction also checks the live profile grant,
-  including before warm-spare adoption. Extension-tab restoration was included
-  in the owner's clean-build confirmation above. No separate document server or
-  extension-specific URL is used.
-- Hidden manager new-window requests require a recent explicit action/options
-  command (five seconds, up to eight requests) and the live foreground human
-  tab. Ordinary unprompted manager opens remain denied. Popup-origin requests
-  retain the exact focused-popup and environment checks.
-- Dark Reader content works, but its background chooses a protected about: page
-  for per-site popup controls despite the corrected popup query. On click site
-  access, runtime optional-permission UI and native messaging remain withheld
-  or unqualified. The extension-count limit of eight remains a pre-release item.
-- Full-app cross-profile acceptance, signed-in Bitwarden/autofill, full catalog behavior,
-  complete disk-residue removal, update permission escalation, and sustained
-  foreground/resource testing remain manual QA work. The separate Work product
-  is not enabled or qualified by this build.
-- Occasional action-refresh rejections on the internal manager retain prior
-  presentation. Concurrent installed Zephium can own the global shortcut;
-  QA does not take it over.
+Full xtask: **154 passed**. App: **318**; core: **211**; engine with
+agentic-browser feature: **277**; webext: **53**; desktop: **110 passed, one
+existing ignored test**, including four new HTTP fixture tests for body limits
+and interrupted downloads; desktop configuration integration tests: **8 passed**.
+The optional real-CRX integration test remains ignored (native qualifiers use
+cached verified packages). Worker/action-host JavaScript: **13 passed**.
+Strict desktop + Windows lab clippy, formatting and whitespace checks passed;
+three pre-existing vendored Wry dead-code warnings remain.
 
-## Checks
+Native qualifiers passed again: lifecycle/profile isolation
+(`target/webext-lifecycle/20260929-221804`), same-ID storage/access replacement
+(`target/webext-access-transition/20260929-221811`), host network rules
+(`target/webext-host-rules/20260929-221817`), and worker tab-create/action relay
+(`target/webext-worker-compat/20260929-221821`). These tests use disposable data.
+Frontend behavior did not change in this pass; the previously built production
+frontend is reused by the optimized QA rebuild. This is not a claim that all
+workspace/platform CI or the remaining manual release gates passed.
 
-Whole xtask suite: **154 passed**, including the revised Work boundary and
-negative mutations. Engine with Work feature: **277 passed** under normal-user
-execution (the restricted sandbox run had three filesystem failures, retained
-in its separate log). Core: **211 passed**; webext: **53 passed**; app: **318 passed**;
-worker/action-host JavaScript: **7 passed**, including delayed responses across
-tab switches and coalescing rapid switches to the latest tab. Desktop's preceding run:
-**106 passed, one existing ignored test**.
-QA desktop and Windows lab clippy pass with `-D warnings` using the required configuration;
-three pre-existing vendored Wry dead-code warnings remain. The QA frontend
-production build passes. No frontend behavior changed in this review follow-up.
-The preceding shared extension/frontend/component results are in commit history;
-these checks are not a claim that all workspace CI or release QA is green.
+```powershell
+$env:TAURI_CONFIG = Get-Content desktop/tauri.webext-qa.conf.json -Raw
+cargo test -p zephium-desktop -p zephium-engine -p zephium-app -p zephium-core -p zephium-webext -p xtask --features zephium-desktop/webext-qa,zephium-engine/agentic-browser
+cargo clippy -p zephium-desktop -p zephium-webext-windows --features zephium-desktop/webext-qa,zephium-webext-windows/lab --all-targets -- -D warnings
+node --test crates/zephium-webext/src/windows/action-host.test.mjs crates/zephium-webext/src/windows/worker-compat.test.mjs
+cargo fmt --all --check
+```
 
-Reproduce the September 29 sign-in/menu/1Password findings with
-`crates\zephium-webext-windows\run-browser-surfaces.ps1` after rebuilding the lab.
-It requires cached signed Grammarly, Bitwarden and 1Password packages, uses
-fresh profiles, and submits no account credentials. Its DOM click is diagnostic,
-not evidence of physical user activation. Native document-load events establish
-arrival at the Grammarly sign-in page; they do not establish OAuth completion.
-`crates\zephium-webext-windows\run-worker-compat.ps1` checks native promise/callback
-tab IDs and action relay against an account-free fixture. Completed Grammarly
-authentication and restart persistence were checked separately by the owner.
+## Reproduction
+
+Build `cargo build -p zephium-webext-windows --features lab`; the lab is excluded
+from product builds. Run scripts through PowerShell with process-scoped
+`-ExecutionPolicy Bypass`. They use disposable profiles and no credentials.
+
+| Scope | Runner under crates/zephium-webext-windows |
+| --- | --- |
+| Enable/disable/remove and profile isolation | `run-lifecycle.ps1` |
+| Storage-preserving All/Specific transition | `run-access-transition.ps1` |
+| Allowed/denied network rules | `run-host-rules.ps1` |
+| Native tab IDs and explicit action relay | `run-worker-compat.ps1` |
+| Sign-in arrival / native menu / 1Password diagnostics | `run-browser-surfaces.ps1` |
+| Live store UI and exact-origin restriction | `run-store-ui.ps1` |
+| Page and action-work measurements | `run-page-performance.ps1` |
+| 1/3/5 manager comparisons | `run-management-resources.ps1` |
+
+Browser-surface checks need cached signed CRXs. Diagnostic DOM clicks do not prove
+physical activation or completed authentication; credential checks remain manual.
+Full QA sampling uses `desktop/measure-webext-qa.ps1`. Raw target directories are
+local ignored artifacts; retain relevant sanitized results before cleaning.
+The scripts and this summary are committed.
