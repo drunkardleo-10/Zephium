@@ -583,8 +583,12 @@ mod tests {
         // `Path::components` intentionally normalizes a harmless trailing `.`.
         assert!(user_data_directory_matches(&expected, &expected.join(".")).unwrap());
         assert!(!user_data_directory_matches(&expected, &other).unwrap());
+        // PathBuf::join normalizes `..` on Windows verbatim paths. Preserve the
+        // actual rejected input rather than testing an already-normalized path.
+        let mut parent_input = expected.as_os_str().to_os_string();
+        parent_input.push(format!("{0}child{0}..", std::path::MAIN_SEPARATOR));
         assert_eq!(
-            user_data_directory_matches(&expected, &expected.join("child").join(".."))
+            user_data_directory_matches(&expected, Path::new(&parent_input))
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidInput
