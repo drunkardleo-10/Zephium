@@ -719,7 +719,6 @@ impl AgentWorkController {
                         }
                         () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
                     }
-                    state.refresh_account(worker, browser)?;
                 }
                 result => break result?,
             }
