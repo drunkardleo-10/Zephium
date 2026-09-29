@@ -46,29 +46,24 @@ export function listedName(work: WorkEnvironmentSummary, untitled: string): stri
   return work.name || (work.requests[0] ? requestName(work.requests[0]) : "");
 }
 
-type Execution = WorkRuntimeProjection["executions"][number];
-/** What a run called what it did: the title its finish gave, else its reply's. */
-function runName(execution: Execution): string {
-  const titled = execution.title?.trim();
-  if (titled) return titled;
-  const reply = execution.artifacts.find(
-    (artifact) => artifact.data.kind === "reply" || artifact.data.kind === "answer",
-  );
-  return reply?.title.trim() ?? "";
-}
-
 /**
- * The name a work takes from its first run once it has ended: the run's
- * title, else its reply's, else the request's first words.
+ * The name a work takes from its first request once its first run has ended:
+ * the first of its runs to give a title, else what the first run's reply was
+ * called, else the request's first words.
  */
 export function firstRunName(
   projection: WorkRuntimeProjection | undefined,
   request: string,
   live: boolean,
 ): string {
-  const first = projection?.executions[0];
+  const runs = projection?.executions ?? [];
+  const first = runs[0];
   if (!first || live) return "";
-  return (runName(first) || requestName(request)).slice(0, 64);
+  const titled = runs.map((run) => run.title?.trim() ?? "").find(Boolean);
+  const reply = first.artifacts
+    .find((artifact) => artifact.data.kind === "reply" || artifact.data.kind === "answer")
+    ?.title.trim();
+  return (titled || reply || requestName(request)).slice(0, 64);
 }
 
 const DAY = 24 * 60 * 60 * 1000;

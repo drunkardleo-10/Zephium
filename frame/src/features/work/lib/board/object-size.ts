@@ -5,7 +5,7 @@ import type { ObjectView, SheetColumn } from "./types";
 type Range = { min: number; ideal: number; max: number };
 
 /** A pick's card at its natural width; a set shows up to four across. */
-const CARD = { pictured: 232, plain: 272, gap: 16, across: 4 } as const;
+const CARD = { pictured: 232, plain: 272, row: 208, gap: 16, across: 4 } as const;
 const COLUMN: Record<SheetColumn["kind"], number> = {
   entity: 208,
   text: 168,
@@ -31,9 +31,15 @@ export function objectWidth(view: ObjectView): Range {
     case "picks": {
       if (view.facet === "flight" && view.items.every((item) => item.route))
         return { min: 440, ideal: 560, max: 640 };
+      const count = Math.max(1, view.items.length);
+      // Up to five stand in one row at the card's own width: never 4 + 1.
+      if (count <= 5) {
+        const row = count * CARD.row + (count - 1) * CARD.gap;
+        return { min: Math.min(row, 2 * CARD.row + CARD.gap), ideal: row, max: row };
+      }
       const card = view.items.some((item) => item.picture) ? CARD.pictured : CARD.plain;
-      const across = Math.min(CARD.across, Math.max(1, view.items.length));
-      const width = (count: number) => count * card + (count - 1) * CARD.gap;
+      const across = Math.min(CARD.across, count);
+      const width = (cards: number) => cards * card + (cards - 1) * CARD.gap;
       return { min: width(Math.min(2, across)), ideal: width(across), max: width(across) + 160 };
     }
     case "plan":
@@ -90,7 +96,7 @@ export function objectHeight(view: ObjectView, width: number): number {
       if (view.facet === "flight" && view.items.every((item) => item.route))
         return 44 + view.items.length * 108;
       const pictured = view.items.some((item) => item.picture);
-      const card = pictured ? CARD.pictured : CARD.plain;
+      const card = view.items.length <= 5 ? CARD.row : pictured ? CARD.pictured : CARD.plain;
       const across = Math.max(1, Math.floor((width + CARD.gap) / (card + CARD.gap)));
       const rows = Math.ceil(view.items.length / across);
       const height = pictured ? Math.round(card * 0.75) + 132 : 148;

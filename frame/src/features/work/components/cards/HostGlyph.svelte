@@ -1,6 +1,7 @@
 <script module lang="ts">
   import { favicons } from "$domain/favicons";
   import type { SiteMark } from "$shared/ui/data/Artifact/site-marks";
+  import { registrableSite } from "../../lib/run/site";
   /** The mark the favicon cache already holds for an address or a bare host; it asks native for nothing. */
   export function siteMark(address: string): SiteMark | null {
     const value = address.trim();
@@ -16,11 +17,13 @@
       }
     }
     const bare = host.replace(/^www\./iu, "");
-    return (
-      favicons.forPage(`https://${bare}`) ??
-      favicons.forPage(`https://www.${bare}`) ??
-      favicons.forPage(`http://${bare}`)
-    );
+    const of = (name: string) =>
+      favicons.forPage(`https://${name}`) ??
+      favicons.forPage(`https://www.${name}`) ??
+      favicons.forPage(`http://${name}`);
+    // A subdomain with no icon of its own wears its site's: docs.hetzner.com is Hetzner's.
+    const site = registrableSite(bare);
+    return of(bare) ?? (site !== bare ? of(site) : null);
   }
   /** The HTTPS origin native may probe for an address or a bare host. */
   export function siteOrigin(address: string): string | null {

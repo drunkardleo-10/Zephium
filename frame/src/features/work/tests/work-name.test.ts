@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
-import type { WorkEnvironmentSummary } from "$shared/ipc/bindings";
-import { defaultTitle, listedName, requestName } from "../lib/work-name";
+import type { WorkEnvironmentSummary, WorkRuntimeProjection } from "$shared/ipc/bindings";
+import { defaultTitle, firstRunName, listedName, requestName } from "../lib/work-name";
 
 const work = (over: Partial<WorkEnvironmentSummary>): WorkEnvironmentSummary => ({
   id: "01M3PGBTDZVSAZZ8MBTKGXXDR9",
@@ -36,5 +36,29 @@ describe("a work's name", () => {
       listedName(work({ title: "Untitled project", requests: ["Plan my day"] }), "New work"),
     ).toBe("Plan my day");
     expect(defaultTitle("  ", "New work")).toBe(true);
+  });
+});
+
+describe("a work named by its first request", () => {
+  const run = (title: string | null, reply?: string) =>
+    ({
+      ...(title ? { title } : {}),
+      artifacts: reply ? [{ title: reply, data: { kind: "reply" } }] : [],
+    }) as unknown as WorkRuntimeProjection["executions"][number];
+  const work = (...executions: WorkRuntimeProjection["executions"]) =>
+    ({ executions }) as unknown as WorkRuntimeProjection;
+
+  test("takes the first title a run gave, else the first reply's, else the first words", () => {
+    expect(
+      firstRunName(work(run(null, "Context so far"), run("YC trip from Warsaw")), "Plan it", false),
+    ).toBe("YC trip from Warsaw");
+    expect(firstRunName(work(run(null, "Your compiler learning path")), "Find", false)).toBe(
+      "Your compiler learning path",
+    );
+    expect(firstRunName(work(run(null)), "plan my whole day", false)).toBe("Plan my whole day");
+  });
+
+  test("waits while the first run is still going", () => {
+    expect(firstRunName(work(run("Trip")), "Plan", true)).toBe("");
   });
 });

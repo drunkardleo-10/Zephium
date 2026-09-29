@@ -514,6 +514,7 @@ function leadView(
                     display: item.price.display,
                     ...(amount !== undefined ? { amount } : {}),
                     ...(item.price.currency ? { currency: item.price.currency } : {}),
+                    ...(item.price.was ? { was: item.price.was } : {}),
                   },
                 }
               : {}),

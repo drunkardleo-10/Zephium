@@ -26,7 +26,7 @@
       }}
     >
       <SubjectPicture picture={item.image} name={item.title} large />
-      <span class="play-mark"><PlayMark youtube size={48} /></span>
+      <span class="play-mark"><PlayMark youtube size={60} /></span>
     </button>{:else}<div class="thumbnail">
       <SubjectPicture picture={item.image} name={item.title} large />
     </div>{/if}{/snippet}

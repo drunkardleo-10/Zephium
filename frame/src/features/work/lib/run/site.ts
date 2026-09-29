@@ -112,6 +112,21 @@ const KNOWN: Record<string, string> = {
   substack: "Substack",
 };
 
+/** Products that live on a subdomain of a larger site, by the host they answer on. */
+const PRODUCTS: Record<string, string> = {
+  "mail.google.com": "Gmail",
+  "calendar.google.com": "Google Calendar",
+  "docs.google.com": "Google Docs",
+  "drive.google.com": "Google Drive",
+  "meet.google.com": "Google Meet",
+  "maps.google.com": "Google Maps",
+  "outlook.live.com": "Outlook",
+  "outlook.office.com": "Outlook",
+  "teams.microsoft.com": "Teams",
+  "aws.amazon.com": "AWS",
+  "console.aws.amazon.com": "AWS",
+};
+
 const squash = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 
 /**
@@ -121,6 +136,8 @@ const squash = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, 
  * made up from a fragment of a host.
  */
 export function siteName(host: string, titles: readonly string[] = []): string {
+  const product = PRODUCTS[host.replace(/^www\./u, "").toLowerCase()];
+  if (product) return product;
   const site = registrableSite(host);
   const key = siteKey(host);
   if (!key) return host;

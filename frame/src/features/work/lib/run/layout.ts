@@ -19,6 +19,8 @@ export const RUN = {
   feed: 96,
   found: 32,
   foundGap: 24,
+  /** A row's finds wrap past this width, so the result stays in view. */
+  foundRow: 1080,
   /** The Sources under the result. */
   sources: 40,
   spine: 32,
@@ -123,18 +125,30 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
   for (const row of run.rows) {
     const rowTop = y;
     rects[row.part.id] = { x: partsX, y: rowTop, width: row.part.width, height: row.part.height };
-    let x = snap(partsX + row.part.width + RUN.found);
+    const start = snap(partsX + row.part.width + RUN.found);
+    let x = start;
+    let lineTop = rowTop;
+    let lineHeight = 0;
     let height = row.part.height;
     let last = row.part.id;
+    let farthest = partsX + row.part.width;
+    // What a part found runs along its row, and wraps under itself rather than pushing the result off the view.
     for (const found of row.found) {
-      rects[found.id] = { x, y: rowTop, width: found.width, height: found.height };
-      last = found.id;
+      if (x > start && x + found.width - start > RUN.foundRow) {
+        lineTop = snap(lineTop + lineHeight + RUN.foundGap);
+        x = start;
+        lineHeight = 0;
+      }
+      rects[found.id] = { x, y: lineTop, width: found.width, height: found.height };
+      if (lineTop === rowTop) last = found.id;
+      farthest = Math.max(farthest, x + found.width);
       x = snap(x + found.width + RUN.foundGap);
-      height = Math.max(height, found.height);
+      lineHeight = Math.max(lineHeight, found.height);
+      height = Math.max(height, lineTop - rowTop + found.height);
     }
     const lastRect = rects[last]!;
     const right = lastRect.x + lastRect.width;
-    widest = Math.max(widest, right - partsX);
+    widest = Math.max(widest, farthest - partsX);
     rowEnds.push({ row, end: { x: right + RUN.air, y: rowTop + RUN.labelMid }, last, lastRect });
     y = snap(rowTop + height + RUN.rowGap);
   }

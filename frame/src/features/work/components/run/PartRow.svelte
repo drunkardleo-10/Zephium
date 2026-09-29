@@ -355,14 +355,15 @@
     color: var(--color-text);
   }
 
+  /* The remedy is quiet: a control of the row, not a call to action over the canvas. */
   .need {
     align-self: flex-start;
     margin: 6px 0 0 23px;
-    padding: 4px 12px;
+    padding: 3px 11px;
     border: 0;
     border-radius: var(--radius-capsule);
-    background: var(--color-lit);
-    color: var(--color-on-lit);
+    background: var(--color-control);
+    color: var(--color-text);
     font: inherit;
     font-size: var(--text-label);
     font-weight: 600;
@@ -372,7 +373,7 @@
   }
 
   .need:hover {
-    background: var(--color-lit-hover);
+    background: var(--color-control-hover);
   }
 
   .need:focus-visible {
