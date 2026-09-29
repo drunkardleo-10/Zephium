@@ -4,6 +4,7 @@ import type { CanvasPosition } from "./canvas-model";
 import { clean, tiersOf, type DiagramFlow, type DiagramLayout, type DiagramShape } from "./diagram";
 import { DIAGRAM, gutterOf } from "./diagram-metrics";
 import { diagramRows, type DiagramRows } from "./diagram-rows";
+import { channels } from "./diagram-channels";
 
 /**
  * The layered algorithm as a diagram reads: rows top to bottom as given,
@@ -36,27 +37,25 @@ export const ELK_OPTIONS: LayoutOptions = {
 };
 
 /**
- * How each flow is laid out. Flows down the picture leave their part through
- * one shared port, a trunk that branches; they gather into their target's
- * shared port only from the row just above (gathered from further up, they
- * would join long before they arrive), and only when they carry one name. A flow drawn up (`back`), and one of
- * an opposite pair, runs on a line of its own at both ends. Where a part's
- * flows reach past the next row, they run down as one trunk to a junction
- * above the first of their targets and part there (`via`).
+ * How each flow is laid out. A flow to the next row is the engine's: flows
+ * down leave their part through one shared port, a trunk that branches, and
+ * gather into their target's shared port. A flow drawn up (`back`), and one of
+ * an opposite pair, runs on a line of its own. A flow that reaches past the
+ * next row (`outer`) is no part of the engine's graph: it runs down a channel
+ * outside the parts (see `diagram-channels`).
  */
-type Route = {
+export type Route = {
   lead: number;
   partner?: number;
   back: boolean;
   source: boolean;
   target: boolean;
-  via?: string;
-  /** Drawn up into a part that other flows also return to under one name: they share its way in. */
+  outer: boolean;
+  /** Drawn up into a part that other flows also return to: they share its way in. */
   returns?: boolean;
 };
-type Plan = { routes: Route[]; junctions: Map<string, { id: string; row: number }> };
 
-function plan(shape: DiagramShape, rows: DiagramRows): Plan {
+function plan(shape: DiagramShape, rows: DiagramRows): Route[] {
   const routes: Route[] = [];
   const open = new Map<string, Route>();
   const row = (id: string) => rows.rowOf.get(id)!;
@@ -69,63 +68,27 @@ function plan(shape: DiagramShape, rows: DiagramRows): Plan {
       continue;
     }
     const back = !rows.forward.get(flow.index);
-    const long = Math.abs(row(flow.to) - row(flow.from)) > 1;
-    const route: Route = { lead: flow.index, back, source: !back, target: !back && !long };
+    const outer = Math.abs(row(flow.to) - row(flow.from)) > 1;
+    const route: Route = { lead: flow.index, back, source: !back, target: !back, outer };
     routes.push(route);
     open.set(`${flow.from}\n${flow.to}`, route);
   }
-  const junctions = new Map<string, { id: string; row: number }>();
-  const reaching = new Map<string, Route[]>();
-  for (const route of routes) {
-    const flow = shape.flows.find((entry) => entry.index === route.lead)!;
-    if (route.source && row(flow.to) - row(flow.from) > 1)
-      reaching.set(flow.from, [...(reaching.get(flow.from) ?? []), route]);
-  }
-  for (const [from, list] of reaching) {
-    if (list.length < 2) continue;
-    const first = Math.min(
-      ...list.map((route) => row(shape.flows.find((entry) => entry.index === route.lead)!.to)),
-    );
-    junctions.set(from, { id: `j${junctions.size}`, row: first - 1 });
-    for (const route of list) {
-      route.via = from;
-      const to = shape.flows.find((entry) => entry.index === route.lead)!.to;
-      route.target = row(to) === first;
-    }
-  }
-  // Flows gather into one port only when they carry one name: otherwise each keeps its own run in.
-  const gathering = new Map<string, Route[]>();
-  for (const route of routes)
-    if (route.target) {
-      const to = shape.flows.find((entry) => entry.index === route.lead)!.to;
-      gathering.set(to, [...(gathering.get(to) ?? []), route]);
-    }
-  const label = (route: Route) => shape.flows.find((entry) => entry.index === route.lead)!.label;
-  for (const list of gathering.values())
-    if (new Set(list.map(label)).size > 1) for (const route of list) route.target = false;
   const returning = new Map<string, Route[]>();
   for (const route of routes)
-    if (route.back && route.partner === undefined) {
+    if (route.back && route.partner === undefined && !route.outer) {
       const to = shape.flows.find((entry) => entry.index === route.lead)!.to;
       returning.set(to, [...(returning.get(to) ?? []), route]);
     }
   for (const list of returning.values())
-    if (list.length > 1 && new Set(list.map(label)).size === 1)
-      for (const route of list) route.returns = true;
-  return { routes, junctions };
+    if (list.length > 1) for (const route of list) route.returns = true;
+  return routes;
 }
 
 /** The ELK graph for a diagram: its parts in their rows, their shared and own ports, the flows. */
 export function elkGraph(shape: DiagramShape, rows: DiagramRows = diagramRows(shape)): ElkNode {
-  const { routes, junctions } = plan(shape, rows);
   const node = new Map(shape.parts.map((part, index) => [part.id, `n${index}`]));
   const flow = new Map(shape.flows.map((entry) => [entry.index, entry]));
-  const ports = new Map<string, ElkPort[]>(
-    [...node.values(), ...[...junctions.values()].map((junction) => junction.id)].map((id) => [
-      id,
-      [],
-    ]),
-  );
+  const ports = new Map<string, ElkPort[]>([...node.values()].map((id) => [id, []]));
   const port = (owner: string, key: string, side: "NORTH" | "SOUTH") => {
     const list = ports.get(owner)!;
     const name = `${owner}${key}`;
@@ -134,18 +97,12 @@ export function elkGraph(shape: DiagramShape, rows: DiagramRows = diagramRows(sh
     return name;
   };
   const edges: ElkExtendedEdge[] = [];
-  for (const [from, junction] of junctions)
-    edges.push({
-      id: junction.id,
-      sources: [port(node.get(from)!, "out", "SOUTH")],
-      targets: [port(junction.id, "in", "NORTH")],
-      layoutOptions: { "elk.layered.priority.straightness": "20" },
-    });
-  for (const route of routes) {
+  for (const route of plan(shape, rows)) {
+    if (route.outer) continue;
     const lead = flow.get(route.lead)!;
     // Laid out down the picture: from whichever end stands higher.
     const [upper, lower] = route.back ? [lead.to, lead.from] : [lead.from, lead.to];
-    const owner = route.via ? junctions.get(route.via)!.id : node.get(upper)!;
+    const owner = node.get(upper)!;
     const source = route.source
       ? port(owner, "out", "SOUTH")
       : route.returns
@@ -156,7 +113,6 @@ export function elkGraph(shape: DiagramShape, rows: DiagramRows = diagramRows(sh
       : port(node.get(lower)!, `e${route.lead}t`, "NORTH");
     edges.push({ id: `e${route.lead}`, sources: [source], targets: [target] });
   }
-  const options = { "elk.portConstraints": "FIXED_SIDE" };
   const children: ElkNode[] = rows.rows.flatMap((row, at) =>
     row.map((id, column) => ({
       id: node.get(id)!,
@@ -165,19 +121,9 @@ export function elkGraph(shape: DiagramShape, rows: DiagramRows = diagramRows(sh
       width: DIAGRAM.node.width,
       height: DIAGRAM.node.height,
       ports: ports.get(node.get(id)!)!,
-      layoutOptions: options,
+      layoutOptions: { "elk.portConstraints": "FIXED_SIDE" },
     })),
   );
-  for (const junction of junctions.values())
-    children.push({
-      id: junction.id,
-      x: 0,
-      y: junction.row * 400 + DIAGRAM.node.height / 2,
-      width: 1,
-      height: 1,
-      ports: ports.get(junction.id)!,
-      layoutOptions: options,
-    });
   return { id: "diagram", layoutOptions: ELK_OPTIONS, children, edges };
 }
 
@@ -216,20 +162,16 @@ function fromElk(
   const flows: Record<number, DiagramFlow> = {};
   const side = (id: string) => !!shape.parts.find((part) => part.id === id)?.side;
   const quiet = (index: number) => !rows.forward.get(index) || side(flow.get(index)!.to);
-  const { routes, junctions } = plan(shape, rows);
+  const routes = plan(shape, rows);
   const run = (id: string) => {
     const section = edges.get(id)?.sections?.[0];
     return section ? [section.startPoint, ...(section.bendPoints ?? []), section.endPoint] : null;
   };
-  for (const route of routes) {
-    const branch = run(`e${route.lead}`);
-    const trunk = route.via ? run(junctions.get(route.via)!.id) : [];
-    if (!branch || !trunk) continue;
-    const line = clean([...trunk, ...branch].map(moved));
+  const drawn = (route: Route, line: CanvasPosition[]) => {
     const paired = route.partner !== undefined;
     const lead = flow.get(route.lead)!;
     const lower = route.back ? lead.from : lead.to;
-    const drawn = (index: number, down: boolean, twin: boolean) => {
+    const put = (index: number, down: boolean, twin: boolean) => {
       const entry = flow.get(index)!;
       flows[index] = {
         from: entry.from,
@@ -242,8 +184,29 @@ function fromElk(
         ...(twin ? { twin: true } : {}),
       };
     };
-    drawn(route.lead, !route.back, false);
-    if (route.partner !== undefined) drawn(route.partner, route.back, true);
+    put(route.lead, !route.back, false);
+    if (route.partner !== undefined) put(route.partner, route.back, true);
+  };
+  for (const route of routes) {
+    if (route.outer) continue;
+    const line = run(`e${route.lead}`);
+    if (line) drawn(route, clean(line.map(moved)));
+  }
+  // Flows past the next row run outside the parts, one channel per part they leave.
+  const outer = channels(
+    shape,
+    rows,
+    at,
+    routes.filter((route) => route.outer),
+    Object.values(flows).map((entry) => entry.points),
+    left,
+  );
+  for (const [key, point] of Object.entries(outer.at)) at[key] = point;
+  for (const entry of Object.values(flows))
+    entry.points = entry.points.map((point) => ({ x: point.x + outer.shift, y: point.y }));
+  for (const route of routes) {
+    const line = outer.lines.get(route.lead);
+    if (line) drawn(route, line);
   }
   const xs = [
     ...Object.values(at).flatMap((p) => [p.x, p.x + DIAGRAM.node.width]),

@@ -49,20 +49,11 @@ test("a diagram becomes an ELK graph read top to bottom, rows fixed, ports share
   });
   const api = graph.children!.find((child) => child.id === "n1")!;
   expect([api.width, api.height]).toEqual([W, H]);
-  // The API's flows down leave through one port; the pair with Postgres keeps a line of its own.
+  // The API's flows to the next row leave through one port.
   const south = api.ports!.filter((port) => port.layoutOptions!["elk.port.side"] === "SOUTH");
-  expect(south.map((port) => port.id).sort()).toEqual(["n1e5s", "n1out"]);
-  // Its three flows into data run down one trunk to a junction and part there.
-  const junction = graph.children!.find((child) => child.id.startsWith("j"))!;
-  expect([junction.width, junction.height]).toEqual([1, 1]);
-  const trunk = graph.edges!.find((edge) => edge.id === junction.id)!;
-  expect(trunk.sources).toEqual(["n1out"]);
-  expect(
-    graph
-      .edges!.filter((edge) => edge.sources[0] === `${junction.id}out`)
-      .map((edge) => edge.id)
-      .sort(),
-  ).toEqual(["e6", "e7"]);
+  expect(south.map((port) => port.id)).toEqual(["n1out"]);
+  // Its three flows into data skip the rows between: they are no part of the engine's graph.
+  expect(graph.edges!.map((edge) => edge.id)).not.toContain("e6");
 });
 
 const segments = (points: readonly { x: number; y: number }[]) =>
@@ -99,7 +90,17 @@ test("a fan-out leaves as one trunk: its flows share their first run", async () 
   const layout = await engineLayout(diagramShape(SAAS));
   const first = (index: number) => layout.flows[index]!.points.slice(0, 2);
   expect(first(1)).toEqual(first(2));
-  expect(first(6)[0]).toEqual(first(1)[0]);
+});
+
+test("flows past the next row run in a channel outside the parts, one strand per part", async () => {
+  const layout = await engineLayout(diagramShape(SAAS));
+  const xs = Object.values(layout.at).flatMap((at) => [at.x, at.x + W]);
+  const [low, high] = [Math.min(...xs), Math.max(...xs)];
+  // CRUD, Cache and Uploads leave the API together and share their channel's run.
+  const channel = (index: number) =>
+    layout.flows[index]!.points.filter((point) => point.x < low || point.x > high).map((p) => p.x);
+  for (const index of [5, 6, 7]) expect(channel(index).length).toBeGreaterThan(0);
+  expect(new Set([...channel(6), ...channel(7)]).size).toBe(1);
 });
 
 test("a pair of opposite flows is one line with a head at each end", async () => {
