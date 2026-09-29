@@ -82,6 +82,18 @@ export type QuestionAsk = Base & {
   answer: string | null;
 };
 
+/** "Read Lunios?": a folder the request named, read for this work once allowed. */
+export type FolderAsk = Base & {
+  kind: "folder";
+  /** The folder's own name: "Lunios". */
+  name: string;
+  path: string;
+  /** Rust's option words, as they go back: allow first, then not now. */
+  allow: string;
+  decline: string;
+  answer: string | null;
+};
+
 export type SignInAsk = {
   kind: "sign_in";
   step: string;
@@ -92,7 +104,8 @@ export type SignInAsk = {
   state: "open" | "working";
 };
 
-export type Ask = ConfirmAsk | EntryAsk | ContextAsk | ConnectionAsk | QuestionAsk | SignInAsk;
+export type Ask =
+  ConfirmAsk | EntryAsk | ContextAsk | ConnectionAsk | FolderAsk | QuestionAsk | SignInAsk;
 
 /** Rust's fixed words for the questions it puts itself (`work_sites.rs`, `work_context_tools.rs`). */
 export const ASK_WORDS = {
@@ -223,10 +236,26 @@ function connectionOf(base: AskBase, { prompt, options, answer }: Words): Connec
   };
 }
 
+/** "Read Lunios?": the folder rides the step's local fact; its name is the path's last. */
+function folderOf(base: AskBase, step: WorkStepFact, { options, answer }: Words): FolderAsk | null {
+  const path = step.local?.folder?.trim();
+  if (!path) return null;
+  const name = path.replace(/\/+$/u, "").split("/").at(-1) || path;
+  return {
+    ...base,
+    kind: "folder",
+    name,
+    path,
+    allow: options[0] ?? ASK_WORDS.allow,
+    decline: options[1] ?? ASK_WORDS.notNow,
+    answer,
+  };
+}
+
 function fromAsk(
   step: WorkStepFact,
   steps: readonly WorkStepFact[],
-): EntryAsk | ContextAsk | ConnectionAsk | QuestionAsk | null {
+): EntryAsk | ContextAsk | ConnectionAsk | FolderAsk | QuestionAsk | null {
   if (step.kind.kind !== "ask") return null;
   const { prompt, options, purpose } = step.kind;
   const answer = step.kind.answer ?? null;
@@ -241,6 +270,8 @@ function fromAsk(
       return contextOf(base, words, true) ?? question;
     case "connection":
       return connectionOf(base, words) ?? question;
+    case "folder":
+      return folderOf(base, step, words) ?? question;
     case "question":
     case "budget":
     case "confirm":

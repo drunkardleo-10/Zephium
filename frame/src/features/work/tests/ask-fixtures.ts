@@ -100,6 +100,17 @@ export const githubAsk = running("ask-github", {
   options: ["Use GitHub", "Use the website instead"],
 });
 
+export const folderAsk = running(
+  "ask-folder",
+  {
+    kind: "ask",
+    prompt: "Read Lunios?",
+    options: ["Allow for this work", "Not now"],
+    purpose: "folder",
+  },
+  { local: { folder: "/Users/crynta/Dev/Lunios" } as WorkStepFact["local"] },
+);
+
 export const budgetAsk = running("ask-budget", {
   kind: "ask",
   prompt: "What's your budget for the stay, for the whole month?",

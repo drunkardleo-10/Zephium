@@ -15,7 +15,7 @@
           <AskCard ask={row.ask} {actions} placement="island" seed={3} />
         </div>
         <div class="far" style:zoom={0.5}>
-          <AskCard ask={row.ask} {actions} detail="overview" seed={3} />
+          <AskCard ask={row.ask} {actions} seed={3} />
         </div>{/if}
     </div>
   {/each}

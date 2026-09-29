@@ -64,6 +64,7 @@ test("every ask, open and decided, on the canvas and in the island, in both them
     f.notesAsk,
     f.tabsAsk,
     f.githubAsk,
+    f.folderAsk,
     f.budgetAsk,
     f.notionTask,
     f.settled(f.decided(f.slackSend, "approved", "succeeded"), { id: "sent" }),
@@ -80,6 +81,7 @@ test("every ask, open and decided, on the canvas and in the island, in both them
     ),
     f.settled(f.answered(f.slackEntry, "Always for Slack"), { id: "entry-always" }),
     f.settled(f.answered(f.historyAsk, "Allow"), { id: "history-allowed" }),
+    f.settled(f.answered(f.folderAsk, "Allow for this work"), { id: "folder-allowed" }),
   ]);
   const asks = asksOf(execution, [f.tripPage], [f.notionWall]);
   const rows = asks.map((ask) => ({ name: `${ask.kind}-${ask.step}`, ask }));
