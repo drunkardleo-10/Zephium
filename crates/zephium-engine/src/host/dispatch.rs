@@ -532,6 +532,25 @@ pub(super) fn try_open_native_tab(
 }
 
 #[cfg(target_os = "windows")]
+pub(super) fn try_open_windows_extension_tab(
+    runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+    url: &str,
+    features: wry::NewWindowFeatures,
+) -> wry::NewWindowResponse {
+    if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
+        return wry::NewWindowResponse::Deny;
+    }
+    HOST.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return wry::NewWindowResponse::Deny;
+        };
+        slot.as_mut().map_or(wry::NewWindowResponse::Deny, |host| {
+            host.open_windows_extension_tab(runtime, url, features)
+        })
+    })
+}
+
+#[cfg(target_os = "windows")]
 pub(super) fn finish_windows_native_tab(child: zephium_core::ids::ItemId, attached: bool) -> bool {
     HOST.with(|slot| {
         let Ok(mut slot) = slot.try_borrow_mut() else {

@@ -731,6 +731,78 @@ impl super::EngineHost {
         result.unwrap_or_else(ExtensionActionSettlement::Rejected)
     }
 
+    pub(super) fn open_windows_extension_tab(
+        &mut self,
+        runtime: ExtensionRuntimeInstance,
+        url: &str,
+        features: wry::NewWindowFeatures,
+    ) -> wry::NewWindowResponse {
+        use std::sync::atomic::Ordering;
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindowVisible};
+        let Some(popup) = self.windows_extensions.popup.as_ref() else {
+            return wry::NewWindowResponse::Deny;
+        };
+        let profile = runtime.profile();
+        // Only the live, focused extension popup may request an ordinary tab.
+        // A hidden observer/worker, stale popup, or page IPC cannot use this path.
+        if !features.user_initiated
+            || !zephium_core::navigation::is_allowed_str(url)
+            || popup.runtime != runtime
+            || !popup.view.alive.get()
+            || popup.view.view.webview().as_raw() != features.opener.webview.as_raw()
+            || unsafe { GetForegroundWindow() } != popup.window.0
+            || self.windows_view_admission_blocked(profile)
+            || self.erasure_tombstones.contains(&profile)
+            || self
+                .windows_extensions
+                .installs
+                .get(&(profile, runtime.install_id()))
+                .is_none_or(|install| install.runtime != runtime)
+            || self.environments.get(&profile).is_none_or(|environment| {
+                !crate::platform::imp::same_environment(environment, &features.opener.environment)
+            })
+        {
+            return wry::NewWindowResponse::Deny;
+        }
+        let source = popup.tab;
+        let popup_window = popup.window.0;
+        if self
+            .partitions
+            .get(&source)
+            .is_none_or(|partition| partition.profile() != profile)
+            || self
+                .extension_browser_surfaces
+                .get(&profile)
+                .is_none_or(|surface| {
+                    !surface
+                        .windows()
+                        .iter()
+                        .any(|window| window.active() == Some(source))
+                })
+        {
+            return wry::NewWindowResponse::Deny;
+        }
+        let Some(view) = self.views.get(&source) else {
+            return wry::NewWindowResponse::Deny;
+        };
+        let Some(activity) = view.navigation.activity_snapshot() else {
+            return wry::NewWindowResponse::Deny;
+        };
+        if !view.presentation_permit.load(Ordering::Acquire)
+            || !view.download_surface_intent.load(Ordering::Acquire)
+        {
+            return wry::NewWindowResponse::Deny;
+        }
+        let permit = view.event_permit.clone();
+        self.adopt_native_tab(source, &permit, activity, url, features, move || {
+            // Construction pumps native messages: closing or defocusing the
+            // popup during that interval must invalidate its pending request.
+            unsafe {
+                GetForegroundWindow() == popup_window && IsWindowVisible(popup_window).as_bool()
+            }
+        })
+    }
+
     fn present_windows_extension_popup(
         &mut self,
         request: ExtensionActionRequest,
@@ -836,6 +908,7 @@ impl super::EngineHost {
         );
         let base = format!("chrome-extension://{extension_id}/");
         let navigation_base = base.clone();
+        let burst = Cell::new((std::time::Instant::now(), 0u8));
         let built = wry::WebViewBuilder::new()
             .with_environment(environment)
             .with_browser_extension_startup_gate(move |env, core| startup.authenticate(env, core))
@@ -849,7 +922,20 @@ impl super::EngineHost {
             .with_picture_in_picture_enabled(false)
             .with_general_autofill_enabled(false)
             .with_browser_accelerator_keys(false)
-            .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
+            .with_new_window_req_handler(move |url, features| {
+                let now = std::time::Instant::now();
+                let (started, count) = burst.get();
+                let (started, count) = if now.duration_since(started).as_secs() >= 1 {
+                    (now, 0)
+                } else {
+                    (started, count)
+                };
+                if count >= 8 {
+                    return wry::NewWindowResponse::Deny;
+                }
+                burst.set((started, count + 1));
+                super::dispatch::try_open_windows_extension_tab(runtime, &url, features)
+            })
             .with_permission_handler(|_| wry::PermissionResponse::Deny)
             .with_download_policy(wry::DownloadPolicy::DenyWithoutMetadata)
             .with_navigation_handler(move |target| {
