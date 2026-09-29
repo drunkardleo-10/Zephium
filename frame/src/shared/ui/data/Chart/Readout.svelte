@@ -123,9 +123,7 @@
 
   .host {
     min-inline-size: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
 
   .chip:hover:not(:disabled) {

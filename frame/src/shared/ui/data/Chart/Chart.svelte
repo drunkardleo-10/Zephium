@@ -1107,7 +1107,7 @@
   }
 
   .chip {
-    max-inline-size: 180px;
+    max-inline-size: 240px;
     padding: 1px 8px;
     border: 0;
     border-radius: var(--radius-capsule);
@@ -1116,9 +1116,7 @@
     font: inherit;
     font-size: var(--text-caption);
     cursor: default;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
 
   summary:focus-visible,
