@@ -19,7 +19,14 @@ const RENDERING_OPPORTUNITY: Duration = Duration::from_millis(100);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 // Cleanup may outlive revoked authority. It gets finite callback opportunities,
 // never a renewed lease/deadline or permission to keep presenting a page.
-const MAX_WAKES: u8 = 104;
+const CLEANUP_WAKES: u16 = 4;
+/// One wake per poll across a look's budget, then the cleanup wakes: a five
+/// second look has 104.
+fn max_wakes(duration: Duration) -> u16 {
+    u16::try_from(duration.as_millis() / POLL_INTERVAL.as_millis())
+        .unwrap_or(u16::MAX - CLEANUP_WAKES)
+        + CLEANUP_WAKES
+}
 type Result = std::result::Result<SemanticSnapshot, SemanticRuntimePortFailure>;
 type WakeAction = Box<dyn FnOnce() + Send>;
 
@@ -51,7 +58,9 @@ pub(super) struct WorkObservation {
     outcome: Option<Result>,
     refusal: Option<SemanticRuntimePortFailure>,
     wake: Option<ObservationWake>,
-    wakes: u8,
+    wakes: u16,
+    /// Wakes that cover this look's own budget, plus the cleanup ones.
+    max_wakes: u16,
 }
 
 /// Cancelling an unentered timer consumes its original callback/permit. Once
@@ -389,6 +398,7 @@ impl EngineHost {
             refusal: None,
             wake: ObservationWake::schedule(&guard),
             wakes: 1,
+            max_wakes: max_wakes(duration),
         });
         // The resource now owns every partial native effect and the exact task.
         let read = resource.observation.as_mut().unwrap();
@@ -603,7 +613,7 @@ impl EngineHost {
             read.wake = None;
         }
         if read.wake.is_none() {
-            if read.wakes >= MAX_WAKES {
+            if read.wakes >= read.max_wakes {
                 resource.cancel_observation(SemanticRuntimePortFailure::TimedOut);
                 guard.fail();
                 return;
@@ -611,7 +621,7 @@ impl EngineHost {
             read.wakes += 1;
             read.wake = ObservationWake::schedule(guard);
             if read.wake.is_none() {
-                read.wakes = MAX_WAKES;
+                read.wakes = read.max_wakes;
                 resource.cancel_observation(SemanticRuntimePortFailure::Shutdown);
                 guard.fail();
                 notify_work_resource(guard.clone());
@@ -726,6 +736,7 @@ mod tests {
             refusal: None,
             wake: None,
             wakes: 0,
+            max_wakes: max_wakes(OBSERVATION_BUDGET),
         }
     }
     #[test]
