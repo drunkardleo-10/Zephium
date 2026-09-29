@@ -295,8 +295,13 @@ impl State {
         }
         // A saved commit's own page may hand on with a form GET (a consent
         // host returning to the site): it is followed as the POST's redirect.
-        // A consent press's own reload or hand-back is followed the same way.
-        if get && (follow.posted || follow.consent) {
+        // A consent press's own reload or hand-back is followed the same way,
+        // and so is any action's reload of the page it is on: it opens no new
+        // destination, and the controller cannot follow it as one.
+        let reload = self.effective.as_ref().is_some_and(|effective| {
+            ContextNavigationTarget::parse(raw).is_ok_and(|target| target == *effective)
+        });
+        if get && (follow.posted || follow.consent || reload) {
             let (Some(generation), Some(loads)) = (
                 self.finalization_generation.checked_add(1),
                 self.site_loads
@@ -1451,6 +1456,18 @@ mod tests {
         settle(&gate, start);
         assert!(gate.ready(Some(start)) && !gate.failed());
         assert_eq!(slot.take(), None);
+        // An ordinary action's reload of its own page is followed natively;
+        // a load of another page on the site stays the controller's to follow.
+        let gate = ready();
+        gate.open_follow(false, false, slot.clone());
+        assert!(!gate.allows_apple_action(
+            "https://www.google.com/travel/hotels",
+            apple_action(T::LinkActivated, true)
+        ));
+        assert!(gate.ready(Some(start)));
+        assert!(slot.take().is_some());
+        assert!(gate.allows_apple_action(start, apple_action(T::Reload, true)));
+        assert!(gate.handed_on());
         // A script that saved the choice and reloads the page is followed,
         // not diverted; another site never is.
         let gate = ready();
