@@ -291,7 +291,8 @@ fn summary(
     snapshot: WorkEnvironmentSnapshot,
 ) -> Result<WorkEnvironmentSummary, WorkError> {
     let mut requests: Vec<String> = vec![];
-    let mut name: Option<String> = None;
+    let mut titled: Option<String> = None;
+    let mut replied: Option<String> = None;
     let mut touched = 0_i64;
     let mut runs = tx
         .prepare_cached(
@@ -335,15 +336,23 @@ fn summary(
             let asked = request.filter(|request| !request.trim().is_empty());
             push_request(
                 &mut requests,
-                asked.as_deref().unwrap_or(if index == 0 { &text } else { "" }),
+                asked
+                    .as_deref()
+                    .unwrap_or(if index == 0 { &text } else { "" }),
             );
-            // Only the work's first run names it.
-            if index == 0 && seen.len() == 1 {
-                name = [title, reply]
-                    .into_iter()
-                    .flatten()
-                    .map(|name| name.trim().to_owned())
-                    .find(|name| !name.is_empty());
+            // The work's first request names it: the first of its runs to give a
+            // title, else what its first run's reply was called.
+            if seen.len() == 1 {
+                let given = |name: Option<String>| {
+                    name.map(|name| name.trim().to_owned())
+                        .filter(|name| !name.is_empty())
+                };
+                if titled.is_none() {
+                    titled = given(title);
+                }
+                if index == 0 {
+                    replied = given(reply);
+                }
             }
         }
     }
@@ -354,7 +363,9 @@ fn summary(
         title: snapshot.title,
         lifecycle: snapshot.lifecycle,
         revision: snapshot.revision,
-        name: name.map(|name| cut(&name, MAX_SUMMARY_REQUEST_CHARS)),
+        name: titled
+            .or(replied)
+            .map(|name| cut(&name, MAX_SUMMARY_REQUEST_CHARS)),
         requests,
         touched_ms: touched.max(0).to_string(),
     })
