@@ -19,6 +19,13 @@ export const canvasArrival = Symbol("canvas-arrival");
 export const canvasProbe = Symbol("canvas-probe");
 /** The runs behind the canvas, for a helper's own view of a part: `(objective) => projection`. */
 export const canvasWork = Symbol("canvas-work");
+/**
+ * Whether a node has come near the view: until it has, it stands as an empty
+ * box of its size, so opening a large work draws only what can be seen.
+ */
+export const canvasSeen = Symbol("canvas-seen");
+/** Whether the canvas is seen from far (under half size): page frames draw as small copies. */
+export const canvasFar = Symbol("canvas-far");
 /** What a board's blocks ask of their canvas: see `BoardActions`. */
 export const canvasBoard = Symbol("canvas-board");
 /** A board's blocks report their size, open in place, and act through the canvas's owner. */

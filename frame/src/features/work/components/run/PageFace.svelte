@@ -1,5 +1,8 @@
 <script lang="ts">
+  import { getContext } from "svelte";
   import HostGlyph from "../cards/HostGlyph.svelte";
+  import { canvasFar } from "../../lib/canvas-context";
+  import { thumbnail } from "../../lib/frame-thumbs";
 
   /**
    * A page as a small browser window: a slim bar with the site's mark, its
@@ -21,6 +24,9 @@
     live?: boolean;
   } = $props();
 
+  /** From far away a settled page draws a small copy of its frame; the live one stays itself. */
+  const scale = getContext<{ readonly far: boolean } | undefined>(canvasFar);
+  const small = $derived(!!scale?.far && !live);
   /** A frame that failed to load, or came back one flat colour, is not shown. */
   let failed = $state<string | null>(null);
   let blank = $state<string | null>(null);
@@ -71,9 +77,12 @@
     <span class="mark"><HostGlyph {host} {url} size={14} loading={live} initial={false} /></span>
     <span class="host">{site}</span>
     <span class="heading">{heading}</span>
+    {#if live}{#key frame}<span class="arrived" aria-hidden="true"></span>{/key}{/if}
   </span>
   <span class="view">
-    {#if shown}
+    {#if shown && small}
+      <canvas class="thumb" use:thumbnail={{ url: frame!, width: 224 }}></canvas>
+    {:else if shown}
       <img
         src={frame}
         alt=""
@@ -115,6 +124,7 @@
   }
 
   .bar {
+    position: relative;
     display: grid;
     flex: none;
     grid-template-columns: 14px max-content minmax(0, 1fr);
@@ -126,6 +136,41 @@
     background: var(--color-raised);
     font-size: var(--text-caption);
     line-height: 14px;
+  }
+
+  /* A new look at the live page draws one hairline across the bar, once: the
+     page moved, and nothing moves between looks. */
+  .arrived {
+    position: absolute;
+    inset: auto 0 -1px;
+    block-size: 1.5px;
+    background: var(--color-accent);
+    transform-origin: left;
+    animation: arrived var(--motion-page) var(--ease-emphasized) forwards;
+  }
+
+  @keyframes arrived {
+    from {
+      scale: 0 1;
+      opacity: 1;
+    }
+
+    70% {
+      scale: 1 1;
+      opacity: 1;
+    }
+
+    to {
+      scale: 1 1;
+      opacity: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .arrived {
+      animation: none;
+      opacity: 0;
+    }
   }
 
   .mark {
@@ -164,6 +209,14 @@
     object-fit: cover;
     object-position: top;
     pointer-events: none;
+  }
+
+  .thumb {
+    display: block;
+    inline-size: 100%;
+    block-size: 100%;
+    object-fit: cover;
+    object-position: top;
   }
 
   /* No picture of the page: its title, set, on the page's own sheet. */

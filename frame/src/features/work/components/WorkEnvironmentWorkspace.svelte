@@ -67,7 +67,7 @@
     environmentStages,
     fetchedPictures,
     laneElement,
-    measureKey,
+    measurer,
   } from "../lib/project-environment-board";
   import type { BoardActions } from "../lib/canvas-context";
   import type { ObjectActions, ObjectView } from "../lib/board/types";
@@ -756,6 +756,7 @@
   /** The block opened in place, and every block's height as it measured itself. */
   let openBlock = $state<string | null>(null);
   const measured = new SvelteMap<string, number>();
+  const takeMeasure = measurer(measured);
   /** The bar's height, context included, so the canvas fades under all of it. */
   let dockHeight = $state(64);
   /** Blocks the person dragged: only those can leave their board's flow. */
@@ -1323,10 +1324,7 @@
     return execution && artifact ? artifactView(artifact, execution) : undefined;
   }
   const boardActions: BoardActions = {
-    measure(id, width, open, height) {
-      const key = measureKey(id, width, open);
-      if (measured.get(key) !== height) measured.set(key, height);
-    },
+    measure: takeMeasure,
     toggle: toggleBlock,
     ask: (name) => askAbout(name),
     choose(element, choose) {
@@ -1487,7 +1485,15 @@
         ...plannedGeometry.positions,
         ...planGeometry.positions,
         ...savedResultPositions,
-        ...clearOfBands(own.positions, own.sizes ?? {}, stages, loose),
+        ...clearOfBands(
+          own.positions,
+          {
+            ...Object.fromEntries(results.items.map((item) => [item.id, defaultSize(item)])),
+            ...own.sizes,
+          },
+          stages,
+          loose,
+        ),
         ...requests.positions,
         ...agents.positions,
       },

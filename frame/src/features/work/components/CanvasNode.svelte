@@ -10,6 +10,7 @@
     canvasFocusResult,
     canvasAreas,
     canvasArrival,
+    canvasSeen,
   } from "../lib/canvas-context";
   import { arrive } from "../lib/arrival";
   import type { Duration } from "$shared/lib/motion";
@@ -42,6 +43,9 @@
   );
   const arrival = getContext<((id: string) => Duration | null) | undefined>(canvasArrival);
   let { id, data, selected }: NodeProps<WorkItemNode> = $props();
+  const seen = getContext<((id: string) => boolean) | undefined>(canvasSeen);
+  /** Far from the view it is an empty box of its size; its content draws once it comes near. */
+  const near = $derived(!seen || seen(id));
   let root = $state<HTMLDivElement>();
   // A card the run just placed rises into its group; one that was there already does not.
   onMount(() => {
@@ -139,47 +143,49 @@
   </div>
 </NodeToolbar>
 <div class="node-root" bind:this={root}>
-  {#if data.decision}<span class="decision" title={data.decision}
-      ><Icon icon={Tick02Icon} size={12} />{m.work_env_decided()}</span
-    >{/if}
-  {#if type === "block" && data.block}<BlockHost {id} item={data} {selected} />
-  {:else if type === "head"}<BoardHead {id} item={data} />
-  {:else if type === "trail"}<Trail item={data} {selected} />
-  {:else if type === "tab" || type === "link"}<TabCard
-      item={data}
-      {selected}
-      onplay={() => action(id, "play")}
-    />
-  {:else if type === "subject"}<SubjectCard item={data} {selected} />
-  {:else if type === "folder"}<FolderCard item={data} {selected} />
-  {:else if type === "page"}<PageCard item={data} {selected} onhelp={() => action(id, "help")} />
-  {:else if type === "note"}<NoteCard item={data} {selected} />
-  {:else if type === "media"}<MediaCard item={data} {selected} />
-  {:else if type === "responsibility"}<ResponsibilityCard item={data} {selected} />
-  {:else if type === "objective" || type === "request"}<RequestText
-      item={data}
-      {selected}
-      ontoggle={() => action(id, "expand-request")}
-      onaction={() => action(id)}
-    />
-  {:else if type === "object" && data.object}<ObjectHost {id} item={data} {selected} />
-  {:else if type === "input"}<InputMark item={data} />
-  {:else if type === "sources"}<SourcesCard item={data} {selected} />
-  {:else if type === "part"}<PartRow
-      item={data}
-      {selected}
-      onopen={(page) => action(id, `page:${page}`)}
-      onneed={(how) => action(id, `need:${how}`)}
-      onlist={() => open(id)}
-    />
-  {:else if data.artifact?.content.kind === "matrix"}<CompareCard item={data} {selected} />
-  {:else if type === "result" || data.artifact}<ResultCard
-      {id}
-      item={data}
-      {selected}
-      onaction={() => action(id)}
-    />
-  {:else}<ObjectiveCard item={data} {selected} onaction={() => action(id)} />{/if}
+  {#if !near}<span class="unseen" aria-hidden="true"></span>{:else}
+    {#if data.decision}<span class="decision" title={data.decision}
+        ><Icon icon={Tick02Icon} size={12} />{m.work_env_decided()}</span
+      >{/if}
+    {#if type === "block" && data.block}<BlockHost {id} item={data} {selected} />
+    {:else if type === "head"}<BoardHead {id} item={data} />
+    {:else if type === "trail"}<Trail item={data} {selected} />
+    {:else if type === "tab" || type === "link"}<TabCard
+        item={data}
+        {selected}
+        onplay={() => action(id, "play")}
+      />
+    {:else if type === "subject"}<SubjectCard item={data} {selected} />
+    {:else if type === "folder"}<FolderCard item={data} {selected} />
+    {:else if type === "page"}<PageCard item={data} {selected} onhelp={() => action(id, "help")} />
+    {:else if type === "note"}<NoteCard item={data} {selected} />
+    {:else if type === "media"}<MediaCard item={data} {selected} />
+    {:else if type === "responsibility"}<ResponsibilityCard item={data} {selected} />
+    {:else if type === "objective" || type === "request"}<RequestText
+        item={data}
+        {selected}
+        ontoggle={() => action(id, "expand-request")}
+        onaction={() => action(id)}
+      />
+    {:else if type === "object" && data.object}<ObjectHost {id} item={data} {selected} />
+    {:else if type === "input"}<InputMark item={data} />
+    {:else if type === "sources"}<SourcesCard item={data} {selected} />
+    {:else if type === "part"}<PartRow
+        item={data}
+        {selected}
+        onopen={(page) => action(id, `page:${page}`)}
+        onneed={(how) => action(id, `need:${how}`)}
+        onlist={() => open(id)}
+      />
+    {:else if data.artifact?.content.kind === "matrix"}<CompareCard item={data} {selected} />
+    {:else if type === "result" || data.artifact}<ResultCard
+        {id}
+        item={data}
+        {selected}
+        onaction={() => action(id)}
+      />
+    {:else}<ObjectiveCard item={data} {selected} onaction={() => action(id)} />{/if}
+  {/if}
 </div>
 <!-- Where a line meets a node is its route's to say; the handles only let the flow draw it. -->
 <Handle
@@ -193,6 +199,12 @@
 <style>
   .node-root {
     display: contents;
+  }
+
+  .unseen {
+    display: block;
+    inline-size: 100%;
+    block-size: 100%;
   }
 
   .decision {

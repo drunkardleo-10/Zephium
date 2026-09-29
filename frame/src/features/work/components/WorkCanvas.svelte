@@ -19,6 +19,8 @@
     canvasArrival,
     canvasProbe,
     canvasBoard,
+    canvasSeen,
+    canvasFar,
     canvasWork,
     type BoardActions,
   } from "../lib/canvas-context";
@@ -242,6 +244,52 @@
     if (!homed || !canvasWidth) return;
     const settle = setTimeout(() => (homed = false), HOME_SETTLE);
     return () => clearTimeout(settle);
+  });
+  /**
+   * The nodes that have come within a screen of the view. Until one has, it
+   * is an empty box of its size: a large work opens drawing what can be seen,
+   * not every object once before the flow culls it. Once near, a node stays
+   * drawn while the flow keeps it; the set only grows, and only changes when
+   * something new comes near.
+   */
+  let near = $state.raw<ReadonlySet<string>>(new Set());
+  $effect(() => {
+    const view = viewport;
+    // Before the canvas has measured itself, the window stands in for it.
+    const width = canvasWidth || window.innerWidth;
+    const height = canvasHeight || window.innerHeight;
+    const list = nodes;
+    untrack(() => {
+      const left = -view.x / view.zoom - width / view.zoom;
+      const top = -view.y / view.zoom - height / view.zoom;
+      const right = left + (width * 3) / view.zoom;
+      const bottom = top + (height * 3) / view.zoom;
+      const added: string[] = [];
+      for (const node of list) {
+        if (near.has(node.id)) continue;
+        const at = absolutePosition(node, list);
+        const w = node.width ?? node.measured?.width ?? 0;
+        const h = node.height ?? node.measured?.height ?? 0;
+        if (at.x > right || at.y > bottom || at.x + w < left || at.y + h < top) continue;
+        added.push(node.id);
+      }
+      if (added.length) near = new Set([...near, ...added]);
+    });
+  });
+  setContext(canvasSeen, (id: string) => near.has(id));
+  /** Seen from far, with a margin either way so a pinch around the line doesn't flicker. */
+  let far = $state(false);
+  $effect(() => {
+    const zoom = viewport.zoom;
+    untrack(() => {
+      if (!far && zoom < 0.5) far = true;
+      else if (far && zoom > 0.6) far = false;
+    });
+  });
+  setContext(canvasFar, {
+    get far() {
+      return far;
+    },
   });
   // One bad card never hides the canvas: the scene is repaired, then guarded.
   const scene = $derived(sanitizeScene(items, links));

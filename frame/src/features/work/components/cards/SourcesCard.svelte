@@ -6,6 +6,7 @@
   import type { CanvasItem } from "../../lib/canvas-model";
   import { canvasBoard, type BoardActions } from "../../lib/canvas-context";
   import { SOURCE_ROWS } from "../../lib/project-environment-board";
+  import { thumbnail } from "../../lib/frame-thumbs";
   import type { RunSource } from "../../lib/run/sources";
   import * as m from "$shared/i18n/messages";
 
@@ -71,13 +72,9 @@
                 event.stopPropagation();
                 open(row);
               }}
-              ><img
-                src={row.frame}
-                alt=""
-                loading="lazy"
-                decoding="async"
-                draggable="false"
-              /></button
+              ><!-- A small copy of the frame, drawn at the size it shows: the full page isn't kept. --><canvas
+                use:thumbnail={{ url: row.frame!, width: 288 }}
+              ></canvas></button
             >
           </li>{/each}
       </ul>{/if}
@@ -203,7 +200,7 @@
     translate: 0 -2px;
   }
 
-  .frame img {
+  .frame canvas {
     display: block;
     inline-size: 100%;
     block-size: 100%;

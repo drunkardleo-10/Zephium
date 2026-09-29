@@ -5,7 +5,7 @@
     clearOfBands,
     environmentStages,
     fetchedPictures,
-    measureKey,
+    measurer,
   } from "../lib/project-environment-board";
   import {
     environmentAgents,
@@ -18,6 +18,7 @@
   } from "../lib/project-environment";
   import { environmentRequests, requestDress, runFolders } from "../lib/project-environment-thread";
   import type { BoardActions } from "../lib/canvas-context";
+  import { defaultSize } from "../lib/canvas-model";
   import { exchangeOf } from "../components/asks/asks";
   import type { PartAsk } from "../lib/run/parts";
   import type { BoardScene } from "./board-fixtures";
@@ -83,10 +84,7 @@
     ),
   );
   const board: BoardActions = {
-    measure(id, width, opened, height) {
-      const key = measureKey(id, width, opened);
-      if (measured.get(key) !== height) measured.set(key, height);
-    },
+    measure: measurer(measured),
     toggle: (id) => (open = open === id ? null : id),
     ask: (name) => asked.push(name),
     choose: () => {},
@@ -107,7 +105,15 @@
     positions: {
       ...clearOfBands(
         own.positions,
-        own.sizes ?? {},
+        {
+          ...Object.fromEntries(
+            environmentItems(scene.snapshot, [], [], scene.objectives, scene.media).map((item) => [
+              item.id,
+              defaultSize(item),
+            ]),
+          ),
+          ...own.sizes,
+        },
         stages,
         environmentItems(scene.snapshot, [], [], scene.objectives, scene.media).flatMap((item) =>
           item.type === "objective" || folders.has(item.id) ? [] : [item.id],

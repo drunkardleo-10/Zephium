@@ -122,6 +122,26 @@ export function requestTextSize(text: string, open: boolean) {
 export const measureKey = (id: string, width: number, open: boolean) =>
   `${id}|${Math.round(width)}|${open ? 1 : 0}`;
 
+/**
+ * What blocks report of their height, taken in once per turn: every block
+ * that measured itself while the canvas drew lands in one change, so the runs
+ * are laid out again once, not once per block.
+ */
+export function measurer(measured: Map<string, number>) {
+  const pending = new Map<string, number>();
+  let queued = false;
+  return (id: string, width: number, open: boolean, height: number) => {
+    pending.set(measureKey(id, width, open), height);
+    if (queued) return;
+    queued = true;
+    queueMicrotask(() => {
+      queued = false;
+      for (const [key, value] of pending) if (measured.get(key) !== value) measured.set(key, value);
+      pending.clear();
+    });
+  };
+}
+
 export type StageOptions = {
   recorded?: (objective: string) => readonly WorkPageV1[];
   pictures?: ReadonlyMap<string, Picture>;
