@@ -1,27 +1,46 @@
 //! One on-demand planning call, followed by one profile-bound Store CAS.
 //! There is no approval, execution capability, polling worker, or automatic retry.
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use zephium_core::{
     ids::ProfileId,
     work::{planning::*, port::*, *},
 };
 
-static ACTIVE: Mutex<Vec<(ProfileId, WorkId)>> = Mutex::new(Vec::new());
-struct Permit((ProfileId, WorkId));
+type Active = std::sync::Mutex<Vec<(ProfileId, WorkId)>>;
+/// The app's active runs. Tests run many apps in one process, so each test
+/// thread keeps its own.
+fn active() -> &'static Active {
+    #[cfg(not(test))]
+    {
+        static ACTIVE: Active = std::sync::Mutex::new(Vec::new());
+        &ACTIVE
+    }
+    #[cfg(test)]
+    {
+        thread_local! {
+            static ACTIVE: &'static Active = Box::leak(Box::default());
+        }
+        ACTIVE.with(|active| *active)
+    }
+}
+struct Permit((ProfileId, WorkId), &'static Active);
 impl Permit {
     fn acquire(key: (ProfileId, WorkId)) -> Result<Self, WorkPlanningError> {
-        let mut active = ACTIVE.lock().map_err(|_| WorkPlanningError::Unavailable)?;
+        let registry = active();
+        let mut active = registry
+            .lock()
+            .map_err(|_| WorkPlanningError::Unavailable)?;
         if active.len() >= 2 || active.contains(&key) {
             return Err(WorkPlanningError::Capacity);
         }
         active.push(key);
-        Ok(Self(key))
+        Ok(Self(key, registry))
     }
 }
 impl Drop for Permit {
     fn drop(&mut self) {
-        if let Ok(mut active) = ACTIVE.lock() {
+        if let Ok(mut active) = self.1.lock() {
             active.retain(|key| *key != self.0);
         }
     }

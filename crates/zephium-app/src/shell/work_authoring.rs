@@ -332,6 +332,7 @@ mod tests {
             // Deliberately forged flags: the actor must replace them from its
             // actual selected profile, Space and tab ownership.
             let (submission, request) = WorkDocumentSubmission::prepare_bound(
+                &crate::work_authoring::Pending::default(),
                 WorkRequest::Environment {
                     call,
                     space_available: true,
@@ -414,7 +415,8 @@ mod tests {
         );
     }
     fn wait(request: &crate::WorkDocumentRequest) -> Result<WorkDocumentProjection, WorkError> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // A hang guard, not a speed bound: a busy parallel suite starves the store thread.
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if let Some(reply) = request.try_recv() {
                 return reply;

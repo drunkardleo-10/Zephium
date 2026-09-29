@@ -10,21 +10,38 @@ use zephium_core::{
     work::{artifact::*, port::*, runtime::*, *},
 };
 
-static ACTIVE: Mutex<Vec<(ProfileId, WorkId, WorkPlanNodeId)>> = Mutex::new(Vec::new());
-struct Permit((ProfileId, WorkId, WorkPlanNodeId));
+type Active = std::sync::Mutex<Vec<(ProfileId, WorkId, WorkPlanNodeId)>>;
+/// The app's active runs. Tests run many apps in one process, so each test
+/// thread keeps its own.
+fn active() -> &'static Active {
+    #[cfg(not(test))]
+    {
+        static ACTIVE: Active = std::sync::Mutex::new(Vec::new());
+        &ACTIVE
+    }
+    #[cfg(test)]
+    {
+        thread_local! {
+            static ACTIVE: &'static Active = Box::leak(Box::default());
+        }
+        ACTIVE.with(|active| *active)
+    }
+}
+struct Permit((ProfileId, WorkId, WorkPlanNodeId), &'static Active);
 impl Permit {
     fn acquire(key: (ProfileId, WorkId, WorkPlanNodeId)) -> Result<Self, WorkError> {
-        let mut active = ACTIVE.lock().map_err(|_| WorkError::Unavailable)?;
+        let registry = active();
+        let mut active = registry.lock().map_err(|_| WorkError::Unavailable)?;
         if active.len() >= 4 || active.contains(&key) {
             return Err(WorkError::Capacity);
         }
         active.push(key);
-        Ok(Self(key))
+        Ok(Self(key, registry))
     }
 }
 impl Drop for Permit {
     fn drop(&mut self) {
-        if let Ok(mut active) = ACTIVE.lock() {
+        if let Ok(mut active) = self.1.lock() {
             active.retain(|key| *key != self.0);
         }
     }

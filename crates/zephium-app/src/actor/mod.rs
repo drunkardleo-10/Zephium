@@ -255,6 +255,7 @@ pub struct FocusedContentPolicyStatusRequest {
 #[derive(Default)]
 pub(super) struct WorkerThreads {
     state: Mutex<WorkerThreadState>,
+    work_pending: crate::work_authoring::Pending,
 }
 
 #[derive(Default)]
@@ -840,8 +841,11 @@ impl Handle {
         request: zephium_core::work::port::WorkRequest,
         owner: Option<zephium_core::ids::ProfileId>,
     ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
-        let (submission, receiver) =
-            crate::work_authoring::WorkDocumentSubmission::prepare_bound(request, owner)?;
+        let (submission, receiver) = crate::work_authoring::WorkDocumentSubmission::prepare_bound(
+            &self.workers.work_pending,
+            request,
+            owner,
+        )?;
         self.queue_work_document(submission, receiver)
     }
 
@@ -851,8 +855,11 @@ impl Handle {
         request: zephium_core::work::port::WorkRequest,
         owner: zephium_core::ids::ProfileId,
     ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
-        let (submission, receiver) =
-            crate::work_authoring::WorkDocumentSubmission::prepare_pinned(request, owner)?;
+        let (submission, receiver) = crate::work_authoring::WorkDocumentSubmission::prepare_pinned(
+            &self.workers.work_pending,
+            request,
+            owner,
+        )?;
         self.queue_work_document(submission, receiver)
     }
 

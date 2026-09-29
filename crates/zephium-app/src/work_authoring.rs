@@ -9,11 +9,13 @@ use zephium_core::{
     work::{port::*, WorkError},
 };
 
-static PENDING: AtomicUsize = AtomicUsize::new(0);
-pub(crate) struct Permit;
+/// Work documents in flight for one actor, bounded at `LIMIT` across its handles.
+pub(crate) type Pending = std::sync::Arc<AtomicUsize>;
+const LIMIT: usize = 4;
+pub(crate) struct Permit(Pending);
 impl Drop for Permit {
     fn drop(&mut self) {
-        PENDING.fetch_sub(1, Ordering::AcqRel);
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -160,6 +162,7 @@ impl WorkDocumentSubmission {
     }
     #[cfg(feature = "work-runtime")]
     pub(crate) fn prepare_pinned(
+        pending: &Pending,
         request: WorkRequest,
         profile: ProfileId,
     ) -> Result<(Self, WorkDocumentRequest), WorkError> {
@@ -172,7 +175,7 @@ impl WorkDocumentSubmission {
         ) {
             return Err(WorkError::Invalid);
         }
-        let prepared = Self::prepare_bound(request, Some(profile))?;
+        let prepared = Self::prepare_bound(pending, request, Some(profile))?;
         prepared
             .0
              .0
@@ -188,6 +191,7 @@ impl WorkDocumentSubmission {
     }
 
     pub(crate) fn prepare_bound(
+        pending: &Pending,
         request: WorkRequest,
         expected_owner: Option<ProfileId>,
     ) -> Result<(Self, WorkDocumentRequest), WorkError> {
@@ -212,9 +216,9 @@ impl WorkDocumentSubmission {
             | WorkRequest::SiteAccess { .. }
             | WorkRequest::Personal(_) => None,
         };
-        PENDING
+        pending
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < 4).then_some(n + 1)
+                (n < LIMIT).then_some(n + 1)
             })
             .map_err(|_| WorkError::Capacity)?;
         let (reply, receiver) = std::sync::mpsc::sync_channel(1);
@@ -231,7 +235,7 @@ impl WorkDocumentSubmission {
                 expected_owner,
                 pinned_owner: false,
                 reply,
-                permit: Permit,
+                permit: Permit(pending.clone()),
                 notes_checked: false,
             })))),
             WorkDocumentRequest {
@@ -262,9 +266,12 @@ mod tests {
     }
     #[test]
     fn work_document_dropped_future_releases_registered_observer() {
-        let (submission, mut receipt) =
-            WorkDocumentSubmission::prepare_bound(WorkRequest::Read { id: 1.into() }, None)
-                .unwrap();
+        let (submission, mut receipt) = WorkDocumentSubmission::prepare_bound(
+            &Pending::default(),
+            WorkRequest::Read { id: 1.into() },
+            None,
+        )
+        .unwrap();
         let counter = Arc::new(Counter(AtomicUsize::new(0)));
         let waker = Waker::from(counter.clone());
         assert!(Pin::new(&mut receipt)
@@ -279,9 +286,12 @@ mod tests {
     #[test]
     fn work_document_future_wakes_for_success_and_lost_last_sender() {
         for lost in [false, true] {
-            let (submission, mut receipt) =
-                WorkDocumentSubmission::prepare_bound(WorkRequest::Read { id: 1.into() }, None)
-                    .unwrap();
+            let (submission, mut receipt) = WorkDocumentSubmission::prepare_bound(
+                &Pending::default(),
+                WorkRequest::Read { id: 1.into() },
+                None,
+            )
+            .unwrap();
             let counter = Arc::new(Counter(AtomicUsize::new(0)));
             let waker = Waker::from(counter.clone());
             let mut context = Context::from_waker(&waker);
