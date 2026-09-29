@@ -660,11 +660,18 @@ impl super::EngineHost {
             })
             .with_url("about:blank");
         match builder.build_as_child(&self.parent) {
-            Ok(view) => Ok(ExtensionView {
-                view,
-                resource,
-                alive,
-            }),
+            Ok(view) => {
+                // This controller stays hidden for its lifetime. Use the same
+                // cache-trimming hint as background tabs, without suspending
+                // the action observer or the extension's native event delivery.
+                // Popups use their own visible controller at the normal level.
+                let _ = view.set_memory_usage_level(wry::MemoryUsageLevel::Low);
+                Ok(ExtensionView {
+                    view,
+                    resource,
+                    alive,
+                })
+            }
             Err(error) => {
                 let mut resource = Some(resource);
                 for debt in wry::pending_webview2_cleanup_debts() {
