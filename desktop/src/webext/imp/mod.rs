@@ -102,6 +102,13 @@ impl WebExtensions {
         let mut changed = false;
         let mut loads = Vec::new();
         for entry in registry.extensions.iter_mut() {
+            // Windows removal uses the native ID, not a prepared document.
+            // Leave disabled packages untouched during startup; enabling one
+            // comes through this same path and prepares its current grants then.
+            #[cfg(target_os = "windows")]
+            if !entry.enabled {
+                continue;
+            }
             let revision = compat_revision(&entry.access);
             if entry.compat != revision {
                 match self.rebuild(entry, &revision) {
