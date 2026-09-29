@@ -657,6 +657,10 @@ async fn admit_remote(
                 });
             }
         };
+        let bytes = match tokio::task::spawn_blocking(move || fit_for_display(bytes)).await {
+            Ok(Some(bytes)) => bytes,
+            _ => return refused(ResourceError::Capacity),
+        };
         trace.bytes = bytes.len();
         let receiver = shell.import_media(
             profile,
@@ -746,6 +750,57 @@ async fn admit_remote(
     }
 }
 
+/// A fetched picture as the canvas shows it: at most 1600 px on its long
+/// edge and within the store's fetched-image limit. A picture already that
+/// size passes unchanged; a larger one is scaled down and stored as JPEG, or
+/// as PNG when it has transparency. None when it cannot be made to fit.
+#[cfg(feature = "work-product")]
+fn fit_for_display(bytes: Vec<u8>) -> Option<Vec<u8>> {
+    use image::{ImageFormat, ImageReader};
+    use std::io::Cursor;
+    const EDGE: u32 = zephium_agentic::public_asset::DISPLAY_EDGE;
+    let limit = zephium_core::resources::MAX_MEDIA_FETCHED_IMAGE_BYTES as usize;
+    let format = image::guess_format(&bytes).ok()?;
+    let mut reader = ImageReader::with_format(Cursor::new(bytes.as_slice()), format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(zephium_core::resources::MAX_MEDIA_DIMENSION);
+    limits.max_image_height = Some(zephium_core::resources::MAX_MEDIA_DIMENSION);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits.clone());
+    let (width, height) = reader.into_dimensions().ok()?;
+    if width.max(height) <= EDGE && bytes.len() <= limit {
+        return Some(bytes);
+    }
+    if format == ImageFormat::Gif {
+        return None;
+    }
+    let mut reader = ImageReader::with_format(Cursor::new(bytes.as_slice()), format);
+    reader.limits(limits);
+    let decoded = reader.decode().ok()?;
+    let alpha =
+        decoded.color().has_alpha() && decoded.to_rgba8().pixels().any(|pixel| pixel.0[3] < 255);
+    for edge in [EDGE, 1200, 900] {
+        let scaled = if decoded.width().max(decoded.height()) > edge {
+            decoded.resize(edge, edge, image::imageops::FilterType::CatmullRom)
+        } else {
+            decoded.clone()
+        };
+        let mut out = Vec::new();
+        let written = if alpha {
+            scaled
+                .to_rgba8()
+                .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+        } else {
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 84)
+                .encode_image(&scaled.to_rgb8())
+        };
+        if written.is_ok() && !out.is_empty() && out.len() <= limit {
+            return Some(out);
+        }
+    }
+    None
+}
+
 #[cfg(feature = "work-product")]
 fn remote_image_target(
     reference: &zephium_core::work::environment::WorkEnvironmentReference,
@@ -759,6 +814,47 @@ fn remote_image_target(
             | WorkEnvironmentReference::Link { .. }
             | WorkEnvironmentReference::Artifact { .. }
     )
+}
+
+#[cfg(all(test, feature = "work-product"))]
+mod display_tests {
+    use super::fit_for_display;
+
+    fn png(width: u32, height: u32, alpha: u8) -> Vec<u8> {
+        let image = image::RgbaImage::from_fn(width, height, |x, y| {
+            image::Rgba([(x / 13) as u8, (y / 10) as u8, 120, alpha])
+        });
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn a_large_product_photo_is_scaled_to_display_size_instead_of_refused() {
+        let small = png(800, 600, 255);
+        assert_eq!(fit_for_display(small.clone()), Some(small));
+        for alpha in [255, 128] {
+            let fitted = fit_for_display(png(3200, 2400, alpha)).unwrap();
+            let decoded = image::load_from_memory(&fitted).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (1600, 1200));
+            assert!(
+                fitted.len() <= zephium_core::resources::MAX_MEDIA_FETCHED_IMAGE_BYTES as usize
+            );
+            assert_eq!(
+                image::guess_format(&fitted).unwrap(),
+                if alpha == 255 {
+                    image::ImageFormat::Jpeg
+                } else {
+                    image::ImageFormat::Png
+                }
+            );
+        }
+    }
 }
 
 #[cfg(test)]
