@@ -398,7 +398,21 @@ impl zephium_core::work::model::WorkModelClient for Scripted {
     }
 }
 
-pub(super) const LEAD_SCENARIOS: [LeadScenario; 8] = [
+pub(super) const LEAD_SCENARIOS: [LeadScenario; 10] = [
+    LeadScenario {
+        name: "flight",
+        requests: &["Find me a flight WAW→SFO on 5 January 2027"],
+        answer: "One adult, economy, one way.",
+        folder: false,
+        site: None,
+    },
+    LeadScenario {
+        name: "month",
+        requests: &["A month in San Francisco on Airbnb near South Park, from 1 January 2027"],
+        answer: "One adult, up to $6,000 for the month.",
+        folder: false,
+        site: None,
+    },
     LeadScenario {
         name: "trip",
         requests: &["Plan my YC batch trip from Warsaw"],
@@ -560,23 +574,20 @@ async fn stand_in(
                 }
             }
             WorkStepKindV1::Confirm { confirm } => {
-                // Refusing cookies commits nothing; the gate still holds it
-                // (a classifier miss to fix), so the stand-in lets it through.
+                // A cookie banner is never a held step; one showing up here
+                // is a classifier miss, reported and declined like any other.
                 let action = confirm.action.to_lowercase();
-                let consent = action.contains("reject all") || action.contains("odrzuć");
+                let consent = ["reject", "accept", "cookie", "odrzuć", "necessary"]
+                    .iter()
+                    .any(|word| action.contains(word));
                 say(format_args!(
-                    "lead-person: {} held step category={:?}",
-                    if consent {
-                        "approved consent"
-                    } else {
-                        "declined"
-                    },
+                    "lead-person: declined held step category={:?} consent_miss={consent}",
                     confirm.category
                 ));
                 WorkRuntimeIntent::ApproveStep {
                     execution: execution.id,
                     step: step.id,
-                    approve: consent,
+                    approve: false,
                     for_run: false,
                 }
             }
