@@ -1,16 +1,13 @@
 import type { Component } from "svelte";
-import type { Detail } from "../../lib/board/types";
 import type { PartView } from "../../lib/canvas-model";
 
 /**
- * What a helper's own view of its work receives in a part's row: the part,
- * the canvas's detail, and where its steps are (the facts come from the
- * `canvasWork` context).
+ * What a helper's own view of its work receives in a part's row: the part
+ * and where its steps are (the facts come from the `canvasWork` context).
  */
 export type PartContentProps = {
   id: string;
   part: PartView;
-  detail: Detail;
   objective: string;
   steps: readonly string[];
 };

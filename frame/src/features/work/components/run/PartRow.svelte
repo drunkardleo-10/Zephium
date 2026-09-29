@@ -180,7 +180,6 @@
         {#if content}{#await content() then view}<view.default
               id={item.id}
               {part}
-              detail="full"
               objective={part.objective ?? ""}
               steps={part.steps ?? []}
             />{/await}

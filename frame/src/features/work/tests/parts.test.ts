@@ -1,5 +1,13 @@
 import { describe, expect, test } from "vitest";
-import { agentOf, changeCounts, computerRows, computerView, testsIn } from "../lib/parts/computer";
+import {
+  agentOf,
+  changeCounts,
+  computerRows,
+  computerView,
+  errorLine,
+  firstFailure,
+  testsIn,
+} from "../lib/parts/computer";
 import { connectionRows, connectionView } from "../lib/parts/connection";
 import { fixScene } from "./parts-look";
 
@@ -24,7 +32,9 @@ describe("a computer part's view", () => {
     ]);
     expect(view.tests).toEqual({ passed: 43, failed: 0 });
     expect([view.reads, view.searches, view.working]).toEqual([2, 2, false]);
-    expect(computerRows(view)).toBe(4);
+    // Every command, and under each what came of it: the first failing test by name.
+    expect(view.commands[0]!.failure).not.toBeNull();
+    expect(computerRows(view)).toBe(7);
   });
 
   test("a change waiting on the person and a command still running", () => {
@@ -57,6 +67,27 @@ describe("a computer part's view", () => {
     });
     expect(testsIn("Ran 3 tests in 0.002s\n\nOK\n")).toEqual({ passed: 3, failed: 0 });
     expect(testsIn("Compiling")).toBeNull();
+  });
+
+  test("a failed run names its first failing test; a failed command says its error", () => {
+    expect(firstFailure("running 3 tests\ntest a::b ... ok\ntest lex::unicode ... FAILED\n")).toBe(
+      "lex::unicode",
+    );
+    expect(firstFailure("---- parser::tests::nested stdout ----\nthread panicked")).toBe(
+      "parser::tests::nested",
+    );
+    expect(firstFailure("FAILED tests/test_api.py::test_login - AssertionError")).toBe(
+      "tests/test_api.py::test_login",
+    );
+    expect(firstFailure("  × lexer > handles unicode 4ms")).toBe("lexer > handles unicode 4ms");
+    expect(firstFailure("--- FAIL: TestParse (0.00s)")).toBe("TestParse");
+    expect(firstFailure("all good")).toBeNull();
+    expect(
+      errorLine("fatal: not a git repository (or any of the parent directories): .git\n"),
+    ).toBe("not a git repository (or any of the parent directories): .git");
+    expect(errorLine("warming up\nerror[E0425]: cannot find value `x`\n")).toBe(
+      "error[E0425]: cannot find value `x`",
+    );
   });
 });
 

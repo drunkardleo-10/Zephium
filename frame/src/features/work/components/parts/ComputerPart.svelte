@@ -6,7 +6,6 @@
   import Cancel01Icon from "@hugeicons/core-free-icons/Cancel01Icon";
   import File01Icon from "@hugeicons/core-free-icons/File01Icon";
   import FileBracesIcon from "@hugeicons/core-free-icons/FileBracesIcon";
-  import FileDiffIcon from "@hugeicons/core-free-icons/FileDiffIcon";
   import FileCodeIcon from "@hugeicons/core-free-icons/FileCodeIcon";
   import FileImageIcon from "@hugeicons/core-free-icons/FileImageIcon";
   import FileTypeIcon from "@hugeicons/core-free-icons/FileTypeIcon";
@@ -17,7 +16,7 @@
   import { computerView, type ComputerCommand, type ComputerFile } from "../../lib/parts/computer";
   import type { PartContentProps } from "../run/slots";
 
-  let { part, detail, objective, steps }: PartContentProps = $props();
+  let { part, objective, steps }: PartContentProps = $props();
 
   const work = getContext<((objective: string) => WorkRuntimeProjection | undefined) | undefined>(
     canvasWork,
@@ -27,14 +26,6 @@
   /** Three files, or two and a line saying how many more. */
   const shownFiles = $derived(view.files.slice(0, view.files.length > FILES ? FILES - 1 : FILES));
   const moreFiles = $derived(view.files.length - shownFiles.length);
-  /** The command that matters now: the running one, else the newest. */
-  const shownCommands = $derived(
-    [...view.commands]
-      .reverse()
-      .sort((a, b) => Number(b.state === "running") - Number(a.state === "running"))
-      .slice(0, 1),
-  );
-  const changed = $derived(view.files.filter((file) => file.state === "done").length);
   const running = $derived(view.commands.find((command) => command.state === "running"));
 
   const CODE =
@@ -81,12 +72,15 @@
     }
   }
 
+  /** Where a command stands beside it: waiting, declined, stopped, or how long it took. */
   function commandNote(command: ComputerCommand): string {
     if (command.state === "asking") return m.work_computer_waiting();
     if (command.state === "declined") return m.work_computer_declined();
     if (command.state === "stopped") return m.work_computer_stopped();
-    return testsLine(command) ?? seconds(command.ms);
+    return seconds(command.ms);
   }
+  /** A failed inspection is a fact about the folder, not a fault: it stays quiet. */
+  const quiet = (command: ComputerCommand) => command.state === "failed" && command.inspection;
 
   const reading = $derived.by(() => {
     const parts: string[] = view.folder ? [view.folder] : [];
@@ -115,13 +109,13 @@
   }
 </script>
 
-{#snippet status(state: ComputerCommand["state"] | ComputerFile["state"])}
-  <span class="status" data-state={state} aria-hidden="true"
+{#snippet status(state: ComputerCommand["state"] | ComputerFile["state"], calm = false)}
+  <span class="status" data-state={calm ? "quiet" : state} aria-hidden="true"
     >{#if state === "passed" || state === "done"}<Icon
         icon={Tick02Icon}
         size={12}
         strokeWidth={2}
-      />{:else if state === "failed" || state === "declined"}<Icon
+      />{:else if (state === "failed" || state === "declined") && !calm}<Icon
         icon={Cancel01Icon}
         size={11}
         strokeWidth={2}
@@ -129,89 +123,79 @@
   >
 {/snippet}
 
-<div class="computer {detail}" class:working={view.working} aria-label={part.title}>
-  {#if detail === "tile"}
-    <div class="tile">
-      <Icon icon={FileDiffIcon} size={40} strokeWidth={1.4} />
-      {#if changed}<strong>{changed}</strong>{/if}
-    </div>
-  {:else if detail === "overview"}
-    <div class="survey">
-      {#if running}<p class="big live">
-          {running.agent
-            ? m.work_computer_agent_working({ agent: agentName[running.agent] })
-            : m.work_computer_agent_running({
-                command: running.line.split(/\s+/u).slice(0, 2).join(" "),
-              })}
-        </p>{:else if changed}<p class="big">
-          {changed === 1
-            ? m.work_computer_changed_one()
-            : m.work_computer_changed({ count: String(changed) })}
-        </p>{/if}
-      {#if view.tests && !running}<p class="big tests" data-failed={view.tests.failed > 0}>
-          <Icon icon={view.tests.failed ? Cancel01Icon : Tick02Icon} size={22} strokeWidth={2} />
-          {view.tests.failed
-            ? m.work_computer_tests_failing({ count: String(view.tests.failed) })
-            : m.work_computer_tests_pass()}
-        </p>{/if}
-    </div>
-  {:else}
-    <ul class="rows">
-      {#each shownFiles as file (file.key)}
-        <li class="file" data-state={file.state} title={file.path}>
-          <span class="glyph"><Icon icon={fileIcon(file.name)} size={14} /></span>
-          <span class="path"
-            >{#if file.folder}<span class="dir">{file.folder}/</span>{/if}<span class="name"
-              >{file.name}</span
-            ></span
-          >
-          {#if fileNote(file)}<span class="note">{fileNote(file)}</span>{:else}<span class="counts"
-              >{#if file.added}<span class="added">+{file.added}</span>{/if}{#if file.removed}<span
-                  class="removed">−{file.removed}</span
-                >{/if}</span
-            >{/if}
+<div class="computer" class:working={view.working} aria-label={part.title}>
+  <ul class="rows">
+    {#each shownFiles as file (file.key)}
+      <li class="file" data-state={file.state} title={file.path}>
+        <span class="glyph"><Icon icon={fileIcon(file.name)} size={14} /></span>
+        <span class="path"
+          >{#if file.folder}<span class="dir">{file.folder}/</span>{/if}<span class="name"
+            >{file.name}</span
+          ></span
+        >
+        {#if fileNote(file)}<span class="note">{fileNote(file)}</span>{:else}<span class="counts"
+            >{#if file.added}<span class="added">+{file.added}</span>{/if}{#if file.removed}<span
+                class="removed">−{file.removed}</span
+              >{/if}</span
+          >{/if}
+      </li>
+    {/each}
+    {#if moreFiles}<li class="quiet">
+        {moreFiles === 1
+          ? m.work_computer_more_file()
+          : m.work_computer_more_files({ count: String(moreFiles) })}
+      </li>{/if}
+  </ul>
+  {#if view.commands.length}
+    <ol class="commands">
+      {#each view.commands as command (command.key)}
+        <li class="command" data-state={command.state} class:calm={quiet(command)}>
+          {@render status(command.state, quiet(command))}
+          <div class="said">
+            <div class="line">
+              {#if command.agent}<span class="agent"
+                  ><Icon icon={serviceMark(command.agent)} size={13} strokeWidth={1.6} /><strong
+                    >{agentName[command.agent]}</strong
+                  ><span class="activity"
+                    >{command.state === "running"
+                      ? activity(command.live)
+                      : m.work_computer_agent_worked_short()}</span
+                  ></span
+                >{:else}<code>{command.line}</code>{/if}
+              <span class="note"
+                >{command.state === "running" ? seconds(command.ms) : commandNote(command)}</span
+              >
+            </div>
+            {#if command.tests}<p class="outcome" class:failing={command.tests.failed > 0}>
+                <span class="count">{testsLine(command)}</span>{#if command.failure}<span
+                    class="first">{m.work_computer_first_failure({ name: command.failure })}</span
+                  >{/if}
+              </p>{:else if command.said}<p class="outcome words">{command.said}</p>{/if}
+            {#if command.state === "running" && command.live && !command.agent}<p class="live-line">
+                {command.live}
+              </p>{/if}
+          </div>
         </li>
       {/each}
-      {#if moreFiles}<li class="quiet">
-          {moreFiles === 1
-            ? m.work_computer_more_file()
-            : m.work_computer_more_files({ count: String(moreFiles) })}
-        </li>{/if}
-      {#each shownCommands as command (command.key)}
-        <li class="command" data-state={command.state} title={command.line}>
-          {@render status(command.state)}
-          {#if command.agent}<span class="agent"
-              ><Icon icon={serviceMark(command.agent)} size={13} strokeWidth={1.6} /><strong
-                >{agentName[command.agent]}</strong
-              ><span class="activity"
-                >{command.state === "running"
-                  ? activity(command.live)
-                  : m.work_computer_agent_worked_short()}</span
-              ></span
-            >{:else}<code><span class="prompt" aria-hidden="true">$</span>{command.line}</code>{/if}
-          <span class="note" class:bad={command.state === "failed" && !!command.tests?.failed}
-            >{command.state === "running" ? seconds(command.ms) : commandNote(command)}</span
-          >
-        </li>
-        {#if command.state === "running" && command.live && !command.agent}<li class="live-line">
-            <span>{command.live}</span>
-          </li>{/if}
-      {/each}
-      {#if reading && !(running?.live && !running.agent)}<li class="quiet reading">
-          <span class="glyph"><Icon icon={Folder01Icon} size={13} /></span>{reading}
-        </li>{/if}
-    </ul>
+    </ol>
   {/if}
+  {#if reading && !(running?.live && !running.agent)}<p class="quiet reading">
+      <span class="glyph"><Icon icon={Folder01Icon} size={13} /></span>{reading}
+    </p>{/if}
 </div>
 
 <style>
   .computer {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
     box-sizing: border-box;
     inline-size: 100%;
     color: var(--color-text);
   }
 
-  .rows {
+  .rows,
+  .commands {
     display: flex;
     flex-direction: column;
     margin: 0;
@@ -219,12 +203,16 @@
     list-style: none;
   }
 
-  li {
+  .rows:empty {
+    display: none;
+  }
+
+  .rows li {
     display: flex;
     align-items: center;
     gap: 8px;
     min-inline-size: 0;
-    block-size: 24px;
+    min-block-size: 24px;
     font-size: var(--text-label);
     line-height: 16px;
   }
@@ -239,10 +227,8 @@
 
   .path {
     flex: 1;
-    overflow: hidden;
     min-inline-size: 0;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
 
   .dir {
@@ -293,35 +279,86 @@
     font-weight: 600;
   }
 
-  .note.bad {
-    color: var(--color-danger);
+  /* Each command exactly as it ran, its time beside it and what came of it under it. */
+  .command {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    column-gap: 8px;
+    padding-block: 4px;
+  }
+
+  .said {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-inline-size: 0;
+  }
+
+  .line {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
   }
 
   .command code {
-    flex: 1;
-    overflow: hidden;
     min-inline-size: 0;
     color: var(--color-text);
     font-family: var(--font-mono);
     font-size: var(--text-caption);
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    line-height: 17px;
+    overflow-wrap: anywhere;
   }
 
-  .prompt {
-    margin-inline-end: 6px;
+  .command.calm code,
+  .command[data-state="declined"] code,
+  .command[data-state="stopped"] code {
+    color: var(--color-muted);
+  }
+
+  .outcome {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 8px;
+    margin: 0;
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+    line-height: 16px;
+  }
+
+  .outcome .count {
+    color: var(--color-label-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .outcome.failing .count {
+    color: var(--color-text);
+    font-weight: 600;
+  }
+
+  .outcome .first {
+    min-inline-size: 0;
+    font-family: var(--font-mono);
+    overflow-wrap: anywhere;
+  }
+
+  .outcome.words {
+    overflow-wrap: anywhere;
+  }
+
+  .command.calm .outcome {
     color: var(--color-faint);
   }
 
   .agent {
     display: flex;
     flex: 1;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 6px;
-    overflow: hidden;
+    gap: 4px 6px;
     min-inline-size: 0;
+    font-size: var(--text-label);
     font-weight: 500;
-    white-space: nowrap;
   }
 
   .agent strong {
@@ -330,9 +367,9 @@
   }
 
   .activity {
-    overflow: hidden;
+    min-inline-size: 0;
     color: var(--color-muted);
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
   }
 
   .status {
@@ -354,11 +391,20 @@
     color: var(--color-danger);
   }
 
+  .command > .status {
+    margin-block-start: 1px;
+  }
+
   .status i {
     inline-size: 6px;
     block-size: 6px;
     border-radius: var(--radius-capsule);
     background: var(--color-faint);
+  }
+
+  .status[data-state="quiet"] i {
+    inline-size: 7px;
+    block-size: 1.5px;
   }
 
   .status[data-state="running"] i {
@@ -377,18 +423,12 @@
   }
 
   .live-line {
-    block-size: 18px;
-    padding-inline-start: 24px;
-    margin-block-start: -4px;
-  }
-
-  .live-line span {
-    overflow: hidden;
+    margin: 0;
     color: var(--color-muted);
     font-family: var(--font-mono);
     font-size: var(--text-caption);
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    line-height: 16px;
+    overflow-wrap: anywhere;
   }
 
   .quiet {
@@ -397,56 +437,15 @@
   }
 
   .reading {
-    color: var(--color-muted);
-  }
-
-  .reading .glyph {
-    color: var(--color-faint);
-  }
-
-  .survey {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding-block-start: 2px;
-  }
-
-  .big {
     display: flex;
     align-items: center;
     gap: 8px;
     margin: 0;
-    font-size: var(--text-overview-title);
-    font-weight: 600;
-    line-height: 1.15;
-    letter-spacing: -0.01em;
+    min-block-size: 22px;
   }
 
-  .big.live {
-    color: var(--color-accent);
-  }
-
-  .big.tests {
-    color: var(--color-success);
-  }
-
-  .big.tests[data-failed="true"] {
-    color: var(--color-danger);
-  }
-
-  .tile {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    color: var(--color-muted);
-  }
-
-  .tile strong {
-    color: var(--color-text);
-    font-size: var(--text-overview-figure);
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-    line-height: 1;
+  .reading .glyph {
+    color: var(--color-faint);
   }
 
   @media (prefers-reduced-motion: reduce) {

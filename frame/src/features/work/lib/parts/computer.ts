@@ -33,6 +33,12 @@ export type ComputerCommand = {
   live: string | null;
   /** A coding agent the command handed work to. */
   agent: Agent | null;
+  /** The first test that failed, by its name. */
+  failure: string | null;
+  /** What a failed command said: its first line that reads as the error. */
+  said: string | null;
+  /** Looking around (`git status`, `ls`) rather than doing: its failure is only a fact. */
+  inspection: boolean;
 };
 
 /** What a computer part did, from its steps: display only, never authority. */
@@ -116,6 +122,40 @@ export function testsIn(text: string): Tests | null {
   const mocha = /^\s+(\d+) passing[^\n]*(?:\n\s+\d+ pending)?(?:\n\s+(\d+) failing)?/mu.exec(text);
   if (mocha) return { passed: Number(mocha[1]), failed: Number(mocha[2] ?? 0) };
   return null;
+}
+
+/**
+ * The first failing test a runner names: cargo's `---- name stdout ----` or
+ * `test name ... FAILED`, pytest's `FAILED path::name`, jest's and vitest's
+ * `✕`/`×` lines, go's `--- FAIL: Name`, mocha's `1) name`.
+ */
+export function firstFailure(text: string): string | null {
+  const patterns = [
+    /^---- (\S+) stdout ----$/mu,
+    /^test (\S+) \.\.\. FAILED$/mu,
+    /^FAILED (\S+?)(?: - .*)?$/mu,
+    /^\s*[✕×] (.+?)(?: \(\d+ ?m?s\))?$/mu,
+    /^\s*--- FAIL: (\S+)/mu,
+    /^\s+1\) (.+)$/mu,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(text);
+    if (match?.[1]) return match[1].trim().slice(0, 120);
+  }
+  return null;
+}
+
+/** A failed command's own words: its first line that reads as an error, else its last line. */
+export function errorLine(text: string): string | null {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const error = lines.find((line) =>
+    /\b(error|fatal|not found|no such|denied|cannot|can't|failed|not a)\b/iu.test(line),
+  );
+  const line = error ?? lines.at(-1);
+  return line ? line.replace(/^(error|fatal):\s*/iu, "").slice(0, 160) : null;
 }
 
 /** Which coding agent a command hands work to. */
@@ -257,6 +297,7 @@ export function computerView(
         const agent = agentOf(kind.command);
         const state = commandState(step, kind.decision, tests);
         const running = state === "running";
+        const failed = state === "failed";
         view.commands.push({
           key: step.id,
           line: kind.command,
@@ -265,6 +306,9 @@ export function computerView(
           tests,
           live: running ? (agent ? agentActivity(agent, output) : lastLine(output)) : null,
           agent,
+          failure: tests?.failed ? firstFailure(output) : null,
+          said: failed && !tests?.failed && !agent ? errorLine(output) : null,
+          inspection: step.local?.policy?.reason === "inspection",
         });
         if (tests) view.tests = tests;
         break;
@@ -282,10 +326,14 @@ export function computerView(
   return view;
 }
 
-/** Rows the view draws at full detail, so the canvas can size its slot. */
+/** Rows the view draws, so the canvas can size its slot before it measures itself. */
 export function computerRows(view: ComputerView): number {
   const files = Math.min(view.files.length, 3);
-  const commands = Math.min(view.commands.length, 1);
+  const commands = view.commands.reduce(
+    (sum, command) =>
+      sum + 1 + (command.tests || command.said || (command.live && !command.agent) ? 1 : 0),
+    0,
+  );
   const quiet = view.folder || view.reads || view.searches ? 1 : 0;
   return Math.max(1, files + commands + quiet);
 }
