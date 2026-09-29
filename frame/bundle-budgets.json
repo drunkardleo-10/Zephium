@@ -371,9 +371,9 @@
     "description": "One kind's renderer, fetched the first time the canvas shows one: image, the YouTube player created on play, and the audio player. Measured 161504 JS and 7056 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. Round 3's canvas and object work in the shared Work graph: 163698 JS measured. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 164175 JS measured."
   },
   "lazy:features/work/components/objects/Page.svelte": {
-    "js": 164200,
-    "css": 7000,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: a page's frame under its title bar. Measured 162175 JS and 5971 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The live page's one-shot hairline on a new look and the small copy a far-away page frame draws as: 6801 CSS measured."
+    "js": 170600,
+    "css": 13200,
+    "description": "One kind's renderer, fetched the first time the canvas shows one: a page's frame under its title bar. Measured 162175 JS and 5971 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The live page's one-shot hairline on a new look and the small copy a far-away page frame draws as: 6801 CSS measured. Round 4: the live page's reading orb and pages over what they gave bring the presence runtime into this graph: 170535 JS measured."
   },
   "lazy:features/work/components/objects/Note.svelte": {
     "js": 170700,
