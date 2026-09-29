@@ -10,6 +10,7 @@ const OBSERVER: &str = include_str!("windows/action-observer.js");
 const WORKER_COMPAT: &str = include_str!("windows/worker-compat.js");
 const HOST_SCRIPT: &str = include_str!("windows/action-host.js");
 pub const POPUP_TARGET_SCRIPT: &str = include_str!("windows/popup-target.js");
+pub const CHROME_STORE_SCRIPT: &str = include_str!("windows/chrome-store.js");
 
 pub fn prepare(dir: &Path, sites: Option<&[String]>) -> Result<(), String> {
     let manifest = crate::manifest::Manifest::load(dir).map_err(|e| e.to_string())?;

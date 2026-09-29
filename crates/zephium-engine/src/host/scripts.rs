@@ -567,7 +567,7 @@ struct ProtectedScriptSpec {
     all_frames: bool,
 }
 
-const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec; 3] = [
+const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec; 3 + cfg!(target_os = "windows") as usize] = [
     ProtectedScriptSpec {
         id: 1,
         source: DISCARD_SAFETY_BOOTSTRAP_JS,
@@ -582,6 +582,13 @@ const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec; 3] = [
         id: 3,
         source: crate::PAGE_PRINT_DENY_SCRIPT,
         all_frames: true,
+    },
+    #[cfg(target_os = "windows")]
+    ProtectedScriptSpec {
+        // The desktop's global page style already owns builtin ID 4.
+        id: 5,
+        source: zephium_webext::windows::CHROME_STORE_SCRIPT,
+        all_frames: false,
     },
 ];
 

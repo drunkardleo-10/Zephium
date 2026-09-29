@@ -521,7 +521,10 @@ pub fn run() -> Result<()> {
             visible,
             adopt_new_windows,
             allow_native_windows,
-            ..Default::default()
+            initialization: steps
+                .iter()
+                .any(|step| step["chrome_store_ui"] == true)
+                .then_some(zephium_webext::windows::CHROME_STORE_SCRIPT),
         },
     )?;
     if visible {
