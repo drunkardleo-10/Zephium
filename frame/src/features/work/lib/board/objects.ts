@@ -48,6 +48,7 @@ const NEW_KINDS = new Set([
   "diff",
   "draft",
   "media",
+  "project",
 ]);
 /** Whether an artifact is one of the lead's objects rather than a legacy result. */
 export const leadObject = (artifact: WorkArtifactV1) => NEW_KINDS.has(artifact.data.kind);
@@ -653,9 +654,63 @@ function leadView(
           ? { startSecs: data.start_secs }
           : {}),
       };
+    case "project":
+      return {
+        ...base,
+        kind: "project",
+        name: data.name,
+        ...(data.summary ? { summary: data.summary } : {}),
+        path: data.root,
+        stack: (data.stack ?? []).map((item) => ({
+          name: item.name,
+          ...(item.host ? { logo: item.host } : {}),
+          ...(item.version ? { version: item.version } : {}),
+          ...(item.role ? { role: item.role } : {}),
+        })),
+        tree: projectTree(data.tree),
+        ...(data.more ? { more: data.more } : {}),
+        scripts: (data.scripts ?? []).map((script) => ({
+          name: script.name,
+          command: script.command,
+          ...(script.source ? { source: script.source } : {}),
+        })),
+        ...(data.git
+          ? {
+              git: {
+                ...(data.git.branch ? { branch: data.git.branch } : {}),
+                changed: data.git.changed,
+                ...(data.git.ahead ? { ahead: data.git.ahead } : {}),
+                ...(data.git.behind ? { behind: data.git.behind } : {}),
+              },
+            }
+          : {}),
+      };
     default:
       return null;
   }
+}
+
+type WireEntry = { path: string; kind: "folder" | "file"; more?: number | null };
+type Entry = { name: string; folder: boolean; children?: Entry[]; more?: number };
+/** A project's entries, listed parents before children by path, as a tree. */
+function projectTree(entries: readonly WireEntry[]): Entry[] {
+  const root: Entry[] = [];
+  const byPath = new Map<string, Entry>();
+  for (const entry of entries) {
+    const path = entry.path.replace(/^\/+|\/+$/gu, "");
+    if (!path) continue;
+    const at = path.lastIndexOf("/");
+    const node: Entry = {
+      name: path.slice(at + 1),
+      folder: entry.kind === "folder",
+      ...(entry.more ? { more: entry.more } : {}),
+    };
+    byPath.set(path, node);
+    const parent = at > 0 ? byPath.get(path.slice(0, at)) : undefined;
+    if (parent) (parent.children ??= []).push(node);
+    else root.push(node);
+  }
+  return root;
 }
 
 /** A plan step's pick, drawn as a small thumbnail beside it. */

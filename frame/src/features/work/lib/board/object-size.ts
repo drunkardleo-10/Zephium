@@ -55,21 +55,23 @@ export function objectWidth(view: ObjectView): Range {
         ? { min: 320, ideal: 400, max: 480 }
         : { min: 480, ideal: 560, max: 720 };
     case "page":
-      return { min: 320, ideal: 400, max: 480 };
+      return { min: 320, ideal: 336, max: 360 };
     case "note":
       return { min: 280, ideal: 360, max: 480 };
     case "file":
       return { min: 240, ideal: 280, max: 360 };
     case "folder":
       return { min: 240, ideal: 280, max: 320 };
+    case "project":
+      return { min: 400, ideal: 520, max: 640 };
     case "code":
       return { min: 460, ideal: 600, max: 720 };
     case "document":
       return { min: 360, ideal: 480, max: 560 };
     case "diagram": {
-      // A diagram stands at its own drawn width, so its names read at their size from afar.
-      const ideal = Math.min(BOARD.wide, diagramWidth(view.diagram) + 40);
-      return { min: Math.min(ideal, 720), ideal, max: BOARD.wide };
+      // A diagram stands at its own drawn width, up to what reads whole at 100%.
+      const ideal = Math.min(BOARD.max, diagramWidth(view.diagram) + 40);
+      return { min: Math.min(ideal, 720), ideal, max: BOARD.max };
     }
   }
 }
@@ -121,13 +123,27 @@ export function objectHeight(view: ObjectView, width: number): number {
     case "media":
       return view.media === "audio" ? 72 : Math.round(width * 0.5625) + 40;
     case "page":
-      return Math.round(width * 0.625) + 48;
+      return Math.round((width * 238) / 336);
     case "note":
       return 48 + lines(view.markdown, width, 8) * 22;
     case "file":
       return 220;
     case "folder":
       return 180;
+    case "project": {
+      const rows = (entries: readonly { children?: readonly unknown[] }[]): number =>
+        entries.reduce(
+          (sum, entry) => sum + 1 + (entry.children ? rows(entry.children as typeof entries) : 0),
+          0,
+        );
+      return (
+        96 +
+        (view.stack.length ? 48 : 0) +
+        Math.min(24, rows(view.tree)) * 26 +
+        (view.scripts.length ? 40 + view.scripts.length * 26 : 0) +
+        (view.git ? 32 : 0)
+      );
+    }
     case "code":
       return 80 + Math.min(16, view.text.split("\n").length) * 20;
     case "document":

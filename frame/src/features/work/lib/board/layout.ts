@@ -12,8 +12,8 @@ export type LayoutBlock = {
 };
 export type BoardLayout = { width: number; height: number; at: Record<string, Rect> };
 
-/** A board is 720–1280 wide; a diagram that leads may widen it to 1600 rather than shrink. */
-export const BOARD = { min: 720, max: 1280, wide: 2560, gap: 24, row: 24 } as const;
+/** A result is 640–1120 wide: at 100% it reads whole in the view it opens in. */
+export const BOARD = { min: 640, max: 1120, gap: 24, row: 24 } as const;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -103,7 +103,7 @@ function widths(row: readonly LayoutBlock[], width: number): number[] {
 }
 
 /**
- * A board laid out for its content: a width between 720 and 1280 (a diagram's own, up to 2560) that its
+ * A board laid out for its content: a width between 640 and 1120 that its
  * widest row asks for, rows top to bottom, nothing overlapping. An open block
  * takes a row of its own at the board's width; a pinned block is the person's
  * and takes no room.
@@ -114,8 +114,7 @@ export function boardLayout(
 ): BoardLayout {
   const laid = reading(blocks.filter((block) => !pinned.has(block.id)));
   if (!laid.length) return { width: BOARD.min, height: 0, at: {} };
-  // A diagram draws at its own width, so its names read at their size: the board widens to it.
-  const cap = laid.some((block) => block.kind === "diagram") ? BOARD.wide : BOARD.max;
+  const cap = BOARD.max;
   const asked = pack(laid, cap).reduce((need, row) => {
     const ideal = row.reduce(
       (sum, block, index) => sum + Math.min(block.width.ideal, cap) + (index ? BOARD.gap : 0),
