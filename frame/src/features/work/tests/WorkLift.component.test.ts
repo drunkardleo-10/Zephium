@@ -189,7 +189,7 @@ test("a request lifts whole with its run as a quiet timeline", async () => {
   session.dispose();
 });
 
-test("a video link shows its admitted thumbnail with a play mark and plays in the pane", async () => {
+test("a video link shows its admitted thumbnail with YouTube's mark and plays in the Work browser", async () => {
   await page.viewport(900, 700);
   const onplay = vi.fn();
   const screen = await render(TabCard, {
@@ -208,7 +208,7 @@ test("a video link shows its admitted thumbnail with a play mark and plays in th
   // The admitted picture fills a 16:9 hero; the play mark sits on it.
   expect(screen.container.querySelector(".hero .thumbnail")).not.toBeNull();
   expect(screen.container.querySelector(".thumbnail .play-mark")).not.toBeNull();
-  await screen.getByRole("button", { name: "Play here" }).click();
+  await screen.getByRole("button", { name: "Play youtube.com" }).click();
   expect(onplay).toHaveBeenCalledOnce();
   await screen.unmount();
 });
