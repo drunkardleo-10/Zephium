@@ -12,7 +12,7 @@ import { clipText, type CanvasPosition } from "./canvas-model";
 import { threadOf, type WorkStage } from "./project-environment-thread";
 import { boardOf } from "./board/adapter";
 import { boardLayout, type LayoutBlock } from "./board/layout";
-import { leadObject, onCanvas, runObjects, type RunObject } from "./board/objects";
+import { leadObject, onCanvas, pictureKey, runObjects, type RunObject } from "./board/objects";
 import { objectHeight, objectWidth } from "./board/object-size";
 import { ulidTime } from "./ulid-time";
 import { runTrail } from "./board/trail";
@@ -79,6 +79,29 @@ export function elementPictures(
 }
 
 /**
+ * Pictures the canvas admitted from the web, by the address they were fetched
+ * from: an object's item finds its own among its candidates.
+ */
+export function fetchedPictures(
+  snapshot: WorkEnvironmentSnapshot,
+  media: ReadonlyMap<string, MediaAssetV1>,
+): Map<string, Picture> {
+  const used = new Set(
+    (snapshot.relations ?? []).flatMap((relation) =>
+      relation.kind === "uses" ? [relation.to] : [],
+    ),
+  );
+  const pictures = new Map<string, Picture>();
+  for (const element of snapshot.elements) {
+    if (element.reference.kind !== "resource" || !used.has(element.id)) continue;
+    const asset = media.get(element.reference.resource);
+    if (asset?.kind !== "image" || asset.origin?.kind !== "fetched") continue;
+    pictures.set(pictureKey(asset.origin.url), { profile: snapshot.profile, digest: asset.digest });
+  }
+  return pictures;
+}
+
+/**
  * The person's words as text on the canvas: who and when over them, two lines
  * at rest, every line once opened.
  */
@@ -97,6 +120,8 @@ export const measureKey = (id: string, width: number, open: boolean) =>
 export type StageOptions = {
   recorded?: (objective: string) => readonly WorkPageV1[];
   pictures?: ReadonlyMap<string, Picture>;
+  /** Pictures admitted from the web, by the address they came from. */
+  fetched?: ReadonlyMap<string, Picture>;
   chosen?: ReadonlySet<string>;
   /** Heights blocks and heads measured, by `measureKey`. */
   measured?: ReadonlyMap<string, number>;
@@ -337,6 +362,7 @@ export function environmentStages(
         live,
         pending: m.work_board_pending(),
         lead: lead.entries,
+        ...(options.fetched ? { fetched: options.fetched } : {}),
       });
       const legacyFound = foundByPart(board, parts);
       const found = new Map<string, string>();

@@ -63,6 +63,7 @@
     clearOfBands,
     elementPictures,
     environmentStages,
+    fetchedPictures,
     laneElement,
     measureKey,
   } from "../lib/project-environment-board";
@@ -779,6 +780,7 @@
       ? environmentStages(snapshot, context.objectives, {
           recorded: recordedPages,
           pictures: elementPictures(snapshot, context.media),
+          fetched: fetchedPictures(snapshot, context.media),
           chosen,
           measured,
           open: openBlock,
@@ -825,6 +827,25 @@
       if (!best || across * down > best.area) best = { area: across * down, execution };
     }
     return best?.execution;
+  });
+  /** What the runs in view placed: their pictures are admitted first. */
+  const nearElements = $derived.by((): ReadonlySet<string> => {
+    const view = camera;
+    const width = cardHost?.clientWidth ?? 0;
+    const height = cardHost?.clientHeight ?? 0;
+    if (!view || !width || !height) return new Set();
+    const left = -view.x / view.zoom;
+    const top = -view.y / view.zoom;
+    const right = left + width / view.zoom;
+    const bottom = top + height / view.zoom;
+    return new Set(
+      stages.flatMap((stage) => {
+        const box = stage.lane.box;
+        const off =
+          box.x > right || box.x + box.width < left || box.y > bottom || box.y + box.height < top;
+        return off ? [] : stage.objects.map((object) => object.id);
+      }),
+    );
   });
   /** From a run's result to its right end: what must read whole when the run is shown. */
   const resultSpan = (stage: (typeof stages)[number]) =>
@@ -1066,6 +1087,7 @@
     session: () => session,
     media: () => context.media,
     objectives: () => context.objectives,
+    near: () => nearElements,
   });
   $effect(() => {
     const current = snapshot;

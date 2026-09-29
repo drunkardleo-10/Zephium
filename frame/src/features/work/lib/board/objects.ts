@@ -15,6 +15,7 @@ import type {
   ObjectView,
   PickView,
   PicksView,
+  Picture,
   PlanStepView,
   ReplyView,
   SheetColumn,
@@ -450,10 +451,20 @@ function legacyReply(id: string, board: Board, live: boolean, pending: string): 
 }
 
 /** A lead object from its wire data. */
+/** An address as the picture store keys it. */
+export function pictureKey(url: string): string {
+  try {
+    return new URL(url).toString();
+  } catch {
+    return url;
+  }
+}
+
 function leadView(
   id: string,
   artifact: WorkArtifactV1,
   execution: WorkExecutionFact,
+  fetched: ReadonlyMap<string, Picture> = new Map(),
 ): ObjectView | null {
   const evidence = artifactView(artifact, execution).evidence;
   const sources: Record<string, EvidenceReference> = Object.fromEntries(
@@ -489,9 +500,15 @@ function leadView(
         items: data.items.map((item): PickView => {
           const amount = numberOf(item.price?.amount);
           const rating = numberOf(item.rating?.value);
+          // The first candidate the canvas admitted is the item's own picture; its logo else.
+          const admitted = (item.image_candidates ?? [])
+            .map((candidate) => fetched.get(pictureKey(candidate)))
+            .find((picture) => !!picture);
+          const src = admitted ? mediaUrl(admitted.profile, admitted.digest) : null;
           return {
             name: item.name,
             ...(item.subtitle ? { subtitle: item.subtitle } : {}),
+            ...(src ? { picture: { src } } : {}),
             ...(item.logo_host ? { logo: item.logo_host } : {}),
             ...(item.url ? { url: item.url } : {}),
             ...(item.price
@@ -732,6 +749,8 @@ export type ObjectsInput = {
   head: string;
   live: boolean;
   pending: string;
+  /** Pictures the canvas admitted from the web, by the address they came from. */
+  fetched?: ReadonlyMap<string, Picture>;
   /** Lead objects placed on the canvas, by element, newest version resolved. */
   lead: readonly {
     element: string;
@@ -751,7 +770,7 @@ export function runObjects(input: ObjectsInput): { reply?: RunObject; objects: R
   const objects: RunObject[] = [];
   let reply: RunObject | undefined;
   for (const entry of input.lead) {
-    const view = leadView(entry.element, entry.artifact, entry.execution);
+    const view = leadView(entry.element, entry.artifact, entry.execution, input.fetched);
     if (!view) continue;
     const shown = entry.updated ? { ...view, updated: entry.updated } : view;
     // The reply stands as its own element, so opening it opens what the agent wrote.

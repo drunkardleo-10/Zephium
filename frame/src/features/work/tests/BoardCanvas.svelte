@@ -1,7 +1,12 @@
 <script lang="ts">
   import { SvelteMap } from "svelte/reactivity";
   import WorkCanvas from "../components/WorkCanvas.svelte";
-  import { clearOfBands, environmentStages, measureKey } from "../lib/project-environment-board";
+  import {
+    clearOfBands,
+    environmentStages,
+    fetchedPictures,
+    measureKey,
+  } from "../lib/project-environment-board";
   import {
     environmentAgents,
     environmentBoards,
@@ -35,6 +40,7 @@
     environmentStages(scene.snapshot, scene.objectives, {
       recorded,
       pictures: scene.pictures,
+      ...(scene.media ? { fetched: fetchedPictures(scene.snapshot, scene.media) } : {}),
       measured,
       open,
       ...(asks ? { asks } : {}),
