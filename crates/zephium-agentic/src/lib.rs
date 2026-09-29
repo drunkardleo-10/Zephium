@@ -649,7 +649,8 @@ pub use provider_transport::agent::agent_turn_wire_faults;
 pub use provider_transport::agent::{OpenAiWorkAgent, WorkAgentWireFault};
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::decision::{
-    search_reuse_projection, untracked_document_address, AdmittedDecisionOutput,
+    search_enough_projection, search_reuse_projection, untracked_document_address,
+    AdmittedDecisionOutput,
     DecisionActionSelection, DecisionBackendKind, DecisionCallAccounting, DecisionCallDiagnostic,
     DecisionCallFailure, DecisionCallOutput, DecisionEnvelopeFacts, DecisionEnvelopeFailure,
     DecisionLocatedRead, DecisionObservation, DecisionObservationAnswers,

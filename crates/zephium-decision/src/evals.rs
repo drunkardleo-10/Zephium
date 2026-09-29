@@ -152,6 +152,46 @@ pub fn fixtures() -> Result<Vec<EvalFixture>, ContractError> {
             "search_reuse_07",
             include_str!("../evals/search_reuse_07.json"),
         ),
+        (
+            "search_enough_01",
+            include_str!("../evals/search_enough_01.json"),
+        ),
+        (
+            "search_enough_02",
+            include_str!("../evals/search_enough_02.json"),
+        ),
+        (
+            "search_enough_03",
+            include_str!("../evals/search_enough_03.json"),
+        ),
+        (
+            "search_enough_04",
+            include_str!("../evals/search_enough_04.json"),
+        ),
+        (
+            "search_enough_05",
+            include_str!("../evals/search_enough_05.json"),
+        ),
+        (
+            "search_enough_06",
+            include_str!("../evals/search_enough_06.json"),
+        ),
+        (
+            "search_enough_07",
+            include_str!("../evals/search_enough_07.json"),
+        ),
+        (
+            "search_enough_08",
+            include_str!("../evals/search_enough_08.json"),
+        ),
+        (
+            "search_enough_09",
+            include_str!("../evals/search_enough_09.json"),
+        ),
+        (
+            "search_enough_10",
+            include_str!("../evals/search_enough_10.json"),
+        ),
     ];
     sources
         .into_iter()

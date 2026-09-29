@@ -757,6 +757,32 @@ impl WorkPublicSearchProvider for OpenAiPublicSearch {
         })
     }
 
+    fn enough<'a>(
+        &'a self,
+        scope: &'a WorkPublicSearchScope,
+        found: &'a str,
+        limits: WorkExecutionLimits,
+        deadline: std::time::Instant,
+    ) -> WorkPublicSearchReuseFuture<'a> {
+        Box::pin(async move {
+            match &self.decisions {
+                Some(decisions) => {
+                    decisions
+                        .enough(
+                            &self.transport,
+                            &self.credential,
+                            scope,
+                            found,
+                            limits,
+                            deadline,
+                        )
+                        .await
+                }
+                None => Ok(WorkPublicSearchReuse::default()),
+            }
+        })
+    }
+
     fn minimum_reservation(
         &self,
         scope: &WorkPublicSearchScope,

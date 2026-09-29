@@ -60,6 +60,7 @@ pub(super) fn run_case(case: &std::ffi::OsStr, model: ProbeModel) -> Result<(), 
         Some("book-catalog") => 21,
         Some("lego-product-specs") => 22,
         Some("search-reuse") => return run_range(23..30, model),
+        Some("search-enough") => return run_range(30..40, model),
         _ => return Err(ProbeFailure::Authority),
     };
     run_selected(Some(index), model)
@@ -251,7 +252,7 @@ fn report(
                 "done" => DecisionPurpose::Completion,
                 "picture" | "tower_bridge_picture" => DecisionPurpose::Picture,
                 "wall" => DecisionPurpose::Wall,
-                "same_request" | "found" => DecisionPurpose::Completion,
+                "same_request" | "found" | "answered" => DecisionPurpose::Completion,
                 key if key.starts_with("rows_") => DecisionPurpose::Evidence,
                 "operation" | "click_target" if navigation => DecisionPurpose::Navigation,
                 "operation" | "click_target" | "type_target" | "scroll_target"

@@ -2877,6 +2877,95 @@ fn recorded_search_reuse_eval_requests_match_the_shipping_projection() {
 }
 
 #[test]
+fn recorded_search_enough_eval_requests_match_the_shipping_projection() {
+    use sha2::Digest as _;
+    let source = include_str!("../../../../zephium-decision/evals/search_enough_source_01.json");
+    let fixtures = [
+        include_str!("../../../../zephium-decision/evals/search_enough_01.json"),
+        include_str!("../../../../zephium-decision/evals/search_enough_02.json"),
+        include_str!("../../../../zephium-decision/evals/search_enough_03.json"),
+        include_str!("../../../../zephium-decision/evals/search_enough_04.json"),
+        include_str!("../../../../zephium-decision/evals/search_enough_05.json"),
+        include_str!("../../../../zephium-decision/evals/search_enough_06.json"),
+        include_str!("../../../../zephium-decision/evals/search_enough_07.json"),
+        include_str!("../../../../zephium-decision/evals/search_enough_08.json"),
+        include_str!("../../../../zephium-decision/evals/search_enough_09.json"),
+        include_str!("../../../../zephium-decision/evals/search_enough_10.json"),
+    ];
+    let raw: Value = serde_json::from_str(source).unwrap();
+    let cases = raw["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), fixtures.len());
+    let digest = format!("{:x}", sha2::Sha256::digest(source.as_bytes()));
+    for (case, fixture) in cases.iter().zip(fixtures) {
+        let fixture: Value = serde_json::from_str(fixture).unwrap();
+        assert_eq!(fixture["source_sha256"], digest);
+        let scope: zephium_core::work::search::WorkPublicSearchScope =
+            serde_json::from_value(case["scope"].clone()).unwrap();
+        let actual =
+            super::search::search_enough_projection(&scope, case["found"].as_str().unwrap())
+                .unwrap();
+        assert!(actual.state() == &fixture["request"]["state"]);
+        assert!(
+            serde_json::to_value(actual.questions()).unwrap() == fixture["request"]["questions"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_part_has_enough_only_when_jev_is_confident() {
+    let (scope, _) = search_ranking_fixture(2);
+    for (noul, enough) in [(0.93, true), (0.7, false), (0.05, false)] {
+        let (endpoint, jev_server) = server(vec![response(
+            200,
+            "",
+            &json!({
+                "model":zephium_decision::JEV_MODEL,
+                "answers":{"answered":{"type":"noul","noul":noul}},
+                "usage":{"input_tokens":900,"output_tokens":4}
+            })
+            .to_string(),
+        )]);
+        let transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            "http://127.0.0.1:9/v1/responses",
+            "http://127.0.0.1:9/v1/messages",
+        )
+        .unwrap();
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-key".into(),
+        )
+        .unwrap();
+        let ranking = super::search::SearchDecisionRanking::new(
+            Some(client(endpoint)),
+            emulation_config(),
+            None,
+        );
+        let jev_server = jev_server();
+        let decided = ranking
+            .enough(
+                &transport,
+                &credential,
+                &scope,
+                "Public answers the part's searches found.",
+                limits(),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+        assert_eq!(jev_server.join().unwrap(), 1);
+        assert_eq!(decided.answers, enough);
+        assert_eq!(decided.usage.model_tokens, 904);
+    }
+    assert!(super::search::search_enough_projection(&scope, " ").is_err());
+    assert!(super::search::search_enough_projection(
+        &scope,
+        "Authorization: Bearer do-not-disclose-this-secret"
+    )
+    .is_err());
+}
+
+#[test]
 fn search_terms_ignore_order_case_and_filler_and_keep_sites() {
     use super::search::SearchQueryTerms;
     let a = SearchQueryTerms::of("Official Hetzner cloud prices for load balancers");
