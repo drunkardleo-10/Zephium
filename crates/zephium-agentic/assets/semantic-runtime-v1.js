@@ -771,6 +771,12 @@
     menuitem: "menu_item",
     menuitemcheckbox: "menu_item",
     menuitemradio: "menu_item",
+    // An app's sidebar tree (Slack's channels, a file tree) is a list of
+    // selectable items, and a feed is a list of articles.
+    tree: "list",
+    treeitem: "option",
+    feed: "list",
+    article: "document",
     dialog: "dialog",
     alertdialog: "dialog",
     list: "list",

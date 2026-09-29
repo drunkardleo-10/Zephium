@@ -739,6 +739,34 @@ impl AgentBrowserAction {
     pub(crate) const fn applied_on_page_change(&self) -> bool {
         self.applied_on_page_change
     }
+    /// A navigation-like read whose page has not changed yet while its settle
+    /// window is still open: a single-page app may draw the view it opened a
+    /// moment later, so the page is looked at again before it is verified.
+    pub(crate) fn awaits_page_change(
+        &self,
+        current: &SemanticObservation,
+        now: SemanticSettleInstant,
+    ) -> bool {
+        let action = &self.proposal.action;
+        action.effect() == SemanticEffectClass::Read
+            && matches!(
+                action.kind(),
+                SemanticActionKind::Click | SemanticActionKind::Press | SemanticActionKind::Select
+            )
+            && self.terminal.as_ref().is_some_and(|terminal| {
+                terminal
+                    .tracker()
+                    .deadline()
+                    .millis()
+                    .saturating_sub(now.millis())
+                    > PAGE_CHANGE_LOOK_MILLIS
+            })
+            && current
+                .frames()
+                .iter()
+                .find(|snapshot| snapshot.frame() == action.frame())
+                .is_some_and(|snapshot| action.page_unchanged(snapshot))
+    }
 
     pub(crate) fn accepts_settlement(
         &self,
@@ -988,6 +1016,9 @@ impl fmt::Debug for AgentBrowserAction {
             .finish_non_exhaustive()
     }
 }
+
+/// How long a page waits before looking again for a read's change.
+pub(crate) const PAGE_CHANGE_LOOK_MILLIS: u64 = 400;
 
 /// Closed, content-free action refusal. No variant authorizes retry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

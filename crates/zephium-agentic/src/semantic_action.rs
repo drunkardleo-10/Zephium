@@ -1057,6 +1057,13 @@ impl SemanticPreparedAction {
         self.page_digest
     }
 
+    /// Whether a snapshot of this action's frame still shows the page as it
+    /// was when the action was prepared: roles, names, text, links, values
+    /// and states, not keys, geometry or focus.
+    pub fn page_unchanged(&self, snapshot: &SemanticSnapshot) -> bool {
+        snapshot.frame() == self.frame() && page_digest(snapshot) == self.page_digest
+    }
+
     /// Original observation-bound action contract.
     pub const fn bound_action(&self) -> &SemanticBoundAction {
         &self.action

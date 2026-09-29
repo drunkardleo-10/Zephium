@@ -3423,6 +3423,17 @@ impl AgentBrowserSession {
     ) -> Option<zephium_agentic::AgentProviderActionRefusal> {
         self.rejected_refusal.take()
     }
+    /// The pending action is a read whose page has not changed yet, with
+    /// time left in its settle window to look again.
+    pub(crate) fn action_awaits_page_change(
+        &self,
+        current: &zephium_agentic::SemanticObservation,
+        now: zephium_agentic::SemanticSettleInstant,
+    ) -> bool {
+        self.action
+            .as_ref()
+            .is_some_and(|action| action.awaits_page_change(current, now))
+    }
 
     /// Independently verifies and accounts the pending action before continuation.
     pub fn settle_action(

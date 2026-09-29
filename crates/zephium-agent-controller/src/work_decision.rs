@@ -728,6 +728,33 @@ impl AgentWorkController {
                 result => break result?,
             }
         };
+        // A read that opened something may draw it a moment later: look
+        // again while its settle window lasts, so the change is its proof.
+        let mut current = current;
+        for _ in 0..4 {
+            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+            let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
+            if !session.action_awaits_page_change(
+                &current,
+                SemanticSettleInstant::from_millis(now.millis()),
+            ) {
+                break;
+            }
+            let wake =
+                Instant::now() + Duration::from_millis(crate::action::PAGE_CHANGE_LOOK_MILLIS);
+            if wake >= state.native.deadline {
+                break;
+            }
+            tokio::select! {
+                biased;
+                event = state.native.next_event(worker, browser) => {
+                    state.native.retain(event?)?;
+                    return Err(AgentWorkFailure::Mailbox);
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+            }
+            current = Self::observe(state, worker, browser).await?;
+        }
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
         let (_, transition) = session
