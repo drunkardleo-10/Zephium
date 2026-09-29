@@ -67,6 +67,10 @@ pub const MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES: usize = 256 * 1024;
 /// The independent byte and input-token ceilings still apply; more small tool
 /// results do not authorize retaining a larger page or a larger transcript.
 pub const MAX_AGENT_PROVIDER_CONTINUATION_TURNS: usize = 64;
+/// Transcript bytes past which the oldest looks are retired to a stub.
+const TRANSCRIPT_WORKING_BYTES: usize = 48 * 1024;
+const RETIRED_TOOL_RESULT: &str =
+    r#"{"status":"retired","note":"an earlier look; its refs are retired, use the latest look"}"#;
 
 /// Host-projected action vocabulary for one exact semantic observation.
 ///
@@ -559,6 +563,7 @@ impl AgentProviderTranscript {
             .retained_bytes()
             .and_then(|bytes| bytes.checked_add(tool_result.len()))
             .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
+        self.retire_to_fit(turn_bytes);
         let retained_bytes = self
             .retained_bytes
             .checked_add(turn_bytes)
@@ -575,6 +580,23 @@ impl AgentProviderTranscript {
             },
             retained_bytes,
         })
+    }
+
+    /// Earlier looks' page content is stale once newer looks exist (their
+    /// refs are retired): past the working size, the oldest tool results
+    /// become a short stub, the latest two kept whole, so a long look at one
+    /// page does not resend every earlier capture on each call.
+    fn retire_to_fit(&mut self, incoming: usize) {
+        let keep = self.turns.len().saturating_sub(2);
+        for turn in self.turns.iter_mut().take(keep) {
+            if self.retained_bytes.saturating_add(incoming) <= TRANSCRIPT_WORKING_BYTES {
+                break;
+            }
+            if turn.tool_result.len() > RETIRED_TOOL_RESULT.len() {
+                self.retained_bytes -= turn.tool_result.len() - RETIRED_TOOL_RESULT.len();
+                turn.tool_result = RETIRED_TOOL_RESULT.to_owned();
+            }
+        }
     }
 
     #[cfg(test)]
@@ -5344,6 +5366,33 @@ mod tests {
         assert!(!debug.contains("private retained tool result"));
         assert!(!debug.contains("call_continuation_1"));
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn a_long_look_at_one_page_retires_its_oldest_captures_and_keeps_the_latest_two() {
+        let capture = "c".repeat(16 * 1024);
+        let mut retained = transcript();
+        for _ in 0..6 {
+            retained = retained
+                .try_append(openai_correlation("{}"), capture.clone())
+                .expect("bounded turn");
+        }
+        assert!(retained.retained_bytes <= TRANSCRIPT_WORKING_BYTES + 2 * capture.len());
+        let retired = retained
+            .turns
+            .iter()
+            .filter(|turn| turn.tool_result == RETIRED_TOOL_RESULT)
+            .count();
+        assert!(retired >= 3);
+        assert!(retained.turns[4..]
+            .iter()
+            .all(|turn| turn.tool_result == capture));
+        let short = transcript()
+            .try_append(openai_correlation("{}"), "small".to_owned())
+            .and_then(|t| t.try_append(openai_correlation("{}"), "small".to_owned()))
+            .and_then(|t| t.try_append(openai_correlation("{}"), "small".to_owned()))
+            .expect("bounded turn");
+        assert!(short.turns.iter().all(|turn| turn.tool_result == "small"));
     }
 
     #[test]
