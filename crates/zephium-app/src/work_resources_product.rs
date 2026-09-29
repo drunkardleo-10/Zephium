@@ -742,6 +742,15 @@ impl ProductWork {
                 .as_ref()
                 .is_some_and(RetainedWork::awaits_group_audit)
     }
+    /// A settled member whose own native audit ended without closing it:
+    /// nothing further can close it, so its group cannot give way.
+    pub(crate) fn beyond_closing(&self) -> bool {
+        self.native_member()
+            && self
+                .coordinator
+                .as_ref()
+                .is_some_and(RetainedWork::native_audit_settled)
+    }
     /// Its owner asked it to close or stop before it was admitted.
     pub(crate) fn given_up(&self) -> bool {
         self.signal.close.load(Ordering::Acquire) || self.signal.stop.load(Ordering::Acquire)

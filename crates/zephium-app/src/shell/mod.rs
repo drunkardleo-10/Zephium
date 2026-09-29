@@ -1266,6 +1266,24 @@ impl Shell {
                 .retained_page_runtime
                 .as_ref()
                 .is_some_and(|group| group.is_failed() || group.is_sealed());
+        // A failed group held only by members nothing can close will not
+        // give way: its pages are refused at once, not after their wait.
+        if !seated
+            && self
+                .retained_page_runtime
+                .as_ref()
+                .is_some_and(|group| group.is_failed())
+            && self.retained_pages.is_empty()
+            && self
+                .retained_graveyard
+                .iter()
+                .filter(|work| work.native_member())
+                .all(|work| work.beyond_closing())
+        {
+            crate::diagnostic!("work: page refused, its run's page group cannot close");
+            work.refuse();
+            return;
+        }
         // A failed or sealed group takes no new page; one of the same run
         // waits for the group to retire and a fresh one to start, within the
         // page's own bounded wait.

@@ -47,6 +47,9 @@ struct Recipe {
     /// Stays at least this long use this recipe; shorter ones the next.
     min_nights: u16,
     max_nights: u16,
+    /// A site that answers a fresh browser with a consent page it cannot
+    /// leave (Google) never leads, even when the part names it.
+    leads: bool,
     template: &'static str,
 }
 
@@ -57,6 +60,7 @@ const RECIPES: &[Recipe] = &[
         kind: Kind::Stays,
         min_nights: 28,
         max_nights: u16::MAX,
+        leads: true,
         template: "https://www.airbnb.com/s/{place:slug}/homes?date_picker_type=monthly_stay&monthly_start_date={checkin}&monthly_length={months}&monthly_end_date={checkout}&adults={adults}[&currency={currency}]",
     },
     Recipe {
@@ -65,6 +69,7 @@ const RECIPES: &[Recipe] = &[
         kind: Kind::Stays,
         min_nights: 1,
         max_nights: 27,
+        leads: true,
         template: "https://www.airbnb.com/s/{place:slug}/homes?checkin={checkin}&checkout={checkout}&adults={adults}[&currency={currency}]",
     },
     Recipe {
@@ -73,6 +78,7 @@ const RECIPES: &[Recipe] = &[
         kind: Kind::Stays,
         min_nights: 1,
         max_nights: u16::MAX,
+        leads: true,
         template: "https://www.booking.com/searchresults.html?ss={place:q}&checkin={checkin}&checkout={checkout}&group_adults={adults}&no_rooms=1&lang=en-us[&selected_currency={currency}]",
     },
     Recipe {
@@ -81,6 +87,7 @@ const RECIPES: &[Recipe] = &[
         kind: Kind::Flights,
         min_nights: 0,
         max_nights: u16::MAX,
+        leads: true,
         template: "https://www.kayak.com/flights/{from}-{to}/{depart}[/{back}]{cabin_path}{party_path}?sort=bestflight_a",
     },
     Recipe {
@@ -89,6 +96,7 @@ const RECIPES: &[Recipe] = &[
         kind: Kind::Flights,
         min_nights: 0,
         max_nights: u16::MAX,
+        leads: false,
         template: "https://www.google.com/travel/flights?q=Flights%20from%20{from:q}%20to%20{to:q}%20on%20{depart}{trip:q}{party:q}{cabin_class:q}&hl=en[&curr={currency}]",
     },
     Recipe {
@@ -97,6 +105,7 @@ const RECIPES: &[Recipe] = &[
         kind: Kind::Products,
         min_nights: 0,
         max_nights: u16::MAX,
+        leads: true,
         template: "https://www.amazon.com/s?k={query:q}",
     },
     Recipe {
@@ -105,6 +114,7 @@ const RECIPES: &[Recipe] = &[
         kind: Kind::Products,
         min_nights: 0,
         max_nights: u16::MAX,
+        leads: true,
         template: "https://www.lego.com/en-us/search?q={query:q}",
     },
 ];
@@ -343,8 +353,8 @@ fn fill(template: &str, search: &SiteSearch) -> Option<String> {
 }
 
 /// The results pages this search opens: the part's own site first when the
-/// table knows it, then the same search on the other known sites of its
-/// kind, for when that site will not load.
+/// table knows it and it can lead, then the same search on the other known
+/// sites of its kind, for when that site will not load.
 pub(crate) fn pages(search: &SiteSearch, site: Option<&str>) -> Vec<(&'static str, String)> {
     let Some(kind) = search.kind() else {
         return Vec::new();
@@ -358,7 +368,7 @@ pub(crate) fn pages(search: &SiteSearch, site: Option<&str>) -> Vec<(&'static st
     };
     let site = site.map(|site| site.trim_start_matches("www.").to_ascii_lowercase());
     let mut recipes: Vec<&Recipe> = RECIPES.iter().filter(fits).collect();
-    recipes.sort_by_key(|recipe| Some(recipe.site) != site.as_deref());
+    recipes.sort_by_key(|recipe| (!recipe.leads, Some(recipe.site) != site.as_deref()));
     recipes
         .into_iter()
         .filter_map(|recipe| Some((recipe.name, fill(recipe.template, search)?)))
@@ -428,6 +438,7 @@ mod tests {
             ]
         );
         assert_eq!(super::pages(&business, Some("kayak.com"))[0].0, "Kayak");
+        assert_eq!(super::pages(&business, Some("google.com"))[0].0, "Kayak");
     }
 
     #[test]
