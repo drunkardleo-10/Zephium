@@ -71,6 +71,9 @@ pub(crate) struct LeadRun {
     /// The run's one output: every object it places is minted under it.
     pub output: WorkExpectedOutput,
     state: Mutex<State>,
+    /// Connections the person chose for this run where they were asked for
+    /// something broader (their day's sources): no second question.
+    accepted: Mutex<Vec<String>>,
     diagnostic: Option<fn(super::WorkLeadDiagnostic)>,
 }
 
@@ -127,8 +130,26 @@ impl LeadRun {
                 stopped: None,
                 unreadable: 0,
             }),
+            accepted: Mutex::new(Vec::new()),
             diagnostic,
         }
+    }
+    /// The person chose this connection for the run.
+    pub(crate) fn accept_connection(&self, connection: &str) {
+        let mut accepted = self
+            .accepted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !accepted.iter().any(|known| known == connection) {
+            accepted.push(connection.to_owned());
+        }
+    }
+    pub(crate) fn accepted_connection(&self, connection: &str) -> bool {
+        self.accepted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|known| known == connection)
     }
     fn state(&self) -> MutexGuard<'_, State> {
         self.state

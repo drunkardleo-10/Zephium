@@ -13,7 +13,7 @@ mod project;
 mod prompt;
 mod recipes;
 pub mod registry;
-mod route;
+pub(crate) mod route;
 mod run;
 mod schema;
 pub mod skills;

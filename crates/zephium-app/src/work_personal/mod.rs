@@ -2,6 +2,7 @@
 //! their history, notes and open tabs behind a consent asked once per work.
 //! The lead reaches it through [`PersonalTools`]; Settings through the
 //! functions here and [`skills`].
+mod day;
 pub mod skills;
 mod tools;
 

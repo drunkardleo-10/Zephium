@@ -59,6 +59,7 @@ const BUILTIN: &[&str] = &[
     include_str!("../../skills/research/SKILL.md"),
     include_str!("../../skills/explain-a-subject/SKILL.md"),
     include_str!("../../skills/today-from-my-messages/SKILL.md"),
+    include_str!("../../skills/plan-my-day/SKILL.md"),
     include_str!("../../skills/fix-a-bug/SKILL.md"),
     include_str!("../../skills/job-search/SKILL.md"),
     include_str!("../../skills/learning-path/SKILL.md"),

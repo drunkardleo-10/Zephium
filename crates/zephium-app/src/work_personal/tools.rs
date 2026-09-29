@@ -51,7 +51,11 @@ fn clip(text: &str, max: usize) -> String {
     format!("{}…", cut.trim_end())
 }
 
-fn input(kind: WorkInputKindV1, label: &str, reference: Option<String>) -> WorkInputFactV1 {
+pub(super) fn input(
+    kind: WorkInputKindV1,
+    label: &str,
+    reference: Option<String>,
+) -> WorkInputFactV1 {
     WorkInputFactV1 {
         kind,
         label: clip(label, 40).replace('\n', " "),
@@ -60,7 +64,7 @@ fn input(kind: WorkInputKindV1, label: &str, reference: Option<String>) -> WorkI
     }
 }
 
-fn day(unix_ms: i64) -> String {
+pub(super) fn day(unix_ms: i64) -> String {
     let days = unix_ms.div_euclid(86_400_000);
     // Civil date from days since the epoch (Howard Hinnant's algorithm).
     let z = days + 719_468;
@@ -167,6 +171,22 @@ impl LeadToolSet for PersonalTools {
                 ),
             },
             WorkModelTool {
+                name: "list_tasks".into(),
+                description: "The person's own tasks in Zephium: today's and overdue ones (today) or the coming ones (upcoming), with due date and time, priority, status and list. Use it for their day, their tasks, what is due. Asked under the notes question, once per work.".into(),
+                schema: schema(
+                    json!({
+                        "view": {"type": "string", "enum": ["today", "upcoming"]},
+                        "why": {"type": "string", "maxLength": MAX_WHY_CHARS, "description": WHY},
+                    }),
+                    &["view"],
+                ),
+            },
+            WorkModelTool {
+                name: "day_sources".into(),
+                description: "Where the person's day lives, for planning their day or what they have to do today: the apps and connections to read and how (one part each), and whether to read their Zephium tasks. Remembered after the person's first answer; call it before starting those parts.".into(),
+                schema: schema(json!({}), &[]),
+            },
+            WorkModelTool {
                 name: "list_tabs".into(),
                 description: "List the titles and sites of the tabs open in the person's window, to use what they are already looking at. The person is asked once per work.".into(),
                 schema: schema(
@@ -191,6 +211,8 @@ impl LeadToolSet for PersonalTools {
                 "search_notes" => search_notes(context, arguments).await,
                 "read_note" => read_note(context, arguments).await,
                 "list_tabs" => list_tabs(context, arguments).await,
+                "list_tasks" => list_tasks(context, arguments).await,
+                "day_sources" => super::day::day_sources(context, arguments).await,
                 _ => LeadToolOutcome::error("unknown tool"),
             }
         })
@@ -436,6 +458,95 @@ async fn read_note(context: LeadToolContext<'_>, arguments: &Value) -> LeadToolO
         })
         .to_string(),
     )
+}
+
+const TASK_HITS: u16 = 40;
+
+async fn list_tasks(context: LeadToolContext<'_>, arguments: &Value) -> LeadToolOutcome {
+    use zephium_core::resources::{
+        ResourceCall, ResourceResponse, TaskPriority, TaskQuery, TaskStatus, TaskView,
+    };
+    let view = match text_arg(arguments, "view") {
+        Some("upcoming") => TaskView::Upcoming,
+        _ => TaskView::Today,
+    };
+    if let Err(outcome) = allowed(context, WorkContextSourceV1::Notes, arguments).await {
+        return outcome;
+    }
+    let today = super::day::local_day();
+    let call = ResourceCall::ListTasks {
+        query: TaskQuery {
+            list: None,
+            view,
+            today: today.clone(),
+            search: String::new(),
+            after: None,
+            limit: TASK_HITS,
+        },
+    };
+    let receiver = context.handle().resource_call(context.profile(), call);
+    let Some(reply) = tokio::task::spawn_blocking(move || receiver.recv_timeout(super::TIMEOUT))
+        .await
+        .ok()
+        .and_then(Result::ok)
+    else {
+        return LeadToolOutcome::error("tasks are unavailable right now; carry on");
+    };
+    if reply.profile.as_deref() != Some(context.profile().to_string().as_str()) {
+        return LeadToolOutcome::error("tasks are unavailable right now; carry on");
+    }
+    let ResourceResponse::TaskPage {
+        lists,
+        metadata,
+        items,
+        ..
+    } = reply.response
+    else {
+        return LeadToolOutcome::error("tasks are unavailable right now; carry on");
+    };
+    context
+        .input(input(WorkInputKindV1::Notes, "Your tasks", None))
+        .await;
+    if items.is_empty() {
+        return LeadToolOutcome::ok(format!("No open task is due by {today}."));
+    }
+    let tasks: Vec<Value> = items
+        .iter()
+        .map(|task| {
+            let meta = metadata.iter().find(|m| m.id == task.id);
+            let mut out = json!({"title": clip(&task.title, 160)});
+            if let Some(date) = &task.due_date {
+                out["due"] = json!(match &task.due_time {
+                    Some(time) => format!("{date} {time}"),
+                    None => date.clone(),
+                });
+            }
+            if let Some(deadline) = meta.and_then(|m| m.deadline.as_ref()) {
+                out["deadline"] = json!(deadline);
+            }
+            if let Some(minutes) = meta.and_then(|m| m.duration) {
+                out["minutes"] = json!(minutes);
+            }
+            match meta.map(|m| m.priority) {
+                Some(TaskPriority::High) => out["priority"] = json!("high"),
+                Some(TaskPriority::Medium) => out["priority"] = json!("medium"),
+                _ => {}
+            }
+            match task.status {
+                Some(TaskStatus::Active) => out["status"] = json!("in progress"),
+                Some(TaskStatus::Blocked) => out["status"] = json!("blocked"),
+                _ => {}
+            }
+            if let Some(list) = meta
+                .and_then(|m| m.list.as_ref())
+                .and_then(|id| lists.iter().find(|l| &l.id == id))
+            {
+                out["list"] = json!(clip(&list.title, 60));
+            }
+            out
+        })
+        .collect();
+    LeadToolOutcome::ok(json!({"today": today, "tasks": tasks}).to_string())
 }
 
 async fn list_tabs(context: LeadToolContext<'_>, arguments: &Value) -> LeadToolOutcome {

@@ -199,6 +199,17 @@ async fn allow(
     work: WorkId,
     asked: &Mutex<Vec<String>>,
 ) {
+    answer(handle, profile, work, asked, "Allow").await
+}
+
+/// Answers every question with `reply`, counting them, until the run ends.
+async fn answer(
+    handle: &crate::Handle,
+    profile: zephium_core::ids::ProfileId,
+    work: WorkId,
+    asked: &Mutex<Vec<String>>,
+    reply: &str,
+) {
     loop {
         tokio::time::sleep(Duration::from_millis(20)).await;
         let state = projection(handle, profile, work).await;
@@ -237,7 +248,7 @@ async fn allow(
                     intent: WorkRuntimeIntent::AnswerStep {
                         execution: execution.id,
                         step,
-                        answer: "Allow".into(),
+                        answer: reply.into(),
                     },
                 },
             )
@@ -348,4 +359,129 @@ async fn work_lead_remembers_asks_once_for_history_and_shows_what_it_read() {
     .await
     .unwrap();
     assert_eq!(consent, Some(true));
+}
+
+/// Plans a day: asks for its sources once, reads them, remembers them.
+struct Day;
+impl WorkModelClient for Day {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            let assistant = match turn {
+                0 => vec![call("d", "day_sources", json!({}))],
+                1 => {
+                    let seen = results(&request);
+                    assert!(
+                        seen.contains("\"service\":\"mail.google.com\"")
+                            && seen.contains("list_tasks"),
+                        "{seen}"
+                    );
+                    vec![call("t", "list_tasks", json!({"view": "today"}))]
+                }
+                2 => {
+                    let seen = results(&request);
+                    assert!(seen.contains("No open task is due by"), "{seen}");
+                    vec![call(
+                        "f",
+                        "finish",
+                        json!({"say": "Your day is on the canvas."}),
+                    )]
+                }
+                _ => vec![],
+            };
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 1_000,
+                    cached_input_tokens: 0,
+                    output_tokens: 100,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+                assistant,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_day_plan_asks_for_its_sources_once_and_remembers_them() {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store.clone());
+    store.record_visit(
+        profile,
+        "https://mail.google.com/mail/u/0/#inbox".into(),
+        "Inbox - ana@example.com - Gmail".into(),
+    );
+    assert!(store.flush());
+    let day = Arc::new(Day);
+    let lead = LeadModel {
+        client: day,
+        ..model(Arc::new(Script {
+            seen: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = || WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead.clone(),
+    };
+    let service = WorkLeadService::new(handle.clone());
+    let mut asked_each = Vec::new();
+    for _ in 0..2 {
+        let create = handle
+            .work_document(WorkIntent::Create {
+                objective: "Plan my day".into(),
+            })
+            .unwrap();
+        let work = create.work_id().unwrap();
+        drive(&mut shell, &queue, create).await.unwrap();
+        let asked = Mutex::new(Vec::new());
+        let (state, ()) = drive(&mut shell, &queue, async {
+            tokio::join!(
+                service.run(
+                    profile,
+                    begin(work, WorkRevision::INITIAL),
+                    None,
+                    models(),
+                    &NoSearch,
+                    |_, _| async { Err(WorkError::Unavailable) },
+                    |_| {},
+                ),
+                answer(&handle, profile, work, &asked, "Use these"),
+            )
+        })
+        .await;
+        let run = &state.unwrap().executions[0];
+        assert_eq!(run.status, WorkExecutionStatus::NeedsReview);
+        asked_each.push(asked.into_inner().unwrap());
+    }
+    assert_eq!(
+        asked_each,
+        [
+            vec!["Plan your day from Gmail and Zephium tasks and notes?".to_owned()],
+            vec![]
+        ]
+    );
+    let kept = drive(
+        &mut shell,
+        &queue,
+        crate::work_personal::memories(&handle, profile, None, None, 10),
+    )
+    .await
+    .unwrap();
+    assert!(
+        kept.iter()
+            .any(|m| m.text == "Plans the day from Gmail and Zephium tasks and notes"),
+        "{:?}",
+        kept.iter().map(|m| m.text.clone()).collect::<Vec<_>>()
+    );
 }

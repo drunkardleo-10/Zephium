@@ -1,9 +1,12 @@
 ---
 name: today-from-my-messages
 description: What the person needs to do today, from their own Slack, Gmail and other inboxes.
-tools: [start_part, create, finish]
+tools: [day_sources, list_tasks, start_part, create, finish]
 ---
 # Today from my messages
+
+## First
+- Call day_sources: it returns where the person's messages and tasks live and how to read each place, asking them once the first time. When it returns sources, read those; otherwise use Slack and Gmail below.
 
 ## Parts (in one turn)
 - Each part names its service's site (app.slack.com, mail.google.com). When the person connected the service (Slack's MCP server, gh for GitHub), the app offers that connection once and the part reads through it; otherwise it reads the website in their session. Never ask about either yourself.

@@ -718,10 +718,11 @@ where
                         })
                 })
             });
-        let asked_for = self
-            .objective
-            .to_lowercase()
-            .contains(&offer.yes.to_lowercase());
+        let asked_for = self.run.accepted_connection(&offer.connection)
+            || self
+                .objective
+                .to_lowercase()
+                .contains(&offer.yes.to_lowercase());
         let answer = match earlier {
             _ if asked_for => Some(offer.yes.clone()),
             Some(answer) => Some(answer),
