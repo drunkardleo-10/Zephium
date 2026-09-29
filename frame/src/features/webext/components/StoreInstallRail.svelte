@@ -10,6 +10,9 @@
     webext.isAvailable() && extensions.isChromeStoreListing(tabs.activeTab()?.url ?? ""),
   );
   let failure = $derived(webext.review() === null ? webext.error() : null);
+  // Downloading, installing and starting all happen here; the rail has no
+  // room for the words the full sidebar shows.
+  let busy = $derived(webext.isInstalling());
 </script>
 
 <!--
@@ -20,17 +23,21 @@
   <button
     type="button"
     class="install"
-    title={failure ?? m.webext_store_install()}
-    aria-label={m.webext_store_install()}
-    aria-busy={webext.isPreparing() || undefined}
-    disabled={webext.isPreparing()}
+    title={busy ? m.webext_store_installing() : (failure ?? m.webext_store_install())}
+    aria-label={busy ? m.webext_store_installing() : m.webext_store_install()}
+    aria-busy={busy || undefined}
+    disabled={busy}
     data-extension-store-install
     onclick={() => {
       const id = tabs.activeId();
       if (id !== null) void webext.prepare(id);
     }}
   >
-    <Icon icon={Download01Icon} size={16} />
+    {#if busy}
+      <span class="spinner" aria-hidden="true"></span>
+    {:else}
+      <Icon icon={Download01Icon} size={16} />
+    {/if}
   </button>
 {/if}
 
@@ -57,8 +64,33 @@
     transition-duration: var(--motion-instant);
   }
 
-  .install:disabled {
+  .install:disabled:not([aria-busy]) {
     opacity: 0.6;
+  }
+
+  /* The tab favicon's loading arc, at icon size. */
+  .spinner {
+    width: 16px;
+    height: 16px;
+    border-radius: var(--radius-capsule);
+    background: conic-gradient(from 0deg, transparent 20%, currentcolor);
+    mask: radial-gradient(farthest-side, transparent calc(100% - 2px), black calc(100% - 1.5px));
+    animation:
+      interface-fade var(--motion-fast) var(--ease-out) both,
+      install-orbit 0.9s linear infinite;
+  }
+
+  @keyframes install-orbit {
+    to {
+      rotate: 1turn;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spinner {
+      animation: none;
+      opacity: 0.6;
+    }
   }
 
   .install:hover:not(:disabled) {

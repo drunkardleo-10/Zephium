@@ -233,7 +233,7 @@
       variant="primary"
       size="compact"
       class="mt-2 w-full"
-      pending={webext.isPreparing()}
+      pending={webext.isInstalling()}
       data-extension-store-install
       title="Install this extension in Zephium"
       onclick={() => {
@@ -241,7 +241,11 @@
         if (id !== null) void webext.prepare(id);
       }}
     >
-      {webext.isPreparing() ? "Preparing…" : "Add to Zephium"}
+      {webext.isPreparing()
+        ? "Preparing…"
+        : webext.isInstalling()
+          ? m.webext_store_installing()
+          : m.webext_store_install()}
     </Button>
     {#if webext.error() !== null && webext.review() === null}
       <p class="mt-1 text-[11px] leading-4 text-danger" role="alert">{webext.error()}</p>

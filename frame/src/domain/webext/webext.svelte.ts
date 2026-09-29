@@ -11,6 +11,8 @@ let installed = $state<WebExtensionView[]>([]);
 let pendingReview = $state<WebExtensionReview | null>(null);
 let preparing = $state(false);
 let confirming = $state(false);
+// The extension just added, until it has started.
+let settling = $state<string | null>(null);
 let failure = $state<string | null>(null);
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 // Extensions ask for access one request at a time; later ones wait.
@@ -22,6 +24,7 @@ export const list = () => installed;
 export const review = () => pendingReview;
 export const isPreparing = () => preparing;
 export const isConfirming = () => confirming;
+export const isInstalling = () => preparing || confirming || settling !== null;
 export const error = () => failure;
 export const accessRequest = () => accessQueue[0] ?? null;
 export const isAnswering = () => answering;
@@ -49,14 +52,16 @@ export async function refresh(): Promise<void> {
   if (result.status === "ok") {
     available = true;
     installed = result.data;
+    if (settling !== null && named(settling)?.state !== "starting") settling = null;
     // Extensions start in the background after a change; follow them until
     // every one has settled.
     clearTimeout(refreshTimer);
     if (installed.some((extension) => extension.state === "starting")) {
       refreshTimer = setTimeout(() => void refresh(), 600);
     }
-  } else if (available === null) {
-    available = false;
+  } else {
+    settling = null;
+    if (available === null) available = false;
   }
 }
 
@@ -93,6 +98,7 @@ export async function confirm(): Promise<void> {
   if (result.status === "ok") {
     pendingReview = null;
     failure = null;
+    settling = current.id;
     await refresh();
   } else {
     failure = result.error;
