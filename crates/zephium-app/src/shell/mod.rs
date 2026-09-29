@@ -1349,11 +1349,14 @@ impl Shell {
         // member, live or graveyarded, not with its last live page: a
         // graveyarded page still owns a native seat and an audit, and a fresh
         // group cannot start natively until every member has closed.
+        // A graveyarded member whose own native audit has ended holds no
+        // seat any more: nothing further can close it, and the next group's
+        // native admission still requires every member's proof.
         if self.retained_pages.is_empty()
             && !self
                 .retained_graveyard
                 .iter()
-                .any(|work| work.native_member())
+                .any(|work| work.native_member() && !work.beyond_closing())
         {
             self.retained_page_runtime = None;
         }

@@ -347,7 +347,8 @@ impl zephium_core::work::model::WorkModelClient for Scripted {
                         id: format!("part-{index}"),
                         name: "start_part".into(),
                         arguments: serde_json::json!({"title": format!("Site {index}"),
-                            "helper": "browser", "goal": goal.chars().take(200).collect::<String>(),
+                            "helper": "browser",
+                            "goal": format!("Page {index}: {}", goal.chars().take(180).collect::<String>()),
                             "brief": goal}),
                     })
                 })
