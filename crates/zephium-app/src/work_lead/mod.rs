@@ -181,12 +181,14 @@ impl WorkLeadService {
             None => (command.into_request()?, Vec::new(), Vec::new()),
         };
         request.validate()?;
-        let response = tokio::time::timeout(
-            Duration::from_secs(10),
-            self.handle.submit_work_document(request, Some(profile))?,
-        )
-        .await
-        .map_err(|_| WorkError::OutcomeUnknown)??;
+        let submitted = crate::work_runtime::admitted(|| {
+            self.handle
+                .submit_work_document(request.clone(), Some(profile))
+        })
+        .await?;
+        let response = tokio::time::timeout(Duration::from_secs(10), submitted)
+            .await
+            .map_err(|_| WorkError::OutcomeUnknown)??;
         if response.profile != profile {
             return Err(WorkError::ProfileUnavailable);
         }
