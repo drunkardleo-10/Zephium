@@ -721,6 +721,33 @@ struct SearchLane<'a> {
     permits: &'a tokio::sync::Semaphore,
 }
 impl WorkPublicSearchProvider for SearchLane<'_> {
+    fn reuse<'a>(
+        &'a self,
+        scope: &'a WorkPublicSearchScope,
+        earlier: &'a str,
+        evidence: &'a WorkProviderSearchEvidenceV1,
+        limits: WorkExecutionLimits,
+        deadline: std::time::Instant,
+    ) -> WorkPublicSearchReuseFuture<'a> {
+        Box::pin(async move {
+            let _permit = self.permits.acquire().await;
+            self.inner
+                .reuse(scope, earlier, evidence, limits, deadline)
+                .await
+        })
+    }
+    fn enough<'a>(
+        &'a self,
+        scope: &'a WorkPublicSearchScope,
+        found: &'a str,
+        limits: WorkExecutionLimits,
+        deadline: std::time::Instant,
+    ) -> WorkPublicSearchReuseFuture<'a> {
+        Box::pin(async move {
+            let _permit = self.permits.acquire().await;
+            self.inner.enough(scope, found, limits, deadline).await
+        })
+    }
     fn minimum_reservation(
         &self,
         scope: &WorkPublicSearchScope,
