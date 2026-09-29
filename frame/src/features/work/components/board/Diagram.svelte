@@ -406,11 +406,11 @@
     text-wrap: balance;
   }
 
+  /* Wrapped greedily, as its lines were counted. */
   .line {
     color: var(--color-muted);
     font-size: var(--text-label);
     line-height: 15px;
-    text-wrap: pretty;
   }
 
   .pop-kind {

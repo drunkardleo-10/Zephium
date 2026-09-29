@@ -6,11 +6,11 @@ import type { CanvasSize } from "./canvas-model";
  * tiers are named in, the extra air above each tier, and the widest it draws.
  */
 export const DIAGRAM = {
-  node: { width: 184, height: 72 },
-  column: 24,
+  node: { width: 176, height: 72 },
+  column: 20,
   row: 56,
   across: 5,
-  gutter: 96,
+  gutter: 88,
   tier: 16,
   /** The widest a picture draws at full size: a result's width. */
   reach: 1120,

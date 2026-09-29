@@ -17,8 +17,8 @@ function measure(text: string, size: number, weight: number): number {
       typeof document === "undefined" ? null : document.createElement("canvas").getContext("2d");
   let width = text.length * size * (weight >= 600 ? 0.58 : 0.54);
   if (context) {
-    const face = getComputedStyle(document.documentElement).getPropertyValue("--font-sans").trim();
-    context.font = `${weight} ${size}px ${face || "system-ui"}`;
+    // The interface face as a canvas reads a font: a quoted family list may not parse, so plainly.
+    context.font = `${weight} ${size}px -apple-system, BlinkMacSystemFont, system-ui, sans-serif`;
     width = context.measureText(text).width;
   }
   if (widths.size > 4000) widths.clear();

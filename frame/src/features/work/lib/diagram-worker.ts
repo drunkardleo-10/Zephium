@@ -265,6 +265,19 @@ function fromElk(
   };
 }
 
+/**
+ * Rows that stand over each other: straightened lines may drag a chain of
+ * rows off to one side, leaving the tiers' names far from their parts.
+ */
+function even(rows: DiagramRows, layout: DiagramLayout): boolean {
+  const centres = rows.rows.map((row) => {
+    const xs = row.map((id) => layout.at[id]!.x);
+    return (Math.min(...xs) + Math.max(...xs) + DIAGRAM.node.width) / 2;
+  });
+  const span = layout.bounds.width - layout.gutter;
+  return Math.max(...centres) - Math.min(...centres) <= span * 0.3;
+}
+
 type Engine = { layout: (graph: ElkNode) => Promise<ElkNode> };
 let local: Promise<Engine> | null = null;
 /** ELK in a worker; `failed` settles if the page refuses it (a policy, a failed load). */
@@ -376,7 +389,12 @@ export async function engineLayout(shape: DiagramShape): Promise<DiagramLayout> 
       "elk.layered.nodePlacement.strategy": placement,
     };
     const layout = fromElk(shape, await run(graph), rows);
-    if (layout.bounds.width <= DIAGRAM.reach) return layout;
+    // Drawn a few percent smaller reads better than a row broken in two.
+    if (
+      layout.bounds.width <= DIAGRAM.reach * 1.06 &&
+      (placement === "SIMPLE" || even(rows, layout))
+    )
+      return layout;
     if (!best || layout.bounds.width < best.bounds.width) best = layout;
   }
   return best!;
