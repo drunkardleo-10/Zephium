@@ -585,7 +585,7 @@ test("a run that ended short says what is missing and offers the one thing that 
   await expect.element(screen.getByText("Flights couldn’t be read", { exact: true })).toBeVisible();
   await screen.getByRole("button", { name: "Try again" }).click();
   expect(onact).toHaveBeenCalledOnce();
-  expect(screen.container.querySelector(".run-mark.stopped")).not.toBeNull();
+  expect(screen.container.querySelector(".character.lead.stopped")).not.toBeNull();
   await screen.unmount();
   session.dispose();
 });

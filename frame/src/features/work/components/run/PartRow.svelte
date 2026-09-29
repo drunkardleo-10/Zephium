@@ -3,20 +3,14 @@
   import type { CanvasItem, PartPage } from "../../lib/canvas-model";
   import { PART, partLead, rowKey, stackSize } from "../../lib/run/part-size";
   import { reasonBadge } from "../../lib/work-human";
-  import {
-    CommandLineIcon,
-    ComputerTerminal01Icon,
-    FileEditIcon,
-    File01Icon,
-    Search01Icon,
-  } from "../../lib/icons";
+  import { CommandLineIcon, FileEditIcon, File01Icon, Search01Icon } from "../../lib/icons";
   import { askCard, partContent } from "./slots";
   import { needWords } from "../../lib/run/need";
-  import { serviceKey, serviceMark } from "$domain/connections";
   import { getContext, untrack } from "svelte";
   import { canvasBoard, type BoardActions } from "../../lib/canvas-context";
   import HostGlyph from "../cards/HostGlyph.svelte";
   import PageFace from "./PageFace.svelte";
+  import PartMark from "../presence/PartMark.svelte";
   import * as m from "$shared/i18n/messages";
 
   let {
@@ -118,27 +112,7 @@
         onlist();
       }}
     >
-      {#if part.helper !== "browser"}<span class="glyph"
-          ><!-- At work, a helper's glyph turns the arc a loading tab's mark does. --><span
-            class="favicon"
-            data-loading={part.state === "running"}
-            ><Icon
-              icon={part.helper === "research"
-                ? Search01Icon
-                : part.helper === "computer"
-                  ? ComputerTerminal01Icon
-                  : serviceMark(serviceKey(part.connection, part.title))}
-              size={14}
-            /></span
-          ></span
-        >{:else}<span class="mark"
-          ><HostGlyph
-            host={part.host ?? ""}
-            size={16}
-            loading={part.state === "running"}
-            initial={false}
-          /></span
-        >{/if}
+      <PartMark {part} />
       <strong>{part.title}</strong>
     </button>
     {#if needSaid}<p class="summary need-text">{needSaid.text}</p>
@@ -301,33 +275,12 @@
     outline-offset: 2px;
   }
 
-  .mark,
-  .glyph {
-    display: grid;
-    flex: none;
-    place-items: center;
-    inline-size: 16px;
-    block-size: 18px;
-  }
-
-  .glyph {
-    color: var(--color-muted);
-  }
-
   strong {
     font-size: var(--fitted, var(--text-body));
     font-weight: 600;
     line-height: 18px;
     letter-spacing: -0.005em;
     text-wrap: balance;
-  }
-
-  .glyph .favicon {
-    position: relative;
-    display: grid;
-    place-items: center;
-    inline-size: 16px;
-    block-size: 16px;
   }
 
   .summary {

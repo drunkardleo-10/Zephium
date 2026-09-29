@@ -17,8 +17,8 @@
   import { preparationFailure } from "../lib/preparation-failure";
   import { fileName } from "../lib/work-files";
   import type { CanvasItem } from "../lib/canvas-model";
-  import RunMark from "./run/RunMark.svelte";
-  import HostGlyph from "./cards/HostGlyph.svelte";
+  import { Character, Orb, type Mood, type OrbKind } from "$shared/ui/presence";
+  import HostGlyph, { siteMark } from "./cards/HostGlyph.svelte";
   import Icon from "$shared/ui/Icon";
   import {
     ArrowDown01Icon,
@@ -48,7 +48,13 @@
     ended = null,
   }: {
     /** The parts at work now, each with what it is doing, for the island's list. */
-    working?: readonly { id: string; title: string; now: string; host?: string }[];
+    working?: readonly {
+      id: string;
+      title: string;
+      now: string;
+      host?: string;
+      helper?: "browser" | "research" | "computer" | "connection";
+    }[];
     /** Why the run in view ended short, in a person's words, and the one thing that helps. */
     ended?: { text: string; action: string; onact: () => void } | null;
     session: WorkSession;
@@ -306,6 +312,52 @@
             ? ("stopped" as const)
             : ("idle" as const),
   );
+  /** What the lead is doing, as its face and its indicator show it. */
+  const doing = $derived.by((): { mood: Mood; orb: OrbKind } => {
+    if (fileState)
+      return (execution?.steps ?? []).some(
+        (step) =>
+          step.status === "running" &&
+          (step.kind.kind === "write_file" || step.kind.kind === "edit_file"),
+      )
+        ? { mood: "working", orb: "working" }
+        : { mood: "reading", orb: "reading" };
+    switch (activity) {
+      case "searching":
+        return { mood: "searching", orb: "searching" };
+      case "reading":
+        return { mood: "reading", orb: "reading" };
+      case "interacting":
+        return { mood: "working", orb: "working" };
+      case "planning":
+      case "delegating":
+      case "finishing":
+        return { mood: "thinking", orb: "planning" };
+      case "producing_artifact":
+        return { mood: "working", orb: "planning" };
+      default:
+        return { mood: "thinking", orb: "thinking" };
+    }
+  });
+  const face = $derived<Mood>(
+    mark === "waiting"
+      ? "waiting"
+      : mark === "live"
+        ? doing.mood
+        : mark === "done"
+          ? "done"
+          : mark === "stopped"
+            ? "stopped"
+            : "rest",
+  );
+  const helperOf = (part: (typeof working)[number]) =>
+    part.helper ?? (part.host ? "browser" : "research");
+  const HELPER_MOOD: Record<string, Mood> = {
+    browser: "reading",
+    research: "searching",
+    computer: "working",
+    connection: "working",
+  };
   /** How long the run has been going, by this window's clock: a second hand only while it runs. */
   let now = $state(Date.now());
   const since = $derived.by(() => {
@@ -443,15 +495,18 @@
                     }}
                   >
                     <span class="row-mark"
-                      >{#if part.host}<HostGlyph
-                          host={part.host}
-                          size={14}
-                          loading
-                          initial={false}
-                        />{:else}<RunMark state="live" size={14} />{/if}</span
+                      ><Character
+                        kind={helperOf(part)}
+                        mood={HELPER_MOOD[helperOf(part)]}
+                        size={22}
+                      />{#if part.host && siteMark(part.host)}<span class="row-badge"
+                          ><HostGlyph host={part.host} size={10} initial={false} /></span
+                        >{/if}</span
                     >
-                    <span class="who">{part.title}</span>
-                    <span class="doing">{part.now}</span>
+                    <span class="said">
+                      <span class="who">{part.title}</span>
+                      {#if part.now}<span class="doing">{part.now}</span>{/if}
+                    </span>
                   </button>
                 </li>
               {:else}<li class="none">{m.work_line_no_agents()}</li>{/each}
@@ -541,8 +596,9 @@
           aria-label={m.work_line_agents()}
           onclick={() => (want = want === "agents" ? null : "agents")}
         >
-          <RunMark state={mark} size={16} />
+          <Character kind="lead" mood={face} size={22} label={m.work_agent_line()} />
         </button>
+        {#if mark === "live" && !waiting}<Orb kind={doing.orb} size={14} />{/if}
         <div class="state">
           {#if waiting}
             <button
@@ -638,6 +694,21 @@
               }}>{m.work_line_approve()}</button
             >
           {/if}
+          {#if live && working.length}
+            <button
+              type="button"
+              class="helpers"
+              aria-expanded={panel === "agents"}
+              aria-label={m.work_line_agents()}
+              onclick={() => (want = want === "agents" ? null : "agents")}
+            >
+              {#each working.slice(0, 4) as part (part.id)}<span class="helper"
+                  ><Character kind={helperOf(part)} size={18} /></span
+                >{/each}{#if working.length > 4}<span class="more-helpers"
+                  >+{working.length - 4}</span
+                >{/if}
+            </button>
+          {/if}
           {#if live}
             <button
               type="button"
@@ -669,15 +740,15 @@
 
   /* The island: a pill while it is one line (the panel radius clamps to half
      its height), a sheet once it holds rows. Its line stays on top and what it
-     opens grows down from it, the way the island at the top of a phone does. */
+     opens grows down from it, the way the island at the top of a phone does.
+     It is solid: a glass would blur the canvas again every frame a helper moves. */
   .capsule {
     display: flex;
     flex-direction: column-reverse;
     min-inline-size: 0;
     border-radius: var(--radius-panel);
-    background: var(--color-menu);
+    background: color-mix(in srgb, var(--color-float) var(--wash-raised), var(--color-canvas));
     box-shadow: var(--shadow-menu);
-    backdrop-filter: blur(24px);
   }
 
   /* Grows on the arrival curve, folds on the exit curve; the rows fade with it. */
@@ -996,7 +1067,7 @@
     transition: background-color var(--motion-fast) var(--ease-out);
   }
 
-  .row :global(svg) {
+  .row > :global(svg) {
     flex: none;
     color: var(--color-muted);
   }
@@ -1034,8 +1105,16 @@
     background: var(--row-pressed);
   }
 
+  /* A helper at work, the way a colleague is listed: who, then what it is doing, whole. */
+  .said {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 1px;
+    min-inline-size: 0;
+  }
+
   .who {
-    flex: none;
     font-weight: 550;
   }
 
@@ -1044,23 +1123,75 @@
     display: grid;
     flex: none;
     place-items: center;
-    inline-size: 16px;
-    block-size: 16px;
+    inline-size: 24px;
+    block-size: 24px;
   }
 
-  .doing,
-  .none {
-    flex: 1;
-    min-inline-size: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .row-badge {
+    position: absolute;
+    inset-block-end: -2px;
+    inset-inline-end: -3px;
+    display: grid;
+    place-items: center;
+    inline-size: 13px;
+    block-size: 13px;
+    border-radius: 50%;
+    background: var(--color-float);
+  }
+
+  .doing {
     color: var(--color-muted);
+    line-height: 16px;
   }
 
   .none {
     padding: 6px 10px;
+    overflow: hidden;
+    color: var(--color-muted);
     font-size: var(--text-label);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* The helpers at work, shoulder to shoulder: the way into their list. */
+  .helpers {
+    display: flex;
+    align-items: center;
+    block-size: 26px;
+    padding: 0 6px 0 8px;
+    border: 0;
+    border-radius: var(--radius-capsule);
+    background: transparent;
+    color: var(--color-muted);
+    font: inherit;
+    font-size: var(--text-caption);
+    font-variant-numeric: tabular-nums;
+    cursor: default;
+    transition: background-color var(--motion-fast) var(--ease-out);
+  }
+
+  .helpers:hover,
+  .helpers[aria-expanded="true"] {
+    background: var(--color-control-hover);
+  }
+
+  .helpers:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  .helper {
+    display: grid;
+    place-items: center;
+    margin-inline-start: -5px;
+  }
+
+  .helper:first-child {
+    margin-inline-start: 0;
+  }
+
+  .more-helpers {
+    margin-inline-start: 5px;
   }
 
   form {
