@@ -72,6 +72,13 @@ WebView2. Package records include version, manifest version and SHA-256.
 
 ## QA follow-up qualifiers
 
+- `run-browser-surfaces.ps1` checks Grammarly's native OAuth-window adoption,
+  native extension context-menu entries, and 1Password's empty runtime popup
+  and separate welcome document. It reports failed native action commands as
+  findings. No account is used and no extension API is replaced. Its DOM/CDP
+  clicks are diagnostic, not physical user activation. `adopt_new_windows` is
+  a lab-only scenario flag for up to four HTTP(S) native child windows; default
+  scenarios continue denying all new-window requests.
 - `run-access-transition.ps1` replaces a keyed test extension from a different,
   narrowed directory without removing its native ID. It asserts local storage
   survival, the native manifest change, and allowed/denied content injection.

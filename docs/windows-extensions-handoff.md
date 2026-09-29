@@ -29,6 +29,17 @@ PowerShell process. See [the QA checklist](windows-extension-qa.md).
   and icon without polling. Popups use a small anchored native window and the
   15-line popup-only native-query binding. Bitwarden's welcome popup renders;
   signed-in vault/autofill acceptance remains manual.
+- A focused, live Windows extension popup can open an ordinary browser tab
+  through WebView2's original new-window request. The host validates the exact
+  popup, runtime, profile environment, active human tab and foreground window,
+  then uses the existing bounded native adoption path. It rechecks popup focus
+  after construction. Hidden observers still cannot open tabs through this path.
+  Grammarly 14.1333.0's real OAuth request reaches its sign-in document in the
+  disposable lab; completed account sign-in remains a user acceptance check.
+- Native context-menu entries named `extension` are preserved, including their
+  native submenus and command dispatch. The previous allowlist removed them.
+  Ordinary unknown commands and custom host entries remain filtered. An
+  account-free Bitwarden lab profile confirmed the native extension menu entry.
 - All sites and Specific sites use immutable prepared manifests, intersecting
   original host permissions and content-script matches. Native content-script,
   scripting and network-rule host restrictions were checked. A fixture's
@@ -101,6 +112,17 @@ sample had a gap. Use `desktop\measure-webext-qa.ps1` for a fresh fixed-tab run.
 
 ## Limits and open acceptance items
 
+- **1Password 8.12.37.1 is not usable yet.** It declares a default popup but
+  clears the native popup URL during unsigned-in startup, then requests
+  `chrome-extension://.../app/app.html#/page/welcome`. That document renders
+  when explicitly opened in the lab; normal Windows tabs correctly reject its
+  extension scheme. Its non-popup action and extension-owned document lifecycle
+  need a separate implementation/review. `Extensions.triggerAction` and
+  `Extensions.getExtensions` returned `0x80070057` in this WebView2 runtime;
+  no native action path was qualified. Do not hardcode its internal welcome URL,
+  force the cleared manifest popup, or add a replacement action dispatcher.
+  This also explains some blocked-new-tab notices during installation/startup;
+  a notice on a web page does not identify that page as the request's cause.
 - Dark Reader content works, but its background chooses a protected about: page
   for per-site popup controls despite the corrected popup query. No background
   tabs/action/permissions emulator was added.
@@ -129,3 +151,10 @@ three pre-existing vendored Wry dead-code warnings remain. The QA frontend
 production build passes. No frontend behavior changed in this review follow-up.
 The preceding shared extension/frontend/component results are in commit history;
 these checks are not a claim that all workspace CI or release QA is green.
+
+Reproduce the September 29 sign-in/menu/1Password findings with
+`crates\zephium-webext-windows\run-browser-surfaces.ps1` after rebuilding the lab.
+It requires cached signed Grammarly, Bitwarden and 1Password packages, uses
+fresh profiles, and submits no account credentials. Its DOM click is diagnostic,
+not evidence of physical user activation. Native document-load events establish
+arrival at the Grammarly sign-in page; they do not establish OAuth completion.

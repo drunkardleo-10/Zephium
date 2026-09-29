@@ -44,6 +44,15 @@ checkout, verifies the binary's QA product identity, and launches
 
 ## Current limits
 
+- 1Password currently clears its popup and requires an extension-owned welcome
+  tab plus non-popup action handling. Those Windows paths are not implemented;
+  installation alone does not mean this extension is usable.
+- Grammarly's popup sign-in request now uses native tab adoption. Please verify
+  both arrival at sign-in and successful return to a signed-in extension. The
+  latter needs your account; the lab does not submit credentials.
+- Native extension context-menu entries are now retained. For Bitwarden,
+  right-click a login field and check its submenu. Menu availability alone does
+  not establish that credential filling or inline suggestions work.
 - Popup-only native active-tab query binding works in the lab for Bitwarden and
   Dark Reader. Dark Reader's background logic still selects a protected `about:`
   page; its per-site popup controls are not qualified. Its content scripts work.
