@@ -201,10 +201,7 @@ async fn work_page_tasks_ask_once_per_site_and_keep_the_answer() {
     .await;
     let execution = &result.unwrap().executions[0];
     settled_with_notes(execution);
-    assert_eq!(
-        prompt,
-        "Work in your Slack? I'll read #design since Monday."
-    );
+    assert_eq!(prompt, "Work in your Slack?");
     assert_eq!(asks(execution), [(prompt, Some("Allow".into()))]);
 
     let opened = opened.into_inner().unwrap();

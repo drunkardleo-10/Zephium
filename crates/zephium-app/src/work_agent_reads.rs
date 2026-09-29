@@ -302,21 +302,21 @@ impl Driver {
     {
         let mut open: Vec<OpenConfirm> = Vec::new();
         // An entry question the start page's check put to the person.
-        let mut entry: Option<(WorkConfirmPort, WorkStepId, String)> = None;
+        let mut entry: Option<(WorkConfirmPort, WorkStepId, String, Vec<String>)> = None;
         let mut signed_out = false;
         loop {
             let settled = tokio::time::timeout(ASK_POLL, next_read(pending))
                 .await
                 .ok();
             let port_of = |request: &WorkAgentBrowseRequest| {
-                let WorkStepKindV1::Read { url, goal, .. } = &request.step else {
+                let WorkStepKindV1::Read { url, .. } = &request.step else {
                     return None;
                 };
                 Some((
                     request.confirm.clone()?,
                     request.id,
                     crate::work_sites::site_of(url)?,
-                    goal.clone().unwrap_or_default(),
+                    crate::work_sites::host_of(url).unwrap_or_default(),
                 ))
             };
             let ports: Vec<(WorkConfirmPort, WorkStepId, String, String)> = pending
@@ -328,21 +328,24 @@ impl Driver {
                         .and_then(|(request, _, _)| port_of(request)),
                 )
                 .collect();
-            for (port, page, site, goal) in ports {
+            for (port, page, site, host) in ports {
                 if port.take_entry_ask() && entry.is_none() {
-                    let (prompt, options) = crate::work_sites::entry_question(&site, &goal);
+                    let (prompt, options) =
+                        crate::work_sites::entry_question_for(&[crate::work_sites::service_name(
+                            &host,
+                        )]);
                     self.probe.record_activity(WorkActivityV1::WaitingForHuman);
                     let step = self.step(
                         WorkStepKindV1::Ask {
                             prompt,
-                            options,
+                            options: options.clone(),
                             answer: None,
                             purpose: Some(WorkAskPurposeV1::Entry),
                         },
                         WorkStepStatus::Running,
                     );
                     let step = self.begin(step, vec![], None).await?;
-                    entry = Some((port.clone(), step, site.clone()));
+                    entry = Some((port.clone(), step, site.clone(), options));
                 }
                 if let Some(wait) = port.take_needs_you() {
                     self.part_needs_you(wait.map(|wait| (site.as_str(), wait)))
@@ -390,8 +393,8 @@ impl Driver {
                     }
                 }
             }
-            if let Some((port, step, site)) =
-                entry.clone().filter(|(port, _, _)| port.entry().is_none())
+            if let Some((port, step, site, options)) =
+                entry.clone().filter(|(port, ..)| port.entry().is_none())
             {
                 let state = self.probe.runtime_projection().await?;
                 let answer = state
@@ -407,7 +410,7 @@ impl Driver {
                         _ => None,
                     });
                 if let Some(answer) = answer {
-                    let answer = crate::work_sites::entry_answer(&site, &answer);
+                    let answer = crate::work_sites::entry_answer_to(&options, &answer);
                     self.answer_entry(&site, answer).await;
                     port.answer_entry(match answer {
                         crate::work_sites::EntryAnswer::Allow => WorkSiteEntry::Allow,
@@ -449,7 +452,7 @@ impl Driver {
                 }
             }
             if let Some(read) = settled {
-                if let Some((port, step, site)) = entry.take() {
+                if let Some((port, step, site, _)) = entry.take() {
                     if port.entry().is_none() {
                         self.settle(
                             step,

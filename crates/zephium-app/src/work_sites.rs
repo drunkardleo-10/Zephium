@@ -213,14 +213,67 @@ pub fn always_label(site: &str) -> String {
     format!("Always for {}", site_name(site))
 }
 
-/// The question a run asks once per site: the site is Rust's, the plan the agent's.
-pub fn entry_question(site: &str, goal: &str) -> (String, Vec<String>) {
-    let plan = goal.trim().trim_end_matches('.');
-    let prompt = format!("Work in your {}? {plan}.", site_name(site));
+/// What a person calls a signed-in service by its host: Gmail and Calendar
+/// rather than Google, else the vendor's name, else the site.
+pub fn service_name(host: &str) -> String {
+    const SERVICES: &[(&str, &str)] = &[
+        ("mail.google.com", "Gmail"),
+        ("calendar.google.com", "Calendar"),
+        ("drive.google.com", "Drive"),
+        ("docs.google.com", "Docs"),
+        ("meet.google.com", "Meet"),
+        ("outlook.live.com", "Outlook"),
+        ("outlook.office.com", "Outlook"),
+    ];
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if let Some((_, name)) = SERVICES.iter().find(|(known, _)| *known == host) {
+        return (*name).to_owned();
+    }
+    site_of(&format!("https://{host}/")).map_or(host, |site| site_name(&site))
+}
+
+/// Names as a person lists them: "Slack", "Slack and Gmail",
+/// "Slack, Gmail and Calendar".
+fn spoken(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// The one short question a run asks before it works in the person's own
+/// services, naming each of them; the answer covers them all.
+pub fn entry_question_for(names: &[String]) -> (String, Vec<String>) {
+    let named = spoken(names);
     (
-        zephium_core::work::agent::clip_text(&prompt, 480),
-        vec![ALLOW.into(), always_label(site), NOT_NOW.into()],
+        zephium_core::work::agent::clip_text(&format!("Work in your {named}?"), 480),
+        vec![
+            ALLOW.into(),
+            zephium_core::work::agent::clip_text(&format!("Always for {named}"), 120),
+            NOT_NOW.into(),
+        ],
     )
+}
+
+/// The question a page asks for its own site when no run question covered it.
+pub fn entry_question(site: &str) -> (String, Vec<String>) {
+    entry_question_for(&[site_name(site)])
+}
+
+/// The person's answer to an entry question, read against its own options.
+pub fn entry_answer_to(options: &[String], answer: &str) -> EntryAnswer {
+    let answer = answer.trim();
+    if answer.eq_ignore_ascii_case(ALLOW) {
+        EntryAnswer::Allow
+    } else if options
+        .get(1)
+        .is_some_and(|always| answer.eq_ignore_ascii_case(always))
+    {
+        EntryAnswer::Always
+    } else {
+        EntryAnswer::NotNow
+    }
 }
 
 /// Anything but an exact yes is a no.
@@ -480,15 +533,30 @@ mod tests {
 
     #[test]
     fn work_site_questions_name_the_site_and_read_only_exact_yeses() {
-        let (prompt, options) = entry_question(
-            "slack.com",
-            "I'll read #design since Monday and draft a reply.",
+        let (prompt, options) = entry_question("slack.com");
+        assert_eq!(prompt, "Work in your Slack?");
+        assert_eq!(options, ["Allow", "Always for Slack", "Not now"]);
+        let names: Vec<String> = ["app.slack.com", "mail.google.com", "calendar.google.com"]
+            .into_iter()
+            .map(service_name)
+            .collect();
+        let (prompt, options) = entry_question_for(&names);
+        assert_eq!(prompt, "Work in your Slack, Gmail and Calendar?");
+        assert_eq!(
+            options,
+            ["Allow", "Always for Slack, Gmail and Calendar", "Not now"]
         );
         assert_eq!(
-            prompt,
-            "Work in your Slack? I'll read #design since Monday and draft a reply."
+            entry_answer_to(&options, "Always for Slack, Gmail and Calendar"),
+            EntryAnswer::Always
         );
-        assert_eq!(options, ["Allow", "Always for Slack", "Not now"]);
+        assert_eq!(entry_answer_to(&options, "Allow"), EntryAnswer::Allow);
+        assert_eq!(
+            entry_answer_to(&options, "Always for Slack"),
+            EntryAnswer::NotNow
+        );
+        assert_eq!(service_name("www.notion.so"), "Notion");
+        assert_eq!(service_name("unknown.example.com"), "example.com");
         assert_eq!(entry_answer("slack.com", "allow"), EntryAnswer::Allow);
         assert_eq!(
             entry_answer("slack.com", "Always for Slack"),

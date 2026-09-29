@@ -2269,6 +2269,37 @@ impl WorkPartDriver {
         self.0.steps = u32::try_from(steps).unwrap_or(u32::MAX);
         self.0.fetch(attempt, search, browser, kinds).await
     }
+    /// The sites among this driver's page tasks whose entry the run has not
+    /// decided and that would ask the person first; the rest are decided now
+    /// exactly as a page task would decide them.
+    pub(crate) async fn undecided_entries(&mut self, sites: Vec<String>) -> Vec<String> {
+        let present = crate::work_context::sessions_present(self.0.profile, sites.clone()).await;
+        sites
+            .into_iter()
+            .zip(present)
+            .filter(|(site, present)| {
+                self.0.sites.entry(site, *present) == crate::work_sites::Entry::Ask
+            })
+            .map(|(site, _)| site)
+            .collect()
+    }
+    /// Puts the run's one entry question naming each service; the answer
+    /// read against its own options, or the terminal status that ended it.
+    pub(crate) async fn ask_entry(
+        &mut self,
+        names: &[String],
+    ) -> Result<Result<crate::work_sites::EntryAnswer, WorkAttemptStatus>, WorkError> {
+        let (prompt, options) = crate::work_sites::entry_question_for(names);
+        Ok(self
+            .0
+            .ask_person(prompt, options.clone(), WorkAskPurposeV1::Entry)
+            .await?
+            .map(|answer| crate::work_sites::entry_answer_to(&options, &answer)))
+    }
+    /// Records the run's entry answer for one of this driver's sites.
+    pub(crate) async fn enter(&mut self, site: &str, answer: crate::work_sites::EntryAnswer) {
+        self.0.answer_entry(site, answer).await;
+    }
     /// What the driver refused or learned since it was last asked, in
     /// closed words.
     pub(crate) fn take_notices(&mut self) -> Vec<String> {

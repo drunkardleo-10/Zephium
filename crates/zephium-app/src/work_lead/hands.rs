@@ -33,6 +33,7 @@ pub(crate) struct SharedBrowser<B> {
     pages: tokio::sync::Semaphore,
     searches: tokio::sync::Semaphore,
     sites: Mutex<Vec<(String, std::sync::Arc<tokio::sync::Mutex<()>>)>>,
+    entries: EntryDesk,
 }
 impl<B> SharedBrowser<B> {
     pub(crate) fn new(browser: B) -> Self {
@@ -41,6 +42,7 @@ impl<B> SharedBrowser<B> {
             pages: tokio::sync::Semaphore::new(LIVE_PAGES),
             searches: tokio::sync::Semaphore::new(LIVE_SEARCHES),
             sites: Mutex::new(Vec::new()),
+            entries: EntryDesk::default(),
         }
     }
     fn site_lane(&self, site: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
@@ -54,6 +56,103 @@ impl<B> SharedBrowser<B> {
         let lane = std::sync::Arc::new(tokio::sync::Mutex::new(()));
         sites.push((site.to_owned(), lane.clone()));
         lane
+    }
+}
+
+/// How long the first part to reach the entry question waits for the
+/// services of the parts started with it, so one question names them all.
+const ENTRY_GATHER: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// The run's entry question: the parts that start together ask it once,
+/// naming every service, and each applies the answer to its own sites.
+#[derive(Default)]
+pub(crate) struct EntryDesk {
+    state: Mutex<Desk>,
+    changed: tokio::sync::Notify,
+}
+#[derive(Default)]
+struct Desk {
+    /// Services waiting for a question: (site, name).
+    waiting: Vec<(String, String)>,
+    asking: bool,
+    answers: Vec<(String, crate::work_sites::EntryAnswer)>,
+    stopped: bool,
+}
+enum EntryTurn {
+    /// Ask one question for these services, then publish the answer.
+    Ask(Vec<(String, String)>),
+    Decided(Vec<(String, crate::work_sites::EntryAnswer)>),
+    Stopped,
+}
+impl EntryDesk {
+    async fn next(&self, mine: &[(String, String)]) -> EntryTurn {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(turn) = self.look(mine) {
+                return turn;
+            }
+            if self.lead() {
+                tokio::time::sleep(ENTRY_GATHER).await;
+                let mut desk = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                return EntryTurn::Ask(std::mem::take(&mut desk.waiting));
+            }
+            changed.await;
+        }
+    }
+    /// The answer for all of `mine`, or the stop; otherwise `mine` waits.
+    fn look(&self, mine: &[(String, String)]) -> Option<EntryTurn> {
+        let mut desk = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if desk.stopped {
+            return Some(EntryTurn::Stopped);
+        }
+        let decided: Vec<_> = desk
+            .answers
+            .iter()
+            .filter(|(site, _)| mine.iter().any(|(own, _)| own == site))
+            .cloned()
+            .collect();
+        if decided.len() == mine.len() {
+            return Some(EntryTurn::Decided(decided));
+        }
+        for (site, name) in mine {
+            if !desk.answers.iter().any(|(known, _)| known == site)
+                && !desk.waiting.iter().any(|(known, _)| known == site)
+            {
+                desk.waiting.push((site.clone(), name.clone()));
+            }
+        }
+        None
+    }
+    /// Takes the question when nobody is asking one.
+    fn lead(&self) -> bool {
+        let mut desk = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !std::mem::replace(&mut desk.asking, true)
+    }
+    fn publish(&self, wave: &[(String, String)], answer: Option<crate::work_sites::EntryAnswer>) {
+        let mut desk = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        desk.asking = false;
+        match answer {
+            Some(answer) => desk
+                .answers
+                .extend(wave.iter().map(|(site, _)| (site.clone(), answer))),
+            None => desk.stopped = true,
+        }
+        drop(desk);
+        self.changed.notify_waiters();
     }
 }
 
@@ -132,6 +231,9 @@ where
         };
         let started = std::time::Instant::now();
         let mut driver = self.driver.lock().await;
+        if let Some(status) = self.enter_sites(&mut driver, &requests).await {
+            return Err(status);
+        }
         let mut gate = |probe: WorkAttemptProbe, request: WorkAgentBrowseRequest| {
             let lane = match &request.step {
                 WorkStepKindV1::Read {
@@ -272,6 +374,83 @@ where
         match terminal {
             Some(status) if status != WorkAttemptStatus::Succeeded => Err(status),
             _ => Ok(results),
+        }
+    }
+
+    /// Decides, before its pages open, the person's entry for every site
+    /// this call works on as them: one question for the run's parts that
+    /// start together. A terminal status means the run ended on it.
+    async fn enter_sites(
+        &self,
+        driver: &mut WorkPartDriver,
+        requests: &[Request],
+    ) -> Option<WorkAttemptStatus> {
+        let mut hosts: Vec<(String, String)> = Vec::new();
+        for request in requests {
+            if let WorkStepKindV1::Read {
+                url, goal: Some(_), ..
+            } = &request.kind
+            {
+                let (Some(site), Some(host)) = (
+                    crate::work_sites::site_of(url),
+                    crate::work_sites::host_of(url),
+                ) else {
+                    continue;
+                };
+                if !hosts.iter().any(|(known, _)| *known == site) {
+                    hosts.push((site, host));
+                }
+            }
+        }
+        if hosts.is_empty() {
+            return None;
+        }
+        let undecided = driver
+            .undecided_entries(hosts.iter().map(|(site, _)| site.clone()).collect())
+            .await;
+        let mine: Vec<(String, String)> = hosts
+            .into_iter()
+            .filter(|(site, _)| undecided.contains(site))
+            .map(|(site, host)| (site, crate::work_sites::service_name(&host)))
+            .collect();
+        if mine.is_empty() {
+            return None;
+        }
+        let desk = &self.browser.entries;
+        loop {
+            match desk.next(&mine).await {
+                EntryTurn::Ask(wave) => {
+                    let mut names: Vec<String> = Vec::new();
+                    for (_, name) in &wave {
+                        if !names.contains(name) {
+                            names.push(name.clone());
+                        }
+                    }
+                    crate::work_trace::record(format_args!(
+                        "work: phase=entry state=asked services={} sites={}",
+                        names.len(),
+                        wave.len()
+                    ));
+                    match driver.ask_entry(&names).await {
+                        Ok(Ok(answer)) => desk.publish(&wave, Some(answer)),
+                        Ok(Err(status)) => {
+                            desk.publish(&wave, None);
+                            return Some(status);
+                        }
+                        Err(_) => {
+                            desk.publish(&wave, None);
+                            return Some(WorkAttemptStatus::Failed);
+                        }
+                    }
+                }
+                EntryTurn::Decided(answers) => {
+                    for (site, answer) in answers {
+                        driver.enter(&site, answer).await;
+                    }
+                    return None;
+                }
+                EntryTurn::Stopped => return Some(WorkAttemptStatus::Cancelled),
+            }
         }
     }
 
@@ -659,6 +838,51 @@ mod tests {
                 Err(WorkPublicSearchError::NotDispatched(WorkError::Unavailable))
             })
         }
+    }
+
+    #[test]
+    fn parts_that_start_together_ask_one_entry_question_for_all_their_services() {
+        use crate::work_sites::EntryAnswer;
+        let desk = std::sync::Arc::new(EntryDesk::default());
+        let asked = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let part = |sites: &[(&str, &str)]| {
+            let desk = desk.clone();
+            let asked = asked.clone();
+            let mine: Vec<(String, String)> = sites
+                .iter()
+                .map(|(site, name)| ((*site).to_owned(), (*name).to_owned()))
+                .collect();
+            async move {
+                loop {
+                    match desk.next(&mine).await {
+                        EntryTurn::Ask(wave) => {
+                            asked.lock().unwrap().push(wave.len());
+                            desk.publish(&wave, Some(EntryAnswer::Allow));
+                        }
+                        EntryTurn::Decided(answers) => return answers.len(),
+                        EntryTurn::Stopped => return 0,
+                    }
+                }
+            }
+        };
+        let decided = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let early = tokio::join!(
+                    part(&[("slack.com", "Slack")]),
+                    part(&[("google.com", "Gmail")]),
+                    async {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        part(&[("google.com", "Calendar"), ("linear.app", "Linear")]).await
+                    },
+                );
+                let late = part(&[("github.com", "GitHub")]).await;
+                (early, late)
+            });
+        assert_eq!(decided, ((1, 1, 2), 1));
+        assert_eq!(*asked.lock().unwrap(), [3, 1]);
     }
 
     #[test]
