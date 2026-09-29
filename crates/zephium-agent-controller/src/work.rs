@@ -3798,6 +3798,7 @@ impl AgentWorkController {
             ),
         )
         .await?;
+        let dropped = result.stats().dropped();
         if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete {
             return Err(AgentWorkFailure::Contract);
         }
@@ -3807,6 +3808,11 @@ impl AgentWorkController {
                 .into_owned()
                 .map_err(|_| AgentWorkFailure::Contract)?,
         );
+        if dropped > 0 {
+            state
+                .journal_mut()?
+                .emit(AgentWorkEventKind::ExtractionDropped { values: dropped })?;
+        }
         Ok(())
     }
 
@@ -4878,6 +4884,12 @@ pub enum AgentWorkEventKind {
     ActionRejected(SemanticActionFailure),
     /// A completed read-only scroll did not prove movement; its failed receipt is closed.
     ActionUnverified(SemanticActionFailure),
+    /// Records or optional record fields left out of an extraction because
+    /// their own evidence did not hold; the rest stood.
+    ExtractionDropped {
+        /// Records and fields left out.
+        values: u16,
+    },
     /// A read's own target re-rendered while its page visibly changed; the
     /// change proved the action (a channel, thread or date opened).
     AppliedOnPageChange,

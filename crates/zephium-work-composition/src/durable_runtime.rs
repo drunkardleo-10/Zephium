@@ -657,6 +657,7 @@ impl MacosWorkComposition {
                         | AgentWorkEventKind::NavigationRefused(_)
                         | AgentWorkEventKind::ActionProposalRefused(_)
                         | AgentWorkEventKind::AppliedOnPageChange
+                        | AgentWorkEventKind::ExtractionDropped { .. }
                         | AgentWorkEventKind::Verified
                         | AgentWorkEventKind::ModelRequestedHuman(_)
                         | AgentWorkEventKind::DecisionSettled(_)
