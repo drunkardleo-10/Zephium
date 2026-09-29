@@ -315,19 +315,39 @@
    elements (see lib/editor/highlight.ts). Only colour applies here, and
    from global tokens: a highlight does not see the editor's own variables. */
 ::highlight(note-code-comment) {
-  color: var(--color-faint);
+  color: var(--color-code-comment);
 }
 
 ::highlight(note-code-string) {
-  color: color-mix(in oklab, var(--color-tint-sage) 88%, var(--color-text));
+  color: var(--color-code-string);
 }
 
 ::highlight(note-code-number) {
-  color: color-mix(in oklab, var(--color-tint-sky) 88%, var(--color-text));
+  color: var(--color-code-number);
 }
 
 ::highlight(note-code-keyword) {
-  color: color-mix(in oklab, var(--color-tint-rose) 88%, var(--color-text));
+  color: var(--color-code-keyword);
+}
+
+::highlight(note-code-function) {
+  color: var(--color-code-function);
+}
+
+::highlight(note-code-type) {
+  color: var(--color-code-type);
+}
+
+::highlight(note-code-property) {
+  color: var(--color-code-property);
+}
+
+::highlight(note-code-tag) {
+  color: var(--color-code-tag);
+}
+
+::highlight(note-code-attribute) {
+  color: var(--color-code-attribute);
 }
 
 .note-editor hr {
