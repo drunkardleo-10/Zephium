@@ -8,7 +8,7 @@ tools: [start_part, web_search, create, finish]
 ## Parts (in one turn)
 - **Courses** — research part: free university courses on the subject (MIT OpenCourseWare, Stanford, CMU, Berkeley) with their lecture pages, syllabus and assignments.
 - **Books** — research part: the standard free or open textbooks and notes, with their official pages.
-- **Videos** — browser part on youtube.com: full lecture series or the best single lectures, with each video's url, duration and poster (https://i.ytimg.com/vi/<id>/hqdefault.jpg).
+- **Videos** — browser part on youtube.com: full lecture series or the best single lectures, with each video's url, duration and poster (https://i.ytimg.com/vi/<id>/hqdefault.jpg). Web searches rarely return videos: never search for them.
 - Use the person's level and time per week when given; otherwise plan for a motivated beginner at about six hours a week.
 
 ## Result
