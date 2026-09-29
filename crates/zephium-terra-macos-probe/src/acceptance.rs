@@ -399,7 +399,7 @@ impl zephium_core::work::model::WorkModelClient for Scripted {
     }
 }
 
-pub(super) const LEAD_SCENARIOS: [LeadScenario; 15] = [
+pub(super) const LEAD_SCENARIOS: [LeadScenario; 17] = [
     // A day planned from sources that need no real profile: the person's
     // Zephium tasks, seeded for today; the day's sources are asked once.
     LeadScenario {
@@ -509,6 +509,20 @@ pub(super) const LEAD_SCENARIOS: [LeadScenario; 15] = [
         name: "conversion",
         requests: &["30 EUR in PLN"],
         answer: "",
+        folder: false,
+        site: None,
+    },
+    LeadScenario {
+        name: "pricing",
+        requests: &["How do Linear, Height and Plane price? I'm pricing a new issue tracker"],
+        answer: "",
+        folder: false,
+        site: None,
+    },
+    LeadScenario {
+        name: "exam",
+        requests: &["Help me prepare for my algorithms final (MIT 6.006)"],
+        answer: "The exam is on 16 October 2026; 2 to 3 hours a day.",
         folder: false,
         site: None,
     },
