@@ -1137,11 +1137,12 @@ impl EngineAgentBrowserPort {
         let Some(now) = work_browser_monotonic_now() else {
             return reject(request, ContextPortFailure::NativeRefused);
         };
+        // A group's pages share one run; each still opens in its own store
+        // (the run's anonymous one, or the person's session for its site).
         if let Some(group) = &self.admission.group {
             if group
                 .upgrade()
                 .is_none_or(|group| group.work != request.resource().identity().work())
-                || !request.isolated_public()
             {
                 return reject(request, ContextPortFailure::NativeRefused);
             }

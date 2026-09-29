@@ -636,9 +636,20 @@ fn work_page_group_retains_three_distinct_pages_and_rejects_unrelated_admission(
         deadline,
     })
     .unwrap();
-    let refused = callback.attach_retained_work(request).unwrap();
+    // A fourth page of the same run waits for a seat instead of failing;
+    // stopped while it waits, it is refused without a native page.
+    let queued = callback.attach_retained_work(request).unwrap();
+    let settle = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < settle {
+        match queue.try_recv() {
+            Some(command) => shell.handle(command),
+            None => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+    assert_eq!(queued.snapshot().phase, RetainedWorkPhase::Attaching);
+    assert!(queued.stop());
     pump(&queue, &mut shell, || {
-        refused.snapshot().phase == RetainedWorkPhase::Refused
+        queued.snapshot().phase == RetainedWorkPhase::Refused
     });
     assert_eq!(factories.load(Ordering::Acquire), 3);
     assert!(views[0].close());

@@ -123,8 +123,7 @@ impl PreparedRetainedWork {
         mut self,
         page: RetainedPageAdmission,
     ) -> Result<Self, AgentWorkFailure> {
-        if !self.spec.isolated_public
-            || self.work != Some(page.work)
+        if self.work != Some(page.work)
             || self.profile.profile() != page.profile
             || self.spec.deadline > page.deadline
         {
@@ -664,6 +663,24 @@ impl ProductWork {
                 admits(peer, false)
             })
             && seats < usize::from(page.workers.min(3))
+    }
+    /// This page belongs with the group's pages (the same run and step
+    /// lineage), whatever seats they hold: when they are full it may wait.
+    pub(crate) fn joins_group<'a>(
+        &self,
+        live: &[ProductWork],
+        settled: impl Iterator<Item = &'a ProductWork>,
+    ) -> bool {
+        let Some(page) = &self.page else {
+            return false;
+        };
+        let joins = |peer: &ProductWork, live: bool| {
+            peer.page.as_ref().is_some_and(|other| {
+                page.same_group(other) && (!live || page.step != other.step)
+            })
+        };
+        live.iter().all(|peer| joins(peer, true))
+            && settled.into_iter().all(|peer| joins(peer, false))
     }
     /// An unclosed page that owns a native resource owner in its group.
     pub(crate) fn native_member(&self) -> bool {

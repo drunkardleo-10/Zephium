@@ -187,6 +187,10 @@ impl AgentLifecycleOwner {
 mod browser_pages;
 mod work_pane;
 
+/// Pages a run may queue for a seat in its page group at once.
+#[cfg(feature = "work-execution")]
+const MAX_QUEUED_PAGES: usize = 8;
+
 struct NativeOpener {
     source: ItemId,
     activate_when_presentable: bool,
@@ -199,6 +203,9 @@ pub struct Shell {
     retained_work: Option<Box<crate::work_resources::product::ProductWork>>,
     #[cfg(feature = "work-execution")]
     retained_pages: Vec<crate::work_resources::product::ProductWork>,
+    /// Pages waiting for a seat in their run's page group, in arrival order.
+    #[cfg(feature = "work-execution")]
+    queued_pages: std::collections::VecDeque<crate::work_resources::product::ProductWork>,
     #[cfg(feature = "work-execution")]
     retained_page_runtime: Option<crate::work_resources::product::RetainedWorkGroup>,
     /// Retained works the runtime gave up on before they could close; they
@@ -517,6 +524,8 @@ impl Shell {
             #[cfg(feature = "work-execution")]
             retained_pages: Vec::new(),
             #[cfg(feature = "work-execution")]
+            queued_pages: std::collections::VecDeque::new(),
+            #[cfg(feature = "work-execution")]
             retained_page_runtime: None,
             #[cfg(feature = "work-execution")]
             retained_graveyard: Vec::new(),
@@ -598,8 +607,7 @@ impl Shell {
             }
             #[cfg(feature = "work-execution")]
             Command::AttachRetainedWork(attachment) => {
-                if let Some(mut work) =
-                    crate::work_resources::product::ProductWork::take(&attachment)
+                if let Some(work) = crate::work_resources::product::ProductWork::take(&attachment)
                 {
                     self.retire_settled_pages();
                     if self
@@ -612,44 +620,7 @@ impl Shell {
                             self.retained_graveyard.push(*stuck);
                         }
                     }
-                    if self.work.is_some()
-                        || self
-                            .retained_work
-                            .as_ref()
-                            .is_some_and(|work| !work.is_closed())
-                        || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
-                        || !work.admits(&self.engine, &self.store, self.work_profile_binding())
-                        || if work.is_page() {
-                            !work.admits_peers(
-                                &self.retained_pages,
-                                self.retained_graveyard
-                                    .iter()
-                                    .filter(|work| work.native_member()),
-                            ) || self
-                                .retained_page_runtime
-                                .as_ref()
-                                .is_some_and(|group| group.is_failed() || group.is_sealed())
-                        } else {
-                            self.retained_page_runtime.is_some()
-                        }
-                    {
-                        work.refuse();
-                    } else if work.is_page() {
-                        if self.retained_page_runtime.is_none() {
-                            self.retained_page_runtime = work.new_runtime_group().ok();
-                        }
-                        if let Some(group) = &self.retained_page_runtime {
-                            work.set_runtime_group(group.clone());
-                            self.retained_pages.push(work);
-                            self.retained_pages.last_mut().unwrap().initialize();
-                        } else {
-                            work.refuse();
-                        }
-                    } else {
-                        // Install original ownership before native construction.
-                        self.retained_work = Some(Box::new(work));
-                        self.retained_work.as_mut().unwrap().initialize();
-                    }
+                    self.attach_retained(work);
                 }
             }
             #[cfg(feature = "work-execution")]
@@ -1253,6 +1224,89 @@ impl Shell {
         self.poll_work();
     }
 
+    /// Admits a retained work now, or, for a page that waits only for a
+    /// seat in the run's page group, keeps it queued in order until one frees.
+    #[cfg(feature = "work-execution")]
+    fn attach_retained(&mut self, mut work: crate::work_resources::product::ProductWork) {
+        if self.work.is_some()
+            || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
+            || !work.admits(&self.engine, &self.store, self.work_profile_binding())
+        {
+            work.refuse();
+            return;
+        }
+        if !work.is_page() {
+            if self
+                .retained_work
+                .as_ref()
+                .is_some_and(|work| !work.is_closed())
+                || self.retained_page_runtime.is_some()
+            {
+                work.refuse();
+            } else {
+                // Install original ownership before native construction.
+                self.retained_work = Some(Box::new(work));
+                self.retained_work.as_mut().unwrap().initialize();
+            }
+            return;
+        }
+        let seated = self
+            .retained_work
+            .as_ref()
+            .is_none_or(|work| work.is_closed())
+            && self.queued_pages.is_empty()
+            && work.admits_peers(
+                &self.retained_pages,
+                self.retained_graveyard
+                    .iter()
+                    .filter(|work| work.native_member()),
+            )
+            && !self
+                .retained_page_runtime
+                .as_ref()
+                .is_some_and(|group| group.is_failed() || group.is_sealed());
+        if !seated {
+            let joins = work.joins_group(
+                &self.retained_pages,
+                self.retained_graveyard
+                    .iter()
+                    .filter(|work| work.native_member()),
+            ) && self.queued_pages.iter().all(|queued| {
+                queued.joins_group(std::slice::from_ref(&work), std::iter::empty())
+            });
+            if joins && self.queued_pages.len() < MAX_QUEUED_PAGES {
+                self.queued_pages.push_back(work);
+            } else {
+                work.refuse();
+            }
+            return;
+        }
+        if self.retained_page_runtime.is_none() {
+            self.retained_page_runtime = work.new_runtime_group().ok();
+        }
+        if let Some(group) = &self.retained_page_runtime {
+            work.set_runtime_group(group.clone());
+            self.retained_pages.push(work);
+            self.retained_pages.last_mut().unwrap().initialize();
+        } else {
+            work.refuse();
+        }
+    }
+
+    /// Queued pages take seats in order as their group frees them; one whose
+    /// run ended or ran out of time while it waited is refused.
+    #[cfg(feature = "work-execution")]
+    fn admit_queued_pages(&mut self) {
+        let queued = std::mem::take(&mut self.queued_pages);
+        for work in queued {
+            if !self.queued_pages.is_empty() {
+                self.queued_pages.push_back(work);
+                continue;
+            }
+            self.attach_retained(work);
+        }
+    }
+
     /// A settled page that cannot close with its group moves to the graveyard
     /// and stops holding admission; the group no longer waits on it.
     #[cfg(feature = "work-execution")]
@@ -1334,6 +1388,7 @@ impl Shell {
     #[cfg(feature = "work-execution")]
     fn poll_work(&mut self) {
         self.grant_native_audit();
+        self.admit_queued_pages();
         for page in &mut self.retained_pages {
             page.poll();
             if let Some(queue) = &self.self_queue {
@@ -1365,6 +1420,10 @@ impl Shell {
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
         #[cfg(feature = "work-runtime")]
         crate::work_commands::shutdown();
+        #[cfg(feature = "work-execution")]
+        for mut page in std::mem::take(&mut self.queued_pages) {
+            page.refuse();
+        }
         #[cfg(feature = "work-execution")]
         for page in &mut self.retained_pages {
             page.begin_shutdown();

@@ -386,14 +386,10 @@ impl MacosWorkComposition {
             decisions,
             deadline: probe.deadline().min(Instant::now() + MAX_STEP_DURATION),
         };
-        // Grouped Work pages are isolated by the engine; a page task or a page
-        // in the person's session runs as its own lifetime.
-        let task = page_task(&request);
+        // Every page of a run shares its page group: reads and page tasks,
+        // anonymous or in the person's session, each in its own store.
         let signed_in = session_origin(&request);
-        let admission = if matches!(request.step, WorkStepKindV1::Read { .. })
-            && signed_in.is_none()
-            && !task
-        {
+        let admission = if matches!(request.step, WorkStepKindV1::Read { .. }) {
             Some(probe.admit_read_page(request.id).await?)
         } else {
             None
@@ -517,7 +513,7 @@ impl MacosWorkComposition {
             .map_err(|_| WorkError::Invalid)?;
         let original_deadline = original_spec.deadline;
         let construction_attempt = invocation.construction_attempt;
-        let ready_deadline = original_deadline
+        let mut ready_deadline = original_deadline
             .min(Instant::now() + construction_attempt.budget() + Duration::from_secs(15));
         configure_decisions(&mut invocation, decisions, original_deadline).await?;
         let view = self
@@ -759,8 +755,10 @@ impl MacosWorkComposition {
             if retired {
                 retired_at.get_or_insert(now);
             }
-            let settle_retired = anonymous
-                && settles_retired(
+            // A grouped page whose own cleanup has retired settles without
+            // waiting on its peers; the group's native audit stays with the
+            // Shell. This holds for pages in the person's session too.
+            let settle_retired = settles_retired(
                     now,
                     close_grace,
                     retired_at,
@@ -1117,6 +1115,12 @@ impl MacosWorkComposition {
                         | RetainedWorkPhase::Terminal
                 );
             }
+            // A page queued for a seat in its group is not late: its time
+            // to get ready starts once it is admitted.
+            if snapshot.phase == RetainedWorkPhase::Attaching {
+                ready_deadline = original_deadline
+                    .min(now + construction_attempt.budget() + Duration::from_secs(15));
+            }
             if !running_seen && !requested_close && now >= ready_deadline {
                 trace("close:not_ready");
                 not_ready = true;
@@ -1461,8 +1465,10 @@ fn human_wait_expired(
 
 /// A page asked to close settles within its grace. Once its own cleanup is
 /// retired, a page with nothing to publish settles at once with its own
-/// outcome; a page with a result waits for the group's native proof only
-/// until the grace ends. The group's audit stays with the Shell.
+/// outcome; a page with a result waits briefly for the group's native proof,
+/// so a finished page never waits on its peers' work. The group's audit
+/// stays with the Shell.
+const GROUP_PROOF_WAIT: Duration = Duration::from_secs(3);
 fn settles_retired(
     now: Instant,
     grace: Option<Instant>,
@@ -1481,7 +1487,9 @@ fn settles_retired(
                 | AgentWorkDisposition::Cancelled
                 | AgentWorkDisposition::WaitingForHuman,
             ) => true,
-            Some(AgentWorkDisposition::Succeeded) => archived && now >= grace,
+            Some(AgentWorkDisposition::Succeeded) => {
+                archived && (now >= grace || now >= retired_at + GROUP_PROOF_WAIT)
+            }
             _ => false,
         }
 }
@@ -1788,10 +1796,18 @@ mod closed_result_tests {
         assert_eq!(settled, Some(start + Duration::from_millis(50)));
         assert_eq!(logged, 2);
 
-        // A published result waits for the group proof only within the grace.
+        // A published result waits for the group proof only briefly, and
+        // never past the grace.
         let close = start + Duration::from_secs(30);
         let succeeded = Some(AgentWorkDisposition::Succeeded);
-        let before = close - Duration::from_millis(1);
+        let before = start + GROUP_PROOF_WAIT - Duration::from_millis(1);
+        assert!(settles_retired(
+            start + GROUP_PROOF_WAIT,
+            Some(close),
+            Some(start),
+            succeeded,
+            true
+        ));
         assert!(!settles_retired(
             before,
             Some(close),

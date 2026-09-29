@@ -1972,9 +1972,9 @@ fn human_handoff_contract(cancel: bool) {
         assert_eq!(human.deadline, deadline);
         assert!(!work.ready());
         let region = WorkBrowserHumanRegion::try_new(0, 0, 800, 600).unwrap();
-        assert!(!work.present_human(human.generation + 1, region, now()));
+        assert!(!work.present_human(human.generation + 1, Some(region), now()));
         native.hold_human.store(true, Ordering::Release);
-        assert!(work.present_human(human.generation, region, now()));
+        assert!(work.present_human(human.generation, Some(region), now()));
         assert!(!work.continue_human(human.generation, now()));
         if cancel {
             work.begin_shutdown();
