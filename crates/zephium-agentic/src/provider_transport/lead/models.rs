@@ -1,5 +1,7 @@
-//! The built-in model list, checked against each provider's own model and
-//! pricing pages on 2026-09-28, and the Zephium Cloud catalog parser.
+//! The built-in model list: a short, curated set of current models per
+//! provider, lead and small, checked against each provider's own model and
+//! pricing pages (and OpenRouter's catalog) on 2026-09-29; and the Zephium
+//! Cloud catalog parser, whose list replaces this one when signed in.
 
 use serde_json::Value;
 use zephium_core::work::model::*;
@@ -85,16 +87,16 @@ const SPECS: &[Spec] = &[
         price: (10.0, 0.25, 50.0),
     },
     Spec {
-        provider: P::Anthropic,
-        model: "claude-sonnet-5",
-        name: "Claude Sonnet 5",
-        roles: &[R::Lead, R::Page],
-        recommended: false,
-        context: 1_000_000,
+        provider: P::OpenAi,
+        model: "gpt-6-luna",
+        name: "GPT-6 Luna",
+        roles: &[R::Lead, R::Page, R::Light],
+        recommended: true,
+        context: 1_050_000,
         output: 128_000,
         vision: true,
         search: true,
-        price: (2.0, 0.2, 10.0),
+        price: (0.1, 0.01, 0.5),
     },
     Spec {
         provider: P::OpenAi,
@@ -107,18 +109,6 @@ const SPECS: &[Spec] = &[
         vision: true,
         search: true,
         price: (2.0, 0.2, 10.0),
-    },
-    Spec {
-        provider: P::OpenAi,
-        model: "gpt-6-luna",
-        name: "GPT-6 Luna",
-        roles: &[R::Page, R::Light],
-        recommended: true,
-        context: 1_050_000,
-        output: 128_000,
-        vision: true,
-        search: true,
-        price: (0.1, 0.01, 0.5),
     },
     Spec {
         provider: P::OpenAi,
@@ -192,6 +182,67 @@ const SPECS: &[Spec] = &[
         vision: false,
         search: false,
         price: (0.3, 0.006, 1.2),
+    },
+    // OpenRouter serves the same models under its own ids and prices.
+    Spec {
+        provider: P::OpenRouter,
+        model: "anthropic/claude-sonnet-5.5",
+        name: "Claude Sonnet 5.5",
+        roles: &[R::Lead, R::Page],
+        recommended: true,
+        context: 1_000_000,
+        output: 128_000,
+        vision: true,
+        search: false,
+        price: (2.0, 0.2, 10.0),
+    },
+    Spec {
+        provider: P::OpenRouter,
+        model: "anthropic/claude-opus-5.5",
+        name: "Claude Opus 5.5",
+        roles: &[R::Lead],
+        recommended: false,
+        context: 1_000_000,
+        output: 128_000,
+        vision: true,
+        search: false,
+        price: (4.0, 0.2, 20.0),
+    },
+    Spec {
+        provider: P::OpenRouter,
+        model: "openai/gpt-6-luna",
+        name: "GPT-6 Luna",
+        roles: &[R::Lead, R::Page, R::Light],
+        recommended: true,
+        context: 1_050_000,
+        output: 128_000,
+        vision: true,
+        search: false,
+        price: (0.1, 0.01, 0.5),
+    },
+    Spec {
+        provider: P::OpenRouter,
+        model: "openai/gpt-6-sol",
+        name: "GPT-6 Sol",
+        roles: &[R::Lead, R::Page],
+        recommended: false,
+        context: 1_050_000,
+        output: 128_000,
+        vision: true,
+        search: false,
+        price: (2.0, 0.2, 10.0),
+    },
+    Spec {
+        provider: P::OpenRouter,
+        model: "google/gemini-3.8-flash",
+        name: "Gemini 3.8 Flash",
+        roles: &[R::Lead, R::Page],
+        recommended: false,
+        context: 1_048_576,
+        output: 65_536,
+        vision: true,
+        search: false,
+        price: (0.75, 0.075, 3.75),
     },
 ];
 
@@ -282,13 +333,14 @@ pub fn family_default(provider: WorkModelProvider, role: WorkModelRole) -> Optio
     Some(match (provider, role) {
         (P::Anthropic, R::Lead) => "claude-opus-5-5",
         (P::Anthropic, R::Page | R::Light) => "claude-haiku-4-5-20251001",
-        (P::OpenAi, R::Lead) => "gpt-6-sol",
-        (P::OpenAi, R::Page | R::Light) => "gpt-6-luna",
+        (P::OpenAi, R::Lead | R::Page | R::Light) => "gpt-6-luna",
         (P::Google, R::Lead) => "gemini-3.1-pro-preview",
         (P::Google, R::Page) => "gemini-3.8-flash",
         (P::Google, R::Light) => "gemini-3.5-flash-lite",
         (P::DeepSeek, R::Lead) => "deepseek-v4-pro",
         (P::DeepSeek, R::Light) => "deepseek-flash",
+        (P::OpenRouter, R::Lead) => "anthropic/claude-sonnet-5.5",
+        (P::OpenRouter, R::Page | R::Light) => "openai/gpt-6-luna",
         _ => return None,
     })
 }
@@ -413,7 +465,13 @@ mod tests {
             assert!(entry.price.is_some());
             assert_eq!(entry.id, entry_id(entry.model.provider, &entry.model.model));
         }
-        for provider in [P::OpenAi, P::Anthropic, P::Google, P::DeepSeek] {
+        for provider in [
+            P::OpenAi,
+            P::Anthropic,
+            P::Google,
+            P::DeepSeek,
+            P::OpenRouter,
+        ] {
             for role in [R::Lead, R::Light] {
                 let model = family_default(provider, role).unwrap();
                 let entry = entries
@@ -422,6 +480,20 @@ mod tests {
                     .unwrap();
                 assert!(entry.roles.contains(&role));
             }
+        }
+        assert_eq!(family_default(P::OpenAi, R::Lead), Some("gpt-6-luna"));
+        for provider in [
+            P::OpenAi,
+            P::Anthropic,
+            P::Google,
+            P::DeepSeek,
+            P::OpenRouter,
+        ] {
+            let listed = entries
+                .iter()
+                .filter(|e| e.model.provider == provider)
+                .count();
+            assert!((2..=5).contains(&listed), "{provider:?} lists {listed}");
         }
         assert_eq!(
             builtin_price(P::Anthropic, "claude-opus-5-5")

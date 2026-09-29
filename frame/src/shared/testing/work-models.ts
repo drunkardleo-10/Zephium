@@ -57,11 +57,13 @@ const builtin: WorkModelEntry[] = [
   entry("anthropic", "claude-sonnet-5-5", "Claude Sonnet 5.5", true, ["lead", "page"]),
   entry("anthropic", "claude-haiku-4-5-20251001", "Claude Haiku 4.5", true, ["page", "light"]),
   entry("anthropic", "claude-fable-5-1", "Claude Fable 5.1", false, ["lead"]),
+  entry("open_ai", "gpt-6-luna", "GPT-6 Luna", true, ["lead", "page", "light"]),
   entry("open_ai", "gpt-6-sol", "GPT-6 Sol", true, ["lead", "page"]),
-  entry("open_ai", "gpt-6-luna", "GPT-6 Luna", true, ["page", "light"]),
+  entry("open_ai", "gpt-6-astra", "GPT-6 Astra", false, ["lead"]),
   entry("google", "gemini-3.1-pro-preview", "Gemini 3.1 Pro", true, ["lead"]),
   entry("google", "gemini-3.8-flash", "Gemini 3.8 Flash", true, ["lead", "page"]),
   entry("deep_seek", "deepseek-v4-pro", "DeepSeek V4 Pro", true, ["lead"]),
+  entry("open_router", "anthropic/claude-sonnet-5.5", "Claude Sonnet 5.5", true, ["lead", "page"]),
 ];
 
 export const PROFILE = "00000000000000000000000001";

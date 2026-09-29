@@ -1,10 +1,10 @@
 import { describe, expect, test } from "vitest";
 import type { WorkModelEntry, WorkModelsV1 } from "$shared/ipc/bindings";
-import { moreGroups, pickerGroups, shortName, usable } from "../catalog";
+import { pickerGroups, shortName, usable } from "../catalog";
 import { entry, models } from "$shared/testing/work-models";
 
 describe("the picker's list", () => {
-  test("groups recommended models of usable providers, Zephium first, and sets keyless apart", () => {
+  test("groups the curated models of usable providers, recommended first, Zephium first", () => {
     const view = models({
       keys: { anthropic: "valid", open_ai: "set", google: "invalid" },
       cloud: true,
@@ -14,20 +14,24 @@ describe("the picker's list", () => {
     expect(ready[1]!.entries.map((item) => item.id)).toEqual([
       "anthropic/claude-opus-5-5",
       "anthropic/claude-sonnet-5-5",
+      "anthropic/claude-fable-5-1",
+    ]);
+    expect(ready[2]!.entries.map((item) => item.id)).toEqual([
+      "openai/gpt-6-luna",
+      "openai/gpt-6-sol",
+      "openai/gpt-6-astra",
     ]);
     // A refused key reads as needing one, not as broken; OpenRouter and a
-    // custom server have no recommended models to offer here.
+    // custom server are optional and never ask.
     expect(needsKey).toEqual(["google", "deep_seek"]);
   });
 
-  test("More models holds what the list leaves out, with provider listings, searchable", () => {
-    const view = models({ keys: { open_router: "valid", anthropic: "set" } });
-    const listed = { open_router: [entry("open_router", "moonshotai/kimi-k3", "Kimi K3", false)] };
-    const groups = moreGroups(view, listed, "lead");
-    expect(groups.map((group) => group.provider)).toEqual(["anthropic", "open_router"]);
-    expect(groups[0]!.entries.map((item) => item.id)).toEqual(["anthropic/claude-fable-5-1"]);
-    expect(moreGroups(view, listed, "lead", "kimi")[0]!.entries[0]!.display_name).toBe("Kimi K3");
-    expect(moreGroups(view, listed, "lead", "nothing")).toEqual([]);
+  test("a custom server adds the models it serves", () => {
+    const view = models({ base: "http://localhost:11434/v1" });
+    const served = [entry("compatible", "qwen4:32b", "qwen4:32b", false)];
+    const { ready } = pickerGroups(view, "lead", served);
+    expect(ready.map((group) => group.provider)).toEqual(["compatible"]);
+    expect(ready[0]!.entries[0]!.display_name).toBe("qwen4:32b");
   });
 
   test("a custom server is usable once it has an address, keys only when set or valid", () => {

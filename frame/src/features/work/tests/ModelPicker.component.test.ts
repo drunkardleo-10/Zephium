@@ -1,10 +1,10 @@
 import "$styles/global.css";
 import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
-import { page, userEvent } from "vitest/browser";
+import { page } from "vitest/browser";
 import type { WorkModelsV1 } from "$shared/ipc/bindings";
 import ModelPicker from "../components/bar/ModelPicker.svelte";
-import { PROFILE, entry, models } from "$shared/testing/work-models";
+import { PROFILE, models } from "$shared/testing/work-models";
 
 const native = vi.hoisted(() => ({ read: vi.fn(), choose: vi.fn(), more: vi.fn() }));
 vi.mock("$shared/ipc/bindings", async () => {
@@ -46,31 +46,25 @@ test("the trigger names the running model, and the menu changes it", async () =>
   expect(onsettings).toHaveBeenCalledTimes(1);
 });
 
-test("More models lists each provider's own models and searches them", async () => {
+test("the menu lists each provider's curated models, the smaller ones too", async () => {
   await page.viewport(1200, 800);
-  native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
-  native.more.mockImplementation(async (_profile: string, provider: string) => ({
-    provider,
-    entries:
-      provider === "open_router"
-        ? [entry("open_router", "moonshotai/kimi-k3", "Kimi K3", false)]
-        : [],
-    fault: null,
-  }));
+  native.read.mockResolvedValue(view("openai/gpt-6-luna"));
   const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
-  await screen.getByRole("button", { name: "Model: Claude Opus 5.5" }).click();
-  await page.getByRole("button", { name: "More models" }).click();
-
-  await expect.element(page.getByRole("button", { name: /Kimi K3/u })).toBeVisible();
-  await expect.element(page.getByRole("button", { name: /Claude Fable 5.1/u })).toBeVisible();
-  expect(native.more).toHaveBeenCalledWith(PROFILE, "open_router");
-
-  await userEvent.keyboard("kimi");
+  await screen.getByRole("button", { name: "Model: GPT-6 Luna" }).click();
+  const openai = page.getByRole("region", { name: "OpenAI" });
   await expect
-    .element(page.getByRole("button", { name: /Claude Fable 5.1/u }))
-    .not.toBeInTheDocument();
-  await page.getByRole("button", { name: "Back" }).click();
-  await expect.element(page.getByRole("button", { name: "More models" })).toBeVisible();
+    .element(openai.getByRole("button", { name: "GPT-6 Luna" }))
+    .toHaveAttribute("aria-current", "true");
+  await expect.element(openai.getByRole("button", { name: "GPT-6 Astra" })).toBeVisible();
+  await expect
+    .element(
+      page
+        .getByRole("region", { name: "Anthropic" })
+        .getByRole("button", { name: "Claude Fable 5.1" }),
+    )
+    .toBeVisible();
+  await expect.element(page.getByRole("button", { name: "More models" })).not.toBeInTheDocument();
+  expect(native.more).not.toHaveBeenCalled();
 });
 
 test("without any key the trigger asks for a model and the menu leads to keys", async () => {
@@ -80,7 +74,6 @@ test("without any key the trigger asks for a model and the menu leads to keys", 
   const screen = await render(ModelPicker, { profile: PROFILE, onsettings });
   await screen.getByRole("button", { name: "Model" }).click();
   await expect.element(page.getByRole("button", { name: /Anthropic.*Needs a key/u })).toBeVisible();
-  await expect.element(page.getByRole("button", { name: "More models" })).not.toBeInTheDocument();
   await page.getByRole("button", { name: /Anthropic.*Needs a key/u }).click();
   expect(onsettings).toHaveBeenCalledTimes(1);
 });

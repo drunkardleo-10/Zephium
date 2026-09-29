@@ -13,8 +13,6 @@ const TIMEOUT = 9000;
 /** A key check asks the provider over the network. */
 const KEY_TIMEOUT = 20000;
 
-type More = { entries: WorkModelEntry[]; fault: WorkModelsFaultV1 | null; loading: boolean };
-
 /**
  * The picker's and Settings → AI's view of models and keys. Rust owns the
  * catalog, the choices and the Keychain; this mirrors its last answer. A key
@@ -27,7 +25,9 @@ export class ModelsSession {
   busy = $state<string | null>(null);
   /** What the last action could not do, with the action it belongs to. */
   fault = $state.raw<{ action: string; fault: WorkModelsFaultV1 } | null>(null);
-  more = $state.raw<Partial<Record<WorkModelProvider, More>>>({});
+  /** The models the person's own server serves, once asked. */
+  endpoint = $state.raw<WorkModelEntry[]>([]);
+  private listing = false;
   private active = false;
   private generation = 0;
   private stop: (() => void) | null = null;
@@ -126,23 +126,20 @@ export class ModelsSession {
     return this.act("endpoint", () => commands.workSetModelEndpoint(this.profile, base));
   }
 
-  /** The provider's own list, fetched once per session. */
-  async loadMore(provider: WorkModelProvider) {
-    const known = this.more[provider];
-    if (known && (known.loading || !known.fault)) return;
-    this.more = { ...this.more, [provider]: { entries: [], fault: null, loading: true } };
+  /** The person's own server's models, asked once per session. */
+  async listEndpoint() {
+    if (this.listing || this.endpoint.length) return;
+    this.listing = true;
     const generation = this.generation;
     const response = await observe(
-      Promise.resolve().then(() => commands.workMoreModels(this.profile, provider)),
+      Promise.resolve().then(() => commands.workMoreModels(this.profile, "compatible")),
       KEY_TIMEOUT,
       this.lifetime.signal,
     );
     if (generation !== this.generation) return;
-    const next: More =
-      response.state === "received"
-        ? { entries: response.value.entries, fault: response.value.fault, loading: false }
-        : { entries: [], fault: "unreachable", loading: false };
-    this.more = { ...this.more, [provider]: next };
+    this.listing = false;
+    if (response.state === "received" && !response.value.fault)
+      this.endpoint = response.value.entries;
   }
 
   dispose() {
@@ -154,6 +151,7 @@ export class ModelsSession {
     this.models = null;
     this.busy = null;
     this.fault = null;
-    this.more = {};
+    this.endpoint = [];
+    this.listing = false;
   }
 }

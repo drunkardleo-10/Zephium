@@ -6,6 +6,7 @@
     ModelsSession,
     entryOf,
     keyedProviders,
+    pickerGroups,
     providerMark,
     providerName,
     usable,
@@ -33,6 +34,10 @@
   });
 
   const models = $derived(session?.models ?? null);
+  // The person's own server says which models it serves.
+  $effect(() => {
+    if (usable(models, "compatible")) void session?.listEndpoint();
+  });
   const AUTO = "auto";
   const roles: {
     role: Exclude<WorkModelRole, "decision">;
@@ -61,12 +66,8 @@
       value: AUTO,
       label: effective ? m.ai_role_auto({ model: effective.display_name }) : m.ai_role_auto_none(),
     };
-    const chosen = entryOf(models, models?.chosen[role]);
-    const offered = (models?.entries ?? []).filter(
-      (entry) =>
-        entry.roles.includes(role) &&
-        usable(models, entry.model.provider) &&
-        (entry.recommended || entry.id === chosen?.id),
+    const offered = pickerGroups(models, role, session?.endpoint ?? []).ready.flatMap(
+      (group) => group.entries,
     );
     return [automatic, ...offered.map((entry) => ({ value: entry.id, label: label(entry) }))];
   }

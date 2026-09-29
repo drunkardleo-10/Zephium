@@ -7,7 +7,6 @@
     ModelsSession,
     entryOf,
     keyState,
-    moreGroups,
     pickerGroups,
     providerMark,
     providerName,
@@ -15,14 +14,7 @@
     usable,
   } from "$domain/ai";
   import Icon from "$shared/ui/Icon";
-  import SearchField from "$shared/ui/SearchField";
-  import {
-    ArrowDown01Icon,
-    ArrowLeft02Icon,
-    ArrowRight01Icon,
-    Key01Icon,
-    Tick02Icon,
-  } from "../../lib/icons";
+  import { ArrowDown01Icon, Key01Icon, Tick02Icon } from "../../lib/icons";
   import * as m from "$shared/i18n/messages";
   import "$shared/ui/Menu/popover.css";
 
@@ -44,54 +36,21 @@
   });
 
   let open = $state(false);
-  let view = $state<"main" | "more">("main");
-  let query = $state("");
   let list = $state<HTMLElement>();
-  let field = $state<HTMLInputElement>();
 
   const models = $derived(session?.models ?? null);
   const current = $derived(entryOf(models, models?.effective.lead));
   const chosen = $derived(models?.effective.lead ?? null);
-  const groups = $derived(pickerGroups(models, "lead"));
-  const listed = $derived(
-    Object.fromEntries(
-      Object.entries(session?.more ?? {}).map(([provider, more]) => [
-        provider,
-        more?.entries ?? [],
-      ]),
-    ) as Partial<Record<WorkModelProvider, WorkModelEntry[]>>,
-  );
-  const extra = $derived(moreGroups(models, listed, "lead", query));
-  const listable = $derived(
-    (["anthropic", "open_ai", "google", "deep_seek", "open_router", "compatible"] as const).filter(
-      (provider) => usable(models, provider),
-    ),
-  );
-  const loading = $derived(listable.filter((provider) => session?.more[provider]?.loading));
-  const failed = $derived(listable.filter((provider) => session?.more[provider]?.fault));
+  const groups = $derived(pickerGroups(models, "lead", session?.endpoint ?? []));
   const allKeyed = $derived(groups.needsKey.length === 0);
 
   async function opened(next: boolean) {
     open = next;
     if (!next) return;
-    view = "main";
-    query = "";
+    // The person's own server says which models it serves; the rest is the curated list.
+    if (usable(models, "compatible")) void session?.listEndpoint();
     await tick();
-    rows()[0]?.focus();
-  }
-
-  async function showMore() {
-    view = "more";
-    query = "";
-    for (const provider of listable) void session?.loadMore(provider);
-    await tick();
-    field?.focus();
-  }
-
-  async function back() {
-    view = "main";
-    await tick();
-    list?.querySelector<HTMLElement>("[data-more]")?.focus();
+    (list?.querySelector<HTMLElement>("[data-model-row][aria-current]") ?? rows()[0])?.focus();
   }
 
   /** The menu stays while the choice lands, so the mark moves before it closes. */
@@ -110,11 +69,6 @@
   }
 
   function move(event: KeyboardEvent) {
-    if (event.key === "ArrowLeft" && view === "more" && document.activeElement !== field) {
-      event.preventDefault();
-      void back();
-      return;
-    }
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     const all = rows();
     if (!all.length) return;
@@ -125,12 +79,11 @@
       return;
     }
     const next = index + (event.key === "ArrowDown" ? 1 : -1);
-    if (next < 0 && view === "more") field?.focus();
-    else all[Math.max(0, Math.min(next, all.length - 1))]?.focus();
+    all[Math.max(0, Math.min(next, all.length - 1))]?.focus();
   }
 </script>
 
-{#snippet model(entry: WorkModelEntry, detail: boolean)}
+{#snippet model(entry: WorkModelEntry)}
   <li>
     <button
       type="button"
@@ -140,12 +93,7 @@
       disabled={!!session?.busy}
       onclick={() => void choose(entry)}
     >
-      <span class="text">
-        <span class="name">{entry.display_name}</span>
-        {#if detail && entry.model.model !== entry.display_name}<span class="id"
-            >{entry.model.model}</span
-          >{/if}
-      </span>
+      <span class="name">{entry.display_name}</span>
       <span class="ui-menu-mark" aria-hidden="true"
         >{#if entry.id === chosen}<Icon icon={Tick02Icon} size={14} strokeWidth={2} />{/if}</span
       >
@@ -192,110 +140,45 @@
       aria-label={m.work_model_label()}
       onkeydown={move}
     >
-      <div class="panes" bind:this={list} data-view={view}>
-        {#if view === "main"}
-          <div class="pane">
-            {#each groups.ready as group (group.provider)}
-              <section class="group" aria-label={providerName(group.provider)}>
-                {@render heading(group.provider)}
-                <ul>
-                  {#each group.entries as entry (entry.id)}{@render model(entry, false)}{/each}
-                </ul>
-              </section>
-            {/each}
-            {#if groups.needsKey.length}
-              {#if groups.ready.length}<div
-                  class="ui-menu-separator"
-                  role="presentation"
-                ></div>{/if}
-              <ul aria-label={m.work_model_needs_key()}>
-                {#each groups.needsKey as provider (provider)}
-                  <li>
-                    <button
-                      type="button"
-                      class="ui-menu-item keyless"
-                      data-model-row
-                      onclick={settings}
-                    >
-                      <span class="ui-menu-icon" aria-hidden="true"
-                        ><Icon icon={providerMark(provider)} size={15} strokeWidth={1.6} /></span
-                      >
-                      <span class="name">{providerName(provider)}</span>
-                      <span class="hint"
-                        >{keyState(models, provider) === "invalid"
-                          ? m.work_model_key_refused()
-                          : m.work_model_needs_key()}</span
-                      >
-                    </button>
-                  </li>
-                {/each}
-              </ul>
-            {/if}
-            <div class="ui-menu-separator" role="presentation"></div>
-            {#if listable.length}<button
-                type="button"
-                class="ui-menu-item model-row"
-                data-model-row
-                data-more
-                onclick={() => void showMore()}
-              >
-                <span class="name">{m.work_model_more()}</span>
-                <span class="ui-menu-mark" aria-hidden="true"
-                  ><Icon icon={ArrowRight01Icon} size={13} strokeWidth={2} /></span
+      <div class="pane" bind:this={list}>
+        {#each groups.ready as group (group.provider)}
+          <section class="group" aria-label={providerName(group.provider)}>
+            {@render heading(group.provider)}
+            <ul>
+              {#each group.entries as entry (entry.id)}{@render model(entry)}{/each}
+            </ul>
+          </section>
+        {/each}
+        {#if groups.needsKey.length}
+          {#if groups.ready.length}<div class="ui-menu-separator" role="presentation"></div>{/if}
+          <ul aria-label={m.work_model_needs_key()}>
+            {#each groups.needsKey as provider (provider)}
+              <li>
+                <button
+                  type="button"
+                  class="ui-menu-item keyless"
+                  data-model-row
+                  onclick={settings}
                 >
-              </button>{/if}
-            <button type="button" class="ui-menu-item" data-model-row onclick={settings}>
-              <span class="ui-menu-icon" aria-hidden="true"
-                ><Icon icon={Key01Icon} size={15} /></span
-              >
-              <span class="name">{allKeyed ? m.work_model_manage() : m.work_model_add_key()}</span>
-            </button>
-          </div>
-        {:else}
-          <div class="pane more">
-            <div class="more-head">
-              <button
-                type="button"
-                class="back"
-                aria-label={m.work_model_back()}
-                onclick={() => void back()}
-              >
-                <Icon icon={ArrowLeft02Icon} size={15} strokeWidth={1.8} />
-              </button>
-              <span class="more-title">{m.work_model_more()}</span>
-            </div>
-            <div class="search">
-              <SearchField
-                label={m.work_model_search()}
-                placeholder={m.work_model_search()}
-                bind:value={query}
-                bind:ref={field}
-                onsubmit={() => {
-                  const first = extra[0]?.entries[0];
-                  if (first) void choose(first);
-                }}
-              />
-            </div>
-            <div class="scroller">
-              {#each extra as group (group.provider)}
-                <section class="group" aria-label={providerName(group.provider)}>
-                  {@render heading(group.provider)}
-                  <ul>
-                    {#each group.entries as entry (entry.id)}{@render model(entry, true)}{/each}
-                  </ul>
-                </section>
-              {/each}
-              {#if loading.length}<p class="note" role="status">
-                  <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
-                </p>{:else if !extra.length}<p class="note">
-                  {query.trim() ? m.work_model_no_match() : m.work_model_no_more()}
-                </p>{/if}
-              {#each failed as provider (provider)}<p class="note">
-                  {providerName(provider)} · {m.work_model_list_failed()}
-                </p>{/each}
-            </div>
-          </div>
+                  <span class="ui-menu-icon" aria-hidden="true"
+                    ><Icon icon={providerMark(provider)} size={15} strokeWidth={1.6} /></span
+                  >
+                  <span class="name">{providerName(provider)}</span>
+                  <span class="hint"
+                    >{keyState(models, provider) === "invalid"
+                      ? m.work_model_key_refused()
+                      : m.work_model_needs_key()}</span
+                  >
+                </button>
+              </li>
+            {/each}
+          </ul>
         {/if}
+        <div class="ui-menu-separator" role="presentation"></div>
+        <button type="button" class="ui-menu-item" data-model-row onclick={settings}>
+          <span class="ui-menu-icon" aria-hidden="true"><Icon icon={Key01Icon} size={15} /></span>
+          <span class="name">{allKeyed ? m.work_model_manage() : m.work_model_add_key()}</span>
+        </button>
       </div>
       {#if session?.fault?.action === "choose:lead"}<p class="note failure" role="alert">
           {m.work_model_failed()}
@@ -375,13 +258,6 @@
     transform-origin: var(--bits-floating-transform-origin, bottom right);
   }
 
-  .panes {
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    min-block-size: 0;
-  }
-
   .pane {
     display: flex;
     flex: 1;
@@ -389,30 +265,6 @@
     min-block-size: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
-    animation: pane-in var(--motion-base) var(--ease-out);
-  }
-
-  .panes[data-view="more"] .pane {
-    animation-name: pane-in-more;
-  }
-
-  /* Going deeper does not collapse the panel under the pointer. */
-  .panes[data-view="more"] {
-    min-block-size: min(320px, var(--bits-floating-available-height, 320px));
-  }
-
-  @keyframes pane-in {
-    from {
-      opacity: 0;
-      translate: -8px 0;
-    }
-  }
-
-  @keyframes pane-in-more {
-    from {
-      opacity: 0;
-      translate: 8px 0;
-    }
   }
 
   .group + .group {
@@ -467,28 +319,10 @@
     background: var(--row-active);
   }
 
-  .text {
-    display: flex;
-    flex: 1;
-    flex-direction: column;
-    gap: 1px;
-    min-inline-size: 0;
-  }
-
   .name {
     flex: 1;
     min-inline-size: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .id {
-    overflow: hidden;
-    color: var(--color-faint);
-    font-family: var(--font-mono);
-    font-size: var(--text-caption);
-    line-height: 14px;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -508,53 +342,6 @@
     color: var(--color-muted);
   }
 
-  .more-head {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 0 0 4px;
-  }
-
-  .back {
-    display: grid;
-    inline-size: 28px;
-    block-size: 28px;
-    padding: 0;
-    border: 0;
-    border-radius: var(--radius-inset);
-    background: transparent;
-    color: var(--color-muted);
-    place-items: center;
-  }
-
-  .back:hover,
-  .back:focus-visible {
-    background: var(--row-active);
-    color: var(--color-text);
-    outline: none;
-  }
-
-  .more-title {
-    color: var(--color-text);
-    font-size: var(--text-body);
-    font-weight: 600;
-  }
-
-  .search {
-    padding: 0 2px 6px;
-  }
-
-  .scroller {
-    flex: 1;
-    min-block-size: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-  }
-
-  .more {
-    overflow: hidden;
-  }
-
   .note {
     margin: 0;
     padding: 10px var(--menu-item-inset);
@@ -565,39 +352,5 @@
 
   .failure {
     color: var(--color-danger);
-  }
-
-  .dots {
-    display: inline-flex;
-    gap: 4px;
-  }
-
-  .dots i {
-    inline-size: 4px;
-    block-size: 4px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-faint);
-    animation: dot 1s var(--ease-in-out) infinite;
-  }
-
-  .dots i:nth-child(2) {
-    animation-delay: 0.15s;
-  }
-
-  .dots i:nth-child(3) {
-    animation-delay: 0.3s;
-  }
-
-  @keyframes dot {
-    50% {
-      opacity: 0.3;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .pane,
-    .dots i {
-      animation: none;
-    }
   }
 </style>

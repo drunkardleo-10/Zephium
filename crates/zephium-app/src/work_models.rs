@@ -303,14 +303,15 @@ pub async fn refresh_cloud_catalog() {
 }
 
 /// Every entry the person can pick right now: Cloud's first when signed in,
-/// then the built-in list, then models listed from providers ("More models").
+/// then the curated built-in list, then the models the person's own
+/// endpoint serves. Named providers offer only the curated list.
 fn entries(state: &State) -> Vec<WorkModelEntry> {
     let mut all = Vec::new();
     if cloud().is_some() {
         all.extend(state.cloud.iter().map(|model| model.entry.clone()));
     }
     all.extend(models::builtin());
-    for provider in KEYED_PROVIDERS {
+    for provider in [P::Compatible] {
         for entry in state.listed.get(&provider).into_iter().flatten() {
             if !all.iter().any(|known| known.id == entry.id) {
                 all.push(entry.clone());
@@ -326,13 +327,17 @@ fn stored_choice(state: &State, profile: ProfileId, role: WorkModelRole) -> Opti
         Some(text) => serde_json::from_str(&text).ok()?,
         None => state.choices.get(&key).cloned()?,
     };
-    // A catalog entry may have changed since it was chosen (limits, prices).
-    Some(
-        entries(state)
-            .into_iter()
-            .find(|entry| entry.id == stored.id)
-            .unwrap_or(stored),
-    )
+    // A catalog entry may have changed since it was chosen (limits, prices);
+    // one no longer offered gives way to the family's default. The person's
+    // own endpoint lists its models only once asked, so its choice stands.
+    let current = entries(state)
+        .into_iter()
+        .find(|entry| entry.id == stored.id);
+    match current {
+        Some(entry) => Some(entry),
+        None if stored.model.provider == P::Compatible => Some(stored),
+        None => None,
+    }
 }
 
 fn family_entry(
@@ -749,7 +754,7 @@ mod tests {
         let ids = |role| effective(&state(), profile, role).map(|entry| entry.id);
         assert_eq!(
             ids(WorkModelRole::Lead).as_deref(),
-            Some("openai/gpt-6-sol")
+            Some("openai/gpt-6-luna")
         );
         assert_eq!(
             ids(WorkModelRole::Page).as_deref(),
@@ -807,5 +812,22 @@ mod tests {
         );
         // DeepSeek reads no images: the page role finds no vision model.
         assert_eq!(ids(WorkModelRole::Page), None);
+
+        // A choice no longer offered gives way to the family's default.
+        with_keys(&[P::OpenAi]);
+        let mut gone = models::builtin()
+            .into_iter()
+            .find(|entry| entry.id == "openai/gpt-6-sol")
+            .unwrap();
+        gone.id = "openai/gpt-5.6-luna".into();
+        gone.model.model = "gpt-5.6-luna".into();
+        store_setting(
+            choice_key(profile, WorkModelRole::Lead),
+            serde_json::to_string(&gone).unwrap(),
+        );
+        assert_eq!(
+            ids(WorkModelRole::Lead).as_deref(),
+            Some("openai/gpt-6-luna")
+        );
     }
 }

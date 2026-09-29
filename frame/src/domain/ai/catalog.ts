@@ -56,20 +56,30 @@ export function usable(models: WorkModelsV1 | null, provider: WorkModelProvider)
 export type ModelGroup = { provider: WorkModelProvider; entries: WorkModelEntry[] };
 
 /**
- * The picker's list for a role: recommended models of usable providers,
- * grouped by provider, Zephium first. Providers without a key are listed
+ * The picker's list for a role: every curated model of usable providers,
+ * recommended first, grouped by provider, Zephium first. The person's own
+ * server adds the models it serves. Providers without a key are listed
  * apart, as needing one.
  */
-export function pickerGroups(models: WorkModelsV1 | null, role: WorkModelRole) {
-  const entries = models?.entries ?? [];
+export function pickerGroups(
+  models: WorkModelsV1 | null,
+  role: WorkModelRole,
+  endpoint: readonly WorkModelEntry[] = [],
+) {
+  const entries = [...(models?.entries ?? []), ...endpoint];
   const order: WorkModelProvider[] = ["cloud", ...keyedProviders];
   const ready: ModelGroup[] = [];
   const needsKey: WorkModelProvider[] = [];
   for (const provider of order) {
-    const offered = entries.filter(
-      (entry) =>
-        entry.model.provider === provider && entry.recommended && entry.roles.includes(role),
-    );
+    const seen = new Set<string>();
+    const offered = entries
+      .filter((entry) => {
+        if (entry.model.provider !== provider || !entry.roles.includes(role)) return false;
+        if (seen.has(entry.id)) return false;
+        seen.add(entry.id);
+        return true;
+      })
+      .sort((a, b) => Number(b.recommended) - Number(a.recommended));
     if (usable(models, provider)) {
       if (offered.length) ready.push({ provider, entries: offered });
     } else if (provider !== "cloud" && provider !== "compatible" && provider !== "open_router") {
@@ -77,34 +87,6 @@ export function pickerGroups(models: WorkModelsV1 | null, role: WorkModelRole) {
     }
   }
   return { ready, needsKey };
-}
-
-/** Everything else a usable provider offers for a role, grouped by provider. */
-export function moreGroups(
-  models: WorkModelsV1 | null,
-  listed: Partial<Record<WorkModelProvider, WorkModelEntry[]>>,
-  role: WorkModelRole,
-  query = "",
-): ModelGroup[] {
-  const needle = query.trim().toLocaleLowerCase();
-  const matches = (entry: WorkModelEntry) =>
-    !needle ||
-    entry.display_name.toLocaleLowerCase().includes(needle) ||
-    entry.model.model.toLocaleLowerCase().includes(needle);
-  const groups: ModelGroup[] = [];
-  for (const provider of ["cloud", ...keyedProviders] as WorkModelProvider[]) {
-    if (!usable(models, provider)) continue;
-    const seen = new Set<string>();
-    const rows: WorkModelEntry[] = [];
-    for (const entry of [...(models?.entries ?? []), ...(listed[provider] ?? [])]) {
-      if (entry.model.provider !== provider || seen.has(entry.id)) continue;
-      seen.add(entry.id);
-      if (entry.recommended || !entry.roles.includes(role) || !matches(entry)) continue;
-      rows.push(entry);
-    }
-    if (rows.length) groups.push({ provider, entries: rows });
-  }
-  return groups;
 }
 
 export function entryOf(models: WorkModelsV1 | null, id: string | null | undefined) {

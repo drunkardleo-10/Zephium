@@ -13,7 +13,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     workModels: vi.fn(async () =>
       models({
         keys: { anthropic: "valid", open_ai: "valid", open_router: "set" },
-        lead: "anthropic/claude-opus-5-5",
+        lead: "openai/gpt-6-luna",
       }),
     ),
     workMoreModels: vi.fn(async (_profile: string, provider: WorkModelProvider) => ({
@@ -27,7 +27,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 const shots = "../../../../../target/work-models";
 const settle = () => new Promise((done) => setTimeout(done, 450));
 
-test("the model picker in the ask bar, closed, open and on More models, in both themes", async () => {
+test("the model picker in the ask bar, closed and open, in both themes", async () => {
   await page.viewport(1100, 700);
   const screen = await render(ModelPickerStage, { profile: PROFILE });
   const shoot = async (name: string) => {
@@ -39,8 +39,6 @@ test("the model picker in the ask bar, closed, open and on More models, in both 
     document.documentElement.dataset.theme = "dark";
   };
   await shoot("rest");
-  await screen.getByRole("button", { name: "Model: Claude Opus 5.5" }).click();
+  await screen.getByRole("button", { name: "Model: GPT-6 Luna" }).click();
   await shoot("open");
-  await page.getByRole("button", { name: "More models" }).click();
-  await shoot("more");
 });
