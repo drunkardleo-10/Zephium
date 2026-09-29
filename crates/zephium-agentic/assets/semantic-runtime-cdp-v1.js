@@ -131,6 +131,7 @@ typeof HTMLAnchorElement === "function" ? getter(HTMLAnchorElement.prototype, "h
 const imageCurrentSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "currentSrc") : null;
 const imageSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "src") : null;
 const titleTextGetter = typeof HTMLTitleElement === "function" ? getter(HTMLTitleElement.prototype, "text") : null;
+const scriptTextGetter = typeof HTMLScriptElement === "function" ? getter(HTMLScriptElement.prototype, "text") : null;
 const detailsOpenGetter = typeof HTMLDetailsElement === "function" ? getter(HTMLDetailsElement.prototype, "open") : null;
 const buttonTypeGetter = typeof HTMLButtonElement === "function" ? getter(HTMLButtonElement.prototype, "type") : null;
 const buttonFormGetter = typeof HTMLButtonElement === "function" ? getter(HTMLButtonElement.prototype, "form") : null;
@@ -859,6 +860,10 @@ return { role: "image", tag, inputType };
 if (isPageImageMeta(node, tag)) return { role: "image", tag, inputType, pageImage: true, headMeta: true };
 if (isPageAddressMeta(node, tag)) return { role: "link", tag, inputType, pageAddress: true, headMeta: true, noOperations: true };
 if (pageTitleText(node, tag) !== null) return { role: "paragraph", tag, inputType, pageTitle: true, headMeta: true, noOperations: true };
+if (tag === "script") {
+const facts = structuredFacts(node);
+if (facts !== null) return { role: "paragraph", tag, inputType, pageFacts: facts, headMeta: true, noOperations: true };
+}
 if (tag === "progress" || tag === "meter") return { role: "progress", tag, inputType };
 if (tag === "output") return { role: "status", tag, inputType };
 return genericTextDescriptor(node, tag, inputType);
@@ -866,7 +871,7 @@ return genericTextDescriptor(node, tag, inputType);
 function shouldSkipSubtree(element) {
 const tag = tagName(element);
 return (
-tag === "script" ||
+(tag === "script" && !isStructuredData(element)) ||
 tag === "style" ||
 tag === "template" ||
 tag === "noscript" ||
@@ -885,6 +890,41 @@ return tag === "meta" && lower(attribute(element, "property", 32) || "") === "og
 function isPageAddressMeta(element, tag) {
 return (tag === "link" && lower(attribute(element, "rel", 32) || "") === "canonical") ||
 (tag === "meta" && lower(attribute(element, "property", 32) || "") === "og:url");
+}
+function isStructuredData(element) {
+return lower(attribute(element, "type", 64) || "") === "application/ld+json";
+}
+const FACT_TYPES = ["product", "hotel", "lodgingbusiness", "vacationrental", "event", "flight"];
+function fact(value, limit) {
+if (arrayIsArray(value)) value = value[0];
+if (value !== null && typeof value === "object") value = value.url || value.contentUrl;
+return typeof value === "number" ? "" + value : typeof value === "string" ? apply(stringSlice, apply(stringTrim, value, []), [0, limit]) : "";
+}
+function structuredFacts(element) {
+if (!isStructuredData(element) || scriptTextGetter === null) return null;
+const lines = [], pending = [];
+try {
+const text = read(scriptTextGetter, element);
+if (text.length > 65536) return null;
+pending.push(apply(jsonParse, JSON, [text]));
+} catch (_) { return null; }
+for (let seen = 0; pending.length !== 0 && seen < 300 && lines.length < 12; seen += 1) {
+const item = pending.shift();
+if (item === null || typeof item !== "object") continue;
+if (arrayIsArray(item)) { pending.push(...item.slice(0, 48)); continue; }
+const type = lower(fact(item["@type"], 40));
+if (!FACT_TYPES.includes(type)) {
+for (const key of ["@graph", "itemListElement", "item", "mainEntity"]) if (item[key] !== undefined) pending.push(item[key]);
+continue;
+}
+const offer = (arrayIsArray(item.offers) ? item.offers[0] : item.offers) || item;
+const rating = item.aggregateRating || {};
+const parts = [fact(item.name, 160), fact(offer.price || offer.lowPrice, 24) + " " + fact(offer.priceCurrency, 8),
+fact(rating.ratingValue, 8) && "rated " + fact(rating.ratingValue, 8) + " (" + fact(rating.reviewCount || rating.ratingCount, 12) + ")",
+fact(item.image, 600), fact(item.url, 600)].map(part => apply(stringTrim, part, [])).filter(part => part !== "" && part !== "()");
+if (parts.length > 1) lines.push(type + ": " + parts.join(" | "));
+}
+return lines.length === 0 ? null : lines.join("\n");
 }
 function pageTitleText(element, tag) {
 let text = null;
@@ -1704,14 +1744,15 @@ const sensitivity = sensitivityFor(element);
 if (sensitivity !== "public") setSensitivity(record, sensitivity);
 let name = descriptor.pageImage === true ? "Page image" :
 descriptor.pageAddress === true ? "Page address" :
-descriptor.pageTitle === true ? "Page title" : labelledText(element, descriptor, state);
+descriptor.pageTitle === true ? "Page title" :
+typeof descriptor.pageFacts === "string" ? "Page facts" : labelledText(element, descriptor, state);
 if ((name === null || name === "") && descriptor.role === "image") name = ancestorLabel(element, state);
 if (name !== null && name !== "") addName(record, name, state);
 record.sink = recordSink(descriptor, wire.n !== undefined);
 if (record.sink === "value") record.sinkBytes = 0;
-if (descriptor.pageTitle === true) {
+if (descriptor.pageTitle === true || typeof descriptor.pageFacts === "string") {
 record.sinkBytes = 0;
-appendSink(record, pageTitleText(element, descriptor.tag) || "", state);
+appendSink(record, descriptor.pageTitle === true ? pageTitleText(element, descriptor.tag) || "" : descriptor.pageFacts, state);
 record.sink = null;
 }
 const imageSource = descriptor.role === "image" && (descriptor.tag === "img" || descriptor.pageImage === true);
