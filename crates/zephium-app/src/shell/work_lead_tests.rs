@@ -78,7 +78,21 @@ impl Script {
                             json!({"kind": "reply", "title": "Shorter trip", "data": {
                             "headline": "Home a day early", "text": "The plan now ends on Friday."}}),
                         ),
+                        call(
+                            "r5",
+                            "create",
+                            json!({"kind": "plan", "title": "Your trip, shorter", "data": {"steps": [
+                                {"title": "Fly home early", "kind": "travel"}]}}),
+                        ),
                     ]
+                }
+                2 => {
+                    assert!(seen.contains("already covers this subject"), "{seen}");
+                    vec![call(
+                        "r4",
+                        "finish",
+                        json!({"say": "The plan ends a day earlier."}),
+                    )]
                 }
                 _ => vec![call(
                     "r4",
@@ -194,22 +208,25 @@ impl Script {
                 "web_search",
                 json!({"query": "US entry requirements Polish citizens ESTA"}),
             )],
-            _ => {
+            1 => {
                 let key = first_key(&results(request));
-                vec![
-                    call(
-                        "e2",
-                        "create",
-                        json!({"kind": "list", "title": "Entry needs", "data": {
-                        "style": "requirements", "items": [{"title": "ESTA approved before you fly", "source": key}]},
-                        "sources": [key]}),
-                    ),
-                    call(
-                        "e3",
-                        "finish",
-                        json!({"summary": "Entry needs", "digest": format!("ESTA required [{key}]")}),
-                    ),
-                ]
+                vec![call(
+                    "e2",
+                    "create",
+                    json!({"kind": "list", "title": "Entry needs", "data": {
+                    "style": "requirements", "items": [{"title": "ESTA approved before you fly", "source": key}]},
+                    "sources": [key]}),
+                )]
+            }
+            _ => {
+                let seen = results(request);
+                assert!(seen.contains("finish's digest"), "{seen}");
+                let key = first_key(&seen);
+                vec![call(
+                    "e3",
+                    "finish",
+                    json!({"summary": "Entry needs", "digest": format!("ESTA required [{key}]")}),
+                )]
             }
         }
     }
@@ -502,12 +519,15 @@ async fn a_lead_run_splits_into_parts_builds_the_result_and_revises_on_follow_up
             .count(),
         1
     );
+    // A research part hands its facts to the lead; it places no list.
+    let entry = run.parts.iter().find(|p| p.title == "Entry").unwrap().id;
+    assert!(!run.artifacts.iter().any(|a| a.part == Some(entry)));
     let finish = run.steps.last().unwrap();
     assert!(matches!(&finish.kind, WorkStepKindV1::Finish { followups } if followups.len() == 1));
     assert_eq!(finish.note.as_deref(), Some("Your trip is on the canvas."));
     let calls = script.calls.lock().unwrap().clone();
     assert!(
-        calls.contains(&"browser:2".into()) && calls.contains(&"research:1".into()),
+        calls.contains(&"browser:2".into()) && calls.contains(&"research:2".into()),
         "{calls:?}"
     );
 
@@ -535,4 +555,143 @@ async fn a_lead_run_splits_into_parts_builds_the_result_and_revises_on_follow_up
         .unwrap();
     assert_eq!(revised.revises, Some(object("plan").id));
     assert_eq!(revised.title, "Your trip");
+    assert_eq!(
+        follow_up
+            .artifacts
+            .iter()
+            .filter(|a| a.data.kind_name() == "plan")
+            .count(),
+        1
+    );
+}
+
+/// A part whose site fails says what it needs; the lead may not stand a
+/// figure or a to-do in for what was not found.
+struct Honest;
+impl WorkModelClient for Honest {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            let lead = request
+                .system
+                .iter()
+                .any(|b| b.text.contains("You are the Work agent"));
+            let seen = results(&request);
+            let assistant = match (lead, turn) {
+                (true, 0) => vec![call(
+                    "p",
+                    "start_part",
+                    json!({"title": "Flights", "helper": "browser", "service": "kayak.com",
+                    "goal": "Round trips WAW to SFO for 5 January 2027"}),
+                )],
+                (true, 1) => {
+                    assert!(seen.contains("could not do its job"), "{seen}");
+                    assert!(seen.contains("another try: kayak.com"), "{seen}");
+                    vec![
+                        call(
+                            "r",
+                            "create",
+                            json!({"kind": "reply", "title": "Flights", "data": {
+                            "headline": "Airfare recheck complete", "text": "No fare was found.",
+                            "figures": [{"label": "Exact-date fare", "value": "Not verified"}]}}),
+                        ),
+                        call(
+                            "l",
+                            "create",
+                            json!({"kind": "list", "title": "To do", "data": {"style": "todo",
+                            "items": [{"title": "Retry the Kayak flights check"}]}}),
+                        ),
+                    ]
+                }
+                (true, 2) => {
+                    assert!(seen.contains("figure 1 stands for something"), "{seen}");
+                    assert!(seen.contains("list: item 1 is about work"), "{seen}");
+                    vec![call(
+                        "r2",
+                        "create",
+                        json!({"kind": "reply", "title": "Flights", "data": {
+                        "headline": "No flights found yet",
+                        "text": "Kayak did not load; try again from the Flights row."}}),
+                    )]
+                }
+                (true, _) => vec![call("f", "finish", json!({"say": "No flights yet."}))],
+                (false, _) => vec![call(
+                    "h",
+                    "finish",
+                    json!({"summary": "Kayak did not load", "digest": "The results page failed.",
+                    "found": false, "need": {"kind": "retry", "target": "https://www.kayak.com/flights"}}),
+                )],
+            };
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 1_000,
+                    cached_input_tokens: 0,
+                    output_tokens: 100,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+                assistant,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_part_that_cannot_do_its_job_carries_its_fix_and_nothing_stands_for_it() {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Recheck flights WAW to SFO".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let client = Arc::new(Honest);
+    let lead = LeadModel {
+        client,
+        ..model(Arc::new(Script {
+            calls: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let done = drive(
+        &mut shell,
+        &queue,
+        WorkLeadService::new(handle.clone()).run(
+            profile,
+            command(work, WorkRevision::INITIAL),
+            None,
+            models,
+            &Search,
+            |_, request| page(request),
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    let run = &done.executions[0];
+    let flights = &run.parts[0];
+    assert_eq!(flights.state, WorkPartStateV1::Failed);
+    assert_eq!(
+        flights.need,
+        Some(WorkPartNeedV1::Retry {
+            host: Some("kayak.com".into())
+        })
+    );
+    let kinds: Vec<&str> = run.artifacts.iter().map(|a| a.data.kind_name()).collect();
+    assert_eq!(kinds, ["reply"]);
 }

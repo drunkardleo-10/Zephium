@@ -9,7 +9,7 @@ tools: [start_part, create, finish]
 - **GitHub** — computer part (gh when installed; otherwise a browser part on github.com): read the issue with its comments, the linked pull requests and the failing output they quote.
 - **Code** — computer part in the granted repository folder: find the code the issue points to (search_files, read_file), reproduce with the narrowest test command, make the smallest change that fixes the cause (edit_file; the person approves it), run the tests again and report the output.
 - Start GitHub first when the issue is the only lead; start both together when the request already names the file or the error.
-- Without a granted folder, ask the person to add the repository folder to the canvas, then continue.
+- A folder the request names is asked about before you start. Without a readable repository folder, the Code part finishes with need allow_folder and the reply says in one sentence that the repository is needed.
 
 ## Result
 - One **diff** per changed file: path, language, a one-line summary of the change, and its hunks.

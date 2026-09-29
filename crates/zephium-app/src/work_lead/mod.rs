@@ -4,10 +4,12 @@
 //! frame's subscriptions see it as it happens. The model only proposes;
 //! Rust admits every tool call.
 mod call;
+mod folders;
 mod hands;
 mod lead;
 pub mod objects;
 mod parts;
+mod project;
 mod prompt;
 mod recipes;
 pub mod registry;
@@ -42,11 +44,20 @@ pub enum WorkLeadDiagnostic {
         kind: &'static str,
         error: WorkError,
     },
+    /// One lead turn: what it billed, the provider's input and cached
+    /// tokens, and what it sent by section in characters.
     Turn {
         turn: u8,
         calls: usize,
         tokens: u32,
         cost_micro_usd: u32,
+        input: u32,
+        cached: u32,
+        output: u32,
+        prompt_chars: u32,
+        tools_chars: u32,
+        context_chars: u32,
+        conversation_chars: u32,
     },
     ModelRefused {
         error: zephium_core::work::model::WorkModelError,
@@ -211,23 +222,28 @@ impl WorkLeadService {
         observe(attempt.observer());
         let original = attempt.attempt();
         let limits = attempt.specification().limits;
-        let (files, _) = crate::work_files::WorkFileGrant::admit(&grant.folders);
+        let (granted, allowed) = folders::earlier(&projection, receipt.execution);
         let run = run::LeadRun::new(
             attempt.probe(),
             self.handle.clone(),
             profile,
             grant.clone(),
             limits,
-            (!files.is_empty()).then_some(files),
+            folders::scope(&grant.folders, &granted, &allowed),
             attempt.node().outputs[0].clone(),
             self.diagnostic,
         );
         let objective = attempt.disclosure_objective()?;
+        let named = if grant.private {
+            Vec::new()
+        } else {
+            folders::ask_in_place(&run, &objective).await
+        };
         run.allow_links_in(&objective);
         for body in &bodies {
             run.allow_links_in(&body.text);
         }
-        for input in inputs(&bodies, &tabs, &grant) {
+        for input in inputs(&bodies, &tabs, &run.folders().current) {
             run.input(input).await;
         }
         let memory = crate::work_personal::digest(&self.handle, profile)
@@ -242,7 +258,7 @@ impl WorkLeadService {
             })
             .await;
         }
-        let context = context_text(
+        let mut context = context_text(
             &objective,
             &projection,
             receipt.execution,
@@ -251,6 +267,7 @@ impl WorkLeadService {
             attempt.decisions(),
             &grant,
         );
+        context.push_str(&folders::context(&run, &named));
         let shared = hands::SharedBrowser::new(browser);
         let lead_hands = hands::Hands::new(
             &run,
@@ -394,7 +411,7 @@ async fn settled_usage(run: &run::LeadRun, status: WorkAttemptStatus) -> Option<
 fn inputs(
     bodies: &[context::WorkContextBody],
     tabs: &[context::WorkContextTabV1],
-    grant: &WorkAgentGrantV1,
+    folders: &[String],
 ) -> Vec<WorkInputFactV1> {
     use context::WorkContextItemKind as K;
     let count = |kinds: &[K]| bodies.iter().filter(|b| kinds.contains(&b.kind)).count();
@@ -427,7 +444,14 @@ fn inputs(
         "Open tabs",
         count(&[K::Tab]).max(tabs.len()),
     );
-    add(WorkInputKindV1::Files, "Folders", grant.folders.len());
+    match folders {
+        [one] => add(
+            WorkInputKindV1::Files,
+            &call::clip(&folders::name(one), 40),
+            1,
+        ),
+        many => add(WorkInputKindV1::Files, "Folders", many.len()),
+    }
     inputs
 }
 
@@ -513,12 +537,6 @@ fn context_text(
         for decision in decisions {
             out.push_str(&format!("- {} → {}\n", decision.question, decision.answer));
         }
-    }
-    if !grant.folders.is_empty() {
-        out.push_str(&format!(
-            "\nFolders the person granted: {}\n",
-            grant.folders.join(", ")
-        ));
     }
     if !tabs.is_empty() {
         out.push_str("\nThe person's open tabs:\n");

@@ -19,6 +19,7 @@ tools: [ask, start_part, create, finish]
 - One **plan** from the flight out to the flight back: travel steps for each flight (pick pointing at its flight pick), the stay (pick pointing at its home pick), the event days, entry steps before departure (kind task, with the deadline in when), and the flight home. Advice goes on the step it belongs to ("BART from SFO, about $10, 30 min"). Include a total (flights + stay + known fixed costs) with its label, such as "Estimated total".
 - Then the **reply**: headline with the shape of the trip ("6 nights in SoMa, $3,420 in all"), text naming the recommended flight and home and the one thing to do first; figures for total, flight price and nightly price.
 - Never make to-dos the agent could do itself ("Compare flights" is the Flights part's job). No guide document unless the person asked for one.
+- A part that found nothing leaves its steps without a pick or price: no estimate from a search snippet stands in for a fare or a home, and the reply says in one sentence what is still open. Its row shows the fix.
 
 ## Follow-ups
 - "Cheaper flights", "a different area", "book this one": run only the part it concerns, then revise that part's picks and the plan. Booking goes through the page and the app's Confirm; never say it is booked until the part reports it done.

@@ -5,7 +5,10 @@ use super::tools::{LeadHelper, LeadToolSet};
 
 /// Tools offered beside the lead's own (memory, history, notes, tabs).
 pub(crate) fn tool_sets() -> Vec<Arc<dyn LeadToolSet>> {
-    vec![Arc::new(crate::work_personal::PersonalTools)]
+    vec![
+        Arc::new(crate::work_personal::PersonalTools),
+        Arc::new(super::project::ProjectTools),
+    ]
 }
 
 /// Helpers for `computer` and `connection` parts. A kind without one here

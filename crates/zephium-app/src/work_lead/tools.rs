@@ -113,9 +113,14 @@ impl LeadRunView<'_> {
     pub fn service(&self) -> Option<&zephium_core::work::parts::WorkPartServiceV1> {
         self.service
     }
-    /// Folders the person granted for this run.
-    pub fn folders(&self) -> &[String] {
-        &self.run.grant.folders
+    /// Folders the run may read, the request's own first.
+    pub fn folders(&self) -> Vec<String> {
+        let folders = self.run.folders();
+        folders
+            .current
+            .into_iter()
+            .chain(folders.available)
+            .collect()
     }
     pub fn private(&self) -> bool {
         self.run.grant.private
@@ -154,9 +159,10 @@ impl<'a> LeadToolContext<'a> {
     pub fn probe(&self) -> &'a crate::work_runtime::WorkAttemptProbe {
         &self.run.probe
     }
-    /// The granted folders, admitted by policy; `None` when none is granted.
-    pub fn files(&self) -> Option<&'a crate::work_files::WorkFileGrant> {
-        self.run.files.as_ref()
+    /// The granted folders, admitted by policy, the request's own first;
+    /// `None` when none is granted.
+    pub fn files(&self) -> Option<crate::work_files::WorkFileGrant> {
+        self.run.files()
     }
     pub fn activity(&self, activity: WorkActivityV1) {
         self.run.activity(activity);

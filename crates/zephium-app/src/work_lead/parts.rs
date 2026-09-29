@@ -135,6 +135,19 @@ pub(crate) struct PartReport {
     pub summary: Option<String>,
     pub digest: String,
     pub objects: Vec<WorkArtifactId>,
+    /// What the person can do so the part can do its job.
+    pub need: Option<WorkPartNeedV1>,
+}
+impl PartReport {
+    fn ended(state: WorkPartStateV1, digest: &str, objects: Vec<WorkArtifactId>) -> Self {
+        Self {
+            state,
+            summary: None,
+            digest: digest.into(),
+            objects,
+            need: None,
+        }
+    }
 }
 
 enum Kit {
@@ -178,6 +191,7 @@ where
         let _ = self.run.part(fact.clone()).await;
         self.run.activity(WorkActivityV1::Delegating);
         let mut report = self.helper(fact.id, &spec).await;
+        self.settle_need(fact.id, &spec, &mut report).await;
         if let Kit::Registered(helper) = self.kit(spec.helper) {
             let context = LeadToolContext {
                 run: self.run,
@@ -194,6 +208,7 @@ where
         }
         self.release_part();
         fact.state = report.state;
+        fact.need = report.need.clone();
         fact.ended_ms = Some(now_ms());
         fact.summary = report
             .summary
@@ -213,13 +228,21 @@ where
             match report.state {
                 WorkPartStateV1::Done => "done",
                 WorkPartStateV1::Stopped => "stopped",
-                _ => "failed",
+                _ => "could not do its job",
             }
         );
         if let Some(summary) = &fact.summary {
             out.push_str(&format!(": {summary}"));
         }
         out.push('\n');
+        if let Some(need) = &fact.need {
+            out.push_str(&format!(
+                "It needs {}; its row shows the fix. Build the result only from what was found, make no object, figure, pick or task for what it could not do, and when nothing was found say so in the reply in one sentence.\n",
+                need_words(need)
+            ));
+        } else if report.state != WorkPartStateV1::Done {
+            out.push_str("Build the result only from what was found; make no object, figure, pick or task for what it could not do.\n");
+        }
         if !report.objects.is_empty() {
             let projection = self.run.probe.runtime_projection().await.ok();
             let canvas = projection
@@ -299,11 +322,28 @@ where
                 },
             ),
         };
-        tools.extend(prompt::helper_tools());
-        let set: Option<Arc<dyn LeadToolSet>> = match &kit {
-            Kit::Registered(helper) => Some(helper.tools()),
-            _ => None,
+        // Tool sets beside the lead's own offer tools to helpers too.
+        let view = super::tools::LeadRunView {
+            run: self.run,
+            service: spec.service.as_ref(),
         };
+        let mut sets: Vec<Arc<dyn LeadToolSet>> = Vec::new();
+        if let Kit::Registered(helper) = &kit {
+            sets.push(helper.tools());
+        }
+        for set in &self.extra {
+            let offered = set.tools(LeadScope::Helper(spec.helper), &view);
+            if !offered.is_empty() {
+                tools.extend(
+                    offered
+                        .into_iter()
+                        .filter(|t| !tools.iter().any(|known| known.name == t.name))
+                        .collect::<Vec<_>>(),
+                );
+                sets.push(set.clone());
+            }
+        }
+        tools.extend(prompt::helper_tools());
         let system = vec![
             WorkModelSystemBlock {
                 text: prompt::HELPER.to_owned(),
@@ -345,7 +385,9 @@ where
         if let (Kit::Browser, Some(search)) = (&kit, &spec.search) {
             let pages = super::recipes::pages(
                 search,
-                spec.service.as_ref().and_then(|service| service.host.as_deref()),
+                spec.service
+                    .as_ref()
+                    .and_then(|service| service.host.as_deref()),
             );
             if !pages.is_empty() {
                 brief.push_str("Results pages with the search already in them, the part's own site first; browse the first as start, its goal to read the results shown as records (open an item only for a field the list lacks). If it will not load, use the next one before any form:\n");
@@ -354,11 +396,17 @@ where
                 }
             }
         }
-        if !self.run.grant.folders.is_empty() && matches!(kit, Kit::Files | Kit::Registered(_)) {
-            brief.push_str(&format!(
-                "Granted folders: {}\n",
-                self.run.grant.folders.join(", ")
-            ));
+        let folders = self.run.folders();
+        if matches!(kit, Kit::Files | Kit::Registered(_)) {
+            if !folders.current.is_empty() {
+                brief.push_str(&format!("Folders: {}\n", folders.current.join(", ")));
+            }
+            if !folders.available.is_empty() {
+                brief.push_str(&format!(
+                    "Also readable, only if the goal is about them: {}\n",
+                    folders.available.join(", ")
+                ));
+            }
         }
         brief.push_str(&format!(
             "The person's request: {}\nNow: {}\nYou have at most {max_turns} turns.",
@@ -405,22 +453,22 @@ where
             let (outcome, usage) = match call::call(self.run, model, request).await {
                 Ok(done) => done,
                 Err(CallFailure::Stopped) => {
-                    return PartReport {
-                        state: WorkPartStateV1::Stopped,
-                        summary: None,
-                        digest: "Stopped before it finished.".into(),
-                        objects: placed,
-                    }
+                    return PartReport::ended(
+                        WorkPartStateV1::Stopped,
+                        "Stopped before it finished.",
+                        placed,
+                    )
                 }
                 Err(failure) => {
                     self.record_turn(Some(part), WorkStepStatus::Failed, None, failure)
                         .await;
-                    return PartReport {
-                        state: WorkPartStateV1::Failed,
-                        summary: None,
-                        digest: "The helper's model could not be reached.".into(),
-                        objects: placed,
-                    };
+                    let mut report = PartReport::ended(
+                        WorkPartStateV1::Failed,
+                        "The helper's model could not be reached.",
+                        placed,
+                    );
+                    report.need = Some(WorkPartNeedV1::Retry { host: None });
+                    return report;
                 }
             };
             spent = add(spent, usage);
@@ -445,7 +493,7 @@ where
             idle = 0;
             let mut results: Vec<Option<WorkModelToolResult>> = vec![None; calls.len()];
             let mut requests = Vec::new();
-            let mut finished: Option<(String, String)> = None;
+            let mut finished: Option<(String, String, bool, Option<WorkPartNeedV1>)> = None;
             for (index, tool_call) in calls.iter().enumerate() {
                 let answer = |content: String, is_error: bool| WorkModelToolResult {
                     call: tool_call.id.clone(),
@@ -489,16 +537,37 @@ where
                     "finish" => {
                         let summary = text_arg(&tool_call.arguments, "summary").unwrap_or_default();
                         let digest = text_arg(&tool_call.arguments, "digest").unwrap_or_default();
-                        finished = Some((summary, digest));
+                        let found = tool_call
+                            .arguments
+                            .get("found")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true);
+                        let need = need_arg(tool_call.arguments.get("need"));
+                        finished = Some((summary, digest, found, need));
                         results[index] = Some(answer("Reported to the lead.".into(), false));
                     }
-                    _ => match &set {
+                    name => match sets.iter().find(|set| {
+                        set.tools(LeadScope::Helper(spec.helper), &view)
+                            .iter()
+                            .any(|tool| tool.name == name)
+                    }) {
                         Some(set) => {
                             let context = LeadToolContext {
                                 run: self.run,
                                 part: Some(part),
                             };
                             let outcome = set.call(context, tool_call.clone()).await;
+                            if !outcome.is_error {
+                                if let Some(id) = outcome
+                                    .content
+                                    .split_whitespace()
+                                    .find_map(WorkArtifactId::parse)
+                                {
+                                    if outcome.content.starts_with("Placed project") {
+                                        placed.push(id);
+                                    }
+                                }
+                            }
                             results[index] = Some(answer(outcome.content, outcome.is_error));
                         }
                         None => {
@@ -524,12 +593,11 @@ where
                         }
                     }
                     Err(_) => {
-                        return PartReport {
-                            state: WorkPartStateV1::Stopped,
-                            summary: None,
-                            digest: "Stopped while its pages ran.".into(),
-                            objects: placed,
-                        }
+                        return PartReport::ended(
+                            WorkPartStateV1::Stopped,
+                            "Stopped while its pages ran.",
+                            placed,
+                        )
                     }
                 }
             }
@@ -545,12 +613,17 @@ where
                 })
                 .collect();
             messages.push(WorkModelMessage::ToolResults(results));
-            if let Some((summary, digest)) = finished {
+            if let Some((summary, digest, found, need)) = finished {
                 return PartReport {
-                    state: WorkPartStateV1::Done,
+                    state: if found && need.is_none() {
+                        WorkPartStateV1::Done
+                    } else {
+                        WorkPartStateV1::Failed
+                    },
                     summary: Some(summary),
                     digest: clip(&digest, 3_000),
                     objects: placed,
+                    need,
                 };
             }
         }
@@ -567,6 +640,81 @@ where
                 clip(&last_text, 2_000)
             },
             objects: placed,
+            need: None,
+        }
+    }
+
+    /// The need a part that could not do its job shows on its row: the one
+    /// its helper named, when it holds, else what its steps show.
+    async fn settle_need(&self, part: WorkPartId, spec: &PartSpec, report: &mut PartReport) {
+        if report.state == WorkPartStateV1::Done {
+            report.need = None;
+            return;
+        }
+        let execution = self.run.execution().await.ok();
+        let steps: Vec<&WorkStepFact> = execution
+            .iter()
+            .flat_map(|e| e.steps.iter())
+            .filter(|s| s.part == Some(part))
+            .collect();
+        let service_host = spec.service.as_ref().and_then(|s| s.host.clone());
+        let hosts: Vec<String> = service_host
+            .iter()
+            .cloned()
+            .chain(steps.iter().filter_map(|s| match &s.kind {
+                WorkStepKindV1::Read { url, .. } => crate::work_sites::site_of(url),
+                _ => None,
+            }))
+            .collect();
+        let named = report.need.take().and_then(|need| {
+            let need = match need {
+                WorkPartNeedV1::AllowFolder { path } => {
+                    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+                    let folder = super::folders::folder_for(std::path::Path::new(&path), &home)?;
+                    let folder = folder.to_string_lossy().into_owned();
+                    let (admitted, _) =
+                        crate::work_files::WorkFileGrant::admit(std::slice::from_ref(&folder));
+                    (!admitted.is_empty())
+                        .then_some(WorkPartNeedV1::AllowFolder { path: folder })?
+                }
+                other => other,
+            };
+            need.validate().is_ok().then_some(need)
+        });
+        report.need = named.or_else(|| {
+            let declined_entry = steps.iter().any(|s| match &s.kind {
+                WorkStepKindV1::Ask {
+                    purpose: Some(WorkAskPurposeV1::Entry),
+                    answer: Some(answer),
+                    ..
+                } => hosts.first().is_some_and(|site| {
+                    crate::work_sites::entry_answer(site, answer)
+                        == crate::work_sites::EntryAnswer::NotNow
+                }),
+                _ => false,
+            });
+            if declined_entry {
+                return hosts
+                    .first()
+                    .map(|host| WorkPartNeedV1::AllowSite { host: host.clone() });
+            }
+            let reads: Vec<&&WorkStepFact> = steps
+                .iter()
+                .filter(|s| matches!(s.kind, WorkStepKindV1::Read { .. }))
+                .collect();
+            let pages_failed = !reads.is_empty()
+                && reads
+                    .iter()
+                    .all(|s| s.status != WorkStepStatus::Succeeded || s.artifacts.is_empty());
+            if pages_failed && report.objects.is_empty() {
+                return Some(WorkPartNeedV1::Retry {
+                    host: hosts.first().cloned(),
+                });
+            }
+            None
+        });
+        if report.state == WorkPartStateV1::Stopped {
+            report.need = None;
         }
     }
 
@@ -739,4 +887,57 @@ pub(crate) fn step_request(
         .validate()
         .map_err(|_| format!("{name}: the arguments are outside their limits"))?;
     Ok(kind)
+}
+
+/// A helper's `need` argument: `{kind, target}`.
+fn need_arg(value: Option<&Value>) -> Option<WorkPartNeedV1> {
+    let value = value?;
+    let target = value
+        .get("target")
+        .and_then(Value::as_str)
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty());
+    let host = |t: Option<String>| {
+        t.map(|t| {
+            t.trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_start_matches("www.")
+                .split('/')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+        })
+    };
+    Some(match value.get("kind").and_then(Value::as_str)? {
+        "sign_in" => WorkPartNeedV1::SignIn {
+            host: host(target)?,
+        },
+        "allow_site" => WorkPartNeedV1::AllowSite {
+            host: host(target)?,
+        },
+        "allow_folder" => WorkPartNeedV1::AllowFolder { path: target? },
+        "use_connection" => WorkPartNeedV1::UseConnection {
+            connection: target?,
+        },
+        "retry" => WorkPartNeedV1::Retry {
+            host: host(target).filter(|h| public_host(h)),
+        },
+        _ => return None,
+    })
+}
+
+/// The need in the lead's words.
+fn need_words(need: &WorkPartNeedV1) -> String {
+    match need {
+        WorkPartNeedV1::SignIn { host } => format!("the person to sign in on {host}"),
+        WorkPartNeedV1::AllowSite { host } => format!("the person to allow work on {host}"),
+        WorkPartNeedV1::AllowFolder { path } => format!("the person to allow reading {path}"),
+        WorkPartNeedV1::UseConnection { connection } => {
+            format!("the person to allow using {connection}")
+        }
+        WorkPartNeedV1::Retry { host: Some(host) } => {
+            format!("another try: {host} did not answer as expected")
+        }
+        WorkPartNeedV1::Retry { host: None } => "another try".into(),
+    }
 }

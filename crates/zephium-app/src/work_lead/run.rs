@@ -24,6 +24,27 @@ pub(crate) struct LeadSource {
     pub url: Option<String>,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct Folders {
+    /// Attached with this request or allowed for it, in grant order.
+    pub current: Vec<String>,
+    /// On the canvas from earlier requests: usable when the request is about them.
+    pub available: Vec<String>,
+    pub grant: Option<crate::work_files::WorkFileGrant>,
+}
+impl Folders {
+    fn admit(&mut self) {
+        let all: Vec<String> = self
+            .current
+            .iter()
+            .chain(&self.available)
+            .cloned()
+            .collect();
+        let (files, _) = crate::work_files::WorkFileGrant::admit(&all);
+        self.grant = (!files.is_empty()).then_some(files);
+    }
+}
+
 struct State {
     turn: u8,
     limits: WorkExecutionLimits,
@@ -44,7 +65,9 @@ pub(crate) struct LeadRun {
     pub handle: crate::Handle,
     pub profile: ProfileId,
     pub grant: WorkAgentGrantV1,
-    pub files: Option<crate::work_files::WorkFileGrant>,
+    /// Folders this run may read, the request's own first; a folder the
+    /// person allows mid-run joins them.
+    folders: Mutex<Folders>,
     /// The run's one output: every object it places is minted under it.
     pub output: WorkExpectedOutput,
     state: Mutex<State>,
@@ -73,7 +96,7 @@ impl LeadRun {
         profile: ProfileId,
         grant: WorkAgentGrantV1,
         limits: WorkExecutionLimits,
-        files: Option<crate::work_files::WorkFileGrant>,
+        folders: (Vec<String>, Vec<String>),
         output: WorkExpectedOutput,
         diagnostic: Option<fn(super::WorkLeadDiagnostic)>,
     ) -> Self {
@@ -82,7 +105,15 @@ impl LeadRun {
             handle,
             profile,
             grant,
-            files,
+            folders: Mutex::new({
+                let mut folders = Folders {
+                    current: folders.0,
+                    available: folders.1,
+                    grant: None,
+                };
+                folders.admit();
+                folders
+            }),
             output,
             state: Mutex::new(State {
                 turn: 0,
@@ -103,6 +134,28 @@ impl LeadRun {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    pub(crate) fn folders(&self) -> Folders {
+        self.folders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    /// The granted folders as the file tools resolve them.
+    pub(crate) fn files(&self) -> Option<crate::work_files::WorkFileGrant> {
+        self.folders().grant
+    }
+    /// Adds a folder the person allowed while the run works; it leads.
+    pub(crate) fn grant_folder(&self, folder: &str) {
+        let mut folders = self
+            .folders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        folders.available.retain(|known| known != folder);
+        if !folders.current.iter().any(|known| known == folder) {
+            folders.current.insert(0, folder.to_owned());
+        }
+        folders.admit();
     }
     pub(crate) fn report(&self, event: super::WorkLeadDiagnostic) {
         if let Some(diagnostic) = self.diagnostic {
@@ -336,8 +389,19 @@ impl LeadRun {
         options: Vec<String>,
         part: Option<WorkPartId>,
     ) -> Result<Option<String>, WorkError> {
+        self.ask_with(purpose, prompt, options, part, None).await
+    }
+    /// A question whose step carries a local fact: the folder it asks for.
+    pub(crate) async fn ask_with(
+        &self,
+        purpose: WorkAskPurposeV1,
+        prompt: String,
+        options: Vec<String>,
+        part: Option<WorkPartId>,
+        local: Option<WorkLocalStepV1>,
+    ) -> Result<Option<String>, WorkError> {
         self.activity(WorkActivityV1::WaitingForHuman);
-        let step = self.step(
+        let mut step = self.step(
             WorkStepKindV1::Ask {
                 prompt,
                 options,
@@ -347,6 +411,7 @@ impl LeadRun {
             WorkStepStatus::Running,
             part,
         );
+        step.local = local.map(Box::new);
         let id = self.begin(step, vec![]).await?;
         let waiting = self.wait();
         let since = Instant::now();

@@ -16,6 +16,8 @@ tools: [create, revise, web_search, finish]
 - No document restating the diagram. Never sentences in sheet cells.
 
 ## Comparing providers for an existing design
-- Read the diagram first (read_canvas with its id). Revise it: mark the recommended provider on each node it changes (vendor and a note such as "Cloudflare Workers"). Keep node ids so the person sees what changed.
-- Add one **sheet** comparing the providers: first column entity with each provider's logo host; yes_no columns for capabilities the design needs (checks, not sentences); money columns with currency for comparable prices; best set on the columns where lower or higher wins.
+- The design on the canvas is the subject; the person's own project is not, unless the request names it.
+- Current prices: one web_search per provider yourself, all in one turn. No parts, no lists of notes.
+- Read the diagram first (read_canvas with its id). Revise it in place, keeping its title: mark the recommended provider on each node it changes (vendor and a note such as "Cloudflare Workers"). Keep node ids so the person sees what changed. Never a second diagram.
+- Add one **sheet** comparing the providers: first column entity with each provider's logo host; yes_no columns for capabilities the design needs (checks, not sentences); money columns with currency for comparable prices; best set on the columns where lower or higher wins. An unknown price stays empty.
 - Reply with the recommendation and the reason in one sentence each.

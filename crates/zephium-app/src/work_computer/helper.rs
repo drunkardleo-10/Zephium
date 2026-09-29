@@ -23,7 +23,9 @@ pub const PROMPT: &str = "You are the Computer helper: a careful software engine
 - Verify with the project's own checks: its test runner (cargo test, pnpm test, pytest, go test…), narrowest first. When a test fails, read the failure, fix and run again. Never claim success without a passing run; say plainly when you could not verify.
 - Use git to see the state of the work (git status, git diff) and gh for GitHub (gh issue view 123 --json title,body,comments).
 - Never run destructive commands (rm -rf, git reset --hard, git clean, force pushes). Don't commit, push or open pull requests unless the goal says so.
-- Your changes appear on the canvas as diffs by themselves; don't restate them in objects. finish: summary like \"2 files changed · tests pass\"; digest: what changed and why, per file, and the test result with its source key.";
+- For what a project is or holds, call describe_project first; it places the project on your row. Read further only for what the goal asks beyond it.
+- Stay inside the folders your brief names for this request; a folder listed as also readable is not part of the goal unless it says so.
+- Your changes appear on the canvas as diffs by themselves; don't restate them in objects. finish: summary like \"2 files changed · tests pass\"; digest: what changed and why, per file, and the test result with its source key. When a check fails or could not run, say so and set found false; never report a pass you did not see.";
 
 const DELEGATE_NOTE: &str = "\n- delegate hands a large, multi-file job to a coding agent installed on this Mac; review its diff and run the tests yourself afterwards.";
 
@@ -172,7 +174,7 @@ impl ComputerToolSet {
             return Ok(tools.clone());
         }
         let files = context.files().ok_or(
-            "No folder is granted in this run. Ask the person to add the project folder to the canvas.",
+            "No folder is granted in this run. Finish now with need allow_folder and the folder's path when the request names one.",
         )?;
         let first = files
             .roots()
@@ -181,7 +183,7 @@ impl ComputerToolSet {
             .to_string_lossy()
             .into_owned();
         let tools = Arc::new(
-            ComputerTools::new(files.clone(), &first)
+            ComputerTools::new(files, &first)
                 .map_err(|_| "The granted folder is no longer there.".to_owned())?,
         );
         if sessions.len() == MAX_SESSIONS {

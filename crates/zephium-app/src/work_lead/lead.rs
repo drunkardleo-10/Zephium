@@ -34,12 +34,15 @@ const FLOOR_TOKENS: u32 = 24_000;
 const MAX_IDLE: u8 = 4;
 const MAX_FAILED_CALLS: u8 = 3;
 /// Conversation text past which older tool results are shortened.
-const CONVERSATION_CHARS: usize = 360_000;
+const CONVERSATION_CHARS: usize = 240_000;
 const KEEP_GOING: &str = "Keep going";
 /// The lead's own searches and page reads in one request; wide research
 /// goes to parts, which keep page text out of the lead's view.
 const LEAD_SEARCHES: usize = 12;
 const LEAD_READS: usize = 6;
+/// A part's own object stays compact; the lead composes the result.
+const PART_SHEET_ROWS: usize = 12;
+const PART_SHEET_COLUMNS: usize = 6;
 
 #[derive(Default)]
 struct LeadState {
@@ -209,6 +212,7 @@ where
             self.run.activity(WorkActivityV1::Planning);
             self.steers(&mut messages).await;
             compact(&mut messages);
+            let sizes = Sections::of(&system, &tools, &messages);
             let model = &self.models.lead;
             let request = WorkModelRequest {
                 model: model.entry.model.clone(),
@@ -266,6 +270,13 @@ where
                 calls: calls.len(),
                 tokens: usage.model_tokens,
                 cost_micro_usd: usage.cost_micro_usd,
+                input: u32::try_from(outcome.usage.input_tokens).unwrap_or(u32::MAX),
+                cached: u32::try_from(outcome.usage.cached_input_tokens).unwrap_or(u32::MAX),
+                output: u32::try_from(outcome.usage.output_tokens).unwrap_or(u32::MAX),
+                prompt_chars: sizes.prompt,
+                tools_chars: sizes.tools,
+                context_chars: sizes.context,
+                conversation_chars: sizes.conversation,
             });
             messages.push(WorkModelMessage::Assistant(outcome.assistant));
             if calls.is_empty() {
@@ -504,9 +515,16 @@ where
         let Some(kind) = args.get("kind").and_then(Value::as_str) else {
             return ("kind is required".into(), true);
         };
-        if helper && !matches!(kind, "picks" | "list" | "sheet" | "media") {
+        if helper && !matches!(kind, "picks" | "sheet") {
             return (
-                "A part places picks, a list, a sheet or media; the lead makes the result".into(),
+                "A part places at most one compact object, picks or a small sheet, and hands every other fact to the lead in finish's digest".into(),
+                true,
+            );
+        }
+        if !helper && kind == "project" {
+            return (
+                "A project object comes from describe_project, which reads the folder exactly"
+                    .into(),
                 true,
             );
         }
@@ -535,6 +553,30 @@ where
         }
         let canvas = objects::canvas(&projection, execution);
         let title = args.get("title").and_then(Value::as_str).unwrap_or("");
+        if helper {
+            if let Some(placed) = canvas
+                .iter()
+                .find(|o| o.in_this_run && o.artifact.part.is_some() && o.artifact.part == part)
+            {
+                return (
+                    format!(
+                        "Your part already placed its object ({}); put every other fact in finish's digest",
+                        placed.artifact.id
+                    ),
+                    true,
+                );
+            }
+        } else if let Some(existing) = objects::duplicate(&canvas, kind, title, part) {
+            self.run
+                .report(super::WorkLeadDiagnostic::ObjectRefused { reason: None });
+            return (
+                format!(
+                    "{kind} {} \"{}\" already covers this subject: revise it with revise (id {}) instead of placing a copy",
+                    existing.artifact.id, existing.artifact.title, existing.artifact.id
+                ),
+                true,
+            );
+        }
         let data = args.get("data").cloned().unwrap_or(Value::Null);
         let sources = strings(args.get("sources"));
         let proposed = match objects::propose(self.run, &canvas, kind, title, data, &sources, &[]) {
@@ -546,6 +588,26 @@ where
                 return (fault, true);
             }
         };
+        if helper {
+            if let zephium_core::work::artifact::WorkArtifactDataV1::Sheet {
+                columns, rows, ..
+            } = &proposed.data
+            {
+                if rows.len() > PART_SHEET_ROWS || columns.len() > PART_SHEET_COLUMNS {
+                    return (
+                        format!("A part's sheet is small: at most {PART_SHEET_ROWS} rows and {PART_SHEET_COLUMNS} columns; the rest goes to the lead in finish's digest"),
+                        true,
+                    );
+                }
+            }
+        }
+        if let Err(fault) =
+            objects::honest(&proposed.data, &honesty(&projection, execution, &proposed))
+        {
+            self.run
+                .report(super::WorkLeadDiagnostic::ObjectRefused { reason: None });
+            return (fault, true);
+        }
         match objects::publish(self.run, proposed, part, None).await {
             Ok(id) => {
                 if kind == "reply" {
@@ -581,6 +643,12 @@ where
                 true,
             );
         }
+        if kind == "project" {
+            return (
+                "A project object is an exact reading of its folder: call describe_project again to update it".into(),
+                true,
+            );
+        }
         if kind == "reply" && !target.in_this_run {
             return (
                 "A reply belongs to its own request: make a new reply for this one with create"
@@ -588,10 +656,18 @@ where
                 true,
             );
         }
+        // A revised object keeps its name unless its subject changed; what
+        // changed shows as its update, never as a longer title.
         let title = args
             .get("title")
             .and_then(Value::as_str)
-            .filter(|t| !t.trim().is_empty())
+            .map(str::trim)
+            .filter(|t| {
+                !t.is_empty()
+                    && !t
+                        .to_lowercase()
+                        .starts_with(&target.artifact.title.to_lowercase())
+            })
             .unwrap_or(&target.artifact.title)
             .to_owned();
         let data = args.get("data").cloned().unwrap_or(Value::Null);
@@ -613,6 +689,14 @@ where
                 return (fault, true);
             }
         };
+        if let Err(fault) = objects::honest(
+            &proposed.data,
+            &honesty(&projection, self.run.probe.execution(), &proposed),
+        ) {
+            self.run
+                .report(super::WorkLeadDiagnostic::ObjectRefused { reason: None });
+            return (fault, true);
+        }
         let part = target.in_this_run.then_some(target.artifact.part).flatten();
         match objects::publish(self.run, proposed, part, Some(target.artifact.id)).await {
             Ok(new) => {
@@ -924,6 +1008,45 @@ where
     }
 }
 
+/// What a proposed object is checked against: its sources, and the parts
+/// of this request that could not do their job.
+fn honesty(
+    projection: &WorkRuntimeProjection,
+    execution: WorkExecutionId,
+    proposed: &objects::Proposed,
+) -> objects::Honesty {
+    let mut failed = Vec::new();
+    if let Some(run) = projection.executions.iter().find(|e| e.id == execution) {
+        for part in run.parts.iter().filter(|p| {
+            p.need.is_some()
+                || matches!(
+                    p.state,
+                    zephium_core::work::parts::WorkPartStateV1::Failed
+                        | zephium_core::work::parts::WorkPartStateV1::Stopped
+                )
+        }) {
+            failed.push(part.title.to_lowercase());
+            if let Some(service) = &part.service {
+                if let Some(host) = &service.host {
+                    let host = host.trim_start_matches("www.").trim_start_matches("app.");
+                    if let Some(name) = host.split('.').next() {
+                        failed.push(name.to_lowercase());
+                    }
+                }
+                if let Some(connection) = &service.connection {
+                    failed.push(connection.to_lowercase());
+                }
+            }
+        }
+    }
+    failed.sort();
+    failed.dedup();
+    objects::Honesty {
+        sourced: !proposed.evidence.is_empty(),
+        failed,
+    }
+}
+
 fn publish_fault(error: WorkError) -> String {
     match error {
         WorkError::Capacity => {
@@ -963,10 +1086,38 @@ pub(crate) fn skill_label(name: &str) -> String {
     }
 }
 
-/// Shortens older tool results once the conversation grows past its budget;
-/// the canvas keeps everything, only the model's view shrinks.
-fn compact(messages: &mut [WorkModelMessage]) {
-    let size = |m: &WorkModelMessage| match m {
+/// What a turn sends, by section, in characters: the stable prompt, the tool
+/// definitions, the request's context and the conversation since.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Sections {
+    pub prompt: u32,
+    pub tools: u32,
+    pub context: u32,
+    pub conversation: u32,
+}
+impl Sections {
+    pub(crate) fn of(
+        system: &[WorkModelSystemBlock],
+        tools: &[WorkModelTool],
+        messages: &[WorkModelMessage],
+    ) -> Self {
+        let chars = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        Self {
+            prompt: chars(system.iter().map(|b| b.text.len()).sum()),
+            tools: chars(
+                tools
+                    .iter()
+                    .map(|t| t.name.len() + t.description.len() + t.schema.to_string().len())
+                    .sum(),
+            ),
+            context: chars(messages.first().map(size).unwrap_or(0)),
+            conversation: chars(messages.iter().skip(1).map(size).sum()),
+        }
+    }
+}
+
+fn size(message: &WorkModelMessage) -> usize {
+    match message {
         WorkModelMessage::User(parts) | WorkModelMessage::Assistant(parts) => parts
             .iter()
             .map(|p| match p {
@@ -978,7 +1129,53 @@ fn compact(messages: &mut [WorkModelMessage]) {
         WorkModelMessage::ToolResults(results) => {
             results.iter().map(|r| r.content.len()).sum::<usize>()
         }
+    }
+}
+
+/// A tool result the model has used and moved past: large ones give way to
+/// a stub that keeps their source keys.
+const USED_RESULT_CHARS: usize = 1_200;
+/// Used results are dropped together once this much has gathered, so the
+/// cached prefix breaks once per batch rather than every turn.
+const USED_BATCH_CHARS: usize = 12_000;
+/// Tool results the model still works from: the newest ones stay whole.
+const FRESH_RESULTS: usize = 2;
+const STUB: &str = "[Used; dropped to keep the conversation small.";
+
+/// Keeps the conversation small without moving the cached prefix every
+/// turn: large tool results the model has moved past are replaced together
+/// by a stub with their source keys, and past the hard budget the older
+/// results are shortened too. The canvas keeps everything.
+fn compact(messages: &mut [WorkModelMessage]) {
+    let results: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| matches!(m, WorkModelMessage::ToolResults(_)))
+        .map(|(i, _)| i)
+        .collect();
+    let used = &results[..results.len().saturating_sub(FRESH_RESULTS)];
+    let droppable = |result: &WorkModelToolResult| {
+        result.content.len() > USED_RESULT_CHARS && !result.content.starts_with(STUB)
     };
+    let waiting: usize = used
+        .iter()
+        .filter_map(|i| match &messages[*i] {
+            WorkModelMessage::ToolResults(results) => Some(results),
+            _ => None,
+        })
+        .flatten()
+        .filter(|r| droppable(r))
+        .map(|r| r.content.len())
+        .sum();
+    if waiting >= USED_BATCH_CHARS {
+        for index in used {
+            if let WorkModelMessage::ToolResults(results) = &mut messages[*index] {
+                for result in results.iter_mut().filter(|r| droppable(r)) {
+                    result.content = stub(&result.content);
+                }
+            }
+        }
+    }
     let mut total: usize = messages.iter().map(size).sum();
     let keep = messages.len().saturating_sub(6);
     for message in messages[..keep].iter_mut() {
@@ -997,6 +1194,23 @@ fn compact(messages: &mut [WorkModelMessage]) {
             }
         }
     }
+}
+
+/// A used result's stub: its first line and the keys of its sources.
+fn stub(content: &str) -> String {
+    let first = clip(content.lines().next().unwrap_or(""), 160);
+    let keys: Vec<String> = content
+        .lines()
+        .filter(|line| line.starts_with("[s"))
+        .filter_map(|line| line.split(']').next().map(|key| format!("{key}]")))
+        .take(12)
+        .collect();
+    let mut out = format!("{STUB} It began: {first}");
+    if !keys.is_empty() {
+        out.push_str(&format!(" Its sources: {}.", keys.join(" ")));
+    }
+    out.push_str(" Search, read or read_canvas again if you need it.]");
+    out
 }
 
 /// Polls every future each wake and returns once all have settled.

@@ -466,3 +466,288 @@ fn noun(kind: &str) -> &'static str {
         _ => "object",
     }
 }
+
+/// Words that say a value was not found or not checked.
+const NOT_FOUND: [&str; 12] = [
+    "not verified",
+    "unverified",
+    "could not",
+    "couldn't",
+    "can't access",
+    "cannot access",
+    "not retrieved",
+    "not captured",
+    "not obtained",
+    "not found",
+    "lookup unavailable",
+    "no exact",
+];
+/// What a figure says when it has no value.
+const NO_VALUE: [&str; 5] = [
+    "unknown",
+    "unavailable",
+    "not available",
+    "n/a",
+    "none found",
+];
+/// The agent's own unfinished work, as a to-do.
+const REDO: [&str; 9] = [
+    "retry",
+    "try again",
+    "recheck",
+    "check again",
+    "rerun",
+    "sign in",
+    "grant",
+    "allow access",
+    "give access",
+];
+/// Words that claim a finished or checked result.
+const CLAIMS: [&str; 7] = [
+    "complete",
+    "verified",
+    "confirmed",
+    "all set",
+    "ready",
+    "success",
+    "done",
+];
+/// Tags that stand in for the one recommended mark.
+const PICK_TAGS: [&str; 5] = [
+    "top pick",
+    "best pick",
+    "our pick",
+    "recommended",
+    "best choice",
+];
+
+fn says(text: &str, words: &[&str]) -> bool {
+    let text = text.to_lowercase();
+    words.iter().any(|word| {
+        text.match_indices(word).any(|(at, _)| {
+            let before = text[..at].chars().next_back();
+            let after = text[at + word.len()..].chars().next();
+            !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+        })
+    })
+}
+
+/// What the run knows when an object is proposed.
+pub(crate) struct Honesty {
+    /// The object rests on sources.
+    pub sourced: bool,
+    /// Names of this request's parts that could not do their job, and
+    /// their services, in lower case: "slack", "flights".
+    pub failed: Vec<String>,
+}
+
+/// Refuses an object that stands for a failure or claims more than the run
+/// found: a figure or pick that says it was not found, a to-do to retry the
+/// agent's own work, a recommended pick without sources, or a headline that
+/// calls the result complete while a part failed.
+pub(crate) fn honest(data: &WorkArtifactDataV1, run: &Honesty) -> Result<(), String> {
+    match data {
+        WorkArtifactDataV1::Reply {
+            headline, figures, ..
+        } => {
+            if let Some(at) = figures.iter().position(|f| {
+                says(&f.value, &NOT_FOUND)
+                    || says(&f.value, &NO_VALUE)
+                    || says(&f.label, &NOT_FOUND)
+            }) {
+                return Err(format!("reply: figure {} stands for something that was not found; a figure shows a value that was found. Leave it out and say what is missing in the text", at + 1));
+            }
+            if !run.failed.is_empty() && says(headline, &CLAIMS) {
+                return Err("reply: the headline calls the result finished or checked while a part could not do its job; say what was found".into());
+            }
+        }
+        WorkArtifactDataV1::Picks { items, .. } => {
+            for (at, item) in items.iter().enumerate() {
+                let mut text = vec![item.name.as_str()];
+                text.extend(item.subtitle.as_deref());
+                text.extend(item.price.as_ref().map(|p| p.display.as_str()));
+                text.extend(item.facts.iter().map(|f| f.value.as_str()));
+                if text.iter().any(|t| says(t, &NOT_FOUND)) {
+                    return Err(format!("picks: item {} says it could not be found or checked; picks hold only things that were found. Leave it out", at + 1));
+                }
+                let tagged = item.tags.iter().any(|tag| says(tag, &PICK_TAGS));
+                if (item.recommended || tagged) && !run.sourced {
+                    return Err(format!("picks: item {} is marked recommended without sources; recommend only what your sources show, and never with a tag", at + 1));
+                }
+                if tagged {
+                    return Err(format!("picks: item {} carries a recommendation as a tag; set recommended on it instead", at + 1));
+                }
+            }
+        }
+        WorkArtifactDataV1::List { items, .. } => {
+            let about_failure = |title: &str| {
+                let lower = title.to_lowercase();
+                (says(title, &REDO) || says(title, &NOT_FOUND))
+                    && run.failed.iter().any(|name| lower.contains(name.as_str()))
+            };
+            if let Some(at) = items.iter().position(|item| about_failure(&item.title)) {
+                return Err(format!("list: item {} is about work that could not be done; a list holds what was found, and a part's failure shows on its own row with its fix", at + 1));
+            }
+        }
+        WorkArtifactDataV1::Sheet { columns, rows, .. } => {
+            for (at, row) in rows.iter().enumerate() {
+                let failed = row.cells.iter().zip(columns).any(|(cell, column)| {
+                    column.kind == zephium_core::work::objects::WorkSheetColumnKindV1::Text
+                        && says(cell, &NOT_FOUND)
+                });
+                if failed {
+                    return Err(format!("sheet: row {} has a cell that says a value was not found; an unknown cell stays empty", at + 1));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Significant words of a title, for telling whether two objects are about
+/// the same subject.
+fn subject(title: &str) -> Vec<String> {
+    const SMALL: [&str; 16] = [
+        "a", "an", "the", "of", "for", "and", "to", "in", "on", "with", "your", "my", "by", "vs",
+        "new", "updated",
+    ];
+    let mut words: Vec<String> = title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let w = w.to_lowercase();
+            match w.strip_suffix('s') {
+                Some(stem) if stem.len() > 2 => stem.to_owned(),
+                _ => w,
+            }
+        })
+        .filter(|w| !SMALL.contains(&w.as_str()))
+        .collect();
+    words.sort();
+    words.dedup();
+    words
+}
+
+/// Two titles name the same subject when most words of the shorter one are
+/// in the longer one.
+pub(crate) fn same_subject(a: &str, b: &str) -> bool {
+    let (a, b) = (subject(a), subject(b));
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    if short.is_empty() {
+        return false;
+    }
+    let shared = short.iter().filter(|w| long.contains(w)).count();
+    shared * 3 >= short.len() * 2
+}
+
+/// A current object of the same kind about the same subject: a follow-up
+/// revises it instead of placing a copy. Replies belong to their request,
+/// and the exact records a part's tools made stay as they are.
+pub(crate) fn duplicate<'a>(
+    objects: &'a [CanvasObject],
+    kind: &str,
+    title: &str,
+    part: Option<WorkPartId>,
+) -> Option<&'a CanvasObject> {
+    if matches!(kind, "reply" | "diff" | "project" | "media") {
+        return None;
+    }
+    objects.iter().find(|object| {
+        object.current
+            && object.artifact.data.kind_name() == kind
+            && (object.artifact.part.is_none() || object.artifact.part != part)
+            && same_subject(&object.artifact.title, title)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_follow_up_about_the_same_subject_is_the_same_object() {
+        assert!(same_subject(
+            "Modern AI SaaS architecture",
+            "Modern AI SaaS architecture — provider recommendation"
+        ));
+        assert!(same_subject(
+            "Warsaw–San Francisco flights",
+            "Flights Warsaw to San Francisco"
+        ));
+        assert!(!same_subject(
+            "Modern browser architecture",
+            "AI coding agent architecture"
+        ));
+        assert!(!same_subject("Homes near YC", "Flights to SFO"));
+    }
+
+    #[test]
+    fn failures_never_stand_as_results() {
+        let honest_run = Honesty {
+            sourced: true,
+            failed: vec!["slack".into(), "flights".into()],
+        };
+        let reply: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "reply", "headline": "Airfare recheck complete", "text": "The lookup failed.",
+            "figures": [{"label": "Exact-date fare", "value": "Not verified"}]
+        }))
+        .unwrap();
+        assert!(honest(&reply, &honest_run)
+            .unwrap_err()
+            .contains("figure 1"));
+        let headline: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "reply", "headline": "Airfare recheck complete", "text": "No fare was found."
+        }))
+        .unwrap();
+        assert!(honest(&headline, &honest_run).is_err());
+        assert!(honest(
+            &headline,
+            &Honesty {
+                sourced: true,
+                failed: vec![]
+            }
+        )
+        .is_ok());
+        let said: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "reply", "headline": "I can't access Slack yet", "text": "Sign in to Slack and ask again."
+        }))
+        .unwrap();
+        assert!(honest(&said, &honest_run).is_ok());
+        let todo: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "list", "style": "todo", "items": [{"title": "Retry the Slack check"}]
+        }))
+        .unwrap();
+        assert!(honest(&todo, &honest_run).is_err());
+        let work: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "list", "style": "todo", "items": [{"title": "Retry the failed payment for invoice 12"},
+            {"title": "Unblock Ana on the deck"}]
+        }))
+        .unwrap();
+        assert!(honest(&work, &honest_run).is_ok());
+        let pick: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "picks", "facet": "flight", "items": [{"name": "WAW → SFO", "recommended": true,
+            "price": {"display": "$869 route-wide signal"},
+            "facts": [{"label": "Fare", "value": "Exact-date fare not verified", "kind": "partial"}]}]
+        }))
+        .unwrap();
+        assert!(honest(&pick, &honest_run).is_err());
+        let unsourced: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "picks", "facet": "service", "items": [{"name": "Hetzner", "recommended": true}]
+        }))
+        .unwrap();
+        assert!(honest(
+            &unsourced,
+            &Honesty {
+                sourced: false,
+                failed: vec![]
+            }
+        )
+        .is_err());
+        let tagged: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "picks", "facet": "service", "items": [{"name": "Hetzner", "tags": ["Top pick"]}]
+        }))
+        .unwrap();
+        assert!(honest(&tagged, &honest_run).is_err());
+    }
+}
