@@ -665,18 +665,20 @@ impl WorkAttemptProbe {
         let mut conflicts = 0;
         loop {
             let state = self.runtime_projection().await?;
-            let submitted = self.handle.submit_work_document(
-                WorkRequest::RuntimeCommand {
-                    id: self.work,
-                    expected: state.work.revision,
-                    command: WorkCommandId::generate(),
-                    intent: WorkRuntimeIntent::Cancel {
-                        execution: self.execution,
-                        intervention: None,
-                    },
+            let command = WorkRequest::RuntimeCommand {
+                id: self.work,
+                expected: state.work.revision,
+                command: WorkCommandId::generate(),
+                intent: WorkRuntimeIntent::Cancel {
+                    execution: self.execution,
+                    intervention: None,
                 },
-                Some(self.profile),
-            )?;
+            };
+            let submitted = admitted(|| {
+                self.handle
+                    .submit_work_document(command.clone(), Some(self.profile))
+            })
+            .await?;
             let reply = tokio::time::timeout(Duration::from_secs(10), submitted)
                 .await
                 .map_err(|_| WorkError::OutcomeUnknown)?;
@@ -1059,16 +1061,43 @@ async fn request(
     profile: ProfileId,
     request: WorkRequest,
 ) -> Result<WorkReply, WorkError> {
-    let response = tokio::time::timeout(
-        Duration::from_secs(10),
-        handle.submit_owned_work_runtime(request, profile)?,
-    )
-    .await
-    .map_err(|_| WorkError::OutcomeUnknown)??;
+    let submitted = admitted(|| handle.submit_owned_work_runtime(request.clone(), profile)).await?;
+    let response = tokio::time::timeout(Duration::from_secs(10), submitted)
+        .await
+        .map_err(|_| WorkError::OutcomeUnknown)??;
     if response.profile != profile {
         return Err(WorkError::ProfileUnavailable);
     }
     Ok(response.reply)
+}
+/// The store admits a few Work documents at a time across the app. A
+/// refusal at that bound sent nothing: a run's reads and writes wait for a
+/// place in line instead of failing their step.
+pub(crate) async fn admitted<T>(
+    mut submit: impl FnMut() -> Result<T, WorkError>,
+) -> Result<T, WorkError> {
+    const WAIT: Duration = Duration::from_secs(8);
+    let started = Instant::now();
+    let mut delay = Duration::from_millis(10);
+    loop {
+        match submit() {
+            Err(WorkError::Capacity) if started.elapsed() < WAIT => {
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_millis(200));
+            }
+            result => {
+                let waited = started.elapsed();
+                if result.is_err() || waited >= Duration::from_millis(500) {
+                    crate::work_trace::record(format_args!(
+                        "work: phase=store_admission waited_ms={} refused={:?}",
+                        waited.as_millis(),
+                        result.as_ref().err()
+                    ));
+                }
+                return result;
+            }
+        }
+    }
 }
 pub(crate) fn decision_context(
     work: &WorkSnapshot,

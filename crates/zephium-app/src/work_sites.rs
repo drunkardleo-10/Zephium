@@ -392,12 +392,13 @@ async fn call(
     profile: ProfileId,
     set: Option<(String, Option<WorkSiteAccessV1>)>,
 ) -> Result<Vec<WorkSiteEntryV1>, WorkError> {
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        handle.submit_work_document(WorkRequest::SiteAccess { set }, Some(profile))?,
-    )
-    .await
-    .map_err(|_| WorkError::Unavailable)??;
+    let submitted = crate::work_runtime::admitted(|| {
+        handle.submit_work_document(WorkRequest::SiteAccess { set: set.clone() }, Some(profile))
+    })
+    .await?;
+    let response = tokio::time::timeout(std::time::Duration::from_secs(10), submitted)
+        .await
+        .map_err(|_| WorkError::Unavailable)??;
     match response.reply {
         WorkReply::SiteAccess(entries) if response.profile == profile => Ok(entries),
         _ => Err(WorkError::Invalid),
