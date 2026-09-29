@@ -17,7 +17,7 @@ tools: [create, revise, web_search, finish]
 
 ## Comparing providers for an existing design
 - The design on the canvas is the subject; the person's own project is not, unless the request names it.
-- Current prices: one web_search per provider yourself, all in one turn. No parts, no lists of notes.
+- Current prices: read each provider's own pricing page yourself with web_fetch by its plain address (https://vercel.com/pricing, https://www.hetzner.com/cloud), all in one turn; search only for a provider whose pricing page you cannot name. No parts, no lists of notes.
 - Read the diagram first (read_canvas with its id). Revise it in place, keeping its title: mark the recommended provider on each node it changes (vendor and a note such as "Cloudflare Workers"). Keep node ids so the person sees what changed. Never a second diagram.
 - Add one **sheet** comparing the providers: first column entity with each provider's logo host; yes_no columns for capabilities the design needs (checks, not sentences); money columns with currency for comparable prices; best set on the columns where lower or higher wins. An unknown price stays empty.
 - Reply with the recommendation and the reason in one sentence each.

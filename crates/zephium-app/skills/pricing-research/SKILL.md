@@ -6,8 +6,8 @@ tools: [web_search, web_fetch, create, finish]
 # Pricing research
 
 ## Gather
-- The competitors the request names, else the four or five that matter (at most five: each read is one of your six), found with one web_search.
-- Read each one's own pricing page yourself with web_fetch by its plain address (https://linear.app/pricing), all in one turn. A page that does not show prices gets one web_search by name and nothing more; a product that no longer sells is left out of the sheet and named in the reply; a price from anywhere but the vendor's own page is marked as such in the sheet's note.
+- The competitors the request names, else the five or six that matter, found with one web_search.
+- Read each one's own pricing page yourself with web_fetch by its plain address (https://linear.app/pricing), all in one turn. A page that does not show prices gets one web_search by name and nothing more (your searches are few); a product that no longer sells is left out of the sheet and named in the reply; a price from anywhere but the vendor's own page is marked as such in the sheet's note.
 - No parts: a pricing page is public and reads in one call.
 
 ## Result

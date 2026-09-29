@@ -8,7 +8,7 @@ tools: [start_part, web_search, create, finish]
 ## Gather
 - Products from a named store: one browser part on that store with `search` {query} (the words a person would type in the store's search) and records for name, price, rating, url and up to three image_url fields. The helper starts on the store's results page; the product page is the source of prices and photos, and search snippets never stand in for a displayed price.
 - Options the person names on different sites: one browser part per site only when prices and photos are needed there.
-- Services, providers or tools: one web_search per option yourself, in one turn, for current prices and limits; never a part per option.
+- Services, providers or tools: read each option's own pricing page yourself with web_fetch by its plain address (https://vercel.com/pricing, https://www.hetzner.com/cloud), all in one turn; search only for an option whose pricing page you cannot name, and never a part per option.
 - Providers for a design already on the canvas: follow system-design's "Comparing providers".
 
 ## Result
