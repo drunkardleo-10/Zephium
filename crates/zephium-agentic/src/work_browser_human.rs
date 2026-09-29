@@ -30,9 +30,23 @@ pub fn same_work_human_site(
     }
     domain(source)
         .zip(domain(target))
-        .is_some_and(|(source, target)| {
-            source == target || brand_family(source.as_bytes(), target.as_bytes()).is_some()
+        .is_some_and(|(source_domain, target_domain)| {
+            source_domain == target_domain
+                || brand_family(source_domain.as_bytes(), target_domain.as_bytes()).is_some()
+                || shared_sign_in(source, target_domain.as_bytes())
+                || shared_sign_in(target, source_domain.as_bytes())
         })
+}
+
+/// Sites whose session passes through their owner's sign-in host: a
+/// signed-in YouTube page loads through accounts.google.com and back. Only
+/// that exact host joins the site, never the owner's other pages.
+const SHARED_SIGN_IN: [(&str, &str); 1] = [("youtube.com", "accounts.google.com")];
+
+fn shared_sign_in(host: &str, domain: &[u8]) -> bool {
+    SHARED_SIGN_IN
+        .iter()
+        .any(|(site, sign_in)| host == *sign_in && domain == site.as_bytes())
 }
 
 /// Brands whose one site spans country domains: kayak.com and kayak.pl,
@@ -420,6 +434,24 @@ mod tests {
             ("https://kayak.com/", "https://kayak.github.io/", false),
             ("https://example.com/", "https://example.pl/", false),
             ("https://kayak.com/", "http://kayak.pl/", false),
+            // A signed-in YouTube page passes through Google's sign-in host,
+            // and only that host.
+            (
+                "https://www.youtube.com/watch?v=1",
+                "https://accounts.google.com/ServiceLogin",
+                true,
+            ),
+            (
+                "https://accounts.google.com/CheckCookie",
+                "https://www.youtube.com/",
+                true,
+            ),
+            (
+                "https://www.youtube.com/",
+                "https://mail.google.com/",
+                false,
+            ),
+            ("https://www.youtube.com/", "https://www.google.com/", false),
         ] {
             assert_eq!(
                 same_work_human_site(
