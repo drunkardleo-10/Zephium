@@ -134,7 +134,8 @@ impl LeadRun {
             diagnostic,
         }
     }
-    /// The person chose this connection for the run.
+    /// The person chose this connection for the run, by the answer that
+    /// uses it ("Use Slack").
     pub(crate) fn accept_connection(&self, connection: &str) {
         let mut accepted = self
             .accepted

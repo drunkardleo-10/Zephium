@@ -369,13 +369,13 @@ impl zephium_core::work::model::WorkModelClient for Scripted {
             (false, false) => (
                 "browse",
                 serde_json::json!({"start": start, "goal": goal, "records": {
-                    "title": "Results", "max_items": 8, "columns": [
-                        {"name": "price", "value": {"kind": "text"}, "required": false, "extraction": "verbatim"},
-                        {"name": "rating", "value": {"kind": "text"}, "required": false, "extraction": "verbatim"},
-                        {"name": "details", "value": {"kind": "text"}, "required": false, "extraction": "generate"},
-                        {"name": "url", "value": {"kind": "url"}, "required": false, "extraction": "generate"},
-                        {"name": "photo", "value": {"kind": "image_url"}, "required": false, "extraction": "generate"}
-                    ]}}),
+                "title": "Results", "max_items": 8, "columns": [
+                    {"name": "price", "value": {"kind": "text"}, "required": false, "extraction": "verbatim"},
+                    {"name": "rating", "value": {"kind": "text"}, "required": false, "extraction": "verbatim"},
+                    {"name": "details", "value": {"kind": "text"}, "required": false, "extraction": "generate"},
+                    {"name": "url", "value": {"kind": "url"}, "required": false, "extraction": "generate"},
+                    {"name": "photo", "value": {"kind": "image_url"}, "required": false, "extraction": "generate"}
+                ]}}),
             ),
             (false, true) => (
                 "finish",
@@ -399,7 +399,16 @@ impl zephium_core::work::model::WorkModelClient for Scripted {
     }
 }
 
-pub(super) const LEAD_SCENARIOS: [LeadScenario; 11] = [
+pub(super) const LEAD_SCENARIOS: [LeadScenario; 12] = [
+    // A day planned from sources that need no real profile: the person's
+    // Zephium tasks, seeded for today; the day's sources are asked once.
+    LeadScenario {
+        name: "day",
+        requests: &["Plan my day"],
+        answer: "Use these",
+        folder: false,
+        site: None,
+    },
     LeadScenario {
         name: "flight",
         requests: &["Find me a flight WAW→SFO on 5 January 2027"],
@@ -483,6 +492,86 @@ pub(super) const LEAD_SCENARIOS: [LeadScenario; 11] = [
         site: None,
     },
 ];
+
+/// Today's tasks of a person with a launch this week, in the probe's own
+/// store: due today, one overdue, one at a set time.
+async fn seed_tasks(
+    handle: &zephium_app::Handle,
+    profile: zephium_core::ids::ProfileId,
+) -> Result<(), &'static str> {
+    use zephium_core::resources::*;
+    let today = zephium_app::work_personal::local_day();
+    let tasks: [(&str, &str, Option<&str>, TaskPriority); 4] = [
+        (
+            "Finish the launch post draft",
+            "Blog post for Thursday's launch; needs the pricing section",
+            None,
+            TaskPriority::High,
+        ),
+        (
+            "Review Marta's onboarding PR",
+            "She is blocked until it is reviewed",
+            Some("11:00"),
+            TaskPriority::High,
+        ),
+        (
+            "Call the accountant about Q3 VAT",
+            "",
+            Some("15:30"),
+            TaskPriority::Medium,
+        ),
+        (
+            "Book flights for the Berlin offsite",
+            "Offsite is 12 to 14 November",
+            None,
+            TaskPriority::None,
+        ),
+    ];
+    for (index, (title, description, time, priority)) in tasks.into_iter().enumerate() {
+        let command = ResourceCommand {
+            version: 1,
+            request_id: format!("probe-day-task-{index:0>8}"),
+            intent: ResourceIntent::Create {
+                draft: ResourceDraft {
+                    title: title.into(),
+                    pinned: false,
+                    content: ResourceContent::Task {
+                        details: TaskDetails {
+                            priority,
+                            ..Default::default()
+                        },
+                        description: description.into(),
+                        completed: false,
+                        due_date: Some(today.clone()),
+                        due_time: time.map(str::to_owned),
+                        status: TaskStatus::Open,
+                        assignee: TaskActor::User,
+                        origin: TaskActor::User,
+                        context: None,
+                        sort_key: None,
+                        work: None,
+                    },
+                    related: vec![],
+                },
+            },
+        };
+        let receiver = handle.resource_call(
+            profile,
+            ResourceCall::Mutate {
+                command: Box::new(command),
+            },
+        );
+        let reply =
+            tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(10)))
+                .await
+                .map_err(|_| "seed_tasks")?
+                .map_err(|_| "seed_tasks")?;
+        if !matches!(reply.response, ResourceResponse::Applied { .. }) {
+            return Err("seed_tasks");
+        }
+    }
+    Ok(())
+}
 
 /// A small throwaway repository under the home folder: a web app with a
 /// manifest, sources, a README and one uncommitted change.
@@ -860,6 +949,9 @@ pub(super) async fn lead_workflow(
         .map_err(|_| "search_config")?,
     )
     .map_err(|_| "search_provider")?;
+    if scenario.name == "day" {
+        seed_tasks(handle, profile).await?;
+    }
     let person = tokio::spawn(stand_in(handle.clone(), profile, work, scenario.answer));
     let keys = Arc::new(Mutex::new(keys));
     let callback = handle.callback_handle();

@@ -92,8 +92,11 @@ pub(crate) fn spec(args: &Value) -> Result<PartSpec, String> {
     let service = text_arg(args, "service").and_then(|service| {
         let host = service
             .trim_start_matches("https://")
+            .trim_start_matches("http://")
             .trim_start_matches("www.")
-            .trim_end_matches('/')
+            .split('/')
+            .next()
+            .unwrap_or_default()
             .to_ascii_lowercase();
         if public_host(&host) {
             Some(WorkPartServiceV1 {
@@ -718,7 +721,7 @@ where
                         })
                 })
             });
-        let asked_for = self.run.accepted_connection(&offer.connection)
+        let asked_for = self.run.accepted_connection(&offer.yes)
             || self
                 .objective
                 .to_lowercase()

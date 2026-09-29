@@ -941,16 +941,15 @@ where
         if !self.name_work {
             return Ok(None);
         }
-        let Some(raw) = value.and_then(Value::as_str) else {
-            return Ok(None);
-        };
-        let title = super::call::plain(raw.trim())
-            .trim_end_matches(['.', '!', '?'])
-            .trim()
-            .to_owned();
-        if title.is_empty() {
-            return Ok(None);
-        }
+        let title = value
+            .and_then(Value::as_str)
+            .map(|raw| {
+                super::call::plain(raw.trim())
+                    .trim_end_matches(['.', '!', '?'])
+                    .trim()
+                    .to_owned()
+            })
+            .unwrap_or_default();
         if validate_work_title(&title).is_ok() {
             return Ok(Some(title));
         }
@@ -959,6 +958,9 @@ where
             return Ok(None);
         }
         state.title_refused = true;
+        if title.is_empty() {
+            return Err("Not finished: this is the work's first request, so finish names the work with title, a noun phrase of at most five words such as Compiler learning plan".into());
+        }
         Err(format!(
             "Not finished: title has {} words and {} characters; the limit is {MAX_WORK_TITLE_WORDS} words and {MAX_WORK_TITLE_CHARS} characters, one line: a noun phrase such as Compiler learning plan",
             title.split_whitespace().count(),

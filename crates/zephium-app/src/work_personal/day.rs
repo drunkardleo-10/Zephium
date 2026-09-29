@@ -122,7 +122,7 @@ fn source_name(source: &DaySource) -> String {
 }
 
 /// The person's connection for a daily app, when they added one.
-fn connection(context: &LeadToolContext<'_>, key: &str) -> Option<String> {
+fn offer(context: &LeadToolContext<'_>, key: &str) -> Option<crate::work_lead::route::Offer> {
     let servers = crate::work_connections::store::shared()
         .and_then(|store| store.servers(&context.profile().to_string()).ok())
         .unwrap_or_default();
@@ -131,7 +131,9 @@ fn connection(context: &LeadToolContext<'_>, key: &str) -> Option<String> {
         crate::work_connections::helper::shared().gh_ready(),
         &servers,
     )
-    .map(|offer| offer.connection)
+}
+fn connection(context: &LeadToolContext<'_>, key: &str) -> Option<String> {
+    offer(context, key).map(|offer| offer.connection)
 }
 
 /// Daily apps the person has a connection for or visited lately, by host
@@ -264,10 +266,11 @@ pub(crate) async fn day_sources(
     let mut sources = Vec::new();
     for key in keys {
         let Some(app) = app(key) else { continue };
-        let connection = connection(&context, key);
-        if let Some(connection) = &connection {
-            context.run.accept_connection(connection);
+        let offer = offer(&context, key);
+        if let Some(offer) = &offer {
+            context.run.accept_connection(&offer.yes);
         }
+        let connection = offer.map(|offer| offer.connection);
         sources.push(match connection {
             Some(connection) => json!({
                 "name": app.name, "part": {"title": app.name, "helper": "connection", "service": connection},
@@ -297,7 +300,7 @@ pub(crate) async fn day_sources(
 }
 
 /// Today in the person's own time zone, as `YYYY-MM-DD`.
-pub(crate) fn local_day() -> String {
+pub fn local_day() -> String {
     #[cfg(unix)]
     {
         let now = std::time::SystemTime::now()

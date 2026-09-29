@@ -149,6 +149,11 @@ impl<'a> LeadToolContext<'a> {
     pub fn node(&self) -> WorkPlanNodeId {
         self.run.probe.node()
     }
+    /// The person chose the connection this answer uses ("Use Slack") for
+    /// the run, in a broader question: it is not asked again.
+    pub fn accepted(&self, yes: &str) -> bool {
+        self.run.accepted_connection(yes)
+    }
     /// The part this call works for; steps it records carry it.
     pub fn part(&self) -> Option<WorkPartId> {
         self.part

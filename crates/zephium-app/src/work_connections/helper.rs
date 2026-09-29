@@ -373,6 +373,10 @@ impl ConnectionHost for Bridge<'_> {
             if let Some(answer) = self.answers.lock().ok().and_then(|a| a.get(&key).cloned()) {
                 return Ok(answer);
             }
+            // The person already chose this connection for the run.
+            if let Some(yes) = options.first().filter(|yes| self.context.accepted(yes)) {
+                return Ok(Some((*yes).to_owned()));
+            }
             // A work asks once: an answer given in an earlier run stands.
             let earlier = self
                 .context

@@ -8,6 +8,7 @@ mod tools;
 
 use std::time::Duration;
 
+pub use day::local_day;
 pub use tools::PersonalTools;
 use zephium_core::{
     ids::ProfileId,
