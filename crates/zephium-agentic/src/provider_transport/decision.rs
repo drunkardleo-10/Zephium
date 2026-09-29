@@ -9,18 +9,18 @@ use std::time::SystemTime;
 use zephium_core::work::{planning::WorkPlanningError, runtime::WorkExecutionLimits};
 use zephium_decision::{DecisionRequest, DecisionResponse, DecisionUsage, MAX_RESPONSE_BYTES};
 
+mod link;
 mod projection;
 mod read;
 mod rows;
 mod search;
-mod link;
-pub(super) use search::SearchDecisionRanking;
 pub use projection::{
     DecisionActionSelection, DecisionObservation, DecisionObservationAnswers,
     DecisionObservationFallback, DecisionOperation, DecisionProjectionError,
 };
 pub use read::{untracked_document_address, DecisionLocatedRead, DecisionReadSelection};
 pub use rows::DecisionRowDiscovery;
+pub(super) use search::SearchDecisionRanking;
 
 const JEV_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 const JEV_CALL_TIMEOUT: Duration = Duration::from_secs(15);

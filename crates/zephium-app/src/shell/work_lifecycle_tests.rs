@@ -123,7 +123,11 @@ impl WorkAgentTurnProvider for Script {
     ) -> WorkAgentTurnFuture<'a> {
         Box::pin(async move {
             let context = input.context();
-            for source in &context.sources { if source.acquired_by == "command" { assert!(source.command.is_some()); } }
+            for source in &context.sources {
+                if source.acquired_by == "command" {
+                    assert!(source.command.is_some());
+                }
+            }
             self.seen.lock().unwrap().push(Seen {
                 objective: context.objective.clone(),
                 thread: context

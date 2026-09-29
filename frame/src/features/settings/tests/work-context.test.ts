@@ -1,11 +1,5 @@
 import { expect, test } from "vitest";
-import {
-  parseSkill,
-  renderSkill,
-  sinceLabel,
-  skillName,
-  skillTitle,
-} from "../lib/work-context";
+import { parseSkill, renderSkill, sinceLabel, skillName, skillTitle } from "../lib/work-context";
 
 test("a skill's text splits into fields and renders back the way Rust reads it", () => {
   const text =

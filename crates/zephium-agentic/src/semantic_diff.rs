@@ -613,7 +613,9 @@ impl SemanticObservationAcknowledgement {
             .filter(|node| node.role() == crate::SemanticRole::Document)?
             .reference();
         Some((
-            Self::from_fingerprint(SemanticObservationFingerprint::from_observation(observation)),
+            Self::from_fingerprint(SemanticObservationFingerprint::from_observation(
+                observation,
+            )),
             root,
         ))
     }

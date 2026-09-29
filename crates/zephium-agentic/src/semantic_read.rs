@@ -564,8 +564,15 @@ impl<'a> SemanticReadFragment<'a> {
             return None;
         }
         match (self.field, self.content) {
-            (SemanticReadField::VisibleText | SemanticReadField::AccessibleName, SemanticReadContent::Text(text)) => Some(text.as_str()),
-            (SemanticReadField::TextValue, SemanticReadContent::ValuePreview(preview)) if !preview.truncated() => Some(preview.text()),
+            (
+                SemanticReadField::VisibleText | SemanticReadField::AccessibleName,
+                SemanticReadContent::Text(text),
+            ) => Some(text.as_str()),
+            (SemanticReadField::TextValue, SemanticReadContent::ValuePreview(preview))
+                if !preview.truncated() =>
+            {
+                Some(preview.text())
+            }
             _ => None,
         }
     }
@@ -1237,7 +1244,9 @@ impl<'a> SemanticReadBuilder<'a> {
         let canonical = snapshot.nodes().iter().find_map(|node| {
             let target = node.link_destination()?;
             (node.role() == SemanticRole::Link
-                && node.name().is_some_and(|name| name.as_str() == "Page address")
+                && node
+                    .name()
+                    .is_some_and(|name| name.as_str() == "Page address")
                 && node.operations().is_empty()
                 && node.sensitivity() == SemanticSensitivity::Public
                 && same_origin(target))

@@ -1,7 +1,7 @@
 //! One agent turn through the same counted, fixed-endpoint, bounded transport
 //! as planning and synthesis. The model proposes; nothing here executes.
-use super::{planning::*, synthesis::*, *};
 use super::decision::{DecisionCallDiagnostic, JevDecisionClient, OpenAiDecisionCall};
+use super::{planning::*, synthesis::*, *};
 use serde_json::{json, Value};
 
 #[path = "agent_wire.rs"]
@@ -396,7 +396,17 @@ mod tests {
     }
     #[test]
     fn local_command_instruction_contract() {
-        for sentence in ["Commands run in the person's login shell in a granted folder.", "Prefer read-only inspection first.", "never chain a network step behind a build step", "Show test output by running the test command rather than describing it.", "Every command's output is a source with a key; cite it.", "Never run a command to discover what a file step can read directly.", "they are not a sandbox"] { assert!(INSTRUCTIONS.contains(sentence)); }
+        for sentence in [
+            "Commands run in the person's login shell in a granted folder.",
+            "Prefer read-only inspection first.",
+            "never chain a network step behind a build step",
+            "Show test output by running the test command rather than describing it.",
+            "Every command's output is a source with a key; cite it.",
+            "Never run a command to discover what a file step can read directly.",
+            "they are not a sandbox",
+        ] {
+            assert!(INSTRUCTIONS.contains(sentence));
+        }
     }
     #[test]
     fn link_decision_usage_survives_main_call_failure_and_never_refunds_unknown_usage() {
@@ -470,20 +480,31 @@ mod tests {
         .unwrap();
         let artifact = turn.artifacts.into_iter().next().unwrap();
         assert!(!artifact.general_knowledge);
-        assert!(matches!(artifact.data.resolve(), Ok(zephium_core::work::artifact::WorkArtifactDataV1::Checklist { .. })));
-        let known = |mark: Value| json!({
+        assert!(matches!(
+            artifact.data.resolve(),
+            Ok(zephium_core::work::artifact::WorkArtifactDataV1::Checklist { .. })
+        ));
+        let known = |mark: Value| {
+            json!({
             "say":null,"fetch":[],"ask":null,"finish":false,
             "artifacts":[{"title":"Next steps","evidence":[],"general_knowledge":mark,"data":{"kind":"checklist","value":{"items":[{"text":"Pick a region","completed":false}]}}}]
-        }).to_string();
+        }).to_string()
+        };
         let turn = wire::decode_turn(&known(json!(true)), &mut Vec::new()).unwrap();
         assert!(turn.artifacts[0].general_knowledge && turn.artifacts[0].evidence.is_empty());
         let mut faults = Vec::new();
         let turn = wire::decode_turn(&known(json!("yes")), &mut faults).unwrap();
         assert!(turn.artifacts.is_empty());
-        assert_eq!((faults[0].path.as_str(), faults[0].expected), ("artifacts[0].general_knowledge", "boolean"));
+        assert_eq!(
+            (faults[0].path.as_str(), faults[0].expected),
+            ("artifacts[0].general_knowledge", "boolean")
+        );
         let artifact = &schema["properties"]["artifacts"]["items"];
         assert_eq!(artifact["properties"]["evidence"]["minItems"], 0);
-        assert_eq!(artifact["properties"]["general_knowledge"]["type"], "boolean");
+        assert_eq!(
+            artifact["properties"]["general_knowledge"]["type"],
+            "boolean"
+        );
     }
     #[test]
     fn every_finished_request_publishes_one_answer_and_findings_stay_cited() {
@@ -588,8 +609,17 @@ mod tests {
             .as_array()
             .unwrap()
         {
-            assert_eq!(branch["properties"]["kind"]["enum"].as_array().unwrap().len(), 1);
-            assert!(branch["required"].as_array().unwrap().contains(&json!("kind")));
+            assert_eq!(
+                branch["properties"]["kind"]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(branch["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("kind")));
             assert_eq!(branch["additionalProperties"], false);
         }
         for branch in collection_schema()["anyOf"][0]["properties"]["columns"]["items"]
@@ -659,7 +689,14 @@ mod tests {
         // turn; the envelope now skips it. What remains is shape tolerance.
         let mut faults = Vec::new();
         assert!(wire::decode_turn("I'll check the listing pages directly.", &mut faults).is_none());
-        assert_eq!((faults[0].path.as_str(), faults[0].expected, faults[0].dropped), ("$", "json", false));
+        assert_eq!(
+            (
+                faults[0].path.as_str(),
+                faults[0].expected,
+                faults[0].dropped
+            ),
+            ("$", "json", false)
+        );
         let secret = "https://example.test/?q=private-text";
         let mut faults = Vec::new();
         let turn = wire::decode_turn(&json!({
@@ -678,17 +715,29 @@ mod tests {
         assert_eq!(turn.fetch.len(), 1);
         assert!(turn.artifacts.is_empty() && turn.ask.is_none());
         assert_eq!(turn.malformed, 5);
-        let named: Vec<_> = faults.iter().map(|fault| (fault.path.as_str(), fault.expected)).collect();
-        assert_eq!(named, [
-            ("artifacts[0].evidence", "source_key_array"),
-            ("fetch[0].records.columns[0].value.kind", "value_kind"),
-            ("fetch[2].records.max_items", "integer_0_255"),
-            ("fetch[3]", "known_field"),
-            ("ask.options", "string_array"),
-        ]);
-        assert!(faults.iter().all(|fault| fault.dropped && !fault.path.contains("example")));
+        let named: Vec<_> = faults
+            .iter()
+            .map(|fault| (fault.path.as_str(), fault.expected))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("artifacts[0].evidence", "source_key_array"),
+                ("fetch[0].records.columns[0].value.kind", "value_kind"),
+                ("fetch[2].records.max_items", "integer_0_255"),
+                ("fetch[3]", "known_field"),
+                ("ask.options", "string_array"),
+            ]
+        );
+        assert!(faults
+            .iter()
+            .all(|fault| fault.dropped && !fault.path.contains("example")));
         let mut faults = Vec::new();
-        assert!(wire::decode_turn(&json!({"say":null,"artifacts":[],"fetch":[],"ask":null,"finish":"yes"}).to_string(), &mut faults).is_none());
+        assert!(wire::decode_turn(
+            &json!({"say":null,"artifacts":[],"fetch":[],"ask":null,"finish":"yes"}).to_string(),
+            &mut faults
+        )
+        .is_none());
         assert_eq!(faults[0].path, "finish");
     }
 }

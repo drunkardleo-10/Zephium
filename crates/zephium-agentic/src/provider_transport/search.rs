@@ -1,6 +1,6 @@
 //! One-call OpenAI public search with explicit model-specific token and billing bounds.
 use super::*;
-use crate::{JevDecisionClient, OpenAiDecisionCall, WorkPlanningConfig, DecisionCallDiagnostic};
+use crate::{DecisionCallDiagnostic, JevDecisionClient, OpenAiDecisionCall, WorkPlanningConfig};
 use serde::Deserialize;
 use serde_json::Value;
 use zephium_core::work::search::*;

@@ -14,12 +14,12 @@ pub use sites::*;
 #[path = "work_decision.rs"]
 mod decision;
 pub use decision::*;
-#[path = "work_connections.rs"]
-mod connections;
-pub use connections::*;
 #[path = "work_personal.rs"]
 mod personal;
 pub use personal::*;
+#[path = "work_connections.rs"]
+mod connections;
+pub use connections::*;
 
 pub type WorkProjectionV1 = WorkRuntimeProjection;
 

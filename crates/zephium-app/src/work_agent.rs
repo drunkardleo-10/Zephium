@@ -1812,7 +1812,11 @@ impl Driver {
     ) -> Result<Option<WorkAttemptStatus>, WorkError> {
         let prompt = question.prompt.clone();
         match self
-            .ask_person(question.prompt, question.options, WorkAskPurposeV1::Question)
+            .ask_person(
+                question.prompt,
+                question.options,
+                WorkAskPurposeV1::Question,
+            )
             .await?
         {
             Ok(answer) => {

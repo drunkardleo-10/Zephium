@@ -421,7 +421,9 @@ impl Driver {
                     .unwrap_or_default();
                 for confirm in open.iter_mut().filter(|confirm| !confirm.decided) {
                     let decision = steps.iter().find_map(|step| match &step.kind {
-                        WorkStepKindV1::Confirm { confirm: held } if step.id == confirm.step => held.decision,
+                        WorkStepKindV1::Confirm { confirm: held } if step.id == confirm.step => {
+                            held.decision
+                        }
                         _ => None,
                     });
                     let Some(decision) = decision else {
@@ -510,17 +512,18 @@ impl Driver {
         let step = self.step(
             WorkStepKindV1::Confirm {
                 confirm: Box::new(WorkConfirmV1 {
-                site: site.to_owned(),
-                category: confirmation.category,
-                headline: confirmation.headline,
-                action: confirmation.action,
-                text: confirmation.text,
-                facts: confirmation.facts,
-                page: Some(page),
-                provenance,
-                run_option: confirmation.run_option,
-                decision: None,
-            }) },
+                    site: site.to_owned(),
+                    category: confirmation.category,
+                    headline: confirmation.headline,
+                    action: confirmation.action,
+                    text: confirmation.text,
+                    facts: confirmation.facts,
+                    page: Some(page),
+                    provenance,
+                    run_option: confirmation.run_option,
+                    decision: None,
+                }),
+            },
             WorkStepStatus::Running,
         );
         self.begin(step, vec![], None).await

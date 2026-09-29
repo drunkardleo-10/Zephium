@@ -305,7 +305,10 @@ async fn work_lead_remembers_asks_once_for_history_and_shows_what_it_read() {
         seen.contains("Flights from Warsaw to San Francisco") && seen.contains("google.com"),
         "{seen}"
     );
-    assert!(seen.contains("Prefers aisle seats on long flights"), "{seen}");
+    assert!(
+        seen.contains("Prefers aisle seats on long flights"),
+        "{seen}"
+    );
     assert!(seen.contains("Hacker News"), "{seen}");
 
     assert_eq!(
@@ -340,13 +343,7 @@ async fn work_lead_remembers_asks_once_for_history_and_shows_what_it_read() {
     let consent = drive(
         &mut shell,
         &queue,
-        crate::work_personal::consent(
-            &handle,
-            profile,
-            work,
-            WorkContextSourceV1::History,
-            None,
-        ),
+        crate::work_personal::consent(&handle, profile, work, WorkContextSourceV1::History, None),
     )
     .await
     .unwrap();

@@ -92,6 +92,12 @@ pub use work_authoring_intent::{WorkIntent, WorkUserEdit};
 #[cfg(feature = "work-runtime")]
 pub mod work_agent;
 #[cfg(feature = "work-runtime")]
+pub mod work_commands;
+#[cfg(feature = "work-runtime")]
+pub mod work_computer;
+#[cfg(feature = "work-runtime")]
+pub mod work_connections;
+#[cfg(feature = "work-runtime")]
 pub mod work_coordination;
 #[cfg(feature = "work-runtime")]
 pub mod work_execution;
@@ -99,12 +105,6 @@ pub mod work_execution;
 pub mod work_files;
 #[cfg(feature = "work-runtime")]
 pub mod work_lead;
-#[cfg(feature = "work-runtime")]
-pub mod work_commands;
-#[cfg(feature = "work-runtime")]
-pub mod work_computer;
-#[cfg(feature = "work-runtime")]
-pub mod work_connections;
 #[cfg(feature = "work-planning")]
 pub mod work_models;
 #[cfg(feature = "work-runtime")]
@@ -114,9 +114,9 @@ pub mod work_planning;
 #[cfg(feature = "work-runtime")]
 pub mod work_runtime;
 #[cfg(feature = "work-runtime")]
-pub mod work_sites;
-#[cfg(feature = "work-runtime")]
 mod work_search;
+#[cfg(feature = "work-runtime")]
+pub mod work_sites;
 #[cfg(feature = "work-runtime")]
 mod work_synthesis;
 pub use api::{

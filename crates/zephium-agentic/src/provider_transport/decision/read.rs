@@ -224,9 +224,15 @@ impl ReadProjection {
 
     pub(super) fn purpose(&self, key: &str) -> Option<zephium_decision::DecisionPurpose> {
         if self.findings {
-            return if key.strip_prefix("any_").is_some_and(|index| index.parse::<usize>().is_ok()) {
+            return if key
+                .strip_prefix("any_")
+                .is_some_and(|index| index.parse::<usize>().is_ok())
+            {
                 Some(zephium_decision::DecisionPurpose::Relevance)
-            } else if key.strip_prefix("find_").is_some_and(|index| index.parse::<usize>().is_ok()) {
+            } else if key
+                .strip_prefix("find_")
+                .is_some_and(|index| index.parse::<usize>().is_ok())
+            {
                 Some(zephium_decision::DecisionPurpose::Evidence)
             } else {
                 None
@@ -280,7 +286,11 @@ impl DecisionReadSelection {
     /// Columns whose value node the primary backend located; for a findings
     /// read, the located evidence nodes.
     pub fn located(&self) -> usize {
-        self.targets.iter().filter(|target| target.is_some()).count() + self.evidence.len()
+        self.targets
+            .iter()
+            .filter(|target| target.is_some())
+            .count()
+            + self.evidence.len()
     }
 
     /// Whether this look completes the read except for optional columns whose
@@ -298,7 +308,10 @@ impl DecisionReadSelection {
         };
         !self.absent.is_empty()
             && self.unresolved.iter().all(|index| {
-                self.projection.columns.get(*index).is_some_and(optional_link)
+                self.projection
+                    .columns
+                    .get(*index)
+                    .is_some_and(optional_link)
             })
             && self.located() > 0
             && self
@@ -347,9 +360,11 @@ impl DecisionReadSelection {
                     || (!field.required()
                         && (last
                             || matches!(
-                            field.kind(),
-                            SemanticExtractionValueKind::Url | SemanticExtractionValueKind::ImageUrl
-                        ) || (self.absent.contains(&index) && earlier.absent.contains(&index))))
+                                field.kind(),
+                                SemanticExtractionValueKind::Url
+                                    | SemanticExtractionValueKind::ImageUrl
+                            )
+                            || (self.absent.contains(&index) && earlier.absent.contains(&index))))
             });
         (gained && complete).then(|| Self {
             projection: self.projection.clone(),
@@ -381,7 +396,10 @@ impl DecisionReadSelection {
     /// column `earlier` is waiting on.
     pub fn confirms_absence(&self, earlier: &Self) -> bool {
         self.projection.schema == earlier.projection.schema
-            && earlier.absent.iter().all(|index| self.absent.contains(index))
+            && earlier
+                .absent
+                .iter()
+                .all(|index| self.absent.contains(index))
     }
 }
 
@@ -953,9 +971,7 @@ impl DecisionReadSelection {
                 continue;
             }
             let (sources, required): (&[SemanticReadField], _) = match (target, field.kind()) {
-                (_, _) if field.document_address() => {
-                    (&[SemanticReadField::DocumentAddress], None)
-                }
+                (_, _) if field.document_address() => (&[SemanticReadField::DocumentAddress], None),
                 (Some(_), SemanticExtractionValueKind::Url) => {
                     (&[SemanticReadField::LinkDestination], *target)
                 }
@@ -1028,7 +1044,9 @@ fn page_image(
         .iter()
         .find(|node| {
             node.role() == SemanticRole::Image
-                && node.name().is_some_and(|name| name.as_str() == "Page image")
+                && node
+                    .name()
+                    .is_some_and(|name| name.as_str() == "Page image")
                 && node.image_source().is_some()
                 && node.sensitivity() == SemanticSensitivity::Public
                 && references.contains(&node.reference())
@@ -1125,9 +1143,15 @@ fn labeled_value(
         .frames()
         .iter()
         .find(|frame| frame.nodes().iter().any(|node| node.reference() == target))?;
-    let index = frame.nodes().iter().position(|node| node.reference() == target)?;
+    let index = frame
+        .nodes()
+        .iter()
+        .position(|node| node.reference() == target)?;
     let node = &frame.nodes()[index];
-    if node.text().is_some_and(|text| !text.as_str().trim().is_empty()) {
+    if node
+        .text()
+        .is_some_and(|text| !text.as_str().trim().is_empty())
+    {
         return None;
     }
     let (label, value) = node.name()?.as_str().rsplit_once(':')?;
@@ -1252,10 +1276,15 @@ impl<'a> DecisionLocatedRead<'a> {
             .collect();
         let fields = match (self.projection.row, self.rows) {
             (Some(row), Some(rows)) => {
-                let items: Vec<_> = rows.into_iter().map(|fields| json!({"fields":fields})).collect();
+                let items: Vec<_> = rows
+                    .into_iter()
+                    .map(|fields| json!({"fields":fields}))
+                    .collect();
                 vec![json!({"name":row,"value":{"k":"rows","items":items}})]
             }
-            (Some(row), None) => vec![json!({"name":row,"value":{"k":"rows","items":[{"fields":fields}]}})],
+            (Some(row), None) => {
+                vec![json!({"name":row,"value":{"k":"rows","items":[{"fields":fields}]}})]
+            }
             (None, _) => fields,
         };
         let output = serde_json::to_vec(

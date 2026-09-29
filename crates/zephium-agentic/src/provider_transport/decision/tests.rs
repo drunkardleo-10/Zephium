@@ -486,7 +486,11 @@ fn an_uncertain_read_head_never_reaches_emulation_but_an_unanswered_one_still_do
         )
         .unwrap();
     // Every uncertain head is dropped: no emulated batch is built at all.
-    assert!(projection.route(Ok(response)).unwrap().projection().is_none());
+    assert!(projection
+        .route(Ok(response))
+        .unwrap()
+        .projection()
+        .is_none());
 
     let (_, _, _, projection) = located_fixture(false);
     let asked = projection.question_count();
@@ -590,7 +594,8 @@ fn located_read_copies_exact_sources_and_discards_unused_speculative_fallback() 
 #[test]
 fn a_located_copy_longer_than_its_column_is_unknown_when_optional_and_refused_when_required() {
     for required in [false, true] {
-        let (call, observation, schema, projection) = located_fixture_priced(false, &[], required, 4);
+        let (call, observation, schema, projection) =
+            located_fixture_priced(false, &[], required, 4);
         let response = projection
             .request()
             .decode_emulation(
@@ -617,7 +622,11 @@ fn a_located_copy_longer_than_its_column_is_unknown_when_optional_and_refused_wh
         let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
             panic!()
         };
-        let names: Vec<_> = rows.items()[0].fields().iter().map(|field| field.name()).collect();
+        let names: Vec<_> = rows.items()[0]
+            .fields()
+            .iter()
+            .map(|field| field.name())
+            .collect();
         assert_eq!(names, ["name", "picture"]);
     }
 }
@@ -700,7 +709,10 @@ fn a_whole_page_findings_read_generates_from_ranked_evidence_or_leaves_the_plann
     let (call, observation, _, _) = located_fixture(false);
     let schema = SemanticExtractionSchema::try_new(
         SemanticExtractionSchemaId::new(1).unwrap(),
-        vec![SemanticExtractionFieldSchema::try_text_list("output_0".into(), true, 16, 1024).unwrap()],
+        vec![
+            SemanticExtractionFieldSchema::try_text_list("output_0".into(), true, 16, 1024)
+                .unwrap(),
+        ],
     )
     .unwrap();
     assert!(schema.is_whole_page_findings());
@@ -737,10 +749,14 @@ fn a_whole_page_findings_read_generates_from_ranked_evidence_or_leaves_the_plann
                 (key.clone(), probability)
             })
             .collect();
-        body["answers"]["find_0"] = json!({"type":"choice","choice":"@a5","confidence":0.5,"probabilities":probabilities});
+        body["answers"]["find_0"] =
+            json!({"type":"choice","choice":"@a5","confidence":0.5,"probabilities":probabilities});
         let response = projection
             .request()
-            .decode_emulation(&serde_json::to_vec(&body).unwrap(), DecisionUsage::default())
+            .decode_emulation(
+                &serde_json::to_vec(&body).unwrap(),
+                DecisionUsage::default(),
+            )
             .unwrap();
         let mut answers = projection.route(Ok(response)).unwrap().finish(None);
         let mut evidence = SemanticRetainedReadEvidence::default();
@@ -761,18 +777,30 @@ fn a_whole_page_findings_read_generates_from_ranked_evidence_or_leaves_the_plann
         }
         assert!(ready && selection.located() == 2);
         let located = selection
-            .prepare(&observation, call.account(), SemanticCaptureInstant::from_millis(101), None)
+            .prepare(
+                &observation,
+                call.account(),
+                SemanticCaptureInstant::from_millis(101),
+                None,
+            )
             .unwrap();
         let (generation_schema, read) = located.generation().unwrap();
         assert_eq!(generation_schema.fields()[0].name(), "output_0");
         let texts: Vec<_> = read
             .fragments()
             .iter()
-            .filter_map(|fragment| fragment.content().text().map(|text| text.as_str().to_owned()))
+            .filter_map(|fragment| {
+                fragment
+                    .content()
+                    .text()
+                    .map(|text| text.as_str().to_owned())
+            })
             .collect();
         assert!(texts.iter().any(|text| text == "Product description"));
         assert!(texts.iter().any(|text| text == "Nearby evidence"));
-        assert!(!texts.iter().any(|text| text == "Unrelated footer" || text == "$349.99"));
+        assert!(!texts
+            .iter()
+            .any(|text| text == "Unrelated footer" || text == "$349.99"));
     }
 }
 
@@ -1132,10 +1160,12 @@ fn an_own_address_column_cites_only_the_admitted_document_address() {
         )
         .unwrap()
     };
-    assert!(SemanticExtractionFieldSchema::try_text("name".into(), true, 8)
-        .unwrap()
-        .with_document_address()
-        .is_err());
+    assert!(
+        SemanticExtractionFieldSchema::try_text("name".into(), true, 8)
+            .unwrap()
+            .with_document_address()
+            .is_err()
+    );
     let objective = AgentProviderObjective::try_admit_conservative_utf8(
         "Read the listing name and its address".into(),
         &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
@@ -1183,12 +1213,16 @@ fn an_own_address_column_cites_only_the_admitted_document_address() {
                 document,
             )
             .and_then(|located| located.finish(None));
-        (asked, settled, result.map(|result| {
-            let SemanticExtractedValue::Url(url) = result.fields()[1].value() else {
-                panic!("url");
-            };
-            url.as_str().to_owned()
-        }))
+        (
+            asked,
+            settled,
+            result.map(|result| {
+                let SemanticExtractedValue::Url(url) = result.fields()[1].value() else {
+                    panic!("url");
+                };
+                url.as_str().to_owned()
+            }),
+        )
     };
     // No locate head is asked; the read finishes with the admitted address.
     let (asked, settled, value) = run(&schema(true), Some(&own));
@@ -1280,7 +1314,10 @@ fn document_metadata_nodes_are_never_name_text_or_evidence_candidates() {
     assert_eq!(offered(&catalog, "locate_1"), [true, false]);
     let findings = SemanticExtractionSchema::try_new(
         SemanticExtractionSchemaId::new(1).unwrap(),
-        vec![SemanticExtractionFieldSchema::try_text_list("output_0".into(), true, 16, 1024).unwrap()],
+        vec![
+            SemanticExtractionFieldSchema::try_text_list("output_0".into(), true, 16, 1024)
+                .unwrap(),
+        ],
     )
     .unwrap();
     let findings = DecisionObservation::try_for_read(
@@ -1540,7 +1577,10 @@ fn an_own_page_read_cites_its_canonical_address_and_page_image() {
     )
     .unwrap();
     let untracked = untracked_document_address(&admitted);
-    assert_eq!(untracked.as_url().as_str(), "https://example.test/rooms/42?adults=1");
+    assert_eq!(
+        untracked.as_url().as_str(),
+        "https://example.test/rooms/42?adults=1"
+    );
     let read = |extra: &[Value]| {
         let (call, observation, _, _) = located_fixture_with(false, extra);
         let own_image = !extra.is_empty();
@@ -2073,10 +2113,7 @@ fn fallback_projection_preserves_binding_and_only_repeats_unanswered_heads() {
     );
     let (_, call, observation, projection) = admitted_fixture();
     let mut body = fixture_answers(projection.request());
-    body["answers"]
-        .as_object_mut()
-        .unwrap()
-        .remove("challenge");
+    body["answers"].as_object_mut().unwrap().remove("challenge");
     let primary = projection
         .request()
         .decode_emulation(
@@ -2141,21 +2178,39 @@ fn a_small_read_only_navigation_acts_at_the_measured_threshold_and_a_transaction
             let selection = if key == "operation" {
                 "click".to_owned()
             } else {
-                criteria.keys().find(|key| key.as_str() != "none").unwrap().clone()
+                criteria
+                    .keys()
+                    .find(|key| key.as_str() != "none")
+                    .unwrap()
+                    .clone()
             };
             let probabilities: BTreeMap<_, _> = criteria
                 .keys()
-                .map(|key| (key.clone(), if *key == selection { 0.75 } else { 0.25 / (criteria.len() - 1) as f64 }))
+                .map(|key| {
+                    (
+                        key.clone(),
+                        if *key == selection {
+                            0.75
+                        } else {
+                            0.25 / (criteria.len() - 1) as f64
+                        },
+                    )
+                })
                 .collect();
             body["answers"][key] = json!({"type":"choice","choice":selection,"confidence":0.75,"probabilities":probabilities});
         }
         let response = projection
             .request()
-            .decode_emulation(&serde_json::to_vec(&body).unwrap(), DecisionUsage::default())
+            .decode_emulation(
+                &serde_json::to_vec(&body).unwrap(),
+                DecisionUsage::default(),
+            )
             .unwrap();
         let mut answers = projection.route(Ok(response)).unwrap().finish(None);
         assert_eq!(
-            answers.take_operation(&observation, call.account()).unwrap(),
+            answers
+                .take_operation(&observation, call.account())
+                .unwrap(),
             acts.then(|| DecisionOperation::Click(observation.frames()[0].nodes()[1].reference())),
             "{name}"
         );
@@ -3087,7 +3142,12 @@ fn a_catalog_read_copies_each_found_record_from_inside_it_or_leaves_the_planner(
         json!({"k":1,"r":"document","fc":true}),
         json!({"k":2,"p":0,"r":"list","fc":true}),
     ];
-    nodes.extend(card(3, "Tower Bridge", "Tower Bridge $349.99 New", "tower-bridge"));
+    nodes.extend(card(
+        3,
+        "Tower Bridge",
+        "Tower Bridge $349.99 New",
+        "tower-bridge",
+    ));
     nodes.extend(card(9, "Paris", "Paris $79.99", "paris"));
     nodes.extend(card(15, "London", "$39.99", "london"));
     nodes.extend([
@@ -3143,7 +3203,10 @@ fn a_catalog_read_copies_each_found_record_from_inside_it_or_leaves_the_planner(
     let decide = |projection: &DecisionObservation, body: Value| {
         let response = projection
             .request()
-            .decode_emulation(&serde_json::to_vec(&body).unwrap(), DecisionUsage::default())
+            .decode_emulation(
+                &serde_json::to_vec(&body).unwrap(),
+                DecisionUsage::default(),
+            )
             .unwrap();
         response
     };
@@ -3160,7 +3223,10 @@ fn a_catalog_read_copies_each_found_record_from_inside_it_or_leaves_the_planner(
             panic!("choice expected");
         };
         assert_eq!(
-            criteria.keys().filter(|key| *key != "none").collect::<Vec<_>>(),
+            criteria
+                .keys()
+                .filter(|key| *key != "none")
+                .collect::<Vec<_>>(),
             ["@a15", "@a3", "@a9"]
         );
         assert!(projection.request().questions().contains_key("group_1"));
@@ -3240,14 +3306,34 @@ fn a_catalog_read_copies_each_found_record_from_inside_it_or_leaves_the_planner(
         let copied: Vec<Vec<String>> = rows
             .items()
             .iter()
-            .map(|row| row.fields().iter().map(|field| text(field.value())).collect())
+            .map(|row| {
+                row.fields()
+                    .iter()
+                    .map(|field| text(field.value()))
+                    .collect()
+            })
             .collect();
         assert_eq!(
             copied,
             [
-                ["Tower Bridge", "$349.99", "https://shop.example.test/tower-bridge", "https://shop.example.test/tower-bridge.webp"],
-                ["Paris", "$79.99", "https://shop.example.test/paris", "https://shop.example.test/paris.webp"],
-                ["London", "$39.99", "https://shop.example.test/london", "https://shop.example.test/london.webp"],
+                [
+                    "Tower Bridge",
+                    "$349.99",
+                    "https://shop.example.test/tower-bridge",
+                    "https://shop.example.test/tower-bridge.webp"
+                ],
+                [
+                    "Paris",
+                    "$79.99",
+                    "https://shop.example.test/paris",
+                    "https://shop.example.test/paris.webp"
+                ],
+                [
+                    "London",
+                    "$39.99",
+                    "https://shop.example.test/london",
+                    "https://shop.example.test/london.webp"
+                ],
             ]
         );
     }
@@ -3274,7 +3360,10 @@ fn a_located_label_value_pair_copies_its_value_node() {
         json!({"type":"choice","choice":"@a9","confidence":1.0,"probabilities":probabilities});
     let response = projection
         .request()
-        .decode_emulation(&serde_json::to_vec(&output).unwrap(), DecisionUsage::default())
+        .decode_emulation(
+            &serde_json::to_vec(&output).unwrap(),
+            DecisionUsage::default(),
+        )
         .unwrap();
     let mut answers = projection.route(Ok(response)).unwrap().finish(None);
     let selection = answers
@@ -3282,7 +3371,12 @@ fn a_located_label_value_pair_copies_its_value_node() {
         .unwrap()
         .unwrap();
     let result = selection
-        .prepare(&observation, call.account(), SemanticCaptureInstant::from_millis(101), None)
+        .prepare(
+            &observation,
+            call.account(),
+            SemanticCaptureInstant::from_millis(101),
+            None,
+        )
         .unwrap()
         .finish(None)
         .unwrap();
