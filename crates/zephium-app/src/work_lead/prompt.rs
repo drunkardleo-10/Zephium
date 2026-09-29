@@ -90,6 +90,12 @@ kinds and their data (limits in characters; ? = optional):
 Languages: rust, typescript, javascript, svelte, python, go, java, kotlin, swift, c, cpp, csharp, ruby, php, sql, html, css, json, yaml, toml, bash, markdown, dockerfile, text.
 sources lists the keys (s3, s7) of the sources the object rests on, and an item's source names one of those keys. Pictures and links must come from those sources. An object without sources is your own knowledge and holds no pictures or links.";
 
+const PART_OBJECTS: &str = "\
+kinds and their data (limits in characters; ? = optional):
+- picks {facet: stay|flight|product|place|restaurant|job|course|video|repo|service|company|person|event|article|other; items[1-12]{name ≤60, subtitle? ≤60, image_candidates?[≤3]: https pictures of that item from its sources, logo_host?: bare host such as lego.com, url?, price?{display ≤24 as shown, amount?: decimal, currency?: ISO code}, facts?[≤4]{label ≤18, value ≤32, kind: text|yes|no|partial|rating}, rating?{value, max: 5|10, count?}, why? ≤120, tags?[≤3] ≤16, recommended?: true on one item at most, route?{from ≤40, to ≤40, depart? ≤24, arrive? ≤24, duration? ≤16, stops, carrier? ≤40, carrier_host?} for flights and trains, when? ≤40, duration? ≤16, source?}}. Things to choose between. The subtitle says what the item is (Entire loft in the Mission, Starfighter set) and never repeats its price or facts. An item without its own photo gets its maker's or seller's logo_host.
+- sheet {columns[1-10]{label ≤24, kind: text|number|money|percent|date|duration|yes_no|rating|link|entity|tag, unit? ≤12, currency?: required for money, best?: max|min}; rows[1-200]{cells: one string per column (text ≤60, numbers as plain decimals, yes_no one of yes|no|partial|unknown, rating like 4/5, empty when unknown), entity?{logo_host?, image?}, source?}; note? ≤120}. Real data, no sentences.
+sources lists the keys (s3, s7) of the sources the object rests on, and an item's source names one of those keys. Pictures and links must come from those sources. An object without sources is your own knowledge and holds no pictures or links.";
+
 fn create() -> WorkModelTool {
     tool(
         "create",
@@ -109,7 +115,7 @@ fn create() -> WorkModelTool {
 fn part_create() -> WorkModelTool {
     tool(
         "create",
-        &format!("Places your part's one compact object at the end of its row and returns its id: picks, or a sheet of at most 12 rows and 6 columns. At most one per part.\n{OBJECTS}"),
+        &format!("Places your part's one compact object at the end of its row and returns its id: picks, or a sheet of at most 12 rows and 6 columns. At most one per part.\n{PART_OBJECTS}"),
         object(
             json!({
                 "kind": {"type": "string", "enum": ["picks","sheet"]},

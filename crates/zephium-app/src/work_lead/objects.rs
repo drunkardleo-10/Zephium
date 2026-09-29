@@ -463,6 +463,7 @@ fn noun(kind: &str) -> &'static str {
         "document" => "document",
         "draft" => "draft",
         "media" => "media",
+        "project" => "project",
         _ => "object",
     }
 }

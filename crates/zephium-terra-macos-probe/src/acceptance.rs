@@ -399,7 +399,7 @@ impl zephium_core::work::model::WorkModelClient for Scripted {
     }
 }
 
-pub(super) const LEAD_SCENARIOS: [LeadScenario; 10] = [
+pub(super) const LEAD_SCENARIOS: [LeadScenario; 11] = [
     LeadScenario {
         name: "flight",
         requests: &["Find me a flight WAW→SFO on 5 January 2027"],
@@ -459,6 +459,15 @@ pub(super) const LEAD_SCENARIOS: [LeadScenario; 10] = [
         folder: false,
         site: None,
     },
+    // The request names a small repository the person has not shared yet:
+    // the run asks for it in place, then reads it into a project.
+    LeadScenario {
+        name: "project",
+        requests: &["What's in {repo}?"],
+        answer: "",
+        folder: false,
+        site: None,
+    },
     LeadScenario {
         name: "question",
         requests: &["Who wrote Dune?"],
@@ -474,6 +483,80 @@ pub(super) const LEAD_SCENARIOS: [LeadScenario; 10] = [
         site: None,
     },
 ];
+
+/// A small throwaway repository under the home folder: a web app with a
+/// manifest, sources, a README and one uncommitted change.
+fn project_folder() -> Result<std::path::PathBuf, &'static str> {
+    let home = std::env::var_os("HOME").ok_or("home")?;
+    let folder = std::path::PathBuf::from(home)
+        .join("Library/Caches/app.zephium.probe")
+        .join(format!("tidepool-{}", std::process::id()));
+    let write = |path: &str, text: &str| {
+        let path = folder.join(path);
+        std::fs::create_dir_all(path.parent().ok_or("project_folder")?)
+            .map_err(|_| "project_folder")?;
+        std::fs::write(path, text).map_err(|_| "project_folder")
+    };
+    write(
+        "package.json",
+        r#"{"name":"tidepool","description":"A tide-table web app for surfers, with forecasts from NOAA.","scripts":{"dev":"vite dev","build":"vite build","test":"vitest run"},"dependencies":{"@sveltejs/kit":"^2.9.0","svelte":"^5.2.0"},"devDependencies":{"typescript":"^5.7.2","vite":"^6.0.5","vitest":"^3.0.0","tailwindcss":"^4.0.0"}}"#,
+    )?;
+    write(
+        "pnpm-lock.yaml",
+        "lockfileVersion: '9.0'
+",
+    )?;
+    write(
+        "README.md",
+        "# Tidepool
+
+Tidepool shows the next tides for a surf spot. Forecasts come from NOAA.
+",
+    )?;
+    write(
+        "src/routes/+page.svelte",
+        "<h1>Tides</h1>
+",
+    )?;
+    write(
+        "src/routes/spot/[id]/+page.svelte",
+        "<h1>Spot</h1>
+",
+    )?;
+    write(
+        "src/lib/noaa.ts",
+        "export const base = 'https://api.tidesandcurrents.noaa.gov';
+",
+    )?;
+    write(
+        "src/lib/tides.test.ts",
+        "import { test } from 'vitest';
+test('tides', () => {});
+",
+    )?;
+    write("static/favicon.png", "")?;
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&folder)
+            .env("GIT_AUTHOR_NAME", "Probe")
+            .env("GIT_AUTHOR_EMAIL", "probe@example.com")
+            .env("GIT_COMMITTER_NAME", "Probe")
+            .env("GIT_COMMITTER_EMAIL", "probe@example.com")
+            .output()
+            .map(|_| ())
+            .map_err(|_| "project_git")
+    };
+    git(&["init", "-q", "-b", "main"])?;
+    git(&["add", "."])?;
+    git(&["commit", "-q", "-m", "First tides"])?;
+    write(
+        "src/lib/noaa.ts",
+        "export const base = 'https://api.tidesandcurrents.noaa.gov/v2';
+",
+    )?;
+    Ok(folder)
+}
 
 /// A throwaway repository under the home folder with one failing test.
 fn bug_folder() -> Result<std::path::PathBuf, &'static str> {
@@ -735,6 +818,15 @@ pub(super) async fn lead_workflow(
     } else {
         None
     };
+    let repo = if scenario.name == "project" {
+        Some(project_folder()?)
+    } else {
+        None
+    };
+    let named = |request: &str| match &repo {
+        Some(repo) => request.replace("{repo}", &repo.to_string_lossy()),
+        None => request.to_owned(),
+    };
     let created = handle
         .work_authoring_command(
             profile,
@@ -742,7 +834,7 @@ pub(super) async fn lead_workflow(
                 version: 1,
                 command: WorkCommandId::generate(),
                 intent: WorkAuthoringIntent::Create {
-                    objective: scenario.requests[0].into(),
+                    objective: named(scenario.requests[0]),
                 },
             },
         )
@@ -789,7 +881,7 @@ pub(super) async fn lead_workflow(
                             work,
                             expected_revision: expected,
                             edit: WorkUserEdit::SetObjective {
-                                objective: (*request).into(),
+                                objective: named(request),
                             },
                         },
                     },
