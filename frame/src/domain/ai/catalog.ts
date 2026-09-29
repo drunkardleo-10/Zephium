@@ -53,7 +53,7 @@ export function usable(models: WorkModelsV1 | null, provider: WorkModelProvider)
   return key === "set" || key === "valid";
 }
 
-export type ModelGroup = { provider: WorkModelProvider; entries: WorkModelEntry[] };
+type ModelGroup = { provider: WorkModelProvider; entries: WorkModelEntry[] };
 
 /**
  * The picker's list for a role: every curated model of usable providers,
