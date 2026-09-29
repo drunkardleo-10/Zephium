@@ -2188,6 +2188,14 @@
               : m.work_env_sources_count({ count: liftedItem.sources.length })}
             icon={GlobalIcon}
           />
+          {#if liftedItem.part?.notes?.length}{#await import("./objects/ObjectView.svelte") then module}
+              <div class="lift-notes">
+                {#each liftedItem.part.notes as note (note.id)}<module.default
+                    object={note}
+                    centre
+                  />{/each}
+              </div>
+            {/await}{/if}
           <ul class="lift-sources">
             {#each liftedItem.sources as row (row.key)}
               <li>
@@ -2625,6 +2633,14 @@
     flex-direction: column;
     gap: 16px;
     min-block-size: 0;
+  }
+
+  /* What a research part handed the lead, read before the pages it came from. */
+  .lift-notes {
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+    margin-block-end: 28px;
   }
 
   .lift-sources {

@@ -52,6 +52,8 @@ export type WorkStage = {
   targets: Record<string, CanvasPosition>;
   /** What the run drew on, under its result. */
   sources?: { id: string; view: RunSources };
+  /** Notes a research part handed the lead, by part: shown in the part's opened view, not on its row. */
+  notes: ReadonlyMap<string, readonly RunObject[]>;
 };
 const REQUEST_TEXT = 512;
 

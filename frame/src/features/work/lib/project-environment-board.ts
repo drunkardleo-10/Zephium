@@ -346,6 +346,27 @@ export function environmentStages(
           : legacyFound.get(object.id);
         if (part) found.set(object.id, part);
       }
+      // A research part's notes (a list of what it read, not the person's own to-dos or
+      // messages) are what it handed the lead, not something it found: its row keeps its
+      // summary and the notes live in the part's opened view.
+      const notes = new Map<string, RunObject[]>();
+      const folded = new Set<string>();
+      for (const object of set.objects) {
+        const holder = found.get(object.id);
+        const part = holder ? parts.find((candidate) => candidate.id === holder) : undefined;
+        const view = object.view;
+        if (
+          part?.helper !== "research" ||
+          view.kind !== "list" ||
+          view.style === "todo" ||
+          view.style === "messages" ||
+          view.items.some((item) => !!item.from?.who || !!item.from?.app)
+        )
+          continue;
+        folded.add(object.id);
+        found.delete(object.id);
+        notes.set(part.id, [...(notes.get(part.id) ?? []), object]);
+      }
       const open = options.open ?? undefined;
       const range = (object: RunObject) => objectWidth(object.view);
       const sized = (object: RunObject, width: number, opened: boolean) =>
@@ -355,7 +376,9 @@ export function environmentStages(
       );
       const layout = boardLayout(
         set.objects
-          .filter((object) => !found.has(object.id) && !pinned.has(object.id))
+          .filter(
+            (object) => !found.has(object.id) && !pinned.has(object.id) && !folded.has(object.id),
+          )
           .map((object): LayoutBlock => ({
             id: object.id,
             kind: object.view.kind,
@@ -441,6 +464,7 @@ export function environmentStages(
         inputs,
         found,
         ...(sources ? { sources: { id: sourcesId, view: drawn } } : {}),
+        notes,
         targets: Object.fromEntries(
           Object.entries(lane.rects).map(([id, rect]) => [id, { x: rect.x, y: rect.y }]),
         ),

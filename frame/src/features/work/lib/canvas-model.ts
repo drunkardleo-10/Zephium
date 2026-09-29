@@ -171,6 +171,8 @@ export type PartView = {
   ask?: { props: Record<string, unknown> };
   /** What the part needs from the person to do its job, and its one action. */
   need?: PartNeed;
+  /** Notes it handed the lead, read in its opened view. */
+  notes?: readonly ObjectView[];
 };
 /** A part's need as its row says it: a sentence and the action that meets it. */
 export type PartNeed = {

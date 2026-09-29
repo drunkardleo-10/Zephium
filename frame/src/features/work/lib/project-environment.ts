@@ -765,6 +765,9 @@ export function environmentParts(
           ...(part.connection ? { connection: part.connection } : {}),
           ...(part.ask ? { ask: part.ask } : {}),
           ...(part.need ? { need: needView(part.need) } : {}),
+          ...(stage.notes.get(part.id)?.length
+            ? { notes: stage.notes.get(part.id)!.map((object) => object.view) }
+            : {}),
           ...(helper ? { presence: agentSeed(stage.objective) } : {}),
           ...(part.helper === "research"
             ? {
