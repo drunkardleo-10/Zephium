@@ -904,6 +904,9 @@ where
                     "The work has grown too large for one turn"
                 }
                 CallFailure::Refused(WorkModelError::Network) => "The model could not be reached",
+                CallFailure::Refused(WorkModelError::OverBudget) => {
+                    "The model provider's account is out of credit; add credit there or choose another model in Settings → AI"
+                }
                 _ => "The model's turn could not be used",
             }
             .into(),

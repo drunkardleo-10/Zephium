@@ -630,6 +630,18 @@ fn classify(status: StatusCode, body: &[u8]) -> WorkModelError {
         402 => WorkModelError::OverBudget,
         413 => WorkModelError::ContextTooLong,
         429 if code.contains(&Some("insufficient_quota")) => WorkModelError::OverBudget,
+        400..=499
+            if code.iter().flatten().any(|code| {
+                matches!(
+                    *code,
+                    "credit_balance_exhausted"
+                        | "billing_hard_limit_reached"
+                        | "billing_not_active"
+                )
+            }) || message.contains("credit balance") =>
+        {
+            WorkModelError::OverBudget
+        }
         429 => WorkModelError::RateLimited {
             retry_after_ms: None,
         },
@@ -666,7 +678,11 @@ pub(crate) fn stream_error(code: &str) -> WorkModelError {
         | "UNAUTHENTICATED"
         | "401"
         | "403" => WorkModelError::Unauthorized,
-        "insufficient_quota" | "402" => WorkModelError::OverBudget,
+        "insufficient_quota"
+        | "credit_balance_exhausted"
+        | "billing_hard_limit_reached"
+        | "billing_not_active"
+        | "402" => WorkModelError::OverBudget,
         "invalid_request_error" | "invalid_prompt" | "INVALID_ARGUMENT" | "400" => {
             WorkModelError::BadRequest
         }

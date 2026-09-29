@@ -349,6 +349,15 @@ fn http_failures_classify_without_provider_text() {
         classify(StatusCode::TOO_MANY_REQUESTS, quota),
         WorkModelError::OverBudget
     );
+    let credit = br#"{"error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the API."}}"#;
+    assert_eq!(
+        classify(StatusCode::BAD_REQUEST, credit),
+        WorkModelError::OverBudget
+    );
+    assert_eq!(
+        stream_error("credit_balance_exhausted"),
+        WorkModelError::OverBudget
+    );
     let mut headers = HeaderMap::new();
     headers.insert(RETRY_AFTER, HeaderValue::from_static("7"));
     assert_eq!(retry_after(&headers), Some(Duration::from_secs(7)));
