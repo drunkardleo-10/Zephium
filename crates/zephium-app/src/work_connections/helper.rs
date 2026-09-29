@@ -49,6 +49,12 @@ impl ConnectionHelper {
         Self { tools }
     }
 }
+impl ConnectionHelper {
+    /// gh is installed and signed in, as last seen.
+    pub fn gh_ready(&self) -> bool {
+        self.tools.gh().is_some()
+    }
+}
 impl Default for ConnectionHelper {
     fn default() -> Self {
         Self::new()
@@ -381,11 +387,21 @@ impl ConnectionHost for Bridge<'_> {
                             .iter()
                             .rev()
                             .find_map(|step| match &step.kind {
+                                // The same question, or the same offer: the lead
+                                // may have asked for the service before the part.
                                 WorkStepKindV1::Ask {
                                     prompt: asked,
+                                    options: offered,
                                     answer: Some(answer),
-                                    ..
-                                } if asked == prompt => Some(answer.clone()),
+                                    purpose,
+                                } if asked == prompt
+                                    || (*purpose == Some(WorkAskPurposeV1::Connection)
+                                        && !offered.is_empty()
+                                        && offered.first().map(String::as_str)
+                                            == options.first().copied()) =>
+                                {
+                                    Some(answer.clone())
+                                }
                                 _ => None,
                             })
                     })

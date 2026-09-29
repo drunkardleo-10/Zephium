@@ -34,6 +34,8 @@ const PART_TURNS: u8 = 10;
 /// reservation and one page task's cost.
 const PART_MIN_TOKENS: u32 = zephium_core::work::search::PUBLIC_SEARCH_TOKEN_RESERVATION + 16_384;
 const PART_MIN_COST: u32 = 150_000;
+/// The note a page step ends with when its page asked to sign in.
+const SIGN_IN_NOTE: &str = "The page asked to sign in";
 /// Searches one part may run; past them it reports what it has.
 const PART_SEARCHES: usize = 6;
 
@@ -163,13 +165,14 @@ where
     Fut: Future<Output = Result<WorkBrowserOutcome, WorkError>> + Send,
 {
     /// Runs one part to its end and returns what the lead reads.
-    pub(crate) async fn part(&self, spec: PartSpec) -> (String, bool) {
+    pub(crate) async fn part(&self, mut spec: PartSpec) -> (String, bool) {
         if !self.claim_part() {
             return (
                 format!("A run holds at most {MAX_WORK_PARTS} parts; finish the work with the parts you have"),
                 true,
             );
         }
+        self.route(&mut spec).await;
         let mut fact = WorkPartFactV1 {
             id: WorkPartId::generate(),
             title: spec.title.clone(),
@@ -644,6 +647,88 @@ where
         }
     }
 
+    /// A part about a service the person uses goes through their own
+    /// connection when they have one and accept it (asked once per work),
+    /// else through the website in their session.
+    async fn route(&self, spec: &mut PartSpec) {
+        if self.run.grant.private
+            || !matches!(
+                spec.helper,
+                WorkHelperV1::Browser | WorkHelperV1::Connection
+            )
+        {
+            return;
+        }
+        let Some(brand) = super::route::brand(spec.service.as_ref(), &spec.title) else {
+            return;
+        };
+        let profile = self.run.profile.to_string();
+        let servers = crate::work_connections::store::shared()
+            .and_then(|store| store.servers(&profile).ok())
+            .unwrap_or_default();
+        let offer = super::route::offer(
+            &brand,
+            crate::work_connections::helper::shared().gh_ready(),
+            &servers,
+        );
+        let accepted = match &offer {
+            Some(offer) => self.accepts(offer).await,
+            None => false,
+        };
+        if let Some((helper, service)) =
+            super::route::settle(spec.helper, &brand, offer.as_ref(), accepted)
+        {
+            spec.helper = helper;
+            spec.service = Some(service);
+        }
+    }
+
+    /// The person's answer to a connection offer: an earlier answer in this
+    /// work stands, otherwise they are asked now.
+    async fn accepts(&self, offer: &super::route::Offer) -> bool {
+        let earlier = self
+            .run
+            .probe
+            .runtime_projection()
+            .await
+            .ok()
+            .and_then(|projection| {
+                projection.executions.iter().rev().find_map(|execution| {
+                    execution
+                        .steps
+                        .iter()
+                        .rev()
+                        .find_map(|step| match &step.kind {
+                            WorkStepKindV1::Ask {
+                                options,
+                                answer: Some(answer),
+                                purpose: Some(WorkAskPurposeV1::Connection),
+                                ..
+                            } if options.first() == Some(&offer.yes) => Some(answer.clone()),
+                            _ => None,
+                        })
+                })
+            });
+        let answer = match earlier {
+            Some(answer) => Some(answer),
+            None => self
+                .run
+                .ask(
+                    WorkAskPurposeV1::Connection,
+                    offer.prompt.clone(),
+                    vec![
+                        offer.yes.clone(),
+                        crate::work_connections::gh::DECLINE.into(),
+                    ],
+                    None,
+                )
+                .await
+                .ok()
+                .flatten(),
+        };
+        answer.as_deref() == Some(offer.yes.as_str())
+    }
+
     /// The need a part that could not do its job shows on its row: the one
     /// its helper named, when it holds, else what its steps show.
     async fn settle_need(&self, part: WorkPartId, spec: &PartSpec, report: &mut PartReport) {
@@ -666,6 +751,27 @@ where
                 _ => None,
             }))
             .collect();
+        // A page that waited on a sign-in wall and ended there needs a
+        // sign-in, whatever else went wrong around it.
+        let sign_in = match execution
+            .as_ref()
+            .and_then(|e| e.parts.iter().find(|p| p.id == part))
+            .and_then(|p| p.need.clone())
+        {
+            Some(need @ WorkPartNeedV1::SignIn { .. }) => Some(need),
+            _ => steps.iter().find_map(|s| match &s.kind {
+                WorkStepKindV1::Read { url, .. }
+                    if s.status != WorkStepStatus::Succeeded
+                        && s.note.as_deref() == Some(SIGN_IN_NOTE) =>
+                {
+                    crate::work_sites::site_of(url)
+                        .or_else(|| service_host.clone())
+                        .map(|host| WorkPartNeedV1::SignIn { host })
+                }
+                _ => None,
+            }),
+        }
+        .filter(|need| need.validate().is_ok());
         let named = report.need.take().and_then(|need| {
             let need = match need {
                 WorkPartNeedV1::AllowFolder { path } => {
@@ -681,7 +787,7 @@ where
             };
             need.validate().is_ok().then_some(need)
         });
-        report.need = named.or_else(|| {
+        report.need = sign_in.or(named).or_else(|| {
             let declined_entry = steps.iter().any(|s| match &s.kind {
                 WorkStepKindV1::Ask {
                     purpose: Some(WorkAskPurposeV1::Entry),
@@ -713,7 +819,9 @@ where
             }
             None
         });
-        if report.state == WorkPartStateV1::Stopped {
+        if report.state == WorkPartStateV1::Stopped
+            && !matches!(report.need, Some(WorkPartNeedV1::SignIn { .. }))
+        {
             report.need = None;
         }
     }

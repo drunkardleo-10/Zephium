@@ -6,8 +6,9 @@ tools: [start_part, create, finish]
 # Today from my messages
 
 ## Parts (in one turn)
-- **Slack** — browser part on app.slack.com: unread direct messages, mentions and threads waiting on the person since yesterday; return each with channel or person, time, and their words.
-- **Gmail** — browser part on mail.google.com: unread and starred mail in the primary inbox from the last two days that asks something of the person; skip newsletters and notifications.
+- Each part names its service's site (app.slack.com, mail.google.com). When the person connected the service (Slack's MCP server, gh for GitHub), the app offers that connection once and the part reads through it; otherwise it reads the website in their session. Never ask about either yourself.
+- **Slack** — part on app.slack.com: unread direct messages, mentions and threads waiting on the person since yesterday; return each with channel or person, time, and their words.
+- **Gmail** — part on mail.google.com: unread and starred mail in the primary inbox from the last two days that asks something of the person; skip newsletters and notifications.
 - Add Calendar (calendar.google.com, today's events) or another inbox only when the person uses it or asks.
 - These parts read the person's own accounts; the app asks them first. Never put their messages' text into a search.
 

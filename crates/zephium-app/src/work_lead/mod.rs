@@ -13,6 +13,7 @@ mod project;
 mod prompt;
 mod recipes;
 pub mod registry;
+mod route;
 mod run;
 pub mod skills;
 pub mod tools;

@@ -695,3 +695,215 @@ async fn a_part_that_cannot_do_its_job_carries_its_fix_and_nothing_stands_for_it
     let kinds: Vec<&str> = run.artifacts.iter().map(|a| a.data.kind_name()).collect();
     assert_eq!(kinds, ["reply"]);
 }
+
+/// A Slack part when the person added a Slack MCP server: the run offers it
+/// once, the part runs as a connection and calls the server's tools.
+struct Connected;
+impl WorkModelClient for Connected {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            let system = request
+                .system
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<String>();
+            let seen = results(&request);
+            let assistant = if system.contains("You are the Work agent") {
+                match turn {
+                    0 => vec![call(
+                        "p",
+                        "start_part",
+                        json!({"title": "Slack", "helper": "browser", "service": "app.slack.com",
+                        "goal": "Unread mentions since yesterday"}),
+                    )],
+                    1 => {
+                        assert!(
+                            seen.contains("Part Slack") && seen.contains("done"),
+                            "{seen}"
+                        );
+                        vec![call(
+                            "r",
+                            "create",
+                            json!({"kind": "reply", "title": "Today", "data": {
+                            "headline": "One mention today", "text": "Ana asked about the deck."}}),
+                        )]
+                    }
+                    _ => vec![call("f", "finish", json!({"say": "Slack is read."}))],
+                }
+            } else {
+                assert!(system.contains("Connection helper"), "{system}");
+                match turn {
+                    0 => {
+                        assert!(
+                            request.tools.iter().any(|t| t.name == "slack__echo"),
+                            "the server's tools are offered"
+                        );
+                        vec![call("e", "slack__echo", json!({"text": "mentions"}))]
+                    }
+                    _ => vec![call(
+                        "h",
+                        "finish",
+                        json!({"summary": "1 mention", "digest": "Ana: the deck."}),
+                    )],
+                }
+            };
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 1_000,
+                    cached_input_tokens: 0,
+                    output_tokens: 100,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+                assistant,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs the zephium-mcp-fixture binary in ZEPHIUM_MCP_FIXTURE"]
+async fn a_service_the_person_connected_is_offered_once_before_its_website() {
+    use zephium_ipc::work::{WorkServerTransportV1, WorkServerV1};
+    let program = std::env::var("ZEPHIUM_MCP_FIXTURE").expect("set ZEPHIUM_MCP_FIXTURE");
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let data = std::env::temp_dir().join(format!("zephium-connected-{}", std::process::id()));
+    crate::work_connections::store::install(&data);
+    let server = WorkServerV1 {
+        id: "slack".into(),
+        name: "Slack".into(),
+        transport: WorkServerTransportV1::Stdio {
+            command: program,
+            args: vec![],
+            env: vec![],
+        },
+        enabled: true,
+    };
+    let connections = crate::work_connections::store::shared().unwrap();
+    connections
+        .put(&profile.to_string(), server.clone(), None)
+        .unwrap();
+    crate::work_connections::mcp::check(&profile.to_string(), &server).await;
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "What do I need to do today in Slack?".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let lead = LeadModel {
+        client: Arc::new(Connected),
+        ..model(Arc::new(Script {
+            calls: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let answering = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            let mut answered = 0;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let Ok(request) = handle.work_projection(profile, work) else {
+                    continue;
+                };
+                let zephium_ipc::work::WorkReplyV1::Projection { projection } =
+                    request.response(profile).await.reply
+                else {
+                    continue;
+                };
+                let Some(execution) = projection.executions.last() else {
+                    continue;
+                };
+                let open = execution.steps.iter().find_map(|step| match &step.kind {
+                    WorkStepKindV1::Ask {
+                        options,
+                        answer: None,
+                        purpose,
+                        ..
+                    } if step.status == WorkStepStatus::Running => {
+                        Some((step.id, options[0].clone(), *purpose))
+                    }
+                    _ => None,
+                });
+                let Some((step, first, purpose)) = open else {
+                    continue;
+                };
+                assert_eq!(purpose, Some(WorkAskPurposeV1::Connection));
+                answered += 1;
+                let _ = handle
+                    .work_command(
+                        profile,
+                        WorkCommandV1 {
+                            version: 1,
+                            work,
+                            expected_revision: projection.work.revision,
+                            command: WorkCommandId::generate(),
+                            intent: WorkRuntimeIntent::AnswerStep {
+                                execution: execution.id,
+                                step,
+                                answer: first,
+                            },
+                        },
+                    )
+                    .unwrap()
+                    .await;
+                if answered > 3 {
+                    return answered;
+                }
+            }
+        })
+    };
+    let done = drive(
+        &mut shell,
+        &queue,
+        WorkLeadService::new(handle.clone()).run(
+            profile,
+            command(work, WorkRevision::INITIAL),
+            None,
+            models,
+            &Search,
+            |_, _| async { panic!("the Slack part never opens the website") },
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    answering.abort();
+    let run = &done.executions[0];
+    let asks: Vec<&str> = run
+        .steps
+        .iter()
+        .filter_map(|s| match &s.kind {
+            WorkStepKindV1::Ask { prompt, .. } => Some(prompt.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        asks,
+        ["Use Slack (MCP)? Its tools read Slack as you in this work."]
+    );
+    let slack = &run.parts[0];
+    assert_eq!(slack.helper, WorkHelperV1::Connection);
+    assert_eq!(slack.state, WorkPartStateV1::Done);
+    assert!(run
+        .steps
+        .iter()
+        .any(|s| matches!(&s.kind, WorkStepKindV1::Call { call } if call.service == "slack")));
+    let _ = std::fs::remove_dir_all(&data);
+}
