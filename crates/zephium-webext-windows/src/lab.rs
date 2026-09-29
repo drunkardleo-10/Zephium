@@ -185,15 +185,26 @@ fn profile(view: &WebView) -> Result<ICoreWebView2Profile7> {
     })
 }
 
+#[derive(Default)]
+struct ViewOptions<'a> {
+    visible: bool,
+    initialization: Option<&'a str>,
+    adopt_new_windows: bool,
+}
+
 fn make_view(
     host: &Host,
     root: &Path,
     name: &str,
     environment: Option<&ICoreWebView2Environment>,
     enabled: bool,
-    visible: bool,
-    initialization: Option<&str>,
+    options: ViewOptions<'_>,
 ) -> Result<WebView> {
+    let ViewOptions {
+        visible,
+        initialization,
+        adopt_new_windows,
+    } = options;
     let mut context = wry::WebContext::new(Some(root.to_path_buf()));
     let expected_root = root.canonicalize()?;
     let expected_name = name.to_owned();
@@ -244,6 +255,11 @@ fn make_view(
         .with_visible(visible)
         .with_focused(false)
         .with_devtools(false)
+        .with_on_page_load_handler(|event, url| {
+            if matches!(event, wry::PageLoadEvent::Finished) {
+                emit("document_loaded", json!({"url":url}));
+            }
+        })
         .with_autoplay(false)
         .with_additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI")
         .with_bounds(wry::Rect {
@@ -259,8 +275,69 @@ fn make_view(
     if let Some(environment) = environment {
         builder = builder.with_environment(environment.clone());
     }
+    let child_root = root.to_owned();
+    let child_profile = name.to_owned();
+    let children = std::cell::RefCell::new(Vec::new());
     let view = builder
-        .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
+        .with_new_window_req_handler(move |url, features| {
+            let mut source = PWSTR::null();
+            // SAFETY: the callback retains its native opener on the STA.
+            let source = unsafe { features.opener.webview.Source(&mut source) }
+                .map(|_| take_pwstr(source))
+                .unwrap_or_default();
+            emit(
+                "new_window",
+                json!({"url":url,"source":source,"user_initiated":features.user_initiated}),
+            );
+            if adopt_new_windows
+                && features.user_initiated
+                && children.borrow().len() < 4
+                && url
+                    .parse::<wry::http::Uri>()
+                    .is_ok_and(|url| matches!(url.scheme_str(), Some("http" | "https")))
+            {
+                let created = (|| -> Result<(WebView, Host)> {
+                    let host = Host::new()?;
+                    let view = make_view(
+                        &host,
+                        &child_root,
+                        &child_profile,
+                        Some(&features.opener.environment),
+                        enabled,
+                        ViewOptions {
+                            visible: true,
+                            ..Default::default()
+                        },
+                    )?;
+                    host.show();
+                    Ok((view, host))
+                })();
+                if let Ok((view, host)) = created {
+                    let native = view.webview();
+                    children.borrow_mut().push((view, host));
+                    emit("native_adoption", json!({"url":url}));
+                    return wry::NewWindowResponse::Create { webview: native };
+                }
+            }
+            wry::NewWindowResponse::Deny
+        })
+        .with_native_context_menu_handler(|_, args| {
+            // Keep Chromium's menu and record only its public command names.
+            let names = (|| -> windows::core::Result<Vec<String>> {
+                let items = unsafe { args.MenuItems()? };
+                let mut count = 0;
+                unsafe { items.Count(&mut count)? };
+                let mut names = Vec::new();
+                for index in 0..count.min(64) {
+                    let mut name = PWSTR::null();
+                    unsafe { items.GetValueAtIndex(index)?.Name(&mut name)? };
+                    names.push(take_pwstr(name));
+                }
+                Ok(names)
+            })();
+            emit("context_menu", json!({"names":names.unwrap_or_default()}));
+            true
+        })
         .build_as_child(host)?;
     let label = name.to_owned();
     let handler = webview2_com::ProcessFailedEventHandler::create(Box::new(move |_, args| {
@@ -421,7 +498,19 @@ pub fn run() -> Result<()> {
         "Creating WebView2 environment for disposable data at {}",
         udf.display()
     );
-    let first = make_view(&host, &udf, "LabHuman", None, enabled, visible, None)?;
+    let adopt_new_windows = steps.iter().any(|step| step["adopt_new_windows"] == true);
+    let first = make_view(
+        &host,
+        &udf,
+        "LabHuman",
+        None,
+        enabled,
+        ViewOptions {
+            visible,
+            adopt_new_windows,
+            ..Default::default()
+        },
+    )?;
     if visible {
         host.show();
         first.focus()?;
@@ -548,8 +637,11 @@ pub fn run() -> Result<()> {
                         p,
                         Some(&environment),
                         enabled,
-                        window,
-                        initialization.as_deref(),
+                        ViewOptions {
+                            visible: window,
+                            initialization: initialization.as_deref(),
+                            adopt_new_windows,
+                        },
                     )?,
                 );
                 if window {
@@ -610,6 +702,17 @@ pub fn run() -> Result<()> {
                 }
                 human_binding = Some(binding.clone());
                 return Ok(binding.clone());
+            }
+            if step["native_action"] == true {
+                let human = views.get("tab1").ok_or("missing human view")?;
+                let target = cdp(human, "Target.getTargetInfo", json!({}))?;
+                return cdp(
+                    human,
+                    "Extensions.triggerAction",
+                    json!({
+                        "id":last_id, "targetId":target["targetInfo"]["targetId"]
+                    }),
+                );
             }
             let substitute = |s: &str| {
                 s.replace("$ID", &last_id)
