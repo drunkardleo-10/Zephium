@@ -233,9 +233,9 @@
 </div>
 
 <style>
+  /* Set from the object's own edge, so the tiers' names align with its title. */
   .diagram {
     position: relative;
-    margin-inline: auto;
   }
 
   .picture {
