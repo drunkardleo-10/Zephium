@@ -39,7 +39,7 @@ pub(super) fn store_client() -> Result<reqwest::Client, String> {
 pub(super) async fn download(id: &ExtensionId) -> Result<Vec<u8>, String> {
     let client = store_client()?;
     let url = store::download_url(id, store::CHROME_VERSION);
-    let mut response = client
+    let response = client
         .get(url)
         .send()
         .await
@@ -50,24 +50,13 @@ pub(super) async fn download(id: &ExtensionId) -> Result<Vec<u8>, String> {
             response.status()
         ));
     }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_PACKAGE_BYTES)
-    {
-        return Err("The extension is too large.".into());
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| "The download was interrupted.")?
-    {
-        bytes.extend_from_slice(&chunk);
-        if bytes.len() as u64 > MAX_PACKAGE_BYTES {
-            return Err("The extension is too large.".into());
-        }
-    }
-    Ok(bytes)
+    super::response::read_body(
+        response,
+        MAX_PACKAGE_BYTES,
+        "The extension is too large.",
+        "The download was interrupted.",
+    )
+    .await
 }
 
 fn icon_data_url(dir: &Path, manifest: &Manifest) -> Option<String> {

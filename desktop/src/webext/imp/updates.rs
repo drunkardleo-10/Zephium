@@ -13,7 +13,7 @@ use crate::webext::{Entry, WebExtensions};
 /// The first check waits so launch stays free of network work.
 const FIRST_UPDATE_CHECK: Duration = Duration::from_secs(5 * 60);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60 * 60);
-const MAX_UPDATE_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_UPDATE_RESPONSE_BYTES: u64 = 1024 * 1024;
 
 /// Keeps installed extensions current with the Chrome Web Store.
 pub(in crate::webext) fn start_updates(root: &Path, shell: &Handle) {
@@ -61,13 +61,13 @@ async fn check_updates(extensions: &WebExtensions, shell: &Handle) -> Result<(),
             response.status()
         ));
     }
-    let body = response
-        .bytes()
-        .await
-        .map_err(|_| "The update check was interrupted.")?;
-    if body.len() > MAX_UPDATE_RESPONSE_BYTES {
-        return Err("The update check answered too much.".into());
-    }
+    let body = super::response::read_body(
+        response,
+        MAX_UPDATE_RESPONSE_BYTES,
+        "The update check answered too much.",
+        "The update check was interrupted.",
+    )
+    .await?;
     for info in store::parse_update_response(&String::from_utf8_lossy(&body)) {
         let newer = info.status == "ok"
             && info.version.as_deref().is_some_and(|version| {

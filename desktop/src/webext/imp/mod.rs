@@ -2,6 +2,7 @@
 //! to the shell.
 
 mod install;
+mod response;
 mod updates;
 
 pub(in crate::webext) use install::{choose_file, confirm, prepare, prepare_file, review_update};
