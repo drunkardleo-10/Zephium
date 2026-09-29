@@ -67,9 +67,12 @@
     <div class="body">
       {#each parts as part, index (index)}
         {#if part.kind === "list"}<ul>
-            {#each part.items as item, at (at)}<li><Inline text={item} /></li>{/each}
+            {#each part.items as item, at (at)}<li><Inline text={item} plain /></li>{/each}
           </ul>{:else}<p>
-            {#each part.lines as line, at (at)}{#if at}<br />{/if}<Inline text={line} />{/each}
+            {#each part.lines as line, at (at)}{#if at}<br />{/if}<Inline
+                text={line}
+                plain
+              />{/each}
           </p>{/if}
       {/each}
     </div>{/if}
