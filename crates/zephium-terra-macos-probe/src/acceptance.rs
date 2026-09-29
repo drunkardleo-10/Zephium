@@ -290,8 +290,8 @@ pub(super) fn site_scenario(start: &str, goal: &str) -> &'static LeadScenario {
 
 /// The lead and helper turns of a page check: start one browser part, browse
 /// the start page toward the goal with records, then finish.
-struct Scripted {
-    start: &'static str,
+pub(super) struct Scripted {
+    pub(super) start: &'static str,
 }
 
 impl zephium_core::work::model::WorkModelClient for Scripted {

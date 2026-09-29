@@ -28,7 +28,12 @@ use super::work_durable::{browser_settings, WorkflowResult};
 /// The person's site as the Work contract sees it, and another site.
 const ACCOUNT: &str = "https://account.probe.test";
 const OTHER: &str = "https://other.probe.test";
+const THIRD: &str = "https://third.probe.test";
+const BOARD: &str = "https://board.probe.test";
 const SITE: &str = "account.probe.test";
+const OTHER_SITE: &str = "other.probe.test";
+const THIRD_SITE: &str = "third.probe.test";
+const BOARD_SITE: &str = "board.probe.test";
 const ACCOUNT_COOKIE: &str = "zaccount=signed-in-a";
 const INBOX_FACT: &str = "Quarterly report from Dana";
 const REPORT_FACT: &str = "Reports total is 4,812";
@@ -40,6 +45,10 @@ const VAULT_FACT: &str = "Vault balance is 318 credits";
 const HOME_FACT: &str = "Front page lists five offers";
 const CHURN_FACT: &str = "Churn list holds 12 items";
 const CONSENT_FACT: &str = "Fares list shows 4 flights";
+const DESIGN_FACT: &str = "Mira shipped the new onboarding flow";
+const AGENDA_FACT: &str = "Design review at 14:30";
+const BOARD_FACT: &str = "Ticket ZP-42 is due Thursday";
+const DAY_FACT: &str = "Standup at 09:15";
 /// The vault's own sign-in, kept by the server: a tab sign-in stands for it.
 static VAULT_OPEN: AtomicBool = AtomicBool::new(false);
 /// Page loads the person's tabs made on the site, as the engine would count them.
@@ -88,10 +97,19 @@ enum Check {
     /// A cookie banner that saves the refusal with a form POST, or with a
     /// script and a reload, is refused by Rust and the page reads.
     Consent,
+    /// A single-page app whose sidebar re-renders its rows on every click,
+    /// like Slack: opening a channel reads without a refusal loop.
+    Spa,
+    /// A heavy calendar whose script holds the page for seconds after load:
+    /// its first look waits for it and the day reads.
+    Heavy,
+    /// Three signed-in apps read by three parts of one lead run: one entry
+    /// question names all three and every page opens in the session.
+    Apps,
 }
 /// Freeze leaves a lost page's debt, which the probe's exit reports as an
 /// unclean shutdown; it runs on its own.
-const ALL: [Check; 18] = [
+const ALL: [Check; 21] = [
     Check::Session,
     Check::Always,
     Check::Never,
@@ -110,6 +128,9 @@ const ALL: [Check; 18] = [
     Check::TabSignIn,
     Check::Churn,
     Check::Consent,
+    Check::Spa,
+    Check::Heavy,
+    Check::Apps,
 ];
 static CHECKS: OnceLock<Vec<Check>> = OnceLock::new();
 
@@ -135,6 +156,9 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("churn") => vec![Check::Churn],
         Some("freeze") => vec![Check::Freeze],
         Some("consent") => vec![Check::Consent],
+        Some("spa") => vec![Check::Spa],
+        Some("heavy") => vec![Check::Heavy],
+        Some("apps") => vec![Check::Apps],
         _ => return Err(super::ProbeFailure::Authority),
     };
     let _ = CHECKS.set(checks);
@@ -145,6 +169,8 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
 enum Site {
     Account,
     Other,
+    Third,
+    Board,
 }
 struct Hit {
     site: Site,
@@ -162,8 +188,8 @@ pub(super) fn install_presence(engine: std::sync::Arc<zephium_engine::WebviewEng
                 .into_iter()
                 .map(|site| {
                     match site.as_str() {
-                        SITE => "127.0.0.1",
-                        "other.probe.test" => "localhost",
+                        SITE | THIRD_SITE | BOARD_SITE => "127.0.0.1",
+                        OTHER_SITE => "localhost",
                         _ => "fresh.probe.invalid",
                     }
                     .to_owned()
@@ -179,10 +205,14 @@ pub(super) fn install_presence(engine: std::sync::Arc<zephium_engine::WebviewEng
     }));
 }
 
-/// Two HTTP/1.1 loopback servers that record method, path and cookie only.
+/// Four HTTP/1.1 loopback servers that record method, path and cookie
+/// only. The third and board sites share the account site's host, and so
+/// its cookie.
 struct Sites {
     account: u16,
     other: u16,
+    third: u16,
+    board: u16,
     hits: Arc<Mutex<Vec<Hit>>>,
     stop: Arc<AtomicBool>,
 }
@@ -192,11 +222,20 @@ impl Sites {
         let stop = Arc::new(AtomicBool::new(false));
         let account = TcpListener::bind(("127.0.0.1", 0)).map_err(|_| "loopback_bind")?;
         let other = TcpListener::bind(("127.0.0.1", 0)).map_err(|_| "loopback_bind")?;
+        let third = TcpListener::bind(("127.0.0.1", 0)).map_err(|_| "loopback_bind")?;
+        let board = TcpListener::bind(("127.0.0.1", 0)).map_err(|_| "loopback_bind")?;
+        let board_port = board.local_addr().map_err(|_| "loopback_addr")?.port();
         let ports = (
             account.local_addr().map_err(|_| "loopback_addr")?.port(),
             other.local_addr().map_err(|_| "loopback_addr")?.port(),
         );
-        for (listener, site) in [(account, Site::Account), (other, Site::Other)] {
+        let third_port = third.local_addr().map_err(|_| "loopback_addr")?.port();
+        for (listener, site) in [
+            (account, Site::Account),
+            (other, Site::Other),
+            (third, Site::Third),
+            (board, Site::Board),
+        ] {
             listener
                 .set_nonblocking(true)
                 .map_err(|_| "loopback_nonblocking")?;
@@ -217,6 +256,8 @@ impl Sites {
         Ok(Self {
             account: ports.0,
             other: ports.1,
+            third: third_port,
+            board: board_port,
             hits,
             stop,
         })
@@ -228,6 +269,10 @@ impl Sites {
             format!("http://127.0.0.1:{}{path}", self.account)
         } else if let Some(path) = url.strip_prefix(OTHER) {
             format!("http://localhost:{}{path}", self.other)
+        } else if let Some(path) = url.strip_prefix(THIRD) {
+            format!("http://127.0.0.1:{}{path}", self.third)
+        } else if let Some(path) = url.strip_prefix(BOARD) {
+            format!("http://127.0.0.1:{}{path}", self.board)
         } else {
             url.to_owned()
         }
@@ -461,10 +506,47 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
             String::new(),
             page("Inbox", &format!("<h1>Inbox</h1><ul><li>{INBOX_FACT} is due Friday.</li><li>Team lunch moved to Thursday.</li></ul>")),
         ),
+        // Slack-like: every click re-renders the sidebar's rows and replaces
+        // the message pane, and the address follows the channel.
+        (Site::Account, _, path) if path == "/spa" || path.starts_with("/spa/") => (
+            "200 OK",
+            String::new(),
+            format!("<!doctype html><html><head><title>Workspace</title></head><body><nav aria-label=\"Channels\"><div role=\"tree\" id=\"side\"></div></nav><main id=\"pane\"><h1>#general</h1><ul><li>Ola: coffee at ten?</li></ul></main><script>var chans=['general','design','random'];var msgs={{general:['Ola: coffee at ten?'],design:['Tom: can someone review the icons?','Ana: {DESIGN_FACT}.'],random:['Leo: new plant on the desk']}};function side(active){{var h='';for(var i=0;i<chans.length;i++){{var c=chans[i];h+='<div role=\"treeitem\" tabindex=\"0\" aria-selected=\"'+(c===active)+'\" data-c=\"'+c+'\">#'+c+'</div>';}}var el=document.getElementById('side');el.innerHTML=h;var rows=el.querySelectorAll('[data-c]');for(var j=0;j<rows.length;j++){{rows[j].addEventListener('click',function(){{var c=this.getAttribute('data-c');setTimeout(function(){{open(c);}},150);}});}}}}function open(c){{history.pushState({{}},'','/spa/'+c);document.title='#'+c+' - Workspace';side(c);var h='<h1>#'+c+'</h1><ul>';for(var k=0;k<msgs[c].length;k++){{h+='<li>'+msgs[c][k]+'</li>';}}document.getElementById('pane').innerHTML=h+'</ul>';}}side('general');</script></body></html>"),
+        ),
+        // A heavy day view: a large grid, and a script that holds the page
+        // for eight seconds right after load before it draws the day.
+        (Site::Account, _, "/agenda") => {
+            let mut cells = String::new();
+            for hour in 0..24 {
+                for slot in 0..120 {
+                    cells.push_str(&format!("<div role=\"gridcell\" data-h=\"{hour}\" data-s=\"{slot}\"><span></span></div>"));
+                }
+            }
+            (
+                "200 OK",
+                String::new(),
+                format!("<!doctype html><html><head><title>Calendar</title></head><body><main><h1>Today</h1><ul id=\"day\"><li>Loading your day</li></ul><div role=\"grid\" aria-label=\"Week\" style=\"height:4000px;overflow:hidden\">{cells}</div></main><script>window.addEventListener('load',function(){{setTimeout(function(){{var t=Date.now();while(Date.now()-t<8000){{}}document.getElementById('day').innerHTML='<li>{DAY_FACT}</li><li>{AGENDA_FACT}</li><li>Gym at 18:00</li>';}},0);}});</script></body></html>"),
+            )
+        }
         (Site::Account, _, path) => (
             "200 OK",
             String::new(),
             page("Account page", &format!("<h1>Account page</h1><p>This signed-in page is {}.</p>", path.trim_start_matches('/'))),
+        ),
+        (Site::Third | Site::Board, _, _) if !signed_in => (
+            "200 OK",
+            String::new(),
+            page("Sign in", "<h1>Sign in</h1><form method=\"post\" action=\"/login\"><label>Email <input type=\"email\" name=\"email\"></label><label>Password <input type=\"password\" name=\"password\"></label><button>Sign in</button></form>"),
+        ),
+        (Site::Board, _, _) => (
+            "200 OK",
+            String::new(),
+            page("Board", &format!("<h1>My issues</h1><ul><li>{BOARD_FACT}.</li><li>ZP-17 is in review.</li></ul>")),
+        ),
+        (Site::Third, _, _) => (
+            "200 OK",
+            String::new(),
+            page("Calendar", &format!("<h1>Today</h1><ul><li>{DAY_FACT}.</li><li>Lunch with Ana at 12:30.</li></ul>")),
         ),
         (Site::Other, _, _) => (
             "200 OK",
@@ -547,8 +629,12 @@ impl WorkPublicSearchProvider for NoSearch {
 }
 
 fn browse(path: &str, goal: &str) -> WorkAgentFetch {
+    browse_at(ACCOUNT, path, goal)
+}
+
+fn browse_at(site: &str, path: &str, goal: &str) -> WorkAgentFetch {
     WorkAgentFetch::Browse {
-        start: format!("{ACCOUNT}{path}"),
+        start: format!("{site}{path}"),
         goal: goal.into(),
         collection: None,
     }
@@ -881,6 +967,134 @@ impl Context<'_> {
         })
     }
 
+    /// One lead run whose scripted lead starts one browser part per start
+    /// page; only the page agents call a model. The probe answers with `answer`.
+    async fn lead_run(
+        &self,
+        objective: &str,
+        starts: &'static str,
+        answer: &str,
+    ) -> Result<Run, &'static str> {
+        use zephium_app::work_lead::{LeadModel, WorkLeadModels, WorkLeadService};
+        let entry = zephium_app::work_models::resolve_entry(
+            self.profile,
+            zephium_core::work::model::WorkModelRole::Lead,
+        )
+        .await
+        .map_err(|_| "lead_model")?
+        .0;
+        let scripted = LeadModel {
+            entry,
+            client: Arc::new(super::acceptance::Scripted { start: starts }),
+        };
+        let models = WorkLeadModels {
+            lead: scripted.clone(),
+            page: scripted.clone(),
+            light: scripted,
+        };
+        let work = self.create(objective).await?;
+        let opened = Mutex::new(Vec::<Opened>::new());
+        let asked = Mutex::new(Vec::new());
+        let decisions = Mutex::new(Vec::new());
+        let confirmed = Mutex::new(Vec::new());
+        let done = AtomicBool::new(false);
+        let callback = self.handle.callback_handle();
+        let service = WorkLeadService::new(self.handle.clone()).with_diagnostic(|event| {
+            let _ = writeln!(std::io::stdout().lock(), "loopback-site: lead={event:?}");
+        });
+        let run = async {
+            let state = service
+                .run(
+                    self.profile,
+                    WorkCommandV1 {
+                        version: 1,
+                        work: work.0,
+                        expected_revision: work.1,
+                        command: WorkCommandId::generate(),
+                        intent: WorkRuntimeIntent::BeginAgent {
+                            grant: WorkAgentGrantV1 {
+                                lead: None,
+                                provider: WorkSearchProvider::OpenAi,
+                                model: PUBLIC_SEARCH_MODEL.into(),
+                                max_turns: 10,
+                                max_steps: 32,
+                                browse_hops: 4,
+                                folders: vec![],
+                                accounts: vec![],
+                                private: false,
+                            },
+                            limits: WorkExecutionLimits {
+                                model_tokens: 1_000_000,
+                                cost_micro_usd: 3_000_000,
+                                operations: 256,
+                                timeout_seconds: 1_200,
+                                max_workers: 4,
+                            },
+                        },
+                    },
+                    None,
+                    models,
+                    &NoSearch,
+                    |probe, request| {
+                        let key = self.keys.lock().ok().and_then(|mut keys| keys.pop());
+                        let callback = &callback;
+                        let opened = &opened;
+                        async move {
+                            let (request, yours) = self.local(request)?;
+                            let key = match key {
+                                Some(key) => key,
+                                None => tokio::task::spawn_blocking(
+                                    zephium_agentic::load_macos_probe_openai_credential,
+                                )
+                                .await
+                                .map_err(|_| WorkError::Unavailable)?
+                                .map_err(|_| WorkError::Unavailable)?,
+                            };
+                            let mut settings = browser_settings(self.binding, key);
+                            settings.retain_public_responses = false;
+                            settings.loopback_anonymous = true;
+                            let outcome = self
+                                .composition
+                                .run_agent_step(callback, &probe, request, settings)
+                                .await;
+                            if let Ok(mut opened) = opened.lock() {
+                                opened.push(Opened {
+                                    yours,
+                                    not_ready: false,
+                                    held_back: outcome.as_ref().is_ok_and(|o| o.held_back),
+                                    status: outcome.as_ref().ok().map(|o| o.status),
+                                    intervention: None,
+                                    model_calls: outcome
+                                        .as_ref()
+                                        .ok()
+                                        .and_then(|o| o.measurements)
+                                        .map(|m| m.planner_calls),
+                                });
+                            }
+                            report(&outcome);
+                            outcome
+                        }
+                    },
+                    |_| {},
+                )
+                .await;
+            done.store(true, Ordering::Relaxed);
+            state
+        };
+        let (state, ()) = tokio::join!(
+            run,
+            self.person(work.0, answer, &done, &asked, &decisions, &confirmed)
+        );
+        let state = state.map_err(|_| "lead_run")?;
+        Ok(Run {
+            state,
+            notices: Vec::new(),
+            opened: opened.into_inner().unwrap_or_default(),
+            asked: asked.into_inner().unwrap_or_default(),
+            confirmed: confirmed.into_inner().unwrap_or_default(),
+        })
+    }
+
     /// Points a contract request at its loopback site.
     fn local(
         &self,
@@ -900,7 +1114,7 @@ fn report(outcome: &Result<WorkBrowserOutcome, WorkError>) {
         Ok(outcome) => {
             let _ = writeln!(
                 std::io::stdout().lock(),
-                "loopback-site: page status={:?} artifacts={} held_back={} rerun={} usage={} note={:?} calls={:?}",
+                "loopback-site: page status={:?} artifacts={} held_back={} rerun={} usage={} note={:?} calls={:?} tokens={:?} wall_ms={:?}",
                 outcome.status,
                 outcome.artifacts.len(),
                 outcome.held_back,
@@ -908,6 +1122,8 @@ fn report(outcome: &Result<WorkBrowserOutcome, WorkError>) {
                 outcome.usage.is_some(),
                 outcome.note,
                 outcome.measurements.map(|m| m.planner_calls),
+                outcome.measurements.map(|m| m.model_tokens),
+                outcome.measurements.map(|m| m.wall_millis),
             );
         }
         Err(error) => {
@@ -917,6 +1133,15 @@ fn report(outcome: &Result<WorkBrowserOutcome, WorkError>) {
             );
         }
     }
+}
+
+/// Each page's status and model calls, in the order they settled.
+fn pages_of(run: &Run) -> String {
+    run.opened
+        .iter()
+        .map(|page| format!("{:?}:{}", page.status, page.model_calls.unwrap_or(0)))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn says(run: &Run, text: &str) -> bool {
@@ -1392,6 +1617,85 @@ pub(super) async fn workflow(
                 ));
                 last = run.state;
                 content && loads >= 2 && run.asked.is_empty()
+            }
+            Check::Spa => {
+                let run = context
+                    .run(
+                        "Read the design channel",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            "/spa",
+                            "Open the #design channel and report its newest message",
+                        )]],
+                    )
+                    .await?;
+                let read = says(&run, DESIGN_FACT) || mentions(&run, &["onboarding"]);
+                line(format!("check=spa read={read} pages=[{}]", pages_of(&run)));
+                last = run.state;
+                read
+            }
+            Check::Heavy => {
+                let run = context
+                    .run(
+                        "My day",
+                        false,
+                        "Allow",
+                        vec![vec![browse(
+                            "/agenda",
+                            "Report today's events with their times",
+                        )]],
+                    )
+                    .await?;
+                let read = says(&run, AGENDA_FACT) || mentions(&run, &["14:30"]);
+                line(format!(
+                    "check=heavy read={read} pages=[{}]",
+                    pages_of(&run)
+                ));
+                last = run.state;
+                read
+            }
+            Check::Apps => {
+                for site in [SITE, BOARD_SITE, THIRD_SITE] {
+                    zephium_app::work_sites::set_standing(handle, profile, site.into(), None)
+                        .await
+                        .map_err(|_| "apps_standing")?;
+                }
+                let before = (
+                    context.sites.hits(Site::Account, "/inbox").len(),
+                    context.sites.hits(Site::Board, "/board").len(),
+                    context.sites.hits(Site::Third, "/day").len(),
+                );
+                let run = context
+                    .lead_run(
+                        "What do I need to do today?",
+                        "https://account.probe.test/inbox https://board.probe.test/board https://third.probe.test/day",
+                        "Allow",
+                    )
+                    .await?;
+                let with = |site: Site, path: &str, skip: usize, cookie: &str| {
+                    let hits = context.sites.hits(site, path);
+                    hits.len() > skip && hits[skip..].iter().all(|(_, c)| c.contains(cookie))
+                };
+                let cookies = with(Site::Account, "/inbox", before.0, ACCOUNT_COOKIE)
+                    && with(Site::Board, "/board", before.1, ACCOUNT_COOKIE)
+                    && with(Site::Third, "/day", before.2, ACCOUNT_COOKIE);
+                let named = run.asked.first().is_some_and(|question| {
+                    [SITE, BOARD_SITE, THIRD_SITE]
+                        .iter()
+                        .all(|site| question.contains(site))
+                });
+                let read = (says(&run, INBOX_FACT) || mentions(&run, &["quarterly"]))
+                    && (says(&run, BOARD_FACT) || mentions(&run, &["zp-42"]))
+                    && (says(&run, DAY_FACT) || mentions(&run, &["09:15"]));
+                line(format!(
+                    "check=apps asked={} named={named} yours={} cookies={cookies} read={read} pages=[{}]",
+                    run.asked.len(),
+                    run.opened.iter().all(|p| p.yours),
+                    pages_of(&run)
+                ));
+                last = run.state;
+                run.asked.len() == 1 && named && cookies && read
             }
             Check::Churn => {
                 let first = context
