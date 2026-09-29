@@ -765,7 +765,12 @@ impl WorkAttemptProbe {
         &self,
         mut update: WorkRuntimeUpdate,
     ) -> Result<WorkRuntimeProjection, WorkError> {
-        for _ in 0..4 {
+        // Parallel parts commit to the same run at once: a lost race reads
+        // the fresh revision and tries again after a short, growing pause.
+        for attempt in 0..COMMIT_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(5 * u64::from(attempt))).await;
+            }
             let state = read(&self.handle, self.profile, self.work).await?;
             match request(
                 &self.handle,
@@ -832,6 +837,9 @@ impl WorkAttemptProbe {
         Err(WorkError::Conflict)
     }
 }
+/// Tries one runtime commit gets against concurrent commits of its run.
+const COMMIT_ATTEMPTS: u32 = 12;
+
 /// Sources a search admitted get their site icons without being opened.
 fn probe_source_icons(
     handle: &crate::Handle,
