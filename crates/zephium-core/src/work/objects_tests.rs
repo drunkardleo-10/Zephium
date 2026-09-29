@@ -56,7 +56,7 @@ fn every_kind_round_trips_its_wire_shape() {
             "stack":[{"name":"SvelteKit","version":"2.8","role":"Frontend","host":"svelte.dev","manifest":"package.json"},
             {"name":"Tauri","version":"2","role":"Desktop shell","host":"tauri.app","manifest":"src-tauri/Cargo.toml"}],
             "tree":[{"path":"src","kind":"folder"},{"path":"src/routes","kind":"folder","more":3},
-            {"path":"src-tauri","kind":"folder","more":9},{"path":"package.json","kind":"file"}],
+            {"path":"src-tauri","kind":"folder","more":9},{"path":"package.json","kind":"file"}],"more":12,
             "scripts":[{"name":"dev","command":"vite dev","source":"package.json"}],
             "git":{"branch":"main","changed":2,"ahead":1}}),
         json!({"kind":"media","medium":"video","url":"https://www.youtube.com/watch?v=abc","title":"Lecture 1",

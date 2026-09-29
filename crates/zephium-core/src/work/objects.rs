@@ -411,7 +411,7 @@ pub struct WorkProjectEntryV1 {
     /// Relative to the root, `/`-separated, at most three names deep.
     pub path: String,
     pub kind: WorkProjectEntryKindV1,
-    /// A folder whose contents are not listed: how many entries it holds.
+    /// Entries the folder holds beyond those listed under it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub more: Option<u32>,
 }

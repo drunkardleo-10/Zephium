@@ -422,6 +422,9 @@ pub enum WorkArtifactDataV1 {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         stack: Vec<WorkProjectStackV1>,
         tree: Vec<WorkProjectEntryV1>,
+        /// Entries at the root beyond those listed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        more: Option<u32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         scripts: Vec<WorkProjectScriptV1>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1151,6 +1154,7 @@ impl WorkArtifactDataV1 {
                 tree,
                 scripts,
                 git,
+                ..
             } => objects(
                 Project {
                     name,
