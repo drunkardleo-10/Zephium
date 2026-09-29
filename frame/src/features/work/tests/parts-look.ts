@@ -137,6 +137,18 @@ export function fixScene(stage: Stage): BoardScene {
       glob: null,
       regex: true,
     }),
+    step(
+      "c-0",
+      "code",
+      {
+        kind: "run_command",
+        cwd: ROOT,
+        command: "ls crates/zephium-core/src/time",
+        timeout_secs: 10,
+      },
+      "failed",
+      { evidence: "rec-0", local: policy(false) },
+    ),
     step("c-3", "code", {
       kind: "read_file",
       path: `${ROOT}/crates/zephium-core/src/work/duration.rs`,
@@ -337,6 +349,7 @@ export function fixScene(stage: Stage): BoardScene {
     provider_evidence: [],
     user_artifacts: [],
     command_evidence: [
+      record("rec-0", "ls: crates/zephium-core/src/time: No such file or directory\n", 1, 12),
       record("rec-1", FAILED_RUN, 101, 4_830),
       ...(done ? [record("rec-2", PASSED_RUN, 0, 3_210)] : []),
     ],

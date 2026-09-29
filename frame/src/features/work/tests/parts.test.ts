@@ -27,14 +27,20 @@ describe("a computer part's view", () => {
       ["tests.rs", "…/src/work", 5, 0, "done"],
     ]);
     expect(view.commands.map((c) => [c.state, c.tests, c.ms])).toEqual([
+      ["failed", null, 12],
       ["failed", { passed: 42, failed: 1 }, 4830],
       ["passed", { passed: 43, failed: 0 }, 3210],
     ]);
     expect(view.tests).toEqual({ passed: 43, failed: 0 });
     expect([view.reads, view.searches, view.working]).toEqual([2, 2, false]);
     // Every command, and under each what came of it: the first failing test by name.
-    expect(view.commands[0]!.failure).not.toBeNull();
-    expect(computerRows(view)).toBe(7);
+    expect(view.commands[1]!.failure).not.toBeNull();
+    // Looking for a folder that isn't there is a quiet fact, said in the command's own words.
+    expect([view.commands[0]!.inspection, view.commands[0]!.said]).toEqual([
+      true,
+      "ls: crates/zephium-core/src/time: No such file or directory",
+    ]);
+    expect(computerRows(view)).toBe(9);
   });
 
   test("a change waiting on the person and a command still running", () => {
