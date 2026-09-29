@@ -145,6 +145,124 @@
   --color-code-tag: var(--color-code-keyword);
   --color-code-attribute: color-mix(in oklab, var(--chart-2) 70%, var(--color-text));
 
+  /* Soft colour: six quiet hues for what a person marks as theirs (a note's
+     ground, a code chip, a key term) and for the agents' characters. Each hue
+     has its tone, a wash to set things on and an ink to write in; the wash
+     and ink are mixed from the theme's own ground and text, so both themes
+     follow. Never a gradient on content, never a glow. */
+  --color-soft-sky: #8db9f2;
+  --color-soft-mint: #88d0b3;
+  --color-soft-lemon: #e6cb80;
+  --color-soft-peach: #efaa89;
+  --color-soft-rose: #ee9aae;
+  --color-soft-lilac: #b7a6f0;
+  --soft-wash: 15%;
+  --soft-edge: 26%;
+  --soft-ink: 62%;
+  --color-soft-sky-wash: color-mix(
+    in oklab,
+    var(--color-soft-sky) var(--soft-wash),
+    var(--color-surface)
+  );
+  --color-soft-mint-wash: color-mix(
+    in oklab,
+    var(--color-soft-mint) var(--soft-wash),
+    var(--color-surface)
+  );
+  --color-soft-lemon-wash: color-mix(
+    in oklab,
+    var(--color-soft-lemon) var(--soft-wash),
+    var(--color-surface)
+  );
+  --color-soft-peach-wash: color-mix(
+    in oklab,
+    var(--color-soft-peach) var(--soft-wash),
+    var(--color-surface)
+  );
+  --color-soft-rose-wash: color-mix(
+    in oklab,
+    var(--color-soft-rose) var(--soft-wash),
+    var(--color-surface)
+  );
+  --color-soft-lilac-wash: color-mix(
+    in oklab,
+    var(--color-soft-lilac) var(--soft-wash),
+    var(--color-surface)
+  );
+  --color-soft-sky-edge: color-mix(in oklab, var(--color-soft-sky) var(--soft-edge), transparent);
+  --color-soft-mint-edge: color-mix(in oklab, var(--color-soft-mint) var(--soft-edge), transparent);
+  --color-soft-lemon-edge: color-mix(
+    in oklab,
+    var(--color-soft-lemon) var(--soft-edge),
+    transparent
+  );
+  --color-soft-peach-edge: color-mix(
+    in oklab,
+    var(--color-soft-peach) var(--soft-edge),
+    transparent
+  );
+  --color-soft-rose-edge: color-mix(in oklab, var(--color-soft-rose) var(--soft-edge), transparent);
+  --color-soft-lilac-edge: color-mix(
+    in oklab,
+    var(--color-soft-lilac) var(--soft-edge),
+    transparent
+  );
+  --color-soft-sky-ink: color-mix(
+    in oklab,
+    var(--color-soft-sky) var(--soft-ink),
+    var(--color-text)
+  );
+  --color-soft-mint-ink: color-mix(
+    in oklab,
+    var(--color-soft-mint) var(--soft-ink),
+    var(--color-text)
+  );
+  --color-soft-lemon-ink: color-mix(
+    in oklab,
+    var(--color-soft-lemon) var(--soft-ink),
+    var(--color-text)
+  );
+  --color-soft-peach-ink: color-mix(
+    in oklab,
+    var(--color-soft-peach) var(--soft-ink),
+    var(--color-text)
+  );
+  --color-soft-rose-ink: color-mix(
+    in oklab,
+    var(--color-soft-rose) var(--soft-ink),
+    var(--color-text)
+  );
+  --color-soft-lilac-ink: color-mix(
+    in oklab,
+    var(--color-soft-lilac) var(--soft-ink),
+    var(--color-text)
+  );
+
+  /* Inline code is a tinted chip, and a term the reply leans on carries a
+     soft accent: an ink and, at most, a marker's wash under it. */
+  --color-code-chip: color-mix(in oklab, var(--color-soft-lilac) 13%, transparent);
+  --color-code-chip-ink: var(--color-soft-lilac-ink);
+  --color-term: var(--color-soft-sky-ink);
+  --color-term-wash: color-mix(in oklab, var(--color-soft-sky) 12%, transparent);
+
+  /* The agents' characters: the lead is a pearl at the family's centre and
+     each helper kind has its own hue. Bodies are lit from the upper left:
+     the light and the deep are what a hue is mixed toward, the ground is the
+     contact shadow under a character standing on the canvas. */
+  --color-agent-lead: #ecebf4;
+  --color-agent-lead-sheen: #c9d6ff;
+  --color-agent-browser: var(--color-soft-sky);
+  --color-agent-research: var(--color-soft-lemon);
+  --color-agent-computer: var(--color-soft-mint);
+  --color-agent-connection: var(--color-soft-lilac);
+  --color-agent-light: #fff;
+  --color-agent-deep: #17162b;
+  --color-agent-eye: #15151d;
+  --color-agent-ground: rgb(0 0 0 / 0.5);
+
+  /* The dots of a working indicator: the text's own tone, brighter in front. */
+  --color-dots: var(--color-text);
+
   /* YouTube's own play mark, the same in both themes: a video from there says so. */
   --color-youtube: #ff0033;
   --color-on-youtube: #fff;
@@ -490,6 +608,25 @@
   --color-success: #2f7f5a;
   --color-warning: #8c6a2a;
   --color-info: #2f6fd6;
+  --color-soft-sky: #4f8fe0;
+  --color-soft-mint: #2f9c77;
+  --color-soft-lemon: #b88c14;
+  --color-soft-peach: #d2703f;
+  --color-soft-rose: #d35d7a;
+  --color-soft-lilac: #7e67d6;
+  --soft-wash: 13%;
+  --soft-edge: 30%;
+  --soft-ink: 78%;
+  --color-code-chip: color-mix(in oklab, var(--color-soft-lilac) 10%, transparent);
+  --color-term-wash: color-mix(in oklab, var(--color-soft-sky) 11%, transparent);
+  --color-agent-lead: #e3e2ee;
+  --color-agent-lead-sheen: #b8c8fb;
+  --color-agent-browser: #7fb0f0;
+  --color-agent-research: #eac66a;
+  --color-agent-computer: #74c9a6;
+  --color-agent-connection: #a795ee;
+  --color-agent-deep: #2b2a4a;
+  --color-agent-ground: rgb(24 24 48 / 0.2);
   --chart-1: #5d8fcc;
   --chart-2: #a6531e;
   --chart-3: #449d7a;
