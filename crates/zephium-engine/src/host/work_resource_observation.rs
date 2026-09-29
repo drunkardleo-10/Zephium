@@ -12,6 +12,9 @@ use std::sync::{
 use zephium_agentic::WorkBrowserExecutionLease;
 
 const OBSERVATION_BUDGET: Duration = Duration::from_secs(5);
+/// A document's first look: a heavy app (Gmail, Calendar) can hold its main
+/// thread for seconds while it starts, and the look waits for it.
+const FIRST_OBSERVATION_BUDGET: Duration = Duration::from_secs(15);
 const RENDERING_OPPORTUNITY: Duration = Duration::from_millis(100);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 // Cleanup may outlive revoked authority. It gets finite callback opportunities,
@@ -323,7 +326,12 @@ impl EngineHost {
             task.refuse(SemanticRuntimePortFailure::DocumentReplaced);
             return;
         };
-        let duration = OBSERVATION_BUDGET.min(Duration::from_millis(
+        let budget = if resource.looked_document == Some(document) {
+            OBSERVATION_BUDGET
+        } else {
+            FIRST_OBSERVATION_BUDGET
+        };
+        let duration = budget.min(Duration::from_millis(
             lease.deadline().millis().saturating_sub(now.millis()),
         ));
         let Some(deadline) = Instant::now().checked_add(duration) else {
@@ -442,7 +450,13 @@ impl EngineHost {
                     read.ready_since.is_some(), read.dispatched, read.callback_returned, read.wakes,
                     read.presentation.as_ref().map(WorkObservationPresentation::liveness_facts));
             }
-            read.refuse(SemanticRuntimePortFailure::TimedOut);
+            // A look that never reached the page (it waited for another
+            // page's presentation) ran nothing: it is not ready, not lost.
+            read.refuse(if read.dispatched {
+                SemanticRuntimePortFailure::TimedOut
+            } else {
+                SemanticRuntimePortFailure::NotReady
+            });
         }
         if let Some(wake) = &read.wake {
             if wake.drained() {
@@ -553,6 +567,7 @@ impl EngineHost {
                 }
                 ended.wake = None;
                 if preserve {
+                    resource.looked_document = Some(ended.document);
                     resource.reading_presentation = ended.presentation.take();
                     resource.capture_frame();
                 }

@@ -2321,8 +2321,12 @@ impl AgentWorkController {
         }
         // Only an explicit pre-dispatch NotReady receipt can start another
         // read-only readiness check. Never retry a mutation, stale reference,
-        // replaced document, malformed callback or provider turn.
-        for _ in 0..64 {
+        // replaced document, malformed callback or provider turn. Another
+        // page's look holds the one presentation for up to its own budget, so
+        // readiness is waited for by time, not by a count of quick refusals.
+        let started = Instant::now();
+        let mut delay = Duration::from_millis(50);
+        while started.elapsed() < NOT_READY_PATIENCE {
             match Self::observe_once(state, worker, browser).await {
                 Err(AgentWorkFailure::Observation(SemanticRuntimePortFailure::NotReady)) => {
                     tokio::select! {
@@ -2331,8 +2335,9 @@ impl AgentWorkController {
                             state.native.retain(event?)?;
                             return Err(AgentWorkFailure::Mailbox);
                         }
-                        () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                        () = tokio::time::sleep(delay) => {}
                     }
+                    delay = (delay * 2).min(Duration::from_millis(400));
                 }
                 result => return result,
             }
@@ -2761,6 +2766,7 @@ impl AgentWorkController {
         // reference: counted by a digest of its role and name, a second
         // refusal tells the model to change approach and a third ends the loop.
         let mut refused_controls = Vec::<(u64, u8)>::new();
+        let mut refused_navigations = 0u8;
         let mut refused_inspections = 0u8;
         loop {
             state.check_task_contract()?;
@@ -2961,6 +2967,14 @@ impl AgentWorkController {
                 state
                     .journal_mut()?
                     .emit(AgentWorkEventKind::NavigationRefused(reason))?;
+                // A model that keeps proposing refused moves ends its page
+                // instead of spending the rest of its calls on them.
+                refused_navigations = refused_navigations.saturating_add(1);
+                if refused_navigations > MAX_REFUSED_NAVIGATIONS {
+                    return Err(AgentWorkFailure::Browser(
+                        AgentBrowserProviderError::ActionProposalLoop,
+                    ));
+                }
                 let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                 if session.turns.saturating_add(2) > session.max_model_calls {
                     return Err(AgentWorkFailure::Browser(
@@ -4879,6 +4893,13 @@ pub enum AgentWorkEventKind {
     /// Exact retained ownership needs reconciliation; this is not success.
     Recovery,
 }
+
+/// How long a page waits for its look to become ready (another page's look
+/// holding the presentation, a document still committing).
+const NOT_READY_PATIENCE: Duration = Duration::from_secs(30);
+
+/// Refused Navigate proposals one page task may make before it ends.
+const MAX_REFUSED_NAVIGATIONS: u8 = 4;
 
 /// Stable content-free correlation for a product event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

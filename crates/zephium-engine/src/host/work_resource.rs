@@ -152,6 +152,10 @@ pub(super) struct WorkNativeResource {
         Option<crate::platform::work_document_navigation::WorkDocumentFinalizationTicket>,
     hand_on_wake: Option<crate::platform::imp::ContentPolicyTimeout>,
     pub(super) last_invocation: u64,
+    /// The document a look last completed on: a document's first look waits
+    /// longer for a heavy app still starting its own scripts.
+    pub(super) looked_document:
+        Option<crate::platform::work_document_navigation::WorkDocumentStamp>,
     document_started: bool,
     retirement_clean: bool,
     deadline_expired: bool,
@@ -239,6 +243,7 @@ impl WorkNativeResource {
             document_finalization_ready: None,
             hand_on_wake: None,
             last_invocation: 0,
+            looked_document: None,
             document_started: false,
             retirement_clean: true,
             deadline_expired: false,
@@ -1039,6 +1044,7 @@ impl EngineHost {
             document_finalization_ready: None,
             hand_on_wake: None,
             last_invocation: 0,
+            looked_document: None,
             document_started: false,
             retirement_clean: false,
             deadline_expired: false,
