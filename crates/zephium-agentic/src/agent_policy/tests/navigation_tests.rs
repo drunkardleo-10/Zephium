@@ -840,20 +840,22 @@ fn initial_effective_metadata_requires_original_retained_binding_before_model_ca
                     AgentPolicyInstant::from_millis(500),
                 )
                 .unwrap();
-            let _ = rows.settle_at(
-                present.complete(WorkBrowserResourceNativeOutcome::HumanPresented),
-                AgentPolicyInstant::from_millis(0),
-            )
-            .unwrap();
+            let _ = rows
+                .settle_at(
+                    present.complete(WorkBrowserResourceNativeOutcome::HumanPresented),
+                    AgentPolicyInstant::from_millis(0),
+                )
+                .unwrap();
             let resume = rows
                 .continue_after_human(&resource, AgentPolicyInstant::from_millis(0))
                 .unwrap();
             effective = requested.clone();
-            let _ = rows.settle_at(
-                resume.complete_human_document(effective.clone()),
-                AgentPolicyInstant::from_millis(0),
-            )
-            .unwrap();
+            let _ = rows
+                .settle_at(
+                    resume.complete_human_document(effective.clone()),
+                    AgentPolicyInstant::from_millis(0),
+                )
+                .unwrap();
         }
         let acquire = rows
             .acquire(
@@ -1531,7 +1533,12 @@ fn route_provider_request_counts_trusted_checkpoint_and_refuses_unsupported_or_s
             let prepared = result.unwrap();
             let body: Value = serde_json::from_slice(prepared.request().body()).unwrap();
             let input = body["input"].as_array().unwrap();
-            assert_eq!(input.len(), 3);
+            // Objective, observation, route checkpoint, then the act targets.
+            assert_eq!(input.len(), 4);
+            assert!(input[3]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("ZEPHIUM_HOST_ACT_TARGETS_V1\n"));
             assert_eq!(input[0]["role"], "user");
             assert_eq!(
                 input[0]["content"][0]["text"],

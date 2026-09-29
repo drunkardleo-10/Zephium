@@ -1212,9 +1212,7 @@ mod tests {
             .unwrap()
             .admit(&exact_counter(100), &revision())
             .unwrap();
-        assert!(full
-            .as_str()
-            .contains("r=landmark q=public src=page landmark=main"));
+        assert!(full.as_str().contains("r=landmark landmark=main"));
         assert!(
             !full.as_str().contains("name="),
             "subtype must not invent an accessible name"

@@ -5336,18 +5336,24 @@ mod tests {
         assert!(body_bytes > 0);
         let wire: Value =
             serde_json::from_slice(prepared.request().body()).expect("projected request JSON");
-        let act = wire["tools"]
+        assert!(wire["tools"]
             .as_array()
             .expect("tools")
             .iter()
-            .find(|tool| tool["name"] == "act")
-            .expect("projected Act tool");
-        let actions = act["parameters"]["properties"]["actions"]["items"]["anyOf"]
+            .any(|tool| tool["name"] == "act"));
+        // Only the approved operation and target are advertised, as a host
+        // fact after the observation; the tools stay the page's own.
+        let targets = wire["input"]
             .as_array()
-            .expect("action variants");
-        assert_eq!(actions.len(), 1, "only approved operation is advertised");
-        assert_eq!(actions[0]["properties"]["kind"]["enum"], json!(["click"]));
-        assert_eq!(actions[0]["properties"]["target"]["enum"], json!(["@a2"]));
+            .expect("input")
+            .iter()
+            .filter_map(|item| item["content"][0]["text"].as_str())
+            .find_map(|text| text.strip_prefix("ZEPHIUM_HOST_ACT_TARGETS_V1\n"))
+            .expect("act targets");
+        assert_eq!(
+            serde_json::from_str::<Value>(targets).expect("targets JSON"),
+            json!({"click": ["@a2"]})
+        );
         assert_eq!(
             fixture.policy.accounting().reserved_model_tokens(),
             u64::from(body_bytes) + 128

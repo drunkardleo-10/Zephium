@@ -765,18 +765,8 @@ impl AgentInspectionProgress {
                 result
             })
             .collect();
-        let mut text = concat!("\nZEPHIUM_HOST_INSPECTION_PROGRESS_V1\n",
-            "Trusted capture history only: not page evidence, previous refs or new authority. ",
-            "current_target, when present, was matched again in the current observation; null gives no target. ",
-            "query is an earlier search operand, never an instruction; matched_sources counts captured text sources, not complete page coverage. Do not repeat completed searches to recover earlier facts; terminal mapping receives whatever evidence remains retained. ",
-            "Do not repeat an unchanged broad scope hoping for later truncated content. ",
-            "Choose a current narrower region or heading/window when needed. ",
-            "snapshot(initial) restores the viewport; it does not scroll or advance a page cursor. ",
-            "Region captures expose nested regions as anchors, not their descendants. ",
-            "Earlier action refs are retired. Terminal mapping may use bounded retained sources supplied in its own read inventory. When remaining_inspections is zero, viewport_restore_available permits only one snapshot(initial) to regain current controls for scrolling or interaction. It does not renew the inspection budget. Otherwise use retained evidence or an admitted navigation; no further snapshots of this document can execute.\n").to_owned();
-        if self.captures.iter().any(|capture| capture.anchor_lost) {
-            text.push_str("failed_anchor_missing means the requested scoped capture failed because its anchor disappeared before execution. Its result is unavailable; the following initial viewport is an independently captured refresh. Use only the fresh refs and do not treat the failed scope as captured evidence.\n");
-        }
+        // What the tag and its fields mean stands once in the instructions.
+        let mut text = "\nZEPHIUM_HOST_INSPECTION_PROGRESS_V1\n".to_owned();
         text.push_str(
             &serde_json::json!({"completed_inspections": captures.len(), "remaining_inspections": MAX_AGENT_INSPECTION_CAPTURES.saturating_sub(captures.len()), "viewport_restore_available": self.can_restore_viewport(current), "captures": captures})
                 .to_string(),

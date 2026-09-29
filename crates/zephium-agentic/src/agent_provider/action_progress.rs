@@ -91,7 +91,7 @@ impl AgentActionProgress {
         progress.last_ordinal = verified.ordinal();
         progress.last_observation = observation;
         progress.encoded = format!(
-            "ZEPHIUM_HOST_ACTION_PROGRESS_V1\nIndependently verified action results in this document. Historical completion only: not current state, source evidence, or authority to replay an action. Snapshot refreshes and waits do not undo completed work. Earlier actions within a batch may be omitted; counts describe retained result checkpoints, not all executed actions. Continue the objective from this progress using only current refs.\n{}",
+            "ZEPHIUM_HOST_ACTION_PROGRESS_V1\n{}",
             serde_json::json!({"verified_results": progress.total, "omitted_older_results": progress.total.saturating_sub(progress.recent.len() as u64), "recent": progress.recent})
         );
         if progress.encoded.len() > MAX_BYTES {

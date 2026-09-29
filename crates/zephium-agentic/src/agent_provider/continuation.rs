@@ -4145,9 +4145,10 @@ mod tests {
             .contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
         let body = super::super::request::encode_openai_continuation_body(&config, &rebound)
             .expect("non-navigation inspection history is encodable");
-        let body = std::str::from_utf8(&body).unwrap();
-        assert!(body.contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
-        assert!(!body.contains("ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1"));
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let input = body["input"].to_string();
+        assert!(input.contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
+        assert!(!input.contains("ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1"));
 
         let history = AgentInspectionProgress::record(None, &initial, &subtree).unwrap();
         let history = AgentInspectionProgress::record(Some(history), &subtree, &restored).unwrap();

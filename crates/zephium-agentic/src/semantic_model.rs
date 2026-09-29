@@ -753,15 +753,20 @@ pub fn encode_semantic_observation(
             } else {
                 output.push("-")?;
             }
-            checked_write(
-                &mut output,
-                format_args!(
-                    " r={} q={} src={}",
-                    role_label(node.role()),
-                    sensitivity_label(node.sensitivity()),
-                    source_label(node.trust()),
-                ),
-            )?;
+            // q=public and src=page are the defaults and are left out.
+            checked_write(&mut output, format_args!(" r={}", role_label(node.role())))?;
+            if node.sensitivity() != SemanticSensitivity::Public {
+                checked_write(
+                    &mut output,
+                    format_args!(" q={}", sensitivity_label(node.sensitivity())),
+                )?;
+            }
+            if node.trust() != SemanticTrust::UntrustedPage {
+                checked_write(
+                    &mut output,
+                    format_args!(" src={}", source_label(node.trust())),
+                )?;
+            }
             if let Some(level) = node.heading_level() {
                 checked_write(&mut output, format_args!(" level={}", level.get()))?;
             }
@@ -1498,12 +1503,12 @@ mod tests {
         assert!(first
             .content
             .starts_with("ZSEM3 content=untrusted scope=initial generation=1 frames=1 nodes=4\n"));
-        assert!(first.content.contains(
-            "r=heading q=public src=page level=1 name=\"Repo \\\"settings\\\"\\\\path\\u2028tail\""
-        ));
         assert!(first
             .content
-            .contains("r=password q=secret src=page ops=fill name=\"Password\" value=[redacted]"));
+            .contains("r=heading level=1 name=\"Repo \\\"settings\\\"\\\\path\\u2028tail\""));
+        assert!(first
+            .content
+            .contains("r=password q=secret ops=fill name=\"Password\" value=[redacted]"));
         assert!(first.content.contains("name=\"N @a99 p=- r=button\""));
         assert!(first.content.contains("disclosure=collapsed"));
         assert!(!first.content.contains(" rect="));
@@ -1534,7 +1539,7 @@ mod tests {
             .content
             .starts_with("ZSEM3 content=untrusted scope=initial generation=1 frames=1 nodes=5\n"));
         assert!(encoded.content.contains(
-            "r=combobox q=public src=page ops=click,select,press name=\"Language\" value=0 options=2 option_refs=locate selected=\"English\""
+            "r=combobox ops=click,select,press name=\"Language\" value=0 options=2 option_refs=locate selected=\"English\""
         ));
         assert!(!encoded.content.contains("name=\"Deutsch\""));
         assert!(encoded.content.contains("name=\"Polski\""));
