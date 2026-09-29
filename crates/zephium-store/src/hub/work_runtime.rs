@@ -684,6 +684,7 @@ pub(super) fn command(
                 folder_approvals: vec![],
                 steps: vec![],
                 accounts: vec![],
+                title: None,
             };
             fact.refresh_accounts();
             fact.validate(plan, expected.next()?)?;

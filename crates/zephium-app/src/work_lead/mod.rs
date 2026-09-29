@@ -259,6 +259,7 @@ impl WorkLeadService {
             })
             .await;
         }
+        let unnamed = !projection.executions.iter().any(|e| e.title.is_some());
         let mut context = context_text(
             &objective,
             &projection,
@@ -269,6 +270,9 @@ impl WorkLeadService {
             &grant,
         );
         context.push_str(&folders::context(&run, &named));
+        if unnamed {
+            context.push_str("\nThe work has no name yet: finish names it with title.\n");
+        }
         let shared = hands::SharedBrowser::new(browser);
         let lead_hands = hands::Hands::new(
             &run,
@@ -280,7 +284,7 @@ impl WorkLeadService {
             objective.clone(),
         )
         .await;
-        let lead = lead::Lead::new(
+        let mut lead = lead::Lead::new(
             &run,
             &attempt,
             &models,
@@ -292,6 +296,7 @@ impl WorkLeadService {
             context,
             memory,
         );
+        lead.name_work = unnamed;
         let outcome = lead.drive().await;
         drop(lead);
         let status = conclude(&run, outcome).await?;

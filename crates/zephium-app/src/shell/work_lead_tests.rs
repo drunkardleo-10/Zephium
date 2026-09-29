@@ -164,7 +164,7 @@ impl Script {
                 "g",
                 "finish",
                 json!({"say": "Your trip is on the canvas.",
-                "followups": ["Book the Mission loft"]}),
+                "followups": ["Book the Mission loft"], "title": "YC trip from Warsaw."}),
             )],
         }
     }
@@ -523,8 +523,11 @@ async fn a_lead_run_splits_into_parts_builds_the_result_and_revises_on_follow_up
     let entry = run.parts.iter().find(|p| p.title == "Entry").unwrap().id;
     assert!(!run.artifacts.iter().any(|a| a.part == Some(entry)));
     let finish = run.steps.last().unwrap();
-    assert!(matches!(&finish.kind, WorkStepKindV1::Finish { followups } if followups.len() == 1));
+    assert!(
+        matches!(&finish.kind, WorkStepKindV1::Finish { followups, .. } if followups.len() == 1)
+    );
     assert_eq!(finish.note.as_deref(), Some("Your trip is on the canvas."));
+    assert_eq!(run.title.as_deref(), Some("YC trip from Warsaw"));
     let calls = script.calls.lock().unwrap().clone();
     assert!(
         calls.contains(&"browser:2".into()) && calls.contains(&"research:2".into()),
@@ -594,7 +597,7 @@ impl WorkModelClient for Honest {
                 )],
                 (true, 1) => {
                     assert!(seen.contains("could not do its job"), "{seen}");
-                    assert!(seen.contains("another try: kayak.com"), "{seen}");
+                    assert!(seen.contains("another try on kayak.com"), "{seen}");
                     vec![
                         call(
                             "r",
@@ -689,7 +692,8 @@ async fn a_part_that_cannot_do_its_job_carries_its_fix_and_nothing_stands_for_it
     assert_eq!(
         flights.need,
         Some(WorkPartNeedV1::Retry {
-            host: Some("kayak.com".into())
+            host: Some("kayak.com".into()),
+            reason: None,
         })
     );
     let kinds: Vec<&str> = run.artifacts.iter().map(|a| a.data.kind_name()).collect();

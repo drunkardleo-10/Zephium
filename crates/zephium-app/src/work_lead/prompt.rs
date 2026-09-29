@@ -219,8 +219,9 @@ pub(crate) fn lead_tools() -> Vec<WorkModelTool> {
             "Ends the run once the result stands on the canvas.",
             object(
                 json!({
-                    "say": {"type": "string", "description": "One sentence to the person about what is on the canvas. At most 200 characters."},
-                    "followups": {"type": "array", "items": {"type": "string"}, "description": "Up to three next requests acting on the result, a few words each: Book the Mission loft, Find cheaper flights."}
+                    "say": {"type": "string", "maxLength": 200, "description": "One sentence to the person about what is on the canvas."},
+                    "followups": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 80}, "description": "Next requests acting on the result, a few words each: Book the Mission loft, Find cheaper flights."},
+                    "title": {"type": "string", "maxLength": 48, "description": "Only when the context says the work has no name yet: its name, a noun phrase of at most five words such as Compiler learning plan or YC trip from Warsaw."}
                 }),
                 &["say"],
             ),
@@ -351,7 +352,8 @@ pub(crate) fn helper_tools() -> Vec<WorkModelTool> {
                         "description": "What the person can do so this part can do its job, when something blocked it.",
                         "properties": {
                             "kind": {"type": "string", "enum": ["sign_in","allow_site","allow_folder","use_connection","retry"]},
-                            "target": {"type": "string", "description": "The site's host (slack.com), the folder's absolute path, or the connection's name."}
+                            "target": {"type": "string", "description": "The site's host (slack.com), the folder's absolute path, or the connection's name."},
+                            "reason": {"type": "string", "enum": ["couldnt_read","blocked_by_check","not_found","site_error","no_answer"], "description": "For retry: the page loaded but could not be read, a human check stopped it, what was asked for is not there, the site showed an error, or it did not answer."}
                         },
                         "required": ["kind"],
                         "additionalProperties": false

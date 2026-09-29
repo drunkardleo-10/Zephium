@@ -19,6 +19,23 @@ pub const MAX_WORK_STEP_NOTE_BYTES: usize = 512;
 pub const WORK_STEP_INTERRUPTED: &str = "Zephium closed during this step";
 pub const MAX_WORK_FOLLOWUPS: usize = 3;
 pub const MAX_WORK_FOLLOWUP_BYTES: usize = 120;
+/// A work's name: at most five words in one short line.
+pub const MAX_WORK_TITLE_CHARS: usize = 48;
+pub const MAX_WORK_TITLE_WORDS: usize = 5;
+
+/// A work's name as a run gives it: one line of one to five words.
+pub fn validate_work_title(value: &str) -> Result<(), WorkError> {
+    validate_text(value, MAX_WORK_TITLE_CHARS * 4)?;
+    let words = value.split_whitespace().count();
+    if value.trim() != value
+        || value.chars().count() > MAX_WORK_TITLE_CHARS
+        || value.chars().any(char::is_control)
+        || !(1..=MAX_WORK_TITLE_WORDS).contains(&words)
+    {
+        return Err(WorkError::Invalid);
+    }
+    Ok(())
+}
 pub const MAX_WORK_FOLDERS: usize = 8;
 pub const MAX_WORK_FILE_PATH_BYTES: usize = 1024;
 /// Text disclosed from one file step: a file excerpt, a listing, hits or a diff.
@@ -1037,6 +1054,9 @@ pub struct WorkExecutionFact {
     /// What a lead run pulled in: skills, notes, tabs, files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<super::parts::WorkInputFactV1>,
+    /// The name its finish gave the work, derived from the finish step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -1138,6 +1158,9 @@ pub enum WorkStepKindV1 {
         /// Up to three short next requests the person may choose.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         followups: Vec<String>,
+        /// The work's name, given by its first run: a short noun phrase.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
     /// A step on a site that commits something for the person, held until
     /// they decide. Every field is Rust's reading of the page, never the
@@ -1473,8 +1496,12 @@ impl WorkStepKindV1 {
                 }
                 Ok(())
             }
-            Self::Finish { followups } => {
-                if followups.len() > MAX_WORK_FOLLOWUPS {
+            Self::Finish { followups, title } => {
+                if followups.len() > MAX_WORK_FOLLOWUPS
+                    || title
+                        .as_deref()
+                        .is_some_and(|t| validate_work_title(t).is_err())
+                {
                     return Err(WorkError::Invalid);
                 }
                 let mut unique = BTreeSet::new();
@@ -2132,8 +2159,19 @@ impl WorkExecutionFact {
             .collect()
     }
     /// Recomputes `accounts`; the Store calls it whenever steps change.
+    /// Recomputes what the steps imply: the signed-in origins used and the
+    /// work's name its finish gave.
     pub fn refresh_accounts(&mut self) {
         self.accounts = self.account_use();
+        self.title = self.finish_title().map(str::to_owned);
+    }
+    fn finish_title(&self) -> Option<&str> {
+        self.steps.iter().find_map(|step| match &step.kind {
+            WorkStepKindV1::Finish {
+                title: Some(title), ..
+            } => Some(title.as_str()),
+            _ => None,
+        })
     }
     pub fn is_agent(&self) -> bool {
         matches!(self.spec.nodes.as_slice(), [node] if matches!(node.capability, WorkCapability::Agent { .. }))
@@ -2233,6 +2271,9 @@ impl WorkExecutionFact {
         // A signed-in read lies inside a granted origin, within its budget.
         let accounts = self.account_use();
         if self.accounts != accounts || accounts.iter().any(|use_| use_.pages_used > use_.pages) {
+            return Err(WorkError::Invalid);
+        }
+        if self.title.as_deref() != self.finish_title() {
             return Err(WorkError::Invalid);
         }
         let running = attempt.is_some_and(|a| a.status == WorkAttemptStatus::Running);

@@ -308,6 +308,7 @@ fn lead_execution() -> (WorkPlanRevision, WorkExecutionFact, WorkRevision) {
         accounts: vec![],
         parts: vec![],
         inputs: vec![],
+        title: None,
     };
     (plan, fact, WorkRevision::new(9).unwrap())
 }
@@ -553,7 +554,10 @@ fn a_part_needs_something_only_once_it_cannot_go_on() {
     assert!(with(WorkPartStateV1::Waiting, sign_in()).validate().is_ok());
     assert!(with(
         WorkPartStateV1::Stopped,
-        WorkPartNeedV1::Retry { host: None }
+        WorkPartNeedV1::Retry {
+            host: None,
+            reason: None
+        }
     )
     .validate()
     .is_ok());
@@ -573,9 +577,11 @@ fn a_part_needs_something_only_once_it_cannot_go_on() {
         },
         WorkPartNeedV1::UseConnection {
             connection: String::new(),
+            reason: None,
         },
         WorkPartNeedV1::Retry {
             host: Some("localhost".into()),
+            reason: Some(WorkPartReasonV1::NoAnswer),
         },
     ] {
         assert!(with(WorkPartStateV1::Failed, need).validate().is_err());
@@ -590,6 +596,18 @@ fn a_part_needs_something_only_once_it_cannot_go_on() {
     assert_eq!(
         wire["need"],
         json!({"kind": "allow_folder", "path": "/Users/ana/Dev/Lunios"})
+    );
+    let read = serde_json::to_value(with(
+        WorkPartStateV1::Failed,
+        WorkPartNeedV1::Retry {
+            host: Some("kayak.com".into()),
+            reason: Some(WorkPartReasonV1::CouldntRead),
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        read["need"],
+        json!({"kind": "retry", "host": "kayak.com", "reason": "couldnt_read"})
     );
 }
 
@@ -631,4 +649,50 @@ fn a_folder_question_names_its_folder() {
         purpose: Some(WorkAskPurposeV1::Question),
     };
     assert!(question.validate().is_err());
+}
+
+#[test]
+fn a_first_run_names_its_work_from_its_finish() {
+    let (plan, mut fact, revision) = lead_execution();
+    let finish = |title: Option<&str>| WorkStepFact {
+        id: 9.into(),
+        turn: 2,
+        kind: WorkStepKindV1::Finish {
+            followups: vec![],
+            title: title.map(str::to_owned),
+        },
+        status: WorkStepStatus::Succeeded,
+        usage: None,
+        artifacts: vec![],
+        evidence: None,
+        note: None,
+        measurements: None,
+        local: None,
+        account: None,
+        part: None,
+    };
+    for refused in [
+        "Plan a trip from Warsaw to San Francisco",
+        " YC trip",
+        "",
+        "A name that runs well past forty-eight characters",
+    ] {
+        assert!(finish(Some(refused)).validate().is_err(), "{refused}");
+    }
+    fact.steps.push(finish(Some("YC trip from Warsaw")));
+    assert!(fact.validate(&plan, revision).is_err());
+    fact.refresh_accounts();
+    assert_eq!(fact.title.as_deref(), Some("YC trip from Warsaw"));
+    fact.validate(&plan, revision).unwrap();
+    let wire = serde_json::to_value(&fact).unwrap();
+    assert_eq!(wire["title"], "YC trip from Warsaw");
+    assert_eq!(wire["steps"][0]["kind"]["title"], "YC trip from Warsaw");
+    let (_, mut unnamed, _) = lead_execution();
+    unnamed.steps.push(finish(None));
+    unnamed.refresh_accounts();
+    assert_eq!(unnamed.title, None);
+    assert!(serde_json::to_value(&unnamed)
+        .unwrap()
+        .get("title")
+        .is_none());
 }

@@ -48,6 +48,8 @@ pub(crate) struct PartSpec {
     pub records: Vec<String>,
     /// What a browser part searches, as typed fields for a site's results page.
     pub search: Option<super::recipes::SiteSearch>,
+    /// The person's connection for the service, when they chose its website.
+    pub declined: Option<super::route::Offer>,
 }
 
 fn now_ms() -> String {
@@ -128,6 +130,7 @@ pub(crate) fn spec(args: &Value) -> Result<PartSpec, String> {
         service,
         records,
         search,
+        declined: None,
     })
 }
 
@@ -470,7 +473,10 @@ where
                         "The helper's model could not be reached.",
                         placed,
                     );
-                    report.need = Some(WorkPartNeedV1::Retry { host: None });
+                    report.need = Some(WorkPartNeedV1::Retry {
+                        host: None,
+                        reason: None,
+                    });
                     return report;
                 }
             };
@@ -675,6 +681,9 @@ where
             Some(offer) => self.accepts(offer).await,
             None => false,
         };
+        if !accepted && spec.helper == WorkHelperV1::Browser {
+            spec.declined = offer.clone();
+        }
         if let Some((helper, service)) =
             super::route::settle(spec.helper, &brand, offer.as_ref(), accepted)
         {
@@ -709,7 +718,12 @@ where
                         })
                 })
             });
+        let asked_for = self
+            .objective
+            .to_lowercase()
+            .contains(&offer.yes.to_lowercase());
         let answer = match earlier {
+            _ if asked_for => Some(offer.yes.clone()),
             Some(answer) => Some(answer),
             None => self
                 .run
@@ -729,8 +743,10 @@ where
         answer.as_deref() == Some(offer.yes.as_str())
     }
 
-    /// The need a part that could not do its job shows on its row: the one
-    /// its helper named, when it holds, else what its steps show.
+    /// The need a part that could not do its job shows on its row, with the
+    /// reason its steps show: the one its helper named when it holds, else
+    /// what its steps show. A web part for a service the person has a
+    /// connection for offers the connection.
     async fn settle_need(&self, part: WorkPartId, spec: &PartSpec, report: &mut PartReport) {
         if report.state == WorkPartStateV1::Done {
             report.need = None;
@@ -751,6 +767,13 @@ where
                 _ => None,
             }))
             .collect();
+        let helper_reason = match &report.need {
+            Some(
+                WorkPartNeedV1::Retry { reason, .. } | WorkPartNeedV1::UseConnection { reason, .. },
+            ) => *reason,
+            _ => None,
+        };
+        let reason = step_reason(&steps, report.objects.is_empty(), helper_reason);
         // A page that waited on a sign-in wall and ended there needs a
         // sign-in, whatever else went wrong around it.
         let sign_in = match execution
@@ -783,6 +806,13 @@ where
                     (!admitted.is_empty())
                         .then_some(WorkPartNeedV1::AllowFolder { path: folder })?
                 }
+                WorkPartNeedV1::Retry { host, .. } => WorkPartNeedV1::Retry {
+                    host: host.or_else(|| hosts.first().cloned()),
+                    reason,
+                },
+                WorkPartNeedV1::UseConnection { connection, .. } => {
+                    WorkPartNeedV1::UseConnection { connection, reason }
+                }
                 other => other,
             };
             need.validate().is_ok().then_some(need)
@@ -812,13 +842,29 @@ where
                 && reads
                     .iter()
                     .all(|s| s.status != WorkStepStatus::Succeeded || s.artifacts.is_empty());
-            if pages_failed && report.objects.is_empty() {
+            if (pages_failed || reason.is_some()) && report.objects.is_empty() {
                 return Some(WorkPartNeedV1::Retry {
-                    host: hosts.first().cloned(),
+                    host: hosts.first().cloned().filter(|h| public_host(h)),
+                    reason,
                 });
             }
             None
         });
+        if let (Some(offer), Some(need)) = (&spec.declined, &report.need) {
+            if !matches!(need, WorkPartNeedV1::AllowFolder { .. }) {
+                let reason = match need {
+                    WorkPartNeedV1::SignIn { .. } => Some(WorkPartReasonV1::SignedOut),
+                    WorkPartNeedV1::Retry { reason, .. } => *reason,
+                    _ => reason,
+                };
+                report.need = Some(WorkPartNeedV1::UseConnection {
+                    connection: offer.connection.clone(),
+                    reason,
+                })
+                .filter(|need| need.validate().is_ok())
+                .or(report.need.take());
+            }
+        }
         if report.state == WorkPartStateV1::Stopped
             && !matches!(report.need, Some(WorkPartNeedV1::SignIn { .. }))
         {
@@ -1016,6 +1062,14 @@ fn need_arg(value: Option<&Value>) -> Option<WorkPartNeedV1> {
                 .to_ascii_lowercase()
         })
     };
+    let reason = match value.get("reason").and_then(Value::as_str) {
+        Some("couldnt_read") => Some(WorkPartReasonV1::CouldntRead),
+        Some("blocked_by_check") => Some(WorkPartReasonV1::BlockedByCheck),
+        Some("not_found") => Some(WorkPartReasonV1::NotFound),
+        Some("site_error") => Some(WorkPartReasonV1::SiteError),
+        Some("no_answer") => Some(WorkPartReasonV1::NoAnswer),
+        _ => None,
+    };
     Some(match value.get("kind").and_then(Value::as_str)? {
         "sign_in" => WorkPartNeedV1::SignIn {
             host: host(target)?,
@@ -1026,9 +1080,11 @@ fn need_arg(value: Option<&Value>) -> Option<WorkPartNeedV1> {
         "allow_folder" => WorkPartNeedV1::AllowFolder { path: target? },
         "use_connection" => WorkPartNeedV1::UseConnection {
             connection: target?,
+            reason,
         },
         "retry" => WorkPartNeedV1::Retry {
             host: host(target).filter(|h| public_host(h)),
+            reason,
         },
         _ => return None,
     })
@@ -1040,12 +1096,96 @@ fn need_words(need: &WorkPartNeedV1) -> String {
         WorkPartNeedV1::SignIn { host } => format!("the person to sign in on {host}"),
         WorkPartNeedV1::AllowSite { host } => format!("the person to allow work on {host}"),
         WorkPartNeedV1::AllowFolder { path } => format!("the person to allow reading {path}"),
-        WorkPartNeedV1::UseConnection { connection } => {
-            format!("the person to allow using {connection}")
+        WorkPartNeedV1::UseConnection { connection, .. } => {
+            format!("the person to choose their {connection} connection instead of its website")
         }
-        WorkPartNeedV1::Retry { host: Some(host) } => {
-            format!("another try: {host} did not answer as expected")
+        WorkPartNeedV1::Retry { host, reason } => {
+            let site = host.as_deref().unwrap_or("the site");
+            match reason {
+                Some(WorkPartReasonV1::CouldntRead) => {
+                    format!("another try: {site} loaded but could not be read")
+                }
+                Some(WorkPartReasonV1::SignedOut) => {
+                    format!("another try: {site} showed its signed-out view")
+                }
+                Some(WorkPartReasonV1::BlockedByCheck) => {
+                    format!("another try: {site} asked for a human check")
+                }
+                Some(WorkPartReasonV1::NotFound) => {
+                    format!("another try: {site} showed nothing that matched")
+                }
+                Some(WorkPartReasonV1::SiteError) => {
+                    format!("another try: {site} failed on its side")
+                }
+                Some(WorkPartReasonV1::NoAnswer) => {
+                    format!("another try: {site} did not answer in time")
+                }
+                None if host.is_some() => format!("another try on {site}"),
+                None => "another try".into(),
+            }
         }
-        WorkPartNeedV1::Retry { host: None } => "another try".into(),
     }
+}
+
+/// Why a part's steps show it could not do its job: the last failed page or
+/// search in closed words, else what the helper named, else nothing found
+/// where its pages read cleanly.
+fn step_reason(
+    steps: &[&WorkStepFact],
+    nothing_placed: bool,
+    named: Option<WorkPartReasonV1>,
+) -> Option<WorkPartReasonV1> {
+    let failed = steps.iter().rev().find(|s| {
+        matches!(
+            s.kind,
+            WorkStepKindV1::Read { .. } | WorkStepKindV1::Search { .. }
+        ) && matches!(
+            s.status,
+            WorkStepStatus::Failed | WorkStepStatus::OutcomeUnknown
+        )
+    });
+    if let Some(reason) = failed.and_then(|step| {
+        note_reason(
+            step.note.as_deref(),
+            matches!(step.kind, WorkStepKindV1::Search { .. }),
+        )
+    }) {
+        return Some(reason);
+    }
+    if named.is_some() {
+        return named;
+    }
+    let read_cleanly = failed.is_none()
+        && steps.iter().any(|s| {
+            matches!(
+                s.kind,
+                WorkStepKindV1::Read { .. } | WorkStepKindV1::Search { .. }
+            )
+        });
+    (read_cleanly && nothing_placed).then_some(WorkPartReasonV1::NotFound)
+}
+
+/// A failed step's closed note as the reason the canvas phrases.
+fn note_reason(note: Option<&str>, search: bool) -> Option<WorkPartReasonV1> {
+    use zephium_core::work::runtime::read_note;
+    use WorkPartReasonV1 as R;
+    let note = note.unwrap_or("");
+    Some(match note {
+        SIGN_IN_NOTE => R::SignedOut,
+        read_note::HUMAN_CHECK => R::BlockedByCheck,
+        read_note::CONSTRUCTION_TIMEOUT
+        | read_note::SLOW_SITE
+        | "The page took too long"
+        | "The page could not be opened"
+        | "The search could not be sent" => R::NoAnswer,
+        "The search gave no usable sources" => R::NotFound,
+        // This Mac's browser or the run's own search, not the site: no
+        // reason to give.
+        "The browser was not available"
+        | "The browser was not ready for this page"
+        | "The browsing profile was not available"
+        | "Too many pages were already open" => return None,
+        _ if search => return None,
+        _ => R::CouldntRead,
+    })
 }

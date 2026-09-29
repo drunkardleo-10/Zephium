@@ -1221,6 +1221,7 @@ impl Driver {
                 let mut step = self.step(
                     WorkStepKindV1::Finish {
                         followups: turn.followups,
+                        title: None,
                     },
                     WorkStepStatus::Succeeded,
                 );

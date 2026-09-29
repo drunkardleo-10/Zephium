@@ -34,6 +34,25 @@ impl WorkPartStateV1 {
     }
 }
 
+/// Why a part could not do its job, in closed words the canvas phrases.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkPartReasonV1 {
+    /// The page loaded but what it shows could not be read.
+    CouldntRead,
+    /// The site showed its signed-out view.
+    SignedOut,
+    /// The site asked for a human check.
+    BlockedByCheck,
+    /// The site answered, but what was asked for is not there.
+    NotFound,
+    /// The site or service failed on its side.
+    SiteError,
+    /// The site or service did not answer in time.
+    NoAnswer,
+}
+
 /// What a part that could not do its job needs from the person, with the
 /// thing it concerns. The fix sits on the part's row.
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -46,12 +65,19 @@ pub enum WorkPartNeedV1 {
     AllowSite { host: String },
     /// Let the agent read a folder on this Mac.
     AllowFolder { path: String },
-    /// Use an installed tool or connected service: "gh", "Linear".
-    UseConnection { connection: String },
-    /// The site or service failed on its side; trying again may work.
+    /// Use an installed tool or connected service: "gh", "Linear"; the
+    /// reason says why its website did not do.
+    UseConnection {
+        connection: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<WorkPartReasonV1>,
+    },
+    /// Trying again may work; the reason says what went wrong.
     Retry {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<WorkPartReasonV1>,
     },
 }
 impl WorkPartNeedV1 {
@@ -60,8 +86,8 @@ impl WorkPartNeedV1 {
         let ok = match self {
             Self::SignIn { host } | Self::AllowSite { host } => host_ok(host),
             Self::AllowFolder { path } => super::runtime::validate_file_path(path).is_ok(),
-            Self::UseConnection { connection } => words(connection, 40).is_ok(),
-            Self::Retry { host } => host.as_deref().is_none_or(host_ok),
+            Self::UseConnection { connection, .. } => words(connection, 40).is_ok(),
+            Self::Retry { host, .. } => host.as_deref().is_none_or(host_ok),
         };
         if ok {
             Ok(())

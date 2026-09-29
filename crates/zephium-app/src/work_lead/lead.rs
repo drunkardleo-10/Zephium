@@ -50,6 +50,7 @@ struct LeadState {
     parts_running: usize,
     reply: Option<WorkArtifactId>,
     finish_refusals: u8,
+    title_refused: bool,
     skills: Vec<String>,
     steers: BTreeSet<WorkStepId>,
     searches: usize,
@@ -71,6 +72,8 @@ pub(crate) struct Lead<'a, B> {
     /// What the person's memory holds, as the prompt's stable tail.
     pub memory: Option<String>,
     pub base_limits: WorkExecutionLimits,
+    /// No run of this work has named it yet: finish gives it a title.
+    pub name_work: bool,
     pub slots: tokio::sync::Semaphore,
     state: Mutex<LeadState>,
 }
@@ -110,6 +113,7 @@ where
             context,
             memory,
             base_limits: run.limits(),
+            name_work: false,
             slots: tokio::sync::Semaphore::new(parts::PARALLEL_PARTS),
             state: Mutex::new(LeadState::default()),
         }
@@ -847,9 +851,13 @@ where
                 followups.push(followup);
             }
         }
+        let title = match self.title(args.get("title")) {
+            Ok(title) => title,
+            Err(fault) => return (fault, true),
+        };
         self.run.activity(WorkActivityV1::Finishing);
         let mut step = self.run.step(
-            WorkStepKindV1::Finish { followups },
+            WorkStepKindV1::Finish { followups, title },
             WorkStepStatus::Succeeded,
             None,
         );
@@ -858,6 +866,37 @@ where
             Ok(_) => ("Finished".into(), false),
             Err(_) => ("The finish could not be recorded".into(), true),
         }
+    }
+
+    /// The work's name from finish's `title`, on a run that names it. A
+    /// title outside the rule is refused once with the rule, then left out.
+    fn title(&self, value: Option<&Value>) -> Result<Option<String>, String> {
+        if !self.name_work {
+            return Ok(None);
+        }
+        let Some(raw) = value.and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let title = super::call::plain(raw.trim())
+            .trim_end_matches(['.', '!', '?'])
+            .trim()
+            .to_owned();
+        if title.is_empty() {
+            return Ok(None);
+        }
+        if validate_work_title(&title).is_ok() {
+            return Ok(Some(title));
+        }
+        let mut state = self.state();
+        if state.title_refused {
+            return Ok(None);
+        }
+        state.title_refused = true;
+        Err(format!(
+            "Not finished: title has {} words and {} characters; the limit is {MAX_WORK_TITLE_WORDS} words and {MAX_WORK_TITLE_CHARS} characters, one line: a noun phrase such as Compiler learning plan",
+            title.split_whitespace().count(),
+            title.chars().count()
+        ))
     }
 
     /// Messages the person sent while the run worked, once each.

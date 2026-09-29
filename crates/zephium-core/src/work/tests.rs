@@ -688,6 +688,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         intervention: None,
         steps: vec![],
         accounts: vec![],
+        title: None,
     };
     fact.validate(&plan, revision).unwrap();
     let mut reviewed = fact.clone();
@@ -814,7 +815,10 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     fact.steps.push(step(
         4,
         2,
-        WorkStepKindV1::Finish { followups: vec![] },
+        WorkStepKindV1::Finish {
+            followups: vec![],
+            title: None,
+        },
         WorkStepStatus::Succeeded,
     ));
     fact.attempts[0].status = WorkAttemptStatus::Succeeded;
@@ -1270,6 +1274,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         step(
             WorkStepKindV1::Finish {
                 followups: followups.into_iter().map(String::from).collect(),
+                title: None,
             },
             WorkStepStatus::Succeeded,
         )
@@ -2067,6 +2072,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         intervention: None,
         steps: vec![],
         accounts: vec![],
+        title: None,
     };
     // The request's accounts are derived: an unrefreshed fact is refused.
     assert!(fact.validate(&plan, revision).is_err());
