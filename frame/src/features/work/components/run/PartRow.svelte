@@ -132,7 +132,12 @@
             /></span
           ></span
         >{:else}<span class="mark"
-          ><HostGlyph host={part.host ?? ""} size={16} loading={working} initial={false} /></span
+          ><HostGlyph
+            host={part.host ?? ""}
+            size={16}
+            loading={part.state === "running"}
+            initial={false}
+          /></span
         >{/if}
       <strong>{part.title}</strong>
     </button>
