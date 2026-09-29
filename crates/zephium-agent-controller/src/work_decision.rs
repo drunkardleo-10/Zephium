@@ -728,10 +728,15 @@ impl AgentWorkController {
                 result => break result?,
             }
         };
-        // A read that opened something may draw it a moment later: look
-        // again while its settle window lasts, so the change is its proof.
+        // A read that opened something in a site's app may draw it a moment
+        // later: look again while its settle window lasts, so the change is
+        // its proof.
         let mut current = current;
-        for _ in 0..4 {
+        let site_app = state
+            .navigation_discovery
+            .as_ref()
+            .is_some_and(AgentNavigationDiscovery::is_site_session);
+        for _ in 0..if site_app { 4 } else { 0 } {
             let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
             let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
             if !session.action_awaits_page_change(
