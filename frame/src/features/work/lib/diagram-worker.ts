@@ -514,18 +514,81 @@ const TRIES: Record<DiagramWay, [number, string][]> = {
 /** Drawn a few percent smaller reads better than a row broken in two. */
 const fits = (layout: DiagramLayout) => layout.bounds.width <= DIAGRAM.reach * 1.06;
 
+/**
+ * What a layout costs a reader: the length of line drawn (a shared run counted
+ * once), each turn, and each crossing of two lines far more.
+ */
+function inkOf(layout: DiagramLayout): number {
+  const runs = new Map<string, [number, number][]>();
+  const segments: [CanvasPosition, CanvasPosition, number][] = [];
+  const turns = new Set<string>();
+  Object.values(layout.flows).forEach((flow, index) => {
+    if (flow.twin) return;
+    const points = flow.points;
+    points.slice(1).forEach((b, at) => {
+      const a = points[at]!;
+      const flat = Math.abs(a.y - b.y) < 0.5;
+      const key = flat ? `h${Math.round(a.y)}` : `v${Math.round(a.x)}`;
+      const span: [number, number] = flat
+        ? [Math.min(a.x, b.x), Math.max(a.x, b.x)]
+        : [Math.min(a.y, b.y), Math.max(a.y, b.y)];
+      runs.set(key, [...(runs.get(key) ?? []), span]);
+      segments.push([a, b, index]);
+      if (at > 0) {
+        const before = points[at - 1]!;
+        if (Math.abs(before.y - a.y) < 0.5 !== flat)
+          turns.add(`${Math.round(a.x)},${Math.round(a.y)}`);
+      }
+    });
+  });
+  let length = 0;
+  for (const spans of runs.values()) {
+    spans.sort((x, y) => x[0] - y[0]);
+    let [from, to] = spans[0]!;
+    for (const [lo, hi] of spans.slice(1)) {
+      if (lo > to) {
+        length += to - from;
+        [from, to] = [lo, hi];
+      } else to = Math.max(to, hi);
+    }
+    length += to - from;
+  }
+  const crossings = new Set<string>();
+  for (const [a, b, one] of segments) {
+    if (Math.abs(a.y - b.y) >= 0.5) continue;
+    for (const [c, d, other] of segments) {
+      if (other === one || Math.abs(c.x - d.x) >= 0.5) continue;
+      const inside =
+        c.x > Math.min(a.x, b.x) + 1 &&
+        c.x < Math.max(a.x, b.x) - 1 &&
+        a.y > Math.min(c.y, d.y) + 1 &&
+        a.y < Math.max(c.y, d.y) - 1;
+      if (inside) crossings.add(`${Math.round(c.x)},${Math.round(a.y)}`);
+    }
+  }
+  return length + turns.size * 40 + crossings.size * 240;
+}
+
 async function laidOut(shape: DiagramShape, way: DiagramWay): Promise<DiagramLayout> {
   let best: DiagramLayout | null = null;
   // Fewest turns first; where that spreads the picture too wide or drags rows aside, rows
-  // centred on each other, then fewer parts to a row.
+  // centred on each other, then fewer parts to a row. Each is laid out with the parts'
+  // own order held and free, and the one with less ink kept.
   for (const [across, placement] of TRIES[way]) {
     const rows = diagramRows(shape, across);
-    const graph = elkGraph(shape, rows, way);
-    graph.layoutOptions = {
-      ...graph.layoutOptions,
-      "elk.layered.nodePlacement.strategy": placement,
-    };
-    const { layout, even } = fromElk(shape, await run(graph), rows, way);
+    let chosen: { layout: DiagramLayout; even: boolean; ink: number } | null = null;
+    for (const held of [false, true]) {
+      const graph = elkGraph(shape, rows, way);
+      graph.layoutOptions = {
+        ...graph.layoutOptions,
+        "elk.layered.nodePlacement.strategy": placement,
+        "elk.layered.crossingMinimization.forceNodeModelOrder": String(held),
+      };
+      const found = fromElk(shape, await run(graph), rows, way);
+      const ink = inkOf(found.layout);
+      if (!chosen || ink < chosen.ink) chosen = { ...found, ink };
+    }
+    const { layout, even } = chosen!;
     if ((way === "right" || fits(layout)) && (placement === "SIMPLE" || even)) return layout;
     if (!best || layout.bounds.width < best.bounds.width) best = layout;
   }
