@@ -195,6 +195,7 @@ pub use agent_native_shutdown_driver::{
     AgentNativeShutdownDriveError, AgentNativeShutdownEventSource, AgentNativeShutdownWait,
     AGENT_NATIVE_SHUTDOWN_RETRY_BASE_MILLIS, AGENT_NATIVE_SHUTDOWN_RETRY_MAX_MILLIS,
 };
+pub use agent_policy::AgentNavigationLedgerRefusal;
 pub use agent_policy::{
     AgentActiveEffect, AgentActiveModelCall, AgentActiveNavigation, AgentEffectAssessment,
     AgentEffectAuthorization, AgentEffectCancellation, AgentEffectDispatchRequest, AgentEffectId,
@@ -217,6 +218,7 @@ pub use agent_progress_metrics::{
 };
 #[cfg(test)]
 pub(crate) use agent_provider::AgentBrowserToolCall;
+pub use agent_provider::AgentProviderNavigationRefusalReason;
 pub(crate) use agent_provider::AgentProviderPricedUsage;
 pub use agent_provider::{
     AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,

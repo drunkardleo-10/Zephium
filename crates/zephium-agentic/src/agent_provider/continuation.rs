@@ -39,7 +39,9 @@ pub(super) use action_refusal::effect_label;
 mod action_refusal;
 #[path = "navigation_refusal.rs"]
 mod navigation_refusal;
-pub use navigation_refusal::AgentProviderNavigationRefusal;
+pub use navigation_refusal::{
+    AgentProviderNavigationRefusal, AgentProviderNavigationRefusalReason,
+};
 #[path = "observation_checkpoint.rs"]
 mod observation_checkpoint;
 #[cfg(any(test, feature = "provider-transport"))]

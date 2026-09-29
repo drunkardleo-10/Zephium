@@ -27,8 +27,8 @@ pub(crate) use navigation::is_document_successor;
 use navigation::AgentNavigationRow;
 pub use navigation::{
     AgentActiveNavigation, AgentNavigationAuthorizationRequest, AgentNavigationKind,
-    AgentNavigationPermit, AgentNavigationProgressId, AgentNavigationReceipt,
-    AgentNavigationSettlement,
+    AgentNavigationLedgerRefusal, AgentNavigationPermit, AgentNavigationProgressId,
+    AgentNavigationReceipt, AgentNavigationSettlement,
 };
 pub(crate) use navigation::{AgentNavigationCheckpoint, AgentNavigationCheckpointBinding};
 
@@ -4259,7 +4259,10 @@ mod tests {
             AgentPolicyInstant::from_millis(NOW - 1),
         );
         let authenticated = observation_taints(&page, signed_in).unwrap();
-        assert_eq!(authenticated[0].sensitivity(), SemanticSensitivity::Sensitive);
+        assert_eq!(
+            authenticated[0].sensitivity(),
+            SemanticSensitivity::Sensitive
+        );
         let typed = observation(
             context,
             origin("typed"),

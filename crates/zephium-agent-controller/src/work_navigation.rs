@@ -33,6 +33,98 @@ impl AgentWorkController {
         Ok(())
     }
 
+    /// Why a model Navigate goes back to the model instead of to policy: a
+    /// miscopied or unobserved link, an address a site task cannot open
+    /// (another site, an in-page `#` route), the open document, a destination
+    /// visited its limit, or no visits left. Each is correctable by the model;
+    /// broken authority still fails closed in policy.
+    pub(super) fn navigation_refusal(
+        state: &WorkState,
+        target: &ContextNavigationTarget,
+        observation: &SemanticObservation,
+    ) -> Option<AgentProviderNavigationRefusalReason> {
+        use AgentProviderNavigationRefusalReason as Reason;
+        let scope = state.navigation_discovery.as_ref()?;
+        if !scope.admits(target) {
+            return scope.is_site_session().then_some(Reason::OutsideScope);
+        }
+        let observed = observation
+            .frames()
+            .iter()
+            .flat_map(|frame| frame.nodes())
+            .any(|node| {
+                node.role() == SemanticRole::Link
+                    && node.sensitivity() == SemanticSensitivity::Public
+                    && node.link_destination() == Some(target)
+            });
+        if !observed {
+            return Some(Reason::Unobserved);
+        }
+        let session = state.session.as_ref()?;
+        session
+            .policy
+            .navigation_ledger_refusal(session.lease.lease(), target)
+            .map(|refusal| match refusal {
+                AgentNavigationLedgerRefusal::HopsSpent => Reason::HopsSpent,
+                AgentNavigationLedgerRefusal::AlreadyHere => Reason::AlreadyHere,
+                AgentNavigationLedgerRefusal::Revisited => Reason::Revisited,
+            })
+    }
+
+    /// Counts a refusal of a control that ran or reached the page (not
+    /// observed, rejected at dispatch, covered) by the control's role and
+    /// name digest: the second marks the refusal repeated, the third ends
+    /// the page's loop. Other refusals pass through.
+    pub(super) fn count_refused_control(
+        refused: &mut Vec<(u64, u8)>,
+        refusal: AgentProviderActionRefusal,
+        observation: &SemanticObservation,
+        frames: &[SemanticFrameJoin],
+    ) -> Result<AgentProviderActionRefusal, AgentWorkFailure> {
+        use std::hash::{Hash, Hasher};
+        if !matches!(
+            refusal.reason(),
+            SemanticActionBindingError::Unverified
+                | SemanticActionBindingError::DispatchRejected
+                | SemanticActionBindingError::TargetCovered
+        ) {
+            return Ok(refusal);
+        }
+        let Some(node) = refusal.target().and_then(|target| {
+            let expected = observation.reference_frame(target).ok()?;
+            let current = frames
+                .iter()
+                .find(|frame| frame.frame() == expected.frame())?;
+            observation.resolve_node(target, current).ok()
+        }) else {
+            return Ok(refusal);
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}", node.role()).hash(&mut hasher);
+        node.name().map(SemanticText::as_str).hash(&mut hasher);
+        let control = hasher.finish();
+        let count = match refused.iter_mut().find(|(known, _)| *known == control) {
+            Some((_, count)) => {
+                *count = count.saturating_add(1);
+                *count
+            }
+            None => {
+                refused
+                    .try_reserve(1)
+                    .map_err(|_| AgentWorkFailure::Contract)?;
+                refused.push((control, 1));
+                1
+            }
+        };
+        match count {
+            1 => Ok(refusal),
+            2 => Ok(refusal.repeated()),
+            _ => Err(AgentWorkFailure::Browser(
+                AgentBrowserProviderError::ActionProposalLoop,
+            )),
+        }
+    }
+
     pub(super) async fn navigate_current(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,

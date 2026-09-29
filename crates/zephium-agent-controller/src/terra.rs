@@ -3714,13 +3714,17 @@ impl AgentBrowserSession {
             .action
             .take()
             .ok_or(AgentBrowserProviderError::ActionPending)?;
+        let page_change = action.applied_on_page_change();
         match action.into_transition(accounted, baseline, current, observed_at) {
             Ok(mut transition) => {
                 if let Some(journal) = self.journal.as_mut() {
                     let terminal = transition
                         .batch_result()
                         .ok_or(AgentBrowserProviderError::Journal)?;
-                    if journal.action_settled(receipt, terminal).is_err() {
+                    if journal
+                        .action_settled(receipt, terminal, page_change)
+                        .is_err()
+                    {
                         self.action_terminal = transition.terminal.take();
                         self.failure = Some(AgentBrowserProviderError::Journal);
                         return Err(AgentBrowserProviderError::Journal);

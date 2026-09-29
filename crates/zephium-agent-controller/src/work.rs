@@ -2757,6 +2757,10 @@ impl AgentWorkController {
         // weak model cannot consume the rest of a run repeating an impossible
         // proposal. Fresh observations carry distinct identities.
         let mut action_refusals = Vec::<AgentProviderActionRefusalKey>::new();
+        // A control a single-page app re-renders comes back under a new
+        // reference: counted by a digest of its role and name, a second
+        // refusal tells the model to change approach and a third ends the loop.
+        let mut refused_controls = Vec::<(u64, u8)>::new();
         let mut refused_inspections = 0u8;
         loop {
             state.check_task_contract()?;
@@ -2942,25 +2946,13 @@ impl AgentWorkController {
             // A model can miscopy a public link. Refuse before policy admission,
             // retaining the exact observation/call and the original budgets.
             // Broken authority and out-of-scope targets still fail closed.
-            let unobserved_navigation = match step.turn.proposal() {
+            let refused_navigation = match step.turn.proposal() {
                 AgentBrowserToolProposal::Navigate(target) => {
-                    state
-                        .navigation_discovery
-                        .as_ref()
-                        .is_some_and(|scope| scope.admits(target))
-                        && !observation
-                            .frames()
-                            .iter()
-                            .flat_map(|frame| frame.nodes())
-                            .any(|node| {
-                                node.role() == SemanticRole::Link
-                                    && node.sensitivity() == SemanticSensitivity::Public
-                                    && node.link_destination() == Some(target)
-                            })
+                    Self::navigation_refusal(state, target, &observation)
                 }
-                _ => false,
+                _ => None,
             };
-            if unobserved_navigation {
+            if let Some(reason) = refused_navigation {
                 state.native.check_control(worker, browser)?;
                 state.refresh_account(worker, browser)?;
                 state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
@@ -2968,7 +2960,7 @@ impl AgentWorkController {
                 ))?;
                 state
                     .journal_mut()?
-                    .emit(AgentWorkEventKind::NavigationRefused)?;
+                    .emit(AgentWorkEventKind::NavigationRefused(reason))?;
                 let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                 if session.turns.saturating_add(2) > session.max_model_calls {
                     return Err(AgentWorkFailure::Browser(
@@ -2979,7 +2971,7 @@ impl AgentWorkController {
                     .into_tool_turn()
                     .into_parts()
                     .1
-                    .refuse_unobserved_navigation(&observation, &session.config)
+                    .refuse_navigation(&observation, &session.config, reason)
                     .map_err(|_| {
                         AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation)
                     })?;
@@ -3132,6 +3124,12 @@ impl AgentWorkController {
                                     .map_err(|_| AgentWorkFailure::Contract)?;
                                 action_refusals.push(key);
                             }
+                            let refusal = Self::count_refused_control(
+                                &mut refused_controls,
+                                refusal,
+                                &observation,
+                                &frames,
+                            )?;
                             let session =
                                 state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                             turn = Self::provider(
@@ -3225,6 +3223,12 @@ impl AgentWorkController {
                             .map_err(|_| AgentWorkFailure::Contract)?;
                         action_refusals.push(key);
                     }
+                    let refusal = Self::count_refused_control(
+                        &mut refused_controls,
+                        refusal,
+                        &observation,
+                        &frames,
+                    )?;
                     let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
                     turn = Self::provider(
                         &mut state.native,
@@ -4841,8 +4845,10 @@ pub enum AgentWorkEventKind {
     /// Snapshot scope was incompatible with the delivered baseline. No native
     /// capture ran; one budgeted provider turn can select a different operation.
     InspectionRefused,
-    /// A model URL absent from the current observation was refused before dispatch.
-    NavigationRefused,
+    /// A model Navigate was refused before dispatch, with its closed reason:
+    /// an unobserved or out-of-task address, the open document, a destination
+    /// visited its limit, or no page visits left.
+    NavigationRefused(AgentProviderNavigationRefusalReason),
     /// A model action failed binding before preparation, policy, or dispatch.
     /// Correcting the proposal consumes another ordinary budgeted model call.
     ActionProposalRefused(SemanticActionBindingError),
@@ -4858,6 +4864,9 @@ pub enum AgentWorkEventKind {
     ActionRejected(SemanticActionFailure),
     /// A completed read-only scroll did not prove movement; its failed receipt is closed.
     ActionUnverified(SemanticActionFailure),
+    /// A read's own target re-rendered while its page visibly changed; the
+    /// change proved the action (a channel, thread or date opened).
+    AppliedOnPageChange,
     /// A native effect was independently verified and accounted.
     Verified,
     /// An explicit policy/human boundary stopped execution.
@@ -5229,6 +5238,7 @@ impl WorkJournal {
         &mut self,
         receipt: AgentEffectReceipt,
         batch: &SemanticActionBatchResult,
+        page_change: bool,
     ) -> Result<(), AgentWorkFailure> {
         self.accounting
             .record_effect_receipt(receipt)
@@ -5243,6 +5253,9 @@ impl WorkJournal {
             )
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.record()?;
+        if page_change {
+            self.emit(AgentWorkEventKind::AppliedOnPageChange)?;
+        }
         self.emit(AgentWorkEventKind::Verified)
     }
 

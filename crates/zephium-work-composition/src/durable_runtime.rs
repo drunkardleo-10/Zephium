@@ -651,8 +651,9 @@ impl MacosWorkComposition {
                     AgentWorkEventKind::ModelSettled { .. }
                         | AgentWorkEventKind::ToolProposed(_)
                         | AgentWorkEventKind::InspectionRefused
-                        | AgentWorkEventKind::NavigationRefused
+                        | AgentWorkEventKind::NavigationRefused(_)
                         | AgentWorkEventKind::ActionProposalRefused(_)
+                        | AgentWorkEventKind::AppliedOnPageChange
                         | AgentWorkEventKind::Verified
                         | AgentWorkEventKind::ModelRequestedHuman(_)
                         | AgentWorkEventKind::DecisionSettled(_)

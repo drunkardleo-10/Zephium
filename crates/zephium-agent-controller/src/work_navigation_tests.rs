@@ -1372,7 +1372,7 @@ pub(super) fn assert_outcome(
         assert_eq!(
             events
                 .iter()
-                .filter(|event| event.kind() == AgentWorkEventKind::NavigationRefused)
+                .filter(|event| matches!(event.kind(), AgentWorkEventKind::NavigationRefused(_)))
                 .count(),
             if matches!(case, 2 | 3) {
                 expected_calls as usize - 1

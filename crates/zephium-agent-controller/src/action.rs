@@ -354,6 +354,7 @@ impl AgentBrowserActionProposal {
             failed: None,
             journal_failed,
             native_unverified: false,
+            applied_on_page_change: false,
             reinspection_owner: None,
             reinspection_result: None,
         })
@@ -373,6 +374,8 @@ impl fmt::Debug for AgentBrowserActionProposal {
 #[must_use]
 pub struct AgentBrowserAction {
     native_unverified: bool,
+    /// Verified by the page's change after its own target re-rendered.
+    applied_on_page_change: bool,
     reinspection_owner: Option<std::sync::Arc<()>>,
     reinspection_result: Option<crate::AgentWorkEffectReobservation>,
     journal_failed: bool,
@@ -733,6 +736,9 @@ impl AgentBrowserAction {
     pub(crate) const fn journal_failed(&self) -> bool {
         self.journal_failed
     }
+    pub(crate) const fn applied_on_page_change(&self) -> bool {
+        self.applied_on_page_change
+    }
 
     pub(crate) fn accepts_settlement(
         &self,
@@ -908,6 +914,13 @@ impl AgentBrowserAction {
                 error,
             )),
         };
+        // A read that opened something in a single-page app: its target
+        // re-rendered while the page changed, and that change is its proof.
+        let verified = verified.or_else(|refusal| {
+            let applied = refusal.applied_by_page_change(&self.proposal.action, snapshot);
+            self.applied_on_page_change = applied.is_ok();
+            applied
+        });
         let verified =
             match verified {
                 Ok(verified) => verified,

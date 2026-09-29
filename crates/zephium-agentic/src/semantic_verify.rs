@@ -550,6 +550,79 @@ impl SemanticActionVerificationRefusal {
         self.error
     }
 
+    /// A navigation-like read (opening a channel, thread, message, tab or
+    /// date) whose own target re-rendered, left or never showed the awaited
+    /// state while the page it acted on visibly changed: the action applied,
+    /// proven by that change. Any other effect keeps its refusal, and so does
+    /// a read whose page did not change.
+    pub fn applied_by_page_change(
+        self,
+        action: &SemanticPreparedAction,
+        snapshot: &SemanticSnapshot,
+    ) -> Result<SemanticActionVerifiedTerminal, Self> {
+        let target_bound = matches!(
+            self.error,
+            SemanticVerificationError::TargetMissing
+                | SemanticVerificationError::TargetChanged
+                | SemanticVerificationError::IncompleteSnapshot
+                | SemanticVerificationError::OutcomeNotObserved
+                | SemanticVerificationError::SettlementFailed(
+                    crate::SemanticActionFailure::StaleReference
+                )
+        );
+        let tracker = self.terminal.tracker();
+        if !target_bound
+            || !matches!(
+                tracker.status(),
+                crate::SemanticSettleStatus::ReadyForVerification
+                    | crate::SemanticSettleStatus::Failed(
+                        crate::SemanticActionFailure::StaleReference
+                    )
+            )
+            || action.effect() != crate::SemanticEffectClass::Read
+            || !matches!(
+                action.kind(),
+                crate::SemanticActionKind::Click
+                    | crate::SemanticActionKind::Press
+                    | crate::SemanticActionKind::Select
+            )
+            || action.verification() == SemanticVerification::PageChanged
+                && self.error == SemanticVerificationError::OutcomeNotObserved
+            || snapshot.frame() != action.frame()
+            || snapshot.generation().get() <= action.checkpoint_snapshot().get()
+            || self.observed_at > tracker.deadline()
+            || tracker
+                .terminal_at()
+                .is_some_and(|terminal| self.observed_at < terminal)
+            || crate::semantic_action::page_digest(snapshot) == action.page_digest()
+        {
+            return Err(self);
+        }
+        let attempt = tracker.attempt();
+        let (active, execution, mut settlement) = self.terminal.into_parts();
+        settlement.settle_by_page_change();
+        let verified = SemanticVerifiedAction {
+            attempt,
+            ordinal: action.ordinal(),
+            verification: action.verification(),
+            proof: SemanticEffectProofKind::PageChanged,
+            observed_at: self.observed_at,
+            deadline: settlement.deadline(),
+            current_context: snapshot.frame().context(),
+            current_invocation: Some(snapshot.invocation()),
+            current_snapshot: Some(snapshot.generation()),
+            action_guard: action.verification_guard(),
+            kind: action.kind(),
+            scroll: action.scroll_recipe(),
+        };
+        Ok(SemanticActionVerifiedTerminal {
+            active,
+            execution,
+            settlement,
+            verified,
+        })
+    }
+
     /// Monotonic instant carried by the consumed independent proof attempt.
     pub const fn observed_at(&self) -> SemanticSettleInstant {
         self.observed_at
@@ -1680,6 +1753,113 @@ mod tests {
         .expect_err("substituted action");
         assert_eq!(refusal.error(), SemanticVerificationError::ActionMismatch);
         assert_eq!(refusal.into_parts().0.attempt().get(), 23);
+    }
+
+    #[test]
+    fn a_read_whose_target_re_rendered_applies_only_when_its_page_changed() {
+        let (template, _) = observation();
+        let original = json!([
+            {"k": 1, "r": "document", "o": 16},
+            {"k": 4, "p": 0, "r": "checkbox", "n": "Private toggle", "o": 1,
+             "b": {"x": 10, "y": 60, "w": 20, "h": 20}}
+        ]);
+        let observation = SemanticObservationAssembler::new(
+            crate::SemanticObservationRequest::initial(
+                SemanticObservationId::new(1).expect("observation"),
+                template.request().context(),
+                SemanticObservationBudget::INITIAL_FILTERED,
+            ),
+            snapshot_for_frame(
+                template.frames()[0].frame().clone(),
+                1,
+                1,
+                "complete",
+                original.clone(),
+            ),
+        )
+        .expect("assembler")
+        .finish()
+        .expect("observation");
+        let prepared = |effect: SemanticEffectClass| {
+            let proposal = SemanticActionProposal::try_new(
+                SemanticActionIntent::Click {
+                    target: SemanticReferenceId::new(2).expect("target"),
+                },
+                effect,
+                SemanticWaitCondition::Immediate,
+                SemanticVerification::TargetState {
+                    state: crate::SemanticState::Checked,
+                    present: true,
+                },
+                SemanticSettleBudget::try_new(250).expect("budget"),
+            )
+            .expect("proposal");
+            SemanticActionBatch::bind(
+                SemanticActionBatchId::new(1).expect("batch"),
+                &observation,
+                &[observation.frames()[0].frame().clone()],
+                vec![proposal],
+            )
+            .expect("batch")
+            .actions()[0]
+                .prepare(&observation.frames()[0])
+                .expect("prepare")
+        };
+        let at = SemanticSettleInstant::from_millis(101);
+        let opened = current(
+            &observation,
+            json!([
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 9, "p": 0, "r": "checkbox", "n": "Private toggle", "o": 1},
+                {"k": 10, "p": 0, "r": "paragraph", "t": "Private channel"}
+            ]),
+        );
+        let read = prepared(SemanticEffectClass::Read);
+        let applied = SemanticActionVerificationRefusal::unobserved(
+            execution_terminal(&read, 31),
+            at,
+            crate::SemanticActionRevalidationError::TargetMissing,
+        )
+        .applied_by_page_change(&read, &opened)
+        .expect("page changed");
+        assert_eq!(
+            applied.verified().proof(),
+            SemanticEffectProofKind::PageChanged
+        );
+        assert!(applied.verified().matches_action(&read));
+        assert_eq!(
+            applied.settlement().status(),
+            SemanticSettleStatus::ReadyForVerification
+        );
+
+        let unchanged = current(&observation, original);
+        let refusal = verify_semantic_action_terminal(
+            execution_terminal(&read, 32),
+            &read,
+            SemanticEffectEvidence::snapshot(
+                SemanticActionAttemptId::new(32).expect("attempt"),
+                at,
+                &unchanged,
+            ),
+        )
+        .expect_err("not checked");
+        assert_eq!(
+            refusal.error(),
+            SemanticVerificationError::OutcomeNotObserved
+        );
+        let refusal = refusal
+            .applied_by_page_change(&read, &unchanged)
+            .expect_err("nothing changed");
+        assert_eq!(refusal.into_parts().0.attempt().get(), 32);
+
+        let draft = prepared(SemanticEffectClass::LocalWrite);
+        assert!(SemanticActionVerificationRefusal::unobserved(
+            execution_terminal(&draft, 33),
+            at,
+            crate::SemanticActionRevalidationError::TargetMissing,
+        )
+        .applied_by_page_change(&draft, &opened)
+        .is_err());
     }
 
     #[test]

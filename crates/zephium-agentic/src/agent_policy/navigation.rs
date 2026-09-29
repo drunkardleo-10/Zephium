@@ -47,6 +47,17 @@ pub(super) struct AgentNavigationRow {
     kind: AgentNavigationKind,
 }
 
+/// A model load the run's navigation ledger refuses before authorization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentNavigationLedgerRefusal {
+    /// Every hop of this page task is spent.
+    HopsSpent,
+    /// The target is the document the page is on.
+    AlreadyHere,
+    /// The target was visited as often as the scope allows.
+    Revisited,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Physical browser transition class covered by one policy receipt.
 pub enum AgentNavigationKind {
@@ -576,6 +587,50 @@ impl AgentRunPolicy {
             AgentNavigationKind::Load,
             true,
         )
+    }
+
+    /// Why a model load to `target` in a discovery scope would be refused by
+    /// this run's own navigation ledger, before any authority is minted:
+    /// every hop spent, the document it is already on, or a destination
+    /// visited its limit. Read-only; the authorization still decides.
+    pub fn navigation_ledger_refusal(
+        &self,
+        lease: AgentPlanLeaseId,
+        target: &ContextNavigationTarget,
+    ) -> Option<AgentNavigationLedgerRefusal> {
+        let binding = &self.leases.get(self.lease_index(lease)?)?.binding;
+        let discovery = self
+            .manifest
+            .plan_node(binding.node())?
+            .navigation_discovery()?;
+        let hop = self.navigation_attempts;
+        if hop >= discovery.max_hops() {
+            return Some(AgentNavigationLedgerRefusal::HopsSpent);
+        }
+        let current = if hop == 0 {
+            self.initial_navigation_document
+                .as_ref()
+                .map(|(_, target)| target)
+                .unwrap_or_else(|| discovery.departure())
+        } else {
+            self.navigation_effective_destinations
+                .get(hop - 1)?
+                .as_ref()?
+        };
+        if current == target {
+            return Some(AgentNavigationLedgerRefusal::AlreadyHere);
+        }
+        if self
+            .navigation_destinations
+            .iter()
+            .flatten()
+            .filter(|destination| *destination == target)
+            .count()
+            >= discovery.max_visits_per_destination()
+        {
+            return Some(AgentNavigationLedgerRefusal::Revisited);
+        }
+        None
     }
 
     /// Reserves one step to the policy-owned successful-history predecessor.

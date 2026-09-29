@@ -493,6 +493,15 @@ impl SemanticSettleTracker {
         self.terminal_at
     }
 
+    /// A read whose target re-rendered or left while the page changed: the
+    /// target-bound settle failure stands for a settled action. Any other
+    /// failure (cancelled, renderer lost, a person took over) stays.
+    pub(crate) fn settle_by_page_change(&mut self) {
+        if self.status == SemanticSettleStatus::Failed(SemanticActionFailure::StaleReference) {
+            self.status = SemanticSettleStatus::ReadyForVerification;
+        }
+    }
+
     pub(crate) fn matches_action(&self, action: &SemanticPreparedAction) -> bool {
         self.frame == *action.frame()
             && self.target == action.target_key()

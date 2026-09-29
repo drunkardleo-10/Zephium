@@ -164,6 +164,7 @@ impl super::super::AgentProviderSettledToolTurn {
                     continuation,
                     error,
                     context: Some(context),
+                    repeated: false,
                 },
             ));
         }
@@ -187,6 +188,7 @@ impl super::super::AgentProviderSettledToolTurn {
                             continuation,
                             error: SemanticActionBindingError::TargetIncomplete,
                             context: refusal_context,
+                            repeated: false,
                         },
                     ));
                 }
@@ -207,6 +209,7 @@ impl super::super::AgentProviderSettledToolTurn {
                     continuation,
                     error,
                     context: refusal_context,
+                    repeated: false,
                 },
             )),
             Err(error) => Err(Error::Binding(error)),
@@ -220,6 +223,7 @@ pub struct AgentProviderActionRefusal {
     continuation: AgentProviderContinuation,
     error: SemanticActionBindingError,
     context: Option<AgentProviderActionRefusalContext>,
+    repeated: bool,
 }
 
 impl AgentProviderActionRefusal {
@@ -234,7 +238,18 @@ impl AgentProviderActionRefusal {
             continuation,
             error,
             context,
+            repeated: false,
         }
+    }
+    /// This control was refused before on an earlier look: the model hears
+    /// to change approach instead of trying it again.
+    pub fn repeated(mut self) -> Self {
+        self.repeated = true;
+        self
+    }
+    /// The refused proposal's target on the observation it was made on.
+    pub fn target(&self) -> Option<SemanticReferenceId> {
+        self.context.map(|context| context.target)
     }
     /// Content-free rejection reason for auditing.
     pub const fn reason(&self) -> SemanticActionBindingError {
@@ -317,10 +332,18 @@ impl AgentProviderActionRefusal {
             _ => return Err(AgentProviderContinuationError::ToolKind),
         };
         let executed = self.error == SemanticActionBindingError::Unverified;
+        let guidance = if self.repeated {
+            format!("{guidance} This control was already refused on an earlier look, so trying it again will not work: change approach. Follow a link to the same view with navigate, use the site's own search or filter box, or scroll the list and read what it already shows.")
+        } else {
+            guidance.to_owned()
+        };
         let mut result = serde_json::json!({
             "status": "refused", "code": code, "executed": executed,
             "guidance": guidance, "observation_unchanged": !executed,
         });
+        if self.repeated {
+            result["repeated_target"] = serde_json::json!(true);
+        }
         if let SemanticActionBindingError::TaskEffectMismatch(expected) = self.error {
             result["required_effect"] = serde_json::json!(effect_label(expected));
         }

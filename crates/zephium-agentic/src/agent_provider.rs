@@ -39,9 +39,9 @@ pub use continuation::{
     AgentProviderBoundExtractionContinuation, AgentProviderBoundLocateContinuation,
     AgentProviderBoundReadContinuation, AgentProviderBoundScreenshotContinuation,
     AgentProviderContinuation, AgentProviderContinuationError, AgentProviderNavigationCheckpoint,
-    AgentProviderNavigationRefusal, AgentProviderObservationCheckpoint,
-    AgentProviderObservationRefusal, AgentProviderObservationResolution,
-    MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
+    AgentProviderNavigationRefusal, AgentProviderNavigationRefusalReason,
+    AgentProviderObservationCheckpoint, AgentProviderObservationRefusal,
+    AgentProviderObservationResolution, MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_CONTINUATION_TURNS,
 };
 pub use extraction::{
