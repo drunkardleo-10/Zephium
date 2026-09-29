@@ -44,6 +44,8 @@ pub(crate) struct PartSpec {
     pub brief: String,
     pub service: Option<WorkPartServiceV1>,
     pub records: Vec<String>,
+    /// What a browser part searches, as typed fields for a site's results page.
+    pub search: Option<super::recipes::SiteSearch>,
 }
 
 fn now_ms() -> String {
@@ -115,6 +117,7 @@ pub(crate) fn spec(args: &Value) -> Result<PartSpec, String> {
                 .collect()
         })
         .unwrap_or_default();
+    let search = super::recipes::parse(args.get("search"))?;
     Ok(PartSpec {
         title,
         helper,
@@ -122,6 +125,7 @@ pub(crate) fn spec(args: &Value) -> Result<PartSpec, String> {
         brief,
         service,
         records,
+        search,
     })
 }
 
@@ -336,6 +340,18 @@ where
                 "Return for each thing: {}\n",
                 spec.records.join(", ")
             ));
+        }
+        if let (Kit::Browser, Some(search)) = (&kit, &spec.search) {
+            let pages = super::recipes::pages(
+                search,
+                spec.service.as_ref().and_then(|service| service.host.as_deref()),
+            );
+            if !pages.is_empty() {
+                brief.push_str("Results pages with the search already in them; browse one as start, its goal to read the results shown as records (open an item only for a field the list lacks), before any form:\n");
+                for (name, url) in pages {
+                    brief.push_str(&format!("- {name}: {url}\n"));
+                }
+            }
         }
         if !self.run.grant.folders.is_empty() && matches!(kit, Kit::Files | Kit::Registered(_)) {
             brief.push_str(&format!(

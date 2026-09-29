@@ -9,6 +9,7 @@ mod lead;
 pub mod objects;
 mod parts;
 mod prompt;
+mod recipes;
 pub mod registry;
 mod run;
 pub mod skills;

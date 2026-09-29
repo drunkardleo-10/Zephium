@@ -6,7 +6,7 @@ tools: [start_part, web_search, create, finish]
 # Compare and choose
 
 ## Gather
-- Products from a named store: one browser part on that store with records for name, price, rating, url and up to three image_url fields. The page is the source of prices and photos; search snippets never stand in for a displayed price.
+- Products from a named store: one browser part on that store with `search` {query} (the words a person would type in the store's search) and records for name, price, rating, url and up to three image_url fields. The helper starts on the store's results page; the product page is the source of prices and photos, and search snippets never stand in for a displayed price.
 - Options the person names on different sites: a research part, or one browser part per site when prices and photos are needed.
 - Services or tools you know well: search only for current prices and limits.
 
