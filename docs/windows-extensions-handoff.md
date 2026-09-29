@@ -35,7 +35,7 @@ PowerShell process. See [the QA checklist](windows-extension-qa.md).
   then uses the existing bounded native adoption path. It rechecks popup focus
   after construction. Hidden observers still cannot open tabs through this path.
   Grammarly 14.1333.0's real OAuth request reaches its sign-in document in the
-  disposable lab; completed account sign-in remains a user acceptance check.
+  disposable lab. **Completed sign-in fails in user QA**; see the limitation below.
 - Native context-menu entries named `extension` are preserved, including their
   native submenus and command dispatch. The previous allowlist removed them.
   Ordinary unknown commands and custom host entries remain filtered. An
@@ -112,6 +112,19 @@ sample had a gap. Use `desktop\measure-webext-qa.ps1` for a fresh fixed-tab run.
 
 ## Limits and open acceptance items
 
+- **Grammarly 14.1333.0 sign-in is not usable yet.** The owner reaches its
+  `chromiumapp.org` callback as a normal page and gets a DNS error. Package
+  inspection shows interactive auth uses `tabs.create`, requires the returned
+  tab ID, then subscribes to `tabs.onUpdated`; `identity.launchWebAuthFlow` is
+  used for silent auth. Two fresh lab runs found native `tabs.create` creates
+  the child but returns `undefined` (both promise and callback; callback has
+  no `runtime.lastError`). Native query/update and URL-change events do work,
+  including a synthetic callback navigation. This reproduces the API contract
+  failure that would prevent Grammarly installing its login listeners; the
+  user's worker was not inspected. Evidence and scenarios:
+  `target/windows-auth-analysis/20260929-165247/`. Next isolate the native
+  adoption return contract before considering any bounded compatibility
+  adapter. A redirect-only identity fix cannot repair this interactive path.
 - **1Password 8.12.37.1 is not usable yet.** It declares a default popup but
   clears the native popup URL during unsigned-in startup, then requests
   `chrome-extension://.../app/app.html#/page/welcome`. That document renders
