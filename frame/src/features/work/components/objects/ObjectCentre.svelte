@@ -6,7 +6,7 @@
 </script>
 
 <div class="centre {object.kind}">
-  <ObjectView {object} detail="full" {actions} centre />
+  <ObjectView {object} {actions} centre />
 </div>
 
 <style>

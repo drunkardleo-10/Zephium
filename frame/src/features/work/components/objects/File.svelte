@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
   import CodeBlock from "$shared/ui/data/Code/CodeBlock.svelte";
-  import type { Detail, FileView, ObjectActions } from "../../lib/board/types";
+  import type { FileView, ObjectActions } from "../../lib/board/types";
   import { File01Icon } from "./icons";
   import { size } from "./size-text";
   import { noteBlocks } from "./markdown";
@@ -12,12 +12,10 @@
    */
   let {
     object,
-    detail,
     actions = {},
     centre = false,
   }: {
     object: FileView;
-    detail: Detail;
     actions?: ObjectActions;
     /** Opened in the centre: all of it, at reading size. */
     centre?: boolean;
@@ -34,7 +32,7 @@
   );
 </script>
 
-<figure class="file {object.file} {detail}" aria-label={object.name}>
+<figure class="file {object.file}" aria-label={object.name}>
   <button
     type="button"
     class="face nodrag nopan"
@@ -55,22 +53,17 @@
       />
     {:else if (object.file === "text" || object.file === "code") && object.lines !== undefined}
       <span class="sheet lines" class:mono={object.file === "code"} class:whole={centre}>
-        {#if detail === "full"}
-          {#if object.file === "code"}<CodeBlock
-              language={object.language ?? ""}
-              text={object.lines}
-              label={object.name}
-              limit={centre ? undefined : 12}
-            />{:else if markdown}{#each noteBlocks(object.lines).slice(0, 8) as part, index (index)}{#if part.kind === "heading"}<strong
-                  class="heading">{part.text}</strong
-                >{:else if part.kind === "list"}{#each part.items as item, at (at)}<span
-                    class="item">{item}</span
-                  >{/each}{:else}<span class="para">{part.lines.join(" ")}</span
-                >{/if}{/each}{:else}{object.lines.split("\n").slice(0, 14).join("\n")}{/if}
-        {:else}{#each object.lines.split("\n").slice(0, 10) as line, index (index)}<span
-              class="bar"
-              style:inline-size={`${Math.min(100, (line.trim().length / 44) * 100)}%`}
-            ></span>{/each}{/if}
+        {#if object.file === "code"}<CodeBlock
+            language={object.language ?? ""}
+            text={object.lines}
+            label={object.name}
+            limit={centre ? undefined : 12}
+          />{:else if markdown}{#each noteBlocks(object.lines).slice(0, 8) as part, index (index)}{#if part.kind === "heading"}<strong
+                class="heading">{part.text}</strong
+              >{:else if part.kind === "list"}{#each part.items as item, at (at)}<span class="item"
+                  >{item}</span
+                >{/each}{:else}<span class="para">{part.lines.join(" ")}</span
+              >{/if}{/each}{:else}{object.lines.split("\n").slice(0, 14).join("\n")}{/if}
       </span>
     {:else}
       <span class="icon">
@@ -81,16 +74,14 @@
             height="64"
             decoding="async"
             onerror={() => (broken = object.picture?.src ?? null)}
-          />{:else}<Icon icon={File01Icon} size={detail === "full" ? 40 : 80} />{/if}
+          />{:else}<Icon icon={File01Icon} size={40} />{/if}
       </span>
     {/if}
   </button>
-  {#if detail !== "tile"}
-    <figcaption>
-      <span class="name">{object.name}</span>
-      {#if meta && detail === "full"}<span class="meta">{meta}</span>{/if}
-    </figcaption>
-  {/if}
+  <figcaption>
+    <span class="name">{object.name}</span>
+    {#if meta}<span class="meta">{meta}</span>{/if}
+  </figcaption>
 </figure>
 
 <style>
@@ -176,15 +167,6 @@
     font-family: var(--font-mono);
   }
 
-  .bar {
-    display: block;
-    flex: none;
-    block-size: 12px;
-    margin-block: 7px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill-strong);
-  }
-
   .icon {
     display: grid;
     place-items: center;
@@ -219,10 +201,5 @@
   .meta {
     color: var(--color-muted);
     font-size: var(--text-caption);
-  }
-
-  .overview .name {
-    font-size: var(--text-overview-label);
-    line-height: 1.3;
   }
 </style>

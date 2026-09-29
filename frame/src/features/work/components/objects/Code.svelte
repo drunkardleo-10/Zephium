@@ -2,18 +2,16 @@
   import CodeBlock from "$shared/ui/data/Code/CodeBlock.svelte";
   import { codeLines } from "$shared/ui/data/Code";
   import * as m from "$shared/i18n/messages";
-  import type { CodeView, Detail, ObjectActions } from "../../lib/board/types";
+  import type { CodeView, ObjectActions } from "../../lib/board/types";
   import { splitPath } from "./path";
   import Title from "./Title.svelte";
   /** An excerpt of a file with its notes: the path set as a header, the lines as the page. */
   let {
     object,
-    detail,
     actions = {},
     centre = false,
   }: {
     object: CodeView;
-    detail: Detail;
     actions?: ObjectActions;
     /** Opened in the centre: all of it, at reading size. */
     centre?: boolean;
@@ -23,38 +21,29 @@
   const path = $derived(object.path ? splitPath(object.path) : null);
 </script>
 
-<section class="code {detail}" aria-label={object.title ?? object.path}>
+<section class="code" aria-label={object.title ?? object.path}>
   <header>
-    {#if object.title && detail !== "tile"}<Title text={object.title} {detail} />{/if}
+    {#if object.title}<Title text={object.title} />{/if}
     {#if path}<p class="path">
         <span class="folder">{path.folder}</span><span class="name">{path.name}</span>
       </p>{/if}
   </header>
-  {#if detail === "full"}
-    <div class="page">
-      <CodeBlock
-        language={object.language}
-        text={object.text}
-        label={object.title ?? object.path ?? ""}
-        notes={object.notes}
-        limit={centre ? undefined : LINES}
-        variant={centre ? "lift" : "card"}
-        start={object.start ?? 1}
-      />
-    </div>
-    {#if count > LINES && !centre}<button
-        type="button"
-        class="all nodrag nopan"
-        onclick={() => actions.open?.(object.id)}>{m.work_object_show_all_lines({ count })}</button
-      >{/if}
-  {:else}
-    <div class="shape" aria-hidden="true">
-      {#each codeLines(object.text).slice(0, detail === "tile" ? 8 : 12) as line, index (index)}<span
-          style:inline-size={`${Math.min(100, (line.trimEnd().length / 60) * 100)}%`}
-          style:margin-inline-start={`${Math.min(40, (line.length - line.trimStart().length) * 1.2)}%`}
-        ></span>{/each}
-    </div>
-  {/if}
+  <div class="page">
+    <CodeBlock
+      language={object.language}
+      text={object.text}
+      label={object.title ?? object.path ?? ""}
+      notes={object.notes}
+      limit={centre ? undefined : LINES}
+      variant={centre ? "lift" : "card"}
+      start={object.start ?? 1}
+    />
+  </div>
+  {#if count > LINES && !centre}<button
+      type="button"
+      class="all nodrag nopan"
+      onclick={() => actions.open?.(object.id)}>{m.work_object_show_all_lines({ count })}</button
+    >{/if}
 </section>
 
 <style>
@@ -110,37 +99,5 @@
 
   .all:hover {
     color: var(--color-text);
-  }
-
-  .shape {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding-block: 6px;
-  }
-
-  .shape span {
-    block-size: 10px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill-strong);
-  }
-
-  .overview,
-  .tile {
-    gap: 20px;
-    padding: 28px;
-  }
-
-  .overview .path,
-  .tile .path {
-    font-size: var(--text-overview-label);
-  }
-
-  .tile .path .folder {
-    display: none;
-  }
-
-  .tile .path {
-    font-size: var(--text-tile-title);
   }
 </style>

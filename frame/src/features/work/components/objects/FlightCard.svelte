@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
-  import type { Detail, ObjectActions, PickView } from "../../lib/board/types";
+  import type { ObjectActions, PickView } from "../../lib/board/types";
   import Mark, { hasMark } from "./Mark.svelte";
   import YesNo from "./YesNo.svelte";
   import { Tick02Icon } from "./icons";
@@ -9,11 +9,9 @@
   /** A flight as its route: times over the airports, the stops as dots on the way. */
   let {
     pick,
-    detail,
     actions = {},
   }: {
     pick: PickView & { route: NonNullable<PickView["route"]> };
-    detail: Detail;
     actions?: ObjectActions;
   } = $props();
   const route = $derived(pick.route);
@@ -27,41 +25,35 @@
   );
 </script>
 
-<article class="flight {detail}" class:recommended={pick.recommended} class:chosen={pick.chosen}>
+<article class="flight" class:recommended={pick.recommended} class:chosen={pick.chosen}>
   <header>
-    {#if carrier && hasMark(carrier)}<Mark
-        address={carrier}
-        size={detail === "full" ? 20 : 40}
-      />{/if}
+    {#if carrier && hasMark(carrier)}<Mark address={carrier} size={20} />{/if}
     <span class="carrier">{route.carrier ?? pick.name}</span>
-    {#if pick.recommended}<span class="flag"
-        ><Star size={detail === "full" ? 11 : 22} />{m.work_pick_top()}</span
-      >{/if}
+    {#if pick.recommended}<span class="flag"><Star size={11} />{m.work_pick_top()}</span>{/if}
     {#if pick.price}<span class="price">{pick.price.display}</span>{/if}
   </header>
-  {#if pick.when && detail === "full"}<p class="when">{pick.when}</p>{/if}
+  {#if pick.when}<p class="when">{pick.when}</p>{/if}
   <div class="route">
     <div class="end">
       <span class="time">{route.depart ?? route.from}</span>
       {#if route.depart}<span class="place">{route.from}</span>{/if}
     </div>
     <div class="way">
-      {#if route.duration && detail === "full"}<span class="duration">{route.duration}</span>{/if}
+      {#if route.duration}<span class="duration">{route.duration}</span>{/if}
       <span class="line" aria-hidden="true">
         {#each Array.from({ length: route.stops }, (_, index) => index) as index (index)}<span
             class="stop"
             style:inset-inline-start={`${((index + 1) / (route.stops + 1)) * 100}%`}
           ></span>{/each}
       </span>
-      {#if detail === "full"}<span class="stops" class:direct={route.stops === 0}>{stops}</span
-        >{/if}
+      <span class="stops" class:direct={route.stops === 0}>{stops}</span>
     </div>
     <div class="end arrive">
       <span class="time">{route.arrive ?? route.to}</span>
       {#if route.arrive}<span class="place">{route.to}</span>{/if}
     </div>
   </div>
-  {#if detail === "full" && pick.facts.length}
+  {#if pick.facts.length}
     <ul class="facts">
       {#each pick.facts as fact (fact.label)}
         <li>
@@ -75,8 +67,8 @@
       {/each}
     </ul>
   {/if}
-  {#if detail === "full" && pick.why}<p class="why">{pick.why}</p>{/if}
-  {#if detail === "full" && (actions.choose || actions.ask)}
+  {#if pick.why}<p class="why">{pick.why}</p>{/if}
+  {#if actions.choose || actions.ask}
     <div class="actions">
       {#if actions.choose && pick.element}<button
           type="button"
@@ -308,48 +300,5 @@
   .actions button:hover {
     background: var(--color-lit);
     color: var(--color-on-lit);
-  }
-
-  .overview {
-    gap: 22px;
-    padding: 24px 28px 28px;
-  }
-
-  .overview .carrier,
-  .overview .flag {
-    font-size: var(--text-overview-label);
-  }
-
-  .overview .price,
-  .overview .time {
-    font-size: var(--text-overview-title);
-  }
-
-  .overview .place {
-    font-size: var(--text-overview-label);
-  }
-
-  .overview .line {
-    block-size: 3px;
-  }
-
-  .tile {
-    gap: 20px;
-    padding: 28px;
-  }
-
-  .tile .carrier,
-  .tile .price,
-  .tile .time {
-    font-size: var(--text-tile-title);
-  }
-
-  .tile .flag,
-  .tile .place {
-    display: none;
-  }
-
-  .tile .line {
-    block-size: 4px;
   }
 </style>

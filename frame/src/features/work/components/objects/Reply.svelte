@@ -1,47 +1,41 @@
 <script lang="ts">
-  import type { Detail, ReplyView } from "../../lib/board/types";
+  import type { ReplyView } from "../../lib/board/types";
   import DocumentView from "$shared/ui/data/Artifact/DocumentView.svelte";
   import Inline from "./Inline.svelte";
   /** The answer, set on the canvas like a caption: a headline, a few lines, the figures. */
   let {
     object,
-    detail,
     centre = false,
   }: {
     object: ReplyView;
-    detail: Detail;
     /** Opened in the centre: an older answer's remaining paragraphs read on below. */
     centre?: boolean;
   } = $props();
 </script>
 
-<article
-  class="reply {detail}"
-  class:waiting={object.state === "pending"}
-  aria-label={object.headline}
->
+<article class="reply" class:waiting={object.state === "pending"} aria-label={object.headline}>
   {#if object.state === "pending"}
     <!-- Still coming: a quiet line, never set as the answer's headline. -->
     <p class="pending" role="status">{object.headline}</p>
     <span class="bar" aria-hidden="true"></span><span class="bar short" aria-hidden="true"></span>
   {:else}
     <h2>{object.headline}</h2>
-    {#if detail === "full" && object.text}<p class="text"><Inline text={object.text} /></p>{/if}
-    {#if detail !== "tile" && object.figures.length}
+    {#if object.text}<p class="text"><Inline text={object.text} /></p>{/if}
+    {#if object.figures.length}
       <dl class="figures">
         {#each object.figures as figure (figure.label)}
           <div>
             <dt>{figure.label}</dt>
             <dd>
-              <span class="value">{figure.value}</span>{#if figure.note && detail === "full"}<span
-                  class="note">{figure.note}</span
+              <span class="value">{figure.value}</span>{#if figure.note}<span class="note"
+                  >{figure.note}</span
                 >{/if}
             </dd>
           </div>
         {/each}
       </dl>
     {/if}
-    {#if detail === "full" && object.points.length}
+    {#if object.points.length}
       <ul class="points">
         {#each object.points as point (point)}<li><Inline text={point} /></li>{/each}
       </ul>
@@ -169,37 +163,9 @@
     gap: 10px;
   }
 
-  .overview .pending {
-    font-size: var(--text-overview-label);
-  }
-
   .more {
     color: var(--color-label-secondary);
     font-size: var(--text-reading);
     line-height: 1.55;
-  }
-
-  .overview {
-    gap: 24px;
-  }
-
-  .overview h2 {
-    font-size: var(--text-overview-figure);
-  }
-
-  .overview dt {
-    font-size: var(--text-overview-label);
-  }
-
-  .overview .value {
-    font-size: var(--text-overview-figure);
-  }
-
-  .overview .figures {
-    gap: 24px 56px;
-  }
-
-  .tile h2 {
-    font-size: var(--text-tile-title);
   }
 </style>

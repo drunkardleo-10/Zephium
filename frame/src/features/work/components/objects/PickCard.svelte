@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
-  import type { Detail, ObjectActions, PickView } from "../../lib/board/types";
+  import type { ObjectActions, PickView } from "../../lib/board/types";
   import Mark, { hasMark } from "./Mark.svelte";
   import YesNo from "./YesNo.svelte";
   import { Tick02Icon } from "./icons";
@@ -13,13 +13,11 @@
    */
   let {
     pick,
-    detail,
     video = false,
     actions = {},
     onopen,
   }: {
     pick: PickView;
-    detail: Detail;
     /** A video: the picture is its poster, with its length and a play mark. */
     video?: boolean;
     actions?: ObjectActions;
@@ -50,18 +48,7 @@
    * a person reads as a name.
    */
   const hyphenate = $derived(
-    !!room &&
-      longest * 0.64 * (detail === "full" ? 12 : 22) > room &&
-      word[0] === word[0]?.toLowerCase(),
-  );
-  const lead = $derived(pick.facts[0]);
-  /** A yes or no says itself with its mark; a value reads after its label. */
-  const leadText = $derived(
-    !lead
-      ? ""
-      : /^(yes|no)$/iu.test(lead.value.trim())
-        ? lead.label
-        : `${lead.label} ${lead.value}`,
+    !!room && longest * 0.64 * 12 > room && word[0] === word[0]?.toLowerCase(),
   );
   const rating = $derived(
     pick.rating
@@ -74,7 +61,7 @@
 </script>
 
 <article
-  class="pick {detail}"
+  class="pick"
   class:recommended={pick.recommended}
   class:chosen={pick.chosen}
   class:pictured={!!picture}
@@ -91,90 +78,73 @@
         height={picture.height}
         onerror={() => (broken = pick.picture?.src ?? null)}
       />
-      {#if video && detail !== "tile"}<span class="play" aria-hidden="true"
-          ><PlayMark size={detail === "full" ? 44 : 88} /></span
+      {#if video}<span class="play" aria-hidden="true"><PlayMark size={44} /></span
         >{#if pick.duration}<span class="length">{pick.duration}</span>{/if}{/if}
-      {#if pick.recommended && detail !== "tile"}<span class="badge"
-          ><Star size={detail === "full" ? 11 : 22} />{m.work_pick_top()}</span
-        >{/if}
+      {#if pick.recommended}<span class="badge"><Star size={11} />{m.work_pick_top()}</span>{/if}
     </div>
   {/if}
-  {#if detail !== "tile"}
-    <div class="body">
-      {#if !picture && pick.recommended}<span class="flag"
-          ><Star size={detail === "full" ? 11 : 22} />{m.work_pick_top()}</span
-        >{/if}
-      <header>
-        {#if logo}<Mark address={logo} size={detail === "full" ? 20 : 36} />{/if}
-        <div class="names" bind:clientWidth={room}>
-          <h4 style:--longest={longest} class:hyphenate>
-            {#if pick.url && detail === "full"}<a
-                class="nodrag"
-                href={pick.url}
-                onclick={(event) => {
-                  if (!actions.link) return;
-                  event.preventDefault();
-                  actions.link(pick.url!);
-                }}>{pick.name}</a
-              >{:else}{pick.name}{/if}
-          </h4>
-          {#if pick.subtitle && (detail === "full" || !picture)}<p class="subtitle">
-              {pick.subtitle}
-            </p>{/if}
-        </div>
-      </header>
-      {#if detail === "full"}
-        {#if pick.rating || (video && pick.duration && !picture)}
-          <p class="meta">
-            {#if pick.rating}<span class="stars"
-                ><Star size={12} />{rating}{#if count}<span class="count">({count})</span
-                  >{/if}</span
-              >{/if}
-            {#if video && pick.duration && !picture}<span>{pick.duration}</span>{/if}
-          </p>
-        {/if}
-        {#if pick.facts.length}
-          <dl class="facts">
-            {#each pick.facts as fact (fact.label)}
-              <div>
-                <dt>{fact.label}</dt>
-                <dd>
-                  {#if fact.kind === "yes" || fact.kind === "no" || fact.kind === "partial"}<YesNo
-                      value={fact.kind}
-                      size={14}
-                    />{/if}{#if !/^(yes|no)$/iu.test(fact.value.trim())}<span
-                      class:quiet={fact.kind === "no"}>{fact.value}</span
-                    >{/if}
-                </dd>
-              </div>
-            {/each}
-          </dl>
-        {/if}
-        {#if pick.why}<p class="why">{pick.why}</p>{/if}
-        {#if pick.tags.length}
-          <ul class="tags">
-            {#each pick.tags as tag (tag)}<li>{tag}</li>{/each}
-          </ul>
-        {/if}
-      {:else if !picture && (lead || (video && pick.duration))}
-        <!-- Words alone from afar: the one fact that tells it apart. -->
-        <p class="lead">
-          {#if lead}{#if lead.kind === "yes" || lead.kind === "no" || lead.kind === "partial"}<YesNo
-                value={lead.kind}
-                size={28}
-              />{/if}<span>{leadText}</span>{:else}<span>{pick.duration}</span>{/if}
-        </p>
-      {/if}
-      {#if pick.price}
-        <p class="price">
-          <span class="figure">{price.figure}</span>{#if price.period && detail === "full"}<span
-              class="period">{price.period}</span
-            >{/if}
-        </p>
-      {/if}
-    </div>
-  {/if}
-  {#if detail === "full" && (actions.choose || actions.ask || onopen)}
+  <div class="body">
+    {#if !picture && pick.recommended}<span class="flag"><Star size={11} />{m.work_pick_top()}</span
+      >{/if}
+    <header>
+      {#if logo}<Mark address={logo} size={20} />{/if}
+      <div class="names" bind:clientWidth={room}>
+        <h4 style:--longest={longest} class:hyphenate>
+          {#if pick.url}<a
+              class="nodrag"
+              href={pick.url}
+              onclick={(event) => {
+                if (!actions.link) return;
+                event.preventDefault();
+                actions.link(pick.url!);
+              }}>{pick.name}</a
+            >{:else}{pick.name}{/if}
+        </h4>
+        {#if pick.subtitle}<p class="subtitle">
+            {pick.subtitle}
+          </p>{/if}
+      </div>
+    </header>
+    {#if pick.rating || (video && pick.duration && !picture)}
+      <p class="meta">
+        {#if pick.rating}<span class="stars"
+            ><Star size={12} />{rating}{#if count}<span class="count">({count})</span>{/if}</span
+          >{/if}
+        {#if video && pick.duration && !picture}<span>{pick.duration}</span>{/if}
+      </p>
+    {/if}
+    {#if pick.facts.length}
+      <dl class="facts">
+        {#each pick.facts as fact (fact.label)}
+          <div>
+            <dt>{fact.label}</dt>
+            <dd>
+              {#if fact.kind === "yes" || fact.kind === "no" || fact.kind === "partial"}<YesNo
+                  value={fact.kind}
+                  size={14}
+                />{/if}{#if !/^(yes|no)$/iu.test(fact.value.trim())}<span
+                  class:quiet={fact.kind === "no"}>{fact.value}</span
+                >{/if}
+            </dd>
+          </div>
+        {/each}
+      </dl>
+    {/if}
+    {#if pick.why}<p class="why">{pick.why}</p>{/if}
+    {#if pick.tags.length}
+      <ul class="tags">
+        {#each pick.tags as tag (tag)}<li>{tag}</li>{/each}
+      </ul>
+    {/if}
+    {#if pick.price}
+      <p class="price">
+        <span class="figure">{price.figure}</span>{#if price.period}<span class="period"
+            >{price.period}</span
+          >{/if}
+      </p>
+    {/if}
+  </div>
+  {#if actions.choose || actions.ask || onopen}
     <div class="actions">
       {#if actions.choose && pick.element}<button
           type="button"
@@ -240,10 +210,6 @@
     inline-size: 100%;
     block-size: 100%;
     object-fit: cover;
-  }
-
-  .tile .photo {
-    aspect-ratio: 1;
   }
 
   .play {
@@ -489,45 +455,5 @@
 
   .actions button.on {
     color: var(--color-success);
-  }
-
-  .overview .body {
-    gap: 14px;
-    padding: 22px 24px 24px;
-  }
-
-  .overview h4 {
-    font-size: clamp(
-      var(--text-overview-label),
-      100cqi / (var(--longest) * 0.64),
-      var(--text-overview-title)
-    );
-    line-height: 1.2;
-  }
-
-  .lead {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin: 0;
-    color: var(--color-label-secondary);
-    font-size: var(--text-overview-label);
-  }
-
-  .overview .subtitle {
-    font-size: var(--text-overview-label);
-    line-height: 1.3;
-  }
-
-  .overview .figure {
-    font-size: var(--text-overview-title);
-  }
-
-  .overview .badge,
-  .overview .flag,
-  .overview .length {
-    gap: 8px;
-    padding: 4px 16px;
-    font-size: var(--text-overview-label);
   }
 </style>

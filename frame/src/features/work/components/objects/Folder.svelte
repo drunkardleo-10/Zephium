@@ -1,17 +1,15 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
-  import type { Detail, FolderView, ObjectActions } from "../../lib/board/types";
+  import type { FolderView, ObjectActions } from "../../lib/board/types";
   import { File01Icon, Folder01Icon } from "./icons";
   /** A folder as a small stack: its name, how many it holds, and the first few. */
   let {
     object,
-    detail,
     actions = {},
     centre = false,
   }: {
     object: FolderView;
-    detail: Detail;
     actions?: ObjectActions;
     /** Opened in the centre: all of it, at reading size. */
     centre?: boolean;
@@ -19,16 +17,16 @@
   const shown = $derived(centre ? object.entries : object.entries.slice(0, 4));
 </script>
 
-<figure class="folder {detail}" aria-label={object.name}>
+<figure class="folder" aria-label={object.name}>
   <span class="behind two" aria-hidden="true"></span>
   <span class="behind one" aria-hidden="true"></span>
   <button type="button" class="front nodrag nopan" onclick={() => actions.open?.(object.id)}>
     <span class="head">
-      <Icon icon={Folder01Icon} size={detail === "full" ? 18 : 36} />
+      <Icon icon={Folder01Icon} size={18} />
       <span class="name">{object.name}</span>
       <span class="count">{m.work_folder_count({ count: object.count })}</span>
     </span>
-    {#if detail === "full" && shown.length}
+    {#if shown.length}
       <ul>
         {#each shown as entry (entry.name)}
           <li>
@@ -146,29 +144,5 @@
   li img {
     border-radius: var(--radius-inset);
     object-fit: cover;
-  }
-
-  .overview .name,
-  .overview .count {
-    font-size: var(--text-overview-label);
-  }
-
-  .overview .front,
-  .tile .front {
-    padding: 22px 24px;
-  }
-
-  .overview .count,
-  .tile .count {
-    display: none;
-  }
-
-  .overview .name,
-  .tile .name {
-    overflow-wrap: normal;
-  }
-
-  .tile .name {
-    font-size: var(--text-tile-title);
   }
 </style>

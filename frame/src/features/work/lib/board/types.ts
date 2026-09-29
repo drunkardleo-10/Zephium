@@ -155,11 +155,8 @@ export type Board = {
 };
 
 // The objects (spec §2). One view type per object, filled by the canvas's adapters from new
-// and legacy artifacts; every renderer takes one of these and a `Detail`. Plain display values:
-// no wire types, pictures already resolved to an address the frame may load.
-
-/** How much an object shows, chosen by its on-screen size: everything, the survey, the mark. */
-export type Detail = "full" | "overview" | "tile";
+// and legacy artifacts; every renderer takes one of these and draws it the same at every zoom.
+// Plain display values: no wire types, pictures already resolved to an address the frame may load.
 
 /** An admitted picture: an address the frame may load, and its natural size when known. */
 type PictureView = { src: string; width?: number; height?: number };

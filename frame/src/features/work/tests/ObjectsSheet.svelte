@@ -2,30 +2,42 @@
   import ObjectView from "../components/objects/ObjectView.svelte";
   import ObjectCentre from "../components/objects/ObjectCentre.svelte";
   import type { ObjectActions, ObjectView as View } from "../lib/board/types";
-  /** Each object at full (100%), overview (as seen at 50%) and tile (as seen at 30%). */
+  /** Each object as it stands at 100%, and the same object as the canvas shows it at 50%. */
   let {
     rows,
     actions = {},
     centre = false,
-    levels = ["full", "overview", "tile"],
+    zooms = [1, 0.5],
   }: {
     rows: readonly { object: View; width: number }[];
     actions?: ObjectActions;
     /** Each object as it opens in the centre, on the lift's surface. */
     centre?: boolean;
-    levels?: readonly ("full" | "overview" | "tile")[];
+    zooms?: readonly number[];
   } = $props();
-  const ZOOM = { full: 1, overview: 0.5, tile: 0.3 } as const;
+  let heights = $state<Record<string, number>>({});
 </script>
 
 <div class="sheet">
   {#each rows as row (row.object.id)}
-    <div class="row" class:stacked={row.width > 900} data-id={row.object.id}>
+    <div class="row" class:stacked={row.width > 1600} data-id={row.object.id}>
       {#if centre}<div class="well" style:inline-size={`${row.width}px`}>
           <ObjectCentre object={row.object} {actions} />
-        </div>{:else}{#each levels as level (level)}
-          <div class="cell" style:zoom={ZOOM[level]} style:inline-size={`${row.width}px`}>
-            <ObjectView object={row.object} detail={level} {actions} />
+        </div>{:else}{#each zooms as zoom (zoom)}
+          <!-- Scaled as the canvas scales it: the same layout, drawn smaller. -->
+          <div
+            class="cell"
+            style:inline-size={`${row.width * zoom}px`}
+            style:block-size={`${(heights[`${row.object.id}:${zoom}`] ?? 0) * zoom}px`}
+          >
+            <div
+              class="scaled"
+              style:inline-size={`${row.width}px`}
+              style:transform={zoom === 1 ? undefined : `scale(${zoom})`}
+              bind:clientHeight={heights[`${row.object.id}:${zoom}`]}
+            >
+              <ObjectView object={row.object} {actions} />
+            </div>
           </div>
         {/each}{/if}
     </div>
@@ -64,6 +76,14 @@
   }
 
   .cell {
+    position: relative;
     flex: none;
+  }
+
+  .scaled {
+    position: absolute;
+    inset-block-start: 0;
+    inset-inline-start: 0;
+    transform-origin: 0 0;
   }
 </style>

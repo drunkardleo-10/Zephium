@@ -50,48 +50,23 @@ function drawnRow(row: HTMLElement): boolean {
   );
 }
 
-/** The diagrams real runs drew, from the QA export. */
+/**
+ * The diagrams real runs drew, every one the QA profile holds (exported by
+ * `export_diagrams.py` into node_modules/.work-look/diagrams), at the width a
+ * result is given at 100%.
+ */
 async function drawn(): Promise<{ object: ObjectView; width: number }[]> {
-  const out: { object: ObjectView; width: number }[] = [];
-  for (const name of ["aisaas", "browser", "saas"]) {
-    const response = await fetch(`/node_modules/.work-look/${name}/scene.json`);
-    if (!response.ok) continue;
-    const scene = (await response.json()) as {
-      objectives: Record<
-        string,
-        {
-          executions: {
-            artifacts: {
-              id: string;
-              title: string;
-              data: { kind: string } & Record<string, unknown>;
-            }[];
-          }[];
-        }
-      >;
-    };
-    for (const objective of Object.values(scene.objectives))
-      for (const execution of objective.executions)
-        for (const artifact of execution.artifacts) {
-          if (artifact.data.kind !== "diagram") continue;
-          const data = artifact.data as unknown as DiagramView["diagram"];
-          out.push({
-            object: {
-              kind: "diagram",
-              id: artifact.id,
-              title: artifact.title,
-              diagram: {
-                kind: "diagram",
-                nodes: data.nodes,
-                edges: data.edges,
-                layers: data.layers ?? [],
-              },
-            },
-            width: 1500,
-          });
-        }
-  }
-  return out;
+  const response = await fetch("/node_modules/.work-look/diagrams/diagrams.json");
+  if (!response.ok) return [];
+  const saved = (await response.json()) as {
+    id: string;
+    title: string;
+    diagram: DiagramView["diagram"];
+  }[];
+  return saved.map(({ id, title, diagram }) => ({
+    object: { kind: "diagram", id, title, diagram },
+    width: 1120,
+  }));
 }
 
 const scenes: Record<string, () => Promise<{ object: ObjectView; width: number }[]>> = {
@@ -101,7 +76,7 @@ const scenes: Record<string, () => Promise<{ object: ObjectView; width: number }
 };
 
 test.each(Object.keys(scenes))(
-  "%s at full, overview and tile",
+  "%s at 100% and at 50%",
   async (name) => {
     await page.viewport(2400, 1600);
     const noop = () => {};
@@ -127,7 +102,14 @@ test.each(Object.keys(scenes))(
       document.documentElement.dataset.theme = theme;
       await settle();
       for (const row of sheet.querySelectorAll<HTMLElement>(":scope > .row")) {
-        row.scrollIntoView({ block: "start" });
+        // The shot is drawn at the scale the page is shown at: a viewport just
+        // larger than the row keeps a small object at 2x and a whole diagram in view.
+        const size = row.getBoundingClientRect();
+        await page.viewport(
+          Math.max(1152, Math.ceil(size.width) + 16),
+          Math.max(720, Math.ceil(size.height) + 16),
+        );
+        row.scrollIntoView({ block: "start", inline: "start" });
         await expect.poll(() => drawnRow(row), { timeout: 20000, interval: 100 }).toBe(true);
         // Charts arrive once over the base motion; they are shot settled.
         await settle(theme === "dark" ? 400 : 120);

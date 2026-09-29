@@ -234,6 +234,9 @@
   --text-headline: 26px;
   --text-reading: 15px;
 
+  /* An object's name on the canvas: large enough to find it when the canvas is surveyed. */
+  --text-object-title: 18px;
+
   /* Canvas objects read from afar. Below 75% zoom an object sets only what
      stays at least 11px on screen at 50% (overview); below 40% only its name,
      at least 11px at 25% (tile). The figure is the one number an object says. */

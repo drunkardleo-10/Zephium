@@ -1,16 +1,14 @@
 <script lang="ts">
   import DocumentView from "$shared/ui/data/Artifact/DocumentView.svelte";
   import * as m from "$shared/i18n/messages";
-  import type { Detail, DocumentObjectView, ObjectActions } from "../../lib/board/types";
+  import type { DocumentObjectView, ObjectActions } from "../../lib/board/types";
   /** Text the person asked for, set as a sheet of paper: its first page on the canvas. */
   let {
     object,
-    detail,
     actions = {},
     centre = false,
   }: {
     object: DocumentObjectView;
-    detail: Detail;
     actions?: ObjectActions;
     /** Opened in the centre: all of it, at reading size. */
     centre?: boolean;
@@ -29,7 +27,7 @@
   });
 </script>
 
-<article class="paper {detail}" aria-label={object.title}>
+<article class="paper" aria-label={object.title}>
   <div
     class="page"
     class:overflows
@@ -39,24 +37,16 @@
     style:min-block-size={width ? `${Math.round(width * 0.72)}px` : undefined}
   >
     {#if object.title}<h2>{object.title}</h2>{/if}
-    {#if detail === "full"}
-      <div class="text">
-        {#if object.content.formatted}<DocumentView
-            document={object.content.formatted}
-            onlink={actions.link}
-          />{:else}{#each object.content.paragraphs as paragraph, index (index)}<p>
-              {paragraph}
-            </p>{/each}{/if}
-      </div>
-    {:else}
-      <div class="lines" aria-hidden="true">
-        {#each Array.from({ length: detail === "tile" ? 6 : 9 }, (_, index) => index) as index (index)}<span
-            class:short={index % 4 === 3}
-          ></span>{/each}
-      </div>
-    {/if}
+    <div class="text">
+      {#if object.content.formatted}<DocumentView
+          document={object.content.formatted}
+          onlink={actions.link}
+        />{:else}{#each object.content.paragraphs as paragraph, index (index)}<p>
+            {paragraph}
+          </p>{/each}{/if}
+    </div>
   </div>
-  {#if overflows && detail === "full" && !centre}<button
+  {#if overflows && !centre}<button
       type="button"
       class="read nodrag nopan"
       onclick={() => actions.open?.(object.id)}>{m.work_object_read_all()}</button
@@ -159,30 +149,5 @@
   .read:hover {
     text-decoration: underline;
     text-underline-offset: 3px;
-  }
-
-  .lines {
-    display: flex;
-    flex-direction: column;
-    gap: 18px;
-    padding-block-start: 12px;
-  }
-
-  .lines span {
-    block-size: 12px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill-strong);
-  }
-
-  .lines .short {
-    inline-size: 62%;
-  }
-
-  .overview h2 {
-    font-size: var(--text-overview-figure);
-  }
-
-  .tile h2 {
-    font-size: var(--text-tile-title);
   }
 </style>

@@ -25,17 +25,15 @@
 </script>
 
 <script lang="ts">
-  import type { Detail, ObjectActions, ObjectView } from "../../lib/board/types";
+  import type { ObjectActions, ObjectView } from "../../lib/board/types";
   import Reply from "./Reply.svelte";
-  /** One canvas object at the detail its on-screen size allows. */
+  /** One canvas object, drawn the same at every zoom. */
   let {
     object,
-    detail = "full",
     actions = {},
     centre = false,
   }: {
     object: ObjectView;
-    detail?: Detail;
     actions?: ObjectActions;
     /** The object opened in the centre: its whole reading or editing surface. */
     centre?: boolean;
@@ -63,5 +61,5 @@
   });
 </script>
 
-{#if object.kind === "reply"}<Reply {object} {detail} {centre} />
-{:else if Drawn}<Drawn {object} {detail} {actions} {centre} />{/if}
+{#if object.kind === "reply"}<Reply {object} {centre} />
+{:else if Drawn}<Drawn {object} {actions} {centre} />{/if}

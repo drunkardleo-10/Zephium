@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
-  import type { Detail, DraftView, ObjectActions } from "../../lib/board/types";
+  import type { DraftView, ObjectActions } from "../../lib/board/types";
   import Inline from "./Inline.svelte";
   import Mark from "./Mark.svelte";
   import { blocks } from "./markdown";
@@ -13,12 +13,10 @@
    */
   let {
     object,
-    detail,
     actions = {},
     centre = false,
   }: {
     object: DraftView;
-    detail: Detail;
     actions?: ObjectActions;
     /** Opened in the centre: the words can be changed before they go. */
     centre?: boolean;
@@ -56,11 +54,6 @@
               : m.work_draft_message(),
   );
   const parts = $derived(blocks(object.body));
-  const gist = $derived(
-    object.subject ??
-      (parts[0]?.kind === "paragraph" ? parts[0].lines[0] : parts[0]?.items[0]) ??
-      "",
-  );
   /** X counts what it lets through; past its limit the count turns. */
   const left = $derived(object.destination === "x" ? 280 - [...object.body].length : null);
 </script>
@@ -93,67 +86,63 @@
     />{/if}
 {/snippet}
 
-<article class="draft {object.destination} {detail}" aria-label={where}>
+<article class="draft {object.destination}" aria-label={where}>
   <header>
-    {#if host}<Mark address={host} size={detail === "full" ? 16 : 32} />{/if}
+    {#if host}<Mark address={host} size={16} />{/if}
     <span class="where">{where}</span>
     {#if object.to && object.destination !== "email"}<span class="to">{object.to}</span>{/if}
-    {#if detail === "full"}<span class="state">{m.work_draft_draft()}</span>{/if}
+    <span class="state">{m.work_draft_draft()}</span>
   </header>
-  {#if detail === "full"}
-    {#if object.destination === "email"}
-      <dl class="fields">
-        {#if object.to}<div>
-            <dt>{m.work_draft_to()}</dt>
-            <dd>{object.to}</dd>
-          </div>{/if}
-        {#if object.subject}<div>
-            <dt>{m.work_draft_subject()}</dt>
-            <dd class="subject">{object.subject}</dd>
-          </div>{/if}
-      </dl>
-      {@render body()}
-    {:else if object.destination === "slack" || object.destination === "message"}
-      <div class="message">
-        {@render author(32)}
-        <div class="said">
-          {#if object.author}<p class="who">
-              <strong>{object.author.name}</strong><span class="when">{m.work_draft_now()}</span>
-            </p>{/if}
-          {@render body()}
-        </div>
-      </div>
-    {:else if object.destination === "linkedin" || object.destination === "x"}
-      {#if object.author}<div class="byline">
-          {@render author(40)}
-          <div class="names">
-            <strong>{object.author.name}</strong>
-            {#if object.author.handle}<span class="handle">{object.author.handle}</span>{/if}
-          </div>
+  {#if object.destination === "email"}
+    <dl class="fields">
+      {#if object.to}<div>
+          <dt>{m.work_draft_to()}</dt>
+          <dd>{object.to}</dd>
         </div>{/if}
-      {@render body()}
-    {:else}
-      <div class="comment">
-        {#if object.author}<p class="who"><strong>{object.author.name}</strong></p>{/if}
+      {#if object.subject}<div>
+          <dt>{m.work_draft_subject()}</dt>
+          <dd class="subject">{object.subject}</dd>
+        </div>{/if}
+    </dl>
+    {@render body()}
+  {:else if object.destination === "slack" || object.destination === "message"}
+    <div class="message">
+      {@render author(32)}
+      <div class="said">
+        {#if object.author}<p class="who">
+            <strong>{object.author.name}</strong><span class="when">{m.work_draft_now()}</span>
+          </p>{/if}
         {@render body()}
       </div>
-    {/if}
-    <footer>
-      {#if left !== null}<span class="count" class:over={left < 0}>{left}</span>{/if}
-      <button
-        type="button"
-        class="send nodrag nopan"
-        disabled={send !== "draft" || (left !== null && left < 0)}
-        onclick={() => actions.send?.(object.id)}
-        >{#if send === "sent"}<Icon
-            icon={Tick02Icon}
-            size={13}
-          />{m.work_draft_sent()}{:else if send === "confirming"}{m.work_draft_confirming()}{:else}{verb}{/if}</button
-      >
-    </footer>
+    </div>
+  {:else if object.destination === "linkedin" || object.destination === "x"}
+    {#if object.author}<div class="byline">
+        {@render author(40)}
+        <div class="names">
+          <strong>{object.author.name}</strong>
+          {#if object.author.handle}<span class="handle">{object.author.handle}</span>{/if}
+        </div>
+      </div>{/if}
+    {@render body()}
   {:else}
-    <p class="gist"><Inline text={gist} /></p>
+    <div class="comment">
+      {#if object.author}<p class="who"><strong>{object.author.name}</strong></p>{/if}
+      {@render body()}
+    </div>
   {/if}
+  <footer>
+    {#if left !== null}<span class="count" class:over={left < 0}>{left}</span>{/if}
+    <button
+      type="button"
+      class="send nodrag nopan"
+      disabled={send !== "draft" || (left !== null && left < 0)}
+      onclick={() => actions.send?.(object.id)}
+      >{#if send === "sent"}<Icon
+          icon={Tick02Icon}
+          size={13}
+        />{m.work_draft_sent()}{:else if send === "confirming"}{m.work_draft_confirming()}{:else}{verb}{/if}</button
+    >
+  </footer>
 </article>
 
 <style>
@@ -375,40 +364,5 @@
 
   .send:hover:not(:disabled) {
     background: var(--color-lit-hover);
-  }
-
-  .gist {
-    display: -webkit-box;
-    margin: 0;
-    overflow: hidden;
-    font-size: var(--text-overview-label);
-    line-height: 1.35;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
-  }
-
-  .overview,
-  .tile {
-    gap: 18px;
-    padding: 24px 28px;
-  }
-
-  .overview header,
-  .tile header {
-    gap: 12px;
-    font-size: var(--text-overview-label);
-  }
-
-  .tile .gist {
-    display: none;
-  }
-
-  .tile .where {
-    font-size: var(--text-tile-title);
-  }
-
-  .tile .to {
-    display: none;
   }
 </style>

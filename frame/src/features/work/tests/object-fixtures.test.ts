@@ -1,7 +1,5 @@
 import { describe, expect, test } from "vitest";
 import type {
-  Detail,
-  ObjectActions,
   ObjectKind,
   ObjectView,
   PickView,
@@ -140,12 +138,5 @@ describe("object fixtures", () => {
     } satisfies Record<ObjectKind, number>;
     for (const object of allObjects) kinds[object.kind] += 1;
     expect(Object.entries(kinds).filter(([, count]) => !count)).toEqual([]);
-  });
-
-  test("ask nothing of their canvas at three levels", () => {
-    const levels = ["full", "overview", "tile"] as const satisfies readonly Detail[];
-    const none: ObjectActions = {};
-    expect(levels).toHaveLength(3);
-    expect(Object.keys(none)).toEqual([]);
   });
 });

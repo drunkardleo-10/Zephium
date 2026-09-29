@@ -1,17 +1,15 @@
 <script lang="ts">
   import { tokenize } from "$shared/ui/data/Code/tokenize";
   import * as m from "$shared/i18n/messages";
-  import type { Detail, DiffView, ObjectActions } from "../../lib/board/types";
+  import type { DiffView, ObjectActions } from "../../lib/board/types";
   import { splitPath } from "./path";
   /** A change to one file, read like a good review: path, summary, hunks with their gutters. */
   let {
     object,
-    detail,
     actions = {},
     centre = false,
   }: {
     object: DiffView;
-    detail: Detail;
     actions?: ObjectActions;
     /** Opened in the centre: all of it, at reading size. */
     centre?: boolean;
@@ -69,7 +67,7 @@
     });
     return out;
   });
-  const shown = $derived(detail !== "full" ? [] : centre ? rows : rows.slice(0, LINES));
+  const shown = $derived(centre ? rows : rows.slice(0, LINES));
   const digits = $derived(
     String(Math.max(...object.hunks.map((hunk) => hunk.newStart + hunk.lines.length), 1)).length,
   );
@@ -79,7 +77,7 @@
   );
 </script>
 
-<section class="diff {detail}" aria-label={object.path}>
+<section class="diff" aria-label={object.path}>
   <header>
     <p class="path">
       <span class="folder">{path.folder}</span><span class="name">{path.name}</span>
@@ -91,35 +89,33 @@
       >
     </p>
   </header>
-  {#if detail !== "tile" && object.summary}<p class="summary">{object.summary}</p>{/if}
-  {#if detail === "full"}
-    <div class="hunks" style:--digits={digits}>
-      {#each shown as row, index (index)}
-        {#if row.kind === "hunk"}<div class="fold">
-            {m.work_diff_line({ line: row.at })}
-          </div>{:else}<div class="row {row.op}">
-            <span class="n">{row.old ?? ""}</span><span class="n">{row.new ?? ""}</span><span
-              class="sign"
-              aria-label={row.op === "add"
-                ? m.work_diff_added()
-                : row.op === "del"
-                  ? m.work_diff_removed()
-                  : undefined}>{row.op === "add" ? "+" : row.op === "del" ? "−" : ""}</span
-            ><code
-              >{#each row.tokens as token, at (at)}{#if token.kind === "plain" || token.kind === "punctuation"}{token.text}{:else}<span
-                    class={token.kind}>{token.text}</span
-                  >{/if}{/each}</code
-            >
-          </div>{/if}
-      {/each}
-    </div>
-    {#if hidden > 0}<button
-        type="button"
-        class="all nodrag nopan"
-        onclick={() => actions.open?.(object.id)}
-        >{m.work_object_show_all_lines({ count: hidden + LINES })}</button
-      >{/if}
-  {/if}
+  {#if object.summary}<p class="summary">{object.summary}</p>{/if}
+  <div class="hunks" style:--digits={digits}>
+    {#each shown as row, index (index)}
+      {#if row.kind === "hunk"}<div class="fold">
+          {m.work_diff_line({ line: row.at })}
+        </div>{:else}<div class="row {row.op}">
+          <span class="n">{row.old ?? ""}</span><span class="n">{row.new ?? ""}</span><span
+            class="sign"
+            aria-label={row.op === "add"
+              ? m.work_diff_added()
+              : row.op === "del"
+                ? m.work_diff_removed()
+                : undefined}>{row.op === "add" ? "+" : row.op === "del" ? "−" : ""}</span
+          ><code
+            >{#each row.tokens as token, at (at)}{#if token.kind === "plain" || token.kind === "punctuation"}{token.text}{:else}<span
+                  class={token.kind}>{token.text}</span
+                >{/if}{/each}</code
+          >
+        </div>{/if}
+    {/each}
+  </div>
+  {#if hidden > 0}<button
+      type="button"
+      class="all nodrag nopan"
+      onclick={() => actions.open?.(object.id)}
+      >{m.work_object_show_all_lines({ count: hidden + LINES })}</button
+    >{/if}
 </section>
 
 <style>
@@ -305,45 +301,5 @@
 
   .all:hover {
     color: var(--color-text);
-  }
-
-  .overview,
-  .tile {
-    gap: 18px;
-    padding: 28px 0;
-  }
-
-  .overview header,
-  .overview .summary,
-  .tile header {
-    margin-inline: 28px;
-  }
-
-  .overview .path,
-  .overview .stat,
-  .overview .summary {
-    font-size: var(--text-overview-label);
-    line-height: 1.3;
-  }
-
-  .overview .blocks span,
-  .tile .blocks span {
-    inline-size: 16px;
-    block-size: 16px;
-  }
-
-  .tile header {
-    flex-direction: column;
-    gap: 14px;
-  }
-
-  .tile .path {
-    font-size: var(--text-tile-title);
-  }
-
-  .tile .folder,
-  .tile .added,
-  .tile .removed {
-    display: none;
   }
 </style>

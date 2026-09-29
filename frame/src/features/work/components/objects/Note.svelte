@@ -1,24 +1,20 @@
 <script lang="ts">
   import { tick } from "svelte";
   import * as m from "$shared/i18n/messages";
-  import type { Detail, NoteView, ObjectActions } from "../../lib/board/types";
+  import type { NoteView, ObjectActions } from "../../lib/board/types";
   import Inline from "./Inline.svelte";
   import { noteBlocks } from "./markdown";
   /**
    * Words written on the canvas itself: no card. Click to write, and the text
    * grows as it is written; it is Markdown in the notes store underneath.
    */
-  let {
-    object,
-    detail,
-    actions = {},
-  }: { object: NoteView; detail: Detail; actions?: ObjectActions } = $props();
+  let { object, actions = {} }: { object: NoteView; actions?: ObjectActions } = $props();
   let editing = $state(false);
   let draft = $state("");
   let field = $state<HTMLTextAreaElement>();
   const parts = $derived(noteBlocks(object.markdown));
   async function begin() {
-    if (!actions.write || detail !== "full") return;
+    if (!actions.write) return;
     draft = object.markdown;
     editing = true;
     await tick();
@@ -36,7 +32,7 @@
   }
 </script>
 
-<div class="note {detail}">
+<div class="note">
   {#if editing}
     <textarea
       bind:this={field}
@@ -62,7 +58,7 @@
         if (event.key === "Enter") void begin();
       }}
     >
-      {#each detail === "full" ? parts : parts.slice(0, 1) as part, index (index)}
+      {#each parts as part, index (index)}
         {#if part.kind === "heading"}<h3><Inline text={part.text} /></h3>
         {:else if part.kind === "list"}<ul>
             {#each part.items as item, at (at)}<li><Inline text={item} /></li>{/each}
@@ -135,15 +131,5 @@
     resize: none;
     outline: none;
     caret-color: var(--color-text);
-  }
-
-  .overview h3,
-  .overview p {
-    font-size: var(--text-overview-title);
-  }
-
-  .tile h3,
-  .tile p {
-    font-size: var(--text-tile-title);
   }
 </style>

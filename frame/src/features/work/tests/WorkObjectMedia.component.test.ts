@@ -27,7 +27,7 @@ test("a video plays in place through YouTube's private embed, one at a time", as
       { object: video("one", "FgzyLoSkL5k"), width: 400 },
       { object: video("two", "dQw4w9WgXcQ"), width: 400 },
     ],
-    levels: ["full"],
+    zooms: [1],
   });
   const frames = () => [...screen.container.querySelectorAll("iframe")];
   await expect

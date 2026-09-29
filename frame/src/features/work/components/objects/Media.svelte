@@ -5,7 +5,7 @@
 
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import type { Detail, MediaView, ObjectActions } from "../../lib/board/types";
+  import type { MediaView, ObjectActions } from "../../lib/board/types";
   import { youtubeId } from "../../lib/link-media";
   import Mark from "./Mark.svelte";
   import PlayMark from "./PlayMark.svelte";
@@ -15,11 +15,7 @@
    * own player in place, created on play and gone once it is far from view or
    * another video starts. Audio is a compact player.
    */
-  let {
-    object,
-    detail,
-    actions = {},
-  }: { object: MediaView; detail: Detail; actions?: ObjectActions } = $props();
+  let { object, actions = {} }: { object: MediaView; actions?: ObjectActions } = $props();
   const video = $derived(object.media === "video" ? youtubeId(object.url) : null);
   const poster = $derived(object.poster ?? object.picture);
   /** The address that would not load; a new poster gets its own chance. */
@@ -81,7 +77,7 @@
   }
 </script>
 
-<figure class="media {object.media} {detail}" bind:this={root} aria-label={object.title}>
+<figure class="media {object.media}" bind:this={root} aria-label={object.title}>
   {#if object.media === "image"}
     {#if poster && !failed}<img
         class="image"
@@ -116,18 +112,18 @@
             draggable="false"
             onerror={() => (broken = poster?.src ?? null)}
           />{/if}
-        {#if detail !== "tile"}<button
-            type="button"
-            class="play nodrag nopan"
-            aria-label={m.work_media_play({ title: object.title ?? "" })}
-            onclick={play}><PlayMark size={detail === "full" ? 52 : 96} /></button
-          >{/if}
-        {#if object.duration && detail !== "tile"}<span class="length">{object.duration}</span>{/if}
+        <button
+          type="button"
+          class="play nodrag nopan"
+          aria-label={m.work_media_play({ title: object.title ?? "" })}
+          onclick={play}><PlayMark size={52} /></button
+        >
+        {#if object.duration}<span class="length">{object.duration}</span>{/if}
       {/if}
     </div>
-    {#if detail !== "tile" && object.title}
+    {#if object.title}
       <figcaption>
-        {#if video}<Mark address="youtube.com" size={detail === "full" ? 16 : 32} />{/if}
+        {#if video}<Mark address="youtube.com" size={16} />{/if}
         <span class="title">{object.title}</span>
       </figcaption>
     {/if}
@@ -137,18 +133,17 @@
         type="button"
         class="round nodrag nopan"
         aria-label={m.work_media_play({ title: object.title ?? "" })}
-        onclick={() => actions.link?.(object.url)}
-        ><PlayMark size={detail === "full" ? 36 : 64} /></button
+        onclick={() => actions.link?.(object.url)}><PlayMark size={36} /></button
       >
       <div class="words">
         <span class="title">{object.title ?? m.work_media_audio()}</span>
         {#if object.duration}<span class="length-text">{object.duration}</span>{/if}
       </div>
-      {#if detail === "full"}<span class="wave" aria-hidden="true"
-          >{#each Array.from({ length: 28 }, (_, index) => index) as index (index)}<span
-              style:block-size={`${30 + ((index * 37) % 70)}%`}
-            ></span>{/each}</span
-        >{/if}
+      <span class="wave" aria-hidden="true"
+        >{#each Array.from({ length: 28 }, (_, index) => index) as index (index)}<span
+            style:block-size={`${30 + ((index * 37) % 70)}%`}
+          ></span>{/each}</span
+      >
     </div>
   {/if}
 </figure>
@@ -298,15 +293,5 @@
     flex: 1;
     border-radius: var(--radius-capsule);
     background: var(--color-fill-strong);
-  }
-
-  .overview .title {
-    font-size: var(--text-overview-label);
-    line-height: 1.3;
-  }
-
-  .overview .length {
-    padding: 4px 14px;
-    font-size: var(--text-overview-label);
   }
 </style>

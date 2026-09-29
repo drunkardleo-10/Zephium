@@ -1,6 +1,6 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import type { Detail, ObjectActions, PicksView, PickView } from "../../lib/board/types";
+  import type { ObjectActions, PicksView, PickView } from "../../lib/board/types";
   import PickCard from "./PickCard.svelte";
   import FlightCard from "./FlightCard.svelte";
   import Title from "./Title.svelte";
@@ -9,12 +9,10 @@
   /** Things to choose between, side by side; the set opens as a sheet to compare. */
   let {
     object,
-    detail,
     actions = {},
     centre = false,
   }: {
     object: PicksView;
-    detail: Detail;
     actions?: ObjectActions;
     /** Opened in the centre: all of it, at reading size. */
     centre?: boolean;
@@ -32,18 +30,10 @@
       object.items.some((item) => !holds(item)) ||
       new Set(object.items.map(holds)).size > 1,
   );
-  /** At a distance a set shows its first few; the rest wait for a closer look. */
-  const shown = $derived(
-    detail !== "tile" || flights
-      ? object.items
-      : object.items.some((item) => item.picture)
-        ? object.items.filter((item) => item.picture).slice(0, 4)
-        : [],
-  );
 </script>
 
 <section
-  class="picks {detail}"
+  class="picks"
   class:flights
   class:pictured
   class:mixed
@@ -52,8 +42,8 @@
 >
   {#if object.title || (actions.compare && object.items.length > 1)}
     <header>
-      {#if object.title}<Title text={object.title} {detail} level={3} />{/if}
-      {#if detail === "full" && actions.compare && object.items.length > 1}<button
+      {#if object.title}<Title text={object.title} />{/if}
+      {#if actions.compare && object.items.length > 1}<button
           type="button"
           class="compare nodrag nopan"
           onclick={() => actions.compare?.(object.id)}>{m.work_pick_compare()}</button
@@ -61,11 +51,10 @@
     </header>
   {/if}
   <div class="set">
-    {#each shown as pick, index (index)}
-      {#if flights && routed(pick)}<FlightCard {pick} {detail} {actions} />
+    {#each object.items as pick, index (index)}
+      {#if flights && routed(pick)}<FlightCard {pick} {actions} />
       {:else}<PickCard
           {pick}
-          {detail}
           {actions}
           video={object.facet === "video"}
           onopen={actions.open ? () => actions.open?.(object.id, index) : undefined}
@@ -73,7 +62,7 @@
     {/each}
   </div>
   {#if centre && object.items.length > 1 && !flights}<div class="compare-sheet">
-      <Sheet object={picksSheet(object)} detail="full" {actions} rows={object.items.length} />
+      <Sheet object={picksSheet(object)} {actions} rows={object.items.length} />
     </div>{/if}
 </section>
 
@@ -133,17 +122,5 @@
 
   .compare-sheet {
     margin-block-start: 16px;
-  }
-
-  .overview {
-    gap: 22px;
-  }
-
-  .overview .set {
-    gap: 24px;
-  }
-
-  .tile .set {
-    gap: 24px;
   }
 </style>

@@ -1,16 +1,14 @@
 <script lang="ts">
   import type { Component } from "svelte";
   import { loadChart } from "$shared/ui/data/Chart";
-  import type { Detail, PlotView } from "../../lib/board/types";
+  import type { PlotView } from "../../lib/board/types";
   import { watchNear } from "./near";
   import Title from "./Title.svelte";
   let {
     object,
-    detail,
     centre = false,
   }: {
     object: PlotView;
-    detail: Detail;
     /** Opened in the centre: the chart with its exact values. */
     centre?: boolean;
   } = $props();
@@ -32,15 +30,10 @@
   const Drawn = $derived(Chart as Component<Record<string, unknown>> | null);
 </script>
 
-<section class="plot {detail}" bind:this={root} aria-label={object.title}>
-  {#if object.title}<Title text={object.title} {detail} />{/if}
+<section class="plot" bind:this={root} aria-label={object.title}>
+  {#if object.title}<Title text={object.title} />{/if}
   <div class="figure">
-    {#if near && Drawn}<Drawn
-        title={object.title ?? ""}
-        {spec}
-        {detail}
-        height={detail === "tile" ? 132 : undefined}
-      />{/if}
+    {#if near && Drawn}<Drawn title={object.title ?? ""} {spec} />{/if}
   </div>
 </section>
 
@@ -55,16 +48,6 @@
     border-radius: var(--radius-card);
     background: var(--color-surface);
     box-shadow: var(--shadow-raised);
-  }
-
-  .plot.overview {
-    gap: 20px;
-    padding: 28px;
-  }
-
-  .plot.tile {
-    gap: 24px;
-    padding: 32px;
   }
 
   .figure {
