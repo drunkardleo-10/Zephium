@@ -132,6 +132,10 @@
   --color-warning: #dcb977;
   --color-info: #8fbcf7;
 
+  /* YouTube's own play mark, the same in both themes: a video from there says so. */
+  --color-youtube: #ff0033;
+  --color-on-youtube: #fff;
+
   /* The chart ladder: eight categorical tones for series identity, in a fixed
      order that is never cycled. The tints above are pastel and too few to
      separate eight series, so this set is stepped for data: every adjacent pair

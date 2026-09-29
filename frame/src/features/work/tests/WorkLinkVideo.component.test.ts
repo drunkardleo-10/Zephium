@@ -37,7 +37,7 @@ vi.mock("$domain/resources", async (original) => ({
 const profile = "00000000000000000000000001";
 const video = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42";
 
-test("a video link admits its thumbnail as its poster and plays in place", async () => {
+test("a video link admits its thumbnail as its poster and opens its page", async () => {
   await page.viewport(1200, 800);
   const snapshot: WorkEnvironmentSnapshot = {
     version: 1,
@@ -147,12 +147,10 @@ test("a video link admits its thumbnail as its poster and plays in place", async
     screen.container.querySelector<HTMLImageElement>(".media.video img")?.getAttribute("src") ?? "";
   await expect.poll(poster, { timeout: 5000 }).toBe(`${PIXEL}#${"e".repeat(64)}`);
   expect(screen.container.textContent).not.toContain("hqdefault.jpg");
-  // It plays where it stands, in YouTube's own player, not in the pane.
+  // A click opens its page like any link: nothing plays in the canvas.
   (screen.container.querySelector(".media.video button") as HTMLElement).click();
-  await expect
-    .poll(() => screen.container.querySelector("iframe")?.getAttribute("src") ?? "")
-    .toContain("youtube-nocookie.com/embed/dQw4w9WgXcQ");
-  expect(native.paneShow).not.toHaveBeenCalled();
+  await expect.poll(() => native.paneShow.mock.calls.length).toBeGreaterThan(0);
+  expect(screen.container.querySelector("iframe")).toBeNull();
   await screen.unmount();
   environment.dispose();
 });

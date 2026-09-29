@@ -7,6 +7,7 @@
   import { Tick02Icon } from "./icons";
   import Star from "./Star.svelte";
   import PlayMark from "./PlayMark.svelte";
+  import { youtubeId } from "../../lib/link-media";
   /**
    * One thing to choose: its own picture first, else its mark beside its name,
    * else its words alone. Facts are typed, the price is the loudest figure.
@@ -23,6 +24,7 @@
     actions?: ObjectActions;
     onopen?: () => void;
   } = $props();
+  const tube = $derived(video && !!pick.url && !!youtubeId(pick.url));
   /** The address that would not load; a new picture gets its own chance. */
   let broken = $state<string | null>(null);
   const failed = $derived(!!pick.picture && broken === pick.picture.src);
@@ -78,7 +80,8 @@
         height={picture.height}
         onerror={() => (broken = pick.picture?.src ?? null)}
       />
-      {#if video}<span class="play" aria-hidden="true"><PlayMark size={44} /></span
+      {#if video}<span class="play" aria-hidden="true"
+          ><PlayMark size={tube ? 52 : 44} youtube={tube} /></span
         >{#if pick.duration}<span class="length">{pick.duration}</span>{/if}{/if}
       {#if pick.recommended}<span class="badge"><Star size={11} />{m.work_pick_top()}</span>{/if}
     </div>
