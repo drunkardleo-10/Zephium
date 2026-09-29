@@ -191,8 +191,9 @@
     "description": "LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (163738 measured over 161433 at 714054aa). The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 166054 JS and 5511 CSS."
   },
   "lazy:features/notes/components/editor/NoteEditor.svelte": {
-    "js": 554700,
-    "css": 16500
+    "js": 563700,
+    "css": 16500,
+    "description": "The shared code scanner (calls, types, properties, tags; one pass over the whole text, shared with notes) adds about 5 KB JS at 37e62d31: measured 562073."
   },
   "lazy:features/notes/components/NotesPage.svelte": {
     "js": 309400,
@@ -290,9 +291,9 @@
     "description": "Measured 4911 JS bytes: d3-quadtree, which LayerChart's tooltip loads only for its quadtree modes; the app's charts never ask for it."
   },
   "lazy:shared/ui/data/Code/CodeBlock.svelte": {
-    "js": 90800,
+    "js": 97500,
     "css": 6000,
-    "description": "Measured 86306 JS and 5661 CSS bytes: the code block and its dependency-free line tokenizer, loaded only when a code card or lift is shown; the rest is the shared runtime chunk and its message modules. LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (88612 measured over 86306 at 714054aa). Line numbers that start where an excerpt starts in its file (Work's code object) add 0.4 KB JS (89796 measured at aef3a6b9, 90268 with the tree's later shared chunk)."
+    "description": "Measured 86306 JS and 5661 CSS bytes: the code block and its dependency-free line tokenizer, loaded only when a code card or lift is shown; the rest is the shared runtime chunk and its message modules. LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (88612 measured over 86306 at 714054aa). Line numbers that start where an excerpt starts in its file (Work's code object) add 0.4 KB JS (89796 measured at aef3a6b9, 90268 with the tree's later shared chunk). The shared code scanner (calls, types, properties, tags; one pass over the whole text, shared with notes) adds about 5 KB JS at 37e62d31: measured 95901."
   },
   "lazy:features/work/index.ts": {
     "js": 149500,
@@ -345,14 +346,14 @@
     "description": "One kind's renderer, fetched the first time the canvas shows one: the diagram object over the board's diagram and its tier layout. Measured 180423 JS and 9713 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 183264 JS and 9548 CSS. Round two lays diagrams out top to bottom with trunks, junctions and placed names, and gives every part a role glyph (about forty Hugeicons): 225972 JS and 9008 CSS."
   },
   "lazy:features/work/components/objects/Code.svelte": {
-    "js": 163500,
+    "js": 169000,
     "css": 8700,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: the code object over the shared code block. Measured 161526 JS and 8196 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches."
+    "description": "One kind's renderer, fetched the first time the canvas shows one: the code object over the shared code block. Measured 161526 JS and 8196 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The shared code scanner (calls, types, properties, tags; one pass over the whole text, shared with notes) adds about 5 KB JS at 37e62d31: measured 167298."
   },
   "lazy:features/work/components/objects/Diff.svelte": {
-    "js": 92900,
+    "js": 98800,
     "css": 7600,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: the review-style diff with the shared tokenizer. Measured 91747 JS and 7201 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches."
+    "description": "One kind's renderer, fetched the first time the canvas shows one: the review-style diff with the shared tokenizer. Measured 91747 JS and 7201 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The shared code scanner (calls, types, properties, tags; one pass over the whole text, shared with notes) adds about 5 KB JS at 37e62d31: measured 97238."
   },
   "lazy:features/work/components/objects/Document.svelte": {
     "js": 201400,
@@ -380,9 +381,9 @@
     "description": "One kind's renderer, fetched the first time the canvas shows one: a note as text on the canvas that edits in place. Measured 86520 JS and 4572 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 168611 JS and 10171 CSS."
   },
   "lazy:features/work/components/objects/File.svelte": {
-    "js": 97000,
+    "js": 102700,
     "css": 8300,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: a file shown as what it holds. Measured 95825 JS and 7872 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches."
+    "description": "One kind's renderer, fetched the first time the canvas shows one: a file shown as what it holds. Measured 95825 JS and 7872 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The shared code scanner (calls, types, properties, tags; one pass over the whole text, shared with notes) adds about 5 KB JS at 37e62d31: measured 101081."
   },
   "lazy:features/work/components/objects/Folder.svelte": {
     "js": 87000,
