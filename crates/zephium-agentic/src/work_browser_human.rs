@@ -30,7 +30,55 @@ pub fn same_work_human_site(
     }
     domain(source)
         .zip(domain(target))
-        .is_some_and(|(source, target)| source == target)
+        .is_some_and(|(source, target)| {
+            source == target || brand_family(source.as_bytes(), target.as_bytes()).is_some()
+        })
+}
+
+/// Brands whose one site spans country domains: kayak.com and kayak.pl,
+/// skyscanner.net and skyscanner.pl, amazon.com and amazon.de. A closed
+/// list, matched on the whole label before an ICANN suffix, never a
+/// substring.
+const BRAND_FAMILIES: [&str; 22] = [
+    "airbnb",
+    "amazon",
+    "agoda",
+    "booking",
+    "ebay",
+    "expedia",
+    "google",
+    "hotels",
+    "ikea",
+    "kayak",
+    "lego",
+    "momondo",
+    "opodo",
+    "rakuten",
+    "skyscanner",
+    "tripadvisor",
+    "trivago",
+    "uber",
+    "vrbo",
+    "wizzair",
+    "ryanair",
+    "zalando",
+];
+
+/// The brand two registrable domains share when both are that brand's own
+/// label under a public ICANN suffix (kayak.com, kayak.co.uk).
+pub fn brand_family(source: &[u8], target: &[u8]) -> Option<&'static str> {
+    fn brand(domain: &[u8]) -> Option<&str> {
+        let parsed = psl::domain(domain)?;
+        if !parsed.suffix().is_known() || parsed.suffix().typ() != Some(psl::Type::Icann) {
+            return None;
+        }
+        let label_end = domain.len().checked_sub(parsed.suffix().as_bytes().len() + 1)?;
+        std::str::from_utf8(domain.get(..label_end)?).ok()
+    }
+    let (source, target) = (brand(source)?, brand(target)?);
+    (source == target)
+        .then(|| BRAND_FAMILIES.iter().copied().find(|brand| *brand == source))
+        .flatten()
 }
 
 /// Logical points from the top-left of the native host's content region.
@@ -359,6 +407,19 @@ mod tests {
                 "https://b.example.invalid/",
                 false,
             ),
+            // A brand's own country domains are one site.
+            ("https://kayak.com/", "https://www.kayak.pl/", true),
+            (
+                "https://www.skyscanner.com/",
+                "https://www.skyscanner.co.uk/",
+                true,
+            ),
+            ("https://www.airbnb.com/", "https://www.airbnb.co.uk/", true),
+            // Never a lookalike, another brand or a hosted tenant.
+            ("https://kayak.com/", "https://kayak-deals.pl/", false),
+            ("https://kayak.com/", "https://kayak.github.io/", false),
+            ("https://example.com/", "https://example.pl/", false),
+            ("https://kayak.com/", "http://kayak.pl/", false),
         ] {
             assert_eq!(
                 same_work_human_site(

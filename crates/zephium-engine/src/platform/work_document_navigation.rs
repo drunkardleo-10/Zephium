@@ -189,6 +189,31 @@ impl Default for WorkDocumentNavigation {
     }
 }
 
+/// A site-session load that settled on another of its brand's country
+/// domains (kayak.com to kayak.pl): a closed fact, the brand only.
+fn log_brand_move(requested: Option<&ContextNavigationTarget>, current: &str) {
+    let Some(requested) = requested else {
+        return;
+    };
+    let Ok(current) = ContextNavigationTarget::parse(current) else {
+        return;
+    };
+    let (Some(from), Some(to)) = (
+        zephium_agentic::registrable_site(requested),
+        zephium_agentic::registrable_site(&current),
+    ) else {
+        return;
+    };
+    if from != to {
+        if let Some(brand) = zephium_agentic::brand_family(from.as_bytes(), to.as_bytes()) {
+            #[cfg(target_os = "macos")]
+            crate::diagnostic!("work: site_session moved within brand={brand}");
+            #[cfg(not(target_os = "macos"))]
+            let _ = brand;
+        }
+    }
+}
+
 /// Script redirects one site-session load may follow before it settles.
 const MAX_SITE_LOADS: u8 = 6;
 
@@ -748,6 +773,9 @@ impl WorkDocumentNavigation {
                 Ok((false, false))
             }
             (Phase::Loading, E::Committed) if exact && state.native_id == Some(event.id) => {
+                if site {
+                    log_brand_move(state.target.as_ref(), &event.url);
+                }
                 #[cfg(feature = "native-agentic-work-resource-probe")]
                 {
                     state.evidence.committed = true;
