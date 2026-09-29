@@ -208,7 +208,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "projection.events.len()<MAX_AGENT_WORK_EVENTS", "projection.extraction=work.take_extraction()",
             "work.shutdown_until(self.clock.as_ref(),deadline)",
             "clean&&!self.native_uncertain&&self.failed_owner.is_none()",
-            "implDropforProductWork", "self.prepared.is_some(){self.refuse();}",
+            "implDropforProductWork",
+            "self.prepared.is_some(){self.refuse(RetainedRefusal::Discarded,RetainedLaneFacts::default());}",
         ],
         &["InspectablePublic", "try_new_for_probe", "AgentWorkController::", "PendingAgentRuntime", "ContextRegistry", "std::thread", "tokio::spawn", "Serialize", "Deserialize", "execute_semantic_action", "invoke_semantic", "AgentNativeShutdownProof"],
     ),
@@ -217,7 +218,10 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
         &[
             // b892f874/24832e90: a stuck retained Work moves to a draining graveyard,
             // and shutdown begins on every retained owner instead of one.
-            "ifself.work.is_some()||self.retained_work.as_ref().is_some_and(|work|!work.is_closed())",
+            // A retained work waits for no application work or lifecycle,
+            // and a lone retained work for no other retained or page group.
+            "letrefusal=ifself.work.is_some()||!matches!(self.agent_lifecycle,AgentLifecycleOwner::Absent){Some(Refusal::Busy)}",
+            "ifself.retained_work.as_ref().is_some_and(|work|!work.is_closed())||self.retained_page_runtime.is_some(){trace_refusal(Refusal::Busy,lane);work.refuse(Refusal::Busy,lane);}",
             "!work.admits(&self.engine,&self.store,self.work_profile_binding())",
             "self.retained_work=Some(Box::new(work));self.retained_work.as_mut().unwrap().initialize()",
             "ifletSome(mutstuck)=self.retained_work.take(){stuck.begin_shutdown();self.retained_graveyard.push(*stuck);}",

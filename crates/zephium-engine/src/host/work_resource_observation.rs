@@ -217,12 +217,23 @@ impl WorkNativeResource {
         })
     }
     pub(super) fn cancel_observation(&mut self, failure: SemanticRuntimePortFailure) {
+        let handed_on = self
+            .view
+            .as_ref()
+            .and_then(|view| view.work_navigation())
+            .is_some_and(|gate| gate.handed_on());
         if let Some(read) = &mut self.observation {
-            read.refuse(failure);
+            // A read of a document an admitted action load replaced is only
+            // retried on the new document.
+            read.refuse(if handed_on {
+                SemanticRuntimePortFailure::NotReady
+            } else {
+                failure
+            });
             read.retirement_ready();
             if read.dispatched && !read.callback_returned {
                 if let Some(runtime) = self.view.as_ref().and_then(|view| view.semantic()) {
-                    if runtime.timeout(read.correlation.invocation()) {
+                    if runtime.timeout(read.correlation.invocation()) && !handed_on {
                         self.guard.fail();
                     }
                 }
@@ -277,7 +288,19 @@ impl EngineHost {
             && admitted_observation_budget(request.invocation().budget())
             && current_scope(request.observation().scope(), resource.last_invocation);
         if !admitted {
-            task.refuse(SemanticRuntimePortFailure::Stale);
+            // While an action's own admitted load replaces the document the
+            // read waits for it, like any read of a page not ready yet.
+            let handing_on = !resource.ready()
+                && resource
+                    .view
+                    .as_ref()
+                    .and_then(|view| view.work_navigation())
+                    .is_some_and(|gate| gate.handed_on());
+            task.refuse(if handing_on {
+                SemanticRuntimePortFailure::NotReady
+            } else {
+                SemanticRuntimePortFailure::Stale
+            });
             return;
         }
         if presentation_busy && !resource.retire_reading_presentation() {
@@ -642,7 +665,9 @@ mod tests {
         assert!(admitted_observation_budget(
             SemanticRuntimeBudget::INITIAL_FILTERED.with_link_url_state()
         ));
-        assert!(admitted_observation_budget(SemanticRuntimeBudget::WHOLE_PAGE));
+        assert!(admitted_observation_budget(
+            SemanticRuntimeBudget::WHOLE_PAGE
+        ));
         assert!(!admitted_observation_budget(
             SemanticRuntimeBudget::try_new(64, 4096, 16 * 1024, 4096, false).unwrap()
         ));

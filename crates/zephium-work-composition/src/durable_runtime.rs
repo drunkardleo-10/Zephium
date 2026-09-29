@@ -344,7 +344,7 @@ impl MacosWorkComposition {
                 measurements: None,
                 helped: false,
                 held_back: false,
-                signed_in_elsewhere: false,
+                rerun: false,
             });
         }
         let diagnostics = Diagnostics::from(&settings);
@@ -434,7 +434,7 @@ impl MacosWorkComposition {
             )
             .await?;
         if let Some(port) = &confirm {
-            port.needs_you(false);
+            port.needs_you(None);
         }
         // An approved step still open ends with its page.
         if let (Some(port), Some((ask, true))) = (&confirm, gate.ask()) {
@@ -459,6 +459,13 @@ impl MacosWorkComposition {
                 artifact.title = format!("Notes from {host}");
             }
         }
+        // Saving a cookie refusal that loads another document ends the page
+        // before the model ever worked on it: it runs again once, with the
+        // choice in place.
+        let rerun = gate.signed_in_elsewhere()
+            || (gate.pressed_consent()
+                && run.status == WorkAttemptStatus::Failed
+                && run.measurements.planner_calls == 0);
         Ok(WorkBrowserOutcome {
             status: match run.status {
                 WorkAttemptStatus::Running => WorkStepStatus::Running,
@@ -474,7 +481,7 @@ impl MacosWorkComposition {
             measurements: Some(run.measurements),
             helped: run.helped,
             held_back: gate.held_back(),
-            signed_in_elsewhere: gate.signed_in_elsewhere(),
+            rerun,
         })
     }
 
@@ -759,13 +766,17 @@ impl MacosWorkComposition {
             // waiting on its peers; the group's native audit stays with the
             // Shell. This holds for pages in the person's session too.
             let settle_retired = settles_retired(
-                    now,
-                    close_grace,
-                    retired_at,
-                    disposition,
-                    archived.is_some(),
-                );
+                now,
+                close_grace,
+                retired_at,
+                disposition,
+                archived.is_some(),
+            );
+            // Its close ended without a clean close: destroyed and audited,
+            // its debt recorded. Waiting longer cannot change the outcome.
+            let lost = guard.0.is_lost();
             if !settle_retired
+                && !lost
                 && cleanup_expired(
                     now,
                     cleanup_deadline,
@@ -981,7 +992,7 @@ impl MacosWorkComposition {
                     helped = true;
                     if std::mem::take(&mut told_waiting) {
                         if let Some(port) = &confirm {
-                            port.needs_you(false);
+                            port.needs_you(None);
                         }
                     }
                     if let Some(since) = human_wait {
@@ -1124,7 +1135,7 @@ impl MacosWorkComposition {
                     .max(ready_deadline);
             }
             if !running_seen && !requested_close && now >= ready_deadline {
-                trace("close:not_ready");
+                trace(&format!("close:not_ready:{:?}", snapshot.phase));
                 not_ready = true;
                 requested_close = true;
             }
@@ -1157,6 +1168,7 @@ impl MacosWorkComposition {
             }
             match snapshot.phase {
                 RetainedWorkPhase::Refused => {
+                    trace(&refusal_line(&snapshot, intervention_origin.is_some()));
                     return Ok(BrowserRun {
                         status: WorkAttemptStatus::Failed,
                         usage: Some(WorkUsage::default()),
@@ -1240,10 +1252,20 @@ impl MacosWorkComposition {
                             now
                         });
                         let cap = human_wait_cap(intervention.as_ref());
-                        if cap < MAX_WORK_HUMAN_WAIT_MILLIS && !told_waiting {
+                        let wait = if cap < MAX_WORK_HUMAN_WAIT_MILLIS {
+                            Some(zephium_app::work_agent::WorkPageWait::Check)
+                        } else if intervention.as_ref().is_some_and(|intervention| {
+                            intervention.kind
+                                == zephium_core::work::runtime::WorkInterventionKindV1::SignIn
+                        }) {
+                            Some(zephium_app::work_agent::WorkPageWait::SignIn)
+                        } else {
+                            None
+                        };
+                        if let (Some(wait), false) = (wait, told_waiting) {
                             told_waiting = true;
                             if let Some(port) = &confirm {
-                                port.needs_you(true);
+                                port.needs_you(Some(wait));
                             }
                         }
                         if human_wait_expired(now, since, original_deadline, human, cap) {
@@ -1295,7 +1317,10 @@ impl MacosWorkComposition {
             if settle_retired {
                 trace("close:retired");
             }
-            if guard.0.is_closed() || settle_retired {
+            if lost {
+                trace("close:lost");
+            }
+            if guard.0.is_closed() || settle_retired || lost {
                 let snapshot = guard.0.snapshot();
                 // Closed usage comes from the original policy/drain/resource and
                 // terminal ACK join, never the lossy public progress stream.
@@ -1423,6 +1448,19 @@ impl MacosWorkComposition {
     }
 }
 
+/// Why the Shell refused a page, the lane as it stood and the page's session,
+/// in closed words for the Work log.
+fn refusal_line(snapshot: &zephium_app::RetainedWorkSnapshot, yours: bool) -> String {
+    let session = if yours { "yours" } else { "anonymous" };
+    match snapshot.refusal {
+        Some((cause, lane)) => format!(
+            "refused:{cause:?} session={session} live={} settled={} lost={} queued={} group_failed={} group_sealed={}",
+            lane.live, lane.settled, lane.lost, lane.queued, lane.group_failed, lane.group_sealed
+        ),
+        None => format!("refused:unstated session={session}"),
+    }
+}
+
 /// A human request waits at most the human wait cap, within the read's own
 /// deadline. Only a page a person has taken, being presented or continued,
 /// is left to the page's own presented deadline.
@@ -1506,7 +1544,10 @@ impl StageOnce {
         if !label.starts_with("close:") {
             return true;
         }
-        let mut seen = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut seen = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if seen.iter().any(|stage| stage == label) {
             return false;
         }
@@ -2687,10 +2728,13 @@ mod human_budget_tests {
             },
             1,
             0,
-            false
+            false,
         )
         .unwrap();
-        assert_eq!(reserved.model_tokens, limits.model_tokens - first.model_tokens);
+        assert_eq!(
+            reserved.model_tokens,
+            limits.model_tokens - first.model_tokens
+        );
         assert!(add_usage(
             first,
             WorkUsage {

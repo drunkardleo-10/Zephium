@@ -46,8 +46,9 @@ mod work_resources;
 #[cfg(feature = "work-execution")]
 pub use work_resources::product::{
     PreparedRetainedContinuation, PreparedRetainedWork, RetainedHumanPhase, RetainedHumanResume,
-    RetainedHumanSnapshot, RetainedPageAdmission, RetainedWorkHandle, RetainedWorkNativeFactory,
-    RetainedWorkPhase, RetainedWorkPorts, RetainedWorkSnapshot,
+    RetainedHumanSnapshot, RetainedLaneFacts, RetainedPageAdmission, RetainedRefusal,
+    RetainedWorkHandle, RetainedWorkNativeFactory, RetainedWorkPhase, RetainedWorkPorts,
+    RetainedWorkSnapshot,
 };
 
 #[cfg(feature = "work-execution-probe")]
@@ -119,6 +120,8 @@ mod work_search;
 pub mod work_sites;
 #[cfg(feature = "work-runtime")]
 mod work_synthesis;
+#[cfg(any(feature = "work-execution", feature = "work-runtime"))]
+pub mod work_trace;
 pub use api::{
     FaviconProber, FaviconProberAttachment, HistoryCompletion, NoteCompletion, NotesAttachment,
     ResourceCompletion,

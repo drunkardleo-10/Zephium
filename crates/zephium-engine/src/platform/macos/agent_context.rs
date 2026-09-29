@@ -558,6 +558,7 @@ where
     .map_err(|_| AgentOwnedViewConstructionError::ExtensionIsolation)?;
     let navigation_semantic = semantic.controller().clone();
     let human_semantic_prepare = semantic.human_navigation_preparer();
+    let follow_semantic_prepare = semantic.follow_navigation_preparer();
     let renderer_semantic = semantic.controller().clone();
     let builder = WebViewBuilder::new()
         .with_url("about:blank")
@@ -587,6 +588,11 @@ where
                 || navigation_policy.allows(&target),
                 |gate| gate.allows_apple_action(&target, action),
             );
+            // An action's own admitted load replaces the document: the old
+            // document's reads end, and the runtime waits for the new one.
+            let allowed = allowed
+                && (!work_policy.as_ref().is_some_and(|gate| gate.take_hand_on())
+                    || follow_semantic_prepare());
             #[cfg(feature = "agentic-browser-qa")]
             if action.target_is_main_frame != Some(false) {
                 super::agentic_liveness_probe::trace(format_args!(

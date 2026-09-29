@@ -308,6 +308,33 @@ pub(crate) fn dismissal(observation: &SemanticObservation) -> Option<SemanticRef
         .map(|(_, reference)| reference)
 }
 
+/// A look that may have cut a consent banner's controls off: the page is a
+/// consent host, or a heading, dialog or short text is about cookies while no
+/// refusal or acknowledgement shows.
+pub(crate) fn suspected(observation: &SemanticObservation) -> bool {
+    let Some(snapshot) = observation.frames().first() else {
+        return false;
+    };
+    let host = snapshot
+        .frame()
+        .origin()
+        .as_url()
+        .host_str()
+        .is_some_and(|host| host.starts_with("consent."));
+    let topic = snapshot.nodes().iter().any(|node| {
+        matches!(
+            node.role(),
+            SemanticRole::Heading | SemanticRole::Dialog | SemanticRole::Paragraph
+        ) && label(node).len() <= 400
+            && names(&label(node), &TOPIC)
+    });
+    let control = snapshot
+        .nodes()
+        .iter()
+        .any(|node| matches!(choice(node), Some(Choice::Refuse | Choice::Acknowledge)));
+    (host || topic) && !control
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,5 +461,30 @@ mod tests {
             json!({"k":5,"p":1,"r":"button","n":"Continue","o":1,"ak":1,"b":at(10)}),
         ]);
         assert_eq!(dismissal(&newsletter), None);
+    }
+
+    #[test]
+    fn a_look_that_cut_off_a_consent_banners_buttons_is_suspected() {
+        // Google's consent page, fitted: the text, not yet the buttons.
+        let cut = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"heading","n":"Before you continue to Google","l":1}),
+            json!({"k":3,"p":0,"r":"paragraph","t":"We use cookies and data to deliver and maintain Google services."}),
+            json!({"k":4,"p":0,"r":"paragraph","t":"Track outages and protect against spam."}),
+        ]);
+        assert_eq!(dismissal(&cut), None);
+        assert!(suspected(&cut));
+        // Its refusal in view: the ordinary dismissal takes it.
+        assert!(!suspected(&page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"paragraph","t":"We use cookies to improve this site."}),
+            json!({"k":3,"p":0,"r":"button","n":"Reject all","o":1,"ak":1,"b":at(10)}),
+        ])));
+        // A page about something else is not.
+        assert!(!suspected(&page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"heading","n":"Homes in San Francisco","l":1}),
+            json!({"k":3,"p":0,"r":"paragraph","t":"Entire home"}),
+        ])));
     }
 }

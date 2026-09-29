@@ -318,7 +318,10 @@ fn keep_frames(observed: &Mutex<Option<zephium_app::work_runtime::WorkAttemptObs
             continue;
         };
         let index = KEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let _ = std::fs::write(directory.join(format!("page-{index}.png")), frame.png.as_slice());
+        let _ = std::fs::write(
+            directory.join(format!("page-{index}.png")),
+            frame.png.as_slice(),
+        );
         let _ = writeln!(
             std::io::stdout().lock(),
             "agent-work: frame index={index} width={} height={} png_bytes={}",
@@ -463,6 +466,9 @@ pub(super) fn replay_agent_turn(
 
 fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
+    zephium_app::work_trace::install(Arc::new(|line: std::fmt::Arguments<'_>| {
+        let _ = writeln!(std::io::stdout().lock(), "trace: {line}");
+    }));
     let coordinated = !matches!(mode, Mode::Public | Mode::MoneyNode);
     let data = tempfile::Builder::new()
         .prefix("zephium-durable-work-")
@@ -915,7 +921,9 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
                     let pages: std::collections::BTreeSet<_> = subjects
                         .iter()
                         .filter_map(|subject| subject.homepage.as_deref().and_then(airbnb_page))
-                        .filter(|page| matches!(page, AirbnbPage::Listing(_)) && airbnb_reads.contains(page))
+                        .filter(|page| {
+                            matches!(page, AirbnbPage::Listing(_)) && airbnb_reads.contains(page)
+                        })
                         .collect();
                     subjects.len() == 3 && pages.len() == 3 && !artifact.evidence.is_empty()
                 })
@@ -947,7 +955,10 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             "listing_address canonical_cited={cited}"
         );
     }
-    if matches!(mode, Mode::AgentTrip | Mode::AgentAirbnb | Mode::AgentListing) {
+    if matches!(
+        mode,
+        Mode::AgentTrip | Mode::AgentAirbnb | Mode::AgentListing
+    ) {
         let _ = writeln!(
             std::io::stdout().lock(),
             "travel_qualification airbnb_reads={} listing_reads={} accepted={travel_accepted}",
@@ -1965,7 +1976,9 @@ fn research_accepted(execution: &WorkExecutionFact) -> bool {
         .iter()
         .filter(|artifact| matches!(artifact.data, Data::Findings { .. }))
         .collect();
-    let cited = findings.iter().all(|artifact| !artifact.evidence.is_empty());
+    let cited = findings
+        .iter()
+        .all(|artifact| !artifact.evidence.is_empty());
     let accepted = answer.accepted() && cited;
     let _ = writeln!(
         std::io::stdout().lock(),
@@ -2086,7 +2099,12 @@ fn concept_comparison_accepted(execution: &WorkExecutionFact) -> bool {
                 criteria,
                 cells,
                 ..
-            } => Some((artifact.general_knowledge, subjects.len(), criteria.len(), cells)),
+            } => Some((
+                artifact.general_knowledge,
+                subjects.len(),
+                criteria.len(),
+                cells,
+            )),
             _ => None,
         })
         .collect();
@@ -2146,13 +2164,16 @@ fn code_review_accepted(execution: &WorkExecutionFact) -> bool {
                 .any(|note| note.from <= line && line <= note.to)
         });
     }
-    let named = execution.artifacts.iter().any(|artifact| match &artifact.data {
-        Data::Findings { items, .. } => items.iter().any(|item| {
-            names_off_by_one(&item.claim, item.detail.as_deref().unwrap_or_default())
-        }),
-        Data::Answer { markdown } => names_off_by_one(markdown, ""),
-        _ => false,
-    });
+    let named = execution
+        .artifacts
+        .iter()
+        .any(|artifact| match &artifact.data {
+            Data::Findings { items, .. } => items.iter().any(|item| {
+                names_off_by_one(&item.claim, item.detail.as_deref().unwrap_or_default())
+            }),
+            Data::Answer { markdown } => names_off_by_one(markdown, ""),
+            _ => false,
+        });
     let answer = AnswerFacts::of(execution);
     let (reads, elapsed_ms) = reads_and_elapsed(execution);
     let accepted = notes >= 2
@@ -2296,7 +2317,7 @@ async fn agent_workflow(
                     4096,
                     zephium_agent_model_catalog::Gpt6LunaDecisionEffort::Low,
                 )
-                    .map_err(|_| "link_model")?,
+                .map_err(|_| "link_model")?,
                 32_768,
                 100_000,
             )
@@ -2351,7 +2372,7 @@ async fn agent_workflow(
                     4096,
                     zephium_agent_model_catalog::Gpt6LunaDecisionEffort::Low,
                 )
-                    .map_err(|_| "ranking_model")?,
+                .map_err(|_| "ranking_model")?,
                 32_768,
                 100_000,
             )
@@ -2705,6 +2726,11 @@ fn money_schema(
     .with_subject_image_field("image_url")
 }
 
+fn probe_clock() -> &'static std::time::Instant {
+    static CLOCK: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    CLOCK.get_or_init(std::time::Instant::now)
+}
+
 pub(super) fn browser_settings(
     profile: zephium_app::AgentWorkProfileBinding,
     credential: zephium_agentic::AgentProviderCredential,
@@ -2714,7 +2740,11 @@ pub(super) fn browser_settings(
         retain_public_responses: true,
         loopback_anonymous: false,
         stage_diagnostic: Some(|stage| {
-            let _ = writeln!(std::io::stdout().lock(), "durable-work: stage={stage}");
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "durable-work: stage={stage} at_ms={}",
+                probe_clock().elapsed().as_millis()
+            );
         }),
         model_diagnostic: Some(|event| {
             let _ = writeln!(std::io::stdout().lock(), "browser-model: {event:?}");
@@ -2763,14 +2793,21 @@ fn airbnb_page(value: &str) -> Option<AirbnbPage> {
         return None;
     }
     let listing = match url.path().strip_prefix("/rooms/") {
-        Some(rest) => rest.split('/').next().filter(|id| !id.is_empty()).map(str::to_owned),
+        Some(rest) => rest
+            .split('/')
+            .next()
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned),
         None if url.path() == "/s/homes" => url
             .query_pairs()
             .find(|(name, value)| name == "pinned_listings[]" && !value.is_empty())
             .map(|(_, value)| value.into_owned()),
         None => None,
     };
-    Some(listing.map_or_else(|| AirbnbPage::Other(url.path().to_owned()), AirbnbPage::Listing))
+    Some(listing.map_or_else(
+        || AirbnbPage::Other(url.path().to_owned()),
+        AirbnbPage::Listing,
+    ))
 }
 
 fn has_product_specification(data: &zephium_core::work::artifact::WorkArtifactDataV1) -> bool {
@@ -2886,9 +2923,18 @@ async fn human_government_input(
 mod explain_tests {
     #[test]
     fn an_objective_names_its_programming_language_by_whole_word() {
-        assert_eq!(super::named_language(super::AGENT_EXPLAIN_RUST_OBJECTIVE), Some("rust"));
-        assert_eq!(super::named_language("How does C++ move semantics work?"), Some("cpp"));
-        assert_eq!(super::named_language(super::AGENT_EXPLAIN_MECHANISM_OBJECTIVE), None);
+        assert_eq!(
+            super::named_language(super::AGENT_EXPLAIN_RUST_OBJECTIVE),
+            Some("rust")
+        );
+        assert_eq!(
+            super::named_language("How does C++ move semantics work?"),
+            Some("cpp")
+        );
+        assert_eq!(
+            super::named_language(super::AGENT_EXPLAIN_MECHANISM_OBJECTIVE),
+            None
+        );
         assert_eq!(super::named_language("Explain trusted computing"), None);
     }
 }
@@ -2915,9 +2961,14 @@ mod airbnb_page_tests {
     #[test]
     fn a_room_and_a_pinned_search_are_the_same_listing_and_a_catalog_is_not() {
         let listing = Some(AirbnbPage::Listing("49597911".into()));
-        assert_eq!(airbnb_page("https://www.airbnb.com/rooms/49597911"), listing);
         assert_eq!(
-            airbnb_page("https://www.airbnb.com/rooms/49597911?search_mode=regular_search&adults=1"),
+            airbnb_page("https://www.airbnb.com/rooms/49597911"),
+            listing
+        );
+        assert_eq!(
+            airbnb_page(
+                "https://www.airbnb.com/rooms/49597911?search_mode=regular_search&adults=1"
+            ),
             listing
         );
         assert_eq!(
@@ -2925,7 +2976,9 @@ mod airbnb_page_tests {
             listing
         );
         assert_eq!(
-            airbnb_page("https://www.airbnb.com/s/homes?pinned_listings[]=49597911&pinned_reason=SEO"),
+            airbnb_page(
+                "https://www.airbnb.com/s/homes?pinned_listings[]=49597911&pinned_reason=SEO"
+            ),
             listing
         );
         assert_eq!(

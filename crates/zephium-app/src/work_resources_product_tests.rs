@@ -455,8 +455,8 @@ fn synchronous_action_rejection_persists_failed_terminal_and_shell_shuts_down_cl
 }
 
 #[test]
-fn work_page_group_retains_three_distinct_pages_and_rejects_unrelated_admission() {
-    if child("work_page_group_retains_three_distinct_pages_and_rejects_unrelated_admission") {
+fn work_page_group_retains_three_distinct_pages_and_keeps_unrelated_pages_waiting() {
+    if child("work_page_group_retains_three_distinct_pages_and_keeps_unrelated_pages_waiting") {
         return;
     }
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
@@ -576,10 +576,20 @@ fn work_page_group_retains_three_distinct_pages_and_rejects_unrelated_admission(
             deadline,
         })
         .unwrap();
-        let refused = callback.attach_retained_work(request).unwrap();
+        // A page that cannot join the live group waits for a seat without a
+        // native page; stopped while it waits, it is refused.
+        let waiting = callback.attach_retained_work(request).unwrap();
+        let settle = Instant::now() + Duration::from_millis(100);
+        pump(&queue, &mut shell, || Instant::now() >= settle);
+        assert_eq!(waiting.snapshot().phase, RetainedWorkPhase::Attaching);
+        assert!(waiting.stop());
         pump(&queue, &mut shell, || {
-            refused.snapshot().phase == RetainedWorkPhase::Refused
+            waiting.snapshot().phase == RetainedWorkPhase::Refused
         });
+        assert!(matches!(
+            waiting.snapshot().refusal,
+            Some((crate::work_resources::product::RetainedRefusal::GivenUp, _))
+        ));
     }
     assert_eq!(factories.load(Ordering::Acquire), 2);
     let native = Arc::new(Native::default());

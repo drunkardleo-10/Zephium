@@ -191,6 +191,17 @@ mod work_pane;
 #[cfg(feature = "work-execution")]
 const MAX_QUEUED_PAGES: usize = 8;
 
+#[cfg(feature = "work-execution")]
+fn trace_refusal(
+    cause: crate::work_resources::product::RetainedRefusal,
+    lane: crate::work_resources::product::RetainedLaneFacts,
+) {
+    crate::work_trace::record(format_args!(
+        "work: phase=page_lane event=refused cause={cause:?} live={} settled={} lost={} queued={} group_failed={} group_sealed={}",
+        lane.live, lane.settled, lane.lost, lane.queued, lane.group_failed, lane.group_sealed
+    ));
+}
+
 struct NativeOpener {
     source: ItemId,
     activate_when_presentable: bool,
@@ -607,8 +618,7 @@ impl Shell {
             }
             #[cfg(feature = "work-execution")]
             Command::AttachRetainedWork(attachment) => {
-                if let Some(work) = crate::work_resources::product::ProductWork::take(&attachment)
-                {
+                if let Some(work) = crate::work_resources::product::ProductWork::take(&attachment) {
                     self.retire_settled_pages();
                     if self
                         .retained_work
@@ -1226,14 +1236,27 @@ impl Shell {
 
     /// Admits a retained work now, or, for a page that waits only for a
     /// seat in the run's page group, keeps it queued in order until one frees.
+    /// A settled page whose native audit ended holds no browser any more: it
+    /// keeps its recorded debt, but neither a seat nor its run's group, so a
+    /// lost page never holds the pages after it, in its run or another.
     #[cfg(feature = "work-execution")]
     fn attach_retained(&mut self, mut work: crate::work_resources::product::ProductWork) {
-        if self.work.is_some()
+        use crate::work_resources::product::RetainedRefusal as Refusal;
+        let lane = self.page_lane();
+        let refusal = if self.work.is_some()
             || !matches!(self.agent_lifecycle, AgentLifecycleOwner::Absent)
-            || work.given_up()
-            || !work.admits(&self.engine, &self.store, self.work_profile_binding())
         {
-            work.refuse();
+            Some(Refusal::Busy)
+        } else if work.given_up() {
+            Some(Refusal::GivenUp)
+        } else if !work.admits(&self.engine, &self.store, self.work_profile_binding()) {
+            Some(Refusal::Stale)
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            trace_refusal(refusal, lane);
+            work.refuse(refusal, lane);
             return;
         }
         if !work.is_page() {
@@ -1243,7 +1266,8 @@ impl Shell {
                 .is_some_and(|work| !work.is_closed())
                 || self.retained_page_runtime.is_some()
             {
-                work.refuse();
+                trace_refusal(Refusal::Busy, lane);
+                work.refuse(Refusal::Busy, lane);
             } else {
                 // Install original ownership before native construction.
                 self.retained_work = Some(Box::new(work));
@@ -1255,76 +1279,90 @@ impl Shell {
             .retained_work
             .as_ref()
             .is_none_or(|work| work.is_closed())
-            && self.queued_pages.is_empty()
             && work.admits_peers(
                 &self.retained_pages,
                 self.retained_graveyard
                     .iter()
-                    .filter(|work| work.native_member()),
+                    .filter(|work| work.holds_seat()),
             )
             && !self
                 .retained_page_runtime
                 .as_ref()
                 .is_some_and(|group| group.is_failed() || group.is_sealed());
-        // A failed group held only by members nothing can close will not
-        // give way: its pages are refused at once, not after their wait.
-        if !seated
-            && self
-                .retained_page_runtime
-                .as_ref()
-                .is_some_and(|group| group.is_failed())
-            && self.retained_pages.is_empty()
-            && self
-                .retained_graveyard
-                .iter()
-                .filter(|work| work.native_member())
-                .all(|work| work.beyond_closing())
-        {
-            crate::diagnostic!("work: page refused, its run's page group cannot close");
-            work.refuse();
-            return;
-        }
-        // A failed or sealed group takes no new page; one of the same run
-        // waits for the group to retire and a fresh one to start, within the
-        // page's own bounded wait.
+        // A page without a seat waits for one, in order, within its own
+        // bounded wait: a full or sealed group of its run, or another run's
+        // pages still closing, give way once their members have closed.
         if !seated {
-            let joins = work.joins_group(
-                &self.retained_pages,
-                self.retained_graveyard
-                    .iter()
-                    .filter(|work| work.native_member()),
-            ) && self.queued_pages.iter().all(|queued| {
-                queued.joins_group(std::slice::from_ref(&work), std::iter::empty())
-            });
-            if joins && self.queued_pages.len() < MAX_QUEUED_PAGES {
+            if self.queued_pages.len() < MAX_QUEUED_PAGES {
+                if work.begin_wait() {
+                    crate::work_trace::record(format_args!(
+                        "work: phase=page_lane event=waiting live={} settled={} lost={} queued={} group_failed={} group_sealed={}",
+                        lane.live, lane.settled, lane.lost, lane.queued, lane.group_failed, lane.group_sealed
+                    ));
+                }
                 self.queued_pages.push_back(work);
             } else {
-                work.refuse();
+                trace_refusal(Refusal::QueueFull, lane);
+                work.refuse(Refusal::QueueFull, lane);
             }
             return;
         }
         if self.retained_page_runtime.is_none() {
             self.retained_page_runtime = work.new_runtime_group().ok();
         }
+        if let Some(waited) = work.waited() {
+            crate::work_trace::record(format_args!(
+                "work: phase=page_lane event=seated waited_ms={}",
+                waited.as_millis()
+            ));
+        }
         if let Some(group) = &self.retained_page_runtime {
             work.set_runtime_group(group.clone());
             self.retained_pages.push(work);
             self.retained_pages.last_mut().unwrap().initialize();
         } else {
-            work.refuse();
+            trace_refusal(Refusal::GroupStart, lane);
+            work.refuse(Refusal::GroupStart, lane);
         }
     }
 
-    /// Queued pages take seats in order as their group frees them; one whose
-    /// run ended or ran out of time while it waited is refused.
+    /// The page lane as it stands, in closed counts.
+    #[cfg(feature = "work-execution")]
+    fn page_lane(&self) -> crate::work_resources::product::RetainedLaneFacts {
+        let count = |n: usize| u8::try_from(n).unwrap_or(u8::MAX);
+        crate::work_resources::product::RetainedLaneFacts {
+            live: count(self.retained_pages.len()),
+            settled: count(
+                self.retained_graveyard
+                    .iter()
+                    .filter(|work| work.holds_seat())
+                    .count(),
+            ),
+            lost: count(
+                self.retained_graveyard
+                    .iter()
+                    .filter(|work| work.beyond_closing())
+                    .count(),
+            ),
+            queued: count(self.queued_pages.len()),
+            group_failed: self
+                .retained_page_runtime
+                .as_ref()
+                .is_some_and(|group| group.is_failed()),
+            group_sealed: self
+                .retained_page_runtime
+                .as_ref()
+                .is_some_and(|group| group.is_sealed()),
+        }
+    }
+
+    /// Queued pages take seats in order as they free; a page that can sit
+    /// now does not wait behind one that cannot (another run's page waiting
+    /// for this run's group to close). One whose run ended or ran out of
+    /// time while it waited is refused.
     #[cfg(feature = "work-execution")]
     fn admit_queued_pages(&mut self) {
-        let queued = std::mem::take(&mut self.queued_pages);
-        for work in queued {
-            if !self.queued_pages.is_empty() {
-                self.queued_pages.push_back(work);
-                continue;
-            }
+        for work in std::mem::take(&mut self.queued_pages) {
             self.attach_retained(work);
         }
     }
@@ -1338,6 +1376,11 @@ impl Shell {
         while index < self.retained_pages.len() {
             if self.retained_pages[index].leaves_group() {
                 let mut page = self.retained_pages.remove(index);
+                crate::work_trace::record(format_args!(
+                    "work: phase=page_lane event=left_group lost={} live={}",
+                    page.beyond_closing(),
+                    self.retained_pages.len()
+                ));
                 page.leave_group();
                 page.begin_shutdown();
                 self.retained_graveyard.push(page);
@@ -1353,12 +1396,13 @@ impl Shell {
         // seat any more: nothing further can close it, and the next group's
         // native admission still requires every member's proof.
         if self.retained_pages.is_empty()
-            && !self
-                .retained_graveyard
-                .iter()
-                .any(|work| work.native_member() && !work.beyond_closing())
+            && !self.retained_graveyard.iter().any(|work| work.holds_seat())
+            && self.retained_page_runtime.take().is_some()
         {
-            self.retained_page_runtime = None;
+            crate::work_trace::record(format_args!(
+                "work: phase=page_lane event=group_closed lost={}",
+                self.retained_graveyard.len()
+            ));
         }
     }
 
@@ -1446,8 +1490,12 @@ impl Shell {
         #[cfg(feature = "work-runtime")]
         crate::work_commands::shutdown();
         #[cfg(feature = "work-execution")]
+        let lane = self.page_lane();
         for mut page in std::mem::take(&mut self.queued_pages) {
-            page.refuse();
+            page.refuse(
+                crate::work_resources::product::RetainedRefusal::Discarded,
+                lane,
+            );
         }
         #[cfg(feature = "work-execution")]
         for page in &mut self.retained_pages {

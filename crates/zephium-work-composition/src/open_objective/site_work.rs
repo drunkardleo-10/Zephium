@@ -744,6 +744,8 @@ struct GateState {
     entry: EntryCheck,
     /// The person finished a sign-in in a tab while the page waited.
     signed_in_elsewhere: bool,
+    /// Rust pressed a cookie banner's refusal on this page.
+    consent_pressed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -782,6 +784,12 @@ impl SiteGate {
     }
     pub(crate) fn signed_in_elsewhere(&self) -> bool {
         self.state().signed_in_elsewhere
+    }
+    pub(crate) fn consent_pressing(&self, pressing: bool) {
+        self.state().consent_pressed |= pressing;
+    }
+    pub(crate) fn pressed_consent(&self) -> bool {
+        self.state().consent_pressed
     }
     pub(crate) fn entry(&self) -> EntryCheck {
         self.state().entry
@@ -925,6 +933,14 @@ fn credential(node: &SemanticNode) -> bool {
 impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
     fn consent_dismissal(&self, observation: &SemanticObservation) -> Option<SemanticReferenceId> {
         super::consent::dismissal(observation)
+    }
+
+    fn consent_suspected(&self, observation: &SemanticObservation) -> bool {
+        super::consent::suspected(observation)
+    }
+
+    fn consent_pressing(&self, pressing: bool) {
+        self.gate.consent_pressing(pressing);
     }
 
     fn whole_first_look(&self) -> bool {

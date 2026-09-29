@@ -249,12 +249,12 @@ fn validate_account_refresh(
         || !sample.contains(".refresh_account(account)")
         || !work.contains("session.continue_inspection(")
         // Pinned across the actor's two files; new admission paths (discovery,
-        // waits, screenshots, decisions, a site's whole first look) each
-        // sample once more.
+        // waits, screenshots, decisions, a site's whole first look, the whole
+        // look a consent press is made on) each sample once more.
         || format!("{work}\n{decision}")
             .matches("state.refresh_account(worker, browser)?")
             .count()
-            != 21
+            != 24
         || !policy.contains("MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;")
     {
         return Err("Work lost per-admission sampling, control or original expiry boundary".into());

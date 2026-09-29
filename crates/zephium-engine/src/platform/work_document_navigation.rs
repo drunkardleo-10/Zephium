@@ -3,6 +3,7 @@
 //! query updates use an explicit public interaction policy within the same native document.
 
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Instant;
 use zephium_agentic::{
     ContextJoin, ContextNavigationRequest, ContextNavigationTarget, ContextOperationJoin,
     ContextPortFailure,
@@ -47,6 +48,12 @@ struct State {
     site_loads: u8,
     /// A site-session load a script redirect replaced; its late events are noise.
     superseded: Option<wry::NavigationId>,
+    /// The gate let an action's own load replace the ready document.
+    handed_on: bool,
+    /// That load still needs the page's semantic runtime prepared for it.
+    hand_on_pending: bool,
+    /// When the current load committed.
+    committed_at: Option<Instant>,
     /// Open while an admitted action runs on a ready site-session page.
     follow: Option<Follow>,
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -180,6 +187,9 @@ impl Default for WorkDocumentNavigation {
             human: None,
             site_loads: 0,
             superseded: None,
+            handed_on: false,
+            hand_on_pending: false,
+            committed_at: None,
             follow: None,
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             url_observation_failure: None,
@@ -224,6 +234,9 @@ const MAX_SITE_LOADS: u8 = 6;
 struct Follow {
     post: bool,
     posted: bool,
+    /// Rust's own press of a cookie banner's refusal: saving the choice is a
+    /// read, so its same-site POST passes once and its loads are followed.
+    consent: bool,
     slot: zephium_agentic::SemanticActionFollow,
 }
 
@@ -282,7 +295,8 @@ impl State {
         }
         // A saved commit's own page may hand on with a form GET (a consent
         // host returning to the site): it is followed as the POST's redirect.
-        if get && follow.posted {
+        // A consent press's own reload or hand-back is followed the same way.
+        if get && (follow.posted || follow.consent) {
             let (Some(generation), Some(loads)) = (
                 self.finalization_generation.checked_add(1),
                 self.site_loads
@@ -298,6 +312,8 @@ impl State {
             self.site_loads = loads;
             self.requested = true;
             self.phase = Phase::Armed;
+            self.handed_on = true;
+            self.hand_on_pending = true;
             return true;
         }
         if get {
@@ -314,7 +330,7 @@ impl State {
                 .host_str()
                 .is_some_and(|host| host.starts_with("consent."))
         });
-        if !(follow.post || consent) || follow.posted {
+        if !(follow.post || follow.consent || consent) || follow.posted {
             return false;
         }
         let Some(generation) = self.finalization_generation.checked_add(1) else {
@@ -328,6 +344,8 @@ impl State {
         self.site_loads = 0;
         self.requested = true;
         self.phase = Phase::Armed;
+        self.handed_on = true;
+        self.hand_on_pending = true;
         true
     }
 }
@@ -337,14 +355,21 @@ impl WorkDocumentNavigation {
     /// site-session page; it lasts until the next action, document change
     /// or cancellation, since a page's script often navigates only after
     /// the click returns. `post` admits one same-site form POST.
-    pub(crate) fn open_follow(&self, post: bool, slot: zephium_agentic::SemanticActionFollow) {
+    pub(crate) fn open_follow(
+        &self,
+        post: bool,
+        consent: bool,
+        slot: zephium_agentic::SemanticActionFollow,
+    ) {
         if let Ok(mut state) = self.0.lock() {
+            state.handed_on = false;
             state.follow = (state.policy
                 == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
                 && state.phase == Phase::Ready)
                 .then_some(Follow {
                     post,
                     posted: false,
+                    consent,
                     slot,
                 });
         }
@@ -364,6 +389,26 @@ impl WorkDocumentNavigation {
         state.navigation_epoch = state.navigation_epoch.checked_add(1).ok_or(())?;
         state.follow = None;
         Ok(effective)
+    }
+    /// The document is being replaced by a load the gate let an action's
+    /// page start (a saved consent, a confirmed commit): reads and actions
+    /// of the old document end without leaving the resource uncertain.
+    pub(crate) fn handed_on(&self) -> bool {
+        self.0.lock().is_ok_and(|state| state.handed_on)
+    }
+    /// When the document an admitted hand-on load committed did so, while it
+    /// has not reported its load finished.
+    pub(crate) fn hand_on_committed_since(&self) -> Option<Instant> {
+        let state = self.0.lock().ok()?;
+        (state.handed_on && state.phase == Phase::Committed)
+            .then_some(state.committed_at)
+            .flatten()
+    }
+    /// Takes the one preparation the last admitted hand-on load needs.
+    pub(crate) fn take_hand_on(&self) -> bool {
+        self.0
+            .lock()
+            .is_ok_and(|mut state| std::mem::take(&mut state.hand_on_pending))
     }
     pub(crate) fn close_follow(&self) {
         if let Ok(mut state) = self.0.lock() {
@@ -781,6 +826,7 @@ impl WorkDocumentNavigation {
                     state.evidence.committed = true;
                 }
                 state.phase = Phase::Committed;
+                state.committed_at = Some(Instant::now());
                 Ok((true, false))
             }
             (Phase::Committed, E::Finished) if exact && state.native_id == Some(event.id) => {
@@ -1270,7 +1316,7 @@ mod tests {
         let search = "https://app.slack.com/search?q=design";
         // Without an action in flight nothing is kept.
         assert!(!gate.allows_apple_action(search, apple_action(T::Other, true)));
-        gate.open_follow(false, slot.clone());
+        gate.open_follow(false, false, slot.clone());
         assert!(!gate.allows_apple_action(search, apple_action(T::FormSubmitted, true)));
         assert!(!gate.allows_apple_action(search, apple_action(T::FormSubmitted, false)));
         assert!(!gate.allows_apple_action("https://evil.test/", apple_action(T::Other, true)));
@@ -1285,7 +1331,7 @@ mod tests {
         assert_eq!(slot.take(), None);
 
         let gate = ready();
-        gate.open_follow(true, slot.clone());
+        gate.open_follow(true, false, slot.clone());
         let book = "https://app.slack.com/book";
         assert!(!gate.allows_apple_action(
             "https://evil.test/pay",
@@ -1328,7 +1374,7 @@ mod tests {
         gate.observe(event(1, E::Finished, consent)).unwrap();
         settle(&gate, consent);
         let slot = zephium_agentic::SemanticActionFollow::default();
-        gate.open_follow(false, slot);
+        gate.open_follow(false, false, slot);
         let save = "https://consent.google.com/save";
         assert!(!gate.allows_apple_action(
             "https://evil.test/save",
@@ -1359,11 +1405,64 @@ mod tests {
             gate.observe(event(1, phase, start)).unwrap();
         }
         settle(&gate, start);
-        gate.open_follow(false, zephium_agentic::SemanticActionFollow::default());
+        gate.open_follow(
+            false,
+            false,
+            zephium_agentic::SemanticActionFollow::default(),
+        );
         assert!(!gate.allows_apple_action(
             "https://www.google.com/save",
             apple_action(T::FormSubmitted, false)
         ));
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn a_consent_press_saves_its_choice_once_and_follows_its_own_loads() {
+        use wry::AppleNavigationType as T;
+        let start = "https://www.google.com/travel/flights";
+        let ready = || {
+            let gate = site_gate(start);
+            for phase in [E::Started, E::Committed, E::Finished] {
+                gate.observe(event(1, phase, start)).unwrap();
+            }
+            settle(&gate, start);
+            gate
+        };
+        let slot = zephium_agentic::SemanticActionFollow::default();
+        // A form saves the choice on the site's consent host, once, then
+        // hands back to the page.
+        let gate = ready();
+        gate.open_follow(false, true, slot.clone());
+        let save = "https://consent.google.com/save";
+        assert!(!gate.allows_apple_action(
+            "https://evil.test/save",
+            apple_action(T::FormSubmitted, false)
+        ));
+        assert!(gate.allows_apple_action(save, apple_action(T::FormSubmitted, false)));
+        assert!(!gate.allows_apple_action(save, apple_action(T::FormSubmitted, false)));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, save)).unwrap();
+        }
+        settle(&gate, save);
+        assert!(gate.allows_apple_action(start, apple_action(T::Other, true)));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(3, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(gate.ready(Some(start)) && !gate.failed());
+        assert_eq!(slot.take(), None);
+        // A script that saved the choice and reloads the page is followed,
+        // not diverted; another site never is.
+        let gate = ready();
+        gate.open_follow(false, true, slot.clone());
+        assert!(!gate.allows_apple_action("https://evil.test/", apple_action(T::Other, true)));
+        assert!(gate.allows_apple_action(start, apple_action(T::Reload, true)));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(gate.ready(Some(start)) && !gate.failed());
+        assert_eq!(slot.take(), None);
     }
     #[test]
     fn successor_uses_same_gate_exact_lineage_and_one_terminal_without_bootstrap() {

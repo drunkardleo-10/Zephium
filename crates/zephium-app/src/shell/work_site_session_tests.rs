@@ -75,7 +75,7 @@ async fn open(
                 measurements: None,
                 helped: false,
                 held_back: false,
-                signed_in_elsewhere: false,
+                rerun: false,
             });
         }
     }

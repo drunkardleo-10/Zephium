@@ -423,7 +423,7 @@ async fn page(request: WorkAgentBrowseRequest) -> Result<WorkBrowserOutcome, Wor
         measurements: None,
         helped: false,
         held_back: false,
-        signed_in_elsewhere: false,
+        rerun: false,
     })
 }
 

@@ -34,6 +34,9 @@ const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 // their exact native navigation finishes. Only an explicitly trusted document
 // policy enters this native quiet-period fence. Exact documents pay no delay.
 const DOCUMENT_FINALIZATION_QUIET_PERIOD: Duration = Duration::from_millis(500);
+/// A page an action's admitted load committed but never reported loaded is
+/// taken as loaded after this long.
+const HAND_ON_COMMITTED_SETTLE: Duration = Duration::from_secs(4);
 
 struct DocumentFinalizationWake {
     timer: Option<crate::platform::imp::ContentPolicyTimeout>,
@@ -147,6 +150,7 @@ pub(super) struct WorkNativeResource {
     document_finalization_wake: Option<DocumentFinalizationWake>,
     document_finalization_ready:
         Option<crate::platform::work_document_navigation::WorkDocumentFinalizationTicket>,
+    hand_on_wake: Option<crate::platform::imp::ContentPolicyTimeout>,
     pub(super) last_invocation: u64,
     document_started: bool,
     retirement_clean: bool,
@@ -233,6 +237,7 @@ impl WorkNativeResource {
             screenshot: None,
             document_finalization_wake: None,
             document_finalization_ready: None,
+            hand_on_wake: None,
             last_invocation: 0,
             document_started: false,
             retirement_clean: true,
@@ -345,6 +350,52 @@ impl WorkNativeResource {
                 None => DocumentFinalizationProgress::WakeUnavailable,
             },
             Err(()) => DocumentFinalizationProgress::Refused,
+        }
+    }
+    /// A document an action's admitted load put in place (a saved consent)
+    /// settles like a load of its own: a page that never reports it finished
+    /// is taken as loaded after a short wait, then the quiet period and the
+    /// location sample make it ready.
+    fn progress_hand_on(&mut self) {
+        if self.construction.is_some() || self.navigation.is_some() || self.history_back.is_some() {
+            return;
+        }
+        let Some(gate) = self
+            .view
+            .as_ref()
+            .and_then(|view| view.work_navigation())
+            .cloned()
+        else {
+            return;
+        };
+        if !gate.handed_on() {
+            return;
+        }
+        if let Some(since) = gate.hand_on_committed_since() {
+            if since.elapsed() >= HAND_ON_COMMITTED_SETTLE {
+                gate.accept_committed_load();
+            } else if self.hand_on_wake.is_none() {
+                let guard = self.guard.clone();
+                self.hand_on_wake = crate::platform::imp::schedule_content_policy_timeout(
+                    HAND_ON_COMMITTED_SETTLE.saturating_sub(since.elapsed()),
+                    move || {
+                        let rejected = guard.clone();
+                        if !crate::host::try_with_agent_context_terminal(move |host| {
+                            host.progress_work_resource(&guard)
+                        }) {
+                            rejected.fail();
+                        }
+                    },
+                );
+            }
+        }
+        if gate.finalization_pending() {
+            self.hand_on_wake = None;
+            match self.progress_document_finalization(&gate) {
+                DocumentFinalizationProgress::Ready(_) | DocumentFinalizationProgress::Pending => {}
+                DocumentFinalizationProgress::WakeUnavailable
+                | DocumentFinalizationProgress::Refused => self.guard.fail(),
+            }
         }
     }
     pub(super) fn resident(&self) -> bool {
@@ -986,6 +1037,7 @@ impl EngineHost {
             screenshot: None,
             document_finalization_wake: None,
             document_finalization_ready: None,
+            hand_on_wake: None,
             last_invocation: 0,
             document_started: false,
             retirement_clean: false,
@@ -1124,6 +1176,7 @@ impl EngineHost {
         resource.progress_navigation(self.erasure_tombstones.contains(&resource.profile()));
         resource.progress_history_back(self.erasure_tombstones.contains(&resource.profile()));
         resource.progress_human(self.erasure_tombstones.contains(&resource.profile()));
+        resource.progress_hand_on();
         if resource
             .construction_presentation
             .as_mut()

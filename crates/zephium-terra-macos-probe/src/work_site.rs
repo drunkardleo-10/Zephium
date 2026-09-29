@@ -38,6 +38,8 @@ const SEARCH_FACT: &str = "Brass lantern stock is 42 units";
 const FILTER_FACT: &str = "Open orders number 7";
 const VAULT_FACT: &str = "Vault balance is 318 credits";
 const HOME_FACT: &str = "Front page lists five offers";
+const CHURN_FACT: &str = "Churn list holds 12 items";
+const CONSENT_FACT: &str = "Fares list shows 4 flights";
 /// The vault's own sign-in, kept by the server: a tab sign-in stands for it.
 static VAULT_OPEN: AtomicBool = AtomicBool::new(false);
 /// Page loads the person's tabs made on the site, as the engine would count them.
@@ -77,8 +79,19 @@ enum Check {
     SignedOut,
     /// A sign-in finished in a tab wakes the held page, which starts over once.
     TabSignIn,
+    /// A page that reloads itself after a click neither fails its read nor
+    /// holds the pages after it, in its run or the next.
+    Churn,
+    /// A page whose script stalls the page after a click is lost alone: the
+    /// next page of its run and the next run's page both read.
+    Freeze,
+    /// A cookie banner that saves the refusal with a form POST, or with a
+    /// script and a reload, is refused by Rust and the page reads.
+    Consent,
 }
-const ALL: [Check; 16] = [
+/// Freeze leaves a lost page's debt, which the probe's exit reports as an
+/// unclean shutdown; it runs on its own.
+const ALL: [Check; 18] = [
     Check::Session,
     Check::Always,
     Check::Never,
@@ -95,6 +108,8 @@ const ALL: [Check; 16] = [
     Check::Autosave,
     Check::SignedOut,
     Check::TabSignIn,
+    Check::Churn,
+    Check::Consent,
 ];
 static CHECKS: OnceLock<Vec<Check>> = OnceLock::new();
 
@@ -117,6 +132,9 @@ pub(super) fn run(which: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         Some("autosave") => vec![Check::Autosave],
         Some("signedout") => vec![Check::SignedOut],
         Some("tabsignin") => vec![Check::TabSignIn],
+        Some("churn") => vec![Check::Churn],
+        Some("freeze") => vec![Check::Freeze],
+        Some("consent") => vec![Check::Consent],
         _ => return Err(super::ProbeFailure::Authority),
     };
     let _ = CHECKS.set(checks);
@@ -271,8 +289,39 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
     let page = |title: &str, body: &str| {
         format!("<!doctype html><html><head><title>{title}</title></head><body><main>{body}</main></body></html>")
     };
+    let consented = |name: &str| cookie.contains(&format!("{name}=no"));
+    let banner = |form: bool| {
+        let buttons = if form {
+            "<form method=\"post\" action=\"/consent/save\"><button name=\"set\" value=\"reject\">Reject all</button><button name=\"set\" value=\"accept\">Accept all</button></form>"
+        } else {
+            "<button id=\"r\" type=\"button\">Reject all</button><button id=\"a\" type=\"button\">Accept all</button><script>document.getElementById('r').addEventListener('click',function(){this.disabled=true;fetch('/consent/jsave',{method:'POST'}).then(function(){location.reload();});});</script>"
+        };
+        format!("<div role=\"dialog\" aria-modal=\"true\" aria-label=\"Before you continue\"><h2>Before you continue</h2><p>We use cookies and data to deliver and maintain our services.</p>{buttons}</div><main><p>Loading fares</p></main>")
+    };
     let (status, headers, body) = match (site, method.as_str(), path.as_str()) {
+        (Site::Account, "POST", "/consent/save") => (
+            "303 See Other",
+            "Set-Cookie: zconsent=no; Path=/; Max-Age=3600\r\nLocation: /gconsent\r\n".into(),
+            String::new(),
+        ),
+        (Site::Account, "POST", "/consent/jsave") => (
+            "200 OK",
+            "Set-Cookie: zjconsent=no; Path=/; Max-Age=3600\r\n".into(),
+            String::new(),
+        ),
         (_, "POST", _) => ("200 OK", String::new(), page("Done", "<p>Saved.</p>")),
+        (Site::Account, _, "/gconsent") if consented("zconsent") => (
+            "200 OK",
+            String::new(),
+            page("Fares", &format!("<h1>Fares</h1><p>{CONSENT_FACT}.</p>")),
+        ),
+        (Site::Account, _, "/jconsent") if consented("zjconsent") => (
+            "200 OK",
+            String::new(),
+            page("Fares", &format!("<h1>Fares</h1><p>{CONSENT_FACT}.</p>")),
+        ),
+        (Site::Account, _, "/gconsent") => ("200 OK", String::new(), banner(true)),
+        (Site::Account, _, "/jconsent") => ("200 OK", String::new(), banner(false)),
         (Site::Account, _, "/seed") => (
             "200 OK",
             format!("Set-Cookie: {ACCOUNT_COOKIE}; Path=/; Max-Age=3600; HttpOnly\r\n"),
@@ -344,6 +393,22 @@ fn serve(mut stream: TcpStream, site: Site, ports: (u16, u16), hits: &Mutex<Vec<
             page(
                 "Home",
                 &format!("<header><nav><a href=\"/login\">Sign in</a></nav></header><h1>Welcome</h1><p>{HOME_FACT}.</p>"),
+            ),
+        ),
+        (Site::Account, _, "/churn") => (
+            "200 OK",
+            String::new(),
+            page(
+                "Churn",
+                &format!("<h1>List</h1><button id=\"c\" type=\"button\">Continue</button><p id=\"p\">Press Continue to load the list.</p><script>var n=+(sessionStorage.getItem('churn')||0);if(n>0&&n<7){{document.getElementById('p').textContent='Loading';sessionStorage.setItem('churn',n+1);setTimeout(function(){{location.reload();}},350);}}else if(n>=7){{document.getElementById('p').textContent='{CHURN_FACT}.';}}document.getElementById('c').addEventListener('click',function(){{sessionStorage.setItem('churn',1);setTimeout(function(){{location.reload();}},120);}});</script>"),
+            ),
+        ),
+        (Site::Account, _, "/freeze") => (
+            "200 OK",
+            String::new(),
+            page(
+                "Freeze",
+                "<h1>Report</h1><button id=\"l\" type=\"button\">Load</button><p id=\"p\">Press Load to fill the report.</p><script>document.getElementById('l').addEventListener('click',function(){document.getElementById('p').textContent='Loading the report';setTimeout(function(){var t=Date.now();while(Date.now()-t<40000){}},300);});</script>",
             ),
         ),
         (Site::Account, _, "/vault-login") => {
@@ -493,6 +558,7 @@ fn browse(path: &str, goal: &str) -> WorkAgentFetch {
 #[derive(Clone)]
 struct Opened {
     yours: bool,
+    not_ready: bool,
     held_back: bool,
     status: Option<WorkStepStatus>,
     intervention: Option<WorkInterventionKindV1>,
@@ -773,6 +839,10 @@ impl Context<'_> {
                             if let Ok(mut opened) = opened.lock() {
                                 opened.push(Opened {
                                     yours,
+                                    not_ready: outcome.as_ref().is_ok_and(|o| {
+                                        o.note.as_deref()
+                                            == Some("The browser was not ready for this page")
+                                    }),
                                     held_back: outcome.as_ref().is_ok_and(|o| o.held_back),
                                     status: outcome.as_ref().ok().map(|o| o.status),
                                     intervention: outcome
@@ -830,11 +900,13 @@ fn report(outcome: &Result<WorkBrowserOutcome, WorkError>) {
         Ok(outcome) => {
             let _ = writeln!(
                 std::io::stdout().lock(),
-                "loopback-site: page status={:?} artifacts={} held_back={} note_bytes={} calls={:?}",
+                "loopback-site: page status={:?} artifacts={} held_back={} rerun={} usage={} note={:?} calls={:?}",
                 outcome.status,
                 outcome.artifacts.len(),
                 outcome.held_back,
-                outcome.note.as_ref().map_or(0, String::len),
+                outcome.rerun,
+                outcome.usage.is_some(),
+                outcome.note,
                 outcome.measurements.map(|m| m.planner_calls),
             );
         }
@@ -1320,6 +1392,154 @@ pub(super) async fn workflow(
                 ));
                 last = run.state;
                 content && loads >= 2 && run.asked.is_empty()
+            }
+            Check::Churn => {
+                let first = context
+                    .run(
+                        "Churn list",
+                        false,
+                        "Allow",
+                        vec![
+                            vec![browse(
+                                "/churn",
+                                "Press Continue, wait for the list, then report how many items it holds",
+                            )],
+                            vec![browse("/inbox", goal)],
+                        ],
+                    )
+                    .await?;
+                let second = context
+                    .run(
+                        "Inbox after",
+                        false,
+                        "Allow",
+                        vec![vec![browse("/inbox", goal)]],
+                    )
+                    .await?;
+                let pages = |run: &Run| {
+                    run.opened
+                        .iter()
+                        .map(|p| {
+                            format!(
+                                "{:?}{}",
+                                p.status,
+                                if p.not_ready { ":not_ready" } else { "" }
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                let churned = says(&first, CHURN_FACT) || mentions(&first, &["12"]);
+                line(format!(
+                    "check=churn churned={churned} first=[{}] second=[{}] inbox={}",
+                    pages(&first),
+                    pages(&second),
+                    says(&second, INBOX_FACT)
+                ));
+                let passed = first
+                    .opened
+                    .iter()
+                    .chain(&second.opened)
+                    .all(|p| !p.not_ready)
+                    && says(&second, INBOX_FACT);
+                last = second.state;
+                passed
+            }
+            Check::Freeze => {
+                let started = std::time::Instant::now();
+                let first = context
+                    .run(
+                        "Frozen report",
+                        false,
+                        "Allow",
+                        vec![
+                            vec![browse(
+                                "/freeze",
+                                "Press Load, then report what the report says",
+                            )],
+                            vec![browse("/inbox", goal)],
+                        ],
+                    )
+                    .await?;
+                let first_ms = started.elapsed().as_millis();
+                let started = std::time::Instant::now();
+                let second = context
+                    .run(
+                        "Inbox after freeze",
+                        false,
+                        "Allow",
+                        vec![vec![browse("/inbox", goal)]],
+                    )
+                    .await?;
+                let pages = |run: &Run| {
+                    run.opened
+                        .iter()
+                        .map(|p| {
+                            format!(
+                                "{:?}{}",
+                                p.status,
+                                if p.not_ready { ":not_ready" } else { "" }
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                line(format!(
+                    "check=freeze first=[{}] first_ms={first_ms} second=[{}] second_ms={} inbox={}",
+                    pages(&first),
+                    pages(&second),
+                    started.elapsed().as_millis(),
+                    says(&second, INBOX_FACT)
+                ));
+                let passed = first
+                    .opened
+                    .iter()
+                    .chain(&second.opened)
+                    .all(|p| !p.not_ready)
+                    && says(&first, INBOX_FACT)
+                    && says(&second, INBOX_FACT);
+                last = second.state;
+                passed
+            }
+            Check::Consent => {
+                let mut passed = true;
+                for path in ["/gconsent", "/jconsent"] {
+                    let before = context.sites.posts();
+                    let run = context
+                        .run(
+                            "Fares",
+                            false,
+                            "Allow",
+                            vec![vec![browse(
+                                path,
+                                "Report how many flights the fares list shows",
+                            )]],
+                        )
+                        .await?;
+                    let saves = context.sites.hits(Site::Account, "/consent/").len();
+                    let loads = context
+                        .sites
+                        .hits(Site::Account, path)
+                        .iter()
+                        .map(|(_, cookie)| {
+                            (
+                                cookie.contains(ACCOUNT_COOKIE),
+                                cookie.contains("consent=no"),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    line(format!("consent loads={loads:?}"));
+                    let content = says(&run, CONSENT_FACT) || mentions(&run, &["4"]);
+                    let held = run.opened.iter().any(|p| p.held_back);
+                    line(format!(
+                        "check=consent page={path} content={content} posts={} saves={saves} held={held} status={:?}",
+                        context.sites.posts() - before,
+                        run.opened.first().and_then(|p| p.status)
+                    ));
+                    passed &= content && !held;
+                    last = run.state;
+                }
+                passed
             }
             Check::Wall => {
                 let run = context

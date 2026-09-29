@@ -40,6 +40,7 @@ pub(super) struct WorkAction {
     wakes: u8,
     follow: Option<zephium_agentic::SemanticActionFollow>,
     commits: bool,
+    consent: bool,
 }
 
 impl WorkAction {
@@ -91,12 +92,19 @@ impl WorkNativeResource {
     }
     pub(super) fn cancel_action(&mut self) {
         if let Some(action) = &mut self.action {
+            let handed_on = self
+                .view
+                .as_ref()
+                .and_then(|view| view.work_navigation())
+                .is_some_and(|gate| gate.handed_on());
             if let Some(gate) = self.view.as_ref().and_then(|view| view.work_navigation()) {
                 gate.close_follow();
             }
             action.cancelled = true;
             action.retirement_ready();
-            if action.dispatched {
+            // An action whose own admitted load replaced the document ended
+            // with it; anything else in flight leaves the resource uncertain.
+            if action.dispatched && !handed_on {
                 self.guard.fail();
             }
             if action.dispatched && action.terminal.is_none() {
@@ -122,6 +130,7 @@ impl EngineHost {
         let context = native.frame().context();
         let follow = native.follow().cloned();
         let commits = native.commits();
+        let consent = native.consent();
         let presentation_busy = self.work_resources.iter().any(|(id, resource)| {
             *id != guard.resource().identity().context() && resource.presentation_in_flight()
         });
@@ -226,6 +235,7 @@ impl EngineHost {
             wakes: 1,
             follow,
             commits,
+            consent,
         });
         let action = resource.action.as_mut().unwrap();
         if action.wake.is_none() {
@@ -414,7 +424,7 @@ impl EngineHost {
                         let deadline = action.deadline;
                         let gate = view.work_navigation().cloned();
                         if let Some((gate, slot)) = gate.as_ref().zip(action.follow.clone()) {
-                            gate.open_follow(action.commits, slot);
+                            gate.open_follow(action.commits, action.consent, slot);
                         }
                         let context = action.context;
                         let document = action.document;
@@ -681,6 +691,7 @@ mod tests {
             wakes: 1,
             follow: None,
             commits: false,
+            consent: false,
         };
         // Runtime completion happened, but finish_work_action is still queued.
         // A resource wake in this gap must preserve the existing presentation.

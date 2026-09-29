@@ -292,6 +292,18 @@ pub trait AgentWorkTask: Send {
         None
     }
 
+    /// The look shows a consent banner or page whose controls it may have
+    /// cut off: a whole look decides.
+    fn consent_suspected(&self, _: &SemanticObservation) -> bool {
+        false
+    }
+
+    /// Rust presses a cookie banner's refusal (true), and the press came
+    /// back (false). A page that saved the choice by loading another document
+    /// ends between the two; the task may run the page again once, with the
+    /// choice in place.
+    fn consent_pressing(&self, _: bool) {}
+
     /// A collapsed disclosure the task's own closed name list says may hold
     /// the read's values; toggled once by Rust when a value is unlocated.
     fn detail_disclosure(&self, _: &SemanticObservation) -> Option<DecisionOperation> {
@@ -1267,6 +1279,7 @@ impl AgentWorkController {
                     extraction: None,
                     retained_read_evidence: SemanticRetainedReadEvidence::default(),
                     follow: zephium_agentic::SemanticActionFollow::default(),
+                    consent_press: false,
                     failure: None,
                     observation: None,
                     native_terminal: None,
@@ -1286,6 +1299,8 @@ struct WorkState {
     retained_read_evidence: SemanticRetainedReadEvidence,
     /// A same-site load the page started during the last action.
     follow: zephium_agentic::SemanticActionFollow,
+    /// The action in flight is Rust's press of a cookie banner's refusal.
+    consent_press: bool,
     navigation_target: Option<ContextNavigationTarget>,
     navigation_route: Option<AgentNavigationRoute>,
     navigation_discovery: Option<AgentNavigationDiscovery>,
@@ -2243,8 +2258,7 @@ impl AgentWorkController {
             state.refresh_account(worker, browser)?;
             observation =
                 Self::fit_model_observation(Self::observe(state, worker, browser).await?)?;
-            if !Self::classify_human_challenge(state, worker, browser, &observation, false).await?
-            {
+            if !Self::classify_human_challenge(state, worker, browser, &observation, false).await? {
                 return Ok((observation, false));
             }
         }
@@ -2629,21 +2643,35 @@ impl AgentWorkController {
         // The model starts from an ordinary fitted look.
         if first_look && !whole_page {
             state.refresh_account(worker, browser)?;
-            observation =
-                Self::fit_model_observation(Box::pin(Self::observe(state, worker, browser)).await?)?;
+            observation = Self::fit_model_observation(
+                Box::pin(Self::observe(state, worker, browser)).await?,
+            )?;
         }
         // A cookie banner on a page worked for the person is refused by Rust
-        // before any model sees the page.
+        // before any model sees the page. Rust presses on a whole look of the
+        // page: the model's fitted look may shorten the banner's fields or cut
+        // its buttons off, and a press needs them whole.
         if state.actions_before_extraction
             && state
                 .navigation_discovery
                 .as_ref()
                 .is_some_and(AgentNavigationDiscovery::is_site_session)
+            && (state.task.consent_dismissal(&observation).is_some()
+                || state.task.consent_suspected(&observation))
         {
-            if let Some(target) = state.task.consent_dismissal(&observation) {
-                let look = observation.clone();
+            state.refresh_account(worker, browser)?;
+            let initial = Box::pin(Self::observe(state, worker, browser)).await?;
+            let whole = Box::pin(Self::whole_page_capture(
+                state,
+                worker,
+                browser,
+                initial,
+                SemanticExpansionKind::Subtree,
+            ))
+            .await?;
+            if let Some(target) = state.task.consent_dismissal(&whole) {
                 observation =
-                    Box::pin(Self::dismiss_consent(state, worker, browser, look, target)).await?;
+                    Box::pin(Self::dismiss_consent(state, worker, browser, whole, target)).await?;
             }
         }
         let mut captured_at = SemanticCaptureInstant::from_millis(
@@ -2672,8 +2700,9 @@ impl AgentWorkController {
         // The page planner starts from an ordinary fitted capture.
         if whole_page {
             state.refresh_account(worker, browser)?;
-            observation =
-                Self::fit_model_observation(Box::pin(Self::observe(state, worker, browser)).await?)?;
+            observation = Self::fit_model_observation(
+                Box::pin(Self::observe(state, worker, browser)).await?,
+            )?;
             captured_at = SemanticCaptureInstant::from_millis(
                 state
                     .journal_mut()?
@@ -3300,7 +3329,12 @@ impl AgentWorkController {
                 .map_err(|_| AgentWorkFailure::Contract)?,
         )
         .map_err(|_| AgentWorkFailure::Contract)?;
-        match Box::pin(Self::code_owned_read(state, worker, browser, &look, press)).await? {
+        state.consent_press = true;
+        state.task.consent_pressing(true);
+        let pressed = Box::pin(Self::code_owned_read(state, worker, browser, &look, press)).await;
+        state.consent_press = false;
+        state.task.consent_pressing(false);
+        match pressed? {
             Some(after) => Self::fit_model_observation(after),
             None => {
                 state.refresh_account(worker, browser)?;
@@ -3351,8 +3385,15 @@ impl AgentWorkController {
         state
             .journal_mut()?
             .emit(AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Act))?;
-        match Self::execute_prepared_action(state, worker, browser, proposal, assessment, observation)
-            .await
+        match Self::execute_prepared_action(
+            state,
+            worker,
+            browser,
+            proposal,
+            assessment,
+            observation,
+        )
+        .await
         {
             Ok((current, _, transition)) => {
                 let _ = state.follow.take();
@@ -4747,6 +4788,8 @@ pub enum AgentWorkEventKind {
         call: AgentModelCallId,
         /// Charged input tokens.
         input_tokens: u64,
+        /// The cached-read subset of the input, when the provider reports it.
+        cached_input_tokens: u64,
         /// Charged output tokens.
         output_tokens: u64,
         /// Charged micro-USD.
@@ -5156,6 +5199,9 @@ impl WorkJournal {
         self.emit(AgentWorkEventKind::ModelSettled {
             call: receipt.id(),
             input_tokens: receipt.input_tokens(),
+            cached_input_tokens: receipt
+                .pricing_attribution()
+                .map_or(0, |pricing| pricing.cached_input_tokens()),
             output_tokens: receipt.output_tokens(),
             cost_micro_usd: receipt.cost_micro_usd(),
             request_bytes: input.metrics().serialized_request_bytes(),

@@ -21,6 +21,8 @@ impl WorkProviders {
     ) -> Self {
         #[cfg(not(target_os = "macos"))]
         let _ = (engine, store);
+        // The page lane and searches log their refusals as closed facts.
+        zephium_app::work_trace::install(Arc::new(record_diagnostic));
         // A request may offer a grant for a signed-in attached tab: the engine
         // answers whether the profile holds cookies for a site, nothing more.
         #[cfg(target_os = "macos")]

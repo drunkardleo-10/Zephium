@@ -87,9 +87,17 @@ struct ConfirmMailbox {
     asks: std::collections::VecDeque<(u32, WorkSiteConfirmation)>,
     decisions: Vec<(u32, WorkSiteDecision)>,
     settled: std::collections::VecDeque<(u32, WorkSiteReceipt)>,
-    /// The page began or stopped waiting on the person (a bot check).
-    needs_you: Option<bool>,
-    waiting_on_you: bool,
+    /// The page began or stopped waiting on the person.
+    needs_you: Option<Option<WorkPageWait>>,
+    waiting_on_you: Option<WorkPageWait>,
+}
+/// What a page waits on the person for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkPageWait {
+    /// A bot check, a permission or a step the agent cannot take.
+    Check,
+    /// A sign-in on the page's site.
+    SignIn,
 }
 /// One page task's line to the loop: held steps go out, decisions come
 /// back, receipts go out. Polled on both sides; it carries no authority.
@@ -143,14 +151,14 @@ impl WorkConfirmPort {
         self.mailbox().entry = Some(entry);
     }
     /// The page waits on the person, or stopped waiting.
-    pub fn needs_you(&self, waiting: bool) {
+    pub fn needs_you(&self, wait: Option<WorkPageWait>) {
         let mut mailbox = self.mailbox();
-        if mailbox.waiting_on_you != waiting {
-            mailbox.waiting_on_you = waiting;
-            mailbox.needs_you = Some(waiting);
+        if mailbox.waiting_on_you != wait {
+            mailbox.waiting_on_you = wait;
+            mailbox.needs_you = Some(wait);
         }
     }
-    pub(crate) fn take_needs_you(&self) -> Option<bool> {
+    pub(crate) fn take_needs_you(&self) -> Option<Option<WorkPageWait>> {
         self.mailbox().needs_you.take()
     }
 }
@@ -167,9 +175,10 @@ pub struct WorkBrowserOutcome {
     pub helped: bool,
     /// The page agent was stopped before a step that would commit something.
     pub held_back: bool,
-    /// The page waited on a sign-in the person then finished in a tab: the
-    /// page task starts over once, in the fresh session.
-    pub signed_in_elsewhere: bool,
+    /// The page ended so that its task can start over once: the person
+    /// finished a sign-in in a tab while it waited, or saving a cookie
+    /// refusal replaced the page. The site counts as allowed for the rerun.
+    pub rerun: bool,
 }
 pub struct WorkAgentProviders<'a> {
     pub turn: &'a dyn WorkAgentTurnProvider,
@@ -1320,13 +1329,18 @@ impl Driver {
                                     error: None,
                                 },
                                 // Nothing was sent: a failed step, not a lost one.
-                                Err(error) => WorkSearchOutcomeOwned {
-                                    status: WorkAttemptStatus::Failed,
-                                    usage: Some(WorkUsage::default()),
-                                    note: Some("The search could not be run"),
-                                    record: None,
-                                    error: Some(error),
-                                },
+                                Err(error) => {
+                                    crate::work_trace::record(format_args!(
+                                        "work: phase=search refused=not_run cause={error:?}"
+                                    ));
+                                    WorkSearchOutcomeOwned {
+                                        status: WorkAttemptStatus::Failed,
+                                        usage: Some(WorkUsage::default()),
+                                        note: Some("The search could not be run"),
+                                        record: None,
+                                        error: Some(error),
+                                    }
+                                }
                             },
                         )
                     }) as Pin<Box<dyn Future<Output = Fetched> + Send + '_>>

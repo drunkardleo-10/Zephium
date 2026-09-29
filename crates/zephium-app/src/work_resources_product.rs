@@ -272,6 +272,41 @@ pub enum RetainedWorkPhase {
     Refused,
 }
 
+/// Why the Shell refused a retained work before any page was built. Closed
+/// facts only, so a refusal can be explained from the Work log.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetainedRefusal {
+    /// Another retained work or the agent lifecycle holds the browser.
+    Busy,
+    /// Its owner closed it before it was admitted.
+    GivenUp,
+    /// Its profile, store or time no longer admit it.
+    Stale,
+    /// Too many pages already wait for a seat.
+    QueueFull,
+    /// Its run's page group could not start.
+    GroupStart,
+    /// Its time ran out before its page was built.
+    Expired,
+    /// The Shell dropped it unprocessed, or the app is quitting.
+    Discarded,
+}
+
+/// The Shell's page lane when a page was refused.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RetainedLaneFacts {
+    /// Pages live in the run's group.
+    pub live: u8,
+    /// Settled pages that still hold a native seat.
+    pub settled: u8,
+    /// Settled pages whose native audit ended without a clean close.
+    pub lost: u8,
+    /// Pages waiting for a seat.
+    pub queued: u8,
+    pub group_failed: bool,
+    pub group_sealed: bool,
+}
+
 /// Content-free projection. Terminal means durable acknowledgement, not factual
 /// verification, human-input ownership, resource destruction or global shutdown.
 #[derive(Clone, Copy, Debug)]
@@ -290,6 +325,8 @@ pub struct RetainedWorkSnapshot {
     pub artifact_read: Option<Result<bool, AgentWorkJournalError>>,
     /// Exact historical review acknowledgement; its debt is never cleared.
     pub last_review: Option<Result<AgentWorkRecord, AgentWorkJournalError>>,
+    /// Why the page was refused, with the lane as it stood.
+    pub refusal: Option<(RetainedRefusal, RetainedLaneFacts)>,
 }
 struct Projection {
     human: Option<RetainedHumanSnapshot>,
@@ -313,6 +350,7 @@ struct ProductSignal {
     close: AtomicBool,
     closed: AtomicBool,
     group_locally_retired: AtomicBool,
+    lost: AtomicBool,
     projection: Mutex<Projection>,
     stop: AtomicBool,
     reconcile: AtomicBool,
@@ -411,6 +449,12 @@ impl RetainedWorkHandle {
     /// Set only by the original resource owner's native shutdown proof.
     pub fn is_closed(&self) -> bool {
         self.signal.closed.load(Ordering::Acquire)
+    }
+    /// Closing ended without a clean close: the page is destroyed and its
+    /// native audit is over, while its recorded debt stays. Nothing it can
+    /// still do; the caller settles it as failed instead of waiting.
+    pub fn is_lost(&self) -> bool {
+        self.signal.lost.load(Ordering::Acquire)
     }
     /// Scoped worker, resource and journal cleanup is complete. The Shell still
     /// owns the group-wide native audit; this never substitutes for is_closed.
@@ -536,6 +580,7 @@ impl CallbackHandle {
             close: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             group_locally_retired: AtomicBool::new(false),
+            lost: AtomicBool::new(false),
             projection: Mutex::new(Projection {
                 human: None,
                 human_resume: None,
@@ -555,6 +600,7 @@ impl CallbackHandle {
                     artifact: None,
                     artifact_read: None,
                     last_review: None,
+                    refusal: None,
                 },
                 events: VecDeque::with_capacity(MAX_AGENT_WORK_EVENTS),
                 extraction: None,
@@ -571,6 +617,7 @@ impl CallbackHandle {
         let mut prepared = prepared;
         let work = ProductWork {
             page: prepared.page.take(),
+            waiting_since: None,
             runtime_group: None,
             group_shutdown: false,
             clock: prepared.spec.clock.clone(),
@@ -595,6 +642,8 @@ impl CallbackHandle {
 
 pub(crate) struct ProductWork {
     page: Option<RetainedPageAdmission>,
+    /// When it first waited for a seat.
+    waiting_since: Option<Instant>,
     runtime_group: Option<RetainedWorkGroup>,
     group_shutdown: bool,
     prepared: Option<PreparedRetainedWork>,
@@ -663,24 +712,6 @@ impl ProductWork {
                 admits(peer, false)
             })
             && seats < usize::from(page.workers.min(3))
-    }
-    /// This page belongs with the group's pages (the same run and step
-    /// lineage), whatever seats they hold: when they are full it may wait.
-    pub(crate) fn joins_group<'a>(
-        &self,
-        live: &[ProductWork],
-        settled: impl Iterator<Item = &'a ProductWork>,
-    ) -> bool {
-        let Some(page) = &self.page else {
-            return false;
-        };
-        let joins = |peer: &ProductWork, live: bool| {
-            peer.page.as_ref().is_some_and(|other| {
-                page.same_group(other) && (!live || page.step != other.step)
-            })
-        };
-        live.iter().all(|peer| joins(peer, true))
-            && settled.into_iter().all(|peer| joins(peer, false))
     }
     /// An unclosed page that owns a native resource owner in its group.
     pub(crate) fn native_member(&self) -> bool {
@@ -751,6 +782,21 @@ impl ProductWork {
                 .as_ref()
                 .is_some_and(RetainedWork::native_audit_settled)
     }
+    /// Marks it waiting for a seat; true the first time.
+    pub(crate) fn begin_wait(&mut self) -> bool {
+        let first = self.waiting_since.is_none();
+        self.waiting_since.get_or_insert_with(Instant::now);
+        first
+    }
+    /// How long it waited for its seat, if it waited.
+    pub(crate) fn waited(&self) -> Option<std::time::Duration> {
+        self.waiting_since.map(|since| since.elapsed())
+    }
+    /// A member still closing: it holds its native seat until its audit
+    /// ends. One beyond closing keeps its debt but no browser.
+    pub(crate) fn holds_seat(&self) -> bool {
+        self.native_member() && !self.beyond_closing()
+    }
     /// Its owner asked it to close or stop before it was admitted.
     pub(crate) fn given_up(&self) -> bool {
         self.signal.close.load(Ordering::Acquire) || self.signal.stop.load(Ordering::Acquire)
@@ -773,10 +819,11 @@ impl ProductWork {
                 && !self.signal.stop.load(Ordering::Acquire)
         })
     }
-    pub(crate) fn refuse(&mut self) {
+    pub(crate) fn refuse(&mut self, cause: RetainedRefusal, lane: RetainedLaneFacts) {
         self.prepared.take();
         if let Ok(mut projection) = self.signal.projection.lock() {
             projection.snapshot.phase = RetainedWorkPhase::Refused;
+            projection.snapshot.refusal.get_or_insert((cause, lane));
         }
     }
     pub(crate) fn initialize(&mut self) {
@@ -784,11 +831,11 @@ impl ProductWork {
             return;
         };
         let Ok(now) = self.clock.now() else {
-            self.refuse();
+            self.refuse(RetainedRefusal::Stale, RetainedLaneFacts::default());
             return;
         };
         if now >= prepared.spec.expires_at || Instant::now() >= self.deadline {
-            self.refuse();
+            self.refuse(RetainedRefusal::Expired, RetainedLaneFacts::default());
             return;
         }
         let callback = self.callback.clone();
@@ -925,7 +972,16 @@ impl ProductWork {
         }
         let closed = if self.signal.close.load(Ordering::Acquire) {
             work.begin_shutdown();
-            matches!(work.poll_shutdown(now), Ok(true))
+            match work.poll_shutdown(now) {
+                Ok(closed) => closed,
+                // Its audit is over and nothing further can close it cleanly.
+                Err(_) => {
+                    if self.page.is_some() && work.native_audit_settled() {
+                        self.signal.lost.store(true, Ordering::Release);
+                    }
+                    false
+                }
+            }
         } else {
             work.poll(now);
             false
@@ -1064,7 +1120,7 @@ impl Drop for ProductWork {
         // An unprocessed attachment never created external ownership. Report
         // refusal when the queue/actor discards it instead of leaving Attaching.
         if self.prepared.is_some() {
-            self.refuse();
+            self.refuse(RetainedRefusal::Discarded, RetainedLaneFacts::default());
         }
     }
 }

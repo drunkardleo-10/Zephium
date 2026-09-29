@@ -36,30 +36,30 @@ impl AgentWorkController {
         // the page; a later look may finish the read joined with it.
         let mut earlier_look: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
         // The address the one-document gate admitted, never one from page text.
-        let document = state
-            .native
-            .retained
-            .as_ref()
-            .map(|browser| zephium_agentic::untracked_document_address(browser.binding().document()));
+        let document = state.native.retained.as_ref().map(|browser| {
+            zephium_agentic::untracked_document_address(browser.binding().document())
+        });
         loop {
             state.check_task_contract()?;
             state.native.check_control(worker, browser)?;
             let top = observation.frames().first();
-            state.journal_mut()?.emit(AgentWorkEventKind::ObservationFacts {
-                nodes: observation.node_count(),
-                text_bytes: observation.total_text_bytes(),
-                dialogs: top.map_or(0, |frame| {
-                    let dialogs = frame
-                        .nodes()
-                        .iter()
-                        .filter(|node| node.role() == SemanticRole::Dialog)
-                        .count();
-                    u8::try_from(dialogs).unwrap_or(u8::MAX)
-                }),
-                complete: top.is_some_and(|frame| {
-                    frame.completeness() == SemanticCompleteness::Complete
-                }),
-            })?;
+            state
+                .journal_mut()?
+                .emit(AgentWorkEventKind::ObservationFacts {
+                    nodes: observation.node_count(),
+                    text_bytes: observation.total_text_bytes(),
+                    dialogs: top.map_or(0, |frame| {
+                        let dialogs = frame
+                            .nodes()
+                            .iter()
+                            .filter(|node| node.role() == SemanticRole::Dialog)
+                            .count();
+                        u8::try_from(dialogs).unwrap_or(u8::MAX)
+                    }),
+                    complete: top.is_some_and(|frame| {
+                        frame.completeness() == SemanticCompleteness::Complete
+                    }),
+                })?;
             let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
             if session.decisions.is_none() || progress == AgentWorkTaskProgress::Complete {
                 break;
@@ -201,9 +201,12 @@ impl AgentWorkController {
                         // generation if needed; otherwise the earlier look's
                         // copies are cited: a scroll must not lose a value
                         // the first look found.
-                        let prepared = match joined.or(confirmed.filter(|earlier| {
-                            !selection.awaits_absence() || !selection.keeps_located(earlier)
-                        }).map(|earlier| *earlier)) {
+                        let prepared = match joined.or(confirmed
+                            .filter(|earlier| {
+                                !selection.awaits_absence() || !selection.keeps_located(earlier)
+                            })
+                            .map(|earlier| *earlier))
+                        {
                             Some(earlier) => earlier.prepare_confirmed(
                                 &observation,
                                 session.account,
@@ -280,10 +283,9 @@ impl AgentWorkController {
                     .map_err(AgentWorkFailure::DecisionOperation)?,
                 None => None,
             };
-            if proposed
-                .as_ref()
-                .is_some_and(|selection| matches!(selection.operation(), DecisionOperation::Scroll(_)))
-                && more_below != Some(true)
+            if proposed.as_ref().is_some_and(|selection| {
+                matches!(selection.operation(), DecisionOperation::Scroll(_))
+            }) && more_below != Some(true)
             {
                 break;
             }
@@ -291,12 +293,13 @@ impl AgentWorkController {
             // the read continues on the existing planner path instead of ending.
             let mut reobserving = false;
             let selection = match rows_scroll.or(proposed) {
-                Some(selection) if matches!(selection.operation(), DecisionOperation::Scroll(_))
-                    && reobservations < MAX_READ_REOBSERVATIONS
-                    && state
-                        .extraction_schema
-                        .as_ref()
-                        .is_some_and(SemanticExtractionSchema::is_row_collection) =>
+                Some(selection)
+                    if matches!(selection.operation(), DecisionOperation::Scroll(_))
+                        && reobservations < MAX_READ_REOBSERVATIONS
+                        && state
+                            .extraction_schema
+                            .as_ref()
+                            .is_some_and(SemanticExtractionSchema::is_row_collection) =>
                 {
                     reobservations = reobservations.saturating_add(1);
                     reobserving = true;
@@ -495,8 +498,7 @@ impl AgentWorkController {
         let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
         let found = u8::try_from(discovery.rows()).unwrap_or(u8::MAX);
         let asked = cells.is_some();
-        let prepared =
-            discovery.prepare(observation, session.account, captured_at, cells.as_mut());
+        let prepared = discovery.prepare(observation, session.account, captured_at, cells.as_mut());
         state.journal_mut()?.emit(AgentWorkEventKind::RowRead {
             found,
             cells: asked,
@@ -517,11 +519,9 @@ impl AgentWorkController {
         browser: &WorkBrowser<'_>,
         located: zephium_agentic::DecisionLocatedRead<'_>,
     ) -> Result<(), AgentWorkFailure> {
-        state
-            .journal_mut()?
-            .emit(AgentWorkEventKind::ToolProposed(
-                AgentBrowserToolKind::Extract,
-            ))?;
+        state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
+            AgentBrowserToolKind::Extract,
+        ))?;
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let result = Self::provider(
             &mut state.native,
@@ -622,7 +622,12 @@ impl AgentWorkController {
             .as_ref()
             .is_some_and(AgentNavigationDiscovery::is_site_session)
         {
-            request.with_follow(state.follow.clone())
+            let request = request.with_follow(state.follow.clone());
+            if state.consent_press {
+                request.with_consent()
+            } else {
+                request
+            }
         } else {
             request
         };

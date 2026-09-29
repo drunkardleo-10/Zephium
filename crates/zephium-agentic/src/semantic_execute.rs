@@ -349,6 +349,7 @@ pub struct SemanticActionNativeRequest {
     page_dialog_opened: bool,
     effect: crate::SemanticEffectClass,
     follow: Option<SemanticActionFollow>,
+    consent: bool,
     correlation: NativeCorrelation,
     role: SemanticRole,
     expected_geometry: SemanticRect,
@@ -375,6 +376,19 @@ impl SemanticActionNativeRequest {
     /// The follow slot the controller attached, if any.
     pub const fn follow(&self) -> Option<&SemanticActionFollow> {
         self.follow.as_ref()
+    }
+
+    /// Marks Rust's own press of a cookie banner's refusal: the page may save
+    /// that choice with one same-site POST and hand back with its own loads,
+    /// which the native adapter follows instead of diverting.
+    pub fn with_consent(mut self) -> Self {
+        self.consent = true;
+        self
+    }
+
+    /// Rust's own press of a cookie banner's refusal.
+    pub const fn consent(&self) -> bool {
+        self.consent
     }
 
     /// Policy-admitted effect class. A durable commit may carry a same-site
@@ -1160,6 +1174,7 @@ pub(crate) fn prepare_semantic_action_execution(
             ),
             effect,
             follow: None,
+            consent: false,
             correlation,
             role: action.bound_action().target_role(),
             expected_geometry,

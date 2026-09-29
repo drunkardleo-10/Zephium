@@ -37,6 +37,15 @@ pub trait AgentWorkLocalActionPolicy: Send {
         None
     }
 
+    /// A consent banner or page the look may have cut off.
+    fn consent_suspected(&self, _: &SemanticObservation) -> bool {
+        false
+    }
+
+    /// Rust presses the consent dismissal it chose (true), and the press
+    /// came back (false).
+    fn consent_pressing(&self, _: bool) {}
+
     /// A collapsed disclosure in view that may hold a read's values, such as
     /// a product's Specifications, by a closed name list; never a provider's
     /// choice. The operation toggles it.
@@ -172,6 +181,18 @@ impl AgentWorkTask for AgentWorkDiscoveryTask {
         self.local_actions
             .as_ref()
             .and_then(|policy| policy.consent_dismissal(observation))
+    }
+
+    fn consent_suspected(&self, observation: &SemanticObservation) -> bool {
+        self.local_actions
+            .as_ref()
+            .is_some_and(|policy| policy.consent_suspected(observation))
+    }
+
+    fn consent_pressing(&self, pressing: bool) {
+        if let Some(policy) = self.local_actions.as_ref() {
+            policy.consent_pressing(pressing);
+        }
     }
 
     fn detail_disclosure(&self, observation: &SemanticObservation) -> Option<DecisionOperation> {

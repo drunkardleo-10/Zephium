@@ -209,9 +209,10 @@ impl Driver {
                 };
                 let outcome = checked_outcome(outcome, request.limits);
                 // A page task may have drafted something: it is never run
-                // twice, unless it only waited on a sign-in the person then
-                // finished in a tab.
-                let signed_in = matches!(&outcome, Ok(outcome) if outcome.signed_in_elsewhere && outcome.usage.is_some());
+                // twice, unless it ended to start over (a sign-in finished in
+                // a tab, or a saved cookie refusal replaced the page).
+                let signed_in =
+                    matches!(&outcome, Ok(outcome) if outcome.rerun && outcome.usage.is_some());
                 let retry = prior.is_none()
                     && terminal.is_none()
                     && failure.is_none()
@@ -343,8 +344,9 @@ impl Driver {
                     let step = self.begin(step, vec![], None).await?;
                     entry = Some((port.clone(), step, site.clone()));
                 }
-                if let Some(waiting) = port.take_needs_you() {
-                    self.part_needs_you(waiting.then_some(site.as_str())).await;
+                if let Some(wait) = port.take_needs_you() {
+                    self.part_needs_you(wait.map(|wait| (site.as_str(), wait)))
+                        .await;
                 }
                 if port.entry() == Some(WorkSiteEntry::SignedOut) && !signed_out {
                     signed_out = true;
@@ -495,7 +497,7 @@ impl Driver {
     /// other sites whose pages it quotes.
     /// A part whose page waits on the person says so on its row at once,
     /// and goes back to running when the person is done or the wait ends.
-    async fn part_needs_you(&self, site: Option<&str>) {
+    async fn part_needs_you(&self, site: Option<(&str, crate::work_agent::WorkPageWait)>) {
         let Some(part) = self.part else {
             return;
         };
@@ -516,13 +518,20 @@ impl Driver {
             return;
         };
         match site {
-            Some(site) => {
+            Some((site, wait)) => {
                 fact.state = zephium_core::work::parts::WorkPartStateV1::Waiting;
                 fact.summary = Some(format!("Needs you on {site}"));
+                // A sign-in says so on the row, with its fix.
+                fact.need = (wait == crate::work_agent::WorkPageWait::SignIn)
+                    .then(|| zephium_core::work::parts::WorkPartNeedV1::SignIn {
+                        host: site.to_owned(),
+                    })
+                    .filter(|need| need.validate().is_ok());
             }
             None => {
                 fact.state = zephium_core::work::parts::WorkPartStateV1::Running;
                 fact.summary = None;
+                fact.need = None;
             }
         }
         let _ = self
@@ -674,7 +683,7 @@ fn retry_request(
         request.construction_attempt
     };
     // A sign-in the person finished counts as their yes for the site.
-    let entry = request.entry && !matches!(outcome, Ok(outcome) if outcome.signed_in_elsewhere);
+    let entry = request.entry && !matches!(outcome, Ok(outcome) if outcome.rerun);
     WorkAgentBrowseRequest {
         limits,
         construction_attempt,
@@ -935,7 +944,7 @@ mod tests {
                 measurements: None,
                 helped: false,
                 held_back: false,
-                signed_in_elsewhere: false,
+                rerun: false,
             };
             assert!(matches!(
                 checked_outcome(Ok(outcome), limits),

@@ -1748,6 +1748,21 @@ impl AgentSemanticRuntimeRegistration {
         })
     }
 
+    /// Prepares the runtime for a load the Work gate let an action's page
+    /// start. A read still pending on the old document ends as replaced.
+    pub(crate) fn follow_navigation_preparer(&self) -> Rc<dyn Fn() -> bool> {
+        let installation = self.installation.clone();
+        Rc::new(move || {
+            let Ok(mut epochs) = installation.epochs.try_borrow_mut() else {
+                return false;
+            };
+            epochs.active_runtime = None;
+            epochs.parked.clear();
+            drop(epochs);
+            installation.prepare_document_load().is_ok()
+        })
+    }
+
     pub(crate) fn attest_configuration(
         &self,
         configuration: &WKWebViewConfiguration,

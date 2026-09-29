@@ -240,6 +240,7 @@ fn run_mode(mode: Qualification) -> Result<(), super::ProbeFailure> {
                         cost_micro_usd,
                         accounting,
                         elapsed_millis,
+                        ..
                     } => {
                         turns += 1;
                         tokens_in += input_tokens;
