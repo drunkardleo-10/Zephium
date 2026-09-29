@@ -33,7 +33,9 @@ not copy, reset or delete profiles to work around this environment mismatch.
 
 1. Open a Chrome Web Store listing for Bitwarden or Dark Reader. Use the
    browser's **Add to Zephium** button, review permissions, and add the extension.
-   Its row should settle to an enabled version without an error.
+   Its row should settle to an enabled version without an error. On Windows,
+   the store's own Add to Chrome control is hidden; Zephium's sidebar button
+   remains available. Reload existing listings after updating this QA build.
 2. Visit an ordinary HTTP(S) page. Open **Utilities**, then the extension tile.
    Check its icon/title, the anchored popup, and close/reopen behavior. Bitwarden
    should reach its welcome screen. Signed-in vault/autofill testing remains a
@@ -63,7 +65,9 @@ not copy, reset or delete profiles to work around this environment mismatch.
   Desktop companion integration is separate and remains unqualified.
 - Native extension context-menu entries are now retained. For Bitwarden,
   right-click a login field and check its submenu. Menu availability alone does
-  not establish that credential filling or inline suggestions work.
+  not establish that credential filling or inline suggestions work. The owner
+  confirmed Bitwarden's store installation and popup usability; filling and
+  context-menu use were not reported separately.
 - Popup-only native active-tab query binding works in the lab for Bitwarden and
   Dark Reader. Dark Reader's background logic still selects a protected `about:`
   page; its per-site popup controls are not qualified. Its content scripts work.
@@ -79,7 +83,7 @@ not copy, reset or delete profiles to work around this environment mismatch.
 - Work's native adapter uses the extension-free automation subprofile. Its
   isolation was checked in the lab; the separately developing Work product is
   not made available by this QA build.
-- Native messaging, signed-in password-manager workflows, complete disk-residue
+- Native messaging, broader password-manager/autofill workflows, complete disk-residue
   removal, optional-permission UI, and the full extension catalog remain
   unqualified. The Windows catalog does not claim that every listed item works.
 - Specific-sites manifest narrowing is covered by unit tests, native
@@ -108,6 +112,13 @@ Detailed probe findings and remaining work: [Windows handoff](windows-extensions
 
 ## Review follow-up acceptance
 
+- Switch rapidly between two ordinary tabs while extension actions refresh,
+  then open an action. Its state and target should belong to the current tab.
+  The delayed-response race has a regression test. Internal new-tab and
+  extension-management pages continue to omit page action tiles.
+- Reload a store listing: its native install control should be hidden and the
+  sidebar Add button should still open Zephium's review. The live store qualifier
+  covers English and Polish; rerun it if the store's layout changes.
 - Install the storage fixture from `crates/zephium-webext-windows/fixtures/storage`
   using **Install from file > Unpacked folder**. Open its popup on a normal page
   and save the test value. Change All sites to Specific sites, add that page's

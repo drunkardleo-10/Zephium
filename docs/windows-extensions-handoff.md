@@ -27,8 +27,19 @@ PowerShell process. See [the QA checklist](windows-extension-qa.md).
   before native loading.
 - Native workers/content scripts; existing toolbar tiles observe title, badge
   and icon without polling. Popups use a small anchored native window and the
-  15-line popup-only native-query binding. Bitwarden's welcome popup renders;
-  signed-in vault/autofill acceptance remains manual.
+  15-line popup-only native-query binding. The owner confirmed Bitwarden's store
+  installation and popup usability; credential filling and the context-menu
+  workflow were not reported separately. Async action snapshots retain their
+  original native window binding, so a response delayed across a tab switch
+  cannot label the previous tab's action as belonging to the new tab.
+- On Windows, the Chrome Web Store's native install control is hidden; the
+  existing sidebar Add button remains the reviewed install entry point. The
+  presentation script is restricted to the exact HTTPS store origin and the
+  main document, with no polling or new page-to-host bridge. Live English and
+  Polish listing checks passed, as did an unrelated-page negative check.
+  Reproduce with `crates\zephium-webext-windows\run-store-ui.ps1`. The store's
+  install-controller selector must be requalified if Google changes its markup.
+  Extension action tiles remain absent on internal new-tab/management pages.
 - A focused, live Windows extension popup can open an ordinary browser tab
   through WebView2's original new-window request. The host validates the exact
   popup, runtime, profile environment, active human tab and foreground window,
@@ -55,6 +66,13 @@ PowerShell process. See [the QA checklist](windows-extension-qa.md).
   There is no native Remove in access changes and no storage-loss warning is
   needed for this tested path. This does not establish every extension's own
   migration or signed-in storage behavior.
+- A disposable two-profile fixture passed native disable/re-enable, storage
+  preservation, and removal checks. Disabling/removing stopped injection after
+  navigation; re-enabling restored it. Storage and install state stayed separate,
+  and removal in one profile left the other profile enabled and injecting.
+  WebView2's own component extensions remained intact. Reproduce with
+  `crates\zephium-webext-windows\run-lifecycle.ps1`. This qualifies the native
+  lifecycle, not every real extension's migration or full on-disk residue.
 - Ordinary package, identity and add/enable failures settle only that install
   as Failed with Retry. The actual QA app rejected a deliberately invalid CSP
   with AddBrowserExtension `0x80004005`. Retry repeated the local failure;
@@ -128,8 +146,8 @@ sample had a gap. Use `desktop\measure-webext-qa.ps1` for a fresh fixed-tab run.
   own setup document in visible- and hidden-manager lab runs. The owner answered
   "Yes, it works" to the clean-build 1Password checklist covering sign-in, fill,
   repeat click and extension-tab restoration. This is an aggregate manual
-  confirmation, not separately recorded results for each step; no separate
-  Bitwarden result was supplied. Temporary click tracing was removed from the
+  confirmation, not separately recorded results for each step. Bitwarden's later
+  installation/popup confirmation is recorded above. Temporary click tracing was removed from the
   clean build. The earlier inert click did not reproduce
   after rebuilding; no isolated cause for that transient failure is established.
 - Normal Windows tabs admit extension document URLs only with a live grant for
@@ -149,7 +167,7 @@ sample had a gap. Use `desktop\measure-webext-qa.ps1` for a fresh fixed-tab run.
   for per-site popup controls despite the corrected popup query. On click site
   access, runtime optional-permission UI and native messaging remain withheld
   or unqualified. The extension-count limit of eight remains a pre-release item.
-- Cross-profile acceptance, signed-in Bitwarden/autofill, full catalog behavior,
+- Full-app cross-profile acceptance, signed-in Bitwarden/autofill, full catalog behavior,
   complete disk-residue removal, update permission escalation, and sustained
   foreground/resource testing remain manual QA work. The separate Work product
   is not enabled or qualified by this build.
@@ -163,9 +181,10 @@ Whole xtask suite: **154 passed**, including the revised Work boundary and
 negative mutations. Engine with Work feature: **277 passed** under normal-user
 execution (the restricted sandbox run had three filesystem failures, retained
 in its separate log). Core: **211 passed**; webext: **53 passed**; app: **318 passed**;
-worker compatibility JavaScript: **5 passed**. Desktop's preceding run:
+worker/action-host JavaScript: **7 passed**, including delayed responses across
+tab switches and coalescing rapid switches to the latest tab. Desktop's preceding run:
 **106 passed, one existing ignored test**.
-QA desktop clippy passes with `-D warnings` using its required configuration;
+QA desktop and Windows lab clippy pass with `-D warnings` using the required configuration;
 three pre-existing vendored Wry dead-code warnings remain. The QA frontend
 production build passes. No frontend behavior changed in this review follow-up.
 The preceding shared extension/frontend/component results are in commit history;
