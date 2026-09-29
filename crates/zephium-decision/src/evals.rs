@@ -124,6 +124,34 @@ pub fn fixtures() -> Result<Vec<EvalFixture>, ContractError> {
             "lego_product_specs_01",
             include_str!("../evals/lego_product_specs_01.json"),
         ),
+        (
+            "search_reuse_01",
+            include_str!("../evals/search_reuse_01.json"),
+        ),
+        (
+            "search_reuse_02",
+            include_str!("../evals/search_reuse_02.json"),
+        ),
+        (
+            "search_reuse_03",
+            include_str!("../evals/search_reuse_03.json"),
+        ),
+        (
+            "search_reuse_04",
+            include_str!("../evals/search_reuse_04.json"),
+        ),
+        (
+            "search_reuse_05",
+            include_str!("../evals/search_reuse_05.json"),
+        ),
+        (
+            "search_reuse_06",
+            include_str!("../evals/search_reuse_06.json"),
+        ),
+        (
+            "search_reuse_07",
+            include_str!("../evals/search_reuse_07.json"),
+        ),
     ];
     sources
         .into_iter()

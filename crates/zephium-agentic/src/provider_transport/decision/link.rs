@@ -35,6 +35,7 @@ impl SearchDecisionRanking {
                 BTreeMap::from([("next_page".into(), DecisionPurpose::Locate)]),
                 limits,
                 deadline,
+                true,
             ),
         )
         .await

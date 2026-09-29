@@ -2733,39 +2733,26 @@ fn search_ranking_projection_is_bounded_and_uses_only_admitted_public_candidates
 }
 
 #[tokio::test]
-async fn search_ranking_falls_back_per_question_and_charges_both_backends() {
-    let (scope, evidence) = search_ranking_fixture(2);
+async fn search_ranking_leaves_uncertain_sources_unranked_without_a_second_call() {
+    let (scope, evidence) = search_ranking_fixture(3);
     let (endpoint, jev_server) = server(vec![response(
         200,
         "",
         &json!({
             "model":zephium_decision::JEV_MODEL, "answers":{
                 "source_1":{"type":"noul","noul":0.01},
-                "source_2":{"type":"noul","noul":0.5}
+                "source_2":{"type":"noul","noul":0.5},
+                "source_3":{"type":"noul","noul":0.93}
             }, "usage":{"input_tokens":123,"output_tokens":7}
         })
         .to_string(),
     )]);
     let jev = client(endpoint);
-    let body = json!({"object":"response","status":"completed","model":"gpt-5.6-terra","service_tier":"default","error":null,"incomplete_details":null,
-        "output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":json!({"answers":{"source_2":{"type":"noul","noul":0.99}}}).to_string()}]}],
-        "usage":{"input_tokens":100,"output_tokens":200,"total_tokens":300,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":50}}});
-    let (mut endpoint, emulation_server) = server_for_model(
-        vec![
-            response(
-                200,
-                "",
-                r#"{"object":"response.input_tokens","input_tokens":100}"#,
-            ),
-            response(200, "", &body.to_string()),
-        ],
-        "gpt-5.6-terra",
-    );
-    endpoint.set_path("/v1/responses");
+    // Nothing listens here: an emulation call would fail the ranking.
     let transport = AgentProviderTransport::try_new_loopback(
         AgentProviderTransportConfig::STANDARD,
-        endpoint.as_str(),
-        endpoint.as_str(),
+        "http://127.0.0.1:9/v1/responses",
+        "http://127.0.0.1:9/v1/messages",
     )
     .unwrap();
     let credential =
@@ -2773,7 +2760,6 @@ async fn search_ranking_falls_back_per_question_and_charges_both_backends() {
             .unwrap();
     let ranking = super::search::SearchDecisionRanking::new(Some(jev), emulation_config(), None);
     let jev_server = jev_server();
-    let emulation_server = emulation_server();
     let output = ranking
         .rerank(
             &transport,
@@ -2786,16 +2772,134 @@ async fn search_ranking_falls_back_per_question_and_charges_both_backends() {
         .await
         .unwrap();
     assert_eq!(jev_server.join().unwrap(), 1);
-    assert_eq!(emulation_server.join().unwrap(), 2);
-    assert_eq!(output.preferred, vec![2]);
-    assert_eq!(output.usage.model_tokens, 430);
-    assert_eq!(output.usage.operations, 2);
-    assert_eq!(
-        output.usage.accounting,
-        zephium_core::work::runtime::WorkUsageAccounting::Exact
-    );
+    assert_eq!(output.preferred, vec![3]);
+    assert_eq!(output.usage.model_tokens, 130);
+    assert_eq!(output.usage.operations, 1);
     assert!(transport.snapshot().unwrap().is_idle());
     output.validate(&evidence).unwrap();
+}
+
+#[tokio::test]
+async fn search_reuse_needs_the_same_request_and_a_found_answer() {
+    let (scope, evidence) = search_ranking_fixture(2);
+    for (same, found, reused) in [(0.93, 0.9, true), (0.93, 0.05, false), (0.6, 0.9, false)] {
+        let (endpoint, jev_server) = server(vec![response(
+            200,
+            "",
+            &json!({
+                "model":zephium_decision::JEV_MODEL, "answers":{
+                    "same_request":{"type":"noul","noul":same},
+                    "found":{"type":"noul","noul":found}
+                }, "usage":{"input_tokens":400,"output_tokens":9}
+            })
+            .to_string(),
+        )]);
+        let transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            "http://127.0.0.1:9/v1/responses",
+            "http://127.0.0.1:9/v1/messages",
+        )
+        .unwrap();
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "fixture-key".into(),
+        )
+        .unwrap();
+        let ranking = super::search::SearchDecisionRanking::new(
+            Some(client(endpoint)),
+            emulation_config(),
+            None,
+        );
+        let jev_server = jev_server();
+        let decided = ranking
+            .reuse(
+                &transport,
+                &credential,
+                &scope,
+                "an earlier public query",
+                &evidence,
+                limits(),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+        assert_eq!(jev_server.join().unwrap(), 1);
+        assert_eq!(decided.answers, reused);
+        assert_eq!(decided.usage.model_tokens, 409);
+        assert_eq!(decided.usage.operations, 1);
+    }
+    let projection =
+        super::search::search_reuse_projection(&scope, "an earlier public query", &evidence)
+            .unwrap();
+    let text = String::from_utf8(projection.encode().unwrap()).unwrap();
+    assert!(!text.contains("private_query"));
+    assert!(text.contains("untrusted_provider_search"));
+    let mut secret = evidence.clone();
+    secret.answer = "Authorization: Bearer do-not-disclose-this-secret".into();
+    assert!(super::search::search_reuse_projection(&scope, "query", &secret).is_err());
+}
+
+#[test]
+fn recorded_search_reuse_eval_requests_match_the_shipping_projection() {
+    use sha2::Digest as _;
+    let source = include_str!("../../../../zephium-decision/evals/search_reuse_source_01.json");
+    let fixtures = [
+        include_str!("../../../../zephium-decision/evals/search_reuse_01.json"),
+        include_str!("../../../../zephium-decision/evals/search_reuse_02.json"),
+        include_str!("../../../../zephium-decision/evals/search_reuse_03.json"),
+        include_str!("../../../../zephium-decision/evals/search_reuse_04.json"),
+        include_str!("../../../../zephium-decision/evals/search_reuse_05.json"),
+        include_str!("../../../../zephium-decision/evals/search_reuse_06.json"),
+        include_str!("../../../../zephium-decision/evals/search_reuse_07.json"),
+    ];
+    let raw: Value = serde_json::from_str(source).unwrap();
+    let pairs = raw["pairs"].as_array().unwrap();
+    assert_eq!(pairs.len(), fixtures.len());
+    let digest = format!("{:x}", sha2::Sha256::digest(source.as_bytes()));
+    for (pair, fixture) in pairs.iter().zip(fixtures) {
+        let fixture: Value = serde_json::from_str(fixture).unwrap();
+        assert_eq!(fixture["source_sha256"], digest);
+        let scope: zephium_core::work::search::WorkPublicSearchScope =
+            serde_json::from_value(pair["scope"].clone()).unwrap();
+        let evidence: zephium_core::work::search::WorkProviderSearchEvidenceV1 =
+            serde_json::from_value(pair["evidence"].clone()).unwrap();
+        let actual = super::search::search_reuse_projection(
+            &scope,
+            pair["earlier"].as_str().unwrap(),
+            &evidence,
+        )
+        .unwrap();
+        assert!(actual.state() == &fixture["request"]["state"]);
+        assert!(
+            serde_json::to_value(actual.questions()).unwrap() == fixture["request"]["questions"]
+        );
+    }
+}
+
+#[test]
+fn search_terms_ignore_order_case_and_filler_and_keep_sites() {
+    use super::search::SearchQueryTerms;
+    let a = SearchQueryTerms::of("Official Hetzner cloud prices for load balancers");
+    let b = SearchQueryTerms::of("load balancer price hetzner  CLOUD");
+    assert_eq!(a, b);
+    let site = SearchQueryTerms::of("site:www.cs.cornell.edu/courses/cs4120 compiler assignments");
+    assert_ne!(
+        site,
+        SearchQueryTerms::of("cornell cs4120 compiler assignments")
+    );
+    assert!(site.overlap(&SearchQueryTerms::of("Cornell CS4120 compiler assignments")) >= 0.99);
+    assert_eq!(
+        SearchQueryTerms::of("Stanford compiler course")
+            .overlap(&SearchQueryTerms::of("Cornell compiler course lectures")),
+        2.0 / 3.0
+    );
+    assert_eq!(SearchQueryTerms::of("the of and").words(), 0);
+    assert_eq!(SearchQueryTerms::of("MIT OCW compilers; the").words(), 3);
+    let (_, evidence) = search_ranking_fixture(2);
+    assert!(SearchQueryTerms::of("site:example.test anything").served_by(&evidence));
+    assert!(!SearchQueryTerms::of("site:sub.example.test anything").served_by(&evidence));
+    assert!(!SearchQueryTerms::of("site:other.test anything").served_by(&evidence));
+    assert!(SearchQueryTerms::of("no site restriction").served_by(&evidence));
 }
 
 #[test]

@@ -48,6 +48,8 @@ fn main() {
         #[cfg(feature = "decision-eval")]
         [argument] if argument == "--live-decision-eval-terra" => decision_eval::run_terra(),
         #[cfg(feature = "decision-eval")]
+        [argument, paths @ ..] if argument == "--search-reuse-replay" && !paths.is_empty() => decision_eval::search_reuse_replay(paths),
+        #[cfg(feature = "decision-eval")]
         [argument, effort] if argument == "--live-decision-eval-effort" => decision_eval::run_effort(effort),
         #[cfg(feature = "decision-eval")]
         [argument, case] if argument == "--live-decision-eval-case-terra" => decision_eval::run_case(case, ProbeModel::Terra),

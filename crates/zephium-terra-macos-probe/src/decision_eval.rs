@@ -31,7 +31,7 @@ pub(super) fn run_effort(effort: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
         Some("medium") => Effort::Medium,
         _ => return Err(ProbeFailure::Authority),
     };
-    run_with(None, ProbeModel::Luna, effort)
+    run_with(0..usize::MAX, ProbeModel::Luna, effort)
 }
 
 pub(super) fn run_case(case: &std::ffi::OsStr, model: ProbeModel) -> Result<(), ProbeFailure> {
@@ -59,12 +59,17 @@ pub(super) fn run_case(case: &std::ffi::OsStr, model: ProbeModel) -> Result<(), 
         Some("lego-catalog-cells") => 20,
         Some("book-catalog") => 21,
         Some("lego-product-specs") => 22,
+        Some("search-reuse") => return run_range(23..30, model),
         _ => return Err(ProbeFailure::Authority),
     };
     run_selected(Some(index), model)
 }
 
 fn run_selected(only: Option<usize>, model: ProbeModel) -> Result<(), ProbeFailure> {
+    run_range(only.map_or(0..usize::MAX, |index| index..index + 1), model)
+}
+
+fn run_range(only: std::ops::Range<usize>, model: ProbeModel) -> Result<(), ProbeFailure> {
     run_with(
         only,
         model,
@@ -73,7 +78,7 @@ fn run_selected(only: Option<usize>, model: ProbeModel) -> Result<(), ProbeFailu
 }
 
 fn run_with(
-    only: Option<usize>,
+    only: std::ops::Range<usize>,
     model: ProbeModel,
     effort: zephium_agent_model_catalog::Gpt6LunaDecisionEffort,
 ) -> Result<(), ProbeFailure> {
@@ -132,7 +137,7 @@ fn run_with(
     runtime.block_on(async {
         let mut valid = true;
         for (index, fixture) in fixtures.iter().enumerate() {
-            if only.is_some_and(|selected| selected != index) {
+            if !only.contains(&index) {
                 continue;
             }
             for repetition in 0..3 {
@@ -246,6 +251,7 @@ fn report(
                 "done" => DecisionPurpose::Completion,
                 "picture" | "tower_bridge_picture" => DecisionPurpose::Picture,
                 "wall" => DecisionPurpose::Wall,
+                "same_request" | "found" => DecisionPurpose::Completion,
                 key if key.starts_with("rows_") => DecisionPurpose::Evidence,
                 "operation" | "click_target" if navigation => DecisionPurpose::Navigation,
                 "operation" | "click_target" | "type_target" | "scroll_target"
@@ -312,4 +318,113 @@ fn report(
     }
     writeln!(std::io::stderr(), "decision_eval phase=accepted fixture={index} repetition={repetition} backend={:?} total={accepted} correct={correct}",d.backend).map_err(|_| ProbeFailure::Output)?;
     Ok(valid)
+}
+
+/// Replays recorded runs' searches in order through the search reuse check:
+/// each search is compared with the earlier searches whose words overlap,
+/// by one Jev call. Prints closed facts per pair: indices, overlap and the
+/// probabilities of both heads.
+pub(super) fn search_reuse_replay(paths: &[std::ffi::OsString]) -> Result<(), ProbeFailure> {
+    use zephium_agentic::{search_reuse_projection, SearchQueryTerms};
+    use zephium_core::work::search::{
+        WorkProviderSearchEvidenceV1, WorkPublicSearchScope, WorkSearchProvider,
+    };
+    let transport = AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
+        .map_err(|_| ProbeFailure::Authority)?;
+    let jev = JevDecisionClient::direct(
+        transport.clone(),
+        load_macos_development_typesafe_credential().map_err(|_| ProbeFailure::Keychain)?,
+    )
+    .map_err(|_| ProbeFailure::Authority)?;
+    let noul = |response: &mut zephium_decision::DecisionResponse, key: &str| match response
+        .answers
+        .remove(key)
+    {
+        Some(Ok(answer)) => match answer.value() {
+            AnswerValue::Noul { noul } => format!("{noul:.3}"),
+            _ => "none".to_owned(),
+        },
+        _ => "none".to_owned(),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| ProbeFailure::Runtime)?;
+    runtime.block_on(async {
+        for (run, path) in paths.iter().enumerate() {
+            let bytes = std::fs::read(path).map_err(|_| ProbeFailure::Authority)?;
+            let value: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|_| ProbeFailure::Verification)?;
+            let executions = match value.get("executions") {
+                Some(serde_json::Value::Array(items)) => items.clone(),
+                _ => vec![value],
+            };
+            for execution in executions {
+                let records = execution["provider_evidence"].as_array().cloned().unwrap_or_default();
+                let mut earlier: Vec<(usize, String, SearchQueryTerms, WorkProviderSearchEvidenceV1)> =
+                    Vec::new();
+                let steps = execution["steps"].as_array().cloned().unwrap_or_default();
+                let searches = steps
+                    .iter()
+                    .filter(|step| step["kind"]["kind"] == "search")
+                    .enumerate();
+                for (index, step) in searches {
+                    let Some(query) = step["kind"]["query"].as_str() else {
+                        continue;
+                    };
+                    let terms = SearchQueryTerms::of(query);
+                    let mut candidates: Vec<_> = earlier
+                        .iter()
+                        .map(|(other, other_query, other_terms, evidence)| {
+                            (terms.overlap(other_terms), *other, other_query, other_terms, evidence)
+                        })
+                        .filter(|(overlap, ..)| *overlap >= 0.6)
+                        .collect();
+                    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+                    for (overlap, other, other_query, other_terms, evidence) in
+                        candidates.into_iter().take(2)
+                    {
+                        let scope = WorkPublicSearchScope {
+                            provider: WorkSearchProvider::OpenAi,
+                            model: "gpt-6-luna".into(),
+                            query: query.to_owned(),
+                        };
+                        let Ok(request) = search_reuse_projection(&scope, other_query, evidence)
+                        else {
+                            continue;
+                        };
+                        let output = jev.evaluate_public_request(&request).await;
+                        let cost = output.cost_micro_usd;
+                        let elapsed = output.diagnostic.elapsed_millis;
+                        let (same, found) = match output.response {
+                            Ok(mut response) => (
+                                noul(&mut response, "same_request"),
+                                noul(&mut response, "found"),
+                            ),
+                            Err(_) => ("none".to_owned(), "none".to_owned()),
+                        };
+                        writeln!(std::io::stderr(), "search_reuse run={run} search={index} earlier={other} overlap={overlap:.2} same_terms={} same_request={same} found={found} cost_micro_usd={cost} elapsed_ms={elapsed}",
+                            *other_terms == terms)
+                            .map_err(|_| ProbeFailure::Output)?;
+                    }
+                    if let Some(record) = step["evidence"]
+                        .as_str()
+                        .and_then(|id| records.iter().find(|record| record["id"] == id))
+                    {
+                        if let Ok(evidence) = serde_json::from_value::<WorkProviderSearchEvidenceV1>(
+                            record["evidence"].clone(),
+                        ) {
+                            earlier.push((index, query.to_owned(), terms, evidence));
+                        }
+                    }
+                }
+            }
+        }
+        let _proof = transport
+            .seal_and_prove_shutdown_until(Instant::now() + Duration::from_secs(5))
+            .map_err(|_| ProbeFailure::Authority)?
+            .await
+            .map_err(|_| ProbeFailure::Authority)?;
+        Ok(())
+    })
 }

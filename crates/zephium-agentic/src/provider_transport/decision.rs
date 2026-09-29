@@ -21,6 +21,7 @@ pub use projection::{
 pub use read::{untracked_document_address, DecisionLocatedRead, DecisionReadSelection};
 pub use rows::DecisionRowDiscovery;
 pub(super) use search::SearchDecisionRanking;
+pub use search::{search_reuse_projection, SearchQueryTerms};
 
 const JEV_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 const JEV_CALL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -658,6 +659,18 @@ impl JevDecisionClient {
             cost_micro_usd,
             diagnostic,
         }
+    }
+
+    /// Runs one code-built public request; absent from release builds.
+    #[cfg(feature = "probe-harness")]
+    pub async fn evaluate_public_request(&self, request: &DecisionRequest) -> DecisionCallOutput {
+        self.run(
+            request,
+            eval_limits(),
+            Instant::now() + JEV_CALL_TIMEOUT,
+            &AgentProviderCancellation::new(),
+        )
+        .await
     }
 
     /// Runs only a compiled public evaluation fixture; absent from release builds.

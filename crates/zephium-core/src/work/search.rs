@@ -219,6 +219,14 @@ impl WorkPublicSearchRanking {
         Ok(())
     }
 }
+/// A reuse decision and what deciding it cost.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WorkPublicSearchReuse {
+    pub answers: bool,
+    pub usage: WorkUsage,
+}
+pub type WorkPublicSearchReuseFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<WorkPublicSearchReuse, WorkPublicSearchError>> + Send + 'a>>;
 pub type WorkPublicSearchRankingFuture<'a> = Pin<
     Box<dyn Future<Output = Result<WorkPublicSearchRanking, WorkPublicSearchError>> + Send + 'a>,
 >;
@@ -244,6 +252,20 @@ pub trait WorkPublicSearchProvider: Send + Sync {
         _deadline: std::time::Instant,
     ) -> WorkPublicSearchRankingFuture<'a> {
         Box::pin(async { Ok(WorkPublicSearchRanking::default()) })
+    }
+
+    /// Optional: whether an earlier search, made for `earlier`, already
+    /// answers this scope's query, so its evidence can stand for a new one.
+    /// Deciding may spend a little of `limits`; without it nothing is reused.
+    fn reuse<'a>(
+        &'a self,
+        _scope: &'a WorkPublicSearchScope,
+        _earlier: &'a str,
+        _evidence: &'a WorkProviderSearchEvidenceV1,
+        _limits: WorkExecutionLimits,
+        _deadline: std::time::Instant,
+    ) -> WorkPublicSearchReuseFuture<'a> {
+        Box::pin(async { Ok(WorkPublicSearchReuse::default()) })
     }
 
     /// `context` carries only Rust-admitted public bodies for this attempt.

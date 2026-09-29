@@ -1,0 +1,206 @@
+{
+ "pairs": [
+  {
+   "name": "mit_ocw",
+   "scope": {
+    "provider": "open_ai",
+    "model": "gpt-6-luna",
+    "query": "site:ocw.mit.edu compiler course lectures assignments projects MIT compiler design"
+   },
+   "earlier": "MIT OCW compiler course lecture notes assignments compiler university free",
+   "evidence": {
+    "version": 1,
+    "provider": "open_ai",
+    "model": "gpt-6-luna",
+    "response_model": "gpt-6-luna",
+    "response_id": "resp_07f70ba0969d9d1f016abba786fb7087d2bf47cbdd12616ee1",
+    "search_call_id": "ws_07f70ba0969d9d1f016abba788591487d2925c9588c7f87df7",
+    "answer": "MIT OCW’s best match is 6.035, Computer Language Engineering. It includes lecture notes, problem sets, and five compiler-design projects. ([ocw.mit.edu](https://ocw.mit.edu/courses/6-035-computer-language-engineering-sma-5502-fall-2005/pages/projects/))\n\nFor a shorter introduction, see the compiler material in 6.004, Computation Structures. ([ocw.mit.edu](https://ocw.mit.edu/courses/6-004-computation-structures-spring-2017/pages/c11/))",
+    "citations": [
+     {
+      "url": "https://ocw.mit.edu/courses/6-035-computer-language-engineering-sma-5502-fall-2005/pages/projects/",
+      "title": "Projects | Computer Language Engineering (SMA 5502) | Electrical Engineering and Computer Science | MIT OpenCourseWare",
+      "start_index": 138,
+      "end_index": 253
+     },
+     {
+      "url": "https://ocw.mit.edu/courses/6-004-computation-structures-spring-2017/pages/c11/",
+      "title": "11 Compilers | Computation Structures | Electrical Engineering and Computer Science | MIT OpenCourseWare",
+      "start_index": 343,
+      "end_index": 439
+     }
+    ],
+    "actual_input_tokens": 8701,
+    "actual_output_tokens": 318
+   }
+  },
+  {
+   "name": "yc_batch",
+   "scope": {
+    "provider": "open_ai",
+    "model": "gpt-6-luna",
+    "query": "site:ycombinator.com Winter 2027 batch January March San Francisco official"
+   },
+   "earlier": "Y Combinator Winter 2027 batch dates San Francisco official",
+   "evidence": {
+    "version": 1,
+    "provider": "open_ai",
+    "model": "gpt-6-luna",
+    "response_model": "gpt-6-luna",
+    "response_id": "resp_05926ad195403d7d016abb8c96621487d2981288f7e47f2d22",
+    "search_call_id": "ws_05926ad195403d7d016abb8c976c9887d28f948a5059901ed9",
+    "answer": "Y Combinator’s Winter 2027 batch runs January through March 2027 in person in San Francisco. YC hasn’t published exact start and end dates on its official page. The on-time application deadline is November 2 at 8 p.m. PT; applicants who apply by then should receive a decision by December 11. ([ycombinator.com](https://www.ycombinator.com/apply))",
+    "citations": [
+     {
+      "url": "https://www.ycombinator.com/apply",
+      "title": "Apply to YC | Y Combinator",
+      "start_index": 293,
+      "end_index": 347
+     }
+    ],
+    "actual_input_tokens": 8523,
+    "actual_output_tokens": 197
+   }
+  },
+  {
+   "name": "mit_6035",
+   "scope": {
+    "provider": "open_ai",
+    "model": "gpt-6-luna",
+    "query": "site:ocw.mit.edu/courses/6-035-computer-language-engineering-spring-2010 lecture notes projects scanner parser semantic analysis code generation"
+   },
+   "earlier": "site:ocw.mit.edu compiler design course assignments lectures compiler MIT OCW 6.035",
+   "evidence": {
+    "version": 1,
+    "provider": "open_ai",
+    "model": "gpt-6-luna",
+    "response_model": "gpt-6-luna",
+    "response_id": "resp_048b196bbd31de0d016abace33111487d28f0f48d43853e024",
+    "search_call_id": "ws_048b196bbd31de0d016abace34448087d29d99e4c4ea84d20e",
+    "answer": "MIT OCW’s 6.035 course is Computer Language Engineering, focused on compiler design and implementation. The Spring 2010 course has lecture notes and project assignments covering scanning and parsing, semantic analysis, code generation, data-flow analysis, and optimization. ([ocw.mit.edu](https://ocw.mit.edu/courses/6-035-computer-language-engineering-spring-2010/))",
+    "citations": [
+     {
+      "url": "https://ocw.mit.edu/courses/6-035-computer-language-engineering-spring-2010/",
+      "title": "Computer Language Engineering | Electrical Engineering and Computer Science | MIT OpenCourseWare",
+      "start_index": 274,
+      "end_index": 367
+     }
+    ],
+    "actual_input_tokens": 8626,
+    "actual_output_tokens": 157
+   }
+  },
+  {
+   "name": "stanford_unfound",
+   "scope": {
+    "provider": "open_ai",
+    "model": "gpt-6-luna",
+    "query": "site:stanford.edu CS143 compilers course materials lectures assignments official Stanford free"
+   },
+   "earlier": "site:cs.stanford.edu compiler course CS 143 2025 assignments lectures official syllabus free",
+   "evidence": {
+    "version": 1,
+    "provider": "open_ai",
+    "model": "gpt-6-luna",
+    "response_model": "gpt-6-luna",
+    "response_id": "resp_0bb2bcd06f36b984016abba77cc5f887d28b643828dab39d4a",
+    "search_call_id": "ws_0bb2bcd06f36b984016abba77e9a9c87d2b9ca007325ecb038",
+    "answer": "Stanford’s official Spring 2024–25 schedule lists CS143, Compilers, taught by Kjolstad. The search results didn’t surface an official 2025 course page with its syllabus, assignments, or lectures, so I can’t confirm those materials are publicly available for free. ([legacy.cs.stanford.edu](https://legacy.cs.stanford.edu/courses/schedules/2024-2025.spring.php))",
+    "citations": [
+     {
+      "url": "https://legacy.cs.stanford.edu/courses/schedules/2024-2025.spring.php",
+      "title": "Course Schedule Spring 2024-2025",
+      "start_index": 264,
+      "end_index": 361
+     }
+    ],
+    "actual_input_tokens": 8647,
+    "actual_output_tokens": 278
+   }
+  },
+  {
+   "name": "cornell_stanford",
+   "scope": {
+    "provider": "open_ai",
+    "model": "gpt-6-luna",
+    "query": "site:cs.cornell.edu/courses/cs4120 compiler course assignments lectures 2025 Cornell"
+   },
+   "earlier": "site:cs.stanford.edu compiler course CS 143 2025 assignments lectures official syllabus free",
+   "evidence": {
+    "version": 1,
+    "provider": "open_ai",
+    "model": "gpt-6-luna",
+    "response_model": "gpt-6-luna",
+    "response_id": "resp_0bb2bcd06f36b984016abba77cc5f887d28b643828dab39d4a",
+    "search_call_id": "ws_0bb2bcd06f36b984016abba77e9a9c87d2b9ca007325ecb038",
+    "answer": "Stanford’s official Spring 2024–25 schedule lists CS143, Compilers, taught by Kjolstad. The search results didn’t surface an official 2025 course page with its syllabus, assignments, or lectures, so I can’t confirm those materials are publicly available for free. ([legacy.cs.stanford.edu](https://legacy.cs.stanford.edu/courses/schedules/2024-2025.spring.php))",
+    "citations": [
+     {
+      "url": "https://legacy.cs.stanford.edu/courses/schedules/2024-2025.spring.php",
+      "title": "Course Schedule Spring 2024-2025",
+      "start_index": 264,
+      "end_index": 361
+     }
+    ],
+    "actual_input_tokens": 8647,
+    "actual_output_tokens": 278
+   }
+  },
+  {
+   "name": "nptel_page_video",
+   "scope": {
+    "provider": "open_ai",
+    "model": "gpt-6-luna",
+    "query": "NPTEL compiler design Y N Srikant lecture course page free videos"
+   },
+   "earlier": "NPTEL compiler design lecture 1 Prof Y N Srikant youtube",
+   "evidence": {
+    "version": 1,
+    "provider": "open_ai",
+    "model": "gpt-6-luna",
+    "response_model": "gpt-6-luna",
+    "response_id": "resp_025a593c19e89ac4016abacfb1886087d29e8d0ebec8b58767",
+    "search_call_id": "ws_025a593c19e89ac4016abacfb2bdc887d2a31e9a06b326af91",
+    "answer": "NPTEL Compiler Design, Lecture 1—“An Overview of a Compiler,” by Prof. Y. N. Srikant: [Watch on YouTube](https://www.youtube.com/watch?v=e73sb5pyriQ). ([youtube.com](https://www.youtube.com/watch?v=e73sb5pyriQ))",
+    "citations": [
+     {
+      "url": "https://www.youtube.com/watch?v=e73sb5pyriQ",
+      "title": "Mod-01 Lec-01 An Overview of a Compiler - YouTube",
+      "start_index": 151,
+      "end_index": 211
+     }
+    ],
+    "actual_input_tokens": 8744,
+    "actual_output_tokens": 117
+   }
+  },
+  {
+   "name": "csep_unconfirmed",
+   "scope": {
+    "provider": "open_ai",
+    "model": "gpt-6-luna",
+    "query": "University of Washington CSEP501 lecture 1 video youtube 2:43"
+   },
+   "earlier": "CSEP 501 Lecture 1 University Washington compiler design 2h43 YouTube video watch URL",
+   "evidence": {
+    "version": 1,
+    "provider": "open_ai",
+    "model": "gpt-6-luna",
+    "response_model": "gpt-6-luna",
+    "response_id": "resp_05d4f13fd093fb5f016abacf38d45487d2816f5e51ad9de909",
+    "search_call_id": "ws_05d4f13fd093fb5f016abacf399d3487d29e5783869765c06b",
+    "answer": "I couldn’t confirm the exact 2h43 video. Here’s a YouTube search for it: https://www.youtube.com/results?search_query=CSEP+501+Lecture+1+University+of+Washington+compiler+design. The course is listed as CSEP 501: Compiler Construction at the University of Washington. ([github.com](https://github.com/trandiepbang/Video-Course))",
+    "citations": [
+     {
+      "url": "https://github.com/trandiepbang/Video-Course",
+      "title": "GitHub - trandiepbang/Video-Course: List of Computer Science courses with video lectures. · GitHub",
+      "start_index": 268,
+      "end_index": 328
+     }
+    ],
+    "actual_input_tokens": 8486,
+    "actual_output_tokens": 406
+   }
+  }
+ ]
+}
