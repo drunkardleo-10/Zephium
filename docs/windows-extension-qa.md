@@ -54,14 +54,13 @@ not copy, reset or delete profiles to work around this environment mismatch.
 - The new worker compatibility wrapper supplies missing native tab-create
   results and relays actions without a popup. Extension-owned pages and options
   now use normal profile-checked tabs. These paths passed account-free lab
-  checks, including 1Password's setup action, but need the acceptance below.
+  checks, including 1Password's setup action. Owner acceptance is recorded below.
 - Grammarly completed login and remained signed in after a full QA restart,
   confirmed by the owner. Recheck this after subsequent compatibility changes.
-- 1Password must open setup, complete sign-in, fill a test login, and respond
-  correctly to another toolbar click. Desktop companion integration is separate
-  and remains unqualified. The owner reports it working in rebuilt QA; individual
-  sign-in/fill/repeat-click checks still need confirmation on the clean build.
-  Leave its extension tab open, restart QA, and check that the tab restores.
+- The owner confirmed the clean-build 1Password checklist with "Yes, it works":
+  opening, sign-in, filling, another toolbar click, and extension-tab restoration
+  after restart were requested together. No per-step results were supplied.
+  Desktop companion integration is separate and remains unqualified.
 - Native extension context-menu entries are now retained. For Bitwarden,
   right-click a login field and check its submenu. Menu availability alone does
   not establish that credential filling or inline suggestions work.

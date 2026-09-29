@@ -125,10 +125,12 @@ sample had a gap. Use `desktop\measure-webext-qa.ps1` for a fresh fixed-tab run.
   extension's own host page to registered worker `action.onClicked` listeners.
   Native listeners remain registered. This does not synthesize activeTab grants
   or permission prompts. 1Password 8.12.37.1's cleared-popup action opened its
-  own setup document in visible- and hidden-manager lab runs. The owner now
-  reports it working in rebuilt QA; completed sign-in, filling and repeat-click
-  acceptance have not yet been confirmed individually. Temporary click tracing
-  was removed from the clean build. The earlier inert click did not reproduce
+  own setup document in visible- and hidden-manager lab runs. The owner answered
+  "Yes, it works" to the clean-build 1Password checklist covering sign-in, fill,
+  repeat click and extension-tab restoration. This is an aggregate manual
+  confirmation, not separately recorded results for each step; no separate
+  Bitwarden result was supplied. Temporary click tracing was removed from the
+  clean build. The earlier inert click did not reproduce
   after rebuilding; no isolated cause for that transient failure is established.
 - Normal Windows tabs admit extension document URLs only with a live grant for
   that enabled install in the same profile. Disable/removal revokes the grant;
@@ -136,8 +138,8 @@ sample had a gap. Use `desktop\measure-webext-qa.ps1` for a fresh fixed-tab run.
   web_accessible_resources: a web-initiated public fixture navigation passed,
   while its private document was blocked. Options pages use the same native
   tab path. Fresh/restored tab construction also checks the live profile grant,
-  including before warm-spare adoption. Full restart restoration of an active
-  extension tab remains an owner QA check. No separate document server or
+  including before warm-spare adoption. Extension-tab restoration was included
+  in the owner's clean-build confirmation above. No separate document server or
   extension-specific URL is used.
 - Hidden manager new-window requests require a recent explicit action/options
   command (five seconds, up to eight requests) and the live foreground human
