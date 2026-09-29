@@ -22,6 +22,13 @@ checkout, verifies the binary's QA product identity, and launches
 `%APPDATA%\app.zephium.webext-qa`; it does not import a normal Zephium profile.
 `revision.txt` alongside the executable records the build revision.
 
+If a launch from a packaged development tool reports that a WebView2 generation
+escaped its owned runtime root, run the command above from ordinary Windows
+PowerShell, or open the verified QA executable in File Explorer. Packaged-parent
+AppData redirection can make the canonical child resolve into a package cache
+while its parent resolves into Roaming. Keep the directory check intact and do
+not copy, reset or delete profiles to work around this environment mismatch.
+
 ## First acceptance pass
 
 1. Open a Chrome Web Store listing for Bitwarden or Dark Reader. Use the
