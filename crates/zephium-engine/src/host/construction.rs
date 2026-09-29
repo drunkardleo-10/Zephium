@@ -313,6 +313,11 @@ impl EngineHost {
         purpose: NativeViewPurpose,
     ) -> Option<ObservedView> {
         let report_failure = purpose.reports_failure();
+        #[cfg(target_os = "windows")]
+        let event_permit = event_permit.with_extensions(
+            self.windows_extensions
+                .navigation_grants(partition.profile()),
+        );
         let target_resource_class = purpose.resource_class();
         let logical_id = id.get();
         let reservation_failure_permit = event_permit.clone();

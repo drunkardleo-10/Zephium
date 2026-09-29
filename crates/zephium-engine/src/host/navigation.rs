@@ -27,7 +27,7 @@ fn classify_observed_url(url: Option<String>) -> ObservedUrl {
     match url {
         None => ObservedUrl::Unavailable,
         Some(url) if url.is_empty() => ObservedUrl::Unavailable,
-        Some(url) if navigation::is_allowed_str(&url) => ObservedUrl::Allowed(url),
+        Some(url) if navigation::is_browser_target_str(&url) => ObservedUrl::Allowed(url),
         Some(_) => ObservedUrl::Forbidden,
     }
 }
@@ -68,7 +68,7 @@ fn navigation_observation_events(
     // A single native notification produces at most these two bounded events,
     // and duplicate Source/History/KVO notifications become no-ops.
     let mut events = Vec::with_capacity(2);
-    if let Some(url) = url.filter(|url| navigation::is_allowed_str(url)) {
+    if let Some(url) = url.filter(|url| navigation::is_browser_target_str(url)) {
         if previous.url.as_deref() != Some(url) {
             let url = url.to_owned();
             previous.url = Some(url.clone());
@@ -646,7 +646,7 @@ impl EngineHost {
                 .emit_for(event_token, EngineEvent::NavigationFailed { id, request });
             return;
         }
-        if !navigation::is_allowed_str(url) {
+        if !navigation::is_browser_target_str(url) {
             eprintln!("security: rejected invalid native navigation target");
             self.sink
                 .emit_for(event_token, EngineEvent::NavigationFailed { id, request });
@@ -662,6 +662,11 @@ impl EngineHost {
         if !view.event_permit.matches_token(&event_token) {
             // This host task belongs to a prior same-id generation that was
             // displaced while a native message loop was reentrant.
+            return;
+        }
+        if !view.event_permit.allows_navigation(url) {
+            self.sink
+                .emit_for(event_token, EngineEvent::NavigationFailed { id, request });
             return;
         }
         let Some(epoch) = view.navigation.begin_request(url, request) else {

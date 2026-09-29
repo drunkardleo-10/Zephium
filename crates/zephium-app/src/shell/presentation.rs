@@ -547,7 +547,7 @@ impl Shell {
             crate::diagnostic!("engine: rejected malformed native presentation URL");
             return;
         };
-        if !navigation::is_allowed(&url)
+        if !navigation::is_browser_target(&url)
             || !self.items.tab(id).is_some_and(|tab| {
                 tab.has_view() && tab.url.as_ref().is_some_and(|current| current == &url)
             })

@@ -293,7 +293,7 @@ pub fn restore(state: SessionState) -> Restored {
                 let Ok(url) = Url::parse(&url) else {
                     continue;
                 };
-                if !navigation::is_allowed(&url) {
+                if !navigation::is_browser_target(&url) {
                     continue;
                 }
                 let mut tab = TabState::new();
@@ -372,7 +372,9 @@ fn canonical_recently_closed(
             {
                 return None;
             }
-            let url = Url::parse(&entry.url).ok().filter(navigation::is_allowed)?;
+            let url = Url::parse(&entry.url)
+                .ok()
+                .filter(navigation::is_browser_target)?;
             if entry.session_id.is_some_and(|id| !seen.insert(id)) {
                 return None;
             }

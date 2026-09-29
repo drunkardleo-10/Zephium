@@ -5,6 +5,36 @@ use crate::navigation_epoch::NavigationEpochTracker;
 
 use super::{navigation_callback_matches, EventPermit};
 
+#[cfg(target_os = "windows")]
+#[test]
+fn extension_navigation_requires_live_profile_grant_and_view_token() {
+    let token = Arc::new(AtomicBool::new(true));
+    let grants = super::ExtensionNavigationGrants::default();
+    let allowed = EventPermit::bound(&token).with_extensions(grants.clone());
+    let other_profile =
+        EventPermit::bound(&token).with_extensions(super::ExtensionNavigationGrants::default());
+    let target = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/options.html";
+    assert!(!allowed.allows_navigation(target));
+    grants
+        .lock()
+        .unwrap()
+        .insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+    assert!(allowed.allows_navigation(target));
+    assert!(!other_profile.allows_navigation(target));
+    assert!(!allowed.allows_navigation(
+        "chrome-extension://user@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/options.html"
+    ));
+    let stale = allowed.clone();
+    grants.lock().unwrap().clear();
+    assert!(!stale.allows_navigation(target));
+    grants
+        .lock()
+        .unwrap()
+        .insert("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+    allowed.revoke();
+    assert!(!stale.allows_navigation(target));
+}
+
 #[test]
 fn native_event_permit_is_one_shot_and_generation_exact() {
     let first = Arc::new(AtomicBool::new(true));

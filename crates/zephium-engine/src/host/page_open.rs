@@ -92,7 +92,7 @@ impl EngineHost {
         url: &str,
         features: NewWindowFeatures,
     ) -> NewWindowResponse {
-        if !features.user_initiated || !zephium_core::navigation::is_allowed_str(url) {
+        if !features.user_initiated || !permit.allows_target(url) {
             return NewWindowResponse::Deny;
         }
         let Some(view) = self.views.get(&source) else {

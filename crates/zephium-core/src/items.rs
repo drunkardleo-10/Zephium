@@ -546,7 +546,7 @@ impl Items {
 
     pub fn set_committed_url_str(&mut self, id: ItemId, url: &str) -> bool {
         if let Ok(parsed) = Url::parse(url) {
-            if !navigation::is_allowed(&parsed) {
+            if !navigation::is_browser_target(&parsed) {
                 return false;
             }
             return self.set_committed_url(id, parsed);

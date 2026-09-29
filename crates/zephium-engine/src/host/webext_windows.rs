@@ -37,6 +37,7 @@ struct Action {
     state: Option<ExtensionActionState>,
     popup: Option<String>,
     native_tab: Option<i64>,
+    open_request: Option<(ItemId, std::time::Instant, u8)>,
 }
 
 /// An enabled environment cannot be confused with an ordinary cached one.
@@ -126,6 +127,25 @@ pub(super) struct WindowsExtensions {
     popup: Option<Popup>,
     // A failed explicit child close must not destroy its native parent first.
     retained_popup_window: Option<popup::PopupWindow>,
+    navigation: HashMap<ProfileId, super::permits::ExtensionNavigationGrants>,
+}
+
+impl WindowsExtensions {
+    pub(super) fn navigation_grants(
+        &mut self,
+        profile: ProfileId,
+    ) -> super::permits::ExtensionNavigationGrants {
+        self.navigation.entry(profile).or_default().clone()
+    }
+
+    fn revoke_navigation(&mut self, profile: ProfileId, id: &str) {
+        if let Some(grants) = self.navigation.get(&profile) {
+            grants
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(id);
+        }
+    }
 }
 
 struct Popup {
@@ -141,6 +161,7 @@ struct Install {
     native: ICoreWebView2BrowserExtension,
     bridge: ExtensionView,
     action: Rc<RefCell<Action>>,
+    options: Option<String>,
 }
 
 impl super::EngineHost {
@@ -185,6 +206,12 @@ impl super::EngineHost {
     }
 
     pub(super) fn forget_windows_extensions(&mut self, profile: ProfileId) {
+        if let Some(grants) = self.windows_extensions.navigation.remove(&profile) {
+            grants
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
+        }
         if self
             .windows_extensions
             .popup
@@ -366,6 +393,28 @@ impl super::EngineHost {
                 return Err(error);
             }
         };
+        self.windows_extensions
+            .navigation_grants(profile)
+            .lock()
+            .map_err(|_| "Extension navigation grants are unavailable.")?
+            .insert(load.extension_id.clone());
+        let options = manifest
+            .raw()
+            .get("options_page")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                manifest
+                    .raw()
+                    .pointer("/options_ui/page")
+                    .and_then(Value::as_str)
+            })
+            .and_then(|path| {
+                valid_extension_url(
+                    &runtime,
+                    &format!("chrome-extension://{}/", load.extension_id),
+                    path,
+                )
+            });
         self.windows_extensions.installs.insert(
             (profile, load.install),
             Install {
@@ -374,6 +423,7 @@ impl super::EngineHost {
                 native: item,
                 bridge,
                 action,
+                options,
             },
         );
         Ok(loaded)
@@ -386,6 +436,8 @@ impl super::EngineHost {
             self.close_windows_extension_popup();
         }
         if let Some(install) = self.windows_extensions.installs.remove(&(profile, install)) {
+            self.windows_extensions
+                .revoke_navigation(profile, &install.id);
             install.bridge.alive.set(false);
             let result = native::enable(&install.native, false);
             self.close_extension_view(profile, install.bridge);
@@ -410,6 +462,8 @@ impl super::EngineHost {
                 .installs
                 .remove(&(profile, load.install))
             {
+                self.windows_extensions
+                    .revoke_navigation(profile, &install.id);
                 install.bridge.alive.set(false);
                 let result = native::remove(&install.native);
                 self.close_extension_view(profile, install.bridge);
@@ -520,7 +574,9 @@ impl super::EngineHost {
             .with_permission_handler(|_| wry::PermissionResponse::Deny)
             .with_download_policy(wry::DownloadPolicy::DenyWithoutMetadata)
             .with_page_close_policy(wry::PageClosePolicy::Ignore)
-            .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
+            .with_new_window_req_handler(move |url, features| {
+                super::dispatch::try_open_windows_extension_tab(runtime, &url, features)
+            })
             .with_navigation_handler(move |target| {
                 target == navigation_url || target == "about:blank"
             })
@@ -582,7 +638,7 @@ impl super::EngineHost {
                     value["title"].as_str().unwrap_or(""),
                     value["badge"].as_str().unwrap_or(""),
                     icon,
-                    value["enabled"].as_bool().unwrap_or(false) && popup.is_some(),
+                    value["enabled"].as_bool().unwrap_or(false),
                     popup.is_some(),
                     false,
                 ) else {
@@ -731,6 +787,38 @@ impl super::EngineHost {
         result.unwrap_or_else(ExtensionActionSettlement::Rejected)
     }
 
+    pub(crate) fn open_web_extension_options(&mut self, profile: ProfileId, extension_id: &str) {
+        let Some(install) = self
+            .windows_extensions
+            .installs
+            .values()
+            .find(|install| install.runtime.profile() == profile && install.id == extension_id)
+        else {
+            return;
+        };
+        let Some(url) = install.options.as_ref() else {
+            return;
+        };
+        let Some(tab) = self
+            .extension_browser_surfaces
+            .get(&profile)
+            .and_then(|surface| surface.windows().iter().find_map(|window| window.active()))
+        else {
+            return;
+        };
+        install.action.borrow_mut().open_request = Some((
+            tab,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+            8,
+        ));
+        // The existing native adoption path retains Chromium's extension origin
+        // and web_accessible_resources enforcement; this does not serve HTML.
+        let _ = install.bridge.view.evaluate_script(&format!(
+            "chrome.tabs.create({{url:{},active:true}})",
+            json!(url)
+        ));
+    }
+
     pub(super) fn open_windows_extension_tab(
         &mut self,
         runtime: ExtensionRuntimeInstance,
@@ -739,18 +827,8 @@ impl super::EngineHost {
     ) -> wry::NewWindowResponse {
         use std::sync::atomic::Ordering;
         use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindowVisible};
-        let Some(popup) = self.windows_extensions.popup.as_ref() else {
-            return wry::NewWindowResponse::Deny;
-        };
         let profile = runtime.profile();
-        // Only the live, focused extension popup may request an ordinary tab.
-        // A hidden observer/worker, stale popup, or page IPC cannot use this path.
         if !features.user_initiated
-            || !zephium_core::navigation::is_allowed_str(url)
-            || popup.runtime != runtime
-            || !popup.view.alive.get()
-            || popup.view.view.webview().as_raw() != features.opener.webview.as_raw()
-            || unsafe { GetForegroundWindow() } != popup.window.0
             || self.windows_view_admission_blocked(profile)
             || self.erasure_tombstones.contains(&profile)
             || self
@@ -764,8 +842,56 @@ impl super::EngineHost {
         {
             return wry::NewWindowResponse::Deny;
         }
-        let source = popup.tab;
-        let popup_window = popup.window.0;
+        // A manager may open a child only during a bounded, explicit toolbar /
+        // options command. Unsolicited hidden-worker opens remain denied here.
+        let popup = self.windows_extensions.popup.as_ref().filter(|popup| {
+            popup.runtime == runtime
+                && popup.view.alive.get()
+                && popup.view.view.webview().as_raw() == features.opener.webview.as_raw()
+                && unsafe { GetForegroundWindow() == popup.window.0 }
+        });
+        let (source, opener_window) = if let Some(popup) = popup {
+            (popup.tab, popup.window.0)
+        } else {
+            let Some(install) = self
+                .windows_extensions
+                .installs
+                .get(&(profile, runtime.install_id()))
+            else {
+                return wry::NewWindowResponse::Deny;
+            };
+            if !install.bridge.alive.get()
+                || install.bridge.view.webview().as_raw() != features.opener.webview.as_raw()
+            {
+                return wry::NewWindowResponse::Deny;
+            }
+            let mut action = install.action.borrow_mut();
+            let Some((tab, expires, remaining)) = action.open_request.as_mut() else {
+                return wry::NewWindowResponse::Deny;
+            };
+            if *expires < std::time::Instant::now() || *remaining == 0 {
+                return wry::NewWindowResponse::Deny;
+            }
+            let Some(owner) = self
+                .extension_browser_surfaces
+                .get(&profile)
+                .and_then(|surface| {
+                    surface
+                        .windows()
+                        .iter()
+                        .find(|window| window.active() == Some(*tab))
+                })
+                .and_then(|window| self.stages.get(&window.id()))
+                .and_then(|stage| stage.parent_window())
+            else {
+                return wry::NewWindowResponse::Deny;
+            };
+            if unsafe { GetForegroundWindow() } != owner {
+                return wry::NewWindowResponse::Deny;
+            }
+            *remaining -= 1;
+            (*tab, owner)
+        };
         if self
             .partitions
             .get(&source)
@@ -785,6 +911,9 @@ impl super::EngineHost {
         let Some(view) = self.views.get(&source) else {
             return wry::NewWindowResponse::Deny;
         };
+        if !view.event_permit.allows_navigation(url) {
+            return wry::NewWindowResponse::Deny;
+        }
         let Some(activity) = view.navigation.activity_snapshot() else {
             return wry::NewWindowResponse::Deny;
         };
@@ -798,7 +927,7 @@ impl super::EngineHost {
             // Construction pumps native messages: closing or defocusing the
             // popup during that interval must invalidate its pending request.
             unsafe {
-                GetForegroundWindow() == popup_window && IsWindowVisible(popup_window).as_bool()
+                GetForegroundWindow() == opener_window && IsWindowVisible(opener_window).as_bool()
             }
         })
     }
@@ -836,7 +965,7 @@ impl super::EngineHost {
         if install.runtime != runtime {
             return Err(ExtensionActionRejection::RuntimeSuperseded);
         }
-        let action = install.action.borrow();
+        let mut action = install.action.borrow_mut();
         let state = action
             .state
             .as_ref()
@@ -849,13 +978,23 @@ impl super::EngineHost {
         if !state.is_enabled() {
             return Err(ExtensionActionRejection::ActionDisabled);
         }
-        let url = action
-            .popup
-            .clone()
-            .ok_or(ExtensionActionRejection::PopupUnavailable)?;
         let native_tab = action
             .native_tab
             .ok_or(ExtensionActionRejection::TabUnavailable)?;
+        let Some(url) = action.popup.clone() else {
+            action.open_request = Some((
+                request.tab(),
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+                8,
+            ));
+            drop(action);
+            install
+                .bridge
+                .view
+                .evaluate_script(&format!("window.__zephiumClick?.({native_tab})"))
+                .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?;
+            return Ok(ExtensionActionSettlement::Dispatched);
+        };
         let window_id = action
             .binding
             .ok_or(ExtensionActionRejection::TabUnavailable)?

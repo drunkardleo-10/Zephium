@@ -499,7 +499,7 @@ impl NavigationEpochTracker {
 }
 
 fn canonical_navigation_target(target: &str) -> Option<String> {
-    if !navigation::is_allowed_str(target) {
+    if !navigation::is_browser_target_str(target) {
         return None;
     }
     url::Url::parse(target).ok().map(|url| url.to_string())

@@ -63,7 +63,7 @@ impl ExtensionBrowserRequest {
     ) -> Result<Self, ExtensionBrowserRequestError> {
         if action.url().is_some_and(|url| {
             url.len() > MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES
-                || !crate::navigation::is_allowed_str(url)
+                || !crate::navigation::is_browser_target_str(url)
         }) {
             return Err(ExtensionBrowserRequestError::InvalidUrl);
         }
@@ -231,7 +231,7 @@ impl ExtensionBrowserTab {
         if !page_title_is_sanitized(title) {
             return Err(ExtensionBrowserSurfaceError::InvalidTabTitle);
         }
-        if url.is_some_and(|url| !crate::navigation::is_allowed(url)) {
+        if url.is_some_and(|url| !crate::navigation::is_browser_target(url)) {
             return Err(ExtensionBrowserSurfaceError::InvalidTabUrl);
         }
         let title = previous
