@@ -87,6 +87,8 @@ struct ConfirmMailbox {
     asks: std::collections::VecDeque<(u32, WorkSiteConfirmation)>,
     decisions: Vec<(u32, WorkSiteDecision)>,
     settled: std::collections::VecDeque<(u32, WorkSiteReceipt)>,
+    /// The page began or stopped waiting on the person (a bot check).
+    needs_you: Option<bool>,
 }
 /// One page task's line to the loop: held steps go out, decisions come
 /// back, receipts go out. Polled on both sides; it carries no authority.
@@ -138,6 +140,13 @@ impl WorkConfirmPort {
     }
     pub(crate) fn answer_entry(&self, entry: WorkSiteEntry) {
         self.mailbox().entry = Some(entry);
+    }
+    /// The page waits on the person, or stopped waiting.
+    pub fn needs_you(&self, waiting: bool) {
+        self.mailbox().needs_you = Some(waiting);
+    }
+    pub(crate) fn take_needs_you(&self) -> Option<bool> {
+        self.mailbox().needs_you.take()
     }
 }
 pub struct WorkBrowserOutcome {

@@ -343,6 +343,9 @@ impl Driver {
                     let step = self.begin(step, vec![], None).await?;
                     entry = Some((port.clone(), step, site.clone()));
                 }
+                if let Some(waiting) = port.take_needs_you() {
+                    self.part_needs_you(waiting.then_some(site.as_str())).await;
+                }
                 if port.entry() == Some(WorkSiteEntry::SignedOut) && !signed_out {
                     signed_out = true;
                     self.report(WorkAgentDiagnostic::SiteSignedOut);
@@ -490,6 +493,48 @@ impl Driver {
 
     /// Records a held step for the person; the text's provenance is the
     /// other sites whose pages it quotes.
+    /// A part whose page waits on the person says so on its row at once,
+    /// and goes back to running when the person is done or the wait ends.
+    async fn part_needs_you(&self, site: Option<&str>) {
+        let Some(part) = self.part else {
+            return;
+        };
+        let Ok(state) = self.probe.runtime_projection().await else {
+            return;
+        };
+        let Some(mut fact) = state
+            .executions
+            .iter()
+            .find(|execution| execution.id == self.probe.execution())
+            .and_then(|execution| execution.parts.iter().find(|fact| fact.id == part))
+            .cloned()
+            .filter(|fact| match site {
+                Some(_) => fact.state == zephium_core::work::parts::WorkPartStateV1::Running,
+                None => fact.state == zephium_core::work::parts::WorkPartStateV1::Waiting,
+            })
+        else {
+            return;
+        };
+        match site {
+            Some(site) => {
+                fact.state = zephium_core::work::parts::WorkPartStateV1::Waiting;
+                fact.summary = Some(format!("Needs you on {site}"));
+            }
+            None => {
+                fact.state = zephium_core::work::parts::WorkPartStateV1::Running;
+                fact.summary = None;
+            }
+        }
+        let _ = self
+            .probe
+            .commit_step(WorkRuntimeUpdate::Part {
+                execution: self.probe.execution(),
+                attempt: self.probe.attempt(),
+                part: fact,
+            })
+            .await;
+    }
+
     async fn confirm_step(
         &mut self,
         page: WorkStepId,

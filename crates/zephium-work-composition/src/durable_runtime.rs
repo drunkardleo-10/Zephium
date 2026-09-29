@@ -437,6 +437,9 @@ impl MacosWorkComposition {
                 Some(gate.clone()),
             )
             .await?;
+        if let Some(port) = &confirm {
+            port.needs_you(false);
+        }
         // An approved step still open ends with its page.
         if let (Some(port), Some((ask, true))) = (&confirm, gate.ask()) {
             if let Some(receipt) = gate.finish() {
@@ -549,6 +552,10 @@ impl MacosWorkComposition {
         let mut close_grace: Option<Instant> = None;
         let mut retired_at: Option<Instant> = None;
         let mut human_wait: Option<Instant> = None;
+        // A bot check nobody took ended the page within its short wait.
+        let mut gave_up_on_person = false;
+        // The part was told its page waits on the person.
+        let mut told_waiting = false;
         let mut disposition = None;
         let mut shown_frame = 0;
         let mut reviews = 0u8;
@@ -974,6 +981,11 @@ impl MacosWorkComposition {
                 {
                     resumed_generation = resume.generation;
                     helped = true;
+                    if std::mem::take(&mut told_waiting) {
+                        if let Some(port) = &confirm {
+                            port.needs_you(false);
+                        }
+                    }
                     if let Some(since) = human_wait {
                         waited += now.saturating_duration_since(since);
                     }
@@ -1221,7 +1233,15 @@ impl MacosWorkComposition {
                             trace(&format!("human:waiting:{human:?}"));
                             now
                         });
-                        if human_wait_expired(now, since, original_deadline, human) {
+                        let cap = human_wait_cap(intervention.as_ref());
+                        if cap < MAX_WORK_HUMAN_WAIT_MILLIS && !told_waiting {
+                            told_waiting = true;
+                            if let Some(port) = &confirm {
+                                port.needs_you(true);
+                            }
+                        }
+                        if human_wait_expired(now, since, original_deadline, human, cap) {
+                            gave_up_on_person = cap < MAX_WORK_HUMAN_WAIT_MILLIS;
                             // Nobody took the page within the wait: release it
                             // and settle the read with the page's own words.
                             trace(&format!("close:human_wait:{human:?}"));
@@ -1363,6 +1383,16 @@ impl MacosWorkComposition {
                     }
                     _ if not_ready => Some("The browser was not ready for this page"),
                     Some(AgentWorkDisposition::Succeeded | AgentWorkDisposition::Cancelled) => None,
+                    Some(AgentWorkDisposition::WaitingForHuman) if gave_up_on_person => {
+                        return Ok(BrowserRun::closed(
+                            result,
+                            usage,
+                            intervention,
+                            Some(needs_you(page.as_ref().map(|(_, url)| url.as_str()))),
+                            measure.settle(started, model_in_flight),
+                            helped,
+                        ));
+                    }
                     Some(AgentWorkDisposition::WaitingForHuman) => Some(
                         intervention_note(intervention.as_ref())
                             .unwrap_or("The page needs a person"),
@@ -1390,14 +1420,38 @@ impl MacosWorkComposition {
 /// A human request waits at most the human wait cap, within the read's own
 /// deadline. Only a page a person has taken, being presented or continued,
 /// is left to the page's own presented deadline.
+/// A bot check, a permission or an interaction the agent cannot perform
+/// waits briefly for the person: the part then ends with what it has. A
+/// sign-in or a decision keeps the long wait.
+const HUMAN_CHECK_WAIT_MILLIS: u64 = 90_000;
+fn human_wait_cap(intervention: Option<&WorkInterventionV1>) -> u64 {
+    use zephium_core::work::runtime::WorkInterventionKindV1 as Kind;
+    match intervention.map(|intervention| intervention.kind) {
+        Some(Kind::Challenge | Kind::Permission | Kind::UnsupportedInteraction) => {
+            HUMAN_CHECK_WAIT_MILLIS
+        }
+        _ => MAX_WORK_HUMAN_WAIT_MILLIS,
+    }
+}
+/// "Airbnb needs you to continue", from the page's own site.
+fn needs_you(url: Option<&str>) -> String {
+    let name = url
+        .and_then(zephium_app::work_sites::site_of)
+        .map(|site| zephium_app::work_sites::site_name(&site));
+    match name {
+        Some(name) => format!("{name} needs you to continue"),
+        None => "The page needs you to continue".into(),
+    }
+}
 fn human_wait_expired(
     now: Instant,
     since: Instant,
     deadline: Instant,
     phase: Option<zephium_app::RetainedHumanPhase>,
+    cap: u64,
 ) -> bool {
     use zephium_app::RetainedHumanPhase as Phase;
-    let cap = deadline.min(since + Duration::from_millis(MAX_WORK_HUMAN_WAIT_MILLIS));
+    let cap = deadline.min(since + Duration::from_millis(cap));
     now >= cap
         && !matches!(
             phase,
@@ -1621,20 +1675,67 @@ mod closed_result_tests {
                 cap - Duration::from_millis(1),
                 since,
                 late,
-                phase
+                phase,
+                MAX_WORK_HUMAN_WAIT_MILLIS
             ));
-            assert!(human_wait_expired(cap, since, late, phase));
+            assert!(human_wait_expired(
+                cap,
+                since,
+                late,
+                phase,
+                MAX_WORK_HUMAN_WAIT_MILLIS
+            ));
         }
         let early = since + Duration::from_secs(60);
-        assert!(human_wait_expired(early, since, early, None));
+        assert!(human_wait_expired(
+            early,
+            since,
+            early,
+            None,
+            MAX_WORK_HUMAN_WAIT_MILLIS
+        ));
         for phase in [
             Phase::Presenting,
             Phase::Presented,
             Phase::Continuing,
             Phase::ReadyToResume,
         ] {
-            assert!(!human_wait_expired(cap, since, late, Some(phase)));
+            assert!(!human_wait_expired(
+                cap,
+                since,
+                late,
+                Some(phase),
+                MAX_WORK_HUMAN_WAIT_MILLIS
+            ));
         }
+    }
+
+    #[test]
+    fn a_bot_check_nobody_takes_ends_its_page_within_a_minute_and_a_half() {
+        use zephium_core::work::runtime::{WorkInterventionKindV1 as Kind, WorkInterventionV1};
+        let check = WorkInterventionV1 {
+            kind: Kind::Challenge,
+            origin: Some("https://www.airbnb.com".into()),
+        };
+        let sign_in = WorkInterventionV1 {
+            kind: Kind::SignIn,
+            origin: None,
+        };
+        assert_eq!(human_wait_cap(Some(&check)), HUMAN_CHECK_WAIT_MILLIS);
+        assert_eq!(human_wait_cap(Some(&sign_in)), MAX_WORK_HUMAN_WAIT_MILLIS);
+        let since = Instant::now();
+        let late = since + Duration::from_secs(3600);
+        assert!(human_wait_expired(
+            since + Duration::from_secs(90),
+            since,
+            late,
+            None,
+            human_wait_cap(Some(&check))
+        ));
+        assert_eq!(
+            needs_you(Some("https://www.airbnb.com/s/homes")),
+            "Airbnb needs you to continue"
+        );
     }
 
     #[test]
