@@ -184,11 +184,10 @@ test("read to the right, rows become columns and tiers are named above them", as
   expect(layout.tiers[1]!.start).toBe(x("api"));
 });
 
-test("the picture takes the way that fits a result's width, the shorter where both do", async () => {
-  const deep = await engineLayout(diagramShape(SAAS));
-  // Seven rows to the right run far past a result's width.
-  expect(deep.way).toBe("down");
-  const short = await engineLayout(
+test("a picture reads to the right unless it is held to reading down, a chain on one line", async () => {
+  expect((await engineLayout(diagramShape(SAAS))).way).toBe("right");
+  expect((await engineLayout(diagramShape(SAAS), "down")).way).toBe("down");
+  const chain = await engineLayout(
     diagramShape({
       kind: "diagram",
       layers: [],
@@ -203,7 +202,8 @@ test("the picture takes the way that fits a result's width, the shorter where bo
       ],
     }),
   );
-  expect(short.way).toBe("right");
+  expect(chain.way).toBe("right");
+  expect(new Set(Object.values(chain.at).map((at) => at.y)).size).toBe(1);
 });
 
 test("layoutDiagram answers with the engine's layout off the page", async () => {

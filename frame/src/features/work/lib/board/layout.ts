@@ -12,8 +12,12 @@ export type LayoutBlock = {
 };
 export type BoardLayout = { width: number; height: number; at: Record<string, Rect> };
 
-/** A result is 640–1120 wide: at 100% it reads whole in the view it opens in. */
-export const BOARD = { min: 640, max: 1120, gap: 24, row: 24 } as const;
+/**
+ * A result is 640–1120 wide, so at 100% it reads whole in the view it opens
+ * in; a picture that reads to the right (a diagram, a map) takes the room it
+ * draws, up to `reach`, and the run grows to the right for it.
+ */
+export const BOARD = { min: 640, max: 1120, reach: 2400, gap: 24, row: 24 } as const;
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -104,7 +108,7 @@ function widths(row: readonly LayoutBlock[], width: number): number[] {
 
 /**
  * A board laid out for its content: a width between 640 and 1120 that its
- * widest row asks for, rows top to bottom, nothing overlapping. An open block
+ * widest row asks for (wider only for a spanning picture that draws wider), rows top to bottom, nothing overlapping. An open block
  * takes a row of its own at the board's width; a pinned block is the person's
  * and takes no room.
  */
@@ -114,7 +118,8 @@ export function boardLayout(
 ): BoardLayout {
   const laid = reading(blocks.filter((block) => !pinned.has(block.id)));
   if (!laid.length) return { width: BOARD.min, height: 0, at: {} };
-  const cap = BOARD.max;
+  const wide = Math.max(0, ...laid.map((block) => (spans(block) ? block.width.ideal : 0)));
+  const cap = clamp(wide, BOARD.max, BOARD.reach);
   const asked = pack(laid, cap).reduce((need, row) => {
     const ideal = row.reduce(
       (sum, block, index) => sum + Math.min(block.width.ideal, cap) + (index ? BOARD.gap : 0),

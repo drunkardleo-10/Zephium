@@ -200,7 +200,7 @@ test("one air: a tree's own branches run above the run trees share into the same
   expect(routeAir([{ tree: 0, stems: [40], drops: [{ key: "pc|a", at: 40 }] }]).levels).toBe(0);
 });
 
-test("the rows' layout stands at once: tiers named beside their first row, rows centred", () => {
+test("a picture reads to the right at once: tiers named over their columns, a chain on one line", () => {
   const layout = diagramLayout({
     kind: "diagram",
     nodes: [node("web", "edge"), node("api", "app"), node("db", "app")],
@@ -210,6 +210,31 @@ test("the rows' layout stands at once: tiers named beside their first row, rows 
       { id: "app", name: "Application" },
     ],
   });
+  expect(layout.way).toBe("right");
+  expect(layout.settled).toBe(false);
+  expect(layout.tiers.map((tier) => tier.name)).toEqual(["Edge", "Application"]);
+  expect(layout.at.web!.y).toBe(layout.at.api!.y);
+  expect(layout.at.api!.y).toBe(layout.at.db!.y);
+  expect(layout.at.web!.x + W).toBeLessThan(layout.at.api!.x);
+  expect(layout.at.api!.x + W).toBeLessThan(layout.at.db!.x);
+  // The tiers' names stand over the parts, never beside them.
+  expect(layout.at.web!.y).toBeGreaterThanOrEqual(layout.gutter);
+  expect(layout.tiers[1]!.start).toBe(layout.at.api!.x);
+});
+
+test("the rows' layout stands at once: tiers named beside their first row, rows centred", () => {
+  const layout = diagramLayout(
+    {
+      kind: "diagram",
+      nodes: [node("web", "edge"), node("api", "app"), node("db", "app")],
+      edges: [edge("web", "api", "HTTPS"), edge("api", "db")],
+      layers: [
+        { id: "edge", name: "Edge" },
+        { id: "app", name: "Application" },
+      ],
+    },
+    "down",
+  );
   expect(layout.settled).toBe(false);
   const left = gutterOf(["Edge", "Application"]);
   expect(layout.gutter).toBe(left);
@@ -243,12 +268,15 @@ test("names stand on runs a flow has to itself, and a name siblings share reads 
     edges: [edge("web", "cdn", "Requests"), edge("app", "cdn", "Requests")],
     layers: [],
   });
-  const layout = diagramLayout({
-    kind: "diagram",
-    nodes: [node("web"), node("app"), node("cdn")],
-    edges: [edge("web", "cdn", "Requests"), edge("app", "cdn", "Requests")],
-    layers: [],
-  });
+  const layout = diagramLayout(
+    {
+      kind: "diagram",
+      nodes: [node("web"), node("app"), node("cdn")],
+      edges: [edge("web", "cdn", "Requests"), edge("app", "cdn", "Requests")],
+      layers: [],
+    },
+    "down",
+  );
   const plates = placePlates(shape, layout);
   expect(plates.get(0)!.resting).toBe(true);
   // Both into one part under one name: each reads it, at one place or the other, clear of parts.

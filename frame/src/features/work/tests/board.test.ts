@@ -60,7 +60,12 @@ describe("board layout", () => {
       const open = next() < 0.3 ? blocks[Math.floor(next() * count)]!.id : undefined;
       const layout = boardLayout(blocks, open ? { open } : {});
       expect(layout.width).toBeGreaterThanOrEqual(BOARD.min);
-      expect(layout.width).toBeLessThanOrEqual(BOARD.max);
+      // Only a spanning picture that draws wider widens a board past its most.
+      const wide = blocks.some(
+        (block) =>
+          block.emphasis === "hero" && block.kind !== "prose" && block.width.ideal > BOARD.max,
+      );
+      expect(layout.width).toBeLessThanOrEqual(wide ? BOARD.reach : BOARD.max);
       const rects = Object.values(layout.at);
       expect(rects).toHaveLength(count);
       for (const rect of rects) {
@@ -309,7 +314,7 @@ describe("the process column", () => {
 });
 
 describe("the architecture diagram", () => {
-  test("thirteen parts stand in five tiers read top to bottom, at full size within a 1120 result", async () => {
+  test("thirteen parts stand in five tiers read left to right, at full size", async () => {
     const made = board(saasScene());
     const diagram = made.blocks.find((block) => block.kind === "diagram");
     if (diagram?.kind !== "diagram") throw new Error("diagram");
@@ -317,11 +322,11 @@ describe("the architecture diagram", () => {
     const order = diagram.diagram.layers.map((layer) => layer.id);
     const tier = (id: string) =>
       order.indexOf(diagram.diagram.nodes.find((node) => node.id === id)!.layer ?? "");
-    // Every part of a tier stands above every part of the tiers after it.
+    // Every part of a tier stands left of every part of the tiers after it.
     for (const [a, at] of Object.entries(layout.at))
       for (const [b, bt] of Object.entries(layout.at))
-        if (tier(a) < tier(b)) expect(at.y + DIAGRAM.node.height).toBeLessThan(bt.y);
-    expect(layout.bounds.width).toBeLessThanOrEqual(1120);
+        if (tier(a) < tier(b)) expect(at.x + DIAGRAM.node.width).toBeLessThan(bt.x);
+    expect(layout.way).toBe("right");
     const { width: W, height: H } = DIAGRAM.node;
     const parts = Object.values(layout.at);
     for (const [index, a] of parts.entries())

@@ -4,7 +4,7 @@ import type { CanvasPosition, CanvasSize } from "./canvas-model";
 import * as m from "$shared/i18n/messages";
 import { diagramRows, type DiagramRows } from "./diagram-rows";
 import { placePlates } from "./diagram-labels";
-import { DIAGRAM, gutterOf } from "./diagram-metrics";
+import { DIAGRAM, ROUTE, gutterOf } from "./diagram-metrics";
 
 export { DIAGRAM, PLATE, plateHeight, plateWidth } from "./diagram-metrics";
 
@@ -177,6 +177,74 @@ function rowLayout(shape: DiagramShape, rows: DiagramRows): DiagramLayout {
   };
 }
 
+/**
+ * The rows turned into columns that read to the right, while the engine
+ * answers: each column's parts stacked under each other, the tiers named over
+ * their columns, each flow an elbow from a part's right edge to the next
+ * part's left, a part under another joined straight down.
+ */
+function columnLayout(shape: DiagramShape, rows: DiagramRows): DiagramLayout {
+  const { width: W, height: H } = DIAGRAM.node;
+  const top = shape.lanes.length ? ROUTE.header : 0;
+  const apart = 72;
+  const stack = (row: readonly string[]) =>
+    row.flatMap((id) => {
+      const sides = rows.beside.get(id);
+      return [...(sides?.before ? [sides.before] : []), id, ...(sides?.after ? [sides.after] : [])];
+    });
+  const tallest = Math.max(0, ...rows.rows.map((row) => stack(row).length));
+  const at: Record<string, CanvasPosition> = {};
+  const starts: number[] = [];
+  let x = 0;
+  rows.rows.forEach((row, index) => {
+    if (index && rows.tierStart.has(index)) x += DIAGRAM.tier;
+    starts.push(x);
+    stack(row).forEach((id, place) => (at[id] = { x, y: top + place * (H + DIAGRAM.column) }));
+    x += W + apart;
+  });
+  const flows: Record<number, DiagramFlow> = {};
+  for (const flow of shape.flows) {
+    const a = at[flow.from]!;
+    const b = at[flow.to]!;
+    let points: CanvasPosition[];
+    if (a.x === b.x) {
+      const down = a.y < b.y;
+      points = [
+        { x: a.x + W / 2, y: down ? a.y + H : a.y },
+        { x: b.x + W / 2, y: down ? b.y : b.y + H },
+      ];
+    } else {
+      const right = a.x < b.x;
+      const from = { x: right ? a.x + W : a.x, y: a.y + H / 2 };
+      const to = { x: right ? b.x : b.x + W, y: b.y + H / 2 };
+      const mid = right ? to.x - apart / 2 : to.x + apart / 2;
+      points = clean([from, { x: mid, y: from.y }, { x: mid, y: to.y }, to]);
+    }
+    flows[flow.index] = {
+      from: flow.from,
+      to: flow.to,
+      points,
+      resting: false,
+      quiet: !rows.forward.get(flow.index) || !!sideOf(shape, flow.to),
+      back: !rows.forward.get(flow.index),
+    };
+  }
+  return {
+    way: "right",
+    at,
+    bounds: {
+      x: 0,
+      y: 0,
+      width: Math.max(0, x - apart),
+      height: top + Math.max(0, tallest * (H + DIAGRAM.column) - DIAGRAM.column),
+    },
+    gutter: top,
+    tiers: tiersOf(shape, rows, starts, W),
+    flows,
+    settled: false,
+  };
+}
+
 const sideOf = (shape: DiagramShape, id: string) =>
   shape.parts.find((part) => part.id === id)?.side;
 
@@ -308,14 +376,14 @@ const settled = new SvelteMap<string, DiagramLayout>();
 const rowed = new Map<string, DiagramLayout>();
 const asked = new Set<string>();
 const KEPT = 48;
-const keyOf = (shape: DiagramShape, way?: DiagramWay) => `${way ?? ""}${JSON.stringify(shape)}`;
+const keyOf = (shape: DiagramShape, way: DiagramWay) => `${way}${JSON.stringify(shape)}`;
 
 /** The shape's names placed on the rows' lines: the layout at once, before the engine answers. */
-function provisional(shape: DiagramShape, key: string): DiagramLayout {
+function provisional(shape: DiagramShape, key: string, way: DiagramWay): DiagramLayout {
   let layout = rowed.get(key);
   if (!layout) {
     const rows = diagramRows(shape);
-    layout = named(shape, rowLayout(shape, rows));
+    layout = named(shape, way === "down" ? rowLayout(shape, rows) : columnLayout(shape, rows));
     if (rowed.size >= KEPT) rowed.delete(rowed.keys().next().value!);
     rowed.set(key, layout);
   }
@@ -338,29 +406,32 @@ function named(shape: DiagramShape, layout: DiagramLayout): DiagramLayout {
 
 /**
  * A diagram's layout now: the engine's once it has answered, otherwise the
- * rows while it is asked (in a browser only), so a picture appears at once and
- * settles when the answer lands. The engine picks the way the picture reads
- * unless `way` holds it to one.
+ * columns while it is asked (in a browser only), so a picture appears at once
+ * and settles when the answer lands. A picture reads left to right unless
+ * `way` holds it to reading down.
  */
-export function diagramLayout(diagram: Diagram, way?: DiagramWay): DiagramLayout {
+export function diagramLayout(diagram: Diagram, way: DiagramWay = "right"): DiagramLayout {
   const shape = diagramShape(diagram);
   const key = keyOf(shape, way);
   const done = settled.get(key);
   if (done) return done;
   if (typeof window !== "undefined" && !asked.has(key)) void settle(shape, key, way);
-  return provisional(shape, keyOf(shape));
+  return provisional(shape, key, way);
 }
 
 /** A diagram laid out by the engine, off the main thread where the page allows it. */
-export async function layoutDiagram(diagram: Diagram, way?: DiagramWay): Promise<DiagramLayout> {
+export async function layoutDiagram(
+  diagram: Diagram,
+  way: DiagramWay = "right",
+): Promise<DiagramLayout> {
   const shape = diagramShape(diagram);
   const key = keyOf(shape, way);
   return settled.get(key) ?? (await settle(shape, key, way));
 }
 
-async function settle(shape: DiagramShape, key: string, way?: DiagramWay): Promise<DiagramLayout> {
+async function settle(shape: DiagramShape, key: string, way: DiagramWay): Promise<DiagramLayout> {
   asked.add(key);
-  if (!shape.parts.length) return provisional(shape, keyOf(shape));
+  if (!shape.parts.length) return provisional(shape, key, way);
   try {
     const { engineLayout } = await import("./diagram-worker");
     const layout = named(shape, await engineLayout(shape, way));
@@ -369,7 +440,7 @@ async function settle(shape: DiagramShape, key: string, way?: DiagramWay): Promi
     return layout;
   } catch {
     // The rows stand for good; asking again would fail the same way.
-    return provisional(shape, keyOf(shape));
+    return provisional(shape, key, way);
   }
 }
 

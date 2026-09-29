@@ -208,6 +208,21 @@ function fromElk(
     if (sides?.before) u.set(sides.before, x);
     if (sides?.after) u.set(sides.after, x + block.offset + across + block.after!);
   }
+  // A chain reads as one spine: a part alone in its row that the part alone in the row
+  // before flows into stands in line with it where the engine set it only a port's step aside.
+  for (let at = 1; at < rows.rows.length; at += 1) {
+    const [only] = rows.rows[at]!;
+    const [before] = rows.rows[at - 1]!;
+    if (rows.rows[at]!.length !== 1 || rows.rows[at - 1]!.length !== 1 || !only || !before)
+      continue;
+    if (rows.beside.has(only) || rows.beside.has(before)) continue;
+    const fed = shape.flows.some(
+      (flow) =>
+        (flow.from === before && flow.to === only) || (flow.from === only && flow.to === before),
+    );
+    const step = u.get(only)! - u.get(before)!;
+    if (fed && step && Math.abs(step) <= across * 0.6) u.set(only, u.get(before)!);
+  }
   const trunk = (tree: number, at: number) => {
     const child = placed.get(passOf(tree, at));
     return (child?.x ?? 0) + ROUTE.pass / 2;
@@ -679,22 +694,11 @@ async function laidOut(shape: DiagramShape, way: DiagramWay): Promise<DiagramLay
   return best!;
 }
 
-/**
- * A diagram laid out by ELK and routed: in a worker where the page allows
- * one, else on this thread. Both ways are laid out unless `way` holds it to
- * one; the picture takes the way that fits a result's width without being
- * drawn smaller, the shorter where both fit, the narrower where neither does.
- */
-export async function engineLayout(shape: DiagramShape, way?: DiagramWay): Promise<DiagramLayout> {
+/** A diagram laid out by ELK and routed: in a worker where the page allows one, else on this thread. */
+export async function engineLayout(
+  shape: DiagramShape,
+  way: DiagramWay = "right",
+): Promise<DiagramLayout> {
   if (!shape.parts.length) throw new Error("empty");
-  const found: DiagramLayout[] = [];
-  for (const each of way ? [way] : (["down", "right"] as const))
-    found.push(await laidOut(shape, each));
-  const fitting = found.filter(fits);
-  if (fitting.length)
-    return fitting.sort(
-      (a, b) =>
-        a.bounds.height - b.bounds.height || Number(b.way === "right") - Number(a.way === "right"),
-    )[0]!;
-  return found.sort((a, b) => a.bounds.width - b.bounds.width)[0]!;
+  return laidOut(shape, way);
 }
