@@ -7,9 +7,7 @@ use std::future::Future;
 use std::sync::Mutex;
 
 use serde_json::Value;
-use zephium_core::work::{
-    artifact::*, collection::WorkBrowseCollection, runtime::*, search::WorkPublicSearchProvider, *,
-};
+use zephium_core::work::{artifact::*, collection::WorkBrowseCollection, runtime::*, search::*, *};
 
 use super::call::clip;
 use super::run::LeadRun;
@@ -18,6 +16,10 @@ use crate::work_runtime::{WorkAttemptProbe, WorkNodeAttempt};
 
 /// At most this many agent pages are live at once across a run's parts.
 pub(crate) const LIVE_PAGES: usize = 2;
+/// Searches in flight at once across a run's parts. Each holds one of the
+/// run's provider slots (four) while it searches or ranks; past that a
+/// search waits instead of failing to be sent.
+const LIVE_SEARCHES: usize = 3;
 const SEARCH_ANSWER_CHARS: usize = 2_400;
 const SEARCH_SOURCES: usize = 8;
 const RECORD_LINES: usize = 32;
@@ -29,6 +31,7 @@ const FILE_TEXT_BYTES: usize = 6 * 1024;
 pub(crate) struct SharedBrowser<B> {
     browser: Mutex<B>,
     pages: tokio::sync::Semaphore,
+    searches: tokio::sync::Semaphore,
     sites: Mutex<Vec<(String, std::sync::Arc<tokio::sync::Mutex<()>>)>>,
 }
 impl<B> SharedBrowser<B> {
@@ -36,6 +39,7 @@ impl<B> SharedBrowser<B> {
         Self {
             browser: Mutex::new(browser),
             pages: tokio::sync::Semaphore::new(LIVE_PAGES),
+            searches: tokio::sync::Semaphore::new(LIVE_SEARCHES),
             sites: Mutex::new(Vec::new()),
         }
     }
@@ -154,10 +158,14 @@ where
             }
         };
         let kinds: Vec<WorkStepKindV1> = requests.iter().map(|r| r.kind.clone()).collect();
+        let search = SearchLane {
+            inner: self.search,
+            permits: &self.browser.searches,
+        };
         let outcome = driver
             .run(
                 self.attempt,
-                self.search,
+                &search,
                 &mut gate,
                 self.run.turn(),
                 before.len(),
@@ -516,6 +524,44 @@ where
     }
 }
 
+/// The run's search provider behind its shared search permits.
+struct SearchLane<'a> {
+    inner: &'a dyn WorkPublicSearchProvider,
+    permits: &'a tokio::sync::Semaphore,
+}
+impl WorkPublicSearchProvider for SearchLane<'_> {
+    fn minimum_reservation(
+        &self,
+        scope: &WorkPublicSearchScope,
+        context: &[zephium_core::work::context::WorkContextBody],
+    ) -> Option<WorkUsage> {
+        self.inner.minimum_reservation(scope, context)
+    }
+    fn rerank<'a>(
+        &'a self,
+        scope: &'a WorkPublicSearchScope,
+        evidence: &'a WorkProviderSearchEvidenceV1,
+        limits: WorkExecutionLimits,
+        deadline: std::time::Instant,
+    ) -> WorkPublicSearchRankingFuture<'a> {
+        Box::pin(async move {
+            let _permit = self.permits.acquire().await;
+            self.inner.rerank(scope, evidence, limits, deadline).await
+        })
+    }
+    fn search<'a>(
+        &'a self,
+        scope: &'a WorkPublicSearchScope,
+        context: &'a [zephium_core::work::context::WorkContextBody],
+        limits: WorkExecutionLimits,
+    ) -> WorkPublicSearchFuture<'a> {
+        Box::pin(async move {
+            let _permit = self.permits.acquire().await;
+            self.inner.search(scope, context, limits).await
+        })
+    }
+}
+
 fn host(url: &str) -> String {
     url::Url::parse(url)
         .ok()
@@ -579,4 +625,72 @@ pub(crate) fn collection(value: Option<&Value>) -> Result<Option<WorkBrowseColle
         "records needs a title, 1 to 32 max_items, 1 to 16 distinct ASCII column names other than name, at most three image_url columns, money only with generate, and (columns + 1) × max_items ≤ 256".to_owned()
     })?;
     Ok(Some(collection))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Counting {
+        live: AtomicUsize,
+        most: AtomicUsize,
+    }
+    impl WorkPublicSearchProvider for Counting {
+        fn search<'a>(
+            &'a self,
+            _: &'a WorkPublicSearchScope,
+            _: &'a [zephium_core::work::context::WorkContextBody],
+            _: WorkExecutionLimits,
+        ) -> WorkPublicSearchFuture<'a> {
+            Box::pin(async move {
+                let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+                self.most.fetch_max(live, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                self.live.fetch_sub(1, Ordering::SeqCst);
+                Err(WorkPublicSearchError::NotDispatched(WorkError::Unavailable))
+            })
+        }
+    }
+
+    #[test]
+    fn a_runs_searches_wait_for_a_provider_slot_instead_of_crowding_it() {
+        let provider = Counting::default();
+        let permits = tokio::sync::Semaphore::new(LIVE_SEARCHES);
+        let lane = SearchLane {
+            inner: &provider,
+            permits: &permits,
+        };
+        let scope = WorkPublicSearchScope {
+            provider: WorkSearchProvider::OpenAi,
+            model: PUBLIC_SEARCH_MODEL.into(),
+            query: "public query".into(),
+        };
+        let limits = WorkExecutionLimits {
+            model_tokens: 1,
+            cost_micro_usd: 1,
+            operations: 1,
+            timeout_seconds: 1,
+            max_workers: 1,
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut pending: Vec<_> =
+                    (0..8).map(|_| lane.search(&scope, &[], limits)).collect();
+                std::future::poll_fn(|cx| {
+                    pending.retain_mut(|search| search.as_mut().poll(cx).is_pending());
+                    if pending.is_empty() {
+                        std::task::Poll::Ready(())
+                    } else {
+                        std::task::Poll::Pending
+                    }
+                })
+                .await;
+            });
+        assert_eq!(provider.most.load(Ordering::SeqCst), LIVE_SEARCHES);
+    }
 }
