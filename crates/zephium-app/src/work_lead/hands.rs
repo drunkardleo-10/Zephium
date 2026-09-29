@@ -566,8 +566,15 @@ pub(crate) fn collection(value: Option<&Value>) -> Result<Option<WorkBrowseColle
     let Some(value) = value.filter(|v| !v.is_null()) else {
         return Ok(None);
     };
-    let collection: WorkBrowseCollection = serde_json::from_value(value.clone())
+    let mut collection: WorkBrowseCollection = serde_json::from_value(value.clone())
         .map_err(|error| format!("records does not match its shape: {error}"))?;
+    // A row missing a price or a picture is still a find the lead can use;
+    // only a link is ever required.
+    for column in &mut collection.columns {
+        if column.value != zephium_core::work::collection::WorkBrowseValue::Url {
+            column.required = false;
+        }
+    }
     collection.validate().map_err(|_| {
         "records needs a title, 1 to 32 max_items, 1 to 16 distinct ASCII column names other than name, at most three image_url columns, money only with generate, and (columns + 1) × max_items ≤ 256".to_owned()
     })?;

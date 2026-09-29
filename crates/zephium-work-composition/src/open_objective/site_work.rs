@@ -49,11 +49,10 @@ pub(crate) enum SiteEffect {
 }
 
 /// Words on a control or its region, by what they commit. Earlier lists win.
-const PURCHASE_WORDS: [&str; 20] = [
+const PURCHASE_WORDS: [&str; 19] = [
     "buy",
     "purchase",
     "pay",
-    "checkout",
     "order",
     "book",
     "reserve",
@@ -1481,6 +1480,23 @@ mod tests {
         assert_eq!(
             policy.human_wall(&after),
             Some(AgentBrowserHumanReason::Verification)
+        );
+    }
+
+    #[test]
+    fn a_stays_checkout_date_is_no_purchase() {
+        let widget = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"button","n":"Change dates; Check-in: Add date; Checkout: Add date","o":1,"ak":1}),
+            json!({"k":3,"p":0,"r":"button","n":"Reserve","o":1,"ak":1}),
+        ]);
+        assert_eq!(
+            effect(&widget, 2, SemanticActionKind::Click),
+            SiteEffect::Draft
+        );
+        assert_eq!(
+            effect(&widget, 3, SemanticActionKind::Click),
+            SiteEffect::Commit(Consequence::Purchase)
         );
     }
 
