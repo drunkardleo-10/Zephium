@@ -532,7 +532,19 @@ where
                     }
                 }
             }
-            WorkStepKindV1::Read { url, .. } => {
+            WorkStepKindV1::Read { url, goal, .. } => {
+                let measured = step.measurements.as_ref();
+                crate::work_trace::record(format_args!(
+                    "work: phase=page site={} task={} status={:?} wall_ms={} calls={} actions={} tokens={} records={}",
+                    crate::work_sites::site_of(url).unwrap_or_default(),
+                    goal.is_some(),
+                    step.status,
+                    measured.map_or(0, |m| m.wall_millis),
+                    measured.map_or(0, |m| m.planner_calls),
+                    measured.map_or(0, |m| m.native_actions),
+                    measured.map_or(0, |m| m.model_tokens),
+                    step.artifacts.len(),
+                ));
                 let title = step
                     .local
                     .as_ref()

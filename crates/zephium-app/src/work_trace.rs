@@ -11,7 +11,7 @@ pub fn install(sink: Arc<WorkTraceSink>) {
     let _ = SINK.set(sink);
 }
 
-pub(crate) fn record(arguments: std::fmt::Arguments<'_>) {
+pub fn record(arguments: std::fmt::Arguments<'_>) {
     if let Some(sink) = SINK.get() {
         sink(arguments);
     }

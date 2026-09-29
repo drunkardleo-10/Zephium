@@ -558,6 +558,8 @@ impl MacosWorkComposition {
         let mut human_wait: Option<Instant> = None;
         // A bot check nobody took ended the page within its short wait.
         let mut gave_up_on_person = false;
+        // ...at once, for a research page: it was skipped, not waited on.
+        let mut skipped = false;
         // The part was told its page waits on the person.
         let mut told_waiting = false;
         let mut disposition = None;
@@ -1253,8 +1255,14 @@ impl MacosWorkComposition {
                             trace(&format!("human:waiting:{human:?}"));
                             now
                         });
-                        let cap = human_wait_cap(intervention.as_ref());
-                        let wait = if cap < MAX_WORK_HUMAN_WAIT_MILLIS {
+                        let task = resume_plan
+                            .as_ref()
+                            .is_some_and(|plan| page_task(&plan.request));
+                        let cap = human_wait_cap(intervention.as_ref(), task);
+                        skipped = cap == 0;
+                        let wait = if skipped {
+                            None
+                        } else if cap < MAX_WORK_HUMAN_WAIT_MILLIS {
                             Some(zephium_app::work_agent::WorkPageWait::Check)
                         } else if intervention.as_ref().is_some_and(|intervention| {
                             intervention.kind
@@ -1417,11 +1425,16 @@ impl MacosWorkComposition {
                     _ if not_ready => Some("The browser was not ready for this page"),
                     Some(AgentWorkDisposition::Succeeded | AgentWorkDisposition::Cancelled) => None,
                     Some(AgentWorkDisposition::WaitingForHuman) if gave_up_on_person => {
+                        let url = page.as_ref().map(|(_, url)| url.as_str());
                         return Ok(BrowserRun::closed(
                             result,
                             usage,
                             intervention,
-                            Some(needs_you(page.as_ref().map(|(_, url)| url.as_str()))),
+                            Some(if skipped {
+                                skipped_check(url)
+                            } else {
+                                needs_you(url)
+                            }),
                             measure.settle(started, model_in_flight),
                             helped,
                         ));
@@ -1470,13 +1483,26 @@ fn refusal_line(snapshot: &zephium_app::RetainedWorkSnapshot, yours: bool) -> St
 /// waits briefly for the person: the part then ends with what it has. A
 /// sign-in or a decision keeps the long wait.
 const HUMAN_CHECK_WAIT_MILLIS: u64 = 90_000;
-fn human_wait_cap(intervention: Option<&WorkInterventionV1>) -> u64 {
+/// A research read (one page, no task) behind a bot check is skipped at
+/// once: its part reads its other sources instead of waiting on a person.
+fn human_wait_cap(intervention: Option<&WorkInterventionV1>, task: bool) -> u64 {
     use zephium_core::work::runtime::WorkInterventionKindV1 as Kind;
     match intervention.map(|intervention| intervention.kind) {
+        Some(Kind::Challenge) if !task => 0,
         Some(Kind::Challenge | Kind::Permission | Kind::UnsupportedInteraction) => {
             HUMAN_CHECK_WAIT_MILLIS
         }
         _ => MAX_WORK_HUMAN_WAIT_MILLIS,
+    }
+}
+/// "state.gov asks for a human check", for a research page skipped at once.
+fn skipped_check(url: Option<&str>) -> String {
+    let name = url
+        .and_then(zephium_app::work_sites::site_of)
+        .map(|site| zephium_app::work_sites::site_name(&site));
+    match name {
+        Some(name) => format!("{name} asks for a human check; its page was skipped"),
+        None => "The page asks for a human check; it was skipped".into(),
     }
 }
 /// "Airbnb needs you to continue", from the page's own site.
@@ -1774,8 +1800,12 @@ mod closed_result_tests {
             kind: Kind::SignIn,
             origin: None,
         };
-        assert_eq!(human_wait_cap(Some(&check)), HUMAN_CHECK_WAIT_MILLIS);
-        assert_eq!(human_wait_cap(Some(&sign_in)), MAX_WORK_HUMAN_WAIT_MILLIS);
+        assert_eq!(human_wait_cap(Some(&check), true), HUMAN_CHECK_WAIT_MILLIS);
+        assert_eq!(human_wait_cap(Some(&check), false), 0);
+        assert_eq!(
+            human_wait_cap(Some(&sign_in), false),
+            MAX_WORK_HUMAN_WAIT_MILLIS
+        );
         let since = Instant::now();
         let late = since + Duration::from_secs(3600);
         assert!(human_wait_expired(
@@ -1783,8 +1813,13 @@ mod closed_result_tests {
             since,
             late,
             None,
-            human_wait_cap(Some(&check))
+            human_wait_cap(Some(&check), true)
         ));
+        assert!(human_wait_expired(since, since, late, None, 0));
+        assert_eq!(
+            skipped_check(Some("https://travel.state.gov/content/visas.html")),
+            "state.gov asks for a human check; its page was skipped"
+        );
         assert_eq!(
             needs_you(Some("https://www.airbnb.com/s/homes")),
             "Airbnb needs you to continue"
@@ -2048,7 +2083,16 @@ async fn configure_decisions(
             .map_err(|_| WorkError::Capacity)?;
             match loaded {
                 Ok(Ok(credential)) => AgentBrowserDecisionProvider::TypeSafe(credential),
-                _ => AgentBrowserDecisionProvider::Emulation,
+                failed => {
+                    let cause = match failed {
+                        Ok(Err(error)) => format!("{error:?}"),
+                        _ => "Join".into(),
+                    };
+                    zephium_app::work_trace::record(format_args!(
+                        "work: phase=decisions requested=recommended backend=emulation cause={cause}"
+                    ));
+                    AgentBrowserDecisionProvider::Emulation
+                }
             }
         }
         WorkDecisionPreference::Emulation => AgentBrowserDecisionProvider::Emulation,
