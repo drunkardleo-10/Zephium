@@ -1303,6 +1303,20 @@ mod tests {
         assert!(!gate.failed());
     }
     #[test]
+    fn a_committed_site_page_that_never_finishes_is_taken_as_loaded_once() {
+        let start = "https://www.airbnb.com/rooms/1";
+        let gate = site_gate(start);
+        assert!(!gate.accept_committed_load());
+        gate.observe(event(1, E::Started, start)).unwrap();
+        assert!(!gate.accept_committed_load());
+        gate.observe(event(1, E::Committed, start)).unwrap();
+        assert!(gate.accept_committed_load());
+        assert!(gate.finalization_pending());
+        assert!(!gate.accept_committed_load());
+        settle(&gate, start);
+        assert!(gate.ready(Some(start)) && !gate.failed());
+    }
+    #[test]
     fn a_consent_host_saves_the_choice_with_one_post_on_any_action() {
         use wry::AppleNavigationType as T;
         let start = "https://www.google.com/travel/flights";
