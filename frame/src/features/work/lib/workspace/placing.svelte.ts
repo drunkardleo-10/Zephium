@@ -31,6 +31,8 @@ type Deps = {
   centre: () => CanvasPosition | null;
   /** Where a window point lands on the canvas. */
   at: (x: number, y: number) => CanvasPosition | null;
+  /** A dropped file: its path joins the request, so the run asks for its folder in place. */
+  file?: (path: string) => void;
 };
 
 /**
@@ -100,7 +102,8 @@ export class CanvasPlacing {
           admitted?.status === "ok" &&
           admitted.data.kind === "refused" &&
           admitted.data.not_a_folder;
-        if (!(dropped && file)) this.#refuse();
+        if (dropped && file) this.#deps.file?.(path);
+        else this.#refuse();
         return false;
       }
       return await this.#placeFolder(admitted.data, at ?? null);
@@ -145,7 +148,7 @@ export class CanvasPlacing {
   /**
    * Finder drops: the application hands the frame the dropped paths and the
    * drop point in CSS pixels. Granted folders land where they were dropped; a
-   * file among them is simply not a folder, and says nothing.
+   * file's path joins the request being written.
    */
   listen(): () => void {
     const dropped = (event: Event) => {

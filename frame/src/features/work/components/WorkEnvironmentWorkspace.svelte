@@ -464,6 +464,27 @@
         return again();
     }
   }
+  /** Folder questions seen open here: once allowed, the folder stands on the canvas. */
+  const folderAsks: Record<string, true> = {};
+  $effect(() => {
+    const execution = objectiveSession?.projection?.executions.at(-1);
+    for (const step of execution?.steps ?? []) {
+      const kind = step.kind;
+      const folder = step.local?.folder;
+      if (kind.kind !== "ask" || kind.purpose !== "folder" || !folder) continue;
+      if (!kind.answer) {
+        if (step.status === "running") folderAsks[step.id] = true;
+        continue;
+      }
+      if (!folderAsks[step.id]) continue;
+      delete folderAsks[step.id];
+      if (kind.answer !== kind.options[0]) continue;
+      const placed = snapshot?.elements.some(
+        (element) => element.reference.kind === "folder" && element.reference.path === folder,
+      );
+      if (!placed) untrack(() => void placing.addFolder(folder));
+    }
+  });
   $effect(() => {
     const current = objectiveSession;
     const execution = current?.projection?.executions.at(-1);
@@ -674,6 +695,11 @@
         : null;
     },
     at: (x, y) => canvasRef?.flowPosition(x, y) ?? null,
+    file: (path) => {
+      const draft = session.composer.trimEnd();
+      if (draft.split(/\s+/u).includes(path)) return;
+      session.composer = draft ? `${draft} ${path}` : path;
+    },
   });
   onMount(() => placing.listen());
   function host(url: string): string {
