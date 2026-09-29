@@ -569,8 +569,14 @@ impl AgentWorkRetainedController {
             .map_err(|_| AgentWorkFailure::Contract)?;
         browser.check_health(now)?;
         let binding = browser.binding();
+        let origin_admitted = settled_origin_admitted(
+            input.context.document_policy,
+            &input.context.origin,
+            binding.frame().origin(),
+            binding.document(),
+        );
         if binding.frame().context().identity() != input.context.identity
-            || binding.frame().origin() != &input.context.origin
+            || !origin_admitted
             || binding.requested_document() != &input.context.target
             || binding.document_policy() != input.context.document_policy
             || !input
@@ -623,6 +629,20 @@ impl AgentWorkRetainedController {
             scope,
         ))
     }
+}
+
+/// The frame a retained page starts on: the requested origin, or for a site
+/// session another origin of its site the load settled on (a consent or
+/// locale host), when the frame stands for that settled document.
+fn settled_origin_admitted(
+    policy: zephium_agentic::WorkBrowserDocumentPolicy,
+    requested: &SemanticOrigin,
+    frame: &SemanticOrigin,
+    document: &ContextNavigationTarget,
+) -> bool {
+    frame == requested
+        || (policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            && SemanticOrigin::parse(document.as_url().as_str()).is_ok_and(|origin| &origin == frame))
 }
 
 impl zephium_agent_runtime::AgentRuntimeScopedController for AgentWorkRetainedController {
@@ -1106,5 +1126,45 @@ impl AgentWorkController {
             Some(deadline).filter(|_| cleanup.is_some()),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod settled_origin_tests {
+    use super::*;
+
+    #[test]
+    fn a_site_session_starts_on_the_origin_its_load_settled_on() {
+        use zephium_agentic::WorkBrowserDocumentPolicy as Policy;
+        let origin = |url: &str| SemanticOrigin::parse(url).unwrap();
+        let target = |url: &str| ContextNavigationTarget::parse(url).unwrap();
+        let requested = origin("https://www.google.com/");
+        let consent = target("https://consent.google.com/m?hl=en");
+        assert!(settled_origin_admitted(
+            Policy::SiteSession,
+            &requested,
+            &origin("https://consent.google.com/"),
+            &consent
+        ));
+        // The frame must stand for the settled document.
+        assert!(!settled_origin_admitted(
+            Policy::SiteSession,
+            &requested,
+            &origin("https://accounts.google.com/"),
+            &consent
+        ));
+        // Other policies keep the exact origin.
+        assert!(!settled_origin_admitted(
+            Policy::Exact,
+            &requested,
+            &origin("https://consent.google.com/"),
+            &consent
+        ));
+        assert!(settled_origin_admitted(
+            Policy::Exact,
+            &requested,
+            &requested,
+            &target("https://www.google.com/travel/flights")
+        ));
     }
 }
