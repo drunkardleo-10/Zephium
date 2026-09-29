@@ -15,6 +15,7 @@ import {
 import { roleGlyph } from "../lib/diagram-icons";
 import { gutterOf } from "../lib/diagram-metrics";
 import { diagramRows } from "../lib/diagram-rows";
+import { routeAir } from "../lib/diagram-route";
 import { placePlates } from "../lib/diagram-labels";
 import ApiGatewayIcon from "@hugeicons/core-free-icons/ApiGatewayIcon";
 import BucketIcon from "@hugeicons/core-free-icons/BucketIcon";
@@ -114,6 +115,68 @@ test("a row wider than five parts wraps into balanced rows", () => {
   expect(diagramRows(shape).rows).toEqual([["hub"], ["a", "b", "c", "d"], ["e", "f", "g"]]);
 });
 
+test("a leaf that would take its tier's last row alone stands beside the part feeding it", () => {
+  const shape = diagramShape({
+    kind: "diagram",
+    nodes: [
+      node("web", "edge"),
+      node("api", "app"),
+      node("auth", "app"),
+      node("billing", "app"),
+      node("db", "data"),
+      node("backup", "data"),
+    ],
+    edges: [
+      edge("web", "api"),
+      edge("api", "auth", "Identity"),
+      edge("api", "billing"),
+      edge("api", "db"),
+      edge("db", "backup"),
+    ],
+    layers: [
+      { id: "edge", name: "Edge" },
+      { id: "app", name: "Application" },
+      { id: "data", name: "Data" },
+    ],
+  });
+  const rows = diagramRows(shape);
+  // The API flows on to the data, so its leaves stand beside it; a pipeline's end stays below.
+  expect(rows.rows).toEqual([["web"], ["api"], ["db"], ["backup"]]);
+  expect(rows.beside.get("api")).toEqual({ after: "auth", before: "billing" });
+  expect(rows.rowOf.get("auth")).toBe(1);
+  expect([...rows.forward.values()]).toEqual([true, true, true, true, true]);
+});
+
+test("one air: a tree's own branches run above the run trees share into the same ports", () => {
+  const { levels, level } = routeAir([
+    {
+      tree: 0,
+      stems: [300],
+      drops: [
+        { key: "pc|db", at: 100 },
+        { key: "pc|files", at: 200 },
+        { key: "pc|cache", at: 320 },
+      ],
+    },
+    {
+      tree: 1,
+      stems: [150],
+      drops: [
+        { key: "pc|db", at: 100 },
+        { key: "pc|files", at: 200 },
+      ],
+    },
+  ]);
+  // The API's cache is its own; both reach the database and files on one joined run.
+  expect(levels).toBe(2);
+  expect(level.get("0|pc|cache")).toBe(0);
+  expect(level.get("0|pc|db")).toBe(1);
+  expect(level.get("1|pc|db")).toBe(1);
+  expect(level.get("1|pc|files")).toBe(1);
+  // A stem straight over its only port needs no run.
+  expect(routeAir([{ tree: 0, stems: [40], drops: [{ key: "pc|a", at: 40 }] }]).levels).toBe(0);
+});
+
 test("the rows' layout stands at once: tiers named beside their first row, rows centred", () => {
   const layout = diagramLayout({
     kind: "diagram",
@@ -129,7 +192,7 @@ test("the rows' layout stands at once: tiers named beside their first row, rows 
   expect(layout.gutter).toBe(left);
   expect(layout.at.web).toEqual({ x: left, y: 0 });
   expect(layout.at.api).toEqual({ x: left, y: H + DIAGRAM.row + DIAGRAM.tier });
-  expect(layout.tiers.map((tier) => [tier.name, tier.y])).toEqual([
+  expect(layout.tiers.map((tier) => [tier.name, tier.start])).toEqual([
     ["Edge", 0],
     ["Application", H + DIAGRAM.row + DIAGRAM.tier],
   ]);

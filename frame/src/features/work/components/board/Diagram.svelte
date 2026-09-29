@@ -13,6 +13,7 @@
     partAlong,
     plateHeight,
     plateWidth,
+    type DiagramWay,
   } from "../../lib/diagram";
   import { roleGlyph } from "../../lib/diagram-icons";
   import { PART_TEXT, lineCount } from "../../lib/diagram-text";
@@ -26,6 +27,7 @@
     width,
     actions,
     ask: asking,
+    way,
   }: {
     block?: DiagramBlock;
     diagram?: DiagramBlock["diagram"];
@@ -33,11 +35,13 @@
     width: number;
     actions?: BoardActions;
     ask?: (subject: string) => void;
+    /** Holds the picture to one way of reading; otherwise the one that fits. */
+    way?: DiagramWay;
   } = $props();
   const probe = getContext<((origin: string) => void) | undefined>(canvasProbe);
   const diagram = $derived(given ?? block!.diagram);
   const ask = $derived(asking ?? actions?.ask);
-  const layout = $derived(diagramLayout(diagram));
+  const layout = $derived(diagramLayout(diagram, way));
   const bounds = $derived(layout.bounds);
   const scale = $derived(Math.min(1, width / Math.max(1, bounds.width)));
   const { width: W, height: H } = DIAGRAM.node;
@@ -142,14 +146,21 @@
     style:block-size={`${bounds.height}px`}
     style:transform={scale < 1 ? `scale(${scale})` : undefined}
   >
-    {#each layout.tiers as tier (tier.name)}<div
-        class="tier"
-        style:inset-block-start={`${tier.y - bounds.y}px`}
-        style:block-size={`${tier.height}px`}
-        style:inline-size={`${layout.gutter - 20}px`}
-      >
-        <span>{tier.name}</span>
-      </div>{/each}
+    {#each layout.tiers as tier (tier.name)}{#if layout.way === "down"}<div
+          class="tier"
+          style:inset-block-start={`${tier.start - bounds.y}px`}
+          style:block-size={`${tier.extent}px`}
+          style:inline-size={`${layout.gutter - 20}px`}
+        >
+          <span>{tier.name}</span>
+        </div>{:else}<div
+          class="tier across"
+          style:inset-inline-start={`${tier.start - bounds.x}px`}
+          style:inline-size={`${tier.extent}px`}
+          style:block-size={`${layout.gutter - 14}px`}
+        >
+          <span>{tier.name}</span>
+        </div>{/if}{/each}
     <svg class="flows" width={bounds.width} height={bounds.height} aria-hidden="true">
       {#each flows as flow (flow.index)}{@const points = shift(flow.points)}<g
           class="flow"
@@ -252,6 +263,16 @@
     box-sizing: border-box;
     padding-block-start: 7px;
     border-inline-end: 1px solid var(--color-border);
+  }
+
+  /* Read to the right, a tier names its columns from above, a hairline under their width. */
+  .tier.across {
+    inset-block-start: 0;
+    display: flex;
+    align-items: flex-end;
+    padding-block: 0 8px;
+    border-inline-end: 0;
+    border-block-end: 1px solid var(--color-border);
   }
 
   .tier span {

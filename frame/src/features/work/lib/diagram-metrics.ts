@@ -16,6 +16,24 @@ export const DIAGRAM = {
   reach: 1120,
 } as const satisfies Record<string, number | CanvasSize>;
 
+/**
+ * The air between rows as its lines need it: a stem from a part to the first
+ * bus, the step between buses, the branch below the last bus (room for a
+ * name), air crossed only by straight lines, the room a trunk takes passing
+ * through a row, how far off a part's centre a reply's or a pair's port
+ * stands (of its width across), and the tiers' names over the columns of a
+ * picture that reads to the right.
+ */
+export const ROUTE = {
+  stem: 18,
+  track: 14,
+  drop: 34,
+  straight: 44,
+  pass: 10,
+  port: 0.28,
+  header: 40,
+} as const;
+
 /** A flow's name on its line: caption characters at about 6.6 px, padded, up to two lines. */
 export const PLATE = { char: 6.6, pad: 12, line: 15, height: 18, max: 180 } as const;
 const plateRun = (label: string) => Math.ceil(label.trim().length * PLATE.char + PLATE.pad);

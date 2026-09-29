@@ -76,16 +76,22 @@ export type DiagramFlow = {
   /** The other way of a pair: drawn on its partner's line, only its head its own. */
   twin?: boolean;
 };
-/** A tier's name, level with the top of its first row, in the column left of the parts. */
-export type DiagramTier = { name: string; y: number; height: number };
+/**
+ * A tier's name and the rows it holds, along the way the picture reads: its
+ * top and height when it reads down, its left and width when it reads right.
+ */
+export type DiagramTier = { name: string; start: number; extent: number };
+/** The way a picture reads: rows down the page, or columns to the right. */
+export type DiagramWay = "down" | "right";
 /**
  * Where everything stands, from the picture's corner: parts, flows by their
  * index, the tiers' names, and the whole picture's `bounds`.
  */
 export type DiagramLayout = {
+  way: DiagramWay;
   at: Record<string, CanvasPosition>;
   bounds: Rect;
-  /** The column left of the parts that the tiers are named in. */
+  /** The room the tiers are named in: a column at the left, or a band over the columns. */
   gutter: number;
   tiers: DiagramTier[];
   flows: Record<number, DiagramFlow>;
@@ -95,45 +101,77 @@ export type DiagramLayout = {
 
 /**
  * The layout while the engine answers, and wherever it cannot run: the rows
- * centred on each other, each flow an elbow down from its source to its target.
+ * centred on each other down the picture, each flow an elbow from its source
+ * to its target, a part set beside another joined straight across.
  */
 function rowLayout(shape: DiagramShape, rows: DiagramRows): DiagramLayout {
   const { width: W, height: H } = DIAGRAM.node;
   const left = gutterOf(shape.lanes);
-  const widest = Math.max(0, ...rows.rows.map((row) => row.length));
-  const span = (count: number) => count * W + Math.max(0, count - 1) * DIAGRAM.column;
+  const side = 64;
+  const block = (id: string) => {
+    const sides = rows.beside.get(id);
+    return W + (sides?.before ? W + side : 0) + (sides?.after ? W + side : 0);
+  };
+  const span = (row: readonly string[]) =>
+    row.reduce((sum, id) => sum + block(id), 0) + Math.max(0, row.length - 1) * DIAGRAM.column;
+  const widest = Math.max(0, ...rows.rows.map(span));
   const at: Record<string, CanvasPosition> = {};
+  const starts: number[] = [];
   let y = 0;
   rows.rows.forEach((row, index) => {
     if (index && rows.tierStart.has(index)) y += DIAGRAM.tier;
-    const x = left + (span(widest) - span(row.length)) / 2;
-    row.forEach((id, column) => (at[id] = { x: x + column * (W + DIAGRAM.column), y }));
+    starts.push(y);
+    let x = left + (widest - span(row)) / 2;
+    for (const id of row) {
+      const sides = rows.beside.get(id);
+      if (sides?.before) {
+        at[sides.before] = { x, y };
+        x += W + side;
+      }
+      at[id] = { x, y };
+      x += W;
+      if (sides?.after) {
+        at[sides.after] = { x: x + side, y };
+        x += W + side;
+      }
+      x += DIAGRAM.column;
+    }
     y += H + DIAGRAM.row;
   });
   const flows: Record<number, DiagramFlow> = {};
   for (const flow of shape.flows) {
     const a = at[flow.from]!;
     const b = at[flow.to]!;
-    const down = a.y < b.y;
-    const from = { x: a.x + W / 2, y: down ? a.y + H : a.y };
-    const to = { x: b.x + W / 2, y: down ? b.y : b.y + H };
-    const mid = down ? to.y - DIAGRAM.row / 2 : to.y + DIAGRAM.row / 2;
+    let points: CanvasPosition[];
+    if (a.y === b.y) {
+      const right = a.x < b.x;
+      const mid = a.y + H / 2;
+      points = [
+        { x: right ? a.x + W : a.x, y: mid },
+        { x: right ? b.x : b.x + W, y: mid },
+      ];
+    } else {
+      const down = a.y < b.y;
+      const from = { x: a.x + W / 2, y: down ? a.y + H : a.y };
+      const to = { x: b.x + W / 2, y: down ? b.y : b.y + H };
+      const mid = down ? to.y - DIAGRAM.row / 2 : to.y + DIAGRAM.row / 2;
+      points = clean([from, { x: from.x, y: mid }, { x: to.x, y: mid }, to]);
+    }
     flows[flow.index] = {
       from: flow.from,
       to: flow.to,
-      points: clean([from, { x: from.x, y: mid }, { x: to.x, y: mid }, to]),
+      points,
       resting: false,
       quiet: !rows.forward.get(flow.index) || !!sideOf(shape, flow.to),
       back: !rows.forward.get(flow.index),
     };
   }
-  const width = left + span(widest);
-  const height = Math.max(0, y - DIAGRAM.row);
   return {
+    way: "down",
     at,
-    bounds: { x: 0, y: 0, width, height },
+    bounds: { x: 0, y: 0, width: left + widest, height: Math.max(0, y - DIAGRAM.row) },
     gutter: left,
-    tiers: tiersOf(shape, rows, at),
+    tiers: tiersOf(shape, rows, starts, H),
     flows,
     settled: false,
   };
@@ -142,20 +180,20 @@ function rowLayout(shape: DiagramShape, rows: DiagramRows): DiagramLayout {
 const sideOf = (shape: DiagramShape, id: string) =>
   shape.parts.find((part) => part.id === id)?.side;
 
-/** Each named tier at its first row: its top, and the rows it spans. */
+/** Each named tier along the way the picture reads: from its first row's start past its last. */
 export function tiersOf(
   shape: DiagramShape,
   rows: DiagramRows,
-  at: Record<string, CanvasPosition>,
+  starts: readonly number[],
+  depth: number,
 ): DiagramTier[] {
   if (!shape.lanes.length) return [];
   return rows.tiers.flatMap((tier) => {
     const name = shape.lanes[tier.lane];
-    const first = rows.rows[tier.first]?.[0];
-    const last = rows.rows[tier.last]?.[0];
-    if (name === undefined || !first || !last) return [];
-    const top = at[first]!.y;
-    return [{ name, y: top, height: at[last]!.y + DIAGRAM.node.height - top }];
+    const start = starts[tier.first];
+    const end = starts[tier.last];
+    if (name === undefined || start === undefined || end === undefined) return [];
+    return [{ name, start, extent: end + depth - start }];
   });
 }
 
@@ -270,7 +308,7 @@ const settled = new SvelteMap<string, DiagramLayout>();
 const rowed = new Map<string, DiagramLayout>();
 const asked = new Set<string>();
 const KEPT = 48;
-const keyOf = (shape: DiagramShape) => JSON.stringify(shape);
+const keyOf = (shape: DiagramShape, way?: DiagramWay) => `${way ?? ""}${JSON.stringify(shape)}`;
 
 /** The shape's names placed on the rows' lines: the layout at once, before the engine answers. */
 function provisional(shape: DiagramShape, key: string): DiagramLayout {
@@ -301,36 +339,37 @@ function named(shape: DiagramShape, layout: DiagramLayout): DiagramLayout {
 /**
  * A diagram's layout now: the engine's once it has answered, otherwise the
  * rows while it is asked (in a browser only), so a picture appears at once and
- * settles when the answer lands.
+ * settles when the answer lands. The engine picks the way the picture reads
+ * unless `way` holds it to one.
  */
-export function diagramLayout(diagram: Diagram): DiagramLayout {
+export function diagramLayout(diagram: Diagram, way?: DiagramWay): DiagramLayout {
   const shape = diagramShape(diagram);
-  const key = keyOf(shape);
+  const key = keyOf(shape, way);
   const done = settled.get(key);
   if (done) return done;
-  if (typeof window !== "undefined" && !asked.has(key)) void settle(shape, key);
-  return provisional(shape, key);
+  if (typeof window !== "undefined" && !asked.has(key)) void settle(shape, key, way);
+  return provisional(shape, keyOf(shape));
 }
 
 /** A diagram laid out by the engine, off the main thread where the page allows it. */
-export async function layoutDiagram(diagram: Diagram): Promise<DiagramLayout> {
+export async function layoutDiagram(diagram: Diagram, way?: DiagramWay): Promise<DiagramLayout> {
   const shape = diagramShape(diagram);
-  const key = keyOf(shape);
-  return settled.get(key) ?? (await settle(shape, key));
+  const key = keyOf(shape, way);
+  return settled.get(key) ?? (await settle(shape, key, way));
 }
 
-async function settle(shape: DiagramShape, key: string): Promise<DiagramLayout> {
+async function settle(shape: DiagramShape, key: string, way?: DiagramWay): Promise<DiagramLayout> {
   asked.add(key);
-  if (!shape.parts.length) return provisional(shape, key);
+  if (!shape.parts.length) return provisional(shape, keyOf(shape));
   try {
     const { engineLayout } = await import("./diagram-worker");
-    const layout = named(shape, await engineLayout(shape));
+    const layout = named(shape, await engineLayout(shape, way));
     if (settled.size >= KEPT) settled.delete(settled.keys().next().value!);
     settled.set(key, layout);
     return layout;
   } catch {
     // The rows stand for good; asking again would fail the same way.
-    return provisional(shape, key);
+    return provisional(shape, keyOf(shape));
   }
 }
 

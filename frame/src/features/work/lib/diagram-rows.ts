@@ -2,13 +2,18 @@ import type { DiagramShape } from "./diagram";
 import { DIAGRAM } from "./diagram-metrics";
 
 /**
- * The rows a diagram reads in, top to bottom: tiers in their stated order,
- * and within a tier each part one row below the furthest part of its tier
- * that flows into it. A row holds at most `across` parts; a wider one wraps.
+ * The rows a diagram reads in, along the way it reads: tiers in their stated
+ * order, and within a tier each part one row past the furthest part of its
+ * tier that flows into it. A row holds at most `across` parts; a wider one
+ * wraps. A leaf that would take the tier's last row alone, fed by one part
+ * that also flows elsewhere, stands beside that part instead (`beside`).
  */
 export type DiagramRows = {
   rows: string[][];
+  /** Each part's row, a part set beside another included. */
   rowOf: Map<string, number>;
+  /** Parts set beside the one part that flows into them: before it and after it in its row. */
+  beside: Map<string, { before?: string; after?: string }>;
   /** Each tier's lane and its first and last row. */
   tiers: { lane: number; first: number; last: number }[];
   /** Rows that open a tier after the first. */
@@ -24,6 +29,13 @@ export function diagramRows(shape: DiagramShape, across: number = DIAGRAM.across
   const rows: string[][] = [];
   const tiers: DiagramRows["tiers"] = [];
   const tierStart = new Set<number>();
+  const beside = new Map<string, { before?: string; after?: string }>();
+  const into = new Map<string, string[]>();
+  const out = new Map<string, number>();
+  for (const flow of shape.flows) {
+    into.set(flow.to, [...(into.get(flow.to) ?? []), flow.from]);
+    out.set(flow.from, (out.get(flow.from) ?? 0) + 1);
+  }
   for (const lane of lanes) {
     const ids = shape.parts.filter((part) => part.lane === lane).map((part) => part.id);
     const inside = shape.flows.filter(
@@ -33,6 +45,11 @@ export function diagramRows(shape: DiagramShape, across: number = DIAGRAM.across
     const first = rows.length;
     const byRank: string[][] = [];
     for (const id of ids) (byRank[ranks.get(id)!] ??= []).push(id);
+    const set = besides(byRank, into, out, across);
+    if (set) {
+      byRank.pop();
+      for (const [parent, sides] of set) beside.set(parent, sides);
+    }
     for (const group of byRank.filter(Boolean)) {
       const count = Math.ceil(group.length / across);
       const size = Math.ceil(group.length / count);
@@ -43,10 +60,49 @@ export function diagramRows(shape: DiagramShape, across: number = DIAGRAM.across
   }
   const rowOf = new Map<string, number>();
   rows.forEach((row, index) => row.forEach((id) => rowOf.set(id, index)));
+  for (const [parent, sides] of beside)
+    for (const id of [sides.before, sides.after]) if (id) rowOf.set(id, rowOf.get(parent)!);
+  const lateral = (from: string, to: string) =>
+    beside.get(from)?.before === to || beside.get(from)?.after === to;
   const forward = new Map(
-    shape.flows.map((flow) => [flow.index, rowOf.get(flow.from)! < rowOf.get(flow.to)!]),
+    shape.flows.map((flow) => [
+      flow.index,
+      rowOf.get(flow.from)! < rowOf.get(flow.to)! || lateral(flow.from, flow.to),
+    ]),
   );
-  return { rows, rowOf, tiers, tierStart, forward };
+  return { rows, rowOf, beside, tiers, tierStart, forward };
+}
+
+/**
+ * The tier's last row set beside the parts that feed it, when every part in
+ * it is a leaf fed by one part alone, from the row before, that also flows
+ * elsewhere (a pipeline's end stays on the line), at most one each side of a
+ * part, and the row before keeps within `across`.
+ */
+function besides(
+  byRank: readonly (string[] | undefined)[],
+  into: ReadonlyMap<string, string[]>,
+  out: ReadonlyMap<string, number>,
+  across: number,
+): Map<string, { before?: string; after?: string }> | null {
+  const last = byRank.at(-1);
+  const before = byRank.at(-2);
+  if (byRank.length < 2 || !last?.length || !before?.length) return null;
+  if (before.length + last.length > across) return null;
+  const set = new Map<string, { before?: string; after?: string }>();
+  for (const id of last) {
+    const from = into.get(id) ?? [];
+    const parent = from[0];
+    if (from.length !== 1 || out.get(id) || !parent || !before.includes(parent)) return null;
+    const sides = set.get(parent) ?? {};
+    if (!sides.after) sides.after = id;
+    else if (!sides.before) sides.before = id;
+    else return null;
+    set.set(parent, sides);
+  }
+  for (const [parent, sides] of set)
+    if ((out.get(parent) ?? 0) <= Number(!!sides.before) + Number(!!sides.after)) return null;
+  return set;
 }
 
 /**

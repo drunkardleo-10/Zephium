@@ -1,16 +1,25 @@
-import type { ElkExtendedEdge, ElkNode, ElkPort, LayoutOptions } from "elkjs/lib/elk-api";
+import type { ElkExtendedEdge, ElkNode, LayoutOptions } from "elkjs/lib/elk-api";
 import elkScript from "elkjs/lib/elk.bundled.js?url";
 import type { CanvasPosition } from "./canvas-model";
-import { clean, tiersOf, type DiagramFlow, type DiagramLayout, type DiagramShape } from "./diagram";
-import { DIAGRAM, gutterOf } from "./diagram-metrics";
+import {
+  clean,
+  tiersOf,
+  type DiagramFlow,
+  type DiagramLayout,
+  type DiagramShape,
+  type DiagramWay,
+} from "./diagram";
+import { DIAGRAM, PLATE, ROUTE, gutterOf, plateHeight, plateWidth } from "./diagram-metrics";
 import { diagramRows, type DiagramRows } from "./diagram-rows";
-import { channels } from "./diagram-channels";
+import { joined, passes, planOf, routeAir, topOf, type Step, type Tree } from "./diagram-route";
 
 /**
- * The layered algorithm as a diagram reads: rows top to bottom as given,
- * parts ordered to cross little (their own order breaks ties), a parent
- * centred over what it feeds, lines orthogonal. Flows that leave one port
- * share one trunk and branch; flows that reach one port gather into one.
+ * The layered algorithm places the parts: rows as given, parts ordered to
+ * cross little (their own order breaks ties), then placed across their rows
+ * for the fewest turns (network simplex straightens more lines than
+ * Brandes–Köpf on real diagrams), a trunk kept straight through the rows it
+ * passes. Its lines are not
+ * used: the router draws them (see `diagram-route`).
  */
 export const ELK_OPTIONS: LayoutOptions = {
   "elk.algorithm": "layered",
@@ -20,225 +29,384 @@ export const ELK_OPTIONS: LayoutOptions = {
   "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
   "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
   "elk.layered.thoroughness": "12",
-  "elk.layered.nodePlacement.strategy": "BRANDES_KOEPF",
+  "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
   "elk.layered.nodePlacement.bk.fixedAlignment": "BALANCED",
   "elk.layered.nodePlacement.favorStraightEdges": "true",
   "elk.spacing.nodeNode": String(DIAGRAM.column),
-  "elk.layered.spacing.nodeNodeBetweenLayers": String(DIAGRAM.row),
-  "elk.layered.spacing.edgeNodeBetweenLayers": "26",
-  "elk.spacing.edgeNode": "18",
-  "elk.spacing.edgeEdge": "14",
-  "elk.layered.spacing.edgeEdgeBetweenLayers": "12",
-  "elk.spacing.portPort": "16",
-  "elk.portAlignment.default": "CENTER",
+  "elk.layered.spacing.nodeNodeBetweenLayers": "40",
   "elk.separateConnectedComponents": "false",
   "elk.padding": "[top=0,left=0,bottom=0,right=0]",
   "elk.randomSeed": "1",
 };
 
-/**
- * How each flow is laid out. A flow to the next row is the engine's: flows
- * down leave their part through one shared port, a trunk that branches, and
- * gather into their target's shared port. A flow drawn up (`back`), and one of
- * an opposite pair, runs on a line of its own. A flow that reaches past the
- * next row (`outer`) is no part of the engine's graph: it runs down a channel
- * outside the parts (see `diagram-channels`).
- */
-export type Route = {
-  lead: number;
-  partner?: number;
-  back: boolean;
-  source: boolean;
-  target: boolean;
-  outer: boolean;
-  /** Drawn up into a part that other flows also return to: they share its way in. */
-  returns?: boolean;
-};
+const { width: W, height: H } = DIAGRAM.node;
+/** A part's extent across its row and along the way the picture reads. */
+const extent = (way: DiagramWay) =>
+  way === "down" ? { across: W, along: H } : { across: H, along: W };
 
-function plan(shape: DiagramShape, rows: DiagramRows): Route[] {
-  const routes: Route[] = [];
-  const open = new Map<string, Route>();
-  const row = (id: string) => rows.rowOf.get(id)!;
-  for (const flow of shape.flows) {
-    const partner = open.get(`${flow.to}\n${flow.from}`);
-    if (partner) {
-      partner.partner = flow.index;
-      partner.source = partner.target = false;
-      open.delete(`${flow.to}\n${flow.from}`);
-      continue;
-    }
-    const back = !rows.forward.get(flow.index);
-    const outer = Math.abs(row(flow.to) - row(flow.from)) > 1;
-    const route: Route = { lead: flow.index, back, source: !back, target: !back, outer };
-    routes.push(route);
-    open.set(`${flow.from}\n${flow.to}`, route);
-  }
-  const returning = new Map<string, Route[]>();
-  for (const route of routes)
-    if (route.back && route.partner === undefined && !route.outer) {
-      const to = shape.flows.find((entry) => entry.index === route.lead)!.to;
-      returning.set(to, [...(returning.get(to) ?? []), route]);
-    }
-  for (const list of returning.values())
-    if (list.length > 1) for (const route of list) route.returns = true;
-  return routes;
+/** The air between a part and one set beside it: room for the flow's name on the line across. */
+function besideGap(way: DiagramWay, label: string): number {
+  if (!label) return 40;
+  return way === "down"
+    ? Math.min(PLATE.max + 32, Math.max(40, plateWidth(label) + 28))
+    : Math.max(40, plateHeight(label) + 26);
 }
 
-/** The ELK graph for a diagram: its parts in their rows, their shared and own ports, the flows. */
-export function elkGraph(shape: DiagramShape, rows: DiagramRows = diagramRows(shape)): ElkNode {
-  const node = new Map(shape.parts.map((part, index) => [part.id, `n${index}`]));
-  const flow = new Map(shape.flows.map((entry) => [entry.index, entry]));
-  const ports = new Map<string, ElkPort[]>([...node.values()].map((id) => [id, []]));
-  const port = (owner: string, key: string, side: "NORTH" | "SOUTH") => {
-    const list = ports.get(owner)!;
-    const name = `${owner}${key}`;
-    if (!list.some((entry) => entry.id === name))
-      list.push({ id: name, width: 0, height: 0, layoutOptions: { "elk.port.side": side } });
-    return name;
-  };
-  const edges: ElkExtendedEdge[] = [];
-  for (const route of plan(shape, rows)) {
-    if (route.outer) continue;
-    const lead = flow.get(route.lead)!;
-    // Laid out down the picture: from whichever end stands higher.
-    const [upper, lower] = route.back ? [lead.to, lead.from] : [lead.from, lead.to];
-    const owner = node.get(upper)!;
-    const source = route.source
-      ? port(owner, "out", "SOUTH")
-      : route.returns
-        ? port(owner, "back", "SOUTH")
-        : port(owner, `e${route.lead}s`, "SOUTH");
-    const target = route.target
-      ? port(node.get(lower)!, "in", "NORTH")
-      : port(node.get(lower)!, `e${route.lead}t`, "NORTH");
-    edges.push({ id: `e${route.lead}`, sources: [source], targets: [target] });
+/** The flow into a part set beside another, and how far across its block each part stands. */
+function blocks(shape: DiagramShape, rows: DiagramRows, way: DiagramWay) {
+  const { across } = extent(way);
+  const label = (from: string, to: string) =>
+    shape.flows.find((flow) => flow.from === from && flow.to === to)?.label ?? "";
+  const out = new Map<string, { width: number; offset: number; before?: number; after?: number }>();
+  for (const id of rows.rows.flat()) {
+    const sides = rows.beside.get(id);
+    const before = sides?.before ? besideGap(way, label(id, sides.before)) : 0;
+    const after = sides?.after ? besideGap(way, label(id, sides.after)) : 0;
+    const offset = sides?.before ? across + before : 0;
+    out.set(id, {
+      width: offset + across + (sides?.after ? after + across : 0),
+      offset,
+      ...(sides?.before ? { before } : {}),
+      ...(sides?.after ? { after } : {}),
+    });
   }
-  const children: ElkNode[] = rows.rows.flatMap((row, at) =>
-    row.map((id, column) => ({
-      id: node.get(id)!,
-      x: column * 400,
-      y: at * 400,
-      width: DIAGRAM.node.width,
-      height: DIAGRAM.node.height,
-      ports: ports.get(node.get(id)!)!,
-      layoutOptions: { "elk.portConstraints": "FIXED_SIDE" },
-    })),
-  );
+  return out;
+}
+
+const unitOf = (shape: DiagramShape) => {
+  const index = new Map(shape.parts.map((part, at) => [part.id, `n${at}`]));
+  return (id: string) => index.get(id)!;
+};
+const passOf = (tree: number, row: number) => `t${tree}r${row}`;
+
+/**
+ * The ELK graph for a diagram, read down its rows whichever way it will be
+ * drawn: each part as a block with the parts set beside it, a small node
+ * wherever a trunk passes a row, and each tree's steps from row to row.
+ */
+export function elkGraph(
+  shape: DiagramShape,
+  rows: DiagramRows = diagramRows(shape),
+  way: DiagramWay = "down",
+): ElkNode {
+  const { across, along } = extent(way);
+  const unit = unitOf(shape);
+  const sized = blocks(shape, rows, way);
+  const plan = planOf(shape, rows);
+  const children: ElkNode[] = [];
+  const port = (id: string, x: number, height: number) => [
+    { id: `${id}in`, x, y: 0, width: 0, height: 0, layoutOptions: { "elk.port.side": "NORTH" } },
+    {
+      id: `${id}out`,
+      x,
+      y: height,
+      width: 0,
+      height: 0,
+      layoutOptions: { "elk.port.side": "SOUTH" },
+    },
+  ];
+  const trunks = plan.trees.map((tree) => passes(tree, rows));
+  // Each row in the order its units should first stand: a trunk beside the part it came from.
+  const key = new Map<string, number>();
+  rows.rows.forEach((row, at) => {
+    const units: { node: ElkNode; key: number }[] = row.map((id, column) => {
+      const block = sized.get(id)!;
+      key.set(unit(id), (column + 0.5) / row.length);
+      return {
+        key: key.get(unit(id))!,
+        node: {
+          id: unit(id),
+          width: block.width,
+          height: along,
+          ports: port(unit(id), block.offset + across / 2, along),
+          layoutOptions: { "elk.portConstraints": "FIXED_POS" },
+        },
+      };
+    });
+    trunks.forEach((list, tree) => {
+      if (!list.includes(at)) return;
+      const above = list.includes(at - 1)
+        ? passOf(tree, at - 1)
+        : unit(plan.trees[tree]!.roots[0]!);
+      key.set(passOf(tree, at), (key.get(above) ?? 1) + 0.001 * (tree + 1));
+      units.push({
+        key: key.get(passOf(tree, at))!,
+        node: {
+          id: passOf(tree, at),
+          width: ROUTE.pass,
+          height: along,
+          ports: port(passOf(tree, at), ROUTE.pass / 2, along),
+          layoutOptions: { "elk.portConstraints": "FIXED_POS" },
+        },
+      });
+    });
+    units
+      .sort((a, b) => a.key - b.key)
+      .forEach((entry, column) => children.push({ ...entry.node, x: column * 400, y: at * 400 }));
+  });
+  const edges: ElkExtendedEdge[] = [];
+  plan.trees.forEach((tree, index) => {
+    const top = topOf(tree, rows);
+    const through = new Set(trunks[index]);
+    const deepest = Math.max(...tree.leaves.map((leaf) => rows.rowOf.get(leaf.part)!));
+    for (let row = top + 1; row <= deepest; row += 1) {
+      const from = [
+        ...(through.has(row - 1) ? [passOf(index, row - 1)] : []),
+        ...tree.roots.filter((id) => rows.rowOf.get(id) === row - 1).map(unit),
+      ];
+      const to = [
+        ...new Set(
+          tree.leaves
+            .filter((leaf) => rows.rowOf.get(leaf.part) === row)
+            .map((leaf) => unit(leaf.part)),
+        ),
+        ...(through.has(row) ? [passOf(index, row)] : []),
+      ];
+      for (const source of from)
+        for (const target of to)
+          edges.push({
+            id: `s${index}_${source}_${target}`,
+            sources: [`${source}out`],
+            targets: [`${target}in`],
+          });
+    }
+  });
   return { id: "diagram", layoutOptions: ELK_OPTIONS, children, edges };
 }
 
 const round = (value: number) => Math.round(value * 10) / 10;
 
 /**
- * What ELK answered, read back into the diagram's own coordinates: the tiers'
- * column to the left, and extra air opened above each tier after the first
- * (between the lines that gather over its parts and the parts themselves, so
- * only straight runs grow).
+ * What ELK placed, routed: where each part stands across its row, the air
+ * between rows sized for the buses that cross it, every tree's lines, then
+ * the whole turned to the way the picture reads and moved clear of the
+ * tiers' names.
  */
 function fromElk(
   shape: DiagramShape,
   out: ElkNode,
-  rows: DiagramRows = diagramRows(shape),
-): DiagramLayout {
-  const { height: H } = DIAGRAM.node;
-  const left = gutterOf(shape.lanes);
-  const children = new Map((out.children ?? []).map((child) => [child.id, child]));
-  const raw = new Map(
-    shape.parts.map((part, index) => {
-      const child = children.get(`n${index}`);
-      return [part.id, { x: child?.x ?? 0, y: child?.y ?? 0 }];
-    }),
-  );
-  const gaps = [...rows.tierStart]
-    .map((row) => Math.min(...rows.rows[row]!.map((id) => raw.get(id)!.y)) - 13)
-    .sort((a, b) => a - b);
-  const moved = (point: CanvasPosition) => ({
-    x: round(point.x + left),
-    y: round(point.y + gaps.filter((gap) => point.y > gap).length * DIAGRAM.tier),
+  rows: DiagramRows,
+  way: DiagramWay,
+): { layout: DiagramLayout; even: boolean } {
+  const { across, along } = extent(way);
+  const unit = unitOf(shape);
+  const sized = blocks(shape, rows, way);
+  const plan = planOf(shape, rows);
+  const placed = new Map((out.children ?? []).map((child) => [child.id, child]));
+  const row = (id: string) => rows.rowOf.get(id)!;
+
+  // Across: each part's start, and each trunk where it passes a row.
+  const u = new Map<string, number>();
+  for (const id of rows.rows.flat()) {
+    const block = sized.get(id)!;
+    const x = placed.get(unit(id))?.x ?? 0;
+    u.set(id, x + block.offset);
+    const sides = rows.beside.get(id);
+    if (sides?.before) u.set(sides.before, x);
+    if (sides?.after) u.set(sides.after, x + block.offset + across + block.after!);
+  }
+  const trunk = (tree: number, at: number) => {
+    const child = placed.get(passOf(tree, at));
+    return (child?.x ?? 0) + ROUTE.pass / 2;
+  };
+  const offset = ROUTE.port * across;
+  const port = (tree: Tree, id: string) =>
+    u.get(id)! + across / 2 + (tree.kind === "back" ? offset : tree.kind === "pair" ? -offset : 0);
+
+  // Each tree's steps across each air, and the lines the air draws for them.
+  const portKey = (tree: Tree, id: string) =>
+    `p${tree.kind === "down" ? "c" : tree.kind === "back" ? "b" : "a"}|${id}`;
+  const trunkKey = (tree: number) => `t${tree}`;
+  const steps = new Map<number, Step[]>();
+  plan.trees.forEach((tree, index) => {
+    const top = topOf(tree, rows);
+    const through = new Set(passes(tree, rows));
+    const deepest = Math.max(...tree.leaves.map((leaf) => row(leaf.part)));
+    for (let gap = top; gap < deepest; gap += 1) {
+      const drops = new Map<string, number>();
+      for (const leaf of tree.leaves)
+        if (row(leaf.part) === gap + 1) drops.set(portKey(tree, leaf.part), port(tree, leaf.part));
+      if (through.has(gap + 1)) drops.set(trunkKey(index), trunk(index, gap + 1));
+      const stems = [
+        ...(gap === top ? [] : [trunk(index, gap)]),
+        ...tree.roots.filter((id) => row(id) === gap).map((id) => port(tree, id)),
+      ];
+      steps.set(gap, [
+        ...(steps.get(gap) ?? []),
+        { tree: index, stems, drops: [...drops].map(([key, at]) => ({ key, at })) },
+      ]);
+    }
   });
-  const at = Object.fromEntries([...raw].map(([id, point]) => [id, moved(point)]));
-  const flow = new Map(shape.flows.map((entry) => [entry.index, entry]));
-  const edges = new Map((out.edges ?? []).map((edge) => [edge.id, edge]));
-  const flows: Record<number, DiagramFlow> = {};
+  // A port only one line reaches takes it straight where its stem already stands over the part.
+  const landing = new Map<string, number>();
+  const arrivals = new Map<string, number>();
+  for (const list of steps.values())
+    for (const step of list)
+      for (const drop of step.drops) arrivals.set(drop.key, (arrivals.get(drop.key) ?? 0) + 1);
+  for (const list of steps.values())
+    for (const step of list)
+      for (const drop of step.drops) {
+        const part = drop.key.startsWith("p") ? drop.key.slice(drop.key.indexOf("|") + 1) : "";
+        if (!part || arrivals.get(drop.key) !== 1) continue;
+        const start = u.get(part)!;
+        const inset = Math.min(24, across / 4);
+        const stem = step.stems.length === 1 ? step.stems[0]! : NaN;
+        if (stem >= start + inset && stem <= start + across - inset) {
+          landing.set(`${step.tree}|${drop.key}`, stem);
+          drop.at = stem;
+        }
+      }
+  const airs = rows.rows.slice(0, -1).map((_, gap) => routeAir(steps.get(gap) ?? []));
+  const label = (index: number) => shape.flows.find((flow) => flow.index === index)?.label ?? "";
+  // The names that land in each air: on the branches into its next row.
+  const named = new Map<number, string[]>();
+  for (const tree of plan.trees)
+    for (const leaf of tree.leaves) {
+      const text = label(leaf.index);
+      if (!text) continue;
+      const gap = row(leaf.part) - 1;
+      named.set(gap, [...(named.get(gap) ?? []), text]);
+    }
+  const room = (gap: number) => {
+    const names = named.get(gap) ?? [];
+    if (way === "down")
+      return names.some((text) => plateHeight(text) > PLATE.height) ? PLATE.line : 0;
+    const widest = Math.max(0, ...names.map(plateWidth));
+    return widest ? Math.max(0, Math.min(PLATE.max, widest) + 16 - ROUTE.drop) : 0;
+  };
+  const gaps = airs.map(({ levels }, gap) => {
+    return levels
+      ? ROUTE.stem + (levels - 1) * ROUTE.track + ROUTE.drop + room(gap)
+      : ROUTE.straight + room(gap);
+  });
+  const starts: number[] = [];
+  rows.rows.forEach((_, at) => {
+    starts.push(
+      at
+        ? starts[at - 1]! + along + gaps[at - 1]! + (rows.tierStart.has(at) ? DIAGRAM.tier : 0)
+        : 0,
+    );
+  });
+
+  // Every flow's line, in the picture's own frame.
+  const lines = new Map<number, CanvasPosition[]>();
+  plan.trees.forEach((tree, index) => {
+    for (const leaf of tree.leaves) {
+      const [first, end] = [row(leaf.root), row(leaf.part)];
+      const line: CanvasPosition[] = [{ x: port(tree, leaf.root), y: starts[first]! + along }];
+      for (let gap = first; gap < end; gap += 1) {
+        const last = gap + 1 === end;
+        const key = last ? portKey(tree, leaf.part) : trunkKey(index);
+        const stem = gap === first ? port(tree, leaf.root) : trunk(index, gap);
+        const next = last
+          ? (landing.get(`${index}|${key}`) ?? port(tree, leaf.part))
+          : trunk(index, gap + 1);
+        const level = airs[gap]!.level.get(`${index}|${key}`);
+        if (level !== null && level !== undefined) {
+          const y = starts[gap]! + along + ROUTE.stem + level * ROUTE.track;
+          line.push({ x: stem, y }, { x: next, y });
+        }
+        line.push({ x: next, y: starts[gap + 1]! });
+        if (!last) line.push({ x: next, y: starts[gap + 1]! + along });
+      }
+      const flow = shape.flows.find((entry) => entry.index === leaf.index)!;
+      const drawn = clean(line);
+      // Drawn from where the flow starts: a reply, or a pair led upward, runs back up.
+      lines.set(leaf.index, flow.from === leaf.root ? drawn : drawn.reverse());
+    }
+  });
+  for (const flow of plan.lateral) {
+    const [a, b] = [u.get(flow.from)!, u.get(flow.to)!];
+    const y = starts[row(flow.from)]! + along / 2;
+    lines.set(
+      flow.index,
+      a < b
+        ? [
+            { x: a + across, y },
+            { x: b, y },
+          ]
+        : [
+            { x: a, y },
+            { x: b + across, y },
+          ],
+    );
+  }
+  const keys = [...lines.keys()];
+  const split = joined(keys.map((key) => lines.get(key)!));
+  keys.forEach((key, at) => lines.set(key, split[at]!));
+
+  // Turned to the way the picture reads, clear of the tiers' names.
+  const gutter = way === "down" ? gutterOf(shape.lanes) : shape.lanes.length ? ROUTE.header : 0;
+  const turn = (point: CanvasPosition): CanvasPosition =>
+    way === "down"
+      ? { x: round(point.x + gutter), y: round(point.y) }
+      : { x: round(point.y), y: round(point.x + gutter) };
+  const at: Record<string, CanvasPosition> = {};
+  for (const [id, start] of u) {
+    const corner = turn({ x: start, y: starts[row(id)]! });
+    at[id] = corner;
+  }
   const side = (id: string) => !!shape.parts.find((part) => part.id === id)?.side;
-  const quiet = (index: number) => !rows.forward.get(index) || side(flow.get(index)!.to);
-  const routes = plan(shape, rows);
-  const run = (id: string) => {
-    const section = edges.get(id)?.sections?.[0];
-    return section ? [section.startPoint, ...(section.bendPoints ?? []), section.endPoint] : null;
-  };
-  const drawn = (route: Route, line: CanvasPosition[]) => {
-    const paired = route.partner !== undefined;
-    const lead = flow.get(route.lead)!;
-    const lower = route.back ? lead.from : lead.to;
-    const put = (index: number, down: boolean, twin: boolean) => {
-      const entry = flow.get(index)!;
-      flows[index] = {
-        from: entry.from,
-        to: entry.to,
-        points: down ? line : [...line].reverse(),
-        resting: false,
-        // Both ways between two parts is one solid line with a head at each end.
-        quiet: paired ? side(lower) : quiet(index),
-        back: paired ? false : !rows.forward.get(index),
-        ...(twin ? { twin: true } : {}),
-      };
-    };
-    put(route.lead, !route.back, false);
-    if (route.partner !== undefined) put(route.partner, route.back, true);
-  };
-  for (const route of routes) {
-    if (route.outer) continue;
-    const line = run(`e${route.lead}`);
-    if (line) drawn(route, clean(line.map(moved)));
-  }
-  // Flows past the next row run outside the parts, one channel per part they leave.
-  const outer = channels(
-    shape,
-    rows,
-    at,
-    routes.filter((route) => route.outer),
-    Object.values(flows).map((entry) => entry.points),
-    left,
+  const flows: Record<number, DiagramFlow> = {};
+  const twinOf = new Map([...plan.twins].map(([twin, lead]) => [lead, twin]));
+  const kindOf = new Map(
+    plan.trees.flatMap((tree) => tree.leaves.map((leaf) => [leaf.index, tree] as const)),
   );
-  for (const [key, point] of Object.entries(outer.at)) at[key] = point;
-  for (const entry of Object.values(flows))
-    entry.points = entry.points.map((point) => ({ x: point.x + outer.shift, y: point.y }));
-  for (const route of routes) {
-    const line = outer.lines.get(route.lead);
-    if (line) drawn(route, line);
+  for (const flow of shape.flows) {
+    const line = lines.get(flow.index);
+    if (!line) continue;
+    const tree = kindOf.get(flow.index);
+    const points = line.map(turn);
+    const back = tree?.kind === "back";
+    const quiet = tree?.kind === "pair" ? side(tree.leaves[0]!.part) : back || side(flow.to);
+    flows[flow.index] = { from: flow.from, to: flow.to, points, resting: false, quiet, back };
+    const twin = twinOf.get(flow.index);
+    if (twin !== undefined) {
+      const other = shape.flows.find((entry) => entry.index === twin)!;
+      flows[twin] = {
+        from: other.from,
+        to: other.to,
+        points: [...points].reverse(),
+        resting: false,
+        quiet,
+        back: false,
+        twin: true,
+      };
+    }
   }
+  const size = way === "down" ? { w: W, h: H } : { w: W, h: H };
   const xs = [
-    ...Object.values(at).flatMap((p) => [p.x, p.x + DIAGRAM.node.width]),
+    ...Object.values(at).map((p) => p.x + size.w),
     ...Object.values(flows).flatMap((entry) => entry.points.map((point) => point.x)),
   ];
   const ys = [
-    ...Object.values(at).flatMap((p) => [p.y, p.y + H]),
+    ...Object.values(at).map((p) => p.y + size.h),
     ...Object.values(flows).flatMap((entry) => entry.points.map((point) => point.y)),
   ];
-  const width = Math.ceil(Math.max(0, ...xs));
-  const height = Math.ceil(Math.max(0, ...ys));
-  return {
-    at,
-    bounds: { x: 0, y: Math.min(0, ...ys), width, height },
-    gutter: left,
-    tiers: tiersOf(shape, rows, at),
-    flows,
-    settled: true,
-  };
-}
-
-/**
- * Rows that stand over each other: straightened lines may drag a chain of
- * rows off to one side, leaving the tiers' names far from their parts.
- */
-function even(rows: DiagramRows, layout: DiagramLayout): boolean {
-  const centres = rows.rows.map((row) => {
-    const xs = row.map((id) => layout.at[id]!.x);
-    return (Math.min(...xs) + Math.max(...xs) + DIAGRAM.node.width) / 2;
+  // Rows that stand over each other: straightened trunks may drag a chain of rows aside.
+  const centres = rows.rows.map((ids) => {
+    const starts = ids.map((id) => u.get(id)!);
+    return (Math.min(...starts) + Math.max(...starts) + across) / 2;
   });
-  const span = layout.bounds.width - layout.gutter;
-  return Math.max(...centres) - Math.min(...centres) <= span * 0.3;
+  const all = [...u.values()];
+  const span = Math.max(...all) + across - Math.min(...all);
+  return {
+    layout: {
+      way,
+      at,
+      bounds: {
+        x: 0,
+        y: 0,
+        width: Math.ceil(Math.max(0, ...xs)),
+        height: Math.ceil(Math.max(0, ...ys)),
+      },
+      gutter,
+      tiers: tiersOf(shape, rows, starts, along),
+      flows,
+      settled: true,
+    },
+    even: Math.max(...centres) - Math.min(...centres) <= span * 0.3,
+  };
 }
 
 type Engine = { layout: (graph: ElkNode) => Promise<ElkNode> };
@@ -329,36 +497,57 @@ async function run(graph: ElkNode): Promise<ElkNode> {
   return (await inPage()).layout(graph);
 }
 
-/**
- * A diagram laid out by ELK: in a worker where the page allows one, else on
- * this thread, within a result's width where it can be.
- */
-export async function engineLayout(shape: DiagramShape): Promise<DiagramLayout> {
-  if (!shape.parts.length) throw new Error("empty");
-  let best: DiagramLayout | null = null;
-  // Straight lines first; where aligning them spreads the picture too wide, rows centred on
-  // each other, then fewer parts to a row.
-  const tries: [number, string][] = [
+/** The ways a picture is tried: parts to a row, and how ELK places them. */
+const TRIES: Record<DiagramWay, [number, string][]> = {
+  down: [
+    [DIAGRAM.across, "NETWORK_SIMPLEX"],
     [DIAGRAM.across, "BRANDES_KOEPF"],
     [DIAGRAM.across, "SIMPLE"],
     [DIAGRAM.across - 1, "SIMPLE"],
     [DIAGRAM.across - 2, "SIMPLE"],
-  ];
-  for (const [across, placement] of tries) {
+  ],
+  right: [
+    [DIAGRAM.across, "NETWORK_SIMPLEX"],
+    [DIAGRAM.across, "SIMPLE"],
+  ],
+};
+/** Drawn a few percent smaller reads better than a row broken in two. */
+const fits = (layout: DiagramLayout) => layout.bounds.width <= DIAGRAM.reach * 1.06;
+
+async function laidOut(shape: DiagramShape, way: DiagramWay): Promise<DiagramLayout> {
+  let best: DiagramLayout | null = null;
+  // Fewest turns first; where that spreads the picture too wide or drags rows aside, rows
+  // centred on each other, then fewer parts to a row.
+  for (const [across, placement] of TRIES[way]) {
     const rows = diagramRows(shape, across);
-    const graph = elkGraph(shape, rows);
+    const graph = elkGraph(shape, rows, way);
     graph.layoutOptions = {
       ...graph.layoutOptions,
       "elk.layered.nodePlacement.strategy": placement,
     };
-    const layout = fromElk(shape, await run(graph), rows);
-    // Drawn a few percent smaller reads better than a row broken in two.
-    if (
-      layout.bounds.width <= DIAGRAM.reach * 1.06 &&
-      (placement === "SIMPLE" || even(rows, layout))
-    )
-      return layout;
+    const { layout, even } = fromElk(shape, await run(graph), rows, way);
+    if ((way === "right" || fits(layout)) && (placement === "SIMPLE" || even)) return layout;
     if (!best || layout.bounds.width < best.bounds.width) best = layout;
   }
   return best!;
+}
+
+/**
+ * A diagram laid out by ELK and routed: in a worker where the page allows
+ * one, else on this thread. Both ways are laid out unless `way` holds it to
+ * one; the picture takes the way that fits a result's width without being
+ * drawn smaller, the shorter where both fit, the narrower where neither does.
+ */
+export async function engineLayout(shape: DiagramShape, way?: DiagramWay): Promise<DiagramLayout> {
+  if (!shape.parts.length) throw new Error("empty");
+  const found: DiagramLayout[] = [];
+  for (const each of way ? [way] : (["down", "right"] as const))
+    found.push(await laidOut(shape, each));
+  const fitting = found.filter(fits);
+  if (fitting.length)
+    return fitting.sort(
+      (a, b) =>
+        a.bounds.height - b.bounds.height || Number(b.way === "right") - Number(a.way === "right"),
+    )[0]!;
+  return found.sort((a, b) => a.bounds.width - b.bounds.width)[0]!;
 }

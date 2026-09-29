@@ -39,29 +39,37 @@ const SAAS: Diagram = {
   ],
 };
 
-test("a diagram becomes an ELK graph read top to bottom, rows fixed, ports shared by trunks", () => {
+test("ELK places blocks and the trunks that pass rows; its own lines are not used", () => {
   const graph = elkGraph(diagramShape(SAAS));
   expect(graph.layoutOptions).toMatchObject({
     ...ELK_OPTIONS,
     "elk.direction": "DOWN",
-    "elk.edgeRouting": "ORTHOGONAL",
     "elk.layered.layering.strategy": "INTERACTIVE",
   });
   const api = graph.children!.find((child) => child.id === "n1")!;
   expect([api.width, api.height]).toEqual([W, H]);
-  // The API's flows to the next row leave through one port.
-  const south = api.ports!.filter((port) => port.layoutOptions!["elk.port.side"] === "SOUTH");
-  expect(south.map((port) => port.id)).toEqual(["n1out"]);
-  // Its three flows into data skip the rows between: they are no part of the engine's graph.
-  expect(graph.edges!.map((edge) => edge.id)).not.toContain("e6");
+  expect(api.ports!.map((port) => [port.id, port.x])).toEqual([
+    ["n1in", W / 2],
+    ["n1out", W / 2],
+  ]);
+  // The API's lines to the data tier pass the three rows between as one trunk (its two-way
+  // line with the database as another).
+  const passing = graph.children!.filter((child) => child.id.startsWith("t"));
+  const trunks = new Map<string, number>();
+  for (const child of passing) {
+    const tree = child.id.replace(/r\d+$/u, "");
+    trunks.set(tree, (trunks.get(tree) ?? 0) + 1);
+  }
+  expect([...trunks.values()]).toEqual([3, 3]);
 });
 
 const segments = (points: readonly { x: number; y: number }[]) =>
   points.slice(1).map((point, i) => [points[i]!, point] as const);
 
 test("the engine's layout: no part on another, no line through a part, all within a result", async () => {
-  const layout = await engineLayout(diagramShape(SAAS));
+  const layout = await engineLayout(diagramShape(SAAS), "down");
   expect(layout.settled).toBe(true);
+  expect(layout.way).toBe("down");
   expect(layout.bounds.width).toBeLessThanOrEqual(1120);
   const parts = Object.entries(layout.at);
   for (const [index, [, a]] of parts.entries())
@@ -79,37 +87,88 @@ test("the engine's layout: no part on another, no line through a part, all withi
       }
     }
   }
-  // Tiers read down the picture: every edge part above every application part, above the data.
   const y = (id: string) => layout.at[id]!.y;
   expect(y("web")).toBeLessThan(y("api"));
   expect(Math.max(y("api"), y("worker"))).toBeLessThan(Math.min(y("db"), y("cache"), y("files")));
   expect(layout.tiers.map((tier) => tier.name)).toEqual(["Edge", "Application", "Data"]);
 });
 
+/** The runs two lines share from their start. */
+const shared = (a: readonly { x: number; y: number }[], b: readonly { x: number; y: number }[]) => {
+  let at = 0;
+  while (at < Math.min(a.length, b.length) && a[at]!.x === b[at]!.x && a[at]!.y === b[at]!.y)
+    at += 1;
+  return at;
+};
+
 test("a fan-out leaves as one trunk: its flows share their first run", async () => {
-  const layout = await engineLayout(diagramShape(SAAS));
-  const first = (index: number) => layout.flows[index]!.points.slice(0, 2);
-  expect(first(1)).toEqual(first(2));
+  const layout = await engineLayout(diagramShape(SAAS), "down");
+  expect(shared(layout.flows[1]!.points, layout.flows[2]!.points)).toBeGreaterThanOrEqual(2);
 });
 
-test("flows past the next row run in a channel outside the parts, one strand per part", async () => {
-  const layout = await engineLayout(diagramShape(SAAS));
-  const xs = Object.values(layout.at).flatMap((at) => [at.x, at.x + W]);
-  const [low, high] = [Math.min(...xs), Math.max(...xs)];
-  // CRUD, Cache and Uploads leave the API together and share their channel's run.
-  const channel = (index: number) =>
-    layout.flows[index]!.points.filter((point) => point.x < low || point.x > high).map((p) => p.x);
-  for (const index of [5, 6, 7]) expect(channel(index).length).toBeGreaterThan(0);
-  expect(new Set([...channel(6), ...channel(7)]).size).toBe(1);
+test("flows past the next row share one trunk down through the rows between", async () => {
+  const layout = await engineLayout(diagramShape(SAAS), "down");
+  // Cache and Uploads leave the API together and part only in the air above the data tier.
+  const [cache, files] = [layout.flows[6]!.points, layout.flows[7]!.points];
+  const together = shared(cache, files);
+  expect(cache[together - 1]!.y).toBeGreaterThan(layout.at.worker!.y + H);
+  // Nothing else of the API's one-way lines runs beside that trunk: one line, not a comb.
+  const xs = new Set(
+    [6, 7].map((index) => layout.flows[index]!.points.find((p) => p.y > layout.at.jobs!.y)!.x),
+  );
+  expect(xs.size).toBe(1);
+});
+
+test("flows into one part join before it", async () => {
+  const layout = await engineLayout(diagramShape(SAAS), "down");
+  // CRUD from the API and Persist from the worker end on one run into the database.
+  const [crud, persist] = [layout.flows[5]!.points, layout.flows[8]!.points];
+  expect(crud.at(-1)).toEqual(persist.at(-1));
+  expect(crud.at(-2)!.x).toBe(persist.at(-2)!.x);
 });
 
 test("a pair of opposite flows is one line with a head at each end", async () => {
-  const layout = await engineLayout(diagramShape(SAAS));
+  const layout = await engineLayout(diagramShape(SAAS), "down");
   const crud = layout.flows[5]!;
   const rows = layout.flows[9]!;
   expect(rows.twin).toBe(true);
   expect(rows.points).toEqual([...crud.points].reverse());
   expect(crud.back || rows.back).toBe(false);
+});
+
+test("read to the right, rows become columns and tiers are named above them", async () => {
+  const layout = await engineLayout(diagramShape(SAAS), "right");
+  expect(layout.way).toBe("right");
+  const x = (id: string) => layout.at[id]!.x;
+  expect(x("web")).toBeLessThan(x("api"));
+  expect(x("worker")).toBeLessThan(x("db"));
+  expect(layout.gutter).toBeGreaterThan(0);
+  expect(Math.min(...Object.values(layout.at).map((at) => at.y))).toBeGreaterThanOrEqual(
+    layout.gutter,
+  );
+  expect(layout.tiers[1]!.start).toBe(x("api"));
+});
+
+test("the picture takes the way that fits a result's width, the shorter where both do", async () => {
+  const deep = await engineLayout(diagramShape(SAAS));
+  // Seven rows to the right run far past a result's width.
+  expect(deep.way).toBe("down");
+  const short = await engineLayout(
+    diagramShape({
+      kind: "diagram",
+      layers: [],
+      nodes: [
+        { id: "a", name: "Source", kind: "service" },
+        { id: "b", name: "Transform", kind: "worker" },
+        { id: "c", name: "Sink", kind: "store" },
+      ],
+      edges: [
+        { from: "a", to: "b" },
+        { from: "b", to: "c" },
+      ],
+    }),
+  );
+  expect(short.way).toBe("right");
 });
 
 test("layoutDiagram answers with the engine's layout off the page", async () => {
