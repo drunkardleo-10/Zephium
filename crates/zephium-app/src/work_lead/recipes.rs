@@ -342,8 +342,9 @@ fn fill(template: &str, search: &SiteSearch) -> Option<String> {
     Some(out)
 }
 
-/// The results pages this search opens: on the part's own site when it
-/// names one the table knows, else on every known site for its kind.
+/// The results pages this search opens: the part's own site first when the
+/// table knows it, then the same search on the other known sites of its
+/// kind, for when that site will not load.
 pub(crate) fn pages(search: &SiteSearch, site: Option<&str>) -> Vec<(&'static str, String)> {
     let Some(kind) = search.kind() else {
         return Vec::new();
@@ -356,13 +357,10 @@ pub(crate) fn pages(search: &SiteSearch, site: Option<&str>) -> Vec<(&'static st
                     && nights <= i64::from(recipe.max_nights)))
     };
     let site = site.map(|site| site.trim_start_matches("www.").to_ascii_lowercase());
-    let known = site
-        .as_deref()
-        .is_some_and(|site| RECIPES.iter().filter(fits).any(|recipe| recipe.site == site));
-    RECIPES
-        .iter()
-        .filter(fits)
-        .filter(|recipe| !known || Some(recipe.site) == site.as_deref())
+    let mut recipes: Vec<&Recipe> = RECIPES.iter().filter(fits).collect();
+    recipes.sort_by_key(|recipe| Some(recipe.site) != site.as_deref());
+    recipes
+        .into_iter()
         .filter_map(|recipe| Some((recipe.name, fill(recipe.template, search)?)))
         .collect()
 }
@@ -381,12 +379,13 @@ mod tests {
         let week = search(json!({"place": "San Francisco, CA", "checkin": "2027-01-05",
             "checkout": "2027-01-12", "adults": 1}));
         assert_eq!(
-            pages(&week, Some("airbnb.com")),
-            [(
+            pages(&week, Some("booking.com"))[1],
+            (
                 "Airbnb",
                 "https://www.airbnb.com/s/San-Francisco--CA/homes?checkin=2027-01-05&checkout=2027-01-12&adults=1".to_owned()
-            )]
+            )
         );
+        assert_eq!(pages(&week, Some("booking.com"))[0].0, "Booking.com");
         let month = search(json!({"place": "San Francisco, CA", "checkin": "2027-01-01",
             "checkout": "2027-02-01", "adults": 1, "currency": "usd"}));
         assert_eq!(
@@ -428,18 +427,15 @@ mod tests {
                 "https://www.kayak.com/flights/WAW-SFO/2027-01-05/business/2adults?sort=bestflight_a",
             ]
         );
-        assert_eq!(
-            super::pages(&business, Some("kayak.com")).len(),
-            1
-        );
+        assert_eq!(super::pages(&business, Some("kayak.com"))[0].0, "Kayak");
     }
 
     #[test]
     fn products_search_the_store_and_bad_fields_say_their_rule() {
         let lego = search(json!({"query": "star wars"}));
         assert_eq!(
-            pages(&lego, Some("lego.com")),
-            [("LEGO", "https://www.lego.com/en-us/search?q=star%20wars".to_owned())]
+            pages(&lego, Some("lego.com"))[0],
+            ("LEGO", "https://www.lego.com/en-us/search?q=star%20wars".to_owned())
         );
         assert!(pages(&lego, Some("unknown.shop")).len() == 2);
         for (bad, rule) in [

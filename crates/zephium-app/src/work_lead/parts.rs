@@ -347,7 +347,7 @@ where
                 spec.service.as_ref().and_then(|service| service.host.as_deref()),
             );
             if !pages.is_empty() {
-                brief.push_str("Results pages with the search already in them; browse one as start, its goal to read the results shown as records (open an item only for a field the list lacks), before any form:\n");
+                brief.push_str("Results pages with the search already in them, the part's own site first; browse the first as start, its goal to read the results shown as records (open an item only for a field the list lacks). If it will not load, use the next one before any form:\n");
                 for (name, url) in pages {
                     brief.push_str(&format!("- {name}: {url}\n"));
                 }
