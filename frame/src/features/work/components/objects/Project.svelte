@@ -16,7 +16,8 @@
     /** Opened in the centre: the whole tree. */
     centre?: boolean;
   } = $props();
-  const ROWS = 18;
+  /** The map's tree is a glance at the shape; the centre holds all of it. */
+  const ROWS = 12;
   const rows = $derived(treeRows(object.tree, object.more));
   const shown = $derived(centre ? rows : rows.slice(0, ROWS));
   const git = $derived(object.git);
@@ -24,7 +25,7 @@
   const where = $derived(object.root.replace(/^\/(?:Users|home)\/[^/]+/u, "~"));
 </script>
 
-<section class="project" aria-label={object.name}>
+{#snippet identity()}
   <header>
     <span class="glyph" aria-hidden="true"><Icon icon={Folder01Icon} size={22} /></span>
     <div class="head">
@@ -49,51 +50,79 @@
         </p>{/if}
     </div>
   </header>
+{/snippet}
 
-  {#if object.stack.length}<ul class="stack" aria-label={m.work_project_stack()}>
-      {#each object.stack as item (item.name)}<li title={item.role}>
-          {#if item.host}<Mark address={item.host} size={16} />{/if}
-          <span class="name">{item.name}</span>
-          {#if item.version}<span class="version">{item.version}</span>{/if}
-        </li>{/each}
-    </ul>{/if}
+{#snippet tree()}
+  <h4>{m.work_project_structure()}</h4>
+  <ul class="tree">
+    {#each shown as row, index (index)}<li
+        class:folder={"folder" in row && row.folder}
+        style:padding-inline-start={`${row.depth * 18}px`}
+      >
+        {#if "more" in row}<span class="count rest">{m.work_project_more({ count: row.more })}</span
+          >{:else}<Icon icon={row.folder ? Folder01Icon : File01Icon} size={14} /><span
+            class="entry">{row.name}</span
+          >{#if row.holds}<span class="count">{row.holds}</span>{/if}{/if}
+      </li>{/each}
+  </ul>
+  {#if shown.length < rows.length}<button
+      type="button"
+      class="all nodrag nopan"
+      onclick={() => actions.open?.(object.id)}>{m.work_project_show_tree()}</button
+    >{/if}
+{/snippet}
 
-  <div class="body" class:single={!object.scripts.length || !rows.length}>
-    {#if rows.length}<div class="column">
-        <h4>{m.work_project_structure()}</h4>
-        <ul class="tree">
-          {#each shown as row, index (index)}<li
-              class:folder={"folder" in row && row.folder}
-              style:padding-inline-start={`${row.depth * 18}px`}
-            >
-              {#if "more" in row}<span class="count rest"
-                  >{m.work_project_more({ count: row.more })}</span
-                >{:else}<Icon icon={row.folder ? Folder01Icon : File01Icon} size={14} /><span
-                  class="entry">{row.name}</span
-                >{#if row.holds}<span class="count">{row.holds}</span>{/if}{/if}
+{#snippet scripts()}
+  <h4>{m.work_project_scripts()}</h4>
+  <dl class="scripts">
+    {#each object.scripts as script, index (index)}<div>
+        <dt>
+          <span>{script.name}</span>{#if script.source}<span class="source">{script.source}</span
+            >{/if}
+        </dt>
+        {#if script.command && script.command !== script.name}<dd>{script.command}</dd>{/if}
+      </div>{/each}
+  </dl>
+{/snippet}
+
+{#if centre}
+  <section class="project" aria-label={object.name}>
+    {@render identity()}
+
+    {#if object.stack.length}<ul class="stack" aria-label={m.work_project_stack()}>
+        {#each object.stack as item (item.name)}<li title={item.role}>
+            {#if item.host}<Mark address={item.host} size={16} />{/if}
+            <span class="name">{item.name}</span>
+            {#if item.version}<span class="version">{item.version}</span>{/if}
+          </li>{/each}
+      </ul>{/if}
+
+    <div class="body" class:single={!object.scripts.length || !rows.length}>
+      {#if rows.length}<div class="column">{@render tree()}</div>{/if}
+      {#if object.scripts.length}<div class="column">{@render scripts()}</div>{/if}
+    </div>
+  </section>
+{:else}
+  <!-- On the canvas a project is a small map: the folder leads, its stack, shape and
+       commands stand beside it as pieces of their own on one line. -->
+  <section class="map" aria-label={object.name}>
+    <div class="piece lead">{@render identity()}</div>
+    {#if object.stack.length}<div class="piece stack-piece">
+        <h4>{m.work_project_stack()}</h4>
+        <ul class="manifest">
+          {#each object.stack as item (item.name)}<li title={item.role}>
+              <span class="mark"
+                >{#if item.host}<Mark address={item.host} size={16} />{/if}</span
+              >
+              <span class="name">{item.name}</span>
+              {#if item.version}<span class="version">{item.version}</span>{/if}
             </li>{/each}
         </ul>
-        {#if shown.length < rows.length}<button
-            type="button"
-            class="all nodrag nopan"
-            onclick={() => actions.open?.(object.id)}>{m.work_project_show_tree()}</button
-          >{/if}
       </div>{/if}
-    {#if object.scripts.length}<div class="column">
-        <h4>{m.work_project_scripts()}</h4>
-        <dl class="scripts">
-          {#each object.scripts as script, index (index)}<div>
-              <dt>
-                <span>{script.name}</span>{#if script.source}<span class="source"
-                    >{script.source}</span
-                  >{/if}
-              </dt>
-              {#if script.command && script.command !== script.name}<dd>{script.command}</dd>{/if}
-            </div>{/each}
-        </dl>
-      </div>{/if}
-  </div>
-</section>
+    {#if rows.length}<div class="piece tree-piece">{@render tree()}</div>{/if}
+    {#if object.scripts.length}<div class="piece scripts-piece">{@render scripts()}</div>{/if}
+  </section>
+{/if}
 
 <style>
   .project {
@@ -344,5 +373,102 @@
     font-size: var(--text-label);
     line-height: 17px;
     overflow-wrap: anywhere;
+  }
+
+  /* The map: pieces on one line, joined by a hairline at their heads' height. */
+  .map {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 40px;
+    inline-size: 100%;
+    color: var(--color-text);
+  }
+
+  .map::before {
+    position: absolute;
+    inset-block-start: 27px;
+    inset-inline: 24px;
+    border-block-start: 1px solid var(--color-border-strong);
+    content: "";
+  }
+
+  .piece {
+    position: relative;
+    display: flex;
+    box-sizing: border-box;
+    flex: none;
+    flex-direction: column;
+    gap: 10px;
+    padding: 20px 20px 18px;
+    border-radius: var(--radius-card);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-raised);
+  }
+
+  /* Where the line meets a piece: a small port on its edge. */
+  .piece:not(.lead)::before {
+    position: absolute;
+    inset-block-start: 24px;
+    inset-inline-start: -4px;
+    inline-size: 7px;
+    block-size: 7px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-muted);
+    content: "";
+  }
+
+  .lead {
+    inline-size: 296px;
+  }
+
+  .lead .summary {
+    font-size: var(--text-body);
+  }
+
+  .stack-piece {
+    inline-size: 232px;
+  }
+
+  .tree-piece {
+    inline-size: 272px;
+  }
+
+  .scripts-piece {
+    inline-size: 320px;
+  }
+
+  .manifest {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .manifest li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-block-size: 28px;
+    font-size: var(--text-body);
+  }
+
+  .manifest .mark {
+    display: inline-flex;
+    flex: none;
+    inline-size: 16px;
+  }
+
+  .manifest .name {
+    min-inline-size: 0;
+    font-weight: 550;
+    overflow-wrap: anywhere;
+  }
+
+  .manifest .version {
+    margin-inline-start: auto;
+    font-size: var(--text-label);
   }
 </style>

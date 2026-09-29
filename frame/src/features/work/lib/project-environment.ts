@@ -19,6 +19,7 @@ import type { RunPart } from "./run/parts";
 import { hostOf, siteName } from "./run/site";
 import type { SourceRow } from "./project-environment-stage";
 import { RUN } from "./run/layout";
+import { pageName } from "./run/sources";
 import { PART, partLead } from "./run/part-size";
 import { fileName } from "./work-files";
 import { linkVideo } from "./link-media";
@@ -210,6 +211,7 @@ function elementItems(
         detail: note?.modified_at ?? "",
         status: area,
         unavailable: !note,
+        ...(note ? { note: { id: note.id, preview: note.preview } } : {}),
       };
     }
     if (element.reference.kind === "folder") {
@@ -716,7 +718,12 @@ export function environmentParts(
         return {
           id: entry.id,
           url: entry.url,
-          title: clipText(observed?.trim() || entry.tab?.title.trim() || "", TITLE_TEXT),
+          title: clipText(
+            observed?.trim() ||
+              entry.tab?.title.trim() ||
+              pageName(projection.executions, entry.url, entry.steps.at(-1)?.id),
+            TITLE_TEXT,
+          ),
           status: shown
             ? m.work_env_tab_caption()
             : held
@@ -777,6 +784,7 @@ export function environmentParts(
           state,
           shape: partShape(part).kind,
           ...(summary ? { summary } : {}),
+          ...(part.state === "running" && part.now ? { now: part.now } : {}),
           pages: entries,
           objective: stage.objective,
           ...(part.steps ? { steps: part.steps } : {}),

@@ -47,6 +47,61 @@ function same(url: string): string {
 }
 
 type Execution = WorkExecutionFact;
+
+/** A page's own words for itself from its address: a search's query, else its last path segment. */
+function addressName(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const query = ["q", "query", "search", "k", "keywords"]
+      .map((key) => parsed.searchParams.get(key)?.trim())
+      .find(Boolean);
+    if (query) return query;
+    const segments = parsed.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    const last = segments.at(-1) ?? "";
+    // A numbered page is named with what it is a number of: "issues 123".
+    const numbered = /^\d+$/u.test(last) && segments.length > 1;
+    const words = (text: string) => text.replace(/[-_+]+/gu, " ").trim();
+    const segment = numbered
+      ? `${words(segments.at(-2)!)} ${last}`
+      : words(last.replace(/\.[a-z0-9]{2,5}$/iu, "")).replace(/(?:\s\d{3,})+$/u, "");
+    if (!segment || /^\d+$/u.test(segment) || segment.length < 3) return "";
+    return segment.charAt(0).toLocaleUpperCase() + segment.slice(1);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * What a page read in a run is called, never its host said twice: the title
+ * the page gave, the list it was read for, the name of what the run took from
+ * it, a citation's title for the same address, the words in its address.
+ */
+export function pageName(runs: readonly Execution[], url: string, step?: string): string {
+  const at = same(url);
+  for (const run of runs) {
+    const read = (run.steps ?? []).find(
+      (entry) =>
+        entry.kind.kind === "read" && (entry.id === step || (!step && same(entry.kind.url) === at)),
+    );
+    const titled = read?.local?.page_title?.trim();
+    if (titled) return titled;
+    if (read?.kind.kind === "read" && read.kind.collection?.title?.trim())
+      return read.kind.collection.title.trim();
+  }
+  for (const run of runs)
+    for (const artifact of run.artifacts) {
+      const data = artifact.data;
+      if (data.kind !== "picks") continue;
+      const item = data.items.find((entry) => entry.url && same(entry.url) === at);
+      if (item?.name.trim()) return item.name.trim();
+    }
+  for (const run of runs)
+    for (const record of run.provider_evidence ?? [])
+      for (const citation of record.evidence.citations)
+        if (citation.url && same(citation.url) === at && citation.title?.trim())
+          return citation.title.trim();
+  return addressName(url);
+}
 /** What a search or a listing of a folder found is not a source; the files it led to are. */
 const LISTINGS = new Set(["search", "list", "listing", "directory"]);
 type Link = { extraction_id: string; source_id: number };
@@ -63,7 +118,7 @@ function resolve(execution: Execution, link: Link): RunSource | null {
       key,
       url: clipText(citation.url, URL_TEXT),
       host,
-      title: clipText(citation.title?.trim() || host, TEXT),
+      title: clipText(citation.title?.trim() || addressName(citation.url) || host, TEXT),
     };
   }
   const file = execution.file_evidence?.find((entry) => entry.id === link.extraction_id);
@@ -130,7 +185,7 @@ export function runSources(
         key: `page:${run.id}:${step.id}`,
         url: clipText(url, URL_TEXT),
         host,
-        title: clipText(step.local?.page_title?.trim() || host, TEXT),
+        title: clipText(pageName(runs, url, step.id) || host, TEXT),
         ...(frame ? { frame } : {}),
       });
     }

@@ -14,12 +14,15 @@
     fitColumns,
     host,
     numeric,
+    pickOf,
     rating,
     yesNo,
   } from "./sheet";
+  import { versus } from "../../lib/board/versus";
   import { vendorHost } from "../../lib/vendors";
   import Title from "./Title.svelte";
   import Mark, { hasMark } from "./Mark.svelte";
+  import ZephiumMark, { isZephium } from "./ZephiumMark.svelte";
   import YesNo from "./YesNo.svelte";
   import Dots from "./Dots.svelte";
   let {
@@ -36,6 +39,9 @@
     centre?: boolean;
   } = $props();
   const first = $derived(object.columns[0]);
+  /** A few named things compared: they stand as columns, the measures read down. */
+  const facing = $derived(versus(object));
+  const pick = $derived(facing ? pickOf(object) : null);
   const best = $derived(bests(object));
   let width = $state(0);
   /** Every column once the person asks for them; they scroll inside the sheet. */
@@ -85,14 +91,23 @@
     range: (from: number, to: number, total: number) =>
       m.work_table_range({ first: from, last: to, total }),
   });
-  /** The row's own logo, else a known product its name is. */
+  /**
+   * The row's own logo, else a known product its name is, else the site of
+   * the page it was read from: the first whose mark is at hand, or the first
+   * at all, so its mark is asked for.
+   */
   function logo(index: number): string | null {
     const row = object.rows[index];
-    const own = row?.entity?.logo;
-    if (own && hasMark(own)) return own;
-    if (first?.kind !== "entity") return null;
-    const known = vendorHost(undefined, row?.cells[0] ?? "");
-    return known && hasMark(known) ? known : null;
+    const cited = (row?.sources ?? []).flatMap((key) => {
+      const url = object.sources?.[key]?.url;
+      return url ? [url] : [];
+    });
+    const candidates = [
+      row?.entity?.logo,
+      ...(first?.kind === "entity" ? [vendorHost(undefined, row?.cells[0] ?? "")] : []),
+      ...(first?.kind === "entity" ? cited : []),
+    ].filter((entry): entry is string => !!entry);
+    return candidates.find((entry) => hasMark(entry)) ?? candidates[0] ?? null;
   }
   const limit = $derived(centre ? object.rows.length : shown);
   /** Where the columns run on past the sheet's edge, each side. */
@@ -122,7 +137,10 @@
       loading="lazy"
       width={size + 8}
       height={size + 8}
-    />{:else if logo(index)}<Mark address={logo(index)!} {size} />{/if}
+    />{:else if isZephium(row?.cells[0] ?? "")}<ZephiumMark {size} />{:else if logo(index)}<Mark
+      address={logo(index)!}
+      {size}
+    />{/if}
 {/snippet}
 
 {#snippet value(index: number, at: number)}
@@ -143,7 +161,10 @@
   {:else if column.kind === "entity"}
     {@const known = vendorHost(undefined, text)}
     <span class="subject"
-      >{#if known}<Mark address={known} size={16} />{/if}<span class="name">{text}</span></span
+      >{#if isZephium(text)}<ZephiumMark size={16} />{:else if known}<Mark
+          address={known}
+          size={16}
+        />{/if}<span class="name">{text}</span></span
     >
   {:else if column.kind === "tag"}{#if text.trim()}<span class="tag">{text}</span>{/if}
   {:else if column.kind === "link"}
@@ -160,60 +181,95 @@
   {:else}<span class="text">{text}</span>{/if}
 {/snippet}
 
-<section class="sheet" class:centre aria-label={object.title} bind:clientWidth={width}>
-  {#if object.title}<Title text={object.title} />{/if}
-  <div
-    class="nodrag table"
-    class:before={more.before}
-    class:after={more.after}
-    class:nowheel={more.before || more.after}
-    bind:this={table}
-    onscrollcapture={(event) => measure(event.target as Element)}
-  >
-    <DataTable
-      caption={object.title ?? ""}
-      showCaption={false}
-      {columns}
-      {rows}
-      {labels}
-      plain
-      headSortable={object.rows.length > 2}
-      bind:sort
-      {limit}
+{#if facing}
+  <section class="sheet versus" class:centre aria-label={object.title}>
+    {#if object.title}<Title text={object.title} />{/if}
+    <div class="grid" role="table" aria-label={object.title} style:--columns={object.rows.length}>
+      <div class="line contenders" role="row">
+        <span class="measure" role="columnheader"></span>
+        {#each object.rows as row, index (index)}<div
+            class="contender"
+            class:pick={pick === index}
+            role="columnheader"
+          >
+            <span class="face">{@render subject(index, 28)}</span>
+            <span class="who">{row.cells[0] ?? ""}</span>
+            {#if pick === index}<span class="pick-tag">{m.work_sheet_pick()}</span>{/if}
+          </div>{/each}
+      </div>
+      {#each said as at (at)}{@const column = object.columns[at]!}
+        <div class="line" role="row">
+          <span class="measure" role="rowheader"
+            >{column.unit && column.kind !== "money"
+              ? `${column.label} (${column.unit})`
+              : column.label}</span
+          >
+          {#each object.rows as _, index (index)}<span
+              class="value"
+              class:pick={pick === index}
+              class:centred={column.kind === "yes_no" || column.kind === "rating"}
+              role="cell">{@render value(index, at)}</span
+            >{/each}
+        </div>{/each}
+    </div>
+    {#if object.note}<footer><p class="note">{object.note}</p></footer>{/if}
+  </section>
+{:else}
+  <section class="sheet" class:centre aria-label={object.title} bind:clientWidth={width}>
+    {#if object.title}<Title text={object.title} />{/if}
+    <div
+      class="nodrag table"
+      class:before={more.before}
+      class:after={more.after}
+      class:nowheel={more.before || more.after}
+      bind:this={table}
+      onscrollcapture={(event) => measure(event.target as Element)}
     >
-      {#snippet head(row)}
-        <span class="subject"
-          >{@render subject(Number(row.key), 18)}<span class="name">{row.label}</span></span
-        >
-      {/snippet}
-      {#snippet cell(row, column)}{@render value(Number(row.key), Number(column.key))}{/snippet}
-    </DataTable>
-  </div>
-  {#if object.rows.length > limit || object.note || (hidden > 0 && !centre)}
-    <footer>
-      {#if object.note}<p class="note">{object.note}</p>{/if}
-      <span class="more">
-        {#if hidden > 0 && !centre}<button
-            type="button"
-            class="all nodrag nopan"
-            aria-expanded={wide}
-            onclick={() => (wide = !wide)}
-            >{wide
-              ? m.work_sheet_fewer_columns()
-              : hidden === 1
-                ? m.work_sheet_more_column()
-                : m.work_sheet_more_columns({ count: hidden })}</button
-          >{/if}
-        {#if object.rows.length > limit}<button
-            type="button"
-            class="all nodrag nopan"
-            onclick={() => actions.open?.(object.id)}
-            >{m.work_object_show_all({ count: object.rows.length })}</button
-          >{/if}
-      </span>
-    </footer>
-  {/if}
-</section>
+      <DataTable
+        caption={object.title ?? ""}
+        showCaption={false}
+        {columns}
+        {rows}
+        {labels}
+        plain
+        headSortable={object.rows.length > 2}
+        bind:sort
+        {limit}
+      >
+        {#snippet head(row)}
+          <span class="subject"
+            >{@render subject(Number(row.key), 18)}<span class="name">{row.label}</span></span
+          >
+        {/snippet}
+        {#snippet cell(row, column)}{@render value(Number(row.key), Number(column.key))}{/snippet}
+      </DataTable>
+    </div>
+    {#if object.rows.length > limit || object.note || (hidden > 0 && !centre)}
+      <footer>
+        {#if object.note}<p class="note">{object.note}</p>{/if}
+        <span class="more">
+          {#if hidden > 0 && !centre}<button
+              type="button"
+              class="all nodrag nopan"
+              aria-expanded={wide}
+              onclick={() => (wide = !wide)}
+              >{wide
+                ? m.work_sheet_fewer_columns()
+                : hidden === 1
+                  ? m.work_sheet_more_column()
+                  : m.work_sheet_more_columns({ count: hidden })}</button
+            >{/if}
+          {#if object.rows.length > limit}<button
+              type="button"
+              class="all nodrag nopan"
+              onclick={() => actions.open?.(object.id)}
+              >{m.work_object_show_all({ count: object.rows.length })}</button
+            >{/if}
+        </span>
+      </footer>
+    {/if}
+  </section>
+{/if}
 
 <style>
   .sheet {
@@ -347,5 +403,98 @@
 
   .all:hover {
     color: var(--color-text);
+  }
+
+  /* Contenders as columns under their marks, the measures read down, the pick on a soft ground. */
+  .grid {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .line {
+    display: grid;
+    grid-template-columns: 144px repeat(var(--columns), minmax(0, 1fr));
+    column-gap: 4px;
+  }
+
+  .contenders {
+    align-items: end;
+  }
+
+  .contender {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 12px 12px 14px;
+    border-start-start-radius: var(--radius-row);
+    border-start-end-radius: var(--radius-row);
+  }
+
+  .face {
+    display: flex;
+    align-items: center;
+    min-block-size: 28px;
+  }
+
+  .face :global(.picture) {
+    border-radius: var(--radius-inset);
+    object-fit: cover;
+  }
+
+  .who {
+    font-size: var(--text-reading);
+    font-weight: 650;
+    line-height: 1.25;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+
+  .pick-tag {
+    color: var(--color-term);
+    font-size: var(--text-caption);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .measure {
+    padding: 12px 12px 12px 0;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    font-weight: 500;
+    line-height: 18px;
+  }
+
+  .value {
+    min-inline-size: 0;
+    padding: 12px;
+    color: var(--color-label-secondary);
+    line-height: 18px;
+    overflow-wrap: anywhere;
+    text-wrap: pretty;
+  }
+
+  .line + .line .measure,
+  .line + .line .value {
+    border-block-start: 1px solid var(--color-border);
+  }
+
+  .value.centred {
+    display: flex;
+    align-items: flex-start;
+  }
+
+  .pick {
+    background: var(--color-term-wash);
+  }
+
+  .grid > .line:last-child .value.pick {
+    border-end-start-radius: var(--radius-row);
+    border-end-end-radius: var(--radius-row);
+  }
+
+  .versus footer {
+    padding-block-start: 2px;
   }
 </style>

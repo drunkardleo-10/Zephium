@@ -142,6 +142,8 @@ export type CanvasItem = {
     )[];
   };
   unavailable?: boolean;
+  /** One of the person's notes: the note it is and its first words after the title. */
+  note?: { id: string; preview: string };
   /** The stage a run is working in right now; it glows while that is true. */
   active?: boolean;
   /** The user's recorded choice about this element. */
@@ -165,6 +167,8 @@ export type PartView = {
   shape: "pages" | "sources" | "helper" | "ask" | "label";
   /** What it came to, in a few words: "3 homes". */
   summary?: string;
+  /** While it works, what it is doing now, in words. */
+  now?: string;
   pages: readonly PartPage[];
   /** What a search part cited, first few. */
   cited?: readonly { key: string; url: string; where: string; title: string }[];

@@ -256,9 +256,9 @@
     "description": "Measured 202469 JS and 8555 CSS bytes: the diagram lift's picture at 1.25 scale with its parts and flows lists, loaded only when a diagram is lifted; its own chunk is 6.7 KB JS and 4.0 KB CSS, the rest the shared Work graph (favicons, vendor names, the layout)."
   },
   "lazy:features/work/lib/diagram-worker.ts": {
-    "js": 178500,
+    "js": 179300,
     "css": 4200,
-    "description": "Measured 160928 JS and 3963 CSS bytes: the ELK adapter (graph in, layout out) and the worker client, 5.8 KB of its own over the shared runtime. ELK itself is in no budgeted graph: the worker script (1.43 MB) and the in-page fallback script (elk.bundled, 1.61 MB, loaded as a plain script so no page chunk carries ELK's CommonJS wrapper) load only when a diagram is laid out. The tiered layout joins the diagram module this graph shares (167891 measured). One line for two flows between the same parts adds 0.2 KB JS (168749 measured). Ports spread over a part's side and passing rows kept apart in the tier layout add 0.6 KB JS (169598 measured at aef3a6b9, 170070 at 8f0f32ac). The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 171802 JS and 3963 CSS. Round 3's shared Work graph with the concurrent diagram work in the tree: 175475 JS measured. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 178120 JS measured."
+    "description": "Measured 160928 JS and 3963 CSS bytes: the ELK adapter (graph in, layout out) and the worker client, 5.8 KB of its own over the shared runtime. ELK itself is in no budgeted graph: the worker script (1.43 MB) and the in-page fallback script (elk.bundled, 1.61 MB, loaded as a plain script so no page chunk carries ELK's CommonJS wrapper) load only when a diagram is laid out. The tiered layout joins the diagram module this graph shares (167891 measured). One line for two flows between the same parts adds 0.2 KB JS (168749 measured). Ports spread over a part's side and passing rows kept apart in the tier layout add 0.6 KB JS (169598 measured at aef3a6b9, 170070 at 8f0f32ac). The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 171802 JS and 3963 CSS. Round 3's shared Work graph with the concurrent diagram work in the tree: 175475 JS measured. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 178120 JS measured. Round 4: diagrams read left to right, with a column layout while the engine answers and a chain kept on one line: 179143 JS measured."
   },
   "lazy:features/work/components/WorkSubjectInspector.svelte": {
     "js": 213900,
@@ -391,9 +391,9 @@
     "description": "One kind's renderer, fetched the first time the canvas shows one: a folder as a small stack. Measured 85954 JS and 5345 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches."
   },
   "lazy:features/work/components/objects/Project.svelte": {
-    "js": 167000,
-    "css": 8600,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: a folder read as a project (stack marks, the tree with its two glyphs, scripts, git state). Measured 163102 JS and 8125 CSS, most of it the shared Work graph every object chunk reaches."
+    "js": 167400,
+    "css": 9700,
+    "description": "One kind's renderer, fetched the first time the canvas shows one: a folder read as a project (stack marks, the tree with its two glyphs, scripts, git state). Measured 163102 JS and 8125 CSS, most of it the shared Work graph every object chunk reaches. Round 4: on the canvas a project is a small map (the folder, then its stack, tree and scripts as pieces on one line); the centre keeps the whole card: 167271 JS and 9653 CSS measured."
   },
   "lazy:features/work/components/bar/ModelPicker.svelte": {
     "js": 286500,
@@ -429,5 +429,10 @@
     "js": 306500,
     "css": 18000,
     "description": "Measured 302801 JS and 17064 CSS bytes. Settings → Skills: built-in and personal skills with the Markdown editor."
+  },
+  "lazy:features/work/components/start/WorkStart.svelte": {
+    "js": 116700,
+    "css": 12300,
+    "description": "A new work's first screen (workflows by what the person does), fetched only when a work is empty so the Workspace chunk does not carry it. Measured 116550 JS and 12231 CSS, most of it the shared Work graph."
   }
 }

@@ -758,7 +758,7 @@ export type ObjectsInput = {
   }[];
 };
 
-const HERO = new Set(["diagram", "picks", "sheet", "plan"]);
+const HERO = new Set(["diagram", "picks", "sheet", "plan", "project"]);
 
 /**
  * A run's objects: the reply that heads its result, then everything else it

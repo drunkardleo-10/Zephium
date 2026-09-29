@@ -93,7 +93,7 @@
                 ><HostGlyph host={row.host} url={row.url} file={!!row.file} size={16} /></span
               >
               <span class="site">{row.host}</span>
-              <span class="title">{row.title}</span>
+              {#if row.title !== row.host}<span class="title">{row.title}</span>{/if}
             </button>
           </li>{/each}
       </ul>{/if}

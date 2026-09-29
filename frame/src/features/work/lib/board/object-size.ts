@@ -1,6 +1,7 @@
 import { diagramLayout, diagramWidth } from "../diagram";
 import { BOARD } from "./layout";
 import type { ObjectView, SheetColumn } from "./types";
+import { versus } from "./versus";
 
 type Range = { min: number; ideal: number; max: number };
 
@@ -22,6 +23,16 @@ const COLUMN: Record<SheetColumn["kind"], number> = {
 
 const lines = (text: string, width: number, advance: number) =>
   Math.max(1, Math.ceil((text.length * advance) / Math.max(120, width)));
+
+/** A project map's pieces, by their widths: the folder, and its stack, tree and scripts where it has them. */
+function projectPieces(view: Extract<ObjectView, { kind: "project" }>): number[] {
+  return [
+    296,
+    ...(view.stack.length ? [232] : []),
+    ...(view.tree.length ? [272] : []),
+    ...(view.scripts.length ? [320] : []),
+  ];
+}
 
 /** How wide an object may stand: its least, its natural and its widest. */
 export function objectWidth(view: ObjectView): Range {
@@ -47,6 +58,11 @@ export function objectWidth(view: ObjectView): Range {
     case "list":
       return { min: 400, ideal: 560, max: 640 };
     case "sheet": {
+      // A few named things compared stand as columns under a column of measures.
+      if (versus(view)) {
+        const facing = 44 + 148 + view.rows.length * 212;
+        return { min: Math.min(facing, 640), ideal: facing, max: Math.max(facing, 1120) };
+      }
       const ideal = view.columns.reduce((sum, column) => sum + COLUMN[column.kind], 40);
       return { min: Math.min(ideal, 480), ideal: Math.min(ideal, 1120), max: 1120 };
     }
@@ -68,16 +84,19 @@ export function objectWidth(view: ObjectView): Range {
       return { min: 240, ideal: 280, max: 360 };
     case "folder":
       return { min: 240, ideal: 280, max: 320 };
-    case "project":
-      return { min: 400, ideal: 520, max: 640 };
+    case "project": {
+      // The map's pieces side by side: the folder, then its stack, its tree, its scripts.
+      const width = projectPieces(view).reduce((sum, piece) => sum + piece + 40, -40);
+      return { min: width, ideal: width, max: width };
+    }
     case "code":
       return { min: 460, ideal: 600, max: 720 };
     case "document":
       return { min: 360, ideal: 480, max: 560 };
     case "diagram": {
-      // A diagram stands at its own drawn width, up to what reads whole at 100%.
-      const ideal = Math.min(BOARD.max, diagramWidth(view.diagram) + 40);
-      return { min: Math.min(ideal, 720), ideal, max: BOARD.max };
+      // A diagram reads to the right at its own drawn width: the run grows to hold it.
+      const ideal = Math.min(BOARD.reach, diagramWidth(view.diagram));
+      return { min: Math.min(ideal, 720), ideal, max: Math.max(ideal, BOARD.min) };
     }
   }
 }
@@ -99,7 +118,10 @@ export function objectHeight(view: ObjectView, width: number): number {
       const card = view.items.length <= 5 ? CARD.row : pictured ? CARD.pictured : CARD.plain;
       const across = Math.max(1, Math.floor((width + CARD.gap) / (card + CARD.gap)));
       const rows = Math.ceil(view.items.length / across);
-      const height = pictured ? Math.round(card * 0.75) + 132 : 148;
+      const shown = (width - (across - 1) * CARD.gap) / across;
+      // A set drawn under its pages carries each page's window and stem over its card.
+      const from = view.items.some((item) => item.from) ? Math.round((shown * 11) / 16) + 18 : 0;
+      const height = (pictured ? Math.round(card * 0.75) + 132 : 148) + from;
       return (view.title ? 34 : 0) + rows * height + (rows - 1) * CARD.gap;
     }
     case "plan":
@@ -110,6 +132,10 @@ export function objectHeight(view: ObjectView, width: number): number {
         view.items.reduce((sum, item) => sum + (item.from ? 76 : item.detail ? 56 : 40), 0)
       );
     case "sheet": {
+      if (versus(view)) {
+        const measures = view.columns.filter((_, index) => index > 0).length;
+        return (view.title ? 40 : 0) + 36 + 104 + measures * 62 + (view.note ? 32 : 0);
+      }
       const rows = Math.min(view.rows.length, 8);
       return (view.title ? 40 : 0) + 44 + rows * 44 + (view.rows.length > 8 ? 40 : 0);
     }
@@ -142,13 +168,11 @@ export function objectHeight(view: ObjectView, width: number): number {
           (sum, entry) => sum + 1 + (entry.children ? rows(entry.children as typeof entries) : 0),
           0,
         );
-      return (
-        96 +
-        (view.stack.length ? 48 : 0) +
-        Math.min(24, rows(view.tree)) * 26 +
-        (view.scripts.length ? 40 + view.scripts.length * 26 : 0) +
-        (view.git ? 32 : 0)
-      );
+      const lead = 96 + lines(view.summary, 256, 7.5) * 20 + (view.git ? 20 : 0);
+      const stack = view.stack.length ? 64 + view.stack.length * 30 : 0;
+      const tree = rows(view.tree) ? 64 + Math.min(12, rows(view.tree)) * 26 + 24 : 0;
+      const scripts = view.scripts.length ? 64 + view.scripts.length * 44 : 0;
+      return Math.max(lead, stack, tree, scripts);
     }
     case "code":
       return 80 + Math.min(16, view.text.split("\n").length) * 20;

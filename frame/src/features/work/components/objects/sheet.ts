@@ -158,3 +158,12 @@ export function fitColumns(sheet: Pick<SheetView, "columns" | "rows">, width: nu
   }
   return kept.sort((a, b) => a - b);
 }
+
+/** The subject that is best on most of the measures the sheet marks best, if one is. */
+export function pickOf(sheet: Pick<SheetView, "columns" | "rows">): number | null {
+  const counts = sheet.rows.map(() => 0);
+  for (const best of bests(sheet)) for (const row of best) counts[Number(row)]! += 1;
+  const top = Math.max(0, ...counts);
+  if (!top || counts.filter((count) => count === top).length > 1) return null;
+  return counts.indexOf(top);
+}

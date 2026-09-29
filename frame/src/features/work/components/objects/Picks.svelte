@@ -6,6 +6,7 @@
   import Title from "./Title.svelte";
   import Sheet from "./Sheet.svelte";
   import { picksSheet } from "./centre";
+  import PageFace from "../run/PageFace.svelte";
   /** A card's least width, pictured or plain, and the gap between cards. */
   const CARD = { pictured: 200, plain: 220, gap: 16 } as const;
   /** Things to choose between, side by side; the set opens as a sheet to compare. */
@@ -38,6 +39,10 @@
     !!pick.route;
   const flights = $derived(object.facet === "flight" && object.items.every(routed));
   const pictured = $derived(object.items.some((item) => item.picture));
+  /** Each thing stands under the page it was taken from, when the set came from several. */
+  const sourced = $derived(!flights && !centre && object.items.some((item) => item.from));
+  /** The column looked at: its page and its thing light up together. */
+  let lit = $state<number | null>(null);
   /** What a card holds under its name: a set shares one height only when its cards hold alike. */
   const holds = (pick: PickView) =>
     pick.facts.length || pick.price || pick.why ? `${pick.facts.length}|${!!pick.price}` : "";
@@ -68,9 +73,35 @@
         >{/if}
     </header>
   {/if}
-  <div class="set">
+  <div class="set" class:sourced>
     {#each object.items as pick, index (index)}
       {#if flights && routed(pick)}<FlightCard {pick} {actions} />
+      {:else if sourced}<div
+          class="cell"
+          class:lit={lit === index}
+          role="group"
+          onpointerenter={() => (lit = index)}
+          onpointerleave={() => lit === index && (lit = null)}
+        >
+          {#if pick.from}{@const from = pick.from}<button
+              type="button"
+              class="from nodrag nopan"
+              aria-label={from.title || from.url}
+              onclick={(event) => {
+                event.stopPropagation();
+                actions.link?.(from.url);
+              }}><PageFace url={from.url} title={from.title} frame={from.frame} /></button
+            ><span class="stem" aria-hidden="true"></span>{:else}<span
+              class="from none"
+              aria-hidden="true"
+            ></span><span class="stem none" aria-hidden="true"></span>{/if}
+          <PickCard
+            {pick}
+            {actions}
+            video={object.facet === "video"}
+            onopen={actions.open ? () => actions.open?.(object.id, index) : undefined}
+          />
+        </div>
       {:else}<PickCard
           {pick}
           {actions}
@@ -131,6 +162,73 @@
 
   .mixed .set {
     align-items: start;
+  }
+
+  /* A page over what was taken from it: the window, a short stem, the thing. */
+  .set.sourced {
+    position: relative;
+    align-items: start;
+  }
+
+  /* One quiet trunk through the pages' bars: they were read in one go. */
+  .set.sourced::before {
+    position: absolute;
+    inset-block-start: 14px;
+    inset-inline: 0;
+    border-block-start: 1px solid var(--color-border);
+    content: "";
+  }
+
+  .cell {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-inline-size: 0;
+  }
+
+  .from {
+    position: relative;
+    display: block;
+    inline-size: 100%;
+    aspect-ratio: 16 / 11;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-row);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: default;
+    transition: opacity var(--motion-fast) var(--ease-out);
+  }
+
+  .from.none {
+    visibility: hidden;
+  }
+
+  .from:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  .stem {
+    align-self: center;
+    inline-size: 1px;
+    block-size: 18px;
+    background: var(--color-border-strong);
+    transition: background var(--motion-fast) var(--ease-out);
+  }
+
+  .stem.none {
+    visibility: hidden;
+  }
+
+  .cell.lit .stem {
+    background: var(--color-muted);
+  }
+
+  .set.sourced:has(.cell.lit) .cell:not(.lit) .from {
+    opacity: 0.55;
   }
 
   .flights .set {

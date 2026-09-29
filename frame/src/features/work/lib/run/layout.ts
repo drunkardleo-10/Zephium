@@ -56,7 +56,7 @@ export type RunInputs = {
 };
 type RunLine = {
   id: string;
-  kind: "part" | "feed" | "input";
+  kind: "part" | "feed" | "input" | "found";
   source: string;
   target: string;
   /** The route as laid out, in canvas coordinates. */
@@ -145,6 +145,22 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
       x = snap(x + found.width + RUN.foundGap);
       lineHeight = Math.max(lineHeight, found.height);
       height = Math.max(height, lineTop - rowTop + found.height);
+    }
+    const first = row.found[0] ? rects[row.found[0].id] : undefined;
+    // The part's work is joined to what it found, straight along the row.
+    if (first) {
+      const y = rowTop + RUN.labelMid;
+      const from = { x: partsX + row.part.width + RUN.air, y };
+      lines.push({
+        id: `found:${row.part.id}`,
+        kind: "found",
+        source: row.part.id,
+        target: row.found[0]!.id,
+        points: [from, { x: first.x - RUN.air, y }],
+        from: { x: row.part.width + RUN.air, y: RUN.labelMid },
+        to: { x: -RUN.air, y: RUN.labelMid },
+        laid: ORIGIN,
+      });
     }
     const lastRect = rects[last]!;
     const right = lastRect.x + lastRect.width;

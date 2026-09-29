@@ -28,6 +28,7 @@ import { PART, partSize, rowKey, type PartShape } from "./run/part-size";
 import { runSources } from "./run/sources";
 import { computerRows, computerView } from "./parts/computer";
 import { foundByPart } from "./run/found";
+import { provenance } from "./run/provenance";
 import * as m from "$shared/i18n/messages";
 
 /** A placement written in board terms: the person moved the block; `x, y` are from the result's corner. */
@@ -462,15 +463,29 @@ export function environmentStages(
         found.delete(object.id);
         notes.set(part.id, [...(notes.get(part.id) ?? []), object]);
       }
+      // What a part found, joined to the pages it was taken from: those pages stand over
+      // what they gave, not in the part's stack.
+      const sourced = new Map<string, Set<string>>();
+      const objects = set.objects.map((object) => {
+        const holder = found.get(object.id);
+        const part = holder ? parts.find((candidate) => candidate.id === holder) : undefined;
+        if (!part || object.view.kind !== "picks") return object;
+        const told = provenance(object.view, part.pages, runs, recorded);
+        if (!told) return object;
+        sourced.set(part.id, new Set([...(sourced.get(part.id) ?? []), ...told.used]));
+        return { ...object, view: told.view };
+      });
+      for (const part of parts) {
+        const used = sourced.get(part.id);
+        if (used) part.pages = part.pages.filter((group) => !used.has(group.id));
+      }
       const open = options.open ?? undefined;
       const range = (object: RunObject) => objectWidth(object.view);
       const sized = (object: RunObject, width: number, opened: boolean) =>
         measured.get(measureKey(object.id, width, opened)) ?? objectHeight(object.view, width);
-      const pinned = new Set(
-        set.objects.flatMap((object) => (pins.has(object.id) ? [object.id] : [])),
-      );
+      const pinned = new Set(objects.flatMap((object) => (pins.has(object.id) ? [object.id] : [])));
       const layout = boardLayout(
-        set.objects
+        objects
           .filter(
             (object) => !found.has(object.id) && !pinned.has(object.id) && !folded.has(object.id),
           )
@@ -492,7 +507,7 @@ export function environmentStages(
         ? { id: reply.id, width: headWidth, height: sized(reply, headWidth, false) }
         : undefined;
       const pinSizes = new Map(
-        set.objects.flatMap((object) => {
+        objects.flatMap((object) => {
           const pin = pins.get(object.id);
           if (!pin) return [];
           const width = range(object).ideal;
@@ -507,7 +522,7 @@ export function environmentStages(
             measured.get(measureKey(rowKey(part.id), 0, false)),
           ),
         },
-        found: set.objects.flatMap((object) => {
+        found: objects.flatMap((object) => {
           if (found.get(object.id) !== part.id || pinned.has(object.id)) return [];
           const width = Math.round(Math.min(FOUND, range(object).ideal));
           return [{ id: object.id, width, height: sized(object, width, object.id === open) }];
@@ -552,7 +567,7 @@ export function environmentStages(
           parts: parts.map((part) => part.id),
           ...(head ? { head: head.id } : {}),
         },
-        objects: set.objects,
+        objects: objects,
         ...(reply ? { reply } : {}),
         revised: lead.revised,
         parts,

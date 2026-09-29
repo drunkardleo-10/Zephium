@@ -244,7 +244,11 @@ export type PickView = Likeness & {
   /** A video's or a course's length: "12:04", "10 weeks". */
   duration?: string;
   sources?: readonly string[];
+  /** The page of its part it was taken from, drawn over it and joined to it. */
+  from?: PickFrom;
 };
+/** A part's page something was taken from: which page, its address and title, its frame. */
+export type PickFrom = { page: string; url: string; title: string; frame: string | null };
 export type PicksView = ObjectBase & {
   kind: "picks";
   facet: PicksFacet;
