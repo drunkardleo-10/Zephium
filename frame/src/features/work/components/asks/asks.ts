@@ -7,7 +7,7 @@ import type {
 } from "$shared/ipc/bindings";
 import { pageFrameUrl } from "$domain/resources";
 import { vendorHost } from "../../lib/vendors";
-import { registrableSite } from "../../lib/run/site";
+import { registrableSite, siteName } from "../../lib/run/site";
 import type { RunTurn } from "../../lib/project-environment-thread";
 
 export { registrableSite, siteName } from "../../lib/run/site";
@@ -48,6 +48,8 @@ export type EntryAsk = Base & {
   /** What people call the site: "Slack". */
   name: string;
   host: string | null;
+  /** Every service one question covers: "Slack, Gmail and Calendar" is three. */
+  hosts: string[];
   /** The agent's plan, in its words; labelled as such, never as a fact. */
   plan: string;
   always: string;
@@ -170,12 +172,15 @@ function entryHost(steps: readonly WorkStepFact[], name: string): string | null 
   );
   const word = name.toLocaleLowerCase().replace(/\s+/gu, "");
   const known = vendorHost(undefined, name);
+  const called = (host: string) =>
+    siteName(host).toLocaleLowerCase().replace(/\s+/gu, "").endsWith(word);
   return (
     tasks.find(
       (host) =>
         (known && (host === known || host.endsWith(`.${known}`))) ||
         host === word ||
-        host.split(".").includes(word.replace(/\.[a-z]+$/u, "")),
+        host.split(".").includes(word.replace(/\.[a-z]+$/u, "")) ||
+        called(host),
     ) ?? (tasks.length === 1 ? tasks[0]! : known)
   );
 }
@@ -195,11 +200,13 @@ function entryOf(
   if (!name) return null;
   const lead = `Work in your ${name}?`;
   const plan = prompt.startsWith(lead) ? prompt.slice(lead.length).trim() : prompt;
+  const hosts = name.split(/, | and /u).flatMap((service) => entryHost(steps, service) ?? []);
   return {
     ...base,
     kind: "entry",
     name,
-    host: entryHost(steps, name),
+    host: hosts.length > 1 ? null : entryHost(steps, name),
+    hosts: [...new Set(hosts)],
     plan: plan.replace(/\.$/u, ""),
     always: always ?? `${ASK_WORDS.alwaysFor}${name}`,
     answer,

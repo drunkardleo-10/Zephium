@@ -66,6 +66,16 @@ describe("asks", () => {
     expect(asks[4]).toMatchObject({ service: "GitHub", tool: "gh", host: "github.com" });
   });
 
+  test("one entry question for several services carries each service's host", () => {
+    const [ask] = asksOf(f.runWith([...f.dayTasks, f.dayEntry]));
+    expect(ask).toMatchObject({
+      kind: "entry",
+      name: "Slack, Gmail and Calendar",
+      host: null,
+      hosts: ["app.slack.com", "mail.google.com", "calendar.google.com"],
+    });
+  });
+
   test("the runtime's purpose decides the card; words only for runs from before it", () => {
     const said = (step: typeof f.slackEntry, purpose: string, patch: object = {}) =>
       f.settled(step, { kind: { ...step.kind, ...patch, purpose } } as never);

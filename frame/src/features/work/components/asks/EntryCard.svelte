@@ -38,7 +38,13 @@
     where={ask.host ? registrableSite(ask.host) : ask.name}
     title={m.work_ask_entry_title({ name: ask.name })}
   >
-    {#snippet mark()}<HostGlyph host={ask.host ?? ""} size={18} initial={false} />{/snippet}
+    {#snippet mark()}
+      {#if ask.hosts.length > 1}<span class="marks"
+          >{#each ask.hosts.slice(0, 3) as host (host)}<span class="mark"
+              ><HostGlyph {host} size={14} initial={false} /></span
+            >{/each}</span
+        >{:else}<HostGlyph host={ask.host ?? ask.hosts[0] ?? ""} size={18} initial={false} />{/if}
+    {/snippet}
     {#if ask.plan}
       <p class="plan"><span class="label">{m.work_ask_plan()}</span>{ask.plan}</p>
     {/if}
@@ -61,6 +67,25 @@
 {/if}
 
 <style>
+  .marks {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .mark {
+    display: inline-grid;
+    place-items: center;
+    inline-size: 18px;
+    block-size: 18px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-surface);
+    box-shadow: 0 0 0 1.5px var(--color-surface);
+  }
+
+  .mark + .mark {
+    margin-inline-start: -5px;
+  }
+
   .plan {
     margin: 0;
     color: var(--color-muted);

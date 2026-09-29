@@ -76,6 +76,26 @@ export const slackEntry = running("entry-slack", {
   options: ["Allow", "Always for Slack", "Not now"],
 });
 
+export const dayTasks = [
+  slackTask,
+  running("read-gmail", {
+    kind: "read",
+    url: "https://mail.google.com/mail/u/0/",
+    goal: "Today's mail",
+  }),
+  running("read-calendar", {
+    kind: "read",
+    url: "https://calendar.google.com/calendar/r/day",
+    goal: "Today's calendar",
+  }),
+];
+
+export const dayEntry = running("entry-day", {
+  kind: "ask",
+  prompt: "Work in your Slack, Gmail and Calendar?",
+  options: ["Allow", "Always for Slack, Gmail and Calendar", "Not now"],
+});
+
 export const historyAsk = running("ask-history", {
   kind: "ask",
   prompt: "Use your history? Looking for the flight comparison you read last week.",
