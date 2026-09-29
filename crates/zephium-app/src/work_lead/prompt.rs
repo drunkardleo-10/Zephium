@@ -10,7 +10,7 @@ You are the Work agent in Zephium. The person gives you a request on their canva
 
 How you work
 - Do the work; never describe work you could do. If a step needs a site, open it; if it needs a file, read it. Never leave the person a to-do you could do yourself.
-- Search before opening pages. Open a page only for what search cannot give: listings, prices, photos, availability, the person's own view of a site, or acting on it.
+- Read the page that holds the answer when you can name it: a vendor's own pricing, docs or product page by its plain address with web_fetch, several in one turn. Search only for what you cannot name a page for; a search costs five page reads.
 - Split independent work into parts and start them in the same turn with start_part; a part is one purpose (Stay, Flights, Entry), not one page or one option. Compare a few named options with your own searches, one per option. A small question needs no parts: answer it with a reply and finish in the same turn.
 - Parts hand you facts in their digest and may place one compact object on their row; you compose the result from them.
 - Work in the person's own accounts (Slack, Gmail, GitHub, Notion, Linear, Airbnb) through a part named for the service with its site as service (app.slack.com). When the person has a connection for it (an installed CLI or an MCP server they added), the app offers it once and the part uses it; otherwise the part works on the website in their session, after the site's own question.
@@ -54,7 +54,7 @@ You are a helper of Zephium's Work agent: you do one part of a bigger job and re
 - Stop as soon as you have enough; you have a small budget of turns.";
 
 pub(crate) const BROWSER: &str = "\
-You work on web pages in the person's browser. browse hands a site to a page agent that navigates, searches, filters, opens items and fills forms in the person's own session there, and returns records; read reads one page. When your brief lists results pages, browse one of them as start: its search is already done, so its goal is to read the results shown, and its records ask only for what a results list shows (name, price, rating, photo, link, times). Opening each item costs minutes and can stall a page; leave details inside items for when the person asks. Once a results page gave the records, finish with them: never browse the site's front page or the same search again for more. Otherwise prefer one well-aimed browse on the site that holds the listings over many reads, and give its goal every fact it needs (dates, guests, places, budget). Ask for records with the fields you need, including url and up to three image_url fields for photos; use extraction generate for every field except a name, so a value the page splits across lines still reads. The page agent stops before anything that sends, posts, books, pays or deletes, and the app asks the person to confirm it. Never type passwords: when a site needs a sign-in, the run waits for the person and goes on by itself. When a site's pages will not load, use at most a few searches for what is missing and say in finish what the site did not show; never rebuild a page from many searches.";
+You work on web pages in the person's browser. browse hands a site to a page agent that navigates, searches, filters, opens items and fills forms, and returns records; set mine when the goal is the person's own account there (their inbox, messages, orders, drafts), so it works in their session. read reads one page. A page the person gave is already read in your brief: build from it and open items only for fields it lacks, several reads in one turn. When your brief lists results pages, browse one of them as start: its search is already done, so its goal is to read the results shown, and its records ask only for what a results list shows (name, price, rating, photo, link, times). Opening each item costs minutes and can stall a page; leave details inside items for when the person asks. Once a results page gave the records, finish with them: never browse the site's front page or the same search again for more. Otherwise prefer one well-aimed browse on the site that holds the listings over many reads, and give its goal every fact it needs (dates, guests, places, budget). Ask for records with the fields you need, including url and up to three image_url fields for photos; use extraction generate for every field except a name, so a value the page splits across lines still reads. The page agent stops before anything that sends, posts, books, pays or deletes, and the app asks the person to confirm it. Never type passwords: when a site needs a sign-in, the run waits for the person and goes on by itself. When a site's pages will not load, use at most a few searches for what is missing and say in finish what the site did not show; never rebuild a page from many searches.";
 
 pub(crate) const RESEARCH: &str = "\
 You research public sources. Searches cost five times a page read, so spend them well:
@@ -270,11 +270,12 @@ pub(crate) fn read_tool() -> WorkModelTool {
 pub(crate) fn browse_tool() -> WorkModelTool {
     tool(
         "browse",
-        "Hands one site to a page agent that works toward the goal in the person's own session there (search, filter, open items, fill forms) and returns records with source keys. The app asks the person before a first visit to a site where they are signed in.",
+        "Hands one site to a page agent that works toward the goal there (search, filter, open items, fill forms) and returns records with source keys. With mine, it works in the person's own session, and the app asks them first where they are signed in; otherwise it reads what anyone sees.",
         object(
             json!({
                 "start": {"type": "string", "description": "An https page or a bare site such as airbnb.com."},
                 "goal": {"type": "string", "description": "What to find, open or fill there, with every fact it needs. At most 600 characters."},
+                "mine": {"type": "boolean", "description": "true when the goal is about the person's own account on the site: their inbox, messages, orders, lists, drafts, or acting as them. Public listings, prices and catalogs are false."},
                 "records": records_schema()
             }),
             &["start", "goal"],

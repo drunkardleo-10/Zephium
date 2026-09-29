@@ -1,7 +1,7 @@
 //! Parts: a helper does one purpose of the job with its own prompt, tools
 //! and model, places what it found at the end of its row, and returns a
 //! digest to the lead. Up to four run at once; their pages share the run's
-//! two live agent pages.
+//! three live agent pages.
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -262,7 +262,7 @@ where
                 .as_ref()
                 .map(|p| objects::canvas(p, self.run.probe.execution()))
                 .unwrap_or_default();
-            out.push_str("Objects it placed:\n");
+            out.push_str("Objects it placed, which stand in the result as they are (never place another object of the same things):\n");
             out.push_str(&objects::view(
                 &canvas
                     .into_iter()
@@ -318,7 +318,13 @@ where
             share,
             objective,
         )
-        .await;
+        .await
+        .personal(
+            spec.helper == WorkHelperV1::Connection
+                || spec.declined.is_some()
+                || super::route::brand(spec.service.as_ref(), &spec.title)
+                    .is_some_and(|brand| super::route::site(&brand).is_some()),
+        );
         let mut tools: Vec<WorkModelTool> = match &kit {
             Kit::Browser => vec![
                 prompt::browse_tool(),
@@ -395,7 +401,46 @@ where
                 spec.records.join(", ")
             ));
         }
-        if let (Kit::Browser, Some(search)) = (&kit, &spec.search) {
+        let given = match kit {
+            Kit::Browser => given_pages(&self.objective, spec),
+            _ => Vec::new(),
+        };
+        if !given.is_empty() {
+            let collection = records_collection(&spec.title, &spec.records);
+            let requests = given
+                .iter()
+                .enumerate()
+                .map(|(index, url)| Request {
+                    call: format!("given-{index}"),
+                    kind: WorkStepKindV1::Read {
+                        url: url.clone(),
+                        collection: collection.clone(),
+                        goal: None,
+                    },
+                    mine: false,
+                })
+                .collect();
+            match hands.run(requests).await {
+                Ok(done) => {
+                    for ((_, content, error), url) in done.into_iter().zip(&given) {
+                        brief.push_str(&format!(
+                            "The page the person gave, already read as given ({url}){}:\n{}\n",
+                            if error { ", which failed" } else { "" },
+                            clip(&content, 6_000)
+                        ));
+                    }
+                    brief.push_str("Build from what it gave. Read or browse other pages only for what it lacks, and never search the site for what it already shows.\n");
+                }
+                Err(_) => {
+                    return PartReport::ended(
+                        WorkPartStateV1::Stopped,
+                        "Stopped while its pages ran.",
+                        Vec::new(),
+                    )
+                }
+            }
+        }
+        if let (Kit::Browser, Some(search), true) = (&kit, &spec.search, given.is_empty()) {
             let pages = super::recipes::pages(
                 search,
                 spec.service
@@ -546,6 +591,11 @@ where
                                 requests.push(Request {
                                     call: tool_call.id.clone(),
                                     kind,
+                                    mine: tool_call
+                                        .arguments
+                                        .get("mine")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false),
                                 })
                             }
                             Err(fault) => results[index] = Some(answer(fault, true)),
@@ -1132,6 +1182,89 @@ fn plain_page(url: &str) -> bool {
         })
 }
 
+/// Pages the person gave in their request (or the lead put in the part's
+/// goal) on the part's own site: a browser part reads them as given first.
+/// Pages in the person's own apps go through the part's page tasks instead.
+fn given_pages(objective: &str, spec: &PartSpec) -> Vec<String> {
+    let site = spec
+        .service
+        .as_ref()
+        .and_then(|service| service.host.as_deref())
+        .and_then(|host| crate::work_sites::site_of(&format!("https://{host}/")));
+    let mut pages: Vec<String> = Vec::new();
+    for text in [objective, spec.goal.as_str(), spec.brief.as_str()] {
+        for word in
+            text.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '(' | ')'))
+        {
+            let word = word.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'']);
+            let Ok(url) = url::Url::parse(word) else {
+                continue;
+            };
+            let url = url.to_string();
+            if !url.starts_with("https://")
+                || url.len() > 1024
+                || crate::work_sites::personal_page(&url)
+                || site
+                    .as_ref()
+                    .is_some_and(|site| crate::work_sites::site_of(&url).as_ref() != Some(site))
+                || pages.contains(&url)
+            {
+                continue;
+            }
+            pages.push(url);
+        }
+    }
+    pages.truncate(2);
+    pages
+}
+
+/// The fields a part returns for each thing, as the rows a page read
+/// collects: a link, up to three pictures, the rest as text.
+fn records_collection(
+    title: &str,
+    records: &[String],
+) -> Option<zephium_core::work::collection::WorkBrowseCollection> {
+    let mut columns: Vec<Value> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    let (mut link, mut pictures) = (false, 0);
+    for field in records {
+        let name: String = field
+            .trim()
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let name = name.trim_matches('_').to_owned();
+        if name.is_empty() || matches!(name.as_str(), "name" | "title") || names.contains(&name) {
+            continue;
+        }
+        let kind = if (name.contains("url") || name.contains("link")) && !link {
+            link = true;
+            "url"
+        } else if ["photo", "image", "picture", "img"]
+            .iter()
+            .any(|w| name.contains(w))
+        {
+            if pictures == 3 {
+                continue;
+            }
+            pictures += 1;
+            "image_url"
+        } else {
+            "text"
+        };
+        names.push(name.clone());
+        columns.push(serde_json::json!({"name": name, "value": {"kind": kind}, "required": kind == "url", "extraction": "generate"}));
+    }
+    if columns.is_empty() {
+        return None;
+    }
+    let max_items = (256 / (columns.len() + 1)).min(12);
+    let value =
+        serde_json::json!({"title": clip(title, 60), "max_items": max_items, "columns": columns});
+    hands::collection(Some(&value)).ok().flatten()
+}
+
 /// A helper's `need` argument: `{kind, target}`.
 fn need_arg(value: Option<&Value>) -> Option<WorkPartNeedV1> {
     let value = value?;
@@ -1287,6 +1420,46 @@ fn note_reason(note: Option<&str>, search: bool) -> Option<WorkPartReasonV1> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_the_person_gave_is_read_as_given_by_the_part_for_its_site() {
+        let spec = PartSpec {
+            title: "Sets".into(),
+            helper: WorkHelperV1::Browser,
+            goal: "Pick three sets".into(),
+            brief: String::new(),
+            service: Some(WorkPartServiceV1 {
+                host: Some("lego.com".into()),
+                connection: None,
+            }),
+            records: vec![
+                "price".into(),
+                "pieces".into(),
+                "url".into(),
+                "photo".into(),
+            ],
+            search: None,
+            declined: None,
+        };
+        assert_eq!(
+            given_pages(
+                "Open https://www.lego.com/en-us/themes/architecture, pick three sets; see https://example.com/x.",
+                &spec
+            ),
+            ["https://www.lego.com/en-us/themes/architecture"]
+        );
+        let slack = PartSpec {
+            service: None,
+            ..spec
+        };
+        assert!(given_pages("Summarise https://app.slack.com/client/T1/C2", &slack).is_empty());
+        let collection = records_collection("Sets", &slack.records).unwrap();
+        assert_eq!(collection.columns.len(), 4);
+        assert!(collection
+            .columns
+            .iter()
+            .all(|c| c.required == (c.name == "url")));
+    }
 
     #[test]
     fn a_sites_plain_page_is_readable_by_its_address() {

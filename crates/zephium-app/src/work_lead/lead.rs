@@ -42,8 +42,8 @@ const CONVERSATION_CHARS: usize = 240_000;
 const KEEP_GOING: &str = "Keep going";
 /// The lead's own searches and page reads in one request; wide research
 /// goes to parts, which keep page text out of the lead's view.
-const LEAD_SEARCHES: usize = 8;
-const LEAD_READS: usize = 6;
+const LEAD_SEARCHES: usize = 5;
+const LEAD_READS: usize = 8;
 /// A part's own object stays compact; the lead composes the result.
 const PART_SHEET_ROWS: usize = 12;
 const PART_SHEET_COLUMNS: usize = 6;
@@ -366,6 +366,7 @@ where
                             Request {
                                 call: tool_call.id.clone(),
                                 kind,
+                                mine: false,
                             },
                         )),
                         Err(fault) => answers[index] = Some((fault, true)),
@@ -383,6 +384,7 @@ where
                         Request {
                             call: tool_call.id.clone(),
                             kind,
+                            mine: false,
                         },
                     )),
                     Err(fault) => answers[index] = Some((fault, true)),
@@ -607,6 +609,34 @@ where
                     ),
                 );
             }
+        } else if let Some(held) = (kind == "picks")
+            .then(|| {
+                let names: Vec<String> = args
+                    .pointer("/data/items")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.get("name").and_then(Value::as_str))
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                objects::part_holds(&canvas, &names)
+            })
+            .flatten()
+        {
+            if lenient {
+                return self.revise(&with_id(args, held.artifact.id)).await;
+            }
+            return self.refuse(
+                &key,
+                ObjectRefusal::Duplicate,
+                format!(
+                    "picks {} from the part already holds these things and stands in the result as it is; add the reply around it, and revise it (id {}) only to change it",
+                    held.artifact.id, held.artifact.id
+                ),
+            );
         } else if let Some(existing) = objects::duplicate(&canvas, kind, title, part) {
             if lenient {
                 return self.revise(&with_id(args, existing.artifact.id)).await;
@@ -643,10 +673,16 @@ where
                 }
             }
         }
-        if let Err(fault) =
-            objects::honest(&proposed.data, &honesty(&projection, execution, &proposed))
-        {
-            return self.refuse(&key, ObjectRefusal::Honesty, fault);
+        let mut proposed = proposed;
+        let run_honesty = honesty(&projection, execution, &proposed);
+        if let Err(fault) = objects::honest(&proposed.data, &run_honesty) {
+            match objects::mend(&proposed.data, &run_honesty).filter(|_| lenient) {
+                Some((data, words)) => {
+                    proposed.data = data;
+                    proposed.left_out.push(words);
+                }
+                None => return self.refuse(&key, ObjectRefusal::Honesty, fault),
+            }
         }
         let left_out = proposed.left_out.clone();
         match objects::publish(self.run, proposed, part, None).await {

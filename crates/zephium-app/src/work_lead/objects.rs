@@ -340,6 +340,7 @@ pub(crate) fn propose(
     };
     map.remove("kind");
     let mut data = Value::Object(map);
+    super::schema::strip_schema_words(kind, &mut data);
     let mut left_out: Vec<String> = Vec::new();
     if lenient {
         for path in super::schema::prune(kind, &mut data) {
@@ -706,6 +707,54 @@ pub(crate) fn honest(data: &WorkArtifactDataV1, run: &Honesty) -> Result<(), Str
     Ok(())
 }
 
+/// The object without the parts `honest` refuses: cells that say a value
+/// was not found stand empty, such figures and facts are left out. None when
+/// what is left would still be refused or nothing changed.
+pub(crate) fn mend(
+    data: &WorkArtifactDataV1,
+    run: &Honesty,
+) -> Option<(WorkArtifactDataV1, String)> {
+    let mut data = data.clone();
+    let mut mended = 0usize;
+    match &mut data {
+        WorkArtifactDataV1::Reply { figures, .. } => {
+            let before = figures.len();
+            figures.retain(|f| {
+                !(says(&f.value, &NOT_FOUND)
+                    || says(&f.value, &NO_VALUE)
+                    || says(&f.label, &NOT_FOUND))
+            });
+            mended = before - figures.len();
+        }
+        WorkArtifactDataV1::Picks { items, .. } => {
+            for item in items.iter_mut() {
+                let before = item.facts.len();
+                item.facts.retain(|f| !says(&f.value, &NOT_FOUND));
+                mended += before - item.facts.len();
+            }
+        }
+        WorkArtifactDataV1::Sheet { columns, rows, .. } => {
+            for row in rows.iter_mut() {
+                for (cell, column) in row.cells.iter_mut().zip(columns.iter()) {
+                    if column.kind == zephium_core::work::objects::WorkSheetColumnKindV1::Text
+                        && says(cell, &NOT_FOUND)
+                    {
+                        cell.clear();
+                        mended += 1;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    (mended > 0 && honest(&data, run).is_ok()).then(|| {
+        (
+            data,
+            format!("{mended} values that said they were not found (left empty)"),
+        )
+    })
+}
+
 /// Significant words of a title, for telling whether two objects are about
 /// the same subject.
 fn subject(title: &str) -> Vec<String> {
@@ -759,6 +808,36 @@ pub(crate) fn duplicate<'a>(
             && object.artifact.data.kind_name() == kind
             && (object.artifact.part.is_none() || object.artifact.part != part)
             && same_subject(&object.artifact.title, title)
+    })
+}
+
+/// A part's picks of this run that already hold most of these items: the
+/// lead's picks of the same things would stand twice on the canvas.
+pub(crate) fn part_holds<'a>(
+    objects: &'a [CanvasObject],
+    names: &[String],
+) -> Option<&'a CanvasObject> {
+    let names: Vec<String> = names.iter().map(|n| n.trim().to_lowercase()).collect();
+    if names.is_empty() {
+        return None;
+    }
+    objects.iter().find(|object| {
+        let WorkArtifactDataV1::Picks { items, .. } = &object.artifact.data else {
+            return false;
+        };
+        object.current
+            && object.in_this_run
+            && object.artifact.part.is_some()
+            && names
+                .iter()
+                .filter(|name| {
+                    items
+                        .iter()
+                        .any(|item| item.name.trim().to_lowercase() == **name)
+                })
+                .count()
+                * 2
+                >= names.len()
     })
 }
 

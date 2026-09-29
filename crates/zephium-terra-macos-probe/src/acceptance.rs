@@ -368,7 +368,7 @@ impl zephium_core::work::model::WorkModelClient for Scripted {
             (true, _) => ("finish", serde_json::json!({"say": "Checked the page."})),
             (false, false) => (
                 "browse",
-                serde_json::json!({"start": start, "goal": goal, "records": {
+                serde_json::json!({"start": start, "goal": goal, "mine": true, "records": {
                 "title": "Results", "max_items": 8, "columns": [
                     {"name": "price", "value": {"kind": "text"}, "required": false, "extraction": "verbatim"},
                     {"name": "rating", "value": {"kind": "text"}, "required": false, "extraction": "verbatim"},
@@ -995,16 +995,22 @@ pub(super) async fn media_row(execution: &zephium_core::work::runtime::WorkExecu
     urls.sort();
     urls.dedup();
     let candidates = urls.len();
-    let (mut admitted, mut too_large, mut other) = (0, 0, 0);
+    let (mut admitted, mut too_large, mut other, mut scaled) = (0, 0, 0, 0);
     for url in urls.into_iter().take(16) {
         match fetch_public_image(&url).await {
-            Ok(_) => admitted += 1,
+            Ok(bytes) => {
+                admitted += 1;
+                // Admission scales these to display size before storing them.
+                if bytes.len() > zephium_core::resources::MAX_MEDIA_FETCHED_IMAGE_BYTES as usize {
+                    scaled += 1;
+                }
+            }
             Err(PublicAssetError::TooLarge) => too_large += 1,
             Err(_) => other += 1,
         }
     }
     say(format_args!(
-        "lead-media: candidates={candidates} admitted={admitted} refused={} too_large={too_large}",
+        "lead-media: candidates={candidates} admitted={admitted} refused={} too_large={too_large} scaled={scaled}",
         too_large + other
     ));
 }

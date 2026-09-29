@@ -194,6 +194,48 @@ pub fn entry_url(url: &str) -> Option<&'static str> {
         .filter(|entry| site_of(entry).as_deref() == Some(site.as_str()))
 }
 
+/// Whether a page is in an app a person only uses signed in: their inbox,
+/// calendar, messages, docs or issues. Such pages are worked on as the
+/// person; any other page is a public read unless the task is about their
+/// own account there.
+pub fn personal_page(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed
+        .host_str()
+        .map(|h| h.trim_start_matches("www.").to_ascii_lowercase())
+    else {
+        return false;
+    };
+    const APPS: &[&str] = &[
+        "mail.google.com",
+        "calendar.google.com",
+        "drive.google.com",
+        "docs.google.com",
+        "meet.google.com",
+        "outlook.live.com",
+        "outlook.office.com",
+        "linear.app",
+        "app.slack.com",
+    ];
+    if APPS.contains(&host.as_str()) {
+        return true;
+    }
+    if host == "github.com" {
+        let first = parsed
+            .path_segments()
+            .and_then(|mut s| s.next())
+            .unwrap_or("");
+        return matches!(first, "" | "notifications" | "pulls" | "issues");
+    }
+    site_of(url).is_some_and(|site| {
+        VENDORS
+            .iter()
+            .any(|(known, _, entry)| *known == site && entry.is_some())
+    })
+}
+
 /// The page's host, for its session badge.
 pub fn host_of(url: &str) -> Option<String> {
     url::Url::parse(url).ok()?.host_str().map(str::to_owned)
@@ -221,6 +263,8 @@ pub enum PrivateBecause {
     Never,
     Sensitive,
     Declined,
+    /// A public read: the page is not about the person's own account.
+    Public,
 }
 
 /// What the run does before a page task on a site.
@@ -326,6 +370,8 @@ pub struct RunSites {
     private: bool,
     standing: Vec<WorkSiteEntryV1>,
     decided: BTreeMap<String, Option<String>>,
+    /// Sites this run reads publicly, without the person's session.
+    public: Vec<String>,
     /// Sites where the person allowed edits for this run.
     edits: Vec<String>,
 }
@@ -335,8 +381,19 @@ impl RunSites {
             private,
             standing,
             decided: BTreeMap::new(),
+            public: Vec::new(),
             edits: Vec::new(),
         }
+    }
+    /// A page task on the site reads what anyone sees there: it opens
+    /// without the person's session and asks nothing. Undone by `personal`.
+    pub fn public(&mut self, site: &str) {
+        if !self.public.iter().any(|known| known == site) {
+            self.public.push(site.to_owned());
+        }
+    }
+    pub fn personal(&mut self, site: &str) {
+        self.public.retain(|known| known != site);
     }
     pub fn allow_edits(&mut self, site: &str) {
         if !self.edits.iter().any(|edit| edit == site) {
@@ -392,6 +449,9 @@ impl RunSites {
             }
             None if is_sensitive(site) => return Entry::Private(PrivateBecause::Sensitive),
             _ => {}
+        }
+        if self.public.iter().any(|known| known == site) {
+            return Entry::Private(PrivateBecause::Public);
         }
         if present {
             Entry::Ask
@@ -546,6 +606,17 @@ mod tests {
             Entry::Private(PrivateBecause::Declined)
         );
         assert_eq!(run.read_session("figma.com"), SiteSession::Private);
+        run.public("lego.com");
+        assert_eq!(
+            run.entry("lego.com", true),
+            Entry::Private(PrivateBecause::Public)
+        );
+        assert!(matches!(
+            run.entry("notion.so", true),
+            Entry::Session(SiteSession::Yours { .. })
+        ));
+        run.personal("lego.com");
+        assert_eq!(run.entry("lego.com", true), Entry::Ask);
         let mut private = RunSites::new(true, vec![]);
         assert_eq!(
             private.entry("slack.com", true),
@@ -625,5 +696,28 @@ mod tests {
             None
         );
         assert!(is_sensitive("chase.com") && !is_sensitive("slack.com"));
+    }
+
+    #[test]
+    fn only_apps_used_signed_in_are_personal_pages() {
+        for personal in [
+            "https://app.slack.com/client",
+            "https://mail.google.com/mail/u/0/",
+            "https://calendar.google.com/",
+            "https://linear.app/team/my-issues",
+            "https://github.com/notifications",
+            "https://www.notion.so/",
+        ] {
+            assert!(personal_page(personal), "{personal}");
+        }
+        for public in [
+            "https://www.lego.com/en-us/themes/architecture",
+            "https://github.com/sveltejs/svelte",
+            "https://www.airbnb.com/s/San-Francisco/homes",
+            "https://www.google.com/search?q=x",
+            "https://vercel.com/pricing",
+        ] {
+            assert!(!personal_page(public), "{public}");
+        }
     }
 }

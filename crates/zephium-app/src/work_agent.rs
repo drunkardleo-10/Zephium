@@ -2040,6 +2040,7 @@ impl Driver {
         use crate::work_sites::*;
         match entry {
             Entry::Session(session) => session,
+            Entry::Private(PrivateBecause::Public) => SiteSession::Private,
             Entry::Private(because) => {
                 self.report(WorkAgentDiagnostic::PrivatePage { because });
                 self.notice(&format!(
@@ -2051,6 +2052,7 @@ impl Driver {
                         PrivateBecause::Sensitive =>
                             "it is a sensitive site the person has not opened to the agent",
                         PrivateBecause::Declined => "the person said not now",
+                        PrivateBecause::Public => "it is a public read",
                     }
                 ));
                 SiteSession::Private
@@ -2295,6 +2297,16 @@ impl WorkPartDriver {
             .ask_person(prompt, options.clone(), WorkAskPurposeV1::Entry)
             .await?
             .map(|answer| crate::work_sites::entry_answer_to(&options, &answer)))
+    }
+    /// Page tasks on these sites read them publicly; the rest are worked on
+    /// as the person, after the entry question where it applies.
+    pub(crate) fn scope_sites(&mut self, public: &[String], personal: &[String]) {
+        for site in public {
+            self.0.sites.public(site);
+        }
+        for site in personal {
+            self.0.sites.personal(site);
+        }
     }
     /// Records the run's entry answer for one of this driver's sites.
     pub(crate) async fn enter(&mut self, site: &str, answer: crate::work_sites::EntryAnswer) {

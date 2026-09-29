@@ -458,6 +458,49 @@ pub(crate) fn prune(kind: &str, value: &mut Value) -> Vec<String> {
     removed
 }
 
+/// JSON Schema words a model sometimes copies into its data beside the
+/// fields (`minItems: 1`); they are never data, so they go on the first try.
+pub(crate) fn strip_schema_words(kind: &str, value: &mut Value) {
+    const WORDS: [&str; 12] = [
+        "minItems",
+        "maxItems",
+        "minLength",
+        "maxLength",
+        "minimum",
+        "maximum",
+        "type",
+        "description",
+        "required",
+        "properties",
+        "additionalProperties",
+        "$schema",
+    ];
+    fn strip(schema: &Value, value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+                    return;
+                };
+                map.retain(|key, _| properties.contains_key(key) || !WORDS.contains(&key.as_str()));
+                for (key, element) in map.iter_mut() {
+                    if let Some(field) = properties.get(key) {
+                        strip(field, element);
+                    }
+                }
+            }
+            Value::Array(items) => {
+                if let Some(item) = schema.get("items") {
+                    items.iter_mut().for_each(|element| strip(item, element));
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(schema) = data(kind) {
+        strip(&schema, value);
+    }
+}
+
 fn prune_at(schema: &Value, value: &mut Value, path: &str, removed: &mut Vec<String>) {
     match value {
         Value::Object(map) => {

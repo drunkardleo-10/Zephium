@@ -14,8 +14,9 @@ use super::run::LeadRun;
 use crate::work_agent::{WorkAgentBrowseRequest, WorkBrowserOutcome, WorkPartDriver};
 use crate::work_runtime::{WorkAttemptProbe, WorkNodeAttempt};
 
-/// At most this many agent pages are live at once across a run's parts.
-pub(crate) const LIVE_PAGES: usize = 2;
+/// At most this many agent pages are live at once across a run's parts: the
+/// page group's native worker seats.
+pub(crate) const LIVE_PAGES: usize = 3;
 /// Searches in flight at once across a run's parts. Each holds one of the
 /// run's provider slots (four) while it searches or ranks; past that a
 /// search waits instead of failing to be sent.
@@ -26,7 +27,7 @@ const RECORD_LINES: usize = 32;
 const FILE_TEXT_BYTES: usize = 6 * 1024;
 
 /// The browser closure the host gives the run, shared by every part, with
-/// its gates: at most two pages live, and at most one page task per site,
+/// its gates: at most three pages live, and at most one page task per site,
 /// since one session means one actor per site.
 pub(crate) struct SharedBrowser<B> {
     browser: Mutex<B>,
@@ -161,6 +162,8 @@ impl EntryDesk {
 pub(crate) struct Request {
     pub call: String,
     pub kind: WorkStepKindV1,
+    /// A page task about the person's own account on its site.
+    pub mine: bool,
 }
 
 pub(crate) struct Hands<'a, B> {
@@ -171,6 +174,8 @@ pub(crate) struct Hands<'a, B> {
     driver: tokio::sync::Mutex<WorkPartDriver>,
     part: Option<WorkPartId>,
     charged: Mutex<WorkUsage>,
+    /// The part is about a service the person uses as themselves.
+    personal: bool,
 }
 
 impl<'a, B, Fut> Hands<'a, B>
@@ -207,7 +212,14 @@ where
             driver: tokio::sync::Mutex::new(driver),
             part,
             charged: Mutex::new(WorkUsage::default()),
+            personal: false,
         }
+    }
+
+    /// Every page task of this part works on the person's own account.
+    pub(crate) fn personal(mut self, personal: bool) -> Self {
+        self.personal = personal;
+        self
     }
 
     /// What this driver has spent in all.
@@ -386,6 +398,7 @@ where
         requests: &[Request],
     ) -> Option<WorkAttemptStatus> {
         let mut hosts: Vec<(String, String)> = Vec::new();
+        let mut public: Vec<String> = Vec::new();
         for request in requests {
             if let WorkStepKindV1::Read {
                 url, goal: Some(_), ..
@@ -397,11 +410,20 @@ where
                 ) else {
                     continue;
                 };
+                if !(request.mine || self.personal || crate::work_sites::personal_page(url)) {
+                    if !public.contains(&site) {
+                        public.push(site);
+                    }
+                    continue;
+                }
                 if !hosts.iter().any(|(known, _)| *known == site) {
                     hosts.push((site, host));
                 }
             }
         }
+        public.retain(|site| !hosts.iter().any(|(known, _)| known == site));
+        let personal: Vec<String> = hosts.iter().map(|(site, _)| site.clone()).collect();
+        driver.scope_sites(&public, &personal);
         if hosts.is_empty() {
             return None;
         }
@@ -645,6 +667,20 @@ where
         } else {
             format!(" [{}]", keys[0])
         };
+        // The page's own structured data names a picture for each item; a
+        // record whose card showed none takes it from there, under the key
+        // of the facts it came from.
+        let facts: Vec<(String, String, String)> = artifact
+            .evidence
+            .iter()
+            .zip(&keys)
+            .filter_map(|(link, key)| Some((driver.preview(link)?.text.as_str(), key)))
+            .flat_map(|(text, key)| {
+                facts_pictures(text)
+                    .into_iter()
+                    .map(move |(page, image)| (page, image, key.clone()))
+            })
+            .collect();
         let subject = |subject: &WorkSubject| {
             let mut line = subject.name.clone();
             if let Some(descriptor) = &subject.descriptor {
@@ -656,6 +692,14 @@ where
             }
             for image in &subject.image_candidates {
                 line.push_str(&format!(" · photo {image}"));
+            }
+            if subject.image_candidates.is_empty() {
+                let page = subject.homepage.as_deref().and_then(url_path);
+                if let Some((_, image, key)) =
+                    facts.iter().find(|(path, ..)| Some(path) == page.as_ref())
+                {
+                    line.push_str(&format!(" · photo {image} [{key}]"));
+                }
             }
             line
         };
@@ -778,6 +822,34 @@ impl WorkPublicSearchProvider for SearchLane<'_> {
             self.inner.search(scope, context, limits).await
         })
     }
+}
+
+fn url_path(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()
+        .map(|url| url.path().trim_end_matches('/').to_ascii_lowercase())
+        .filter(|path| !path.is_empty())
+}
+
+/// Each item's page and picture in a page's structured-data facts
+/// ("product: name | ... | image: url | url: page ;; ...").
+fn facts_pictures(text: &str) -> Vec<(String, String)> {
+    text.split(" ;; ")
+        .filter_map(|item| {
+            let pairs: Vec<(&str, &str)> = item
+                .split(" | ")
+                .filter_map(|pair| pair.split_once(": "))
+                .collect();
+            let find = |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| k.trim() == key)
+                    .map(|(_, v)| v.trim())
+                    .filter(|v| v.starts_with("https://"))
+            };
+            Some((url_path(find("url")?)?, find("image")?.to_owned()))
+        })
+        .collect()
 }
 
 fn host(url: &str) -> String {
@@ -922,6 +994,19 @@ mod tests {
             });
         assert_eq!(decided, ((1, 1, 2), 1));
         assert_eq!(*asked.lock().unwrap(), [3, 1]);
+    }
+
+    #[test]
+    fn a_catalog_items_picture_comes_from_the_page_facts() {
+        let facts = "product: London | price: 39.99 USD | image: https://www.lego.com/cdn/a/21034.jpg?width=800 | url: https://www.lego.com/en-us/product/london-21034 ;; product: Paris | url: https://www.lego.com/en-us/product/paris-21064";
+        assert_eq!(
+            facts_pictures(facts),
+            [(
+                "/en-us/product/london-21034".to_owned(),
+                "https://www.lego.com/cdn/a/21034.jpg?width=800".to_owned()
+            )]
+        );
+        assert!(facts_pictures("A page about London").is_empty());
     }
 
     #[test]
