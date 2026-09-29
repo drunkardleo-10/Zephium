@@ -3486,11 +3486,9 @@ impl AgentBrowserSession {
                 &mut self.action_settlements,
             );
         match result {
-            Err(
-                error @ crate::AgentBrowserActionError::Failed(
-                    zephium_agentic::SemanticActionFailure::TargetOccluded,
-                ),
-            ) => {
+            Err(error @ crate::AgentBrowserActionError::Failed(failure))
+                if crate::action::refused_before_acting(failure) =>
+            {
                 if let Some(refusal) = self.covered_refusal()? {
                     self.rejected_refusal = Some(refusal);
                     return Err(AgentBrowserProviderError::ActionRejected(error));

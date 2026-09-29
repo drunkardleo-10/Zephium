@@ -585,9 +585,9 @@ impl AgentBrowserAction {
             }
         }
     }
-    /// An action the page refused before it acted (its target covered or
-    /// out of view): nothing was pressed or typed, so a read or a draft keeps
-    /// its continuation and the model hears why.
+    /// An action the page refused before it acted (its target covered, out
+    /// of view, changed or gone): nothing was pressed or typed, so a read or
+    /// a draft keeps its continuation and the model hears why.
     pub(crate) fn into_covered_refusal(
         self,
     ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
@@ -603,14 +603,18 @@ impl AgentBrowserAction {
             )
             || self.proposal.continuation.is_none()
             || self.failed.as_ref().is_none_or(|failed| {
-                self.receipt != Some(failed.receipt())
-                    || failed.failure() != SemanticActionFailure::TargetOccluded
+                self.receipt != Some(failed.receipt()) || !refused_before_acting(failed.failure())
             })
         {
             return Err(Box::new(self));
         }
         let mut this = self;
         let failed = this.failed.take().expect("checked original failed owner");
+        let reason = if failed.failure() == SemanticActionFailure::TargetOccluded {
+            SemanticActionBindingError::TargetCovered
+        } else {
+            SemanticActionBindingError::DispatchRejected
+        };
         match this.proposal.batch.fail(&this.proposal.action, failed) {
             Ok(terminal) => Ok((
                 terminal,
@@ -619,7 +623,7 @@ impl AgentBrowserAction {
                         .continuation
                         .take()
                         .expect("checked provider continuation"),
-                    SemanticActionBindingError::TargetCovered,
+                    reason,
                     this.proposal.refusal_context,
                 ),
             )),
@@ -1020,4 +1024,15 @@ pub enum AgentBrowserActionFinalizationRefusal {
     BatchAdmission(Box<SemanticActionBatchAdmissionRefusal>),
     /// Closed batch invariant failure; no successful continuation exists.
     Batch(SemanticActionBatchExecutionError),
+}
+
+/// Native refusals the page runtime makes before it presses or types.
+pub(crate) const fn refused_before_acting(failure: SemanticActionFailure) -> bool {
+    matches!(
+        failure,
+        SemanticActionFailure::TargetOccluded
+            | SemanticActionFailure::TargetChanged
+            | SemanticActionFailure::TargetDisabled
+            | SemanticActionFailure::StaleReference
+    )
 }
