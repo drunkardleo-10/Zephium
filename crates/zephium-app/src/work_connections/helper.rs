@@ -297,6 +297,11 @@ pub fn row(fact: &CallFact) -> String {
             "Listed {count} pull request{}",
             if count == 1 { "" } else { "s" }
         ),
+        "notifications" if count > 0 => format!(
+            "Read {count} notification{}",
+            if count == 1 { "" } else { "s" }
+        ),
+        "notifications" => "No unread notifications".to_owned(),
         "checks" if count > 0 => format!("Read checks on {target} · {count} failing"),
         "checks" => format!("Read checks on {target}"),
         "diff" => format!("Read the diff of {target}"),
@@ -459,6 +464,14 @@ mod tests {
             "Listed 4 pull requests"
         );
         assert_eq!(row(&fact("issues", None, None, Some(1))), "Listed 1 issue");
+        assert_eq!(
+            row(&fact("notifications", None, None, Some(12))),
+            "Read 12 notifications"
+        );
+        assert_eq!(
+            row(&fact("notifications", None, None, Some(0))),
+            "No unread notifications"
+        );
         assert_eq!(
             row(&fact("checks", Some("#45"), None, Some(2))),
             "Read checks on #45 · 2 failing"
