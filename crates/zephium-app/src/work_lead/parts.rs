@@ -206,9 +206,9 @@ where
             for (title, data) in helper.objects(context, &report.digest).await {
                 match context.publish(&title, data).await {
                     Ok(id) => report.objects.push(id),
-                    Err(_) => self
-                        .run
-                        .report(super::WorkLeadDiagnostic::ObjectRefused { reason: None }),
+                    Err(_) => self.run.report(super::WorkLeadDiagnostic::ObjectRefused {
+                        reason: Some(objects::ObjectRefusal::Shape),
+                    }),
                 }
             }
         }

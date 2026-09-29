@@ -282,6 +282,8 @@ pub struct Proposed {
     pub title: String,
     pub data: WorkArtifactDataV1,
     pub evidence: Vec<WorkEvidenceLink>,
+    /// Optional parts a second try placed the object without, in words.
+    pub left_out: Vec<String>,
 }
 
 /// Why an object was refused, as a closed fact for development logs.
@@ -293,9 +295,22 @@ pub enum ObjectRefusal {
     Links,
     Pick,
     Field(WorkArtifactField),
+    /// It stood for a failure or claimed more than the run found.
+    Honesty,
+    /// Another object already covers its subject.
+    Duplicate,
+    /// A second reply, or a part's second object.
+    Second,
 }
 
-/// Turns a model's object into validated data, or a fault naming the field.
+/// Optional parts a second try may leave out before it refuses.
+const MAX_LEFT_OUT: usize = 24;
+
+/// Turns a model's object into validated data, or a fault naming the exact
+/// place. `lenient` is a second try of the same object: fields the kind does
+/// not have and optional parts outside their limits are left out, and the
+/// object stands without them. Required text is never cut.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn propose(
     run: &LeadRun,
     objects: &[CanvasObject],
@@ -304,12 +319,16 @@ pub(crate) fn propose(
     data: Value,
     sources: &[String],
     inherited: &[WorkEvidenceLink],
+    lenient: bool,
 ) -> Result<Proposed, (String, ObjectRefusal)> {
     let title = super::call::plain(title);
-    let title = title.as_str();
+    let title = title.trim();
     if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS || title.contains('\n') {
         return Err((
-            format!("title is one line of 1 to {MAX_TITLE_CHARS} characters"),
+            format!(
+                "title is {} characters; it is one line of 1 to {MAX_TITLE_CHARS}",
+                title.chars().count()
+            ),
             ObjectRefusal::Title,
         ));
     }
@@ -321,6 +340,15 @@ pub(crate) fn propose(
     };
     map.remove("kind");
     let mut data = Value::Object(map);
+    let mut left_out: Vec<String> = Vec::new();
+    if lenient {
+        for path in super::schema::prune(kind, &mut data) {
+            left_out.push(format!("{path} (not a field of {kind})"));
+        }
+    }
+    if let Some(found) = super::schema::mismatch(kind, &data) {
+        return Err((format!("{kind}: {}", found.words), ObjectRefusal::Shape));
+    }
     normalize(kind, &mut data);
     let mut keys: Vec<String> = Vec::new();
     for key in sources {
@@ -329,7 +357,6 @@ pub(crate) fn propose(
             keys.push(key);
         }
     }
-    let mut unknown = None;
     items_mut(&mut data, |item| {
         if let Some(Value::String(key)) = item.get("source") {
             let key = key.trim().to_owned();
@@ -343,6 +370,7 @@ pub(crate) fn propose(
         }
     });
     let mut evidence = Vec::new();
+    let mut unknown = None;
     for key in &keys {
         match run.source(key) {
             Some(source) => evidence.push(source.link),
@@ -362,54 +390,94 @@ pub(crate) fn propose(
     }
     if evidence.len() > MAX_ARTIFACT_EVIDENCE {
         return Err((
-            format!("sources: at most {MAX_ARTIFACT_EVIDENCE} per object"),
+            format!(
+                "sources has {} keys; the limit is {MAX_ARTIFACT_EVIDENCE}",
+                evidence.len()
+            ),
             ObjectRefusal::Source,
         ));
     }
     if let Value::Object(map) = &mut data {
         map.insert("kind".into(), Value::String(kind.to_owned()));
     }
-    let data: WorkArtifactDataV1 = serde_json::from_value(data).map_err(|error| {
-        (
-            format!("data does not match the {kind} shape: {error}"),
-            ObjectRefusal::Shape,
-        )
-    })?;
-    if let Some(fault) = data.lead_fault(evidence.len()) {
+    let data = loop {
+        let parsed: WorkArtifactDataV1 = serde_json::from_value(data.clone()).map_err(|error| {
+            (
+                format!("data does not match the {kind} shape: {error}"),
+                ObjectRefusal::Shape,
+            )
+        })?;
+        let Some(fault) = parsed.lead_fault(evidence.len()) else {
+            break parsed;
+        };
+        if lenient && left_out.len() < MAX_LEFT_OUT && super::schema::drop(&mut data, &fault) {
+            left_out.push(left_words(&fault));
+            continue;
+        }
         return Err((
             format!("{kind}: {}", fault.describe()),
             ObjectRefusal::Field(fault.field),
         ));
-    }
+    };
     if evidence.is_empty() && data.claims_observed_links() {
         return Err((
             format!("{kind}: pictures and links must come from sources; list the keys they came from in sources"),
             ObjectRefusal::Links,
         ));
     }
-    if let WorkArtifactDataV1::Plan { steps, .. } = &data {
-        for (index, step) in steps.iter().enumerate() {
+    let mut data = data;
+    if let WorkArtifactDataV1::Plan { steps, .. } = &mut data {
+        for (index, step) in steps.iter_mut().enumerate() {
             let Some(pick) = &step.pick else { continue };
             let ok = objects.iter().any(|o| {
                 o.artifact.id == pick.artifact
                     && matches!(&o.artifact.data, WorkArtifactDataV1::Picks { items, .. } if usize::from(pick.index) < items.len())
             });
-            if !ok {
-                return Err((
-                    format!(
-                        "plan: step {} names a pick that is not on the canvas; use a picks object id and an item index from it",
-                        index + 1
-                    ),
-                    ObjectRefusal::Pick,
-                ));
+            if ok {
+                continue;
             }
+            if lenient {
+                step.pick = None;
+                left_out.push(format!("steps[{index}].pick (no such pick on the canvas)"));
+                continue;
+            }
+            return Err((
+                format!(
+                    "plan: steps[{index}].pick names a pick that is not on the canvas; use a picks object id and an item index from it"
+                ),
+                ObjectRefusal::Pick,
+            ));
         }
     }
     Ok(Proposed {
         title: title.to_owned(),
         data,
         evidence,
+        left_out,
     })
+}
+
+/// What a second try left out, for the model: the place and why.
+fn left_words(fault: &zephium_core::work::objects::WorkObjectFault) -> String {
+    use zephium_core::work::objects::{WorkFaultDrop, WorkTextFound};
+    let place = fault
+        .drop
+        .map(|drop| fault.fill(drop.path()))
+        .unwrap_or_default();
+    let why = match (fault.found, fault.limit) {
+        (Some(WorkTextFound::Characters(n)), Some(limit)) => {
+            format!("{n} characters; the limit is {limit}")
+        }
+        (Some(WorkTextFound::Items(n)), Some(limit)) => {
+            format!("{n} items; the first {limit} stay")
+        }
+        (Some(WorkTextFound::LineBreak), _) => "it had a line break".into(),
+        _ => fault.field.phrase().to_owned(),
+    };
+    match fault.drop {
+        Some(WorkFaultDrop::Empty(_)) => format!("{place} emptied ({why})"),
+        _ => format!("{place} ({why})"),
+    }
 }
 
 /// Places a new object or a revision, durably, as one Publish step.
@@ -523,12 +591,44 @@ const PICK_TAGS: [&str; 5] = [
 ];
 
 fn says(text: &str, words: &[&str]) -> bool {
+    affirms(text, words, false)
+}
+
+/// Words that turn a claim after them into its opposite.
+const NEGATIONS: [&str; 12] = [
+    "not",
+    "no",
+    "never",
+    "couldn't",
+    "couldn’t",
+    "can't",
+    "can’t",
+    "cannot",
+    "isn't",
+    "isn’t",
+    "wasn't",
+    "wasn’t",
+];
+
+/// A claim the text makes: one of `words` as a whole word, and with
+/// `negation`, not denied by one of the three words before it ("could not
+/// complete", "isn't ready").
+fn affirms(text: &str, words: &[&str], negation: bool) -> bool {
     let text = text.to_lowercase();
     words.iter().any(|word| {
         text.match_indices(word).any(|(at, _)| {
             let before = text[..at].chars().next_back();
             let after = text[at + word.len()..].chars().next();
-            !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+            let whole = !before.is_some_and(char::is_alphanumeric)
+                && !after.is_some_and(char::is_alphanumeric);
+            let denied = negation
+                && text[..at]
+                    .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '’'))
+                    .filter(|w| !w.is_empty())
+                    .rev()
+                    .take(3)
+                    .any(|w| NEGATIONS.contains(&w));
+            whole && !denied
         })
     })
 }
@@ -558,7 +658,7 @@ pub(crate) fn honest(data: &WorkArtifactDataV1, run: &Honesty) -> Result<(), Str
             }) {
                 return Err(format!("reply: figure {} stands for something that was not found; a figure shows a value that was found. Leave it out and say what is missing in the text", at + 1));
             }
-            if !run.failed.is_empty() && says(headline, &CLAIMS) {
+            if !run.failed.is_empty() && affirms(headline, &CLAIMS, true) {
                 return Err("reply: the headline calls the result finished or checked while a part could not do its job; say what was found".into());
             }
         }
@@ -715,6 +815,18 @@ mod tests {
         }))
         .unwrap();
         assert!(honest(&said, &honest_run).is_ok());
+        for headline in [
+            "I couldn't read Slack",
+            "The Slack check could not complete",
+            "Your day plan isn't ready",
+        ] {
+            let plain: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+                "kind": "reply", "headline": headline,
+                "text": "I couldn't read Slack: its page kept changing under me. Try again or use the Slack connection."
+            }))
+            .unwrap();
+            assert!(honest(&plain, &honest_run).is_ok(), "{headline}");
+        }
         let todo: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
             "kind": "list", "style": "todo", "items": [{"title": "Retry the Slack check"}]
         }))

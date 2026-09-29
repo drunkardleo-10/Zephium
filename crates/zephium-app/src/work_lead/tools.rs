@@ -282,6 +282,7 @@ impl<'a> LeadToolContext<'a> {
                 title,
                 data,
                 evidence: vec![],
+                left_out: vec![],
             },
             self.part,
             None,

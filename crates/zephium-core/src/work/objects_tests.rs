@@ -79,13 +79,56 @@ fn limits_come_back_as_the_field_and_the_item() {
     .unwrap();
     assert_eq!(picks.field, F::PickName);
     assert_eq!(picks.index, Some(1));
-    assert!(picks.describe().contains("60 characters"));
-    assert!(picks.describe().contains("position 2"));
     assert!(
-        picks.describe().contains("it has 61 characters"),
+        picks
+            .describe()
+            .starts_with("items[1].name is 61 characters; the limit is 60. Rule: "),
         "{}",
         picks.describe()
     );
+    assert_eq!(picks.drop, None);
+    let detail = fault(
+        json!({"kind":"plan","steps":[{"title":"Fly","kind":"travel"},{"title":"Land","kind":"travel"},
+            {"title":"Stay","kind":"stay"},{"title":"Walk","kind":"task","detail":"x".repeat(281)}]}),
+        0,
+    )
+    .unwrap();
+    assert!(
+        detail
+            .describe()
+            .starts_with("steps[3].detail is 281 characters; the limit is 280."),
+        "{}",
+        detail.describe()
+    );
+    assert_eq!(detail.drop, Some(WorkFaultDrop::Remove("steps[].detail")));
+    let fact = fault(
+        json!({"kind":"picks","facet":"stay","items":[{"name":"Loft","facts":[
+            {"label":"Beds","value":"2","kind":"text"},{"label":"Walk","value":"x".repeat(41),"kind":"text"}]}]}),
+        0,
+    )
+    .unwrap();
+    assert_eq!(fact.fill(fact.path.unwrap()), "items[0].facts[1].value");
+    assert_eq!(fact.drop, Some(WorkFaultDrop::Remove("items[].facts[]")));
+    let cells = |first: &str, second: &str| {
+        fault(
+            json!({"kind":"sheet","columns":[{"label":"Name","kind":"text"},{"label":"Note","kind":"text"}],
+                "rows":[{"cells":[first, second]}]}),
+            0,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        cells("Hetzner", &"x".repeat(61)).drop,
+        Some(WorkFaultDrop::Empty("rows[].cells[]"))
+    );
+    assert_eq!(cells(&"x".repeat(61), "ok").drop, None);
+    let points = fault(
+        json!({"kind":"reply","headline":"H","text":"T","points":["a","b","c","d","e","f"]}),
+        0,
+    )
+    .unwrap();
+    assert!(points.describe().starts_with("points has 6 items; the limit is 5."));
+    assert_eq!(points.drop, Some(WorkFaultDrop::Keep("points")));
     assert_eq!(
         field(
             json!({"kind":"picks","facet":"stay","items":[{"name":"A","recommended":true},{"name":"B","recommended":true}]})

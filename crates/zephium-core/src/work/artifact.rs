@@ -848,32 +848,32 @@ impl WorkArtifactField {
             Self::ReplyMarkup => "reply text is plain sentences with **bold** or `code` only: no headings, lists, links, images or HTML; put lists in points",
             Self::ReplyFigures => "reply has at most 4 figures",
             Self::ReplyFigure => "each reply figure has a label of at most 24 characters, a value of at most 20 and an optional note of at most 40",
-            Self::ReplyPoints => "reply has at most 5 points of one line and at most 110 characters each",
+            Self::ReplyPoints => "reply has at most 5 points of one line and at most 140 characters each",
             Self::PicksItems => "picks has 1 to 12 items",
             Self::PickName => "each pick's name is one line of 1 to 60 characters",
-            Self::PickSubtitle => "a pick's subtitle is one line of at most 60 characters",
+            Self::PickSubtitle => "a pick's subtitle is one line of at most 80 characters",
             Self::PickImages => "a pick has at most 3 image_candidates, each a public https URL of a picture of that subject from its sources",
             Self::PickLogo => "a pick's logo_host is a bare lowercase host such as airbnb.com",
             Self::PickUrl => "a pick's url is a public https URL",
             Self::PickPrice => "a pick's price has a display of at most 24 characters, an optional plain decimal amount and an optional three-letter currency code",
-            Self::PickFacts => "a pick has at most 4 facts, each a label of at most 18 characters and a value of at most 32",
+            Self::PickFacts => "a pick has at most 4 facts, each a label of at most 20 characters and a value of at most 40",
             Self::PickRating => "a pick's rating is a plain decimal value between 0 and max, with max 5 or 10",
-            Self::PickWhy => "a pick's why is one line of at most 120 characters",
+            Self::PickWhy => "a pick's why is one line of at most 160 characters",
             Self::PickTags => "a pick has at most 3 tags of at most 16 characters",
             Self::PickRecommended => "at most one pick is recommended",
             Self::PickRoute => "a pick's route has from and to of at most 40 characters, depart and arrive of at most 24, duration of at most 16, at most 5 stops, carrier of at most 40 and carrier_host a bare host",
             Self::PickWhen => "a pick's when is at most 40 characters and its duration at most 16",
             Self::PlanSteps => "plan has 1 to 40 steps",
             Self::PlanStepWhen => "a plan step's when is one line of at most 32 characters",
-            Self::PlanStepTitle => "each plan step's title is one line of 1 to 70 characters",
-            Self::PlanStepDetail => "a plan step's detail is one line of at most 140 characters",
+            Self::PlanStepTitle => "each plan step's title is one line of 1 to 80 characters",
+            Self::PlanStepDetail => "a plan step's detail is one line of at most 280 characters",
             Self::PlanStepCost => "a plan step's cost is at most 24 characters",
             Self::PlanStepPlace => "a plan step's place is at most 40 characters",
             Self::PlanStepPick => "a plan step's pick names an existing picks object id and the 0-based index of one of its items",
             Self::PlanTotal => "plan total has a label and a value of at most 24 characters each",
             Self::ListItems => "list has 1 to 40 items",
             Self::ListItemTitle => "each list item's title is one line of 1 to 90 characters",
-            Self::ListItemDetail => "a list item's detail is one line of at most 160 characters",
+            Self::ListItemDetail => "a list item's detail is one line of at most 280 characters",
             Self::ListItemDue => "a list item's due is at most 32 characters",
             Self::ListItemFrom => "a list item's from has app of at most 24 characters, who of at most 40, when of at most 32, a quote of at most 200, host a bare host and url a public https URL",
             Self::SheetColumns => "sheet has 1 to 10 columns",
@@ -881,7 +881,7 @@ impl WorkArtifactField {
             Self::SheetRows => "sheet has 1 to 200 rows, each with exactly one cell per column",
             Self::SheetCell => "a sheet cell matches its column: text at most 60 characters, number, money and percent plain decimals, yes_no one of yes, no, partial or unknown, rating like 4/5, link a public https URL, entity at most 40 characters, tag at most 16, date at most 32, duration at most 16, or empty when unknown; never sentences",
             Self::SheetEntity => "a sheet row's entity has logo_host a bare host and image a public https URL",
-            Self::SheetNote => "sheet note is one line of at most 120 characters",
+            Self::SheetNote => "sheet note is one line of at most 200 characters",
             Self::PlotAxis => "plot axis labels are at most 24 characters, the y unit at most 12, and money needs a three-letter currency",
             Self::PlotSeries => "plot has 1 to 8 series, each named in at most 24 characters with 1 to 60 points",
             Self::PlotShape => "donut and radial plots have one series and radar plots at least 3 points per series",
@@ -923,11 +923,7 @@ impl WorkArtifactDataV1 {
     /// `evidence_len` is the artifact's evidence array length; claim-level
     /// indices must address it.
     pub fn validate(&self, evidence_len: usize) -> Result<(), WorkError> {
-        self.check(
-            evidence_len,
-            &mut WorkArtifactField::Content,
-            &mut (None, None),
-        )
+        self.check(evidence_len, &mut WorkArtifactField::Content, &mut None)
     }
     /// The first part that fails `validate`, for a notice the model can act on.
     pub fn fault(&self, evidence_len: usize) -> Option<WorkArtifactField> {
@@ -936,32 +932,24 @@ impl WorkArtifactDataV1 {
     /// The first part that fails `validate` and the item it sits in.
     pub fn fault_at(&self, evidence_len: usize) -> Option<WorkObjectFault> {
         let mut at = WorkArtifactField::Content;
-        let mut detail = (None, None);
+        let mut detail = None;
         match self.check(evidence_len, &mut at, &mut detail) {
             Ok(()) => None,
-            Err(WorkError::Capacity) => Some(WorkObjectFault {
-                field: WorkArtifactField::Text,
-                index: None,
-                found: None,
-            }),
-            Err(_) => Some(WorkObjectFault {
-                field: at,
-                index: detail.0,
-                found: detail.1,
-            }),
+            Err(WorkError::Capacity) => Some(WorkObjectFault::of(WorkArtifactField::Text)),
+            Err(_) => Some(detail.unwrap_or(WorkObjectFault::of(at))),
         }
     }
     /// What a lead run may make: the current kinds only, diagrams within
     /// their tighter limits, and everything `validate` holds.
     pub fn lead_fault(&self, evidence_len: usize) -> Option<WorkObjectFault> {
+        use super::objects::limit as L;
         use WorkArtifactField as F;
-        let whole = |field| {
-            Some(WorkObjectFault {
-                field,
-                index: None,
-                found: None,
-            })
+        let chars = |text: &str| {
+            Some(WorkTextFound::Characters(
+                u32::try_from(text.chars().count()).unwrap_or(u32::MAX),
+            ))
         };
+        let limit = |max: usize| u32::try_from(max).ok();
         match self {
             Self::Table { .. }
             | Self::Comparison { .. }
@@ -971,7 +959,7 @@ impl WorkArtifactDataV1 {
             | Self::ComparisonMatrix { .. }
             | Self::Findings { .. }
             | Self::BrowserResourcePreview { .. }
-            | Self::Answer { .. } => return whole(F::LegacyKind),
+            | Self::Answer { .. } => return Some(WorkObjectFault::of(F::LegacyKind)),
             Self::Diagram {
                 nodes,
                 edges,
@@ -982,25 +970,47 @@ impl WorkArtifactDataV1 {
                     || edges.len() > MAX_DIAGRAM_EDGES
                     || layers.len() > super::objects::MAX_LEAD_DIAGRAM_LAYERS
                 {
-                    return whole(F::LeadDiagramSize);
+                    return Some(WorkObjectFault::of(F::LeadDiagramSize));
                 }
                 for (index, node) in nodes.iter().enumerate() {
-                    if node.name.chars().count() > 28
-                        || node.note.as_ref().is_some_and(|n| n.chars().count() > 60)
+                    let index = u16::try_from(index).ok();
+                    if node.name.chars().count() > L::DIAGRAM_NAME {
+                        return Some(WorkObjectFault {
+                            index,
+                            found: chars(&node.name),
+                            path: Some("nodes[].name"),
+                            limit: limit(L::DIAGRAM_NAME),
+                            ..WorkObjectFault::of(F::LeadDiagramNode)
+                        });
+                    }
+                    if let Some(note) = node
+                        .note
+                        .as_ref()
+                        .filter(|n| n.chars().count() > L::DIAGRAM_NOTE)
                     {
                         return Some(WorkObjectFault {
-                            field: F::LeadDiagramNode,
-                            index: u16::try_from(index).ok(),
-                            found: None,
+                            index,
+                            found: chars(note),
+                            path: Some("nodes[].note"),
+                            limit: limit(L::DIAGRAM_NOTE),
+                            drop: Some(WorkFaultDrop::Remove("nodes[].note")),
+                            ..WorkObjectFault::of(F::LeadDiagramNode)
                         });
                     }
                 }
                 for (index, edge) in edges.iter().enumerate() {
-                    if edge.label.as_ref().is_some_and(|l| l.chars().count() > 24) {
+                    if let Some(label) = edge
+                        .label
+                        .as_ref()
+                        .filter(|l| l.chars().count() > L::DIAGRAM_EDGE_LABEL)
+                    {
                         return Some(WorkObjectFault {
-                            field: F::LeadDiagramEdgeLabel,
                             index: u16::try_from(index).ok(),
-                            found: None,
+                            found: chars(label),
+                            path: Some("edges[].label"),
+                            limit: limit(L::DIAGRAM_EDGE_LABEL),
+                            drop: Some(WorkFaultDrop::Remove("edges[].label")),
+                            ..WorkObjectFault::of(F::LeadDiagramEdgeLabel)
                         });
                     }
                 }
@@ -1042,7 +1052,7 @@ impl WorkArtifactDataV1 {
         &self,
         evidence_len: usize,
         at: &mut WorkArtifactField,
-        detail: &mut (Option<u16>, Option<WorkTextFound>),
+        detail: &mut Option<WorkObjectFault>,
     ) -> Result<(), WorkError> {
         use WorkArtifactField as F;
         let mut budget = TextBudget(0);
@@ -1052,7 +1062,7 @@ impl WorkArtifactDataV1 {
             Ok(()) => Ok(()),
             Err(fault) => {
                 *at = fault.field;
-                *detail = (fault.index, fault.found);
+                *detail = Some(fault);
                 Err(if fault.field == F::Text {
                     WorkError::Capacity
                 } else {

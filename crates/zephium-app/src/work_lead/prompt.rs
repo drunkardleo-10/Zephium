@@ -74,27 +74,22 @@ fn object(properties: Value, required: &[&str]) -> Value {
 }
 
 const OBJECTS: &str = "\
-kinds and their data (limits in characters; ? = optional):
-- reply {headline ≤80; text ≤480: the answer in 1-3 sentences, only **bold** and `code`; figures?[≤4]{label ≤24, value ≤20, note? ≤40}: key numbers shown large; points?[≤5] ≤110}. One per request, made last, on top of the result.
-- picks {facet: stay|flight|product|place|restaurant|job|course|video|repo|service|company|person|event|article|other; items[1-12]{name ≤60, subtitle? ≤60, image_candidates?[≤3]: https pictures of that item from its sources, logo_host?: bare host such as lego.com, url?, price?{display ≤24 as shown, amount?: decimal, currency?: ISO code}, facts?[≤4]{label ≤18, value ≤32, kind: text|yes|no|partial|rating}, rating?{value, max: 5|10, count?}, why? ≤120, tags?[≤3] ≤16, recommended?: true on one item at most, route?{from ≤40, to ≤40, depart? ≤24, arrive? ≤24, duration? ≤16, stops, carrier? ≤40, carrier_host?} for flights and trains, when? ≤40, duration? ≤16, source?}}. Things to choose between. The subtitle says what the item is (Entire loft in the Mission, Starfighter set) and never repeats its price or facts. An item without its own photo gets its maker's or seller's logo_host.
-- plan {steps[1-40]{when? ≤32, title ≤70, detail? ≤140, kind: travel|stay|event|task|milestone|note, cost? ≤24, place? ≤40, pick?{artifact: a picks object id, index: 0-based item}, source?}; total?{label ≤24, value ≤24}; checkable?}. Time-ordered: an itinerary, a roadmap, weeks of study. Advice sits on the step it belongs to.
-- list {style: todo|messages|reading|requirements; items[1-40]{title ≤90, detail? ≤160, due? ≤32, priority?: high, from?{host?, app? ≤24, who? ≤40, when? ≤32, quote? ≤200, url?}, source?}}.
-- sheet {columns[1-10]{label ≤24, kind: text|number|money|percent|date|duration|yes_no|rating|link|entity|tag, unit? ≤12, currency?: required for money, best?: max|min}; rows[1-200]{cells: one string per column (text ≤60, numbers as plain decimals, yes_no one of yes|no|partial|unknown, rating like 4/5, empty when unknown), entity?{logo_host?, image?}, source?}; note? ≤120}. Real data, no sentences.
-- plot {style: bar|bar_horizontal|bar_stacked|bar_grouped|line|area|area_stacked|donut|radial|radar|range; x{label?, kind: category|time|linear}; y{label?, unit?, format: number|money|duration|percent|bytes, currency?}; series[1-8]{name ≤24, points[1-60]{x ≤24, y?: decimal, y2?: range only}}; headline?{label ≤24, value ≤20}; basis ≤120: what the values are and where from; knowledge?: true when the values are your own knowledge}. Never empty or all equal.
-- diagram {nodes[1-24]{id: ASCII, name ≤28, kind: client|edge|gateway|service|worker|model|store|queue|cache|storage|external|other, vendor?: bare host when the node is a real product, note? ≤60, layer?}; edges[]{from, to, label? ≤24}; layers?[≤6]{id, name}}.
-- code {language; text ≤400 lines; notes?[≤24]{from, to, text ≤160}}.
-- diff {path; language; summary ≤120; hunks[1-40]{old_start, new_start, lines[{op: ctx|add|del, text}]}}.
-- document {paragraphs[]}: only when the person asked for text (a guide, a brief, a letter).
-- draft {destination: slack|email|linkedin|x|github|message; to? ≤80; subject? ≤120, email only; body ≤4000 Markdown; target_url?}.
-- media {medium: image|video|audio; url; title? ≤80; provider?: youtube|vimeo|file; poster?; duration? ≤16; start_secs?}.
-Languages: rust, typescript, javascript, svelte, python, go, java, kotlin, swift, c, cpp, csharp, ruby, php, sql, html, css, json, yaml, toml, bash, markdown, dockerfile, text.
+Each kind's data follows the schema whose title is the kind; limits are characters and items, and nothing is ever cut to fit.
+- reply: the answer on top of the result, made last. text is one to three plain sentences with only **bold** and `code`; figures are key numbers shown large; points are short lines. One per request.
+- picks: things to choose between. The subtitle says what the item is (Entire loft in the Mission, Starfighter set) and never repeats its price or facts. An item without its own photo gets its maker's or seller's logo_host. route is for flights and trains. At most one item is recommended.
+- plan: time-ordered steps (an itinerary, a roadmap, weeks of study). Advice sits on the step it belongs to; pick points a step at an item of a picks object (0-based index).
+- list: items without time order; from says where an item came from (app, who, when, a quote, a link back).
+- sheet: real data in typed columns, one string per cell (numbers as plain decimals, yes_no one of yes, no, partial, unknown, rating like 4/5, empty when unknown); money columns name a currency. No sentences.
+- plot: a chart; basis says what the values are and where they come from, knowledge is true when they are your own knowledge. Never empty or all equal.
+- diagram: nodes with ids that edges name; vendor is a bare host only when the node is a real product.
+- code, diff: exact text in one of the code languages. document: only when the person asked for text. draft: a message shaped like its destination; subject is for email only. media: an image, a video or audio at its https url.
 sources lists the keys (s3, s7) of the sources the object rests on, and an item's source names one of those keys. Pictures and links must come from those sources. An object without sources is your own knowledge and holds no pictures or links.";
 
 const PART_OBJECTS: &str = "\
-kinds and their data (limits in characters; ? = optional):
-- picks {facet: stay|flight|product|place|restaurant|job|course|video|repo|service|company|person|event|article|other; items[1-12]{name ≤60, subtitle? ≤60, image_candidates?[≤3]: https pictures of that item from its sources, logo_host?: bare host such as lego.com, url?, price?{display ≤24 as shown, amount?: decimal, currency?: ISO code}, facts?[≤4]{label ≤18, value ≤32, kind: text|yes|no|partial|rating}, rating?{value, max: 5|10, count?}, why? ≤120, tags?[≤3] ≤16, recommended?: true on one item at most, route?{from ≤40, to ≤40, depart? ≤24, arrive? ≤24, duration? ≤16, stops, carrier? ≤40, carrier_host?} for flights and trains, when? ≤40, duration? ≤16, source?}}. Things to choose between. The subtitle says what the item is (Entire loft in the Mission, Starfighter set) and never repeats its price or facts. An item without its own photo gets its maker's or seller's logo_host.
-- sheet {columns[1-10]{label ≤24, kind: text|number|money|percent|date|duration|yes_no|rating|link|entity|tag, unit? ≤12, currency?: required for money, best?: max|min}; rows[1-200]{cells: one string per column (text ≤60, numbers as plain decimals, yes_no one of yes|no|partial|unknown, rating like 4/5, empty when unknown), entity?{logo_host?, image?}, source?}; note? ≤120}. Real data, no sentences.
-sources lists the keys (s3, s7) of the sources the object rests on, and an item's source names one of those keys. Pictures and links must come from those sources. An object without sources is your own knowledge and holds no pictures or links.";
+Each kind's data follows the schema whose title is the kind; limits are characters and items.
+- picks: things to choose between, with photos, prices and links from your sources. The subtitle says what the item is and never repeats its price or facts. An item without its own photo gets its maker's or seller's logo_host. route is for flights and trains.
+- sheet: comparable values in typed columns, one string per cell, empty when unknown. No sentences.
+sources lists the keys (s3, s7) of the sources the object rests on, and an item's source names one of those keys. Pictures and links must come from those sources.";
 
 fn create() -> WorkModelTool {
     tool(
@@ -102,9 +97,9 @@ fn create() -> WorkModelTool {
         &format!("Places one object on the canvas and returns its id.\n{OBJECTS}"),
         object(
             json!({
-                "kind": {"type": "string", "enum": ["reply","picks","plan","list","sheet","plot","diagram","code","diff","document","draft","media"]},
-                "title": {"type": "string", "description": "What the object is, in a few words: Your trip, Homes near YC, Monthly cost by provider. At most 60 characters."},
-                "data": {"type": "object", "description": "The kind's data, as listed above."},
+                "kind": {"type": "string", "enum": super::schema::KINDS},
+                "title": {"type": "string", "maxLength": super::objects::MAX_TITLE_CHARS, "description": "What the object is, in a few words: Your trip, Homes near YC, Monthly cost by provider."},
+                "data": super::schema::any(&super::schema::KINDS),
                 "sources": {"type": "array", "items": {"type": "string"}, "description": "Keys of the sources the object rests on."},
                 "part": {"type": "string", "description": "The id of the part that found these things, when a part did."}
             }),
@@ -119,8 +114,8 @@ fn part_create() -> WorkModelTool {
         object(
             json!({
                 "kind": {"type": "string", "enum": ["picks","sheet"]},
-                "title": {"type": "string", "description": "What it is in a few words: Homes near YC, Flights to SFO. At most 60 characters."},
-                "data": {"type": "object"},
+                "title": {"type": "string", "maxLength": super::objects::MAX_TITLE_CHARS, "description": "What it is in a few words: Homes near YC, Flights to SFO."},
+                "data": super::schema::any(&["picks", "sheet"]),
                 "sources": {"type": "array", "items": {"type": "string"}}
             }),
             &["kind", "title", "data"],
@@ -151,10 +146,10 @@ pub(crate) fn lead_tools() -> Vec<WorkModelTool> {
             "Starts a part: a helper that does one purpose of the job on its own and returns a digest of facts with source keys, and at most one compact object it placed at the end of its row (picks or a small sheet). Start several in one turn to run them in parallel; at most four run at once and the rest wait. Build the result from its digest and object, and point plan steps at its picks. A part that could not do its job says what it needs; its row shows the fix.",
             object(
                 json!({
-                    "title": {"type": "string", "description": "The part's short name on the canvas: Stay, Flights, Entry, Slack, GitHub, Code. At most 24 characters."},
+                    "title": {"type": "string", "maxLength": 24, "description": "The part's short name on the canvas: Stay, Flights, Entry, Slack, GitHub, Code."},
                     "helper": {"type": "string", "enum": ["browser","research","computer","connection"], "description": "browser: web pages and the person's own signed-in sites (listings, prices, photos, inboxes, forms up to the app's Confirm). research: searches and public pages, returns a cited digest. computer: the folders the person granted (files, commands, git, gh). connection: an installed CLI or connected service."},
-                    "goal": {"type": "string", "description": "What the part finds or does, shown on the canvas. At most 200 characters."},
-                    "brief": {"type": "string", "description": "Every fact the helper needs: dates, travellers, budget, places, preferences, what to return. At most 1200 characters."},
+                    "goal": {"type": "string", "maxLength": 200, "description": "What the part finds or does, shown on the canvas."},
+                    "brief": {"type": "string", "maxLength": 1200, "description": "Every fact the helper needs: dates, travellers, budget, places, preferences, what to return."},
                     "service": {"type": "string", "description": "The site's bare host (airbnb.com) or the connection's name, when known."},
                     "records": {"type": "array", "items": {"type": "string"}, "description": "Fields to return for each thing found: name, price, rating, photo, url, dates."},
                     "search": {
@@ -186,7 +181,7 @@ pub(crate) fn lead_tools() -> Vec<WorkModelTool> {
             object(
                 json!({
                     "id": {"type": "string"},
-                    "data": {"type": "object"},
+                    "data": {"type": "object", "description": "The complete new data, in the schema create gives for the object's kind."},
                     "title": {"type": "string", "description": "Only when the object's subject itself changed; the object keeps its name otherwise, and its update shows what changed."},
                     "sources": {"type": "array", "items": {"type": "string"}}
                 }),
@@ -203,8 +198,8 @@ pub(crate) fn lead_tools() -> Vec<WorkModelTool> {
             "Asks the person one question and waits for the answer. options are 2 to 4 short answers they can pick; they may also type their own. Ask only what changes the outcome, before the work it decides.",
             object(
                 json!({
-                    "question": {"type": "string", "description": "One short question. At most 200 characters."},
-                    "options": {"type": "array", "items": {"type": "string"}, "description": "2 to 4 answers of a few words."}
+                    "question": {"type": "string", "maxLength": 240, "description": "One short question."},
+                    "options": {"type": "array", "maxItems": 4, "items": {"type": "string", "maxLength": 80}, "description": "2 to 4 answers of a few words."}
                 }),
                 &["question"],
             ),
@@ -344,7 +339,7 @@ pub(crate) fn helper_tools() -> Vec<WorkModelTool> {
             "Ends your part and reports to the lead.",
             object(
                 json!({
-                    "summary": {"type": "string", "description": "A few words for the canvas about what was found: 3 homes, 4 flights, Entry needs; or what stopped you: Slack needs a sign-in. At most 80 characters."},
+                    "summary": {"type": "string", "maxLength": 80, "description": "A few words for the canvas about what was found: 3 homes, 4 flights, Entry needs; or what stopped you: Slack needs a sign-in."},
                     "digest": {"type": "string", "description": "The facts the lead needs, each with its source key, at most 14 short lines."},
                     "found": {"type": "boolean", "description": "false when nothing usable was found."},
                     "need": {
@@ -421,6 +416,11 @@ mod tests {
     fn the_core_prompt_stays_within_its_budget() {
         // About four characters a token: at most 1.5k tokens.
         assert!(CORE.len() < 6_000, "{}", CORE.len());
+        let tools: usize = lead_tools()
+            .iter()
+            .map(|t| t.name.len() + t.description.len() + t.schema.to_string().len())
+            .sum();
+        assert!(tools < 24_000, "{tools}");
         let names: Vec<String> = lead_tools().into_iter().map(|t| t.name).collect();
         assert_eq!(
             names,

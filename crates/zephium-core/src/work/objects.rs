@@ -477,7 +477,77 @@ redacted!(
     WorkProjectGitV1,
 );
 
-/// The first part of an object that failed, and the item it sits in.
+/// Character and count limits of the lead's objects. The tool schemas the
+/// model sees state the same numbers.
+pub mod limit {
+    pub const REPLY_HEADLINE: usize = 80;
+    pub const REPLY_TEXT: usize = 480;
+    pub const REPLY_FIGURES: usize = 4;
+    pub const FIGURE_LABEL: usize = 24;
+    pub const FIGURE_VALUE: usize = 20;
+    pub const FIGURE_NOTE: usize = 40;
+    pub const REPLY_POINTS: usize = 5;
+    pub const REPLY_POINT: usize = 140;
+    pub const PICK_NAME: usize = 60;
+    pub const PICK_SUBTITLE: usize = 80;
+    pub const PICK_IMAGES: usize = 3;
+    pub const PICK_PRICE: usize = 24;
+    pub const PICK_FACTS: usize = 4;
+    pub const FACT_LABEL: usize = 20;
+    pub const FACT_VALUE: usize = 40;
+    pub const PICK_WHY: usize = 160;
+    pub const PICK_TAGS: usize = 3;
+    pub const PICK_TAG: usize = 16;
+    pub const ROUTE_PLACE: usize = 40;
+    pub const ROUTE_TIME: usize = 24;
+    pub const ROUTE_DURATION: usize = 16;
+    pub const ROUTE_CARRIER: usize = 40;
+    pub const ROUTE_STOPS: u8 = 5;
+    pub const PICK_WHEN: usize = 40;
+    pub const PICK_DURATION: usize = 16;
+    pub const STEP_WHEN: usize = 32;
+    pub const STEP_TITLE: usize = 80;
+    pub const STEP_DETAIL: usize = 280;
+    pub const STEP_COST: usize = 24;
+    pub const STEP_PLACE: usize = 40;
+    pub const PLAN_TOTAL: usize = 24;
+    pub const ITEM_TITLE: usize = 90;
+    pub const ITEM_DETAIL: usize = 280;
+    pub const ITEM_DUE: usize = 32;
+    pub const FROM_APP: usize = 24;
+    pub const FROM_WHO: usize = 40;
+    pub const FROM_WHEN: usize = 32;
+    pub const FROM_QUOTE: usize = 200;
+    pub const COLUMN_LABEL: usize = 24;
+    pub const COLUMN_UNIT: usize = 12;
+    pub const CELL_TEXT: usize = 60;
+    pub const CELL_DATE: usize = 32;
+    pub const CELL_DURATION: usize = 16;
+    pub const CELL_ENTITY: usize = 40;
+    pub const CELL_TAG: usize = 16;
+    pub const SHEET_NOTE: usize = 200;
+    pub const PLOT_LABEL: usize = 24;
+    pub const PLOT_UNIT: usize = 12;
+    pub const PLOT_SERIES_NAME: usize = 24;
+    pub const PLOT_X: usize = 24;
+    pub const PLOT_HEADLINE_LABEL: usize = 24;
+    pub const PLOT_HEADLINE_VALUE: usize = 20;
+    pub const PLOT_BASIS: usize = 120;
+    pub const DIFF_SUMMARY: usize = 120;
+    pub const DIFF_LINE: usize = 500;
+    pub const DRAFT_TO: usize = 80;
+    pub const DRAFT_SUBJECT: usize = 120;
+    pub const MEDIA_TITLE: usize = 80;
+    pub const MEDIA_DURATION: usize = 16;
+    pub const DIAGRAM_NAME: usize = 28;
+    pub const DIAGRAM_NOTE: usize = 60;
+    pub const DIAGRAM_EDGE_LABEL: usize = 24;
+}
+use limit as L;
+
+/// The first part of an object that failed: where it sits, what it
+/// measured against which limit, and how it can be left out when it is
+/// optional.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkObjectFault {
     pub field: F,
@@ -485,32 +555,85 @@ pub struct WorkObjectFault {
     pub index: Option<u16>,
     /// What the refused text measured: its characters, or a line break.
     pub found: Option<WorkTextFound>,
+    /// Where it broke in the object's data, with `[]` for each position:
+    /// `steps[].detail`, `items[].facts[].value`.
+    pub path: Option<&'static str>,
+    /// Zero-based position inside the item: a fact, a tag, a cell.
+    pub sub: Option<u16>,
+    /// The limit the value broke.
+    pub limit: Option<u32>,
+    /// How the object stands without the offending part, when it is
+    /// optional; required text is never cut.
+    pub drop: Option<WorkFaultDrop>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkTextFound {
     Characters(u32),
     LineBreak,
     Empty,
+    Items(u32),
+}
+/// What leaving out an optional part means, at a path in the fault's form.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkFaultDrop {
+    /// Remove the member or array element the path names.
+    Remove(&'static str),
+    /// Empty the sheet cell the path names: it reads as unknown.
+    Empty(&'static str),
+    /// Keep only the first `limit` elements of the array the path names.
+    Keep(&'static str),
+}
+impl WorkFaultDrop {
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::Remove(path) | Self::Empty(path) | Self::Keep(path) => path,
+        }
+    }
 }
 impl WorkObjectFault {
-    /// Closed words for the model: the rule, where it broke and by how much.
-    pub fn describe(&self) -> String {
-        let mut out = self.field.phrase().to_owned();
-        let found = match self.found {
-            Some(WorkTextFound::Characters(n)) => Some(format!("it has {n} characters")),
-            Some(WorkTextFound::LineBreak) => Some("it has a line break".to_owned()),
-            Some(WorkTextFound::Empty) => Some("it is empty".to_owned()),
-            None => None,
-        };
-        match (self.index, found) {
-            (Some(index), Some(found)) => {
-                out.push_str(&format!(" (at position {}: {found})", index + 1))
+    /// A fault of the whole object, with no place in it.
+    pub fn of(field: F) -> Self {
+        fault(field)
+    }
+    /// A path template with its positions filled: `steps[3].detail`.
+    pub fn fill(&self, template: &str) -> String {
+        let mut positions = [self.index, self.sub].into_iter().flatten();
+        let mut out = String::new();
+        let mut rest = template;
+        while let Some(at) = rest.find("[]") {
+            out.push_str(&rest[..at]);
+            match positions.next() {
+                Some(position) => out.push_str(&format!("[{position}]")),
+                None => out.push_str("[]"),
             }
-            (Some(index), None) => out.push_str(&format!(" (at position {})", index + 1)),
-            (None, Some(found)) => out.push_str(&format!(" ({found})")),
-            (None, None) => {}
+            rest = &rest[at + 2..];
         }
+        out.push_str(rest);
         out
+    }
+    /// Closed words for the model: where it broke, by how much against which
+    /// limit, then the rule.
+    pub fn describe(&self) -> String {
+        let limit = self.limit.map(|limit| format!("; the limit is {limit}"));
+        let found = match (self.found, &limit) {
+            (Some(WorkTextFound::Characters(n)), Some(limit)) => {
+                Some(format!("is {n} characters{limit}"))
+            }
+            (Some(WorkTextFound::Characters(n)), None) => Some(format!("is {n} characters")),
+            (Some(WorkTextFound::Items(n)), Some(limit)) => Some(format!("has {n} items{limit}")),
+            (Some(WorkTextFound::Items(n)), None) => Some(format!("has {n} items")),
+            (Some(WorkTextFound::LineBreak), _) => Some("has a line break; it is one line".into()),
+            (Some(WorkTextFound::Empty), _) => Some("is empty".into()),
+            (None, _) => None,
+        };
+        match (self.path, found) {
+            (Some(path), Some(found)) => {
+                format!("{} {found}. Rule: {}", self.fill(path), self.field.phrase())
+            }
+            (Some(path), None) => format!("{}: {}", self.fill(path), self.field.phrase()),
+            (None, Some(found)) => format!("{} (it {found})", self.field.phrase()),
+            (None, None) => self.field.phrase().to_owned(),
+        }
     }
 }
 
@@ -521,13 +644,50 @@ fn fault(field: F) -> WorkObjectFault {
         field,
         index: None,
         found: None,
+        path: None,
+        sub: None,
+        limit: None,
+        drop: None,
     }
 }
-fn at(field: F, index: usize) -> WorkObjectFault {
-    WorkObjectFault {
-        field,
-        index: Some(u16::try_from(index).unwrap_or(u16::MAX)),
-        found: None,
+fn position(value: Option<usize>) -> Option<u16> {
+    value.map(|value| u16::try_from(value).unwrap_or(u16::MAX))
+}
+/// Where a value sits: its path template and its positions.
+#[derive(Clone, Copy)]
+struct Place {
+    path: &'static str,
+    index: Option<usize>,
+    sub: Option<usize>,
+}
+fn place(path: &'static str, index: Option<usize>) -> Place {
+    Place {
+        path,
+        index,
+        sub: None,
+    }
+}
+fn inner(path: &'static str, index: usize, sub: usize) -> Place {
+    Place {
+        path,
+        index: Some(index),
+        sub: Some(sub),
+    }
+}
+impl Place {
+    fn fault(self, field: F) -> WorkObjectFault {
+        WorkObjectFault {
+            index: position(self.index),
+            sub: position(self.sub),
+            path: Some(self.path),
+            ..fault(field)
+        }
+    }
+    fn dropping(self, field: F, drop: WorkFaultDrop) -> WorkObjectFault {
+        WorkObjectFault {
+            drop: Some(drop),
+            ..self.fault(field)
+        }
     }
 }
 fn measured(value: &str) -> WorkTextFound {
@@ -560,26 +720,51 @@ impl Budget {
 fn line_ok(value: &str, max: usize) -> bool {
     !value.trim().is_empty() && value.chars().count() <= max && !value.chars().any(char::is_control)
 }
-fn line(budget: &mut Budget, value: &str, max: usize, field: F, index: Option<usize>) -> Checked {
+fn limit(max: usize) -> Option<u32> {
+    u32::try_from(max).ok()
+}
+/// Required text: one line within its limit.
+fn line(budget: &mut Budget, value: &str, max: usize, field: F, at: Place) -> Checked {
     if !line_ok(value, max) {
-        let mut refused = match index {
-            Some(index) => at(field, index),
-            None => fault(field),
-        };
-        refused.found = Some(measured(value));
-        return Err(refused);
+        return Err(WorkObjectFault {
+            found: Some(measured(value)),
+            limit: limit(max),
+            ..at.fault(field)
+        });
     }
     budget.add(value)
 }
+/// Text that can go as `drop` when it breaks its rule.
+fn droppable(
+    budget: &mut Budget,
+    value: &str,
+    max: usize,
+    field: F,
+    at: Place,
+    drop: WorkFaultDrop,
+) -> Checked {
+    line(budget, value, max, field, at).map_err(|fault| WorkObjectFault {
+        drop: Some(drop),
+        ..fault
+    })
+}
+/// An optional member: out of its rule, the object stands without it.
 fn optional(
     budget: &mut Budget,
     value: &Option<String>,
     max: usize,
     field: F,
-    index: Option<usize>,
+    at: Place,
 ) -> Checked {
     match value {
-        Some(value) => line(budget, value, max, field, index),
+        Some(value) => droppable(
+            budget,
+            value,
+            max,
+            field,
+            at,
+            WorkFaultDrop::Remove(at.path),
+        ),
         None => Ok(()),
     }
 }
@@ -598,15 +783,34 @@ pub(super) fn decimal(value: &str) -> bool {
 fn currency(value: &str) -> bool {
     value.len() == 3 && value.bytes().all(|b| b.is_ascii_uppercase())
 }
-fn source(index: Option<u16>, evidence: usize, at_index: usize) -> Checked {
+fn source(index: Option<u16>, evidence: usize, at: Place) -> Checked {
     if index.is_some_and(|index| usize::from(index) >= evidence) {
-        return Err(at(F::ItemSource, at_index));
+        return Err(at.dropping(F::ItemSource, WorkFaultDrop::Remove(at.path)));
     }
     Ok(())
 }
-fn count(len: usize, max: usize, field: F) -> Checked {
+fn items(len: usize) -> Option<WorkTextFound> {
+    Some(WorkTextFound::Items(u32::try_from(len).unwrap_or(u32::MAX)))
+}
+/// A required array of 1..=max elements.
+fn count(len: usize, max: usize, field: F, at: Place) -> Checked {
     if len == 0 || len > max {
-        return Err(fault(field));
+        return Err(WorkObjectFault {
+            found: items(len),
+            limit: limit(max),
+            ..at.fault(field)
+        });
+    }
+    Ok(())
+}
+/// An optional array of at most max elements: past it, the first max stay.
+fn extra(len: usize, max: usize, field: F, at: Place) -> Checked {
+    if len > max {
+        return Err(WorkObjectFault {
+            found: items(len),
+            limit: limit(max),
+            ..at.dropping(field, WorkFaultDrop::Keep(at.path))
+        });
     }
     Ok(())
 }
@@ -635,69 +839,176 @@ pub(super) fn check_reply(
     figures: &[WorkFigureV1],
     points: &[String],
 ) -> Checked {
-    line(budget, headline, 80, F::ReplyHeadline, None)?;
+    line(
+        budget,
+        headline,
+        L::REPLY_HEADLINE,
+        F::ReplyHeadline,
+        place("headline", None),
+    )?;
     if text.trim().is_empty()
-        || text.chars().count() > 480
+        || text.chars().count() > L::REPLY_TEXT
         || text.chars().any(|c| c.is_control() && c != '\n')
     {
-        return Err(fault(F::ReplyText));
+        let found = if text.trim().is_empty() {
+            WorkTextFound::Empty
+        } else {
+            WorkTextFound::Characters(u32::try_from(text.chars().count()).unwrap_or(u32::MAX))
+        };
+        return Err(WorkObjectFault {
+            found: Some(found),
+            limit: limit(L::REPLY_TEXT),
+            ..place("text", None).fault(F::ReplyText)
+        });
     }
     if !inline_only(text) {
-        return Err(fault(F::ReplyMarkup));
+        return Err(place("text", None).fault(F::ReplyMarkup));
     }
     budget.add(text)?;
-    if figures.len() > 4 {
-        return Err(fault(F::ReplyFigures));
+    extra(
+        figures.len(),
+        L::REPLY_FIGURES,
+        F::ReplyFigures,
+        place("figures", None),
+    )?;
+    let figure = WorkFaultDrop::Remove("figures[]");
+    for (index, item) in figures.iter().enumerate() {
+        let i = Some(index);
+        droppable(
+            budget,
+            &item.label,
+            L::FIGURE_LABEL,
+            F::ReplyFigure,
+            place("figures[].label", i),
+            figure,
+        )?;
+        droppable(
+            budget,
+            &item.value,
+            L::FIGURE_VALUE,
+            F::ReplyFigure,
+            place("figures[].value", i),
+            figure,
+        )?;
+        optional(
+            budget,
+            &item.note,
+            L::FIGURE_NOTE,
+            F::ReplyFigure,
+            place("figures[].note", i),
+        )?;
     }
-    for (index, figure) in figures.iter().enumerate() {
-        line(budget, &figure.label, 24, F::ReplyFigure, Some(index))?;
-        line(budget, &figure.value, 20, F::ReplyFigure, Some(index))?;
-        optional(budget, &figure.note, 40, F::ReplyFigure, Some(index))?;
-    }
-    if points.len() > 5 {
-        return Err(fault(F::ReplyPoints));
-    }
+    extra(
+        points.len(),
+        L::REPLY_POINTS,
+        F::ReplyPoints,
+        place("points", None),
+    )?;
     for (index, point) in points.iter().enumerate() {
-        line(budget, point, 110, F::ReplyPoints, Some(index))?;
+        let at = place("points[]", Some(index));
+        droppable(
+            budget,
+            point,
+            L::REPLY_POINT,
+            F::ReplyPoints,
+            at,
+            WorkFaultDrop::Remove(at.path),
+        )?;
     }
     Ok(())
 }
 
 pub(super) fn check_picks(budget: &mut Budget, evidence: usize, items: &[WorkPickV1]) -> Checked {
-    count(items.len(), MAX_PICKS, F::PicksItems)?;
-    if items.iter().filter(|item| item.recommended).count() > 1 {
-        return Err(fault(F::PickRecommended));
+    use WorkFaultDrop::Remove;
+    count(items.len(), MAX_PICKS, F::PicksItems, place("items", None))?;
+    if let Some(second) = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.recommended)
+        .nth(1)
+    {
+        return Err(place("items[].recommended", Some(second.0))
+            .dropping(F::PickRecommended, Remove("items[].recommended")));
     }
     for (index, item) in items.iter().enumerate() {
         let i = Some(index);
-        line(budget, &item.name, 60, F::PickName, i)?;
-        optional(budget, &item.subtitle, 60, F::PickSubtitle, i)?;
-        if item.image_candidates.len() > 3 || !item.image_candidates.iter().all(|url| https(url)) {
-            return Err(at(F::PickImages, index));
-        }
-        for url in &item.image_candidates {
+        line(
+            budget,
+            &item.name,
+            L::PICK_NAME,
+            F::PickName,
+            place("items[].name", i),
+        )?;
+        optional(
+            budget,
+            &item.subtitle,
+            L::PICK_SUBTITLE,
+            F::PickSubtitle,
+            place("items[].subtitle", i),
+        )?;
+        extra(
+            item.image_candidates.len(),
+            L::PICK_IMAGES,
+            F::PickImages,
+            place("items[].image_candidates", i),
+        )?;
+        for (sub, url) in item.image_candidates.iter().enumerate() {
+            if !https(url) {
+                return Err(inner("items[].image_candidates[]", index, sub)
+                    .dropping(F::PickImages, Remove("items[].image_candidates[]")));
+            }
             budget.add(url)?;
         }
         if !host(&item.logo_host) {
-            return Err(at(F::PickLogo, index));
+            return Err(
+                place("items[].logo_host", i).dropping(F::PickLogo, Remove("items[].logo_host"))
+            );
         }
         if item.url.as_deref().is_some_and(|url| !https(url)) {
-            return Err(at(F::PickUrl, index));
+            return Err(place("items[].url", i).dropping(F::PickUrl, Remove("items[].url")));
         }
         if let Some(price) = &item.price {
-            line(budget, &price.display, 24, F::PickPrice, i)?;
-            if price.amount.as_deref().is_some_and(|a| !decimal(a))
-                || price.currency.as_deref().is_some_and(|c| !currency(c))
-            {
-                return Err(at(F::PickPrice, index));
+            droppable(
+                budget,
+                &price.display,
+                L::PICK_PRICE,
+                F::PickPrice,
+                place("items[].price.display", i),
+                Remove("items[].price"),
+            )?;
+            if price.amount.as_deref().is_some_and(|a| !decimal(a)) {
+                return Err(place("items[].price.amount", i)
+                    .dropping(F::PickPrice, Remove("items[].price.amount")));
+            }
+            if price.currency.as_deref().is_some_and(|c| !currency(c)) {
+                return Err(place("items[].price.currency", i)
+                    .dropping(F::PickPrice, Remove("items[].price.currency")));
             }
         }
-        if item.facts.len() > 4 {
-            return Err(at(F::PickFacts, index));
-        }
-        for fact in &item.facts {
-            line(budget, &fact.label, 18, F::PickFacts, i)?;
-            line(budget, &fact.value, 32, F::PickFacts, i)?;
+        extra(
+            item.facts.len(),
+            L::PICK_FACTS,
+            F::PickFacts,
+            place("items[].facts", i),
+        )?;
+        for (sub, fact) in item.facts.iter().enumerate() {
+            let whole = Remove("items[].facts[]");
+            droppable(
+                budget,
+                &fact.label,
+                L::FACT_LABEL,
+                F::PickFacts,
+                inner("items[].facts[].label", index, sub),
+                whole,
+            )?;
+            droppable(
+                budget,
+                &fact.value,
+                L::FACT_VALUE,
+                F::PickFacts,
+                inner("items[].facts[].value", index, sub),
+                whole,
+            )?;
         }
         if let Some(rating) = &item.rating {
             let value = rating.value.parse::<f64>().ok();
@@ -705,30 +1016,103 @@ pub(super) fn check_picks(budget: &mut Budget, evidence: usize, items: &[WorkPic
                 || !matches!(rating.max, 5 | 10)
                 || value.is_none_or(|v| v < 0.0 || v > f64::from(rating.max))
             {
-                return Err(at(F::PickRating, index));
+                return Err(
+                    place("items[].rating", i).dropping(F::PickRating, Remove("items[].rating"))
+                );
             }
         }
-        optional(budget, &item.why, 120, F::PickWhy, i)?;
-        if item.tags.len() > 3 {
-            return Err(at(F::PickTags, index));
-        }
-        for tag in &item.tags {
-            line(budget, tag, 16, F::PickTags, i)?;
+        optional(
+            budget,
+            &item.why,
+            L::PICK_WHY,
+            F::PickWhy,
+            place("items[].why", i),
+        )?;
+        extra(
+            item.tags.len(),
+            L::PICK_TAGS,
+            F::PickTags,
+            place("items[].tags", i),
+        )?;
+        for (sub, tag) in item.tags.iter().enumerate() {
+            droppable(
+                budget,
+                tag,
+                L::PICK_TAG,
+                F::PickTags,
+                inner("items[].tags[]", index, sub),
+                Remove("items[].tags[]"),
+            )?;
         }
         if let Some(route) = &item.route {
-            line(budget, &route.from, 40, F::PickRoute, i)?;
-            line(budget, &route.to, 40, F::PickRoute, i)?;
-            optional(budget, &route.depart, 24, F::PickRoute, i)?;
-            optional(budget, &route.arrive, 24, F::PickRoute, i)?;
-            optional(budget, &route.duration, 16, F::PickRoute, i)?;
-            optional(budget, &route.carrier, 40, F::PickRoute, i)?;
-            if route.stops > 5 || !host(&route.carrier_host) {
-                return Err(at(F::PickRoute, index));
+            let whole = Remove("items[].route");
+            droppable(
+                budget,
+                &route.from,
+                L::ROUTE_PLACE,
+                F::PickRoute,
+                place("items[].route.from", i),
+                whole,
+            )?;
+            droppable(
+                budget,
+                &route.to,
+                L::ROUTE_PLACE,
+                F::PickRoute,
+                place("items[].route.to", i),
+                whole,
+            )?;
+            optional(
+                budget,
+                &route.depart,
+                L::ROUTE_TIME,
+                F::PickRoute,
+                place("items[].route.depart", i),
+            )?;
+            optional(
+                budget,
+                &route.arrive,
+                L::ROUTE_TIME,
+                F::PickRoute,
+                place("items[].route.arrive", i),
+            )?;
+            optional(
+                budget,
+                &route.duration,
+                L::ROUTE_DURATION,
+                F::PickRoute,
+                place("items[].route.duration", i),
+            )?;
+            optional(
+                budget,
+                &route.carrier,
+                L::ROUTE_CARRIER,
+                F::PickRoute,
+                place("items[].route.carrier", i),
+            )?;
+            if route.stops > L::ROUTE_STOPS {
+                return Err(place("items[].route.stops", i).dropping(F::PickRoute, whole));
+            }
+            if !host(&route.carrier_host) {
+                return Err(place("items[].route.carrier_host", i)
+                    .dropping(F::PickRoute, Remove("items[].route.carrier_host")));
             }
         }
-        optional(budget, &item.when, 40, F::PickWhen, i)?;
-        optional(budget, &item.duration, 16, F::PickWhen, i)?;
-        source(item.source, evidence, index)?;
+        optional(
+            budget,
+            &item.when,
+            L::PICK_WHEN,
+            F::PickWhen,
+            place("items[].when", i),
+        )?;
+        optional(
+            budget,
+            &item.duration,
+            L::PICK_DURATION,
+            F::PickWhen,
+            place("items[].duration", i),
+        )?;
+        source(item.source, evidence, place("items[].source", i))?;
     }
     Ok(())
 }
@@ -744,26 +1128,77 @@ pub(super) fn check_plan(
     steps: &[WorkPlanStepV1],
     total: &Option<WorkLabelledV1>,
 ) -> Checked {
-    count(steps.len(), MAX_PLAN_STEPS, F::PlanSteps)?;
+    count(
+        steps.len(),
+        MAX_PLAN_STEPS,
+        F::PlanSteps,
+        place("steps", None),
+    )?;
     for (index, step) in steps.iter().enumerate() {
         let i = Some(index);
-        optional(budget, &step.when, 32, F::PlanStepWhen, i)?;
-        line(budget, &step.title, 70, F::PlanStepTitle, i)?;
-        optional(budget, &step.detail, 140, F::PlanStepDetail, i)?;
-        optional(budget, &step.cost, 24, F::PlanStepCost, i)?;
-        optional(budget, &step.place, 40, F::PlanStepPlace, i)?;
+        optional(
+            budget,
+            &step.when,
+            L::STEP_WHEN,
+            F::PlanStepWhen,
+            place("steps[].when", i),
+        )?;
+        line(
+            budget,
+            &step.title,
+            L::STEP_TITLE,
+            F::PlanStepTitle,
+            place("steps[].title", i),
+        )?;
+        optional(
+            budget,
+            &step.detail,
+            L::STEP_DETAIL,
+            F::PlanStepDetail,
+            place("steps[].detail", i),
+        )?;
+        optional(
+            budget,
+            &step.cost,
+            L::STEP_COST,
+            F::PlanStepCost,
+            place("steps[].cost", i),
+        )?;
+        optional(
+            budget,
+            &step.place,
+            L::STEP_PLACE,
+            F::PlanStepPlace,
+            place("steps[].place", i),
+        )?;
         if step
             .pick
             .as_ref()
             .is_some_and(|pick| usize::from(pick.index) >= MAX_PICKS)
         {
-            return Err(at(F::PlanStepPick, index));
+            return Err(place("steps[].pick", i)
+                .dropping(F::PlanStepPick, WorkFaultDrop::Remove("steps[].pick")));
         }
-        source(step.source, evidence, index)?;
+        source(step.source, evidence, place("steps[].source", i))?;
     }
     if let Some(total) = &total {
-        line(budget, &total.label, 24, F::PlanTotal, None)?;
-        line(budget, &total.value, 24, F::PlanTotal, None)?;
+        let whole = WorkFaultDrop::Remove("total");
+        droppable(
+            budget,
+            &total.label,
+            L::PLAN_TOTAL,
+            F::PlanTotal,
+            place("total.label", None),
+            whole,
+        )?;
+        droppable(
+            budget,
+            &total.value,
+            L::PLAN_TOTAL,
+            F::PlanTotal,
+            place("total.value", None),
+            whole,
+        )?;
     }
     Ok(())
 }
@@ -773,30 +1208,82 @@ pub(super) fn check_list(
     evidence: usize,
     items: &[WorkListItemV1],
 ) -> Checked {
-    count(items.len(), MAX_LIST_ITEMS, F::ListItems)?;
+    use WorkFaultDrop::Remove;
+    count(
+        items.len(),
+        MAX_LIST_ITEMS,
+        F::ListItems,
+        place("items", None),
+    )?;
     for (index, item) in items.iter().enumerate() {
         let i = Some(index);
-        line(budget, &item.title, 90, F::ListItemTitle, i)?;
-        optional(budget, &item.detail, 160, F::ListItemDetail, i)?;
-        optional(budget, &item.due, 32, F::ListItemDue, i)?;
+        line(
+            budget,
+            &item.title,
+            L::ITEM_TITLE,
+            F::ListItemTitle,
+            place("items[].title", i),
+        )?;
+        optional(
+            budget,
+            &item.detail,
+            L::ITEM_DETAIL,
+            F::ListItemDetail,
+            place("items[].detail", i),
+        )?;
+        optional(
+            budget,
+            &item.due,
+            L::ITEM_DUE,
+            F::ListItemDue,
+            place("items[].due", i),
+        )?;
         if let Some(from) = &item.from {
-            optional(budget, &from.app, 24, F::ListItemFrom, i)?;
-            optional(budget, &from.who, 40, F::ListItemFrom, i)?;
-            optional(budget, &from.when, 32, F::ListItemFrom, i)?;
+            optional(
+                budget,
+                &from.app,
+                L::FROM_APP,
+                F::ListItemFrom,
+                place("items[].from.app", i),
+            )?;
+            optional(
+                budget,
+                &from.who,
+                L::FROM_WHO,
+                F::ListItemFrom,
+                place("items[].from.who", i),
+            )?;
+            optional(
+                budget,
+                &from.when,
+                L::FROM_WHEN,
+                F::ListItemFrom,
+                place("items[].from.when", i),
+            )?;
             if let Some(quote) = &from.quote {
                 if quote.trim().is_empty()
-                    || quote.chars().count() > 200
+                    || quote.chars().count() > L::FROM_QUOTE
                     || quote.chars().any(|c| c.is_control() && c != '\n')
                 {
-                    return Err(at(F::ListItemFrom, index));
+                    return Err(WorkObjectFault {
+                        found: Some(measured(&quote.replace('\n', " "))),
+                        limit: limit(L::FROM_QUOTE),
+                        ..place("items[].from.quote", i)
+                            .dropping(F::ListItemFrom, Remove("items[].from.quote"))
+                    });
                 }
                 budget.add(quote)?;
             }
-            if !host(&from.host) || from.url.as_deref().is_some_and(|url| !https(url)) {
-                return Err(at(F::ListItemFrom, index));
+            if !host(&from.host) {
+                return Err(place("items[].from.host", i)
+                    .dropping(F::ListItemFrom, Remove("items[].from.host")));
+            }
+            if from.url.as_deref().is_some_and(|url| !https(url)) {
+                return Err(place("items[].from.url", i)
+                    .dropping(F::ListItemFrom, Remove("items[].from.url")));
             }
         }
-        source(item.source, evidence, index)?;
+        source(item.source, evidence, place("items[].source", i))?;
     }
     Ok(())
 }
@@ -813,49 +1300,106 @@ pub(super) fn check_sheet(
     rows: &[WorkSheetRowV1],
     note: &Option<String>,
 ) -> Checked {
-    count(columns.len(), MAX_SHEET_COLUMNS, F::SheetColumns)?;
+    use WorkFaultDrop::Remove;
+    count(
+        columns.len(),
+        MAX_SHEET_COLUMNS,
+        F::SheetColumns,
+        place("columns", None),
+    )?;
     let mut labels = std::collections::BTreeSet::new();
     for (index, column) in columns.iter().enumerate() {
         let i = Some(index);
-        line(budget, &column.label, 24, F::SheetColumn, i)?;
-        optional(budget, &column.unit, 12, F::SheetColumn, i)?;
-        if !labels.insert(column.label.trim().to_lowercase())
-            || column.currency.as_deref().is_some_and(|c| !currency(c))
-            || (column.kind == WorkSheetColumnKindV1::Money && column.currency.is_none())
-            || (column.best.is_some()
-                && !matches!(
-                    column.kind,
-                    WorkSheetColumnKindV1::Number
-                        | WorkSheetColumnKindV1::Money
-                        | WorkSheetColumnKindV1::Percent
-                        | WorkSheetColumnKindV1::Rating
-                        | WorkSheetColumnKindV1::YesNo
-                        | WorkSheetColumnKindV1::Duration
-                        | WorkSheetColumnKindV1::Date
-                ))
+        line(
+            budget,
+            &column.label,
+            L::COLUMN_LABEL,
+            F::SheetColumn,
+            place("columns[].label", i),
+        )?;
+        optional(
+            budget,
+            &column.unit,
+            L::COLUMN_UNIT,
+            F::SheetColumn,
+            place("columns[].unit", i),
+        )?;
+        if !labels.insert(column.label.trim().to_lowercase()) {
+            return Err(place("columns[].label", i).fault(F::SheetColumn));
+        }
+        let money = column.kind == WorkSheetColumnKindV1::Money;
+        if column.currency.as_deref().is_some_and(|c| !currency(c))
+            || (money && column.currency.is_none())
         {
-            return Err(at(F::SheetColumn, index));
+            let at = place("columns[].currency", i);
+            return Err(if money {
+                at.fault(F::SheetColumn)
+            } else {
+                at.dropping(F::SheetColumn, Remove("columns[].currency"))
+            });
+        }
+        if column.best.is_some()
+            && !matches!(
+                column.kind,
+                WorkSheetColumnKindV1::Number
+                    | WorkSheetColumnKindV1::Money
+                    | WorkSheetColumnKindV1::Percent
+                    | WorkSheetColumnKindV1::Rating
+                    | WorkSheetColumnKindV1::YesNo
+                    | WorkSheetColumnKindV1::Duration
+                    | WorkSheetColumnKindV1::Date
+            )
+        {
+            return Err(
+                place("columns[].best", i).dropping(F::SheetColumn, Remove("columns[].best"))
+            );
         }
     }
-    count(rows.len(), MAX_SHEET_ROWS, F::SheetRows)?;
+    count(
+        rows.len(),
+        MAX_SHEET_ROWS,
+        F::SheetRows,
+        place("rows", None),
+    )?;
     for (index, row) in rows.iter().enumerate() {
         if row.cells.len() != columns.len() {
-            return Err(at(F::SheetRows, index));
+            return Err(WorkObjectFault {
+                found: items(row.cells.len()),
+                limit: limit(columns.len()),
+                ..place("rows[].cells", Some(index)).fault(F::SheetRows)
+            });
         }
-        for (cell, column) in row.cells.iter().zip(columns) {
+        for (sub, (cell, column)) in row.cells.iter().zip(columns).enumerate() {
             if !sheet_cell(cell, column.kind) {
-                return Err(at(F::SheetCell, index));
+                let at = inner("rows[].cells[]", index, sub);
+                let mut refused = if sub > 0 {
+                    at.dropping(F::SheetCell, WorkFaultDrop::Empty("rows[].cells[]"))
+                } else {
+                    at.fault(F::SheetCell)
+                };
+                if let Some(max) = text_limit(column.kind) {
+                    refused.found = Some(measured(cell));
+                    refused.limit = limit(max);
+                }
+                return Err(refused);
             }
             budget.add(cell)?;
         }
         if let Some(entity) = &row.entity {
             if !host(&entity.logo_host) || entity.image.as_deref().is_some_and(|u| !https(u)) {
-                return Err(at(F::SheetEntity, index));
+                return Err(place("rows[].entity", Some(index))
+                    .dropping(F::SheetEntity, Remove("rows[].entity")));
             }
         }
-        source(row.source, evidence, index)?;
+        source(row.source, evidence, place("rows[].source", Some(index)))?;
     }
-    optional(budget, note, 120, F::SheetNote, None)
+    optional(
+        budget,
+        note,
+        L::SHEET_NOTE,
+        F::SheetNote,
+        place("note", None),
+    )
 }
 pub(super) fn sheet_links(columns: &[WorkSheetColumnV1], rows: &[WorkSheetRowV1]) -> bool {
     rows.iter()
@@ -864,6 +1408,19 @@ pub(super) fn sheet_links(columns: &[WorkSheetColumnV1], rows: &[WorkSheetRowV1]
             column.kind == WorkSheetColumnKindV1::Link
                 && rows.iter().any(|row| !row.cells[index].is_empty())
         })
+}
+
+/// The character limit of a text-like column's cells.
+fn text_limit(kind: WorkSheetColumnKindV1) -> Option<usize> {
+    use WorkSheetColumnKindV1 as K;
+    match kind {
+        K::Text => Some(L::CELL_TEXT),
+        K::Date => Some(L::CELL_DATE),
+        K::Duration => Some(L::CELL_DURATION),
+        K::Entity => Some(L::CELL_ENTITY),
+        K::Tag => Some(L::CELL_TAG),
+        _ => None,
+    }
 }
 
 /// A cell typed by its column; empty is an unknown value.
@@ -875,12 +1432,11 @@ fn sheet_cell(cell: &str, kind: WorkSheetColumnKindV1) -> bool {
     if cell.chars().any(char::is_control) || cell.trim() != cell {
         return false;
     }
-    let chars = cell.chars().count();
+    if let Some(max) = text_limit(kind) {
+        return cell.chars().count() <= max;
+    }
     match kind {
-        K::Text => chars <= 60,
         K::Number | K::Money | K::Percent => decimal(cell),
-        K::Date => chars <= 32,
-        K::Duration => chars <= 16,
         K::YesNo => matches!(cell, "yes" | "no" | "partial" | "unknown"),
         K::Rating => cell.split_once('/').is_some_and(|(value, max)| {
             let max = max.parse::<u8>().ok().filter(|m| (1..=10).contains(m));
@@ -892,8 +1448,7 @@ fn sheet_cell(cell: &str, kind: WorkSheetColumnKindV1) -> bool {
                 })
         }),
         K::Link => https(cell),
-        K::Entity => chars <= 40,
-        K::Tag => chars <= 16,
+        _ => false,
     }
 }
 
@@ -907,37 +1462,76 @@ pub(super) struct Plot<'a> {
 }
 impl Plot<'_> {
     pub(super) fn check(&self, budget: &mut Budget) -> Checked {
-        optional(budget, &self.x.label, 24, F::PlotAxis, None)?;
-        optional(budget, &self.y.label, 24, F::PlotAxis, None)?;
-        optional(budget, &self.y.unit, 12, F::PlotAxis, None)?;
+        optional(
+            budget,
+            &self.x.label,
+            L::PLOT_LABEL,
+            F::PlotAxis,
+            place("x.label", None),
+        )?;
+        optional(
+            budget,
+            &self.y.label,
+            L::PLOT_LABEL,
+            F::PlotAxis,
+            place("y.label", None),
+        )?;
+        optional(
+            budget,
+            &self.y.unit,
+            L::PLOT_UNIT,
+            F::PlotAxis,
+            place("y.unit", None),
+        )?;
         if self.y.currency.as_deref().is_some_and(|c| !currency(c))
             || (self.y.format == WorkPlotFormatV1::Money && self.y.currency.is_none())
         {
-            return Err(fault(F::PlotAxis));
+            return Err(place("y.currency", None).fault(F::PlotAxis));
         }
-        count(self.series.len(), MAX_PLOT_SERIES, F::PlotSeries)?;
+        count(
+            self.series.len(),
+            MAX_PLOT_SERIES,
+            F::PlotSeries,
+            place("series", None),
+        )?;
         let single = matches!(self.style, WorkPlotStyleV1::Donut | WorkPlotStyleV1::Radial);
         if single && self.series.len() != 1 {
-            return Err(fault(F::PlotShape));
+            return Err(place("series", None).fault(F::PlotShape));
         }
         let mut values: Vec<f64> = Vec::new();
         for (index, series) in self.series.iter().enumerate() {
-            line(budget, &series.name, 24, F::PlotSeries, Some(index))?;
-            if series.points.is_empty() || series.points.len() > MAX_PLOT_POINTS {
-                return Err(at(F::PlotSeries, index));
-            }
+            let i = Some(index);
+            line(
+                budget,
+                &series.name,
+                L::PLOT_SERIES_NAME,
+                F::PlotSeries,
+                place("series[].name", i),
+            )?;
+            count(
+                series.points.len(),
+                MAX_PLOT_POINTS,
+                F::PlotSeries,
+                place("series[].points", i),
+            )?;
             if self.style == WorkPlotStyleV1::Radar && series.points.len() < 3 {
-                return Err(at(F::PlotShape, index));
+                return Err(place("series[].points", i).fault(F::PlotShape));
             }
-            for point in &series.points {
-                line(budget, &point.x, 24, F::PlotPoint, Some(index))?;
+            for (sub, point) in series.points.iter().enumerate() {
+                line(
+                    budget,
+                    &point.x,
+                    L::PLOT_X,
+                    F::PlotPoint,
+                    inner("series[].points[].x", index, sub),
+                )?;
                 let range = self.style == WorkPlotStyleV1::Range;
                 if point.y.as_deref().is_some_and(|y| !decimal(y))
                     || point.y2.as_deref().is_some_and(|y| !decimal(y))
                     || (range && point.y.is_some() != point.y2.is_some())
                     || (!range && point.y2.is_some())
                 {
-                    return Err(at(F::PlotPoint, index));
+                    return Err(inner("series[].points[]", index, sub).fault(F::PlotPoint));
                 }
                 if let Some(y) = point.y.as_deref().and_then(|y| y.parse::<f64>().ok()) {
                     values.push(y);
@@ -946,13 +1540,34 @@ impl Plot<'_> {
         }
         let first = values.first().copied();
         if first.is_none() || (values.len() > 1 && values.iter().all(|v| Some(*v) == first)) {
-            return Err(fault(F::PlotValues));
+            return Err(place("series", None).fault(F::PlotValues));
         }
         if let Some(headline) = &self.headline {
-            line(budget, &headline.label, 24, F::PlotHeadline, None)?;
-            line(budget, &headline.value, 20, F::PlotHeadline, None)?;
+            let whole = WorkFaultDrop::Remove("headline");
+            droppable(
+                budget,
+                &headline.label,
+                L::PLOT_HEADLINE_LABEL,
+                F::PlotHeadline,
+                place("headline.label", None),
+                whole,
+            )?;
+            droppable(
+                budget,
+                &headline.value,
+                L::PLOT_HEADLINE_VALUE,
+                F::PlotHeadline,
+                place("headline.value", None),
+                whole,
+            )?;
         }
-        line(budget, self.basis, 120, F::PlotBasis, None)
+        line(
+            budget,
+            self.basis,
+            L::PLOT_BASIS,
+            F::PlotBasis,
+            place("basis", None),
+        )
     }
 }
 
@@ -968,26 +1583,41 @@ impl Diff<'_> {
             || self.path.len() > 512
             || self.path.chars().any(char::is_control)
         {
-            return Err(fault(F::DiffPath));
+            return Err(place("path", None).fault(F::DiffPath));
         }
         budget.add(self.path)?;
         if !CODE_LANGUAGES.contains(&self.language) {
-            return Err(fault(F::DiffLanguage));
+            return Err(place("language", None).fault(F::DiffLanguage));
         }
-        line(budget, self.summary, 120, F::DiffSummary, None)?;
-        count(self.hunks.len(), MAX_DIFF_HUNKS, F::DiffHunks)?;
+        line(
+            budget,
+            self.summary,
+            L::DIFF_SUMMARY,
+            F::DiffSummary,
+            place("summary", None),
+        )?;
+        count(
+            self.hunks.len(),
+            MAX_DIFF_HUNKS,
+            F::DiffHunks,
+            place("hunks", None),
+        )?;
         for (index, hunk) in self.hunks.iter().enumerate() {
             if hunk.lines.is_empty()
                 || hunk.lines.len() > MAX_DIFF_HUNK_LINES
                 || hunk.old_start == 0 && hunk.new_start == 0
             {
-                return Err(at(F::DiffHunks, index));
+                return Err(place("hunks[]", Some(index)).fault(F::DiffHunks));
             }
-            for line in &hunk.lines {
-                if line.text.chars().count() > 500
+            for (sub, line) in hunk.lines.iter().enumerate() {
+                if line.text.chars().count() > L::DIFF_LINE
                     || line.text.chars().any(|c| c.is_control() && c != '\t')
                 {
-                    return Err(at(F::DiffLines, index));
+                    return Err(WorkObjectFault {
+                        found: Some(measured(&line.text)),
+                        limit: limit(L::DIFF_LINE),
+                        ..inner("hunks[].lines[].text", index, sub).fault(F::DiffLines)
+                    });
                 }
                 budget.add(&line.text)?;
             }
@@ -1005,10 +1635,18 @@ pub(super) struct Draft<'a> {
 }
 impl Draft<'_> {
     pub(super) fn check(&self, budget: &mut Budget) -> Checked {
-        optional(budget, self.to, 80, F::DraftTo, None)?;
-        optional(budget, self.subject, 120, F::DraftSubject, None)?;
+        optional(budget, self.to, L::DRAFT_TO, F::DraftTo, place("to", None))?;
+        optional(
+            budget,
+            self.subject,
+            L::DRAFT_SUBJECT,
+            F::DraftSubject,
+            place("subject", None),
+        )?;
         if self.subject.is_some() && self.destination != WorkDraftDestinationV1::Email {
-            return Err(fault(F::DraftSubject));
+            return Err(
+                place("subject", None).dropping(F::DraftSubject, WorkFaultDrop::Remove("subject"))
+            );
         }
         if self.body.trim().is_empty()
             || self.body.chars().count() > MAX_DRAFT_BODY_CHARS
@@ -1017,17 +1655,28 @@ impl Draft<'_> {
                 .chars()
                 .any(|c| c.is_control() && c != '\n' && c != '\t')
         {
-            return Err(fault(F::DraftBody));
+            return Err(WorkObjectFault {
+                found: Some(if self.body.trim().is_empty() {
+                    WorkTextFound::Empty
+                } else {
+                    WorkTextFound::Characters(
+                        u32::try_from(self.body.chars().count()).unwrap_or(u32::MAX),
+                    )
+                }),
+                limit: limit(MAX_DRAFT_BODY_CHARS),
+                ..place("body", None).fault(F::DraftBody)
+            });
         }
         if super::artifact::answer_faults(self.body)
             .iter()
             .any(|field| *field != F::AnswerLink)
         {
-            return Err(fault(F::DraftMarkup));
+            return Err(place("body", None).fault(F::DraftMarkup));
         }
         budget.add(self.body)?;
         if self.target_url.as_deref().is_some_and(|url| !https(url)) {
-            return Err(fault(F::DraftTarget));
+            return Err(place("target_url", None)
+                .dropping(F::DraftTarget, WorkFaultDrop::Remove("target_url")));
         }
         Ok(())
     }
@@ -1057,29 +1706,58 @@ fn relative(path: &str, depth: usize) -> bool {
 }
 impl Project<'_> {
     pub(super) fn check(&self, budget: &mut Budget) -> Checked {
-        line(budget, self.name, 60, F::ProjectName, None)?;
-        line(budget, self.summary, 160, F::ProjectSummary, None)?;
+        line(budget, self.name, 60, F::ProjectName, place("name", None))?;
+        line(
+            budget,
+            self.summary,
+            160,
+            F::ProjectSummary,
+            place("summary", None),
+        )?;
         if super::runtime::validate_file_path(self.root).is_err() {
-            return Err(fault(F::ProjectRoot));
+            return Err(place("root", None).fault(F::ProjectRoot));
         }
         budget.add(self.root)?;
         if self.stack.len() > MAX_PROJECT_STACK {
-            return Err(fault(F::ProjectStack));
+            return Err(place("stack", None).fault(F::ProjectStack));
         }
         let mut names = std::collections::BTreeSet::new();
         for (index, item) in self.stack.iter().enumerate() {
             let i = Some(index);
-            line(budget, &item.name, 32, F::ProjectStack, i)?;
-            optional(budget, &item.version, 24, F::ProjectStack, i)?;
-            optional(budget, &item.role, 24, F::ProjectStack, i)?;
+            line(
+                budget,
+                &item.name,
+                32,
+                F::ProjectStack,
+                place("stack[].name", i),
+            )?;
+            optional(
+                budget,
+                &item.version,
+                24,
+                F::ProjectStack,
+                place("stack[].version", i),
+            )?;
+            optional(
+                budget,
+                &item.role,
+                24,
+                F::ProjectStack,
+                place("stack[].role", i),
+            )?;
             if !names.insert(item.name.trim().to_lowercase())
                 || !host(&item.host)
                 || item.manifest.as_deref().is_some_and(|m| !relative(m, 8))
             {
-                return Err(at(F::ProjectStack, index));
+                return Err(place("stack[]", i).fault(F::ProjectStack));
             }
         }
-        count(self.tree.len(), MAX_PROJECT_TREE, F::ProjectTree)?;
+        count(
+            self.tree.len(),
+            MAX_PROJECT_TREE,
+            F::ProjectTree,
+            place("tree", None),
+        )?;
         let mut seen: Vec<(&str, WorkProjectEntryKindV1)> = Vec::new();
         for (index, entry) in self.tree.iter().enumerate() {
             let parent_ok = match entry.path.rsplit_once('/') {
@@ -1093,22 +1771,46 @@ impl Project<'_> {
                 || seen.iter().any(|(path, _)| *path == entry.path)
                 || (entry.more.is_some() && entry.kind != WorkProjectEntryKindV1::Folder)
             {
-                return Err(at(F::ProjectTree, index));
+                return Err(place("tree[]", Some(index)).fault(F::ProjectTree));
             }
             budget.add(&entry.path)?;
             seen.push((&entry.path, entry.kind));
         }
         if self.scripts.len() > MAX_PROJECT_SCRIPTS {
-            return Err(fault(F::ProjectScripts));
+            return Err(place("scripts", None).fault(F::ProjectScripts));
         }
         for (index, script) in self.scripts.iter().enumerate() {
             let i = Some(index);
-            line(budget, &script.name, 32, F::ProjectScripts, i)?;
-            line(budget, &script.command, 160, F::ProjectScripts, i)?;
-            optional(budget, &script.source, 24, F::ProjectScripts, i)?;
+            line(
+                budget,
+                &script.name,
+                32,
+                F::ProjectScripts,
+                place("scripts[].name", i),
+            )?;
+            line(
+                budget,
+                &script.command,
+                160,
+                F::ProjectScripts,
+                place("scripts[].command", i),
+            )?;
+            optional(
+                budget,
+                &script.source,
+                24,
+                F::ProjectScripts,
+                place("scripts[].source", i),
+            )?;
         }
         if let Some(git) = self.git {
-            optional(budget, &git.branch, 80, F::ProjectGit, None)?;
+            optional(
+                budget,
+                &git.branch,
+                80,
+                F::ProjectGit,
+                place("git.branch", None),
+            )?;
         }
         Ok(())
     }
@@ -1125,8 +1827,9 @@ pub(super) struct Media<'a> {
 }
 impl Media<'_> {
     pub(super) fn check(&self, budget: &mut Budget) -> Checked {
+        use WorkFaultDrop::Remove;
         if !https(self.url) {
-            return Err(fault(F::MediaUrl));
+            return Err(place("url", None).fault(F::MediaUrl));
         }
         budget.add(self.url)?;
         let host = url::Url::parse(self.url)
@@ -1152,15 +1855,27 @@ impl Media<'_> {
             Some(WorkMediaProviderV1::File) | None => true,
         };
         if !provider_ok {
-            return Err(fault(F::MediaProvider));
+            return Err(place("provider", None).dropping(F::MediaProvider, Remove("provider")));
         }
-        optional(budget, self.title, 80, F::MediaTitle, None)?;
+        optional(
+            budget,
+            self.title,
+            L::MEDIA_TITLE,
+            F::MediaTitle,
+            place("title", None),
+        )?;
         if self.poster.as_deref().is_some_and(|url| !https(url)) {
-            return Err(fault(F::MediaPoster));
+            return Err(place("poster", None).dropping(F::MediaPoster, Remove("poster")));
         }
-        optional(budget, self.duration, 16, F::MediaDuration, None)?;
+        optional(
+            budget,
+            self.duration,
+            L::MEDIA_DURATION,
+            F::MediaDuration,
+            place("duration", None),
+        )?;
         if self.start_secs.is_some_and(|secs| secs > 86_400) {
-            return Err(fault(F::MediaDuration));
+            return Err(place("start_secs", None).dropping(F::MediaDuration, Remove("start_secs")));
         }
         Ok(())
     }

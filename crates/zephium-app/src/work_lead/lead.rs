@@ -18,7 +18,7 @@ use zephium_ipc::work::WorkActivityV1;
 
 use super::call::{self, clip, CallFailure, WorkLeadModels};
 use super::hands::{Hands, Request, SharedBrowser};
-use super::objects;
+use super::objects::{self, ObjectRefusal};
 use super::parts;
 use super::prompt;
 use super::run::LeadRun;
@@ -30,8 +30,12 @@ use crate::work_runtime::{WorkAttemptProbe, WorkNodeAttempt};
 /// The lead stops making calls below this much budget and asks first.
 const FLOOR_COST: u32 = 40_000;
 const FLOOR_TOKENS: u32 = 24_000;
-/// Consecutive turns without progress before the run gives up.
+/// Consecutive turns that call no tool before the run closes with what it
+/// has.
 const MAX_IDLE: u8 = 4;
+/// Consecutive turns whose calls were all refused with feedback, or only
+/// read the canvas or a skill, before the run closes with what it has.
+const MAX_STUCK: u8 = 8;
 const MAX_FAILED_CALLS: u8 = 3;
 /// Conversation text past which older tool results are shortened.
 const CONVERSATION_CHARS: usize = 240_000;
@@ -51,6 +55,8 @@ struct LeadState {
     reply: Option<WorkArtifactId>,
     finish_refusals: u8,
     title_refused: bool,
+    /// Objects refused in this run, by what they are, and how often.
+    refused: std::collections::BTreeMap<String, u8>,
     skills: Vec<String>,
     steers: BTreeSet<WorkStepId>,
     searches: usize,
@@ -200,6 +206,7 @@ where
             self.context.clone(),
         )])];
         let mut idle = 0u8;
+        let mut stuck = 0u8;
         let mut failed_calls = 0u8;
         loop {
             if self.run.cancelled().await {
@@ -209,9 +216,7 @@ where
                 return Ok(status);
             }
             if self.run.next_turn() == u8::MAX {
-                return self
-                    .fail("The run took more turns than one run can hold")
-                    .await;
+                return self.close(Stall::Turns).await;
             }
             self.run.activity(WorkActivityV1::Planning);
             self.steers(&mut messages).await;
@@ -259,8 +264,11 @@ where
                             | WorkModelError::Unauthorized
                             | WorkModelError::OverBudget
                     );
-                    if fatal || failed_calls >= MAX_FAILED_CALLS {
+                    if fatal {
                         return Ok(WorkAttemptStatus::Failed);
+                    }
+                    if failed_calls >= MAX_FAILED_CALLS {
+                        return self.close(Stall::Model).await;
                     }
                     continue;
                 }
@@ -286,7 +294,7 @@ where
             if calls.is_empty() {
                 idle += 1;
                 if idle >= MAX_IDLE {
-                    return self.fail("The agent stopped making progress").await;
+                    return self.close(Stall::NoProgress).await;
                 }
                 let nudge = if self.state().reply.is_some() {
                     "If the result stands, call finish; otherwise continue the work with your tools."
@@ -306,12 +314,13 @@ where
             if finished {
                 return Ok(WorkAttemptStatus::Succeeded);
             }
+            idle = 0;
             if progress {
-                idle = 0;
+                stuck = 0;
             } else {
-                idle += 1;
-                if idle >= MAX_IDLE {
-                    return self.fail("The agent stopped making progress").await;
+                stuck += 1;
+                if stuck >= MAX_STUCK {
+                    return self.close(Stall::NoProgress).await;
                 }
             }
         }
@@ -327,6 +336,7 @@ where
         let mut requests: Vec<(usize, Request)> = Vec::new();
         let mut pending: Vec<Pending<'_>> = Vec::new();
         let mut finish_at = None;
+        let mut ran = vec![false; calls.len()];
         for (index, tool_call) in calls.iter().enumerate() {
             let args = &tool_call.arguments;
             match tool_call.name.as_str() {
@@ -378,10 +388,13 @@ where
                     Err(fault) => answers[index] = Some((fault, true)),
                 },
                 "start_part" => match parts::spec(args) {
-                    Ok(spec) => pending.push(Box::pin(async move {
-                        let (content, error) = self.part(spec).await;
-                        vec![(index, content, error)]
-                    })),
+                    Ok(spec) => {
+                        ran[index] = true;
+                        pending.push(Box::pin(async move {
+                            let (content, error) = self.part(spec).await;
+                            vec![(index, content, error)]
+                        }))
+                    }
                     Err(fault) => answers[index] = Some((fault, true)),
                 },
                 "create" => {
@@ -473,10 +486,17 @@ where
         if let Some(status) = terminal {
             return Err(status);
         }
-        let progress = answers.iter().zip(calls).any(|(answer, c)| {
-            !matches!(c.name.as_str(), "read_canvas" | "load_skill" | "finish")
-                && answer.as_ref().is_some_and(|(_, error)| !error)
-        });
+        // A part that ran moved the work even when it could not do its job;
+        // reading the canvas or a skill alone does not.
+        let progress = answers
+            .iter()
+            .zip(calls)
+            .enumerate()
+            .any(|(i, (answer, c))| {
+                ran[i]
+                    || (!matches!(c.name.as_str(), "read_canvas" | "load_skill" | "finish")
+                        && answer.as_ref().is_some_and(|(_, error)| !error))
+            });
         let mut finished = false;
         if let Some(index) = finish_at {
             let others_failed = answers
@@ -510,6 +530,9 @@ where
     }
 
     /// Places an object; a helper may place only its part's found things.
+    /// A second try of an object that was refused stands without its
+    /// offending optional parts; a second try of a copy or a second reply
+    /// updates the object that is already there.
     pub(crate) async fn create(
         &self,
         args: &Value,
@@ -532,11 +555,21 @@ where
                 true,
             );
         }
+        let key = format!(
+            "create {kind} {}",
+            part.map(|p| p.to_string()).unwrap_or_default()
+        );
+        let lenient = self.tried(&key);
         if kind == "reply" {
-            if let Some(reply) = self.state().reply {
-                return (
+            let reply = self.state().reply;
+            if let Some(reply) = reply {
+                if lenient {
+                    return self.revise(&with_id(args, reply)).await;
+                }
+                return self.refuse(
+                    &key,
+                    ObjectRefusal::Second,
                     format!("This request already has its reply ({reply}); revise it instead"),
-                    true,
                 );
             }
         }
@@ -562,45 +595,50 @@ where
                 .iter()
                 .find(|o| o.in_this_run && o.artifact.part.is_some() && o.artifact.part == part)
             {
-                return (
+                if lenient && placed.artifact.data.kind_name() == kind {
+                    return self.revise(&with_id(args, placed.artifact.id)).await;
+                }
+                return self.refuse(
+                    &key,
+                    ObjectRefusal::Second,
                     format!(
                         "Your part already placed its object ({}); put every other fact in finish's digest",
                         placed.artifact.id
                     ),
-                    true,
                 );
             }
         } else if let Some(existing) = objects::duplicate(&canvas, kind, title, part) {
-            self.run
-                .report(super::WorkLeadDiagnostic::ObjectRefused { reason: None });
-            return (
+            if lenient {
+                return self.revise(&with_id(args, existing.artifact.id)).await;
+            }
+            return self.refuse(
+                &key,
+                ObjectRefusal::Duplicate,
                 format!(
                     "{kind} {} \"{}\" already covers this subject: revise it with revise (id {}) instead of placing a copy",
                     existing.artifact.id, existing.artifact.title, existing.artifact.id
                 ),
-                true,
             );
         }
         let data = args.get("data").cloned().unwrap_or(Value::Null);
         let sources = strings(args.get("sources"));
-        let proposed = match objects::propose(self.run, &canvas, kind, title, data, &sources, &[]) {
-            Ok(proposed) => proposed,
-            Err((fault, reason)) => {
-                self.run.report(super::WorkLeadDiagnostic::ObjectRefused {
-                    reason: Some(reason),
-                });
-                return (fault, true);
-            }
-        };
+        let proposed =
+            match objects::propose(self.run, &canvas, kind, title, data, &sources, &[], lenient) {
+                Ok(proposed) => proposed,
+                Err((fault, reason)) => return self.refuse(&key, reason, fault),
+            };
         if helper {
             if let zephium_core::work::artifact::WorkArtifactDataV1::Sheet {
                 columns, rows, ..
             } = &proposed.data
             {
                 if rows.len() > PART_SHEET_ROWS || columns.len() > PART_SHEET_COLUMNS {
-                    return (
-                        format!("A part's sheet is small: at most {PART_SHEET_ROWS} rows and {PART_SHEET_COLUMNS} columns; the rest goes to the lead in finish's digest"),
-                        true,
+                    return self.refuse(
+                        &key,
+                        ObjectRefusal::Field(
+                            zephium_core::work::artifact::WorkArtifactField::SheetRows,
+                        ),
+                        format!("A part's sheet is small: it has {} rows and {} columns; the limit is {PART_SHEET_ROWS} rows and {PART_SHEET_COLUMNS} columns, and the rest goes to the lead in finish's digest", rows.len(), columns.len()),
                     );
                 }
             }
@@ -608,17 +646,20 @@ where
         if let Err(fault) =
             objects::honest(&proposed.data, &honesty(&projection, execution, &proposed))
         {
-            self.run
-                .report(super::WorkLeadDiagnostic::ObjectRefused { reason: None });
-            return (fault, true);
+            return self.refuse(&key, ObjectRefusal::Honesty, fault);
         }
+        let left_out = proposed.left_out.clone();
         match objects::publish(self.run, proposed, part, None).await {
             Ok(id) => {
+                self.placed(&key);
                 if kind == "reply" {
                     self.state().reply = Some(id);
                 }
                 self.run.activity(WorkActivityV1::ProducingArtifact);
-                (format!("Placed {kind} {id}"), false)
+                (
+                    placed_words(&format!("Placed {kind} {id}"), &left_out),
+                    false,
+                )
             }
             Err(error) => (publish_fault(error), true),
         }
@@ -660,6 +701,8 @@ where
                 true,
             );
         }
+        let key = format!("revise {}", target.artifact.id);
+        let lenient = self.tried(&key);
         // A revised object keeps its name unless its subject changed; what
         // changed shows as its update, never as a longer title.
         let title = args
@@ -684,26 +727,22 @@ where
             data,
             &sources,
             &target.artifact.evidence,
+            lenient,
         ) {
             Ok(proposed) => proposed,
-            Err((fault, reason)) => {
-                self.run.report(super::WorkLeadDiagnostic::ObjectRefused {
-                    reason: Some(reason),
-                });
-                return (fault, true);
-            }
+            Err((fault, reason)) => return self.refuse(&key, reason, fault),
         };
         if let Err(fault) = objects::honest(
             &proposed.data,
             &honesty(&projection, self.run.probe.execution(), &proposed),
         ) {
-            self.run
-                .report(super::WorkLeadDiagnostic::ObjectRefused { reason: None });
-            return (fault, true);
+            return self.refuse(&key, ObjectRefusal::Honesty, fault);
         }
+        let left_out = proposed.left_out.clone();
         let part = target.in_this_run.then_some(target.artifact.part).flatten();
         match objects::publish(self.run, proposed, part, Some(target.artifact.id)).await {
             Ok(new) => {
+                self.placed(&key);
                 if kind == "reply" {
                     self.state().reply = Some(new);
                 }
@@ -713,12 +752,40 @@ where
                     format!(" (its newest version was {})", target.artifact.id)
                 };
                 (
-                    format!("Updated {kind}: {new} now stands in place of {id}{forwarded}"),
+                    placed_words(
+                        &format!("Updated {kind}: {new} now stands in place of {id}{forwarded}"),
+                        &left_out,
+                    ),
                     false,
                 )
             }
             Err(error) => (publish_fault(error), true),
         }
+    }
+
+    /// Whether this object was refused before in this run: its next try is
+    /// lenient.
+    fn tried(&self, key: &str) -> bool {
+        self.state().refused.contains_key(key)
+    }
+    fn placed(&self, key: &str) {
+        self.state().refused.remove(key);
+    }
+    /// A refusal with its feedback for the model, logged by its closed reason.
+    fn refuse(&self, key: &str, reason: ObjectRefusal, words: String) -> (String, bool) {
+        *self.state().refused.entry(key.to_owned()).or_default() += 1;
+        self.run.report(super::WorkLeadDiagnostic::ObjectRefused {
+            reason: Some(reason),
+        });
+        let words = if matches!(
+            reason,
+            ObjectRefusal::Field(_) | ObjectRefusal::Shape | ObjectRefusal::Pick
+        ) {
+            format!("{words}\nCorrect it and call again; if the same object comes back once more, optional parts still outside their limits are left out.")
+        } else {
+            words
+        };
+        (words, true)
     }
 
     async fn read_canvas(&self, args: &Value) -> (String, bool) {
@@ -955,10 +1022,7 @@ where
                 >= FLOOR_TOKENS;
         if !room {
             self.run.report(super::WorkLeadDiagnostic::BudgetSpent);
-            return self
-                .fail("The run used its budget before it could finish")
-                .await
-                .map(Some);
+            return self.close(Stall::Budget).await.map(Some);
         }
         let spent = f64::from(self.run.used().cost_micro_usd) / 1_000_000.0;
         let answer = self
@@ -977,7 +1041,7 @@ where
             .report(super::WorkLeadDiagnostic::KeepGoing { granted: keep });
         match answer {
             None => Ok(Some(WorkAttemptStatus::Cancelled)),
-            Some(_) if !keep => self.fail("Stopped at the budget").await.map(Some),
+            Some(_) if !keep => self.close(Stall::Budget).await.map(Some),
             Some(_) => {
                 self.run.probe.extend_limits(grown).await?;
                 self.run.set_limits(grown);
@@ -1036,14 +1100,171 @@ where
         );
         let _ = self.run.begin(step, vec![]).await;
     }
-    async fn fail(&self, note: &str) -> Result<WorkAttemptStatus, WorkError> {
-        let mut step = self
-            .run
-            .step(WorkStepKindV1::Turn, WorkStepStatus::Failed, None);
-        step.usage = Some(WorkUsage::default());
-        step.note = Some(note.to_owned());
-        let _ = self.run.begin(step, vec![]).await;
-        Ok(WorkAttemptStatus::Failed)
+    /// Ends a run that could not reach its own finish as a result: what it
+    /// placed stands, a reply says in plain words what is there, what each
+    /// part that could not do its job needs and why the run stopped, and
+    /// the run finishes. A run never dies with nothing to show.
+    async fn close(&self, stall: Stall) -> Result<WorkAttemptStatus, WorkError> {
+        self.run.report(super::WorkLeadDiagnostic::Closed { stall });
+        let execution = self.run.execution().await?;
+        let projection = self.run.probe.runtime_projection().await?;
+        let placed: Vec<String> = objects::canvas(&projection, execution.id)
+            .into_iter()
+            .filter(|o| o.in_this_run && o.current && o.artifact.data.kind_name() != "reply")
+            .map(|o| o.artifact.title)
+            .collect();
+        if self.state().reply.is_none() {
+            let (headline, text) = closing(&placed, &execution.parts, stall);
+            let data = zephium_core::work::artifact::WorkArtifactDataV1::Reply {
+                headline,
+                text,
+                figures: vec![],
+                points: vec![],
+            };
+            if data.lead_fault(0).is_none() {
+                let proposed = objects::Proposed {
+                    title: "Where this stands".into(),
+                    data,
+                    evidence: vec![],
+                    left_out: vec![],
+                };
+                if let Ok(id) = objects::publish(self.run, proposed, None, None).await {
+                    self.state().reply = Some(id);
+                }
+            }
+        }
+        self.run.activity(WorkActivityV1::Finishing);
+        let mut step = self.run.step(
+            WorkStepKindV1::Finish {
+                followups: vec![],
+                title: None,
+            },
+            WorkStepStatus::Succeeded,
+            None,
+        );
+        step.note = Some(
+            if placed.is_empty() {
+                "I couldn't finish this; the reply says why."
+            } else {
+                "I stopped here; what I found is on the canvas."
+            }
+            .into(),
+        );
+        self.run.begin(step, vec![]).await?;
+        Ok(WorkAttemptStatus::Succeeded)
+    }
+}
+
+/// Why a run closed without its own finish, as a closed fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Stall {
+    /// Its turns stopped moving the work.
+    NoProgress,
+    /// It reached its budget, or the person chose to stop there.
+    Budget,
+    /// It took every turn one run holds.
+    Turns,
+    /// The model stopped answering.
+    Model,
+}
+
+/// The reply a closed run leaves: what it placed, what each part that could
+/// not do its job needs, and why it stopped, in the person's words.
+fn closing(
+    placed: &[String],
+    parts: &[zephium_core::work::parts::WorkPartFactV1],
+    stall: Stall,
+) -> (String, String) {
+    let mut sentences: Vec<String> = Vec::new();
+    if !placed.is_empty() {
+        let names: Vec<&str> = placed.iter().take(3).map(String::as_str).collect();
+        let listed = match names.as_slice() {
+            [one] => (*one).to_owned(),
+            [first @ .., last] => format!("{} and {last}", first.join(", ")),
+            [] => String::new(),
+        };
+        sentences.push(format!("I placed {listed}."));
+    }
+    let blocked: Vec<String> = parts
+        .iter()
+        .filter(|p| {
+            p.need.is_some()
+                || matches!(
+                    p.state,
+                    zephium_core::work::parts::WorkPartStateV1::Failed
+                        | zephium_core::work::parts::WorkPartStateV1::Stopped
+                )
+        })
+        .take(3)
+        .map(part_words)
+        .collect();
+    let any_blocked = !blocked.is_empty();
+    for words in blocked {
+        sentences.push(format!("{words}."));
+    }
+    sentences.push(
+        match stall {
+            Stall::Budget => "I reached this run's budget before I could finish.",
+            Stall::Model => "The model stopped answering before I could finish.",
+            Stall::NoProgress | Stall::Turns => "I stopped before I could put the rest together.",
+        }
+        .into(),
+    );
+    sentences.push(
+        if any_blocked {
+            "Each part's row has its fix."
+        } else {
+            "Ask me to continue and I'll pick up from here."
+        }
+        .into(),
+    );
+    let mut text = String::new();
+    for sentence in sentences {
+        let next = if text.is_empty() {
+            sentence
+        } else {
+            format!("{text} {sentence}")
+        };
+        if next.chars().count() > zephium_core::work::objects::limit::REPLY_TEXT {
+            break;
+        }
+        text = next;
+    }
+    let headline = if placed.is_empty() {
+        "I couldn't finish this"
+    } else {
+        "Here is what I found so far"
+    };
+    (headline.into(), text)
+}
+
+/// A part that could not do its job, and why, in the person's words.
+fn part_words(part: &zephium_core::work::parts::WorkPartFactV1) -> String {
+    use zephium_core::work::parts::{WorkPartNeedV1 as Need, WorkPartReasonV1 as Why};
+    let title = &part.title;
+    match &part.need {
+        Some(Need::SignIn { host }) => format!("{title} needs you to sign in to {host}"),
+        Some(Need::AllowSite { host }) => format!("{title} needs your OK to work on {host}"),
+        Some(Need::AllowFolder { path }) => format!(
+            "{title} needs your OK to read {}",
+            path.rsplit('/').find(|n| !n.is_empty()).unwrap_or(path)
+        ),
+        Some(Need::UseConnection { connection, .. }) => {
+            format!("{title} can go through your {connection} connection instead of the website")
+        }
+        Some(Need::Retry { host, reason }) => {
+            let site = host.as_deref().unwrap_or("the site");
+            match reason {
+                Some(Why::CouldntRead) => format!("{title} couldn't read {site}"),
+                Some(Why::SignedOut) => format!("{site} showed {title} its signed-out view"),
+                Some(Why::BlockedByCheck) => format!("{site} asked {title} for a human check"),
+                Some(Why::NotFound) => format!("{title} found nothing that matched on {site}"),
+                Some(Why::SiteError) => format!("{site} failed on its side for {title}"),
+                Some(Why::NoAnswer) => format!("{site} didn't answer {title} in time"),
+                None => format!("{title} didn't finish"),
+            }
+        }
+        None => format!("{title} didn't finish"),
     }
 }
 
@@ -1083,6 +1304,24 @@ fn honesty(
     objects::Honesty {
         sourced: !proposed.evidence.is_empty(),
         failed,
+    }
+}
+
+/// The same call's arguments aimed at an object already on the canvas.
+fn with_id(args: &Value, id: WorkArtifactId) -> Value {
+    let mut args = args.clone();
+    if let Value::Object(map) = &mut args {
+        map.insert("id".into(), Value::String(id.to_string()));
+    }
+    args
+}
+
+/// A placed object's answer, with what a second try left out.
+fn placed_words(head: &str, left_out: &[String]) -> String {
+    if left_out.is_empty() {
+        head.to_owned()
+    } else {
+        format!("{head}. Left out to place it: {}", left_out.join("; "))
     }
 }
 

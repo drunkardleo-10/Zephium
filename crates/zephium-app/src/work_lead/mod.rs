@@ -15,6 +15,7 @@ mod recipes;
 pub mod registry;
 mod route;
 mod run;
+mod schema;
 pub mod skills;
 pub mod tools;
 
@@ -84,6 +85,10 @@ pub enum WorkLeadDiagnostic {
         builtin: bool,
     },
     BudgetSpent,
+    /// The run closed with what it had instead of its own finish.
+    Closed {
+        stall: lead::Stall,
+    },
     KeepGoing {
         granted: bool,
     },

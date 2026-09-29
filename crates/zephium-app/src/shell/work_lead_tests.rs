@@ -911,3 +911,161 @@ async fn a_service_the_person_connected_is_offered_once_before_its_website() {
         .any(|s| matches!(&s.kind, WorkStepKindV1::Call { call } if call.service == "slack")));
     let _ = std::fs::remove_dir_all(&data);
 }
+
+/// A lead scripted turn by turn: the turn's index and every tool result so
+/// far in, the calls out.
+struct Turns(fn(usize, &str) -> Vec<WorkModelPart>);
+impl WorkModelClient for Turns {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 1_000,
+                    cached_input_tokens: 0,
+                    output_tokens: 100,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+                assistant: (self.0)(turn, &results(&request)),
+            })
+        })
+    }
+}
+
+async fn scripted(
+    objective: &str,
+    turns: fn(usize, &str) -> Vec<WorkModelPart>,
+) -> WorkExecutionFact {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: objective.into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let lead = LeadModel {
+        client: Arc::new(Turns(turns)),
+        ..model(Arc::new(Script {
+            calls: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let done = drive(
+        &mut shell,
+        &queue,
+        WorkLeadService::new(handle.clone()).run(
+            profile,
+            command(work, WorkRevision::INITIAL),
+            None,
+            models,
+            &Search,
+            |_, request| page(request),
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    done.executions[0].clone()
+}
+
+#[tokio::test]
+async fn a_refused_object_stands_on_its_second_try_without_its_optional_excess() {
+    fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        let plan = || {
+            call(
+                "p",
+                "create",
+                json!({"kind": "plan", "title": "Your trip", "data": {"steps": [
+                    {"title": "Fly to SFO", "kind": "travel", "detail": "x".repeat(300)},
+                    {"title": "Check in", "kind": "stay", "date": "5 Jan"}]}}),
+            )
+        };
+        match turn {
+            0 => vec![plan()],
+            1 => {
+                assert!(
+                    seen.contains("plan: steps[1].date is not a field of steps[1]"),
+                    "{seen}"
+                );
+                vec![plan()]
+            }
+            2 => {
+                assert!(
+                    seen.contains("Left out to place it: steps[1].date (not a field of plan); steps[0].detail (300 characters; the limit is 280)"),
+                    "{seen}"
+                );
+                vec![
+                    call(
+                        "r",
+                        "create",
+                        json!({"kind": "reply", "title": "Your trip", "data": {
+                        "headline": "Two steps to San Francisco", "text": "Fly, then check in."}}),
+                    ),
+                    call(
+                        "f",
+                        "finish",
+                        json!({"say": "Your trip is on the canvas.", "title": "Trip to San Francisco"}),
+                    ),
+                ]
+            }
+            _ => panic!("the run finished at turn 2"),
+        }
+    }
+    let run = scripted("Plan my trip", turns).await;
+    assert_eq!(run.status, WorkExecutionStatus::NeedsReview);
+    let plan = run
+        .artifacts
+        .iter()
+        .find_map(|a| match &a.data {
+            WorkArtifactDataV1::Plan { steps, .. } => Some(steps.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(plan[0].detail, None);
+    assert_eq!(plan[1].title, "Check in");
+    assert_eq!(run.title.as_deref(), Some("Trip to San Francisco"));
+}
+
+#[tokio::test]
+async fn a_run_that_stops_moving_closes_with_what_it_has() {
+    fn turns(_: usize, _: &str) -> Vec<WorkModelPart> {
+        vec![WorkModelPart::Text("Thinking about it.".into())]
+    }
+    let run = scripted("Plan my day", turns).await;
+    assert_eq!(run.status, WorkExecutionStatus::NeedsReview);
+    assert!(run.steps.iter().all(|s| s.status != WorkStepStatus::Failed));
+    let reply = run
+        .artifacts
+        .iter()
+        .find_map(|a| match &a.data {
+            WorkArtifactDataV1::Reply { headline, text, .. } => {
+                Some((headline.clone(), text.clone()))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(reply.0, "I couldn't finish this");
+    assert!(reply
+        .1
+        .contains("I stopped before I could put the rest together."));
+    assert!(matches!(
+        run.steps.last().unwrap().kind,
+        WorkStepKindV1::Finish { .. }
+    ));
+}
