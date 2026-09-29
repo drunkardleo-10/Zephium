@@ -90,7 +90,13 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
     (
         "crates/zephium-engine/src/host/work_resource_observation.rs",
         &[
-            "OBSERVATION_BUDGET:Duration=Duration::from_secs(5)", "MAX_WAKES:u8=104",
+            "OBSERVATION_BUDGET:Duration=Duration::from_secs(5)",
+            // A document's first look waits for a heavy app, its wakes cover
+            // its whole budget, and a look never dispatched is not ready.
+            "FIRST_OBSERVATION_BUDGET:Duration=Duration::from_secs(15)",
+            "constCLEANUP_WAKES:u16=4;", "ifread.wakes>=read.max_wakes",
+            "max_wakes:max_wakes(duration)",
+            "read.refuse(ifread.dispatched{SemanticRuntimePortFailure::TimedOut}else{SemanticRuntimePortFailure::NotReady});",
             "RENDERING_OPPORTUNITY:Duration=Duration::from_millis(100)",
             "request.invocation().invocation().get()>resource.last_invocation",
             "current_scope(request.observation().scope(),resource.last_invocation)",
