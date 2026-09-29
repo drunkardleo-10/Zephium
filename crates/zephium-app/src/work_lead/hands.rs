@@ -615,9 +615,16 @@ pub(crate) fn collection(value: Option<&Value>) -> Result<Option<WorkBrowseColle
     let mut collection: WorkBrowseCollection = serde_json::from_value(value.clone())
         .map_err(|error| format!("records does not match its shape: {error}"))?;
     // A row missing a price or a picture is still a find the lead can use;
-    // only a link is ever required.
+    // only a link is ever required. A price is kept as the page shows it:
+    // most sites print "$" without a currency code, which a money value
+    // never admits, and the lead reads records as text either way.
     for column in &mut collection.columns {
-        if column.value != zephium_core::work::collection::WorkBrowseValue::Url {
+        use zephium_core::work::collection::{WorkBrowseExtraction, WorkBrowseValue};
+        if matches!(column.value, WorkBrowseValue::Money { .. }) {
+            column.value = WorkBrowseValue::Text;
+            column.extraction = WorkBrowseExtraction::Generate;
+        }
+        if column.value != WorkBrowseValue::Url {
             column.required = false;
         }
     }
@@ -652,6 +659,26 @@ mod tests {
                 Err(WorkPublicSearchError::NotDispatched(WorkError::Unavailable))
             })
         }
+    }
+
+    #[test]
+    fn a_price_column_keeps_the_price_as_the_page_shows_it() {
+        use zephium_core::work::collection::{WorkBrowseExtraction, WorkBrowseValue};
+        let records = serde_json::json!({
+            "title": "Flights", "max_items": 8,
+            "columns": [
+                {"name": "price", "value": {"kind": "money", "permitted_currencies": ["USD"]},
+                 "required": true, "extraction": "generate"},
+                {"name": "url", "value": {"kind": "url"}, "required": true}
+            ]
+        });
+        let collection = collection(Some(&records)).unwrap().unwrap();
+        assert_eq!(collection.columns[0].value, WorkBrowseValue::Text);
+        assert_eq!(
+            collection.columns[0].extraction,
+            WorkBrowseExtraction::Generate
+        );
+        assert!(!collection.columns[0].required && collection.columns[1].required);
     }
 
     #[test]

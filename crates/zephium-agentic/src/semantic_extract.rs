@@ -957,9 +957,16 @@ pub struct SemanticExtractionStats {
     text_bytes: u32,
     source_edges: u16,
     sensitive_source_edges: u16,
+    dropped: u16,
 }
 
 impl SemanticExtractionStats {
+    /// Records and optional record fields left out because their own
+    /// evidence did not hold; the rest of the extraction stands.
+    pub const fn dropped(self) -> u16 {
+        self.dropped
+    }
+
     /// Admitted output fields.
     pub const fn fields(self) -> u8 {
         self.fields
@@ -1447,6 +1454,7 @@ pub(crate) fn extract_semantic_read_inner<'a>(
         sensitivity_limit,
         &mut sources,
         &mut counters,
+        false,
     )?;
 
     let stats = SemanticExtractionStats {
@@ -1458,6 +1466,7 @@ pub(crate) fn extract_semantic_read_inner<'a>(
             .map_err(|_| SemanticExtractionError::Invariant)?,
         sensitive_source_edges: u16::try_from(counters.sensitive_source_edges)
             .map_err(|_| SemanticExtractionError::Invariant)?,
+        dropped: u16::try_from(counters.dropped).unwrap_or(u16::MAX),
     };
     Ok(SemanticExtractionResult {
         page_title: read.page_title().map(str::to_owned),
@@ -1478,6 +1487,8 @@ pub(crate) fn extract_semantic_read_inner<'a>(
     })
 }
 
+/// `record`: the fields of one row, where an optional field whose own
+/// evidence fails is left out instead of failing the record.
 fn admit_fields<'a>(
     schemas: &[SemanticExtractionFieldSchema],
     raw_fields: Vec<RawField>,
@@ -1485,6 +1496,7 @@ fn admit_fields<'a>(
     sensitivity_limit: SemanticReadSensitivityLimit,
     sources: &mut Vec<SemanticExtractionSource<'a>>,
     counters: &mut ExtractionCounters,
+    record: bool,
 ) -> Result<Vec<SemanticExtractedField>, SemanticExtractionError> {
     if raw_fields.len() > MAX_SEMANTIC_EXTRACTION_FIELDS {
         return Err(SemanticExtractionError::FieldLimit);
@@ -1511,16 +1523,26 @@ fn admit_fields<'a>(
             return Err(SemanticExtractionError::FieldOrder);
         }
         previous_schema_index = Some(schema_index);
-        present[schema_index] = true;
         let field_schema = &schemas[schema_index];
-        let value = admit_value(
+        let kept = (sources.len(), counters.clone());
+        let value = match admit_value(
             field_schema,
             raw_field.value,
             read,
             sensitivity_limit,
             sources,
             counters,
-        )?;
+        ) {
+            Ok(value) => value,
+            Err(error) if record && !field_schema.required() && droppable(error) => {
+                sources.truncate(kept.0);
+                *counters = kept.1;
+                counters.dropped += 1;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        present[schema_index] = true;
         fields.push(SemanticExtractedField {
             name: field_schema.name().to_owned(),
             value,
@@ -1537,10 +1559,12 @@ fn admit_fields<'a>(
     Ok(fields)
 }
 
+#[derive(Clone)]
 struct ExtractionCounters {
     values: usize,
     text_bytes: usize,
     sensitive_source_edges: usize,
+    dropped: usize,
     result_guard: [u8; 32],
 }
 
@@ -1550,9 +1574,19 @@ impl ExtractionCounters {
             values: 0,
             text_bytes: 0,
             sensitive_source_edges: 0,
+            dropped: 0,
             result_guard,
         }
     }
+}
+
+/// A record or record field whose own value or evidence failed: every limit
+/// still holds for what is kept, and the failure stays with that record.
+const fn droppable(error: SemanticExtractionError) -> bool {
+    !matches!(
+        error,
+        SemanticExtractionError::Invariant | SemanticExtractionError::ReadNotDelivered
+    )
 }
 
 fn admit_value<'a>(
@@ -1569,19 +1603,42 @@ fn admit_value<'a>(
                 return Err(SemanticExtractionError::ListLimit);
             }
             let mut rows = Vec::with_capacity(items.len());
+            let mut refused = None;
             for row in items {
-                if row.fields.is_empty() {
-                    return Err(SemanticExtractionError::MissingRequiredField);
+                let kept = (sources.len(), counters.clone());
+                let admitted = if row.fields.is_empty() {
+                    Err(SemanticExtractionError::MissingRequiredField)
+                } else {
+                    admit_fields(
+                        fields,
+                        row.fields,
+                        read,
+                        sensitivity_limit,
+                        sources,
+                        counters,
+                        true,
+                    )
+                };
+                match admitted {
+                    Ok(fields) if !fields.is_empty() => rows.push(SemanticExtractedRow { fields }),
+                    Ok(_) => {
+                        sources.truncate(kept.0);
+                        *counters = kept.1;
+                        counters.dropped += 1;
+                    }
+                    Err(error) if droppable(error) => {
+                        sources.truncate(kept.0);
+                        *counters = kept.1;
+                        counters.dropped += 1;
+                        refused.get_or_insert(error);
+                    }
+                    Err(error) => return Err(error),
                 }
-                let fields = admit_fields(
-                    fields,
-                    row.fields,
-                    read,
-                    sensitivity_limit,
-                    sources,
-                    counters,
-                )?;
-                rows.push(SemanticExtractedRow { fields });
+            }
+            // Records were given and none held: the extraction fails with
+            // the first record's own reason.
+            if let (true, Some(error)) = (rows.is_empty(), refused) {
+                return Err(error);
             }
             Ok(SemanticExtractedValue::Rows(SemanticExtractedRows {
                 items: rows,
@@ -2606,25 +2663,40 @@ mod tests {
         );
         assert_eq!(result.stats().values(), 3);
         assert!(!format!("{rows:?}").contains("Quarterly"));
+        // A record whose own evidence fails is left out; the others stand.
+        let rows_of = |value: &Value| {
+            let result = extract(value).unwrap().into_owned().unwrap();
+            let dropped = result.stats().dropped();
+            let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+                panic!()
+            };
+            (
+                rows.items()
+                    .iter()
+                    .map(|row| row.fields().len())
+                    .collect::<Vec<_>>(),
+                dropped,
+            )
+        };
         let mut missing = output.clone();
         missing["fields"][0]["value"]["items"][0]["fields"] = json!([]);
-        assert_eq!(
-            extract(&missing).unwrap_err(),
-            SemanticExtractionError::MissingRequiredField
-        );
+        assert_eq!(rows_of(&missing), (vec![1], 1));
         let mut foreign = output.clone();
         foreign["fields"][0]["value"]["items"][0]["fields"][1]["value"]["sources"] =
             json!(["@r999"]);
-        assert_eq!(
-            extract(&foreign).unwrap_err(),
-            SemanticExtractionError::SourceMissing
-        );
+        assert_eq!(rows_of(&foreign), (vec![1, 1], 1));
         let mut sensitive = output.clone();
         sensitive["fields"][0]["value"]["items"][0]["fields"][1]["value"]["sources"] =
             json!(["@r5"]);
+        assert_eq!(rows_of(&sensitive), (vec![1, 1], 1));
+        let mut nameless = output.clone();
+        nameless["fields"][0]["value"]["items"][1]["fields"][0]["value"]["sources"] = json!(["r1"]);
+        assert_eq!(rows_of(&nameless), (vec![2], 1));
+        let mut none = nameless.clone();
+        none["fields"][0]["value"]["items"][0]["fields"][0]["value"]["sources"] = json!(["@r999"]);
         assert_eq!(
-            extract(&sensitive).unwrap_err(),
-            SemanticExtractionError::Sensitivity
+            extract(&none).unwrap_err(),
+            SemanticExtractionError::SourceMissing
         );
         let mut excess = output.clone();
         excess["fields"][0]["value"]["items"]
