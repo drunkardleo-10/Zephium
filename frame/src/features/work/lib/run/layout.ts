@@ -96,7 +96,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
     for (const input of inputs) {
       rects[input.id] = { x, y, width: input.width, height: input.height };
       ends.push({ x: x + input.width + RUN.air, y: y + input.height / 2 });
-      y += input.height + 12;
+      y += input.height + 8;
     }
     inputsBottom = y;
     const into = { x: -RUN.air, y: spine };
@@ -218,10 +218,13 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
 
   let sourcesBottom = resultBottom;
   if (run.sources) {
-    const y = snap(resultBottom + RUN.sources);
-    rects[run.sources.id] = { x: resultX, y, width: run.sources.width, height: run.sources.height };
+    // Under the result; a run that came to no result keeps them under its parts.
+    const bare = !resultId && run.rows.length;
+    const x = bare ? partsX : resultX;
+    const y = snap((bare ? partsBottom : resultBottom) + RUN.sources);
+    rects[run.sources.id] = { x, y, width: run.sources.width, height: run.sources.height };
     sourcesBottom = y + run.sources.height;
-    resultRight = Math.max(resultRight, resultX + run.sources.width);
+    resultRight = Math.max(resultRight, x + run.sources.width);
   }
   let extent = Math.max(
     top + run.request.height,

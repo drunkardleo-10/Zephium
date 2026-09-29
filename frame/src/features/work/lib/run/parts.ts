@@ -8,6 +8,8 @@ import {
   type UnreadPage,
 } from "../project-environment-stage";
 import { fileName } from "../work-files";
+import { leadRun } from "../agent-steps";
+import * as m from "$shared/i18n/messages";
 import { runSources } from "./sources";
 import { hostOf, registrableSite, siteKey, siteName } from "./site";
 
@@ -23,6 +25,8 @@ export type RunInputView = {
   lit?: boolean;
   /** A folder the run read, by its own name. */
   folder?: boolean;
+  /** The canvas element it stands for, opened from its mark. */
+  element?: string;
 };
 
 type PartState = "planned" | "running" | "waiting" | "done" | "failed" | "stopped";
@@ -61,7 +65,46 @@ export type RunPart = {
   need?: WorkPartNeedV1;
   /** What a computer part touched, one line each: files read and written, commands run. */
   lines?: { kind: "read" | "write" | "command" | "search"; text: string }[];
+  /** While it works, what it is doing now, in words: "Reading Lux 2br near YC". */
+  now?: string;
 };
+
+/** What a step is doing while it runs, as a live part's row says it. */
+function nowWords(step: Step): string | undefined {
+  const kind = step.kind;
+  switch (kind.kind) {
+    case "read": {
+      const title = step.local?.page_title?.trim();
+      return title
+        ? m.work_now_reading({ what: title })
+        : m.work_line_reading({ host: hostOf(kind.url) || kind.url });
+    }
+    case "search":
+    case "discover":
+      return m.work_now_searching({ query: kind.query });
+    case "list":
+      return m.work_line_listing_files({ name: fileName(kind.path) });
+    case "read_file":
+      return m.work_line_reading_file({ name: fileName(kind.path) });
+    case "search_files":
+      return m.work_now_searching({ query: kind.query });
+    case "run_command":
+      return m.work_now_running({ command: kind.command });
+    case "write_file":
+    case "edit_file":
+      return m.work_line_writing_file({ name: fileName(kind.path) });
+    case "ask":
+      return m.work_line_waiting_for_you();
+    default:
+      return step.note?.trim() || undefined;
+  }
+}
+/** A live part's newest running step, in words. */
+const nowOf = (steps: readonly Step[]) =>
+  steps
+    .filter((step) => step.status === "running")
+    .map(nowWords)
+    .findLast((words) => !!words);
 
 const COMPUTER = new Set([
   "list",
@@ -148,6 +191,7 @@ function factParts(
             : [],
         order: parts.length,
         ...(fact.summary ? { summary: fact.summary } : {}),
+        ...(going && state === "running" && nowOf(steps) ? { now: nowOf(steps)! } : {}),
         ...(fact.need && !going ? { need: fact.need } : {}),
         ...(fact.service?.connection ? { connection: fact.service.connection } : {}),
         ...(fact.helper === "computer"
@@ -179,7 +223,9 @@ export function runParts(
   live: (execution: WorkExecutionFact) => boolean,
   titles: { search: string; unread: string; computer: string },
 ): RunPart[] {
-  if (runs.some((run) => run.parts?.length)) return factParts(card, runs, recorded, live);
+  // A lead run's parts are the ones it recorded, none when it did the work itself.
+  if (runs.some((run) => run.parts?.length || leadRun(run)))
+    return factParts(card, runs, recorded, live);
   const parts = new Map<string, RunPart & { at: Order }>();
   const partFor = (key: string, at: Order, seed: () => Omit<RunPart, "id" | "key" | "order">) => {
     let part = parts.get(key);
@@ -290,7 +336,21 @@ export function runParts(
     }
   }
   const working = current?.key as string | undefined;
-  if (working && parts.has(working)) parts.get(working)!.state = "running";
+  if (working && parts.has(working)) {
+    const part = parts.get(working)!;
+    part.state = "running";
+    const steps = runs.flatMap((run) => (live(run) ? (run.steps ?? []) : []));
+    const mine = new Set([
+      ...part.pages.flatMap((page) => page.steps.map((step) => step.id)),
+      ...(part.steps ?? []),
+    ]);
+    const now = nowOf(
+      working === SEARCH_KEY
+        ? steps.filter((step) => step.kind.kind === "search")
+        : steps.filter((step) => mine.has(step.id)),
+    );
+    if (now) part.now = now;
+  }
   const list = [...parts.values()].sort((a, b) => before(a.at, b.at));
   for (const part of list)
     if (part.helper === "browser") {
@@ -323,4 +383,94 @@ export function runParts(
       names: refused.map((part) => part.title),
     });
   return kept.map(({ at: _at, ...part }, order) => ({ ...part, order }));
+}
+
+/** One thing the lead did on this Mac itself, as a quiet line under the request. */
+export type LocalRead = { kind: "folder" | "file" | "search" | "command" | "change"; text: string };
+
+/** The files a folder listing found: its lines that carry a size, not its folders. */
+function listedFiles(run: WorkExecutionFact, step: Step): number {
+  const record = run.file_evidence?.find((entry) => entry.id === step.evidence);
+  const text = record?.file.text;
+  if (!text) return 0;
+  return text.split("\n").filter((line) => line.includes("\t")).length;
+}
+
+/**
+ * What the lead read or ran on this Mac itself, outside any part, as quiet
+ * lines under the request: "Read Lunios · 38 files", "Read package.json",
+ * "Ran 2 commands". A run with parts keeps their work on their rows.
+ */
+export function localReads(runs: readonly WorkExecutionFact[]): LocalRead[] {
+  const listed = new Map<string, number>();
+  const read: string[] = [];
+  const searched: string[] = [];
+  const ran: string[] = [];
+  const changed: string[] = [];
+  const once = (list: string[], value: string) => void (list.includes(value) || list.push(value));
+  for (const run of runs) {
+    if (!leadRun(run)) continue;
+    for (const step of run.steps ?? []) {
+      if (step.part || step.status === "failed" || step.status === "cancelled") continue;
+      const kind = step.kind;
+      switch (kind.kind) {
+        case "list": {
+          listed.set(kind.path, Math.max(listed.get(kind.path) ?? 0, listedFiles(run, step)));
+          break;
+        }
+        case "read_file":
+          once(read, fileName(kind.path));
+          break;
+        case "search_files":
+          once(searched, fileName(kind.path));
+          break;
+        case "run_command":
+          once(ran, kind.command);
+          break;
+        case "write_file":
+        case "edit_file":
+        case "delete_file":
+          once(changed, fileName(kind.path));
+          break;
+        case "move_file":
+          once(changed, fileName(kind.to));
+          break;
+      }
+    }
+  }
+  const lines: LocalRead[] = [];
+  for (const [path, count] of listed)
+    lines.push({
+      kind: "folder",
+      text: count
+        ? m.work_local_listed({ name: fileName(path), count })
+        : m.work_local_read({ name: fileName(path) }),
+    });
+  if (read.length)
+    lines.push({
+      kind: "file",
+      text:
+        read.length === 1
+          ? m.work_local_read({ name: read[0]! })
+          : m.work_local_read_files({ count: read.length }),
+    });
+  if (searched.length)
+    lines.push({ kind: "search", text: m.work_local_searched({ name: searched[0]! }) });
+  if (ran.length)
+    lines.push({
+      kind: "command",
+      text:
+        ran.length === 1
+          ? m.work_local_ran({ command: ran[0]! })
+          : m.work_local_ran_commands({ count: ran.length }),
+    });
+  if (changed.length)
+    lines.push({
+      kind: "change",
+      text:
+        changed.length === 1
+          ? m.work_local_changed({ name: changed[0]! })
+          : m.work_local_changed_files({ count: changed.length }),
+    });
+  return lines.slice(0, 3);
 }

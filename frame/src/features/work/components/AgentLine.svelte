@@ -17,7 +17,8 @@
   import { preparationFailure } from "../lib/preparation-failure";
   import { fileName } from "../lib/work-files";
   import type { CanvasItem } from "../lib/canvas-model";
-  import AgentOrb from "./cards/AgentOrb.svelte";
+  import RunMark from "./run/RunMark.svelte";
+  import HostGlyph from "./cards/HostGlyph.svelte";
   import Icon from "$shared/ui/Icon";
   import {
     ArrowDown01Icon,
@@ -43,7 +44,13 @@
     onsignin,
     human = null,
     onopenstep,
+    working = [],
+    ended = null,
   }: {
+    /** The parts at work now, each with what it is doing, for the island's list. */
+    working?: readonly { id: string; title: string; now: string; host?: string }[];
+    /** Why the run in view ended short, in a person's words, and the one thing that helps. */
+    ended?: { text: string; action: string; onact: () => void } | null;
     session: WorkSession;
     /** The run the person is looking at: the line speaks for it while nothing runs. */
     viewed?: string | undefined;
@@ -231,8 +238,6 @@
       if (artifact.data.kind === "reply") return artifact.data.headline;
     return execution.artifacts.find((artifact) => artifact.title.trim())?.title.trim() ?? null;
   });
-  /** Why the run ended early, in Rust's words: the note its last unfinished step left. */
-  const ending = $derived(execution ? endingNote(execution) : null);
   /** A request refused before it ran says why, never an older run's words. */
   const refusals: Record<string, () => string> = {
     capacity: m.work_line_full,
@@ -258,6 +263,8 @@
         ? m.work_line_stopping()
         : m.work_line_thinking();
     }
+    // A run that ended short says what is missing and what helps, never why the machine gave up.
+    if (ended && newest) return ended.text;
     switch (execution?.status) {
       case "completed":
       case "needs_review":
@@ -267,12 +274,38 @@
       case "interrupted":
         return ending ?? m.work_line_interrupted();
       case "failed":
-        return ending ?? m.work_line_failed();
+        return ending ?? m.work_line_ended_short();
       default:
         return run?.state.kind === "pending" ? m.work_line_thinking() : m.work_line_ready();
     }
   });
+  /** Why the run ended early, in Rust's closed words: the note its last unfinished step left. */
+  const ending = $derived(execution ? endingNote(execution) : null);
   const settled = $derived(!live && !question && !proposal);
+  /** A short run's one remedy, or Try again for one that simply stopped. */
+  const remedy = $derived.by(() => {
+    if (live || !newest || !execution || question) return null;
+    if (ended) return { label: ended.action, run: ended.onact };
+    if (["failed", "interrupted"].includes(execution.status))
+      return {
+        label: m.work_need_again(),
+        run: () => void session.continueWith(m.work_line_try_again_request()),
+      };
+    return null;
+  });
+  const mark = $derived(
+    waiting || question || proposal || asking
+      ? ("waiting" as const)
+      : live
+        ? ("live" as const)
+        : execution?.status === "completed" || execution?.status === "needs_review"
+          ? ended
+            ? ("stopped" as const)
+            : ("done" as const)
+          : execution && ["failed", "cancelled", "interrupted"].includes(execution.status)
+            ? ("stopped" as const)
+            : ("idle" as const),
+  );
   /** How long the run has been going, by this window's clock: a second hand only while it runs. */
   let now = $state(Date.now());
   const since = $derived.by(() => {
@@ -399,19 +432,26 @@
         <div class="expand-inner">
           {#if held === "agents"}
             <ul class="rows" aria-label={m.work_line_agents()}>
-              {#each agents as agent (agent.id)}
+              {#each working as part (part.id)}
                 <li>
                   <button
                     type="button"
                     class="row"
                     onclick={() => {
                       want = null;
-                      onfocusagent?.(agent.id);
+                      onfocusagent?.(part.id);
                     }}
                   >
-                    <AgentOrb seed={agent.agent?.seed ?? 0} size={18} />
-                    <span class="who">{agent.title}</span>
-                    <span class="doing">{agent.status}</span>
+                    <span class="row-mark"
+                      >{#if part.host}<HostGlyph
+                          host={part.host}
+                          size={14}
+                          loading
+                          initial={false}
+                        />{:else}<RunMark state="live" size={14} />{/if}</span
+                    >
+                    <span class="who">{part.title}</span>
+                    <span class="doing">{part.now}</span>
                   </button>
                 </li>
               {:else}<li class="none">{m.work_line_no_agents()}</li>{/each}
@@ -501,7 +541,7 @@
           aria-label={m.work_line_agents()}
           onclick={() => (want = want === "agents" ? null : "agents")}
         >
-          <AgentOrb seed={agents[0]?.agent?.seed ?? 0} size={22} ring={live} />
+          <RunMark state={mark} size={16} />
         </button>
         <div class="state">
           {#if waiting}
@@ -570,6 +610,10 @@
           {:else if question && !expanded}
             <button type="button" class="action" onclick={() => (want = "answer")}
               >{m.work_line_answer()}</button
+            >
+          {:else if remedy}
+            <button type="button" class="action" disabled={blocked} onclick={() => remedy?.run()}
+              >{remedy.label}</button
             >
           {:else if nextRows}
             <!-- The disclosure of the capsule's growth, not a second surface. -->
@@ -992,6 +1036,16 @@
 
   .who {
     flex: none;
+    font-weight: 550;
+  }
+
+  .row-mark {
+    position: relative;
+    display: grid;
+    flex: none;
+    place-items: center;
+    inline-size: 16px;
+    block-size: 16px;
   }
 
   .doing,

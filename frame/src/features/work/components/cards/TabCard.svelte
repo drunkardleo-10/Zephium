@@ -1,28 +1,35 @@
 <script lang="ts">
-  import Icon from "$shared/ui/Icon";
   import CardFrame from "./CardFrame.svelte";
   import SubjectPicture from "./SubjectPicture.svelte";
   import HostGlyph from "./HostGlyph.svelte";
   import { displayHost } from "$shared/ui/data/Artifact";
-  import { PlayIcon } from "../../lib/icons";
+  import PlayMark from "../objects/PlayMark.svelte";
   import type { CanvasItem } from "../../lib/canvas-model";
   import * as m from "$shared/i18n/messages";
   let { item, selected, onplay }: { item: CanvasItem; selected: boolean; onplay?: () => void } =
     $props();
-  // The webview forbids frames, so a video reads as a link with a play mark and
-  // plays where every page plays: in the pane.
+  // A video is its poster with YouTube's own mark; it plays where every page
+  // plays, in the Work browser, never in a player of the canvas's own.
   const playable = $derived(
     /^https?:\/\/([a-z0-9-]+\.)*(youtube\.com|youtu\.be)$/u.test(item.detail),
   );
   const host = $derived(displayHost(item.detail) || item.detail);
 </script>
 
-{#snippet thumbnail()}<div class="thumbnail">
-    <SubjectPicture picture={item.image} name={item.title} large />
-    {#if playable}<span class="play-mark" aria-hidden="true"
-        ><Icon icon={PlayIcon} size={14} /></span
-      >{/if}
-  </div>{/snippet}
+{#snippet thumbnail()}{#if playable}<button
+      type="button"
+      class="thumbnail poster nodrag nopan"
+      aria-label={m.work_env_play_video({ title: item.title })}
+      onclick={(event) => {
+        event.stopPropagation();
+        onplay?.();
+      }}
+    >
+      <SubjectPicture picture={item.image} name={item.title} large />
+      <span class="play-mark"><PlayMark youtube size={48} /></span>
+    </button>{:else}<div class="thumbnail">
+      <SubjectPicture picture={item.image} name={item.title} large />
+    </div>{/if}{/snippet}
 
 <CardFrame
   id={item.id}
@@ -38,15 +45,7 @@
       icon={item.icon ?? null}
       initial={false}
     />{/snippet}
-  {#snippet footer()}<span class="host" title={item.detail}>{host || item.status}</span
-    >{#if playable}<button
-        type="button"
-        class="play nodrag nopan"
-        onclick={(event) => {
-          event.stopPropagation();
-          onplay?.();
-        }}><Icon icon={PlayIcon} size={11} />{m.work_env_play_here()}</button
-      >{/if}{/snippet}
+  {#snippet footer()}<span class="host" title={item.detail}>{host || item.status}</span>{/snippet}
 </CardFrame>
 
 <style>
@@ -55,18 +54,34 @@
     aspect-ratio: 16 / 9;
   }
 
+  .poster {
+    display: block;
+    inline-size: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: default;
+  }
+
+  .poster:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: -2px;
+  }
+
   .play-mark {
     position: absolute;
     inset: 50% auto auto 50%;
     display: grid;
-    place-items: center;
-    inline-size: 32px;
-    block-size: 32px;
-    border-radius: 50%;
-    background: var(--color-float);
-    box-shadow: var(--shadow-raised);
-    color: var(--color-text);
     translate: -50% -50%;
+    opacity: 0.92;
+    transition:
+      opacity var(--motion-fast) var(--ease-out),
+      scale var(--motion-base) var(--ease-spring);
+  }
+
+  .poster:hover .play-mark {
+    opacity: 1;
+    scale: 1.06;
   }
 
   .host {
@@ -74,32 +89,5 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .play {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    flex: none;
-    padding: 1px 8px 1px 6px;
-    border: 0;
-    border-radius: var(--radius-capsule);
-    background: var(--color-control);
-    color: var(--color-muted);
-    font: inherit;
-    cursor: default;
-    transition:
-      background-color var(--motion-fast) var(--ease-out),
-      color var(--motion-fast) var(--ease-out);
-  }
-
-  .play:hover {
-    background: var(--color-control-hover);
-    color: var(--color-text);
-  }
-
-  .play:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: 1px;
   }
 </style>

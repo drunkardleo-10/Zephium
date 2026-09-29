@@ -39,6 +39,14 @@ export function endingNote(execution: WorkExecutionFact): string | null {
 /** Steps that work inside a granted folder; each settles onto a file record. */
 export const FILE_STEPS = ["list", "read_file", "search_files", "write_file", "edit_file"];
 
+/** Whether a run is the lead's: its parts, inputs and objects are facts it recorded itself. */
+export function leadRun(execution: WorkExecutionFact): boolean {
+  // Runs recorded before the grant was carried have none.
+  return execution.spec.nodes.some(
+    (node) => node.capability.kind === "agent" && !!node.capability.grant?.lead,
+  );
+}
+
 /** Whether an execution ran under the routine agent grant. */
 export function isAgentExecution(execution: WorkExecutionFact): boolean {
   return execution.spec.nodes.some((node) => node.capability.kind === "agent");

@@ -107,7 +107,11 @@ export class WorkEnvironmentSession {
     // The first visit after launch starts on a clean work; an empty one is reused.
     const launch = !this.launched;
     this.launched = true;
-    const last = this.selected ?? this.works.find((work) => work.lifecycle === "active")?.id;
+    const last =
+      this.selected ??
+      this.works
+        .filter((work) => work.lifecycle === "active")
+        .sort((a, b) => Number(b.touched_ms) - Number(a.touched_ms))[0]?.id;
     if (!last) {
       await this.create(defaultTitle);
       return;
@@ -184,43 +188,56 @@ export class WorkEnvironmentSession {
       this.publishRemoteView(snapshot.view);
     this.snapshot = snapshot;
     this.selected = snapshot.id;
+    const known = this.works.find((work) => work.id === snapshot.id);
     this.works = [
       {
+        name: null,
+        requests: [],
+        touched_ms: "0",
+        ...known,
         id: snapshot.id,
         space: snapshot.space,
         title: snapshot.title,
         lifecycle: snapshot.lifecycle,
         revision: snapshot.revision,
+        empty: !snapshot.elements.length && !snapshot.areas.length,
       },
       ...this.works.filter((work) => work.id !== snapshot.id),
     ].slice(0, 256);
     return true;
   }
-  async reload(more = false): Promise<boolean> {
+  /** Every work of the Space, page by page, so the list and its search see them all. */
+  async reload(): Promise<boolean> {
     const request = ++this.listing;
-    const reply = await this.call({
-      kind: "list",
-      space: this.space,
-      after: more ? this.next : null,
-      limit: 32,
-    });
-    if (!this.active || request !== this.listing) return false;
-    if (
-      reply.kind === "environment" &&
-      reply.reply.kind === "page" &&
-      reply.reply.works.every((work) => work.space === this.space)
-    ) {
-      this.works = [
-        ...new SvelteMap(
-          [...(more ? this.works : []), ...reply.reply.works].map((work) => [work.id, work]),
-        ).values(),
-      ].slice(0, 256);
-      this.next = reply.reply.next;
-      if (!this.selected) this.selected = reply.reply.selected;
-      return true;
+    const works: WorkEnvironmentSummary[] = [];
+    let after: string | null = null;
+    let selected: string | null = null;
+    for (let page = 0; page < 8; page++) {
+      const reply = await this.call({ kind: "list", space: this.space, after, limit: 32 });
+      if (!this.active || request !== this.listing) return false;
+      if (
+        reply.kind !== "environment" ||
+        reply.reply.kind !== "page" ||
+        !reply.reply.works.every((work) => work.space === this.space)
+      ) {
+        this.failure = reply.kind === "error" ? reply.error : "outcome_unknown";
+        return false;
+      }
+      works.push(...reply.reply.works);
+      selected ??= reply.reply.selected;
+      after = reply.reply.next;
+      if (!after) break;
     }
-    this.failure = reply.kind === "error" ? reply.error : "outcome_unknown";
-    return false;
+    this.works = [...new SvelteMap(works.map((work) => [work.id, work])).values()].slice(0, 256);
+    this.next = after;
+    if (!this.selected) this.selected = selected;
+    return true;
+  }
+  /** The one untouched work still carrying its first name, if there is one. */
+  private draft(title: string) {
+    return this.works.find(
+      (work) => work.lifecycle === "active" && work.empty && work.title === title,
+    );
   }
   async open(id: string): Promise<boolean> {
     if (this.pending || !(await this.flushView())) return false;
@@ -279,8 +296,11 @@ export class WorkEnvironmentSession {
       view: camera ? { ...view, x: camera.x, y: camera.y, zoom_milli: camera.zoom_milli } : view,
     };
   }
+  /** A new work: the one untouched draft when there is one, so empty works never pile up. */
   async create(title: string) {
     if (!(await this.flushView())) return false;
+    const draft = this.draft(title);
+    if (draft) return draft.id === this.snapshot?.id || this.open(draft.id);
     return this.mutate({ kind: "create", space: this.space, title });
   }
   /** Rename or archive a Work from the list: it is opened first, since an edit applies to the open one. */

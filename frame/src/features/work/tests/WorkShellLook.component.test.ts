@@ -33,18 +33,25 @@ test("the Work screen's own chrome, at rest and in use, in both themes", async (
   const environment = new WorkEnvironmentSession(snapshot.profile, snapshot.space);
   environment.snapshot = { ...structuredClone(snapshot), title: "YC trip from Warsaw" };
   environment.selected = snapshot.id;
+  const hour = 3_600_000;
+  const now = Date.now();
   environment.works = [
-    ["YC trip from Warsaw", snapshot.id],
-    ["AI SaaS architecture and budget", "a"],
-    ["SQLite, DuckDB or RocksDB", "b"],
-    ["New work", "c"],
-    ["Old launch plan", "d"],
-  ].map(([title, id]) => ({
-    id: id!,
+    ["YC trip from Warsaw", snapshot.id, "Plan my YC batch trip from Warsaw, three months", 0],
+    ["AI SaaS architecture and budget", "a", "Design a modern AI SaaS architecture", 5],
+    ["New work", "b", "Compare SQLite, DuckDB and RocksDB for an embedded analytics cache", 30],
+    ["New work", "c", "", 40],
+    ["Compiler learning plan", "e", "Find the best free university material for compilers", 80],
+    ["Old launch plan", "d", "Plan the launch", 400],
+  ].map(([title, id, request, ago]) => ({
+    id: id as string,
     space: snapshot.space,
-    title: title!,
+    title: title as string,
     lifecycle: id === "d" ? ("archived" as const) : ("active" as const),
     revision: "1",
+    name: null,
+    requests: request ? [request as string] : [],
+    touched_ms: String(now - (ago as number) * hour),
+    empty: !request,
   }));
   const objective = workSession(snapshot.profile)!;
   vi.spyOn(objective, "start").mockResolvedValue();

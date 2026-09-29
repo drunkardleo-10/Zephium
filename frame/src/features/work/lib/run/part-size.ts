@@ -15,7 +15,7 @@ export const PART = {
   behindX: 14,
   behindY: 10,
   shown: 3,
-  sources: 280,
+  sources: 320,
   sourceRow: 28,
   sourceRows: 3,
   helper: 400,

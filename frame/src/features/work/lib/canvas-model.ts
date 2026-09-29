@@ -128,6 +128,18 @@ export type CanvasItem = {
     folder?: boolean;
     count?: number;
     lit?: boolean;
+    /** The canvas element it stands for, opened from its mark. */
+    element?: string;
+  };
+  /** Under a request: what the lead read on this Mac itself, and its questions and their answers. */
+  turns?: {
+    local: readonly {
+      kind: "folder" | "file" | "search" | "command" | "change";
+      text: string;
+    }[];
+    exchange: readonly (
+      { kind: "ask"; question: string; answer: string | null } | { kind: "steer"; text: string }
+    )[];
   };
   unavailable?: boolean;
   /** The stage a run is working in right now; it glows while that is true. */
@@ -165,8 +177,6 @@ export type PartView = {
   steps?: readonly string[];
   /** What a computer part touched, for the view that stands in until the helper's own. */
   lines?: readonly { kind: "read" | "write" | "command" | "search"; text: string }[];
-  /** A helper at work here besides the one the orb follows: its small orb's seed. */
-  presence?: number;
   /** A question on this part waiting on the person: the ask card's props. */
   ask?: { props: Record<string, unknown> };
   /** What the part needs from the person to do its job, and its one action. */
@@ -181,6 +191,11 @@ export type PartNeed = {
   target: string;
   /** The page to open for a sign-in, the folder to allow. */
   address?: string;
+  /** Why the part could not do its job, in closed words. */
+  reason?:
+    "couldnt_read" | "signed_out" | "blocked_by_check" | "not_found" | "site_error" | "no_answer";
+  /** The site a connection would stand in for, as a person names it. */
+  site?: string;
 };
 /** One page of a part, as its row shows it. */
 export type PartPage = {
@@ -485,6 +500,7 @@ export function reconcileNodes(
         JSON.stringify(node.data.page) === JSON.stringify(item.page) &&
         JSON.stringify(node.data.part) === JSON.stringify(item.part) &&
         JSON.stringify(node.data.input) === JSON.stringify(item.input) &&
+        JSON.stringify(node.data.turns) === JSON.stringify(item.turns) &&
         JSON.stringify(node.data.remember) === JSON.stringify(item.remember) &&
         node.data.expanded === item.expanded &&
         node.data.when === item.when &&

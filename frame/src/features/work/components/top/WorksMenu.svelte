@@ -13,6 +13,8 @@
     Tick02Icon,
   } from "../../lib/icons";
   import WorkRowMenu from "./WorkRowMenu.svelte";
+  import { defaultTitle, listedName, workedAt } from "../../lib/work-name";
+  import { ulidTime } from "../../lib/ulid-time";
   import * as m from "$shared/i18n/messages";
   import "$shared/ui/Menu/popover.css";
 
@@ -42,13 +44,37 @@
   const busy = $derived(!!session.pending || session.loading);
   const needle = $derived(query.trim().toLocaleLowerCase());
   const matches = (work: WorkEnvironmentSummary) =>
-    !needle || shown(work.title).toLocaleLowerCase().includes(needle);
-  const active = $derived(works.filter((work) => work.lifecycle === "active" && matches(work)));
-  const archived = $derived(works.filter((work) => work.lifecycle === "archived" && matches(work)));
+    !needle ||
+    [shown(work), ...work.requests].some((text) => text.toLocaleLowerCase().includes(needle));
+  /** Most recently worked in first; an untouched draft is not a work to go back to. */
+  const listed = $derived(
+    works
+      .filter((work) => !(work.empty && defaultTitle(work.title, untitled)) && matches(work))
+      .sort((a, b) => touched(b) - touched(a)),
+  );
+  const active = $derived(listed.filter((work) => work.lifecycle === "active"));
+  const archived = $derived(listed.filter((work) => work.lifecycle === "archived"));
+  const now = $derived(open ? Date.now() : 0);
 
-  function shown(name: string) {
-    return name === untitled ? m.work_untitled() : name;
+  function touched(work: WorkEnvironmentSummary) {
+    return Number(work.touched_ms) || ulidTime(work.id)?.getTime() || 0;
   }
+  function shown(work: WorkEnvironmentSummary) {
+    return listedName(work, untitled) || m.work_untitled();
+  }
+  /** The person's first words under the name, unless the name is already made of them. */
+  function asked(work: WorkEnvironmentSummary) {
+    const first = work.requests[0] ?? "";
+    return first.toLocaleLowerCase().startsWith(shown(work).toLocaleLowerCase()) ? "" : first;
+  }
+  const openWork = $derived(works.find((work) => work.id === current));
+  const heading = $derived(
+    openWork && !openWork.empty
+      ? shown(openWork)
+      : title && !defaultTitle(title, untitled)
+        ? title
+        : "",
+  );
 
   async function opened(next: boolean) {
     open = next;
@@ -76,7 +102,7 @@
 
   async function beginRename(work: WorkEnvironmentSummary) {
     renaming = work.id;
-    draft = work.title === untitled ? "" : work.title;
+    draft = defaultTitle(work.title, untitled) ? listedName(work, untitled) : work.title;
     await tick();
     const input = list?.querySelector<HTMLInputElement>("[data-work-rename]");
     input?.focus();
@@ -180,15 +206,19 @@
               onclick={() => (work.lifecycle === "archived" ? restore(work) : choose(work))}
               ondblclick={() => void beginRename(work)}
             >
-              <span class="name" class:untitled={work.title === untitled}>{shown(work.title)}</span>
+              <span class="words">
+                <span class="name">{shown(work)}</span>
+                {#if asked(work)}<span class="asked">{asked(work)}</span>{/if}
+              </span>
               {#if selected}<span class="mark" aria-hidden="true"
                   ><Icon icon={Tick02Icon} size={14} strokeWidth={2} /></span
+                >{:else if touched(work)}<span class="when">{workedAt(touched(work), now)}</span
                 >{/if}
             </button>
             <button
               type="button"
               class="options"
-              aria-label={m.work_row_options({ title: shown(work.title) })}
+              aria-label={m.work_row_options({ title: shown(work) })}
               tabindex="-1"
               onclick={(event) => {
                 const rect = event.currentTarget.getBoundingClientRect();
@@ -207,9 +237,7 @@
 <Popover.Root {open} onOpenChange={(next) => void opened(next)}>
   <Popover.Trigger class="works-trigger" aria-label={m.work_menu_label()}>
     {#if live}<span class="live" aria-hidden="true"></span>{/if}
-    <span class="title" class:untitled={!title || title === untitled}
-      >{shown(title) || m.work_untitled()}</span
-    >
+    <span class="title" class:untitled={!heading}>{heading || m.work_untitled()}</span>
     <Icon icon={ArrowDown01Icon} size={13} strokeWidth={2} />
   </Popover.Trigger>
   <Popover.Portal>
@@ -314,8 +342,7 @@
     color: var(--color-text);
   }
 
-  .title.untitled,
-  .name.untitled {
+  .title.untitled {
     color: var(--color-muted);
   }
 
@@ -334,8 +361,8 @@
     backdrop-filter: none;
     display: flex;
     flex-direction: column;
-    inline-size: 300px;
-    max-block-size: min(480px, var(--bits-floating-available-height, 480px));
+    inline-size: 340px;
+    max-block-size: min(520px, var(--bits-floating-available-height, 480px));
     transform-origin: var(--bits-floating-transform-origin, top left);
     animation:
       ui-menu-fade var(--motion-fast) var(--ease-out),
@@ -384,12 +411,47 @@
     padding-inline-end: 34px;
   }
 
-  .name {
+  .row:has(.asked) {
+    align-items: flex-start;
+    padding-block: 7px;
+  }
+
+  .words {
+    display: flex;
     flex: 1;
+    flex-direction: column;
+    gap: 1px;
     min-inline-size: 0;
+  }
+
+  .name,
+  .asked {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .name {
+    font-weight: 500;
+  }
+
+  .asked {
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    line-height: 16px;
+  }
+
+  .when {
+    flex: none;
+    color: var(--color-faint);
+    font-size: var(--text-caption);
+    font-variant-numeric: tabular-nums;
+    line-height: 18px;
+  }
+
+  .row-shell:hover .when,
+  .row-shell:focus-within .when {
+    visibility: hidden;
   }
 
   .mark {
@@ -475,6 +537,11 @@
 
   .archived .name {
     color: var(--color-muted);
+  }
+
+  .row-shell:has(.asked) .options {
+    inset-block: 5px auto;
+    margin-block: 0;
   }
 
   .empty {

@@ -11,12 +11,12 @@
     Search01Icon,
   } from "../../lib/icons";
   import { askCard, partContent } from "./slots";
+  import { needWords } from "../../lib/run/need";
   import { serviceKey, serviceMark } from "$domain/connections";
   import { getContext, untrack } from "svelte";
   import { canvasBoard, type BoardActions } from "../../lib/canvas-context";
   import HostGlyph from "../cards/HostGlyph.svelte";
   import PageFace from "./PageFace.svelte";
-  import AgentOrb from "../cards/AgentOrb.svelte";
   import * as m from "$shared/i18n/messages";
 
   let {
@@ -65,31 +65,12 @@
   const need = $derived(part.need);
   /** A sign-in opened: what is left is to run the part again. */
   let signing = $state(false);
-  const needWords = $derived.by(() => {
+  const needSaid = $derived.by(() => {
     if (!need) return null;
-    switch (need.kind) {
-      case "sign_in":
-        return signing
-          ? { text: m.work_need_signed_in({ site: need.target }), action: m.work_need_again() }
-          : { text: m.work_need_sign_in({ site: need.target }), action: m.work_ask_sign_in() };
-      case "allow_site":
-        return { text: m.work_need_allow_site({ site: need.target }), action: m.work_ask_allow() };
-      case "allow_folder":
-        return {
-          text: m.work_need_allow_folder({ name: need.target }),
-          action: m.work_ask_allow(),
-        };
-      case "use_connection":
-        return {
-          text: m.work_need_connection({ service: need.target }),
-          action: m.work_need_use({ service: need.target }),
-        };
-      case "retry":
-        return {
-          text: need.target ? m.work_need_retry_site({ site: need.target }) : m.work_need_retry(),
-          action: m.work_need_again(),
-        };
-    }
+    // A sign-in opened: what is left is to run the part again.
+    if (need.kind === "sign_in" && signing)
+      return { text: m.work_need_signed_in({ site: need.target }), action: m.work_need_again() };
+    return needWords(need, part.title, "row");
   });
   const board = getContext<BoardActions | undefined>(canvasBoard);
   // The row's own height: the taller of its name and its work, so rows never overlap.
@@ -137,21 +118,25 @@
         onlist();
       }}
     >
-      {#if part.helper === "research"}<span class="glyph"
-          ><Icon icon={Search01Icon} size={14} /></span
-        >{:else if part.helper === "computer"}<span class="glyph"
-          ><Icon icon={ComputerTerminal01Icon} size={14} /></span
-        >{:else if part.helper === "connection"}<span class="glyph"
-          ><Icon icon={serviceMark(serviceKey(part.connection, part.title))} size={14} /></span
+      {#if part.helper !== "browser"}<span class="glyph"
+          ><!-- At work, a helper's glyph turns the arc a loading tab's mark does. --><span
+            class="favicon"
+            data-loading={part.state === "running"}
+            ><Icon
+              icon={part.helper === "research"
+                ? Search01Icon
+                : part.helper === "computer"
+                  ? ComputerTerminal01Icon
+                  : serviceMark(serviceKey(part.connection, part.title))}
+              size={14}
+            /></span
+          ></span
         >{:else}<span class="mark"
           ><HostGlyph host={part.host ?? ""} size={16} loading={working} initial={false} /></span
         >{/if}
       <strong>{part.title}</strong>
     </button>
-    {#if part.presence !== undefined}<span class="presence" aria-hidden="true"
-        ><AgentOrb seed={part.presence} size={14} ring /></span
-      >{/if}
-    {#if needWords}<p class="summary need-text">{needWords.text}</p>
+    {#if needSaid}<p class="summary need-text">{needSaid.text}</p>
       <button
         type="button"
         class="need nodrag nopan"
@@ -161,7 +146,7 @@
             signing = true;
             onneed?.("meet");
           } else onneed?.(need?.kind === "sign_in" || need?.kind === "retry" ? "again" : "meet");
-        }}>{needWords.action}</button
+        }}>{needSaid.action}</button
       >
     {:else if part.summary}<p class="summary" class:turn={part.state === "waiting"}>
         {part.summary}
@@ -224,7 +209,8 @@
               <span class="site-mark"
                 ><HostGlyph host={row.where} url={row.url} size={14} initial={false} /></span
               >
-              <span class="site">{row.title}</span>
+              <span class="site">{row.where}</span>
+              {#if row.title}<span class="read">{row.title}</span>{/if}
             </button>
           </li>{/each}
         {#if more}<li class="rest">{m.work_part_more_cited({ count: more })}</li>{/if}
@@ -331,19 +317,12 @@
     text-wrap: balance;
   }
 
-  /* Another helper at work: its own small orb at the corner of its row's name. */
-  .presence {
-    position: absolute;
-    inset-block-start: -6px;
-    inset-inline-start: -8px;
-    animation: presence-in var(--motion-base) var(--ease-spring);
-  }
-
-  @keyframes presence-in {
-    from {
-      scale: 0.4;
-      opacity: 0;
-    }
+  .glyph .favicon {
+    position: relative;
+    display: grid;
+    place-items: center;
+    inline-size: 16px;
+    block-size: 16px;
   }
 
   .summary {
@@ -353,6 +332,17 @@
     font-size: var(--text-label);
     line-height: 16px;
     text-wrap: pretty;
+  }
+
+  /* At work, the row says what it does now, in the text's own colour, two lines at most. */
+  .working .summary {
+    display: -webkit-box;
+    overflow: hidden;
+    color: var(--color-text);
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow-wrap: anywhere;
   }
 
   .summary.turn {
@@ -522,7 +512,7 @@
   .cited {
     display: flex;
     flex-direction: column;
-    inline-size: 280px;
+    inline-size: 320px;
     margin: 0;
     padding: 0;
     list-style: none;
@@ -557,8 +547,24 @@
   }
 
   .site {
+    flex: none;
+    max-inline-size: 60%;
+    overflow: hidden;
     color: var(--color-text);
     font-size: var(--text-body);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* The page it read there, quieter, fading at the column's edge. */
+  .read {
+    flex: 1;
+    min-inline-size: 0;
+    overflow: hidden;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    white-space: nowrap;
+    mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
   }
 
   .cited .rest {

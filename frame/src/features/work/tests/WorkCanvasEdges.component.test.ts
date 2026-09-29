@@ -46,7 +46,7 @@ test("the thread rests as a curve with a dot; a relation shows only while an end
   await screen.unmount();
 });
 
-test("the agent is a mark, not a card: an orb with its caption, above the cards", async () => {
+test("the agent is an anchor the view follows, drawn by nothing: no orb, no caption", async () => {
   await page.viewport(1200, 800);
   const agent: CanvasItem = {
     id: "agent:request",
@@ -78,11 +78,10 @@ test("the agent is a mark, not a card: an orb with its caption, above the cards"
   screen.container.style.height = "800px";
   const node = () =>
     screen.container.querySelector<HTMLElement>('.svelte-flow__node[data-id="agent:request"]');
-  await expect
-    .poll(() => node()?.querySelector(".caption")?.textContent)
-    .toBe("Reading airbnb.com");
+  await expect.poll(() => node()?.querySelector('[role="status"]')).not.toBeNull();
   expect(node()!.classList.contains("svelte-flow__node-agent")).toBe(true);
-  expect(node()!.querySelector("article, .card")).toBeNull();
+  expect(node()!.querySelector("svg, .caption, article, .card")).toBeNull();
+  expect(node()!.textContent?.trim()).toBe("");
   expect(node()!.querySelector(".svelte-flow__handle")).toBeNull();
   expect(node()!.getBoundingClientRect().width).toBe(24);
   expect(Number(node()!.style.zIndex)).toBeGreaterThan(0);

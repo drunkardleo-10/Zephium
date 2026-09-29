@@ -4,7 +4,7 @@ import type { Board } from "./board/types";
 import type { Rect } from "./board/layout";
 import type { TrailLine } from "./board/trail";
 import { RUN, type RunPlace } from "./run/layout";
-import type { RunInputView, RunPart } from "./run/parts";
+import type { LocalRead, RunInputView, RunPart } from "./run/parts";
 import type { RunSources } from "./run/sources";
 import type { RunObject } from "./board/objects";
 import * as m from "$shared/i18n/messages";
@@ -54,7 +54,15 @@ export type WorkStage = {
   sources?: { id: string; view: RunSources };
   /** Notes a research part handed the lead, by part: shown in the part's opened view, not on its row. */
   notes: ReadonlyMap<string, readonly RunObject[]>;
+  /** Under the request: what the lead read on this Mac itself, and the questions it asked and their answers. */
+  turns: RunTurns;
+  /** Folders on the canvas this run drew on: its inputs stand for them. */
+  folders: string[];
 };
+/** One exchange with the person during a run: the agent's question and the answer, or words sent in. */
+export type RunTurn =
+  { kind: "ask"; question: string; answer: string | null } | { kind: "steer"; text: string };
+export type RunTurns = { local: LocalRead[]; exchange: RunTurn[] };
 const REQUEST_TEXT = 512;
 
 /** The sentence a work began with; the objective element keeps saying it. */
@@ -198,4 +206,27 @@ function runLinks(stage: WorkStage): CanvasLink[] {
       ? { live: true }
       : {}),
   }));
+}
+
+/**
+ * What each request carries beyond its words: the size its run gives it, and
+ * what the run read on this Mac itself and asked and was told.
+ */
+export function requestDress(
+  stages: readonly WorkStage[],
+): Map<string, Pick<CanvasItem, "size" | "turns">> {
+  return new Map(
+    stages.map((stage) => [
+      stage.card,
+      {
+        size: { width: stage.place.width, height: stage.place.height },
+        ...(stage.turns.local.length || stage.turns.exchange.length ? { turns: stage.turns } : {}),
+      },
+    ]),
+  );
+}
+
+/** Folders the runs drew on: each stands as its run's input, not as a card of its own. */
+export function runFolders(stages: readonly WorkStage[]): Set<string> {
+  return new Set(stages.flatMap((stage) => stage.folders));
 }

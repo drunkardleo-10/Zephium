@@ -6,6 +6,7 @@ import { mediaUrl } from "$domain/resources";
 import { artifactView } from "../project-work";
 import { plain } from "./text";
 import { siteKey, siteName } from "../run/site";
+import { leadRun } from "../agent-steps";
 import type {
   Block,
   Board,
@@ -60,11 +61,7 @@ export const leadObject = (artifact: WorkArtifactV1) => NEW_KINDS.has(artifact.d
  * part's fold and sources. The earlier runtime showed every result.
  */
 export function onCanvas(artifact: WorkArtifactV1, execution: WorkExecutionFact): boolean {
-  const lead = execution.spec.nodes.some(
-    // Runs recorded before the grant was carried have none.
-    (node) => node.capability.kind === "agent" && !!node.capability.grant?.lead,
-  );
-  if (!lead) return true;
+  if (!leadRun(execution)) return true;
   return (execution.steps ?? []).some(
     (step) => step.kind.kind === "publish" && !!step.artifacts?.includes(artifact.id),
   );

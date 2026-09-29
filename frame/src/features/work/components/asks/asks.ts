@@ -8,6 +8,7 @@ import type {
 import { pageFrameUrl } from "$domain/resources";
 import { vendorHost } from "../../lib/vendors";
 import { registrableSite } from "../../lib/run/site";
+import type { RunTurn } from "../../lib/project-environment-thread";
 
 export { registrableSite, siteName } from "../../lib/run/site";
 
@@ -380,3 +381,21 @@ export function askPart(ask: Ask): string | null {
 /** The asks that belong on one part's row. */
 export const asksFor = (asks: readonly Ask[], part: string) =>
   asks.filter((ask) => askPart(ask) === part);
+
+/** The questions runs put to the person and the answers, and words sent in while they ran, in order. */
+export function exchangeOf(runs: readonly WorkExecutionFact[]): RunTurn[] {
+  const turns: RunTurn[] = [];
+  for (const run of runs) {
+    const questions = new Map(
+      asksOf(run).flatMap((ask) => (ask.kind === "question" ? [[ask.step, ask] as const] : [])),
+    );
+    for (const step of run.steps ?? []) {
+      if (step.kind.kind === "steer" && step.kind.text.trim())
+        turns.push({ kind: "steer", text: step.kind.text.trim() });
+      const ask = questions.get(step.id);
+      if (ask && ask.state !== "gone")
+        turns.push({ kind: "ask", question: ask.prompt, answer: ask.answer?.trim() || null });
+    }
+  }
+  return turns;
+}

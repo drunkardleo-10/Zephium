@@ -60,8 +60,6 @@
   const arrival = getContext<((id: string) => Duration | null) | undefined>(canvasArrival);
   const tone = $derived((data?.tone as Tone | undefined) ?? "relation");
   const route = $derived(data?.route as Route | undefined);
-  /** Work moving along a run's line: a dot travels it, and only then. */
-  const moving = $derived(!!data?.live && !reducedMotion());
   const store = useStore();
   /** Where a node stands now; read again whenever any node moves. */
   const corner = (id: string) => {
@@ -121,16 +119,6 @@
   stroke-dasharray={tone === "relation" ? undefined : "1"}
   fill="none"
 />
-{#if moving}<circle class="work-edge-pulse" r="2.5"
-    ><animateMotion
-      dur="1.6s"
-      repeatCount="indefinite"
-      calcMode="spline"
-      keyTimes="0;1"
-      keySplines="0.45 0 0.55 1"
-      {path}
-    /></circle
-  >{/if}
 
 <style>
   .work-edge-line {
@@ -153,12 +141,9 @@
     stroke: var(--color-border);
   }
 
+  /* A line into a part at work is lit, and still: the part itself says what it does. */
   .work-edge-line.flow.live {
-    stroke: color-mix(in srgb, var(--color-accent) 55%, var(--color-border-strong));
-  }
-
-  .work-edge-pulse {
-    fill: var(--color-accent);
+    stroke: color-mix(in srgb, var(--color-accent) 70%, var(--color-border-strong));
   }
 
   /* A tie lit by a focused card comes and goes with the pointer. */

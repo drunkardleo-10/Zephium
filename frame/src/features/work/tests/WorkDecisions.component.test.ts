@@ -159,9 +159,9 @@ test("a decision is recorded on the element, shown on the card, and disclosed as
   await expect.poll(() => session.snapshot?.decisions?.length ?? 0).toBe(1);
   await expect.element(screen.getByText("Decided", { exact: true })).toBeVisible();
   await expect
-    .element(screen.getByRole("button", { name: /Using 1 selected object/ }))
+    .element(screen.getByRole("button", { name: /Using the selected object/ }))
     .toBeVisible();
-  await screen.getByRole("button", { name: /Using 1 selected object/ }).click();
+  await screen.getByRole("button", { name: /Using the selected object/ }).click();
   await expect.element(screen.getByText("Decision", { exact: true }).first()).toBeVisible();
   await screen.getByRole("button", { name: "Ask", exact: true }).click();
   await expect

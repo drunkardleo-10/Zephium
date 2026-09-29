@@ -108,8 +108,13 @@ const WORKS = [
   "lego",
   "aisaas",
   "yctrip",
-  "lunios",
+  "compare",
   "today",
+  "lunios",
+  "trip3",
+  "slack3",
+  "compilers",
+  "day",
 ];
 /** 0 is the view a work opens in with no camera of its own. */
 const LOOKS = [

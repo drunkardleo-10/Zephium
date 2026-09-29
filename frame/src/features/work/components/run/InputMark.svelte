@@ -12,6 +12,7 @@
     WorkHistoryIcon,
     LayoutGridIcon,
   } from "../../lib/icons";
+  import * as m from "$shared/i18n/messages";
 
   let { item }: { item: CanvasItem } = $props();
   const input = $derived(item.input!);
@@ -25,56 +26,103 @@
     connection: Plug01Icon,
     work: LayoutGridIcon,
   } as const;
+  /** What kind of thing it is, under its name: "Skill", "Folder", "3 tabs". */
+  const caption = $derived.by(() => {
+    if (input.folder) return m.work_input_folder();
+    const count = input.count ?? 0;
+    switch (input.kind) {
+      case "memory":
+        return m.work_input_memory();
+      case "skill":
+        return m.work_input_skill();
+      case "history":
+        return m.work_input_history();
+      case "notes":
+        return count > 1 ? m.work_input_notes({ count }) : m.work_input_note();
+      case "tabs":
+        return count > 1 ? m.work_input_tabs({ count }) : m.work_input_tab();
+      case "files":
+        return count > 1 ? m.work_input_files({ count }) : m.work_input_file();
+      case "connection":
+        return m.work_input_connection();
+      case "work":
+        return m.work_input_work();
+    }
+  });
 </script>
 
-<!-- What the agent drew on: a small mark and its words, lit once read. -->
+<!--
+  What the run drew on, set as the mirror of a part's row: its name and what
+  kind of thing it is read toward the request, its mark where the line leaves.
+-->
 <div class="input" class:lit={!!input.lit} title={input.label}>
-  <span class="glyph"
-    ><Icon icon={input.folder ? Folder01Icon : GLYPH[input.kind]} size={14} /></span
+  <span class="words">
+    <span class="label">{input.label}</span>
+    <span class="caption">{caption}</span>
+  </span>
+  <span class="tile" class:folder={!!input.folder}
+    ><Icon icon={input.folder ? Folder01Icon : GLYPH[input.kind]} size={15} /></span
   >
-  <span class="label">{input.label}</span>
 </div>
 
 <style>
   .input {
     display: flex;
     align-items: center;
-    gap: 8px;
+    justify-content: flex-end;
+    gap: 10px;
     box-sizing: border-box;
     inline-size: 100%;
     block-size: 100%;
-    padding: 0 10px 0 4px;
     color: var(--color-muted);
-    font-size: var(--text-label);
-    font-weight: 500;
-    transition: color var(--motion-base) var(--ease-out);
   }
 
-  .glyph {
-    display: grid;
-    flex: none;
-    place-items: center;
-    inline-size: 22px;
-    block-size: 22px;
-    border-radius: var(--radius-inset);
-    background: var(--color-fill);
-    transition:
-      background-color var(--motion-base) var(--ease-out),
-      color var(--motion-base) var(--ease-out);
-  }
-
-  .lit {
-    color: var(--color-text);
-  }
-
-  .lit .glyph {
-    background: var(--color-accent-soft);
-    color: var(--color-accent);
+  .words {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    min-inline-size: 0;
+    text-align: end;
   }
 
   .label {
+    max-inline-size: 100%;
     overflow: hidden;
+    color: var(--color-text);
+    font-size: var(--text-body);
+    font-weight: 500;
+    letter-spacing: -0.003em;
+    line-height: 17px;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .caption {
+    color: var(--color-faint);
+    font-size: var(--text-caption);
+    line-height: 14px;
+  }
+
+  .tile {
+    display: grid;
+    flex: none;
+    place-items: center;
+    inline-size: 30px;
+    block-size: 30px;
+    border-radius: var(--radius-inset);
+    background: var(--color-surface);
+    box-shadow:
+      0 0 0 1px var(--color-border),
+      var(--shadow-raised);
+    color: var(--color-muted);
+    transition: color var(--motion-base) var(--ease-out);
+  }
+
+  .lit .tile {
+    color: var(--color-text);
+  }
+
+  .lit .tile.folder {
+    color: var(--color-accent);
   }
 </style>

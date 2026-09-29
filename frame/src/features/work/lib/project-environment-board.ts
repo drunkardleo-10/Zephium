@@ -9,7 +9,12 @@ import type {
 import type { MediaAssetV1 } from "$domain/resources";
 import { isLive } from "./agent-steps";
 import { clipText, type CanvasPosition } from "./canvas-model";
-import { threadOf, type WorkStage } from "./project-environment-thread";
+import {
+  threadOf,
+  type RunTurn,
+  type RunTurns,
+  type WorkStage,
+} from "./project-environment-thread";
 import { boardOf } from "./board/adapter";
 import { boardLayout, type LayoutBlock } from "./board/layout";
 import { leadObject, onCanvas, pictureKey, runObjects, type RunObject } from "./board/objects";
@@ -18,7 +23,7 @@ import { ulidTime } from "./ulid-time";
 import { runTrail } from "./board/trail";
 import type { Picture } from "./board/types";
 import { RUN, placeRun } from "./run/layout";
-import { runParts, type PartAsk, type RunInputView, type RunPart } from "./run/parts";
+import { localReads, runParts, type PartAsk, type RunInputView, type RunPart } from "./run/parts";
 import { PART, partSize, rowKey, type PartShape } from "./run/part-size";
 import { runSources } from "./run/sources";
 import { computerRows, computerView } from "./parts/computer";
@@ -133,10 +138,12 @@ export type StageOptions = {
   asks?: (objective: string) => readonly PartAsk[];
   /** What a run drew on before it began. */
   inputs?: (runs: readonly WorkExecutionFact[]) => readonly RunInputView[];
+  /** The questions a run put to the person and the answers, as the asks read them. */
+  exchange?: (runs: readonly WorkExecutionFact[]) => RunTurn[];
 };
 
-/** An input's mark: its glyph and its words on one line. */
-const INPUT = { width: 200, height: 28 } as const;
+/** An input's mark: its name over what kind of thing it is, its tile where its line leaves. */
+const INPUT = { width: 200, height: 36 } as const;
 
 const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
 
@@ -218,33 +225,54 @@ const baseName = (path: string) => path.replace(/\/+$/u, "").split("/").at(-1) |
  * canvas's folders its files sit in, else the canvas's folders when they are
  * as many as it read. A count is never a name.
  */
+type Folder = { label: string; element?: string };
 function folderNames(
   snapshot: WorkEnvironmentSnapshot,
   run: WorkExecutionFact,
   fact: InputFact,
-): string[] {
-  if (fact.reference?.startsWith("/")) return [baseName(fact.reference)];
+): Folder[] {
   const folders = snapshot.elements.flatMap((element) =>
     element.reference.kind === "folder"
-      ? [{ path: element.reference.path, name: element.reference.name }]
+      ? [{ path: element.reference.path, name: element.reference.name, element: element.id }]
       : [],
   );
-  const read = (run.file_evidence ?? []).map((record) => record.file.path);
+  const named = (folder: (typeof folders)[number]): Folder => ({
+    label: folder.name || baseName(folder.path),
+    element: folder.element,
+  });
+  if (fact.reference?.startsWith("/")) {
+    const folder = folders.find((candidate) => candidate.path === fact.reference);
+    return [folder ? named(folder) : { label: baseName(fact.reference) }];
+  }
+  const read = [
+    ...(run.file_evidence ?? []).map((record) => record.file.path),
+    ...(run.steps ?? []).flatMap((step) => (step.local?.folder ? [step.local.folder] : [])),
+  ];
   const used = folders.filter((folder) =>
     read.some((path) => path === folder.path || path.startsWith(`${folder.path}/`)),
   );
-  if (used.length) return used.map((folder) => folder.name || baseName(folder.path));
-  if (folders.length && folders.length === (fact.count ?? 1))
-    return folders.map((folder) => folder.name || baseName(folder.path));
-  return [fact.label];
+  if (used.length) return used.map(named);
+  if (folders.length && folders.length === (fact.count ?? 1)) return folders.map(named);
+  return [{ label: fact.label }];
 }
 
-/** Each input once, as a run's several executions name it again. */
-function uniqueInputs(inputs: readonly RunInputView[]): RunInputView[] {
-  const seen = new Set<string>();
+/** Room the lines under a request take, until they measure themselves. */
+function turnsHeight(turns: RunTurns): number {
+  const lines = (text: string, per: number) => Math.max(1, Math.ceil(text.length / per));
+  let height = turns.local.length ? 6 + turns.local.length * 20 : 0;
+  for (const turn of turns.exchange)
+    height +=
+      turn.kind === "ask"
+        ? 12 + lines(turn.question, 40) * 18 + lines(turn.answer ?? "", 40) * 18
+        : 12 + lines(turn.text, 40) * 18;
+  return height + (turns.exchange.length ? 8 : 0);
+}
+
+/** Each input once, as a run's several executions and later requests of its thread name it again. */
+function uniqueInputs(inputs: readonly RunInputView[], shown: Set<string>): RunInputView[] {
   return inputs.filter((input) => {
     const key = `${input.kind}:${input.label}`;
-    return !seen.has(key) && !!seen.add(key);
+    return !shown.has(key) && !!shown.add(key);
   });
 }
 
@@ -295,6 +323,8 @@ export function environmentStages(
     const projection = objectives.get(element.reference.objective);
     if (!projection) continue;
     const recorded = options.recorded?.(projection.work.id) ?? [];
+    /** What earlier requests of this thread already showed they drew on. */
+    const shown = new Set<string>();
     for (const draft of threadOf(element.id, projection)) {
       const runs = draft.executions.flatMap((id) => {
         const execution = projection.executions.find((entry) => entry.id === id);
@@ -320,9 +350,15 @@ export function environmentStages(
         ...(live ? { pending: m.work_board_pending() } : {}),
       });
       const request = clipText(draft.request, REQUEST_TEXT);
+      const opened = !!options.requests?.has(draft.card);
+      const turns: RunTurns = { local: localReads(runs), exchange: options.exchange?.(runs) ?? [] };
+      const words = requestTextSize(request, opened);
       const requestPart = {
         id: draft.card,
-        ...requestTextSize(request, !!options.requests?.has(draft.card)),
+        width: words.width,
+        height:
+          measured.get(measureKey(draft.card, RUN.request, opened)) ??
+          words.height + turnsHeight(turns),
       };
       const parts = runParts(draft.card, runs, recorded, alive, {
         search: m.work_part_search(),
@@ -336,19 +372,32 @@ export function environmentStages(
           if (ask) part.ask = { props: ask.props };
         }
       // What the run drew on: the lead records it as facts; a caller may add its own.
+      const folders: string[] = [];
       const recordedInputs = uniqueInputs(
         runs.flatMap((run) =>
           (run.inputs ?? []).flatMap((fact): RunInputView[] =>
             fact.kind === "files"
-              ? folderNames(snapshot, run, fact).map((label) => ({
-                  kind: "files",
-                  label,
-                  lit: true,
-                  folder: true,
-                }))
-              : [{ kind: fact.kind, label: fact.label, lit: true }],
+              ? folderNames(snapshot, run, fact).map((folder) => {
+                  if (folder.element) folders.push(folder.element);
+                  return {
+                    kind: "files",
+                    label: folder.label,
+                    lit: true,
+                    folder: true,
+                    ...(folder.element ? { element: folder.element } : {}),
+                  };
+                })
+              : [
+                  {
+                    kind: fact.kind,
+                    label: fact.label,
+                    lit: true,
+                    ...(fact.count ? { count: fact.count } : {}),
+                  },
+                ],
           ),
         ),
+        shown,
       );
       const inputs = (options.inputs?.(runs) ?? recordedInputs).map((input, index) => ({
         id: `input:${draft.card}:${index}`,
@@ -491,6 +540,8 @@ export function environmentStages(
         found,
         ...(sources ? { sources: { id: sourcesId, view: drawn } } : {}),
         notes,
+        turns,
+        folders,
         targets: Object.fromEntries(
           Object.entries(lane.rects).map(([id, rect]) => [id, { x: rect.x, y: rect.y }]),
         ),

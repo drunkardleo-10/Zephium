@@ -16,8 +16,9 @@
     environmentSources,
     environmentView,
   } from "../lib/project-environment";
-  import { environmentRequests } from "../lib/project-environment-thread";
+  import { environmentRequests, requestDress, runFolders } from "../lib/project-environment-thread";
   import type { BoardActions } from "../lib/canvas-context";
+  import { exchangeOf } from "../components/asks/asks";
   import type { PartAsk } from "../lib/run/parts";
   import type { BoardScene } from "./board-fixtures";
   let {
@@ -43,6 +44,7 @@
       ...(scene.media ? { fetched: fetchedPictures(scene.snapshot, scene.media) } : {}),
       measured,
       open,
+      exchange: exchangeOf,
       ...(asks ? { asks } : {}),
     }),
   );
@@ -51,9 +53,15 @@
   const agents = $derived(
     environmentAgents(scene.snapshot, scene.objectives, () => undefined, stages),
   );
+  const folders = $derived(runFolders(stages));
+  const dress = $derived(requestDress(stages));
   const items = $derived([
-    ...environmentItems(scene.snapshot, [], [], scene.objectives, scene.media),
-    ...requests.items,
+    ...[
+      ...environmentItems(scene.snapshot, [], [], scene.objectives, scene.media).filter(
+        (item) => !folders.has(item.id),
+      ),
+      ...requests.items,
+    ].map((item) => (dress.get(item.id) ? { ...item, ...dress.get(item.id) } : item)),
     ...environmentBoards(stages),
     ...environmentParts(scene.objectives, stages, recorded),
     ...environmentInputs(stages),
@@ -102,7 +110,7 @@
         own.sizes ?? {},
         stages,
         environmentItems(scene.snapshot, [], [], scene.objectives, scene.media).flatMap((item) =>
-          item.type === "objective" ? [] : [item.id],
+          item.type === "objective" || folders.has(item.id) ? [] : [item.id],
         ),
       ),
       ...requests.positions,

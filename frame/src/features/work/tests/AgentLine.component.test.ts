@@ -362,7 +362,7 @@ test("a failed run says why it gave up, and a stopped one just stops", async () 
   stopped.selected = "objective";
   stopped.projection = { ...structuredClone(projection), executions: [agentRun("cancelled")] };
   const cancelled = await render(AgentLine, { session: stopped });
-  await expect.element(cancelled.getByText("Stopped.", { exact: true })).toBeVisible();
+  await expect.element(cancelled.getByText("Stopped", { exact: true })).toBeVisible();
   await cancelled.unmount();
   session.dispose();
   stopped.dispose();
@@ -416,7 +416,7 @@ test("the line says why a page waits for you, in one sentence, and links to its 
   session.dispose();
 });
 
-test("every run that ended early says why in Rust's words, never a generic failure", async () => {
+test("every run that ended early says why in Rust's words, or calmly that it stopped short", async () => {
   const ended = (
     status: WorkExecutionFact["status"],
     kind: NonNullable<WorkExecutionFact["steps"]>[number]["kind"],
@@ -450,7 +450,7 @@ test("every run that ended early says why in Rust's words, never a generic failu
       ended("interrupted", read, "outcome_unknown", "Zephium closed during this step"),
       "Zephium closed during this step",
     ],
-    [agentRun("failed"), "Something went wrong; try again."],
+    [agentRun("failed"), "Stopped before it finished"],
   ];
   for (const [execution, line] of cases) {
     const session = new WorkSession("profile");
@@ -473,7 +473,7 @@ test("every run that ended early says why in Rust's words, never a generic failu
   };
   const interrupted = await render(AgentLine, { session: left });
   await expect
-    .element(interrupted.getByText("Zephium closed during this run.", { exact: true }))
+    .element(interrupted.getByText("Zephium closed during this run", { exact: true }))
     .toBeVisible();
   await interrupted.unmount();
   left.dispose();
@@ -569,6 +569,23 @@ test("a sign-in wall offers to sign in, and the run goes on by itself once the p
   expect(onsignin).toHaveBeenCalledExactlyOnceWith("page:execution:read-1");
   // No "as me" retry: the run itself resumes after the sign-in.
   expect(screen.container.textContent).not.toContain("Try again as me");
+  await screen.unmount();
+  session.dispose();
+});
+
+test("a run that ended short says what is missing and offers the one thing that helps", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  session.projection = { ...structuredClone(projection), executions: [agentRun("needs_review")] };
+  const onact = vi.fn();
+  const screen = await render(AgentLine, {
+    session,
+    ended: { text: "Flights couldn’t be read", action: "Try again", onact },
+  });
+  await expect.element(screen.getByText("Flights couldn’t be read", { exact: true })).toBeVisible();
+  await screen.getByRole("button", { name: "Try again" }).click();
+  expect(onact).toHaveBeenCalledOnce();
+  expect(screen.container.querySelector(".run-mark.stopped")).not.toBeNull();
   await screen.unmount();
   session.dispose();
 });

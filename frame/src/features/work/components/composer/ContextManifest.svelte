@@ -92,7 +92,9 @@
       >{failure ??
         (preview.kind === "pending"
           ? m.work_context_preparing()
-          : m.work_context_using({ count }))}</span
+          : count === 1
+            ? m.work_context_using_one()
+            : m.work_context_using({ count }))}</span
     >
     {#if preview.kind === "admitted"}<span class="chevron" class:open
         ><Icon icon={ArrowDown01Icon} size={12} /></span

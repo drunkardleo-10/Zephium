@@ -5,7 +5,7 @@
   import AskShell from "./AskShell.svelte";
   import type { QuestionAsk } from "./asks";
   import { ArrowUp02Icon } from "./icons";
-  import AgentOrb from "../cards/AgentOrb.svelte";
+  import RunMark from "../run/RunMark.svelte";
 
   /** The agent's own question: its options answer in one press, or the person says it in words. */
   let {
@@ -13,10 +13,9 @@
     placement = "canvas",
     busy = false,
     onanswer,
-    seed = 0,
   }: {
     ask: QuestionAsk;
-    /** The asking agent's orb. */
+    /** Kept for callers that pass the run's seed; the card marks the run's wait instead. */
     seed?: number;
     placement?: "canvas" | "island";
     busy?: boolean;
@@ -35,7 +34,7 @@
     where={m.work_ask_question()}
     title={ask.prompt}
   >
-    {#snippet mark()}<AgentOrb {seed} size={18} />{/snippet}
+    {#snippet mark()}<RunMark state="waiting" size={18} />{/snippet}
     {#if ask.options.length}
       <div class="options">
         {#each ask.options as option, index (index)}<button

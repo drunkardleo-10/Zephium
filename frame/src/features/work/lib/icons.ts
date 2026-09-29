@@ -44,7 +44,6 @@ export { default as Note01Icon } from "@hugeicons/core-free-icons/Note01Icon";
 export { default as NoteAddIcon } from "@hugeicons/core-free-icons/NoteAddIcon";
 export { default as Pdf01Icon } from "@hugeicons/core-free-icons/Pdf01Icon";
 export { default as PencilEdit02Icon } from "@hugeicons/core-free-icons/PencilEdit02Icon";
-export { default as PlayIcon } from "@hugeicons/core-free-icons/PlayIcon";
 export { default as Plug01Icon } from "@hugeicons/core-free-icons/Plug01Icon";
 export { default as PlusSignIcon } from "@hugeicons/core-free-icons/PlusSignIcon";
 export { default as Search01Icon } from "@hugeicons/core-free-icons/Search01Icon";

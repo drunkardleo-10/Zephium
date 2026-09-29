@@ -82,6 +82,55 @@ test("creates an empty persistent environment only after a confirmed empty list"
   session.dispose();
 });
 
+test("a launch onto a used work reuses the one empty draft instead of making another", async () => {
+  const { WorkEnvironmentSession } = await import("../environment.svelte");
+  const draft = "00000000000000000000000009";
+  const summary = (work: string, empty: boolean) => ({
+    id: work,
+    space,
+    title: empty ? "New work" : "Trip",
+    lifecycle: "active" as const,
+    revision: "1",
+    name: null,
+    requests: empty ? [] : ["Plan my trip"],
+    touched_ms: empty ? "1" : "2",
+    empty,
+  });
+  const used = {
+    ...snapshot(),
+    elements: [
+      {
+        id: element,
+        area: null,
+        reference: { kind: "objective" as const, objective: "00000000000000000000000005" },
+      },
+    ],
+  };
+  const opened: string[] = [];
+  native.call.mockImplementation((_profile: string, call: WorkCallV1) => {
+    if (call.kind !== "environment") throw new Error("No objective calls expected");
+    if (call.request.kind === "list")
+      return response({
+        kind: "environment",
+        reply: {
+          kind: "page",
+          works: [summary(id, false), summary(draft, true)],
+          next: null,
+          selected: id,
+        },
+      });
+    if (call.request.kind !== "open") throw new Error("Nothing should be created");
+    opened.push(call.request.id);
+    const shown = call.request.id === id ? used : { ...snapshot(), id: draft, title: "New work" };
+    return response({ kind: "environment", reply: { kind: "snapshot", snapshot: shown } });
+  });
+  const session = new WorkEnvironmentSession(profile, space);
+  await session.start("New work");
+  expect(opened).toEqual([id, draft]);
+  expect(session.snapshot?.id).toBe(draft);
+  session.dispose();
+});
+
 test("keeps unknown mutation operands across hide/show and retries their exact command", async () => {
   const { WorkEnvironmentSession } = await import("../environment.svelte");
   let saved = snapshot("9007199254740993", "7");

@@ -9,6 +9,8 @@
   import { tabRequest } from "$session/work-tab.svelte";
   import { pointerTool, setPointerTool } from "../lib/pointer-tool.svelte";
   import { ulidTime } from "../lib/ulid-time";
+  import { defaultTitle, firstRunName } from "../lib/work-name";
+  import { needWords } from "../lib/run/need";
   import { editTool, toolSession } from "$session/tool-drafts.svelte";
   import type {
     TabView,
@@ -43,7 +45,7 @@
   import WorkBar from "./bar/WorkBar.svelte";
   import { centreSize, picksSheet } from "./objects/centre";
   import { partAsks } from "./asks/actions";
-  import { ASK_WORDS, asksOf, openAsks, registrableSite } from "./asks/asks";
+  import { ASK_WORDS, asksOf, exchangeOf, openAsks, registrableSite } from "./asks/asks";
   import BarTool from "./bar/BarTool.svelte";
   import NotePanel from "./bar/NotePanel.svelte";
   import AttachPanel, { type AttachKind } from "./bar/AttachPanel.svelte";
@@ -93,7 +95,7 @@
     viewPlacements,
   } from "../lib/project-environment";
   import { canvasProbe } from "../lib/canvas-context";
-  import { environmentRequests } from "../lib/project-environment-thread";
+  import { environmentRequests, requestDress, runFolders } from "../lib/project-environment-thread";
   import { artifactView } from "../lib/project-work";
   import RunView from "./board/RunView.svelte";
   import { failureLine, humanPage, regionOf, sameRegion } from "../lib/work-human";
@@ -297,10 +299,15 @@
   /** A video plays in the pane, opened over its card and at least the pane's minimum. */
   function playHere(id: string) {
     const reference = snapshot?.elements.find((element) => element.id === id)?.reference;
-    if (reference?.kind !== "link") return;
+    if (reference?.kind !== "link" && reference?.kind !== "browser") return;
     const card = canvasRef?.screenRect(id);
     if (card && !pane) openOver(card);
-    openPane({ kind: "url", url: reference.url }, id);
+    openPane(
+      reference.kind === "link"
+        ? { kind: "url", url: reference.url }
+        : { kind: "tab", id: reference.tab },
+      id,
+    );
   }
   function lift(id: string) {
     panel = null;
@@ -749,6 +756,8 @@
   /** The block opened in place, and every block's height as it measured itself. */
   let openBlock = $state<string | null>(null);
   const measured = new SvelteMap<string, number>();
+  /** The bar's height, context included, so the canvas fades under all of it. */
+  let dockHeight = $state(64);
   /** Blocks the person dragged: only those can leave their board's flow. */
   const moved = new SvelteSet<string>();
   function toggleBlock(id: string) {
@@ -789,6 +798,7 @@
               ? partAsks(objectiveSession, { session: human, work: objective }, openStep)
               : [],
           requests: openRequests,
+          exchange: exchangeOf,
         })
       : [],
   );
@@ -869,12 +879,16 @@
       wasLive = now;
     });
   });
-  // A new work names itself after its first result, once, unless the person already has.
+  // A work names itself once its first run ends, unless the person already has; an
+  // older unnamed work takes its name as it is opened.
   const named: Record<string, true> = {};
   $effect(() => {
     const current = snapshot;
-    const title = stages.find((stage) => stage.board.title.trim())?.board.title.trim();
-    if (!current || !title || current.title !== m.work_env_default_title()) return;
+    const first = stages[0];
+    const title = first
+      ? firstRunName(context.objectives.get(first.objective), first.request, first.live)
+      : "";
+    if (!current || !title || !defaultTitle(current.title, m.work_env_default_title())) return;
     if (current.lifecycle !== "active" || named[current.id]) return;
     named[current.id] = true;
     untrack(() => void session.edit({ kind: "rename", title: title.slice(0, 64) }));
@@ -929,6 +943,37 @@
     return null;
   });
   const requests = $derived(environmentRequests(stages));
+  /** The parts of the island's run, by the run's request. */
+  const islandParts = $derived.by(() => {
+    const latest = objectiveSession?.projection?.executions.at(-1)?.id;
+    const stage = latest ? stages.find((entry) => entry.executions.includes(latest)) : undefined;
+    return stage ? parts.filter((item) => item.id.startsWith(`part:${stage.card}:`)) : [];
+  });
+  /** The parts at work now, each saying what it does, for the island's list. */
+  const workingParts = $derived(
+    islandParts.flatMap((item) =>
+      item.part?.state === "running"
+        ? [
+            {
+              id: item.id,
+              title: item.part.title,
+              now: item.part.summary ?? "",
+              ...(item.part.host ? { host: item.part.host } : {}),
+            },
+          ]
+        : [],
+    ),
+  );
+  /** Why the island's run ended short, and the one action that helps, from its first part in need. */
+  const runEnded = $derived.by(() => {
+    const item = islandParts.find((entry) => entry.part?.need && entry.part.state !== "running");
+    const need = item?.part?.need;
+    if (!item || !need) return null;
+    const said = needWords(need, item.part!.title, "island");
+    const how = need.kind === "retry" ? "again" : "meet";
+    return { text: said.text, action: said.action, onact: () => meetNeed(item.id, how) };
+  });
+  const dressOf = $derived(requestDress(stages));
   /** What each run remembered, shown beside its request with Undo. */
   const remembering = $derived(
     new Map(
@@ -952,14 +997,19 @@
       }),
     ),
   );
+  const claimedFolders = $derived(runFolders(stages));
   const items = $derived([
-    ...[...results.items, ...requests.items].map((item) =>
+    ...[
+      ...results.items.filter((item) => !(item.type === "folder" && claimedFolders.has(item.id))),
+      ...requests.items,
+    ].map((item) =>
       item.type === "objective" || item.type === "request"
         ? {
             ...item,
             expanded: openRequests.has(item.id),
             ...(askedAt.get(item.id) ? { when: askedAt.get(item.id) } : {}),
             ...(remembering.get(item.id) ? { remember: remembering.get(item.id) } : {}),
+            ...dressOf.get(item.id),
           }
         : item,
     ),
@@ -1985,6 +2035,8 @@
         session={objectiveSession!}
         viewed={viewedExecution}
         agents={agents.items}
+        working={workingParts}
+        ended={runEnded}
         draft={session.composer}
         onreview={(step: string) => {
           panel = null;
@@ -2149,7 +2201,7 @@
     <!-- The canvas never ends in a hard edge: it fades under what sits at its
          top and bottom, and costs nothing while nothing moves. -->
     <div class="edge-scrim top" aria-hidden="true"></div>
-    <div class="edge-scrim bottom" aria-hidden="true"></div>
+    <div class="edge-scrim bottom" style:--dock="{dockHeight}px" aria-hidden="true"></div>
     <div class="canvas-top">
       <WorksMenu {session} untitled={m.work_env_default_title()} live={!!runStatus} />
       <span class="canvas-top-gap"></span>
@@ -2480,7 +2532,7 @@
         />{/snippet}</LazyView
     >
   {/if}
-  <div class="bar-dock">
+  <div class="bar-dock" bind:clientHeight={dockHeight}>
     {#if aiEnabled}<WorkBar
         bind:ref={composerElement}
         bind:value={session.composer}
@@ -2568,9 +2620,18 @@
     );
   }
 
+  /* Under the bar, however tall its context makes it: solid where the bar stands,
+     then easing out, so nothing reads through or ends in a hard line above it. */
   .edge-scrim.bottom {
     inset-block-end: 0;
-    background: linear-gradient(to top, var(--color-canvas), transparent);
+    block-size: calc(var(--dock, 64px) + 72px);
+    background: linear-gradient(
+      to top,
+      var(--color-canvas) 0 calc(var(--dock, 64px) * 0.6),
+      color-mix(in srgb, var(--color-canvas) 72%, transparent) calc(var(--dock, 64px) + 16px),
+      color-mix(in srgb, var(--color-canvas) 28%, transparent) calc(var(--dock, 64px) + 44px),
+      transparent calc(var(--dock, 64px) + 72px)
+    );
   }
 
   .canvas-top {

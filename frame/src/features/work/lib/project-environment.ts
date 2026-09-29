@@ -16,7 +16,7 @@ import { firstRequest, type WorkStage } from "./project-environment-thread";
 import { host, observedTitle } from "./project-environment-stage";
 import { BOARD_PIN, laneElement, partShape } from "./project-environment-board";
 import type { RunPart } from "./run/parts";
-import { hostOf, siteKey, siteName } from "./run/site";
+import { hostOf, siteName } from "./run/site";
 import type { SourceRow } from "./project-environment-stage";
 import { RUN } from "./run/layout";
 import { PART, partLead } from "./run/part-size";
@@ -588,17 +588,22 @@ export function environmentAgents(
   return { items, positions };
 }
 
-/** What a search part drew on, one row per site: its mark and the name it goes by. */
+/**
+ * What a search part read, one row per site as its address reads, with the
+ * page it read there: never a vendor's name standing in for its site.
+ */
 function citedSites(rows: readonly SourceRow[]) {
   const sites = new Map<string, { key: string; url: string; where: string; title: string }>();
   for (const row of rows) {
-    const host = hostOf(row.url);
-    const key = siteKey(host);
-    if (!host || sites.has(key)) continue;
-    const titles = rows.flatMap((other) =>
-      siteKey(hostOf(other.url)) === key ? [other.title] : [],
-    );
-    sites.set(key, { key: row.key, url: row.url, where: host, title: siteName(host, titles) });
+    const where = hostOf(row.url);
+    if (!where || sites.has(where)) continue;
+    const title = row.title.trim();
+    sites.set(where, {
+      key: row.key,
+      url: row.url,
+      where,
+      title: title && title.toLowerCase() !== where ? title : "",
+    });
   }
   return [...sites.values()];
 }
@@ -607,7 +612,7 @@ function citedSites(rows: readonly SourceRow[]) {
 const TOOLS: Record<string, string> = { gh: "GitHub", glab: "GitLab" };
 
 /** A part's need as its row says it, named the way a person names the thing. */
-function needView(need: NonNullable<RunPart["need"]>): PartNeed {
+function needView(need: NonNullable<RunPart["need"]>, host?: string): PartNeed {
   switch (need.kind) {
     case "sign_in":
     case "allow_site":
@@ -619,9 +624,20 @@ function needView(need: NonNullable<RunPart["need"]>): PartNeed {
         address: need.path,
       };
     case "use_connection":
-      return { kind: need.kind, target: TOOLS[need.connection] ?? need.connection };
-    case "retry":
-      return { kind: need.kind, target: need.host ? siteName(need.host) : "" };
+      return {
+        kind: need.kind,
+        target: TOOLS[need.connection] ?? need.connection,
+        ...(need.reason ? { reason: need.reason } : {}),
+        ...(host ? { site: siteName(host) } : {}),
+      };
+    case "retry": {
+      const site = need.host ?? host;
+      return {
+        kind: need.kind,
+        target: site ? siteName(site) : "",
+        ...(need.reason ? { reason: need.reason } : {}),
+      };
+    }
   }
 }
 
@@ -631,11 +647,14 @@ function partSummary(part: RunPart, stage: WorkStage): string | undefined {
   if (part.summary && part.state !== "running") return part.summary;
   if (part.state === "failed") return m.work_part_failed();
   if (part.state === "running")
-    return part.helper === "research"
-      ? m.work_line_searching()
-      : part.helper === "browser"
-        ? m.work_part_reading()
-        : m.work_env_working();
+    return (
+      part.now ??
+      (part.helper === "research"
+        ? m.work_line_searching()
+        : part.helper === "browser"
+          ? m.work_part_reading()
+          : m.work_env_working())
+    );
   let things = 0;
   for (const block of stage.board.blocks) {
     if (stage.found.get(block.id) !== part.id) continue;
@@ -718,10 +737,6 @@ export function environmentParts(
       });
       const rect = stage.lane.rects[part.id]!;
       const needs = !!part.ask || entries.some((page) => page.human?.phase === "waiting_for_human");
-      // The orb stands at the first part at work; every other part at work has its own small one.
-      const helper =
-        part.state === "running" &&
-        stage.parts.find((candidate) => candidate.state === "running") !== part;
       const state = needs ? "waiting" : part.state;
       const summary = needs ? m.work_line_waiting_for_you() : partSummary(part, stage);
       const rows: NonNullable<CanvasItem["sources"]> =
@@ -768,11 +783,10 @@ export function environmentParts(
           ...(part.lines ? { lines: part.lines } : {}),
           ...(part.connection ? { connection: part.connection } : {}),
           ...(part.ask ? { ask: part.ask } : {}),
-          ...(part.need ? { need: needView(part.need) } : {}),
+          ...(part.need ? { need: needView(part.need, part.host) } : {}),
           ...(stage.notes.get(part.id)?.length
             ? { notes: stage.notes.get(part.id)!.map((object) => object.view) }
             : {}),
-          ...(helper ? { presence: agentSeed(stage.objective) } : {}),
           ...(part.helper === "research"
             ? {
                 cited: citedSites(part.sources).slice(0, PART.sourceRows),

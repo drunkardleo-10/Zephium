@@ -714,7 +714,9 @@
         const now = performance.now();
         if (lastClick.id === node.id && now - lastClick.at < 320) {
           lastClick = { id: "", at: 0 };
-          onopen?.(node.id);
+          // An input that stands for something on the canvas opens that thing.
+          const input = isItemNode(node as WorkNode) ? (node.data as CanvasItem).input : undefined;
+          onopen?.(input?.element ?? node.id);
           return;
         }
         lastClick = { id: node.id, at: now };
