@@ -103,7 +103,7 @@
                 ? m.work_diff_removed()
                 : undefined}>{row.op === "add" ? "+" : row.op === "del" ? "−" : ""}</span
           ><code
-            >{#each row.tokens as token, at (at)}{#if token.kind === "plain" || token.kind === "punctuation"}{token.text}{:else}<span
+            >{#each row.tokens as token, at (at)}{#if token.kind === "plain"}{token.text}{:else}<span
                   class={token.kind}>{token.text}</span
                 >{/if}{/each}</code
           >
@@ -274,17 +274,38 @@
     color: var(--color-danger);
   }
 
-  .keyword {
-    font-weight: 600;
+  .comment {
+    color: var(--color-code-comment);
+    font-style: italic;
+  }
+
+  .keyword,
+  .tag {
+    color: var(--color-code-keyword);
   }
 
   .string {
-    color: var(--color-label-secondary);
+    color: var(--color-code-string);
   }
 
-  .comment {
-    color: var(--color-muted);
-    font-style: italic;
+  .number {
+    color: var(--color-code-number);
+  }
+
+  .function {
+    color: var(--color-code-function);
+  }
+
+  .type {
+    color: var(--color-code-type);
+  }
+
+  .property {
+    color: var(--color-code-property);
+  }
+
+  .attribute {
+    color: var(--color-code-attribute);
   }
 
   .all {

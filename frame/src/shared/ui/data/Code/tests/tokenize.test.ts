@@ -19,7 +19,7 @@ test("rust: keywords, strings, numbers and line comments", () => {
 });
 
 test("script family shares one table and template strings", () => {
-  for (const language of ["typescript", "javascript", "svelte"]) {
+  for (const language of ["typescript", "javascript", "tsx"]) {
     const [row] = tokenize(language, "const n = `t${1}`; return await f(2.5e3);");
     expect(kinds(row, "keyword")).toEqual(["const", "return", "await"]);
     expect(kinds(row, "string")).toEqual(["`t${1}`"]);
@@ -46,10 +46,8 @@ test("hash comment families", () => {
 });
 
 test("c, jvm, go and php families", () => {
-  expect(kinds(tokenize("cpp", "static int n = 42; // x")[0], "keyword")).toEqual([
-    "static",
-    "int",
-  ]);
+  expect(kinds(tokenize("cpp", "static int n = 42; // x")[0], "keyword")).toEqual(["static"]);
+  expect(kinds(tokenize("cpp", "static int n = 42; // x")[0], "type")).toEqual(["int"]);
   expect(kinds(tokenize("csharp", "public class A {}")[0], "keyword")).toEqual(["public", "class"]);
   expect(kinds(tokenize("kotlin", "val x = when (y) {}")[0], "keyword")).toEqual(["val", "when"]);
   expect(kinds(tokenize("swift", "guard let x else { return }")[0], "keyword")).toEqual([
@@ -83,10 +81,7 @@ test("minimal and unknown languages", () => {
   expect(kinds(tokenize("html", '<p class="x"><!-- c --></p>')[0], "comment")).toEqual([
     "<!-- c -->",
   ]);
-  expect(tokenize("markdown", "# Title")[0]).toEqual([
-    { kind: "punctuation", text: "#" },
-    { kind: "plain", text: " Title" },
-  ]);
+  expect(tokenize("markdown", "# Title")[0]).toEqual([{ kind: "plain", text: "# Title" }]);
   expect(tokenize("text", "fn if 1")).toEqual([[{ kind: "plain", text: "fn if 1" }]]);
   expect(tokenize("klingon", "a\n\nb")).toEqual([
     [{ kind: "plain", text: "a" }],
@@ -95,15 +90,15 @@ test("minimal and unknown languages", () => {
   ]);
 });
 
-test("unbalanced strings end at the line and block comments carry until closed", () => {
+test("an open quote is not yet a string and block comments carry until closed", () => {
   const rows = tokenize("typescript", 'const s = "open\nlet x = 1; /* a\nstill */ let y\nlet z');
-  expect(kinds(rows[0], "string")).toEqual(['"open']);
+  expect(kinds(rows[0], "string")).toEqual([]);
   expect(kinds(rows[1], "keyword")).toEqual(["let"]);
   expect(kinds(rows[1], "comment")).toEqual(["/* a"]);
   expect(kinds(rows[2], "comment")).toEqual(["still */"]);
   expect(kinds(rows[2], "keyword")).toEqual(["let"]);
   expect(kinds(rows[3], "keyword")).toEqual(["let"]);
-  expect(kinds(tokenize("python", "x = 'a\\")[0], "string")).toEqual(["'a\\"]);
+  expect(kinds(tokenize("python", "x = 'a\\")[0], "string")).toEqual([]);
 });
 
 test("a limit tokenizes only the leading lines and odd input never throws", () => {
@@ -115,4 +110,74 @@ test("a limit tokenizes only the leading lines and odd input never throws", () =
       ?.map((token) => token.text)
       .join(""),
   ).toBe("😀 é");
+});
+
+test("calls, types and properties", () => {
+  const [row] = tokenize("typescript", "const user: User = api.fetch(id).profile as string;");
+  expect(kinds(row, "function")).toEqual(["fetch"]);
+  expect(kinds(row, "type")).toEqual(["User", "string"]);
+  expect(kinds(row, "property")).toEqual(["profile"]);
+  // A keyword after a dot is a property: `x.default`.
+  expect(kinds(tokenize("typescript", "x.default")[0], "property")).toEqual(["default"]);
+  const [rust] = tokenize("rust", 'let v: Vec<u8> = vec![1]; println!("{}", v.len());');
+  expect(kinds(rust, "function")).toEqual(["vec", "println", "len"]);
+  expect(kinds(rust, "type")).toEqual(["Vec", "u8"]);
+});
+
+test("keys are properties in data", () => {
+  expect(kinds(tokenize("json", '{"name": "zephium", "n": 1}')[0], "property")).toEqual([
+    '"name"',
+    '"n"',
+  ]);
+  expect(kinds(tokenize("json", '{"name": "zephium"}')[0], "string")).toEqual(['"zephium"']);
+  expect(kinds(tokenize("yaml", "name: zephium")[0], "property")).toEqual(["name"]);
+  expect(kinds(tokenize("toml", 'name = "z"')[0], "property")).toEqual(["name"]);
+});
+
+test("tags and attributes in HTML, Svelte and JSX, their script read as script", () => {
+  const svelte = tokenize(
+    "svelte",
+    '<script lang="ts">\n  let count = $state(0);\n</script>\n\n{#if count}<button class="go" onclick={() => count++}>Add</button>{/if}',
+  );
+  expect(kinds(svelte[0], "tag")).toEqual(["script"]);
+  expect(kinds(svelte[0], "attribute")).toEqual(["lang"]);
+  expect(kinds(svelte[1], "keyword")).toEqual(["let"]);
+  expect(kinds(svelte[1], "function")).toEqual(["$state"]);
+  expect(kinds(svelte[4], "keyword")).toEqual(["#if", "/if"]);
+  expect(kinds(svelte[4], "tag")).toEqual(["button", "button"]);
+  expect(kinds(svelte[4], "attribute")).toEqual(["class", "onclick"]);
+  const [jsx] = tokenize("tsx", 'return <Card title="x">{n > 1 ? <b>many</b> : null}</Card>;');
+  expect(kinds(jsx, "tag")).toEqual(["Card", "b", "b", "Card"]);
+  expect(kinds(jsx, "attribute")).toEqual(["title"]);
+  expect(kinds(jsx, "keyword")).toEqual(["return", "null"]);
+  // A comparison is not a tag.
+  expect(kinds(tokenize("tsx", "if (a <b) f();")[0], "tag")).toEqual([]);
+  expect(kinds(tokenize("html", '<p class="x"><!-- c --></p>')[0], "tag")).toEqual(["p", "p"]);
+});
+
+test("css: selectors, properties, at-rules and colours", () => {
+  const [row] = tokenize("css", "@media screen { .card:hover { color: #fff; margin: 0 auto; } }");
+  expect(kinds(row, "keyword")).toEqual(["@media"]);
+  expect(kinds(row, "property")).toEqual(["color", "margin"]);
+  expect(kinds(row, "number")).toEqual(["#fff", "0"]);
+});
+
+test("a 2,000-line file tokenizes in a few milliseconds", () => {
+  const unit = [
+    'import { thing } from "./thing";',
+    "/** A doc comment. */",
+    "export function run(value: number): Result<string> {",
+    "  const out = value.toFixed(2) + `x${value}`; // why",
+    "  return out.length > 3 ? ok(out) : fail(new Error('short'));",
+    "}",
+    "",
+    "<Card title={name}>{items.map((item) => <Row key={item.id} />)}</Card>;",
+  ].join("\n");
+  const text = Array.from({ length: 250 }, () => unit).join("\n");
+  for (let warm = 0; warm < 3; warm += 1) tokenize("tsx", text);
+  const started = performance.now();
+  const rows = tokenize("tsx", text);
+  const took = performance.now() - started;
+  expect(rows).toHaveLength(2000);
+  expect(took).toBeLessThan(40);
 });

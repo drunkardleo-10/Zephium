@@ -52,7 +52,7 @@
           role="presentation"
           onpointerenter={() => (hovered = owner)}
           ><span class="n" aria-hidden="true">{index + start}</span
-          >{#each row as token, at (at)}{#if token.kind === "plain" || token.kind === "punctuation"}{token.text}{:else}<span
+          >{#each row as token, at (at)}{#if token.kind === "plain"}{token.text}{:else}<span
                 class={token.kind}>{token.text}</span
               >{/if}{/each}{#if variant === "card" && owner !== undefined && owner === hovered && index + 1 === Math.max(1, notes[owner]!.from)}<span
               class="note"
@@ -146,22 +146,38 @@
     background: var(--color-lit-soft);
   }
 
-  .keyword {
-    color: var(--color-text);
-    font-weight: 600;
-  }
-
-  .string {
-    color: var(--color-label-secondary);
-  }
-
   .comment {
-    color: var(--color-muted);
+    color: var(--color-code-comment);
     font-style: italic;
   }
 
+  .keyword,
+  .tag {
+    color: var(--color-code-keyword);
+  }
+
+  .string {
+    color: var(--color-code-string);
+  }
+
   .number {
-    color: var(--color-text);
+    color: var(--color-code-number);
+  }
+
+  .function {
+    color: var(--color-code-function);
+  }
+
+  .type {
+    color: var(--color-code-type);
+  }
+
+  .property {
+    color: var(--color-code-property);
+  }
+
+  .attribute {
+    color: var(--color-code-attribute);
   }
 
   .note {

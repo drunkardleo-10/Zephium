@@ -132,6 +132,19 @@
   --color-warning: #dcb977;
   --color-info: #8fbcf7;
 
+  /* Code, lightly: each kind a quiet tone of the text rather than a colour of
+     its own, so a block reads as text first. Mixed from the theme's tints, so
+     both themes follow. */
+  --color-code-comment: var(--color-muted);
+  --color-code-keyword: color-mix(in oklab, var(--color-tint-rose) 78%, var(--color-text));
+  --color-code-string: color-mix(in oklab, var(--color-tint-sage) 80%, var(--color-text));
+  --color-code-number: color-mix(in oklab, var(--chart-4) 72%, var(--color-text));
+  --color-code-function: color-mix(in oklab, var(--color-tint-sky) 78%, var(--color-text));
+  --color-code-type: color-mix(in oklab, var(--chart-7) 74%, var(--color-text));
+  --color-code-property: var(--color-label-secondary);
+  --color-code-tag: var(--color-code-keyword);
+  --color-code-attribute: color-mix(in oklab, var(--chart-2) 70%, var(--color-text));
+
   /* YouTube's own play mark, the same in both themes: a video from there says so. */
   --color-youtube: #ff0033;
   --color-on-youtube: #fff;
