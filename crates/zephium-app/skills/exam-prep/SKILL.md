@@ -17,5 +17,5 @@ tools: [ask, search_notes, start_part, create, finish]
 ## Result
 - One **plan** from today to the exam: one step per session, when as the day ("Mon 12 Oct"), title the topic ("Dynamic programming"), detail with what to do in that session (read a chapter, solve a past paper's questions by number), kind task; mock exams under exam conditions as kind milestone two or three days before; the last day light. Hardest and heaviest topics first. checkable true.
 - One **picks** object of the material, facet course or article: past papers and the two or three best sources, each with its url, its institution's logo host, facts for year and whether solutions are included, and why it is in the plan.
-- One **list**, style requirements, titled "Practice questions": ten questions on the heaviest topics, each title the question and detail its short answer, from with the past paper's url when it came from one.
+- One **list**, style requirements, titled "Practice questions": ten questions on the heaviest topics, each title the question and detail its short answer (no numbers, no "Answer:" label), from with the past paper's url when it came from one.
 - The **reply**: a headline with the shape ("9 days, 6 topics, two mock exams"), text naming what to do today.
