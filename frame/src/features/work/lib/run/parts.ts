@@ -1,4 +1,4 @@
-import type { WorkExecutionFact, WorkPageV1 } from "$shared/ipc/bindings";
+import type { WorkExecutionFact, WorkPageV1, WorkPartNeedV1 } from "$shared/ipc/bindings";
 import {
   pageGroups,
   sourceRows,
@@ -8,6 +8,7 @@ import {
   type UnreadPage,
 } from "../project-environment-stage";
 import { fileName } from "../work-files";
+import { runSources } from "./sources";
 import { hostOf, registrableSite, siteKey, siteName } from "./site";
 
 /** A question waiting on the person about one part: which part (its id, key or site) and the ask card's props. */
@@ -20,6 +21,8 @@ export type RunInputView = {
   count?: number;
   /** Read in this run, or being read now. */
   lit?: boolean;
+  /** A folder the run read, by its own name. */
+  folder?: boolean;
 };
 
 type PartState = "planned" | "running" | "waiting" | "done" | "failed" | "stopped";
@@ -54,6 +57,8 @@ export type RunPart = {
   steps?: string[];
   /** A question waiting on the person about this part. */
   ask?: { props: Record<string, unknown> };
+  /** What the part could not do without the person, with the thing it concerns. */
+  need?: WorkPartNeedV1;
   /** What a computer part touched, one line each: files read and written, commands run. */
   lines?: { kind: "read" | "write" | "command" | "search"; text: string }[];
 };
@@ -137,10 +142,13 @@ function factParts(
         unread,
         sources:
           fact.helper === "research"
-            ? sourceRows({ ...run, steps }).filter((row) => !row.file && !!row.url)
+            ? runSources([{ ...run, steps, artifacts: [] }]).rows.flatMap((row) =>
+                row.url ? [{ key: row.key, url: row.url, where: row.host, title: row.title }] : [],
+              )
             : [],
         order: parts.length,
         ...(fact.summary ? { summary: fact.summary } : {}),
+        ...(fact.need && !going ? { need: fact.need } : {}),
         ...(fact.service?.connection ? { connection: fact.service.connection } : {}),
         ...(fact.helper === "computer"
           ? { steps: [...ids], lines: [] }

@@ -16,10 +16,11 @@ import { leadObject, onCanvas, runObjects, type RunObject } from "./board/object
 import { objectHeight, objectWidth } from "./board/object-size";
 import { ulidTime } from "./ulid-time";
 import { runTrail } from "./board/trail";
-import type { Detail, Picture } from "./board/types";
+import type { Picture } from "./board/types";
 import { RUN, placeRun } from "./run/layout";
 import { runParts, type PartAsk, type RunInputView, type RunPart } from "./run/parts";
-import { PART, askKey, contentKey, partSize, type PartShape } from "./run/part-size";
+import { PART, partSize, rowKey, type PartShape } from "./run/part-size";
+import { runSources } from "./run/sources";
 import { computerRows, computerView } from "./parts/computer";
 import { foundByPart } from "./run/found";
 import * as m from "$shared/i18n/messages";
@@ -90,8 +91,8 @@ export function requestTextSize(text: string, open: boolean) {
 }
 
 /** A block's height as it last measured itself at this width, open or not. */
-export const measureKey = (id: string, width: number, open: boolean, detail: Detail = "full") =>
-  `${id}|${Math.round(width)}|${open ? 1 : 0}${detail === "full" ? "" : `|${detail}`}`;
+export const measureKey = (id: string, width: number, open: boolean) =>
+  `${id}|${Math.round(width)}|${open ? 1 : 0}`;
 
 export type StageOptions = {
   recorded?: (objective: string) => readonly WorkPageV1[];
@@ -103,8 +104,6 @@ export type StageOptions = {
   open?: string | null;
   /** Requests whose words the person opened to read whole. */
   requests?: ReadonlySet<string>;
-  /** The canvas's detail: an object surveyed from afar takes the room it draws at that detail. */
-  detail?: Detail;
   /** Questions waiting on the person, by the work they belong to. */
   asks?: (objective: string) => readonly PartAsk[];
   /** What a run drew on before it began. */
@@ -186,18 +185,49 @@ function leadEntries(
   return { entries, revised };
 }
 
-/** How a part's own node stands: frames while it works, a stack once done. */
-export function partShape(
-  part: RunPart,
-  measured?: number,
-  projection?: WorkRuntimeProjection,
-): PartShape {
+type InputFact = NonNullable<WorkExecutionFact["inputs"]>[number];
+const baseName = (path: string) => path.replace(/\/+$/u, "").split("/").at(-1) || path;
+
+/**
+ * The folders a run read, by name: the one its fact names, else the
+ * canvas's folders its files sit in, else the canvas's folders when they are
+ * as many as it read. A count is never a name.
+ */
+function folderNames(
+  snapshot: WorkEnvironmentSnapshot,
+  run: WorkExecutionFact,
+  fact: InputFact,
+): string[] {
+  if (fact.reference?.startsWith("/")) return [baseName(fact.reference)];
+  const folders = snapshot.elements.flatMap((element) =>
+    element.reference.kind === "folder"
+      ? [{ path: element.reference.path, name: element.reference.name }]
+      : [],
+  );
+  const read = (run.file_evidence ?? []).map((record) => record.file.path);
+  const used = folders.filter((folder) =>
+    read.some((path) => path === folder.path || path.startsWith(`${folder.path}/`)),
+  );
+  if (used.length) return used.map((folder) => folder.name || baseName(folder.path));
+  if (folders.length && folders.length === (fact.count ?? 1))
+    return folders.map((folder) => folder.name || baseName(folder.path));
+  return [fact.label];
+}
+
+/** Each input once, as a run's several executions name it again. */
+function uniqueInputs(inputs: readonly RunInputView[]): RunInputView[] {
+  const seen = new Set<string>();
+  return inputs.filter((input) => {
+    const key = `${input.kind}:${input.label}`;
+    return !seen.has(key) && !!seen.add(key);
+  });
+}
+
+/** How a part's own node stands: its pages as windows, its sources, its helper's view or its ask. */
+export function partShape(part: RunPart, projection?: WorkRuntimeProjection): PartShape {
   if (part.ask) {
     const ask = part.ask.props["ask"] as { kind?: string } | undefined;
-    return {
-      kind: "ask",
-      height: measured ?? (ask?.kind === "confirm" ? PART.askConfirm : PART.askHeight),
-    };
+    return { kind: "ask", confirm: ask?.kind === "confirm" };
   }
   if (part.helper === "computer" || part.helper === "connection") {
     const steps = part.steps ?? [];
@@ -209,7 +239,6 @@ export function partShape(
     return {
       kind: "helper",
       rows: Math.max(rows, Math.min(PART.helperLines, part.lines?.length ?? 0)),
-      ...(measured ? { height: measured } : {}),
     };
   }
   if (part.helper === "research")
@@ -219,9 +248,7 @@ export function partShape(
       more: part.sources.length > PART.sourceRows,
     };
   if (!part.pages.length) return { kind: "label" };
-  return part.state === "running" || part.state === "waiting"
-    ? { kind: "frames", count: part.pages.length }
-    : { kind: "stack", count: part.pages.length };
+  return { kind: "pages", count: part.pages.length };
 }
 
 /**
@@ -236,7 +263,6 @@ export function environmentStages(
 ): WorkStage[] {
   const pins = boardPins(snapshot);
   const measured = options.measured ?? new Map<string, number>();
-  const detail = options.detail ?? "full";
   const stages: WorkStage[] = [];
   let top = 0;
   for (const element of snapshot.elements) {
@@ -284,18 +310,20 @@ export function environmentStages(
           const ask = asked.find((entry) => [part.id, part.key, part.host].includes(entry.part));
           if (ask) part.ask = { props: ask.props };
         }
-      /** A slot's own height at this detail, or in full. */
-      const seen = (key: string, width: number) =>
-        (detail !== "full" ? measured.get(measureKey(key, width, false, detail)) : undefined) ??
-        measured.get(measureKey(key, width, false));
       // What the run drew on: the lead records it as facts; a caller may add its own.
-      const recordedInputs = runs.flatMap((run) =>
-        (run.inputs ?? []).map((fact): RunInputView => ({
-          kind: fact.kind,
-          label: fact.label,
-          ...(fact.count ? { count: fact.count } : {}),
-          lit: true,
-        })),
+      const recordedInputs = uniqueInputs(
+        runs.flatMap((run) =>
+          (run.inputs ?? []).flatMap((fact): RunInputView[] =>
+            fact.kind === "files"
+              ? folderNames(snapshot, run, fact).map((label) => ({
+                  kind: "files",
+                  label,
+                  lit: true,
+                  folder: true,
+                }))
+              : [{ kind: fact.kind, label: fact.label, lit: true }],
+          ),
+        ),
       );
       const inputs = (options.inputs?.(runs) ?? recordedInputs).map((input, index) => ({
         id: `input:${draft.card}:${index}`,
@@ -321,11 +349,7 @@ export function environmentStages(
       const open = options.open ?? undefined;
       const range = (object: RunObject) => objectWidth(object.view);
       const sized = (object: RunObject, width: number, opened: boolean) =>
-        (detail !== "full"
-          ? measured.get(measureKey(object.id, width, opened, detail))
-          : undefined) ??
-        measured.get(measureKey(object.id, width, opened)) ??
-        objectHeight(object.view, width);
+        measured.get(measureKey(object.id, width, opened)) ?? objectHeight(object.view, width);
       const pinned = new Set(
         set.objects.flatMap((object) => (pins.has(object.id) ? [object.id] : [])),
       );
@@ -361,28 +385,32 @@ export function environmentStages(
         part: {
           id: part.id,
           ...partSize(
-            partShape(
-              part,
-              seen(
-                part.ask ? askKey(part.id) : contentKey(part.id),
-                part.ask ? PART.ask : PART.helper,
-              ),
-              projection,
-            ),
-            detail,
+            partShape(part, projection),
+            measured.get(measureKey(rowKey(part.id), 0, false)),
           ),
         },
         found: set.objects.flatMap((object) => {
           if (found.get(object.id) !== part.id || pinned.has(object.id)) return [];
-          const width = Math.round(range(object).ideal);
+          const width = Math.round(Math.min(FOUND, range(object).ideal));
           return [{ id: object.id, width, height: sized(object, width, object.id === open) }];
         }),
         feeds:
           part.state === "done" &&
           (part.pages.length > 0 || part.sources.length > 0 || !!part.lines?.length),
       }));
+      const drawn = runSources(runs, recorded);
+      const sourcesId = `sources:${draft.card}`;
+      const sources =
+        drawn.rows.length || drawn.unread.length
+          ? {
+              id: sourcesId,
+              width: SOURCES,
+              height: measured.get(measureKey(sourcesId, SOURCES, false)) ?? sourcesHeight(drawn),
+            }
+          : undefined;
       const lane = placeRun(top, {
         request: requestPart,
+        ...(sources ? { sources } : {}),
         inputs: inputs.map((entry) => ({ id: entry.id, ...INPUT })),
         rows,
         ...(head ? { head } : {}),
@@ -412,7 +440,7 @@ export function environmentStages(
         parts,
         inputs,
         found,
-        detail,
+        ...(sources ? { sources: { id: sourcesId, view: drawn } } : {}),
         targets: Object.fromEntries(
           Object.entries(lane.rects).map(([id, rect]) => [id, { x: rect.x, y: rect.y }]),
         ),
@@ -421,6 +449,19 @@ export function environmentStages(
     }
   }
   return stages;
+}
+
+/** What a part found stands at its row's end no wider than this, so the result keeps the view. */
+const FOUND = 760;
+/** The Sources under a result: a reading column of rows. */
+const SOURCES = 560;
+/** Rows the Sources show before Show all. */
+export const SOURCE_ROWS = 6;
+function sourcesHeight(drawn: ReturnType<typeof runSources>): number {
+  const frames = drawn.rows.some((row) => row.frame) ? 84 : 0;
+  const rows = Math.min(SOURCE_ROWS, drawn.rows.length);
+  const more = drawn.rows.length > SOURCE_ROWS ? 32 : 0;
+  return 28 + frames + rows * 32 + more + (drawn.unread.length ? 36 : 0);
 }
 
 type Box = { x: number; y: number; width: number; height: number };

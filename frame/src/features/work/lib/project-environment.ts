@@ -19,13 +19,14 @@ import type { RunPart } from "./run/parts";
 import { hostOf, siteKey, siteName } from "./run/site";
 import type { SourceRow } from "./project-environment-stage";
 import { RUN } from "./run/layout";
-import { PART, labelWidth } from "./run/part-size";
+import { PART, partLead } from "./run/part-size";
 import { fileName } from "./work-files";
 import { linkVideo } from "./link-media";
 import { heldPage, humanPage, phaseLabel } from "./work-human";
 import { mediaUrl, pageFrameUrl } from "$domain/resources";
 import {
   clipText,
+  type PartNeed,
   type PartPage,
   type CanvasItem,
   type CanvasLink,
@@ -509,7 +510,7 @@ function standFor(doing: AgentDoing, stage: WorkStage): CanvasPosition {
   if (rect && doing !== "writing" && doing !== "done") {
     if (working!.helper === "browser" && working!.pages.length)
       return {
-        x: rect.x + labelWidth(stage.detail) + PART.gap + PART.tile - MARK / 2,
+        x: rect.x + partLead + PART.window - MARK / 2,
         y: rect.y - MARK / 2,
       };
     // Beside a row that shows its own work, off its end on the row's line.
@@ -598,6 +599,28 @@ function citedSites(rows: readonly SourceRow[]) {
   return [...sites.values()];
 }
 
+/** Command line tools by the service a person knows them as. */
+const TOOLS: Record<string, string> = { gh: "GitHub", glab: "GitLab" };
+
+/** A part's need as its row says it, named the way a person names the thing. */
+function needView(need: NonNullable<RunPart["need"]>): PartNeed {
+  switch (need.kind) {
+    case "sign_in":
+    case "allow_site":
+      return { kind: need.kind, target: siteName(need.host), address: `https://${need.host}` };
+    case "allow_folder":
+      return {
+        kind: need.kind,
+        target: need.path.replace(/\/+$/u, "").split("/").at(-1) || need.path,
+        address: need.path,
+      };
+    case "use_connection":
+      return { kind: need.kind, target: TOOLS[need.connection] ?? need.connection };
+    case "retry":
+      return { kind: need.kind, target: need.host ? siteName(need.host) : "" };
+  }
+}
+
 /** Found things a part names in its summary, by the kind of thing. */
 function partSummary(part: RunPart, stage: WorkStage): string | undefined {
   if (part.names?.length) return part.names.join(", ");
@@ -670,10 +693,7 @@ export function environmentParts(
         return {
           id: entry.id,
           url: entry.url,
-          title: clipText(
-            observed?.trim() || entry.tab?.title.trim() || part.title || m.work_env_page(),
-            TITLE_TEXT,
-          ),
+          title: clipText(observed?.trim() || entry.tab?.title.trim() || "", TITLE_TEXT),
           status: shown
             ? m.work_env_tab_caption()
             : held
@@ -713,7 +733,7 @@ export function environmentParts(
                 key: page.id,
                 url: page.url,
                 where: host(page.url).replace(/^www\./u, ""),
-                title: page.title,
+                title: page.title || page.url,
               })),
               ...part.unread.map((page) => ({
                 key: page.key,
@@ -744,6 +764,7 @@ export function environmentParts(
           ...(part.lines ? { lines: part.lines } : {}),
           ...(part.connection ? { connection: part.connection } : {}),
           ...(part.ask ? { ask: part.ask } : {}),
+          ...(part.need ? { need: needView(part.need) } : {}),
           ...(helper ? { presence: agentSeed(stage.objective) } : {}),
           ...(part.helper === "research"
             ? {
@@ -777,6 +798,27 @@ export function environmentInputs(stages: readonly WorkStage[]): CanvasItem[] {
       };
     }),
   );
+}
+
+/** What each run drew on, under its result. */
+export function environmentSources(stages: readonly WorkStage[]): CanvasItem[] {
+  return stages.flatMap((stage) => {
+    const sources = stage.sources;
+    const rect = sources ? stage.lane.rects[sources.id] : undefined;
+    if (!sources || !rect) return [];
+    return [
+      {
+        id: sources.id,
+        type: "sources" as const,
+        kind: m.work_sources(),
+        title: m.work_sources(),
+        detail: "",
+        status: "",
+        size: { width: rect.width, height: rect.height },
+        drawn: sources.view,
+      },
+    ];
+  });
 }
 
 /** Each run's result and what its parts found: the reply at its head, then its objects. */

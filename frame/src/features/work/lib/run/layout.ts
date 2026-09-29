@@ -3,10 +3,11 @@ import { fanIn, fanOut, type Point } from "./lines";
 
 /**
  * A run on the 8 px grid, left to right: the inputs hang left of the request
- * at x = 0, the parts start 48 past the request, the result 48 past the
- * widest part row. Every line of a run meets its ends on one spine, 32 under
+ * at x = 0, the parts start 48 past the request, the result 96 past the
+ * widest part row, so the lines from what the parts found merge in a gutter
+ * of their own. Every line of a run meets its ends on one spine, 32 under
  * the run's top: the request's first line, each part's name, the answer's
- * headline.
+ * headline. The run's Sources stand under its result.
  */
 export const RUN = {
   inputs: 200,
@@ -14,9 +15,12 @@ export const RUN = {
   gutter: 48,
   rowGap: 32,
   between: 120,
-  label: 120,
-  found: 24,
-  foundGap: 16,
+  /** From the widest part row to the result: room for the lines to merge. */
+  feed: 96,
+  found: 32,
+  foundGap: 24,
+  /** The Sources under the result. */
+  sources: 40,
   spine: 32,
   /** A part's name sits 12 under its row's top. */
   labelMid: 12,
@@ -43,6 +47,8 @@ export type RunInputs = {
   rows: readonly RunRow[];
   head?: Sized;
   board: BoardLayout;
+  /** What the run drew on, under its result. */
+  sources?: Sized;
   /** Blocks the person moved, by their offset from the result's corner. */
   pins?: ReadonlyMap<string, Rect>;
 };
@@ -134,7 +140,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
   }
   const partsBottom = run.rows.length ? y - RUN.rowGap : top;
 
-  const resultX = run.rows.length ? snap(partsX + widest + RUN.gutter) : partsX;
+  const resultX = run.rows.length ? snap(partsX + widest + RUN.feed) : partsX;
   const resultTop = spine - RUN.resultMid;
   let blocks = resultTop;
   if (run.head) {
@@ -179,7 +185,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
     const feeding = rowEnds.filter((entry) => entry.row.feeds);
     fanIn(
       feeding.map((entry) => entry.end),
-      resultX - RUN.gutter / 2,
+      resultX - RUN.feed / 2,
       into,
     ).forEach((points, index) => {
       const entry = feeding[index]!;
@@ -210,7 +216,20 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
       });
   }
 
-  let extent = Math.max(top + run.request.height, inputsBottom, partsBottom, resultBottom);
+  let sourcesBottom = resultBottom;
+  if (run.sources) {
+    const y = snap(resultBottom + RUN.sources);
+    rects[run.sources.id] = { x: resultX, y, width: run.sources.width, height: run.sources.height };
+    sourcesBottom = y + run.sources.height;
+    resultRight = Math.max(resultRight, resultX + run.sources.width);
+  }
+  let extent = Math.max(
+    top + run.request.height,
+    inputsBottom,
+    partsBottom,
+    resultBottom,
+    sourcesBottom,
+  );
   for (const [id, pin] of run.pins ?? []) {
     rects[id] = { ...pin, x: resultX + pin.x, y: resultTop + pin.y };
     extent = Math.max(extent, resultTop + pin.y + pin.height);

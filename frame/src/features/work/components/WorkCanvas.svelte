@@ -19,12 +19,9 @@
     canvasArrival,
     canvasProbe,
     canvasBoard,
-    canvasDetail,
     canvasWork,
     type BoardActions,
   } from "../lib/canvas-context";
-  import { detailAt } from "../lib/zoom";
-  import type { Detail } from "../lib/board/types";
   import CanvasNode from "./CanvasNode.svelte";
   import AreaNode from "./AreaNode.svelte";
   import AgentMark from "./AgentMark.svelte";
@@ -78,6 +75,7 @@
     authoritative,
     fitBottomInset = 0,
     fitTopInset = 0,
+    home,
     still = false,
     virtualizeFrom = 24,
     oninspect,
@@ -93,7 +91,6 @@
     onmoved,
     board,
     work,
-    ondetail,
     onprobe,
     expose,
   }: {
@@ -102,11 +99,14 @@
     areas?: readonly CanvasArea[];
     /** The admitted picture of each subject, by merge key. */
     pictures?: ReadonlyMap<string, { profile: string; digest: string }>;
-    initialView?: CanvasView;
+    /** Without a camera, the canvas opens on its home run. */
+    initialView?: Omit<CanvasView, "viewport"> & { viewport?: CanvasView["viewport"] };
     remoteView?: { sequence: number; view: CanvasView };
     authoritative: ReadonlySet<string>;
     fitBottomInset?: number;
     fitTopInset?: number;
+    /** The run a canvas with no saved camera opens on: framed to its width, its result whole. */
+    home?: { x: number; y: number; width: number };
     /** A lift, the pane or the takeover is open: the camera does not follow the agent. */
     still?: boolean;
     virtualizeFrom?: number;
@@ -131,16 +131,14 @@
     board?: BoardActions;
     /** The runs behind the canvas, by objective, for a helper's own view of its part. */
     work?: (objective: string) => WorkRuntimeProjection | undefined;
-    /** The canvas's detail changed: its owner lays runs out for the new one. */
-    ondetail?: (detail: Detail) => void;
     /** Asks native for the icon of an origin no tab has shown. */
     onprobe?: (origin: string) => void;
     expose?: (api: CanvasApi) => void;
   } = $props();
   setContext(canvasWork, (objective: string) => work?.(objective));
   setContext(canvasBoard, {
-    measure: (id: string, width: number, open: boolean, height: number, level?: Detail) =>
-      board?.measure(id, width, open, height, level),
+    measure: (id: string, width: number, open: boolean, height: number) =>
+      board?.measure(id, width, open, height),
     toggle: (id: string) => board?.toggle(id),
     ask: (name: string) => board?.ask(name),
     choose: (element: string, chosen: boolean) => board?.choose(element, chosen),
@@ -189,6 +187,7 @@
   function center(id: string) {
     const node = nodeFor(id);
     if (!node) return;
+    homed = false;
     const position = absolutePosition(node, nodes);
     viewport = {
       x: Math.max(24, (canvasWidth - (node.width ?? 480)) / 2) - position.x,
@@ -201,38 +200,41 @@
     publishView();
   }
   setContext(canvasFocusResult, center);
-  /** Brings a card to the reading place, at actual size: its corner near the top left. */
-  function reveal(id: string) {
+  const AIR = 64;
+  /**
+   * The view that holds a span of the canvas across its width: at 100% when
+   * it fits, down to 50%; wider still, its right end stays in view, so a
+   * run's result is never cut.
+   */
+  function framing(rect: { x: number; y: number; width: number }) {
+    const room = Math.max(1, canvasWidth - AIR * 2);
+    const zoom = Math.max(0.5, Math.min(1, room / Math.max(1, rect.width)));
+    const over = Math.max(0, rect.width * zoom - room);
+    return { x: AIR - rect.x * zoom - over, y: fitTopInset + 40 - rect.y * zoom, zoom };
+  }
+  /** Brings a card to the reading place: its corner near the top left, as large as its span lets it read whole. */
+  function reveal(id: string, span?: number) {
     const node = nodeFor(id);
     if (!node || !flow) return;
+    homed = false;
     const position = absolutePosition(node, nodes);
-    void flow.setViewport(
-      { x: 64 - position.x, y: fitTopInset + 24 - position.y, zoom: 1 },
-      {
-        duration: reducedMotion() ? 0 : duration("page"),
-        ease: curve(easing("emphasized")),
-        interpolate: "linear",
-      },
-    );
+    void flow.setViewport(framing({ ...position, width: span ?? node.width ?? 480 }), {
+      duration: reducedMotion() ? 0 : duration("page"),
+      ease: curve(easing("emphasized")),
+      interpolate: "linear",
+    });
   }
   const restoredViewport = untrack(() => validViewport(initialView?.viewport));
   let viewport = $state(restoredViewport ?? { x: 0, y: 0, zoom: 1 });
-  /** Changes only when the zoom crosses a level's edge, so nodes redraw then and only then. */
-  let detail = $state<Detail>(untrack(() => detailAt(viewport.zoom)));
+  /**
+   * A canvas with no saved camera stands on its home run, and keeps standing
+   * there as the run's objects measure themselves, until the person moves.
+   */
+  let homed = !restoredViewport;
   $effect(() => {
-    const next = detailAt(
-      viewport.zoom,
-      untrack(() => detail),
-    );
-    if (next !== untrack(() => detail)) {
-      detail = next;
-      untrack(() => ondetail?.(next));
-    }
-  });
-  setContext(canvasDetail, {
-    get level() {
-      return detail;
-    },
+    const target = home;
+    if (!homed || !target || !canvasWidth) return;
+    untrack(() => (viewport = framing(target)));
   });
   // One bad card never hides the canvas: the scene is repaired, then guarded.
   const scene = $derived(sanitizeScene(items, links));
@@ -257,6 +259,7 @@
     if (!valid) return [];
     arrival.see(scene.items);
     return scene.links.flatMap((link) => {
+      if (link.hover && !focused.has(link.source) && !focused.has(link.target)) return [];
       const rest = restLink(link);
       if (!rest && !lit.has(link.id)) return [];
       return [
@@ -436,7 +439,7 @@
     placeArea: (area: string, rect: CanvasPosition & CanvasSize) => void;
     center: (id: string) => void;
     focusCard: (id: string) => void;
-    reveal: (id: string) => void;
+    reveal: (id: string, span?: number) => void;
     followAgent: () => boolean;
     resumeFollow: () => void;
   };
@@ -645,7 +648,6 @@
 <div
   class="work-canvas"
   class:multi={selectedItems.length > 1}
-  data-detail={detail}
   bind:this={host}
   bind:clientWidth={canvasWidth}
   bind:clientHeight={canvasHeight}
@@ -658,7 +660,7 @@
       {nodeTypes}
       {edgeTypes}
       bind:viewport
-      fitView={scene.items.length > 0 && !restoredViewport}
+      fitView={scene.items.length > 0 && !restoredViewport && !home}
       fitViewOptions={{ padding: 0.2, duration: 0 }}
       minZoom={0.2}
       maxZoom={2}
@@ -738,9 +740,14 @@
       onmoveend={publishView}
       oninit={() => requestAnimationFrame(() => requestAnimationFrame(() => (fitted = true)))}
       onmovestart={(event) => {
-        if (event) following = false;
+        if (!event) return;
+        following = false;
+        homed = false;
       }}
-      onnodedragstart={() => (following = false)}
+      onnodedragstart={() => {
+        following = false;
+        homed = false;
+      }}
     >
       <CanvasFlowHandle onready={(handle) => (flow = handle)} />
       <Background patternColor="var(--work-canvas-dot)" gap={20} size={1.5} />
@@ -803,6 +810,12 @@
   /* stylelint-disable-next-line selector-class-pattern */
   .work-canvas :global(.svelte-flow__node.board-block:not(.dragging)) {
     transition: transform var(--motion-slow) var(--ease-emphasized);
+  }
+
+  /* A part's windows fan out over what follows its row. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  .work-canvas :global(.svelte-flow__node:has(.fans:hover)) {
+    z-index: 1000 !important;
   }
 
   /* The agent's mark walks to its work on a spring; it never takes the pointer. */

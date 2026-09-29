@@ -1,19 +1,16 @@
 <script lang="ts">
   import type { CanvasItem } from "../../lib/canvas-model";
-  import type { Detail } from "../../lib/board/types";
   import Remembered from "../asks/Remembered.svelte";
   import * as m from "$shared/i18n/messages";
 
   let {
     item,
     selected,
-    detail = "full",
     ontoggle,
     onaction,
   }: {
     item: CanvasItem;
     selected: boolean;
-    detail?: Detail;
     ontoggle: () => void;
     /** The request's one action, when it has one, such as showing its plan. */
     onaction?: () => void;
@@ -39,7 +36,7 @@
   lines at rest, and a click opens every line where they stand.
 -->
 <div
-  class="request work-drag-handle {detail}"
+  class="request work-drag-handle"
   class:selected
   data-work-request={item.id}
   data-card-id={item.id}
@@ -68,7 +65,7 @@
           }}>{item.actionLabel}</button
         >{/if}
     </p>{/if}
-  {#if item.remember && detail === "full"}<div class="remembered">
+  {#if item.remember}<div class="remembered">
       <Remembered {...item.remember} />
     </div>{/if}
 </div>
@@ -161,31 +158,5 @@
     border-radius: var(--radius-inset);
     outline: 2px solid var(--color-ring);
     outline-offset: 2px;
-  }
-
-  /* Surveyed from afar: the words alone, set to read at half size and below. */
-  .overview .meta,
-  .overview .actions,
-  .tile .meta,
-  .tile .actions {
-    display: none;
-  }
-
-  .overview .words {
-    margin-block-start: 15px;
-    font-size: 28px;
-    font-weight: 600;
-    letter-spacing: -0.02em;
-    line-height: 34px;
-  }
-
-  .tile .words {
-    margin-block-start: 6px;
-    font-size: 44px;
-    font-weight: 600;
-    letter-spacing: -0.025em;
-    line-height: 52px;
-    -webkit-line-clamp: 1;
-    line-clamp: 1;
   }
 </style>

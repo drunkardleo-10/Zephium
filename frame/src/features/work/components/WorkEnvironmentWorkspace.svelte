@@ -43,6 +43,7 @@
   import WorkBar from "./bar/WorkBar.svelte";
   import { centreSize, picksSheet } from "./objects/centre";
   import { partAsks } from "./asks/actions";
+  import { ASK_WORDS, asksOf, openAsks, registrableSite } from "./asks/asks";
   import BarTool from "./bar/BarTool.svelte";
   import NotePanel from "./bar/NotePanel.svelte";
   import AttachPanel, { type AttachKind } from "./bar/AttachPanel.svelte";
@@ -67,7 +68,6 @@
   } from "../lib/project-environment-board";
   import type { BoardActions } from "../lib/canvas-context";
   import type { ObjectActions, ObjectView } from "../lib/board/types";
-  import type { Detail } from "../lib/board/types";
   import HostGlyph from "./cards/HostGlyph.svelte";
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
@@ -84,6 +84,7 @@
     environmentItems,
     environmentLinks,
     environmentInputs,
+    environmentSources,
     environmentParts,
     environmentPictures,
     environmentView,
@@ -185,7 +186,7 @@
     ) => void;
     center: (id: string) => void;
     focusCard: (id: string) => void;
-    reveal: (id: string) => void;
+    reveal: (id: string, span?: number) => void;
     followAgent: () => boolean;
   }>();
   let selectedIds = $state.raw<string[]>([]);
@@ -436,6 +437,47 @@
   function openCitation(url: string) {
     openPane({ kind: "url", url }, null);
   }
+  /** Sites the person allowed from a part's row: the next run's entry question for each is answered once. */
+  const preallowed = new SvelteSet<string>();
+  /** A part's need met from its row: a page to sign in on, a site or folder allowed, the part run again. */
+  function meetNeed(id: string, how: string) {
+    const part = parts.find((item) => item.id === id)?.part;
+    const need = part?.need;
+    const current = objectiveSession;
+    if (!part || !need || !current || current.projection?.work.id !== part.objective) return;
+    const again = (text = m.work_need_again_request({ part: part.title })) =>
+      void current.continueWith(text);
+    if (how === "again") return again();
+    switch (need.kind) {
+      case "sign_in":
+        if (need.address) openCitation(need.address);
+        return;
+      case "allow_site":
+        if (need.address) preallowed.add(registrableSite(new URL(need.address).hostname));
+        return again();
+      case "allow_folder":
+        if (need.address) void placing.addFolder(need.address).then((added) => added && again());
+        return;
+      case "use_connection":
+        return again(m.work_need_use_request({ service: need.target, part: part.title }));
+      case "retry":
+        return again();
+    }
+  }
+  $effect(() => {
+    const current = objectiveSession;
+    const execution = current?.projection?.executions.at(-1);
+    if (!current || !execution || !preallowed.size) return;
+    for (const ask of openAsks(asksOf(execution))) {
+      if (ask.kind !== "entry" || !ask.host) continue;
+      const site = registrableSite(ask.host);
+      if (!preallowed.has(site)) continue;
+      untrack(() => {
+        preallowed.delete(site);
+        void current.answerStep(execution.id, ask.step, ASK_WORDS.allow);
+      });
+    }
+  });
   // The takeover: Rust presents the agent's own view inside the well this pane
   // reserves. There is no resize command, so a moved well is released and
   // presented again.
@@ -680,8 +722,6 @@
   /** The block opened in place, and every block's height as it measured itself. */
   let openBlock = $state<string | null>(null);
   const measured = new SvelteMap<string, number>();
-  /** The canvas's detail, so runs make room for objects surveyed from afar. */
-  let canvasDetail = $state<Detail>("full");
   /** Blocks the person dragged: only those can leave their board's flow. */
   const moved = new SvelteSet<string>();
   function toggleBlock(id: string) {
@@ -720,7 +760,6 @@
             objectiveSession?.projection?.work.id === objective
               ? partAsks(objectiveSession, { session: human, work: objective }, openStep)
               : [],
-          detail: canvasDetail,
           requests: openRequests,
         })
       : [],
@@ -736,6 +775,39 @@
       }),
     ),
   );
+  /** Where the camera rested last, so the island speaks for the run in view. */
+  let camera = $state<CanvasView["viewport"] | undefined>(undefined);
+  /** The run that takes most of the view; the island speaks for it unless another is live. */
+  const viewedExecution = $derived.by(() => {
+    const view = camera;
+    const width = cardHost?.clientWidth ?? 0;
+    const height = cardHost?.clientHeight ?? 0;
+    if (!view || !width || !height) return undefined;
+    const seen = {
+      x: -view.x / view.zoom,
+      y: -view.y / view.zoom,
+      width: width / view.zoom,
+      height: height / view.zoom,
+    };
+    let best: { area: number; execution: string } | undefined;
+    for (const stage of stages) {
+      const box = stage.lane.box;
+      const across = Math.min(box.x + box.width, seen.x + seen.width) - Math.max(box.x, seen.x);
+      const down = Math.min(box.y + box.height, seen.y + seen.height) - Math.max(box.y, seen.y);
+      const execution = stage.executions.at(-1);
+      if (across <= 0 || down <= 0 || !execution) continue;
+      if (!best || across * down > best.area) best = { area: across * down, execution };
+    }
+    return best?.execution;
+  });
+  /** From a run's result to its right end: what must read whole when the run is shown. */
+  const resultSpan = (stage: (typeof stages)[number]) =>
+    stage.lane.box.x + stage.lane.box.width - stage.lane.corner.x;
+  /** A work opened with no camera of its own opens on its newest run. */
+  const home = $derived.by(() => {
+    const box = stages.at(-1)?.lane.box;
+    return box ? { x: box.x, y: box.y, width: box.width } : undefined;
+  });
   // A run that ends while the person follows it hands them its result, at reading size.
   let wasLive = new Set<string>();
   $effect(() => {
@@ -744,7 +816,8 @@
       for (const card of wasLive) {
         if (now.has(card)) continue;
         const stage = stages.find((entry) => entry.card === card);
-        if (stage && canvasRef?.followAgent()) canvasRef.reveal(stage.column.head ?? card);
+        if (stage && canvasRef?.followAgent())
+          canvasRef.reveal(stage.column.head ?? card, resultSpan(stage));
       }
       wasLive = now;
     });
@@ -846,6 +919,7 @@
     ...boards,
     ...parts,
     ...environmentInputs(stages),
+    ...environmentSources(stages),
     ...agents.items,
   ]);
   const links = $derived([
@@ -1151,8 +1225,8 @@
     return execution && artifact ? artifactView(artifact, execution) : undefined;
   }
   const boardActions: BoardActions = {
-    measure(id, width, open, height, level) {
-      const key = measureKey(id, width, open, level);
+    measure(id, width, open, height) {
+      const key = measureKey(id, width, open);
       if (measured.get(key) !== height) measured.set(key, height);
     },
     toggle: toggleBlock,
@@ -1605,6 +1679,7 @@
     }
   }
   function checkpoint(view: CanvasView) {
+    camera = view.viewport ?? camera;
     if (!snapshot || session.loading) return;
     const ids = Object.keys(view.positions).filter(
       (id) =>
@@ -1860,6 +1935,7 @@
     >{#snippet children(Line)}
       <Line
         session={objectiveSession!}
+        viewed={viewedExecution}
         agents={agents.items}
         draft={session.composer}
         onreview={(step: string) => {
@@ -1919,7 +1995,6 @@
               {authoritative}
               expose={(api) => (canvasRef = api)}
               board={boardActions}
-              ondetail={(next: Detail) => (canvasDetail = next)}
               work={(objective: string) =>
                 objectiveSession?.projection?.work.id === objective
                   ? objectiveSession.projection
@@ -1931,6 +2006,7 @@
                 void commands.faviconProbe(session.profile, [origin]).catch(() => false)}
               fitBottomInset={composerHeight}
               fitTopInset={56}
+              {home}
               still={!!lifted || !!pane || !!takeover}
               oninspect={(id: string) => (inspected = id)}
               onopen={openLift}
@@ -1985,6 +2061,10 @@
                 if (action === "expand-request") {
                   if (openRequests.has(id)) openRequests.delete(id);
                   else openRequests.add(id);
+                  return;
+                }
+                if (action?.startsWith("need:")) {
+                  meetNeed(id, action.slice("need:".length));
                   return;
                 }
                 if (action?.startsWith("page:")) {
@@ -2419,9 +2499,17 @@
     pointer-events: none;
   }
 
+  /* Solid behind the title and the island, then easing out: nothing reads through them. */
   .edge-scrim.top {
     inset-block-start: 0;
-    background: linear-gradient(to bottom, var(--color-canvas), transparent);
+    block-size: 112px;
+    background: linear-gradient(
+      to bottom,
+      var(--color-canvas) 0 44px,
+      color-mix(in srgb, var(--color-canvas) 72%, transparent) 64px,
+      color-mix(in srgb, var(--color-canvas) 28%, transparent) 88px,
+      transparent 112px
+    );
   }
 
   .edge-scrim.bottom {

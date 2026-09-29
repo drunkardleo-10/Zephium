@@ -1,21 +1,20 @@
-import type { Detail } from "../board/types";
 /**
- * A part's own node: its name in a 120 px column, then its pages. While the
- * part works they stand as frames, up to three, the live one first; once it
- * is done they fold into a stack at the start of the row.
+ * A part's own node: its name in a 144 px column, then its work. A browser
+ * part's pages stand as small browser windows, the live one (or the last one
+ * read) in front and up to two behind it, at one size whether the part works
+ * or is done, so a run never re-lays out when a part ends.
  */
 export const PART = {
-  label: 120,
-  gap: 16,
-  tile: 176,
-  tileGap: 12,
-  /** A frame at 16:10 with its caption, up to two lines, under it. */
-  tileHeight: 110 + 6 + 32,
+  label: 144,
+  gap: 24,
+  /** A page's window: a slim bar over its frame at 16:10. */
+  window: 336,
+  bar: 28,
+  frame: 210,
+  /** Each window behind the front one sits this far right and down. */
+  behindX: 14,
+  behindY: 10,
   shown: 3,
-  /** Folded pages: 144 × 90 thumbnails, each one behind 12 across and 11 down. */
-  thumb: 144,
-  thumbHeight: 90,
-  stackStep: 12,
   sources: 280,
   sourceRow: 28,
   sourceRows: 3,
@@ -29,59 +28,55 @@ export const PART = {
   labelHeight: 48,
 } as const;
 
-/** Where a part's ask card reports its height. */
-export const askKey = (part: string) => `${part}:ask`;
-/** Where a helper's own view of its part reports its height. */
-export const contentKey = (part: string) => `${part}:content`;
+/** Where a part's row reports the height its name and its work take. */
+export const rowKey = (part: string) => `${part}:row`;
 
 export type PartShape =
-  | { kind: "frames"; count: number }
-  | { kind: "stack"; count: number }
+  | { kind: "pages"; count: number }
   | { kind: "sources"; rows: number; more: boolean }
-  | { kind: "helper"; rows: number; height?: number }
-  | { kind: "ask"; height: number }
+  | { kind: "helper"; rows: number }
+  | { kind: "ask"; confirm: boolean }
   | { kind: "label" };
 
-/** The name's column: surveyed from afar it widens, so a name reads whole at its large size. */
-export const labelWidth = (detail: Detail = "full") => (detail === "full" ? PART.label : 200);
+/** Where the part's work starts, right of its name. */
+export const partLead = PART.label + PART.gap;
 
-export function partSize(
-  shape: PartShape,
-  detail: Detail = "full",
-): { width: number; height: number } {
-  const lead = labelWidth(detail) + PART.gap;
+/** The windows of a part's pages: the front one and up to two behind it. */
+export function stackSize(count: number) {
+  const behind = Math.min(PART.shown, Math.max(1, count)) - 1;
+  return {
+    width: PART.window + behind * PART.behindX,
+    height: PART.bar + PART.frame + behind * PART.behindY,
+  };
+}
+
+/**
+ * A part's size: its work's width right of its name, and the taller of its
+ * name and its work, as the row last measured them or as estimated until then.
+ */
+export function partSize(shape: PartShape, measured?: number): { width: number; height: number } {
+  const lead = partLead;
+  const tall = (estimate: number) => Math.max(PART.labelHeight, measured ?? estimate);
   switch (shape.kind) {
-    case "frames": {
-      const count = Math.max(1, Math.min(PART.shown, shape.count));
-      return {
-        width: lead + count * PART.tile + (count - 1) * PART.tileGap,
-        height: PART.tileHeight,
-      };
-    }
-    case "stack": {
-      const behind = Math.min(PART.shown, Math.max(1, shape.count)) - 1;
-      return {
-        width: lead + PART.thumb + behind * PART.stackStep,
-        height: PART.thumbHeight + behind * 11,
-      };
+    case "pages": {
+      const stack = stackSize(shape.count);
+      return { width: lead + stack.width, height: Math.max(stack.height, measured ?? 0) };
     }
     case "sources":
       return {
         width: lead + PART.sources,
-        height: Math.max(
-          PART.labelHeight,
+        height: tall(
           Math.min(PART.sourceRows, shape.rows) * PART.sourceRow + (shape.more ? 24 : 0),
         ),
       };
     case "helper":
-      // A helper's own view stands 400 wide, a 24 px row per thing it did, until it measures itself.
-      return {
-        width: lead + PART.helper,
-        height: Math.max(PART.labelHeight, shape.height ?? shape.rows * 24 + 8),
-      };
+      return { width: lead + PART.helper, height: tall(shape.rows * 24 + 8) };
     case "ask":
-      return { width: lead + PART.ask, height: Math.max(PART.labelHeight, shape.height) };
+      return {
+        width: lead + PART.ask,
+        height: tall(shape.confirm ? PART.askConfirm : PART.askHeight),
+      };
     case "label":
-      return { width: Math.max(320, lead + 200), height: 56 };
+      return { width: 240, height: tall(56) };
   }
 }

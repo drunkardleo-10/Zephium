@@ -1,19 +1,19 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
   import type { CanvasItem } from "../../lib/canvas-model";
-  import type { Detail } from "../../lib/board/types";
   import {
     AiBrain01Icon,
     BookOpen01Icon,
     BrowserIcon,
     Files01Icon,
+    Folder01Icon,
     Note01Icon,
     Plug01Icon,
     WorkHistoryIcon,
     LayoutGridIcon,
   } from "../../lib/icons";
 
-  let { item, detail = "full" }: { item: CanvasItem; detail?: Detail } = $props();
+  let { item }: { item: CanvasItem } = $props();
   const input = $derived(item.input!);
   const GLYPH = {
     memory: AiBrain01Icon,
@@ -28,10 +28,11 @@
 </script>
 
 <!-- What the agent drew on: a small mark and its words, lit once read. -->
-<div class="input {detail}" class:lit={!!input.lit} title={input.label}>
-  <span class="glyph"><Icon icon={GLYPH[input.kind]} size={14} /></span>
+<div class="input" class:lit={!!input.lit} title={input.label}>
+  <span class="glyph"
+    ><Icon icon={input.folder ? Folder01Icon : GLYPH[input.kind]} size={14} /></span
+  >
   <span class="label">{input.label}</span>
-  {#if input.count && detail === "full"}<span class="count">{input.count}</span>{/if}
 </div>
 
 <style>
@@ -75,28 +76,5 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .count {
-    margin-inline-start: auto;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .overview {
-    gap: 12px;
-    font-size: 22px;
-    font-weight: 600;
-  }
-
-  .overview .glyph {
-    scale: 1.4;
-  }
-
-  .tile .label {
-    display: none;
-  }
-
-  .tile .glyph {
-    scale: 2;
   }
 </style>

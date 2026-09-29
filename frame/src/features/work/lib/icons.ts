@@ -25,6 +25,7 @@ export { default as File01Icon } from "@hugeicons/core-free-icons/File01Icon";
 export { default as FileEditIcon } from "@hugeicons/core-free-icons/FileEditIcon";
 export { default as Files01Icon } from "@hugeicons/core-free-icons/Files01Icon";
 export { default as FolderAddIcon } from "@hugeicons/core-free-icons/FolderAddIcon";
+export { default as Folder01Icon } from "@hugeicons/core-free-icons/Folder01Icon";
 export { default as GitCompareIcon } from "@hugeicons/core-free-icons/GitCompareIcon";
 export { default as GlobalIcon } from "@hugeicons/core-free-icons/GlobalIcon";
 export { default as HandIcon } from "@hugeicons/core-free-icons/HandIcon";

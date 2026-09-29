@@ -1,8 +1,6 @@
 <script lang="ts">
   // BoardCanvas, with the runs behind the canvas for a helper's own view of its part.
-  import { untrack } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
-  import { detailAt } from "../lib/zoom";
   import WorkCanvas from "../components/WorkCanvas.svelte";
   import { clearOfBands, environmentStages, measureKey } from "../lib/project-environment-board";
   import {
@@ -11,11 +9,11 @@
     environmentInputs,
     environmentItems,
     environmentParts,
+    environmentSources,
     environmentView,
   } from "../lib/project-environment";
   import { environmentRequests } from "../lib/project-environment-thread";
   import type { BoardActions } from "../lib/canvas-context";
-  import type { Detail } from "../lib/board/types";
   import type { BoardScene } from "./board-fixtures";
   let {
     scene,
@@ -28,7 +26,6 @@
   } = $props();
   const measured = new SvelteMap<string, number>();
   let open = $state<string | null>(null);
-  let detail = $state<Detail>(untrack(() => detailAt(viewport.zoom)));
   const recorded = () => scene.pages;
   const stages = $derived(
     environmentStages(scene.snapshot, scene.objectives, {
@@ -36,7 +33,6 @@
       pictures: scene.pictures,
       measured,
       open,
-      detail,
     }),
   );
   const requests = $derived(environmentRequests(stages));
@@ -50,6 +46,7 @@
     ...environmentBoards(stages),
     ...environmentParts(scene.objectives, stages, recorded),
     ...environmentInputs(stages),
+    ...environmentSources(stages),
     ...agents.items,
   ]);
   const pictures = $derived(
@@ -67,8 +64,8 @@
     ),
   );
   const board: BoardActions = {
-    measure(id, width, opened, height, level) {
-      const key = measureKey(id, width, opened, level);
+    measure(id, width, opened, height) {
+      const key = measureKey(id, width, opened);
       if (measured.get(key) !== height) measured.set(key, height);
     },
     toggle: (id) => (open = open === id ? null : id),
@@ -105,7 +102,6 @@
   }}
   {board}
   work={(objective: string) => scene.objectives.get(objective)}
-  ondetail={(next) => (detail = next)}
   oninspect={() => {}}
   onopen={(id) => board.toggle(id)}
 />

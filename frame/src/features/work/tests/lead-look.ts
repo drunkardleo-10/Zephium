@@ -347,3 +347,19 @@ export function askingTrip(scene: BoardScene): {
       : [];
   return { scene: lead, asks };
 }
+
+/** A finished run whose part could not do its job: its row says what it needs. */
+export function needingPart(
+  scene: BoardScene,
+  need: NonNullable<NonNullable<WorkExecutionFact["parts"]>[number]["need"]>,
+): BoardScene {
+  const objectives = new Map(
+    [...scene.objectives].map(([id, projection]) => {
+      const copy = structuredClone(projection);
+      for (const execution of copy.executions)
+        for (const part of execution.parts ?? []) if (part.state !== "running") part.need = need;
+      return [id, copy] as const;
+    }),
+  );
+  return { ...scene, objectives };
+}

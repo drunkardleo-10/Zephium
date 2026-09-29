@@ -1,17 +1,43 @@
 <script lang="ts">
   import HostGlyph from "../cards/HostGlyph.svelte";
 
+  /**
+   * A page as a small browser window: a slim bar with the site's mark, its
+   * host and the page's title over the frame the run captured. Without a
+   * frame the page still reads as itself, its title set on its own sheet.
+   */
   let {
     url,
     title,
     frame,
     host = "",
-  }: { url: string; title: string; frame: string | null; host?: string } = $props();
+    live = false,
+  }: {
+    url: string;
+    title: string;
+    frame: string | null;
+    host?: string;
+    /** The agent is on this page now: its window is ringed and its frame follows. */
+    live?: boolean;
+  } = $props();
 
   /** A frame that failed to load, or came back one flat colour, is not shown. */
   let failed = $state<string | null>(null);
   let blank = $state<string | null>(null);
   const shown = $derived(!!frame && failed !== frame && blank !== frame);
+  const site = $derived.by(() => {
+    try {
+      return new URL(url).hostname.replace(/^www\./u, "");
+    } catch {
+      return host.replace(/^www\./u, "");
+    }
+  });
+  /** The title without the site's own name trailing it: the bar already says the site. */
+  const heading = $derived.by(() => {
+    const segments = title.split(/\s+[|·–—-]\s+/u).map((segment) => segment.trim());
+    const own = segments.filter(Boolean);
+    return own.length > 1 ? own.slice(0, -1).join(" – ") : title.trim();
+  });
 
   /** One look at a 12×8 copy: a capture of a page that had not drawn yet is a single tone. */
   function inspect(image: HTMLImageElement) {
@@ -40,24 +66,97 @@
   }
 </script>
 
-{#if shown}
-  <img
-    src={frame}
-    alt=""
-    draggable="false"
-    decoding="async"
-    loading="lazy"
-    onload={(event) => inspect(event.currentTarget as HTMLImageElement)}
-    onerror={() => (failed = frame)}
-  />
-{:else}
-  <span class="face">
-    <HostGlyph {host} {url} size={18} initial={false} />
-    <span class="words">{title}</span>
+<span class="window" class:live>
+  <span class="bar">
+    <span class="mark"><HostGlyph {host} {url} size={14} loading={live} initial={false} /></span>
+    <span class="host">{site}</span>
+    <span class="heading">{heading}</span>
   </span>
-{/if}
+  <span class="view">
+    {#if shown}
+      <img
+        src={frame}
+        alt=""
+        draggable="false"
+        decoding="async"
+        loading="lazy"
+        onload={(event) => inspect(event.currentTarget as HTMLImageElement)}
+        onerror={() => (failed = frame)}
+      />
+    {:else}
+      <span class="face">
+        <span class="sign"><HostGlyph {host} {url} size={28} initial={false} /></span>
+        <span class="words">{heading || site}</span>
+      </span>
+    {/if}
+  </span>
+</span>
 
 <style>
+  .window {
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    inline-size: 100%;
+    block-size: 100%;
+    overflow: hidden;
+    border-radius: var(--radius-row);
+    background: var(--color-surface);
+    box-shadow:
+      0 0 0 1px var(--color-border),
+      var(--shadow-raised);
+    transition: box-shadow var(--motion-base) var(--ease-out);
+  }
+
+  .window.live {
+    box-shadow:
+      0 0 0 1.5px var(--color-accent),
+      var(--shadow-float);
+  }
+
+  .bar {
+    display: grid;
+    flex: none;
+    grid-template-columns: 14px max-content minmax(0, 1fr);
+    align-items: center;
+    gap: 7px;
+    block-size: 28px;
+    padding: 0 10px;
+    border-block-end: 1px solid var(--color-border);
+    background: var(--color-raised);
+    font-size: var(--text-caption);
+    line-height: 14px;
+  }
+
+  .mark {
+    display: grid;
+    place-items: center;
+    inline-size: 14px;
+    block-size: 14px;
+  }
+
+  .host {
+    color: var(--color-text);
+    font-weight: 600;
+  }
+
+  /* One line in the bar: a long title fades at the window's edge. */
+  .heading {
+    overflow: hidden;
+    color: var(--color-muted);
+    white-space: nowrap;
+    mask-image: linear-gradient(to right, black calc(100% - 20px), transparent);
+  }
+
+  .view {
+    position: relative;
+    display: block;
+    flex: 1;
+    min-block-size: 0;
+    overflow: hidden;
+    background: var(--color-surface);
+  }
+
   img {
     display: block;
     inline-size: 100%;
@@ -75,21 +174,26 @@
     box-sizing: border-box;
     inline-size: 100%;
     block-size: 100%;
-    padding: 12px 14px 14px;
-    background: var(--color-surface);
+    padding: 18px 20px 20px;
+  }
+
+  .sign {
+    display: grid;
+    inline-size: 28px;
+    block-size: 28px;
   }
 
   .words {
     display: -webkit-box;
     overflow: hidden;
     color: var(--color-text);
-    font-size: 15px;
+    font-size: 18px;
     font-weight: 600;
-    letter-spacing: -0.01em;
-    line-height: 19px;
+    letter-spacing: -0.015em;
+    line-height: 23px;
+    text-wrap: balance;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 3;
     line-clamp: 3;
-    overflow-wrap: anywhere;
   }
 </style>

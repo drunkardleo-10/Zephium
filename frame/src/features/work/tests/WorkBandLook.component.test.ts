@@ -7,7 +7,7 @@ import BoardCanvas from "./BoardCanvas.svelte";
 import type { BoardScene } from "./board-fixtures";
 import type { MediaAssetV1 } from "$domain/resources";
 import { elementPictures } from "../lib/project-environment-board";
-import { askingTrip, leadTrip } from "./lead-look";
+import { askingTrip, leadTrip, needingPart } from "./lead-look";
 
 // Real runs exported read-only from the QA profile into node_modules/.work-look;
 // without them there is nothing to look at and the test only renders nothing.
@@ -107,11 +107,16 @@ const WORKS = [
   "browser",
   "lego",
   "aisaas",
+  "yctrip",
+  "lunios",
+  "today",
 ];
+/** 0 is the view a work opens in with no camera of its own. */
 const LOOKS = [
   ...WORKS.flatMap(
     (name) =>
       [
+        [name, 0],
         [name, 100],
         [name, 50],
       ] as const,
@@ -123,25 +128,29 @@ const LOOKS = [
   ["trip-leadlive", 100],
   ["trip-asks", 100],
   ["trip-asks", 50],
-  ["trip-lead", 30],
-  ["jobs", 30],
+  ["today-need", 100],
+  ["lunios-need", 0],
 ] as const;
 
 test.each(LOOKS)("%s at %d%%", async (name, percent) => {
   await page.viewport(1440, 900);
-  const base = name.replace(/-(live|lead|leadlive|asks)$/u, "");
+  const base = name.replace(/-(live|lead|leadlive|asks|need)$/u, "");
   const found = await scene(base);
   if (!found) return;
   const asking = name.endsWith("-asks") ? askingTrip(found) : null;
   const loaded = asking
     ? asking.scene
-    : name.endsWith("-live")
-      ? midRun(found)
-      : name.endsWith("-lead")
-        ? leadTrip(found, false)
-        : name.endsWith("-leadlive")
-          ? leadTrip(found, true)
-          : found;
+    : name === "today-need"
+      ? needingPart(found, { kind: "sign_in", host: "app.slack.com" })
+      : name === "lunios-need"
+        ? needingPart(found, { kind: "allow_folder", path: "/Users/crynta/Dev/Lunios" })
+        : name.endsWith("-live")
+          ? midRun(found)
+          : name.endsWith("-lead")
+            ? leadTrip(found, false)
+            : name.endsWith("-leadlive")
+              ? leadTrip(found, true)
+              : found;
   shown = base;
   const errors: string[] = [];
   const listen = (event: ErrorEvent) => errors.push(event.message);
@@ -151,18 +160,24 @@ test.each(LOOKS)("%s at %d%%", async (name, percent) => {
     scene: loaded,
     ...(asking ? { asks: asking.asks } : {}),
     // A lead run draws what it drew on left of its request: the view makes room for it.
-    viewport: {
-      x: (zoom === 1 ? 120 : zoom < 0.4 ? 120 : 200) + (base !== name ? 280 * zoom : 0),
-      y: 72,
-      zoom,
-    },
+    ...(zoom
+      ? {
+          viewport: {
+            x: (zoom === 1 ? 120 : zoom < 0.4 ? 120 : 200) + (base !== name ? 280 * zoom : 0),
+            y: 72,
+            zoom,
+          },
+        }
+      : {}),
   });
   screen.container.style.width = "1440px";
   screen.container.style.height = "900px";
   for (const theme of ["dark", "light"]) {
     document.documentElement.dataset.theme = theme;
     await new Promise((done) => setTimeout(done, 900));
-    await page.screenshot({ path: `${shots}/${name}-${percent}-${theme}.png` });
+    await page.screenshot({
+      path: `${shots}/${name}-${percent ? percent : "open"}-${theme}.png`,
+    });
   }
   document.documentElement.dataset.theme = "dark";
   window.removeEventListener("error", listen);

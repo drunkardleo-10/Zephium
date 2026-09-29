@@ -10,9 +10,7 @@
     canvasFocusResult,
     canvasAreas,
     canvasArrival,
-    canvasDetail,
   } from "../lib/canvas-context";
-  import type { Detail } from "../lib/board/types";
   import { arrive } from "../lib/arrival";
   import type { Duration } from "$shared/lib/motion";
   import { ArrowUpRight01Icon, MinusSignIcon, Target01Icon, Tick02Icon } from "../lib/icons";
@@ -26,6 +24,7 @@
   import CompareCard from "./cards/CompareCard.svelte";
   import FolderCard from "./cards/FolderCard.svelte";
   import PageCard from "./cards/PageCard.svelte";
+  import SourcesCard from "./cards/SourcesCard.svelte";
   import PartRow from "./run/PartRow.svelte";
   import InputMark from "./run/InputMark.svelte";
   import ObjectHost from "./run/ObjectHost.svelte";
@@ -43,8 +42,6 @@
   );
   const arrival = getContext<((id: string) => Duration | null) | undefined>(canvasArrival);
   let { id, data, selected }: NodeProps<WorkItemNode> = $props();
-  const zoom = getContext<{ readonly level: Detail } | undefined>(canvasDetail);
-  const detail = $derived<Detail>(zoom?.level ?? "full");
   let root = $state<HTMLDivElement>();
   // A card the run just placed rises into its group; one that was there already does not.
   onMount(() => {
@@ -162,17 +159,17 @@
   {:else if type === "objective" || type === "request"}<RequestText
       item={data}
       {selected}
-      {detail}
       ontoggle={() => action(id, "expand-request")}
       onaction={() => action(id)}
     />
-  {:else if type === "object" && data.object}<ObjectHost {id} item={data} {selected} {detail} />
-  {:else if type === "input"}<InputMark item={data} {detail} />
+  {:else if type === "object" && data.object}<ObjectHost {id} item={data} {selected} />
+  {:else if type === "input"}<InputMark item={data} />
+  {:else if type === "sources"}<SourcesCard item={data} {selected} />
   {:else if type === "part"}<PartRow
       item={data}
       {selected}
-      {detail}
       onopen={(page) => action(id, `page:${page}`)}
+      onneed={(how) => action(id, `need:${how}`)}
       onlist={() => open(id)}
     />
   {:else if data.artifact?.content.kind === "matrix"}<CompareCard item={data} {selected} />

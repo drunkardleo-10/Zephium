@@ -3,15 +3,14 @@
   import ObjectView from "../objects/ObjectView.svelte";
   import { canvasBoard, canvasOpen, type BoardActions } from "../../lib/canvas-context";
   import type { CanvasItem } from "../../lib/canvas-model";
-  import type { Detail, ObjectActions, ObjectView as View } from "../../lib/board/types";
+  import type { ObjectActions, ObjectView as View } from "../../lib/board/types";
   import { workTasksKey, type WorkTasks } from "../../lib/work-tasks";
 
   let {
     id,
     item,
     selected = false,
-    detail = "full",
-  }: { id: string; item: CanvasItem; selected?: boolean; detail?: Detail } = $props();
+  }: { id: string; item: CanvasItem; selected?: boolean } = $props();
   const board = getContext<BoardActions | undefined>(canvasBoard);
   const open = getContext<((id: string) => void) | undefined>(canvasOpen);
   const tasks = getContext<WorkTasks | undefined>(workTasksKey);
@@ -51,20 +50,18 @@
   };
 
   let body = $state<HTMLElement>();
-  // The object's height at its width and detail: surveyed from afar it may
-  // take more room, and the run makes it when the detail changes.
+  // The object's height at its width, so its run makes the room it takes.
   let reported = "";
   $effect(() => {
     const element = body;
     const across = width;
-    const level = detail;
     if (!element || view.state === "pending") return;
     const report = () => {
       const height = Math.ceil(element.offsetHeight);
-      const key = `${across}|${height}|${level}`;
+      const key = `${across}|${height}`;
       if (!height || key === reported) return;
       reported = key;
-      untrack(() => board?.measure(id, across, false, height, level));
+      untrack(() => board?.measure(id, across, false, height));
     };
     report();
     let frame = 0;
@@ -81,7 +78,7 @@
 </script>
 
 <div class="object work-drag-handle {view.kind}" class:selected data-card-id={id}>
-  <div bind:this={body}><ObjectView object={view} {detail} {actions} /></div>
+  <div bind:this={body}><ObjectView object={view} {actions} /></div>
 </div>
 
 <style>

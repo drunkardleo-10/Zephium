@@ -6,6 +6,7 @@ import type { HumanPage } from "./work-human";
 import { defaultSize as cardSize } from "./card-size";
 import type { Block, ObjectView } from "./board/types";
 import type { TrailLine } from "./board/trail";
+import type { RunSources } from "./run/sources";
 
 /** The Sources card's line for pages that could not be read. */
 const UNREAD_FOOTER = 24;
@@ -90,6 +91,8 @@ export type CanvasItem = {
     /** A file a step disclosed; the lift shows what the run recorded of it. */
     file?: { record: string; path: string; kind: string };
   }[];
+  /** What a run drew on, under its result: the pages and files it cites, and what it could not open. */
+  drawn?: RunSources;
   /** Frames of the pages the request read, kept once its run is done. */
   frames?: readonly { key: string; url: string; host: string; frame: string }[];
   /** Pages a run opened and could not read: the Sources card lists them, never as cards. */
@@ -121,6 +124,8 @@ export type CanvasItem = {
   input?: {
     kind: "memory" | "skill" | "history" | "notes" | "tabs" | "files" | "connection" | "work";
     label: string;
+    /** A folder the run read, by its own name. */
+    folder?: boolean;
     count?: number;
     lit?: boolean;
   };
@@ -142,10 +147,10 @@ export type PartView = {
   helper: "browser" | "research" | "computer" | "connection";
   state: "planned" | "running" | "waiting" | "done" | "failed" | "stopped";
   /**
-   * Frames while it works, a stack once done, a list of what search cited, a
-   * helper's own view of its work, an ask waiting on the person, or just its name.
+   * Its pages as windows, a list of what search cited, a helper's own view of
+   * its work, an ask waiting on the person, or just its name.
    */
-  shape: "frames" | "stack" | "sources" | "helper" | "ask" | "label";
+  shape: "pages" | "sources" | "helper" | "ask" | "label";
   /** What it came to, in a few words: "3 homes". */
   summary?: string;
   pages: readonly PartPage[];
@@ -164,6 +169,16 @@ export type PartView = {
   presence?: number;
   /** A question on this part waiting on the person: the ask card's props. */
   ask?: { props: Record<string, unknown> };
+  /** What the part needs from the person to do its job, and its one action. */
+  need?: PartNeed;
+};
+/** A part's need as its row says it: a sentence and the action that meets it. */
+export type PartNeed = {
+  kind: "sign_in" | "allow_site" | "allow_folder" | "use_connection" | "retry";
+  /** The site, folder or connection it concerns, as a person names it. */
+  target: string;
+  /** The page to open for a sign-in, the folder to allow. */
+  address?: string;
 };
 /** One page of a part, as its row shows it. */
 export type PartPage = {
@@ -190,6 +205,8 @@ export type CanvasLink = {
   label?: string;
   /** A run's line while work is moving along it. */
   live?: boolean;
+  /** Drawn only while one of its ends is under the pointer or selected: it would cross a run to reach the other. */
+  hover?: boolean;
   /** A run's line as its layout routed it, and where it truly meets its two nodes. */
   route?: {
     points: readonly CanvasPosition[];

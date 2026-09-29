@@ -2,10 +2,10 @@ import type { WorkRuntimeProjection } from "$shared/ipc/bindings";
 import { clipText, type CanvasItem, type CanvasLink, type CanvasPosition } from "./canvas-model";
 import type { Board } from "./board/types";
 import type { Rect } from "./board/layout";
-import type { Detail } from "./board/types";
 import type { TrailLine } from "./board/trail";
 import { RUN, type RunPlace } from "./run/layout";
 import type { RunInputView, RunPart } from "./run/parts";
+import type { RunSources } from "./run/sources";
 import type { RunObject } from "./board/objects";
 import * as m from "$shared/i18n/messages";
 
@@ -50,8 +50,8 @@ export type WorkStage = {
   pinned: ReadonlySet<string>;
   /** Where every node of the run stands. */
   targets: Record<string, CanvasPosition>;
-  /** The detail the run was laid out for. */
-  detail: Detail;
+  /** What the run drew on, under its result. */
+  sources?: { id: string; view: RunSources };
 };
 const REQUEST_TEXT = 512;
 
@@ -161,6 +161,7 @@ function reviseLinks(stage: WorkStage, earlier: readonly WorkStage[]): CanvasLin
         source: stage.card,
         target,
         kind: "thread",
+        hover: true,
         route: {
           points: [start, { x, y: spine }, { x, y: end.y }, end],
           from: { x: start.x - stage.place.x, y: RUN.spine },

@@ -1,7 +1,5 @@
 <script lang="ts">
-  import { untrack } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
-  import { detailAt } from "../lib/zoom";
   import WorkCanvas from "../components/WorkCanvas.svelte";
   import { clearOfBands, environmentStages, measureKey } from "../lib/project-environment-board";
   import {
@@ -10,28 +8,28 @@
     environmentInputs,
     environmentItems,
     environmentParts,
+    environmentSources,
     environmentView,
   } from "../lib/project-environment";
   import { environmentRequests } from "../lib/project-environment-thread";
   import type { BoardActions } from "../lib/canvas-context";
-  import type { Detail } from "../lib/board/types";
   import type { PartAsk } from "../lib/run/parts";
   import type { BoardScene } from "./board-fixtures";
   let {
     scene,
-    viewport = { x: 40, y: 40, zoom: 1 },
+    viewport,
     asked = [],
     asks,
   }: {
     scene: BoardScene;
     /** Questions waiting on the person, by part. */
     asks?: (objective: string) => readonly PartAsk[];
+    /** Without one, the canvas opens as a work with no saved camera: on its newest run. */
     viewport?: { x: number; y: number; zoom: number };
     asked?: string[];
   } = $props();
   const measured = new SvelteMap<string, number>();
   let open = $state<string | null>(null);
-  let detail = $state<Detail>(untrack(() => detailAt(viewport.zoom)));
   const recorded = () => scene.pages;
   const stages = $derived(
     environmentStages(scene.snapshot, scene.objectives, {
@@ -39,7 +37,6 @@
       pictures: scene.pictures,
       measured,
       open,
-      detail,
       ...(asks ? { asks } : {}),
     }),
   );
@@ -54,6 +51,7 @@
     ...environmentBoards(stages),
     ...environmentParts(scene.objectives, stages, recorded),
     ...environmentInputs(stages),
+    ...environmentSources(stages),
     ...agents.items,
   ]);
   const pictures = $derived(
@@ -71,8 +69,8 @@
     ),
   );
   const board: BoardActions = {
-    measure(id, width, opened, height, level) {
-      const key = measureKey(id, width, opened, level);
+    measure(id, width, opened, height) {
+      const key = measureKey(id, width, opened);
       if (measured.get(key) !== height) measured.set(key, height);
     },
     toggle: (id) => (open = open === id ? null : id),
@@ -105,11 +103,12 @@
       ...agents.positions,
     },
     sizes: own.sizes,
-    viewport,
+    ...(viewport ? { viewport } : {}),
   }}
+  home={stages.at(-1)?.lane.box}
+  fitTopInset={56}
   {board}
   work={(objective) => scene.objectives.get(objective)}
-  ondetail={(next) => (detail = next)}
   oninspect={() => {}}
   onopen={(id) => board.toggle(id)}
 />
