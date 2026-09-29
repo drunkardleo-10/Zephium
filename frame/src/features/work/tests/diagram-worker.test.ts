@@ -36,6 +36,7 @@ const SAAS: Diagram = {
     { from: "api", to: "files", label: "Uploads" },
     { from: "worker", to: "db", label: "Persist" },
     { from: "db", to: "api", label: "Rows" },
+    { from: "worker", to: "files", label: "Artifacts" },
   ],
 };
 
@@ -121,10 +122,10 @@ test("flows past the next row share one trunk down through the rows between", as
 
 test("flows into one part join before it", async () => {
   const layout = await engineLayout(diagramShape(SAAS), "down");
-  // CRUD from the API and Persist from the worker end on one run into the database.
-  const [crud, persist] = [layout.flows[5]!.points, layout.flows[8]!.points];
-  expect(crud.at(-1)).toEqual(persist.at(-1));
-  expect(crud.at(-2)!.x).toBe(persist.at(-2)!.x);
+  // Uploads from the API and Artifacts from the worker end on one run into object storage.
+  const [uploads, artifacts] = [layout.flows[7]!.points, layout.flows[10]!.points];
+  expect(uploads.at(-1)).toEqual(artifacts.at(-1));
+  expect(uploads.at(-2)!.x).toBe(artifacts.at(-2)!.x);
 });
 
 test("a pair of opposite flows is one line with a head at each end", async () => {
@@ -174,6 +175,6 @@ test("the picture takes the way that fits a result's width, the shorter where bo
 test("layoutDiagram answers with the engine's layout off the page", async () => {
   const layout = await layoutDiagram(SAAS);
   expect(layout.settled).toBe(true);
-  expect(Object.keys(layout.flows).map(Number)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  expect(Object.keys(layout.flows).map(Number)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   expect(layout.flows[0]!.resting).toBe(true);
 });
