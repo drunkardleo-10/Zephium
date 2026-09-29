@@ -435,7 +435,10 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "Self::drain_retained_navigation(state,deadline).await",
             "delivery.proof()==settlement.proof()",
             "ifstate.native.retained.as_ref().is_some_and(|browser|!browser.allows_readiness_retry()){returnSelf::observe_once(state,worker,browser).await;}",
-            "for_in0..64", "tokio::time::sleep(Duration::from_millis(50))",
+            // Readiness is waited for by time: another page's look holds the presentation.
+            "whilestarted.elapsed()<NOT_READY_PATIENCE",
+            "constNOT_READY_PATIENCE:Duration=Duration::from_secs(30);",
+            "tokio::time::sleep(delay)",
         ],
         &["WorkBrowserResources::new", "implAgentWorkRetainedBrowser", "attach_successor_work"],
     ),
