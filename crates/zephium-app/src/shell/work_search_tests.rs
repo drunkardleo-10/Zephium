@@ -902,3 +902,322 @@ async fn direct_public_read_dispatches_only_after_fresh_receipt_and_never_on_rep
         ));
     }
 }
+
+/// Counts searches and reuse checks; every search answers the same public
+/// evidence, and a reuse check answers `reuse`.
+struct ReuseFixture {
+    searches: AtomicUsize,
+    checks: AtomicUsize,
+    reuse: bool,
+}
+impl WorkPublicSearchProvider for ReuseFixture {
+    fn reuse<'a>(
+        &'a self,
+        _: &'a WorkPublicSearchScope,
+        earlier: &'a str,
+        _: &'a WorkProviderSearchEvidenceV1,
+        _: WorkExecutionLimits,
+        _: Instant,
+    ) -> WorkPublicSearchReuseFuture<'a> {
+        Box::pin(async move {
+            assert!(earlier.contains("load balancer"));
+            self.checks.fetch_add(1, Ordering::AcqRel);
+            Ok(WorkPublicSearchReuse {
+                answers: self.reuse,
+                usage: WorkUsage {
+                    model_tokens: 40,
+                    cost_micro_usd: 2,
+                    operations: 1,
+                    accounting: WorkUsageAccounting::Exact,
+                },
+            })
+        })
+    }
+    fn search<'a>(
+        &'a self,
+        scope: &'a WorkPublicSearchScope,
+        _: &'a [zephium_core::work::context::WorkContextBody],
+        _: WorkExecutionLimits,
+    ) -> WorkPublicSearchFuture<'a> {
+        Box::pin(async move {
+            self.searches.fetch_add(1, Ordering::AcqRel);
+            Ok(WorkPublicSearchResult {
+                evidence: WorkProviderSearchEvidenceV1 {
+                    version: 1,
+                    provider: scope.provider,
+                    model: scope.model.clone(),
+                    response_model: scope.model.clone(),
+                    response_id: "resp_reuse".into(),
+                    search_call_id: "ws_reuse".into(),
+                    answer: "Public answer [1].".into(),
+                    citations: vec![WorkProviderSearchCitation {
+                        url: "https://www.hetzner.com/cloud".into(),
+                        title: "Cloud".into(),
+                        start_index: 14,
+                        end_index: 17,
+                    }],
+                    actual_input_tokens: 200,
+                    actual_output_tokens: 100,
+                },
+                usage: WorkUsage {
+                    model_tokens: 300,
+                    cost_micro_usd: 50,
+                    operations: 1,
+                    accounting: WorkUsageAccounting::ConservativeReservation,
+                },
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_work_reuses_a_search_that_already_answers_a_query() {
+    for reuse in [true, false] {
+        reuse_case(reuse).await;
+    }
+}
+
+async fn reuse_case(reuse: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(zephium_store::SqliteStore::open(dir.path()).unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store.clone());
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Compare cloud prices".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let edit = handle
+        .work_document(WorkIntent::Edit {
+            id: work,
+            expected: WorkRevision::INITIAL,
+            edit: WorkUserEdit::ReplaceDraft {
+                proposal: WorkPlanProposal {
+                    nodes: vec![WorkNodeProposal {
+                        key: 0,
+                        objective: "Search public cloud prices".into(),
+                        dependencies: vec![],
+                        outputs: vec![WorkExpectedOutput {
+                            name: "prices".into(),
+                            description: "Public prices for user review".into(),
+                            review: WorkOutputReview::UserAcceptance,
+                        }],
+                    }],
+                },
+            },
+        })
+        .unwrap();
+    let WorkReply::Snapshot(planned) = drive(&mut shell, &queue, edit).await.unwrap().reply else {
+        panic!()
+    };
+    let plan = planned.plan.as_ref().unwrap();
+    let node = plan.draft.nodes[0].id;
+    let limits = WorkExecutionLimits {
+        model_tokens: 8000,
+        cost_micro_usd: 10000,
+        operations: 4,
+        timeout_seconds: 60,
+        max_workers: 1,
+    };
+    let query = |query: &str| WorkPublicSearchScope {
+        provider: WorkSearchProvider::OpenAi,
+        model: PUBLIC_SEARCH_MODEL.into(),
+        query: query.into(),
+    };
+    let approve = handle
+        .work_command(
+            profile,
+            WorkCommandV1 {
+                version: 1,
+                work,
+                expected_revision: planned.revision,
+                command: WorkCommandId::generate(),
+                intent: WorkRuntimeIntent::Approve {
+                    spec: WorkExecutionSpec {
+                        request: None,
+                        context: None,
+                        plan_revision: plan.revision,
+                        limits,
+                        nodes: vec![WorkNodeExecutionSpec {
+                            node,
+                            parent: None,
+                            capability: WorkCapability::PublicSearch {
+                                scope: query("Hetzner cloud load balancer pricing 2026"),
+                            },
+                            limits,
+                        }],
+                    },
+                },
+            },
+        )
+        .unwrap();
+    let WorkReply::RuntimeCommand {
+        projection,
+        receipt,
+    } = drive(&mut shell, &queue, approve).await.unwrap().reply
+    else {
+        panic!()
+    };
+    let runtime = WorkRuntimeService::new(handle.clone());
+    let attempt = drive(
+        &mut shell,
+        &queue,
+        runtime.begin_node(
+            profile,
+            work,
+            projection.work.revision,
+            receipt.execution,
+            node,
+        ),
+    )
+    .await
+    .unwrap();
+    let model = ReuseFixture {
+        searches: AtomicUsize::new(0),
+        checks: AtomicUsize::new(0),
+        reuse,
+    };
+    let probe = attempt.probe();
+    let first = drive(
+        &mut shell,
+        &queue,
+        probe.run_search(
+            &model,
+            &query("Hetzner cloud prices load balancer"),
+            &[],
+            limits,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(first.record.is_some());
+    // The same terms in another order and case: no search, no check, no cost.
+    let same = drive(
+        &mut shell,
+        &queue,
+        probe.run_search(
+            &model,
+            &query("load balancer price HETZNER cloud"),
+            &[],
+            limits,
+        ),
+    )
+    .await
+    .unwrap();
+    let record = same.record.unwrap();
+    assert_eq!(model.searches.load(Ordering::Acquire), 1);
+    assert_eq!(model.checks.load(Ordering::Acquire), 0);
+    assert!(record.ranking.is_none());
+    assert_eq!(same.usage.unwrap().model_tokens, 300);
+    assert_eq!(same.usage.unwrap().cost_micro_usd, 0);
+    // A `site:` the earlier sources are not on is never checked.
+    drive(
+        &mut shell,
+        &queue,
+        probe.run_search(
+            &model,
+            &query("site:vercel.com hetzner cloud load balancer prices"),
+            &[],
+            limits,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(model.searches.load(Ordering::Acquire), 2);
+    assert_eq!(model.checks.load(Ordering::Acquire), 0);
+    // Other words: Jev's check decides, and what it cost stays accounted.
+    let similar = drive(
+        &mut shell,
+        &queue,
+        probe.run_search(
+            &model,
+            &query("Hetzner cloud load balancer pricing 2026"),
+            &[],
+            limits,
+        ),
+    )
+    .await
+    .unwrap();
+    // A refused check tries the next earlier search, at most two.
+    let checks: u32 = if reuse { 1 } else { 2 };
+    assert_eq!(model.checks.load(Ordering::Acquire), checks as usize);
+    assert_eq!(
+        model.searches.load(Ordering::Acquire),
+        if reuse { 2 } else { 3 }
+    );
+    let usage = similar.usage.unwrap();
+    let record = similar.record.unwrap();
+    let ranking = record.ranking.clone().unwrap();
+    assert_eq!(ranking.usage.model_tokens, 40 * checks);
+    assert_eq!(usage.model_tokens, 300 + 40 * checks);
+    assert_eq!(
+        usage.cost_micro_usd,
+        2 * checks + if reuse { 0 } else { 50 }
+    );
+    // Questions joined with ";" are refused before any search or check.
+    let before = model.searches.load(Ordering::Acquire);
+    let joined = query("MIT OCW compiler notes; Stanford CS143 course materials");
+    let refused = drive(
+        &mut shell,
+        &queue,
+        probe.run_search(&model, &joined, &[], limits),
+    )
+    .await
+    .unwrap();
+    assert_eq!(refused.status, WorkAttemptStatus::Failed);
+    assert!(refused.note.is_some() && refused.record.is_none());
+    assert_eq!(model.searches.load(Ordering::Acquire), before);
+    // Two parts asking the same at once: one search, the other waits for it.
+    let before = model.searches.load(Ordering::Acquire);
+    let (one, two) = (
+        query("Cloudflare Workers paid plan pricing"),
+        query("cloudflare workers pricing paid plan"),
+    );
+    let (a, b) = drive(&mut shell, &queue, async {
+        tokio::join!(
+            probe.run_search(&model, &one, &[], limits),
+            probe.run_search(&model, &two, &[], limits),
+        )
+    })
+    .await;
+    assert!(a.unwrap().record.is_some() && b.unwrap().record.is_some());
+    assert_eq!(model.searches.load(Ordering::Acquire), before + 1);
+    // The store admits the record as the attempt's own evidence.
+    let artifact = WorkArtifactDraft {
+        output: "prices".into(),
+        title: "prices".into(),
+        data: WorkArtifactDataV1::EvidenceCollection {
+            summary: record.evidence.answer.clone(),
+            subjects: vec![],
+            entries: vec![],
+        },
+        evidence: vec![WorkEvidenceLink {
+            extraction_id: record.id,
+            source_id: 1,
+        }],
+    };
+    let settled = drive(
+        &mut shell,
+        &queue,
+        attempt.settle_with_provider_evidence(
+            WorkAdapterResult {
+                status: WorkAttemptStatus::Succeeded,
+                intervention: None,
+                usage: Some(usage),
+                artifacts: vec![artifact],
+            },
+            Some(record),
+        ),
+    )
+    .await;
+    assert!(settled.is_ok());
+    assert!(store.flush());
+    drop(runtime);
+    drop(handle);
+    drop(shell);
+    assert_eq!(
+        store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+        zephium_core::ports::store::StoreShutdownOutcome::Clean
+    );
+}
