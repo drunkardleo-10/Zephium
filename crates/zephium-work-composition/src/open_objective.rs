@@ -489,3 +489,5 @@ mod tests;
 mod read_interactions;
 #[cfg(feature = "durable-runtime")]
 pub(crate) mod site_work;
+#[cfg(feature = "durable-runtime")]
+mod consent;

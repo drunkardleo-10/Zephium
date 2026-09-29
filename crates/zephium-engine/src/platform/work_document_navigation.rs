@@ -255,13 +255,41 @@ impl State {
         if !same_site {
             return false;
         }
+        // A saved commit's own page may hand on with a form GET (a consent
+        // host returning to the site): it is followed as the POST's redirect.
+        if get && follow.posted {
+            let (Some(generation), Some(loads)) = (
+                self.finalization_generation.checked_add(1),
+                self.site_loads
+                    .checked_add(1)
+                    .filter(|loads| *loads <= MAX_SITE_LOADS),
+            ) else {
+                return false;
+            };
+            self.superseded = self.native_id.take();
+            self.effective = None;
+            self.finalization_generation = generation;
+            self.location_revision = 0;
+            self.site_loads = loads;
+            self.requested = true;
+            self.phase = Phase::Armed;
+            return true;
+        }
         if get {
             if let Ok(target) = ContextNavigationTarget::parse(raw) {
                 follow.slot.record(target);
             }
             return false;
         }
-        if !follow.post || follow.posted {
+        // A site's own consent host saves the person's cookie choice with a
+        // POST; that choice is a read, so it passes once like a commit.
+        let consent = self.effective.as_ref().is_some_and(|document| {
+            document
+                .as_url()
+                .host_str()
+                .is_some_and(|host| host.starts_with("consent."))
+        });
+        if !(follow.post || consent) || follow.posted {
             return false;
         }
         let Some(generation) = self.finalization_generation.checked_add(1) else {
@@ -598,6 +626,22 @@ impl WorkDocumentNavigation {
             && action.target_is_main_frame == Some(true)
             && action.is_get
             && state.site_follows(target)
+        {
+            return true;
+        }
+        // The page replaced its admitted POST, before it started, with a
+        // same-site GET (a consent host handing back to the site).
+        if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            && action.target_is_main_frame == Some(true)
+            && action.is_get
+            && state.phase == Phase::Armed
+            && state.requested
+            && state.native_id.is_none()
+            && state.follow.as_ref().is_some_and(|follow| follow.posted)
+            && state.target.as_ref().is_some_and(|requested| {
+                ContextNavigationTarget::parse(target)
+                    .is_ok_and(|target| zephium_agentic::same_work_site(requested, &target))
+            })
         {
             return true;
         }
@@ -1212,6 +1256,55 @@ mod tests {
         assert!(!gate.posting());
         assert!(gate.ready(Some(book)));
         assert!(!gate.failed());
+    }
+    #[test]
+    fn a_consent_host_saves_the_choice_with_one_post_on_any_action() {
+        use wry::AppleNavigationType as T;
+        let start = "https://www.google.com/travel/flights";
+        let consent = "https://consent.google.com/m?hl=en";
+        let gate = site_gate(start);
+        gate.observe(event(1, E::Started, start)).unwrap();
+        gate.observe(event(1, E::Redirected, start)).unwrap();
+        gate.observe(event(1, E::Committed, consent)).unwrap();
+        gate.observe(event(1, E::Finished, consent)).unwrap();
+        settle(&gate, consent);
+        let slot = zephium_agentic::SemanticActionFollow::default();
+        gate.open_follow(false, slot);
+        let save = "https://consent.google.com/save";
+        assert!(!gate.allows_apple_action(
+            "https://evil.test/save",
+            apple_action(T::FormSubmitted, false)
+        ));
+        assert!(gate.allows_apple_action(save, apple_action(T::FormSubmitted, false)));
+        assert!(!gate.allows_apple_action(save, apple_action(T::FormSubmitted, false)));
+        // Replaced before it starts by a same-site GET, never another site.
+        assert!(
+            !gate.allows_apple_action("https://evil.test/", apple_action(T::FormSubmitted, true))
+        );
+        assert!(gate.allows_apple_action(start, apple_action(T::FormSubmitted, true)));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, save)).unwrap();
+        }
+        settle(&gate, save);
+        // Its own hand-on back to the site follows as a redirect.
+        assert!(gate.allows_apple_action(start, apple_action(T::FormSubmitted, true)));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(3, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(gate.ready(Some(start)) && !gate.failed());
+
+        // An ordinary host still posts only for a commit.
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        gate.open_follow(false, zephium_agentic::SemanticActionFollow::default());
+        assert!(!gate.allows_apple_action(
+            "https://www.google.com/save",
+            apple_action(T::FormSubmitted, false)
+        ));
     }
     #[test]
     fn successor_uses_same_gate_exact_lineage_and_one_terminal_without_bootstrap() {

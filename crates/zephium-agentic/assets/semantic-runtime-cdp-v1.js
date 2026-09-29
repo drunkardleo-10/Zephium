@@ -2806,7 +2806,7 @@ resolveKeyAtGeneration(request.t, request.g) !== target
 return actionFault("target_changed");
 }
 if (target !== document && !styleIsVisible(target)) return actionFault("target_occluded");
-const rect = target === document ? documentRect() : elementRect(target);
+let rect = target === document ? documentRect() : elementRect(target);
 if (rect === null) return actionFault("target_occluded");
 if (!geometryCompatible(request.e, rect)) return actionFault("target_geometry_changed");
 const viewport = boundedViewport();
@@ -2818,7 +2818,16 @@ point = { x: mathRound(viewport.width / 2), y: mathRound(viewport.height / 2) };
 readiness = "scroll";
 } else {
 point = actionPoint(target, rect, viewport);
-if (point === null) return actionFault("target_occluded");
+if (point === null && target !== document && typeof fixedScrollIntoView === "function") {
+try {
+apply(fixedScrollIntoView, target, [{ block: "center", inline: "nearest", behavior: "instant" }]);
+rect = elementRect(target);
+point = rect === null ? null : actionPoint(target, rect, viewport);
+} catch (_) {
+point = null;
+}
+}
+if (point === null || rect === null) return actionFault("target_occluded");
 readiness = "visible";
 }
 const geometry = wireRect(rect);

@@ -7,6 +7,8 @@ const MAX_UNCHANGED_DECISION_OBSERVATIONS: u8 = 3;
 /// bounds the added work at three native operations and three sub-second
 /// batches, well inside one read's existing action and call allowances.
 const MAX_READ_REOBSERVATIONS: u8 = 3;
+/// Looks at a page still loading after a step, half a second apart.
+const MAX_SETTLING_LOOKS: u8 = 16;
 
 impl AgentWorkController {
     pub(super) async fn run_decision_actions(
@@ -689,7 +691,39 @@ impl AgentWorkController {
             return Err(AgentWorkFailure::Contract);
         }
         state.journal_mut()?.emit(AgentWorkEventKind::Verifying)?;
-        let current = Self::observe(state, worker, browser).await?;
+        // A step that loaded a new page on the site is verified once that
+        // page has settled; a page still loading is looked at again, briefly.
+        let mut waits = 0u8;
+        let current = loop {
+            match Self::observe(state, worker, browser).await {
+                Err(AgentWorkFailure::Observation(
+                    SemanticRuntimePortFailure::NotReady
+                    | SemanticRuntimePortFailure::Stale
+                    | SemanticRuntimePortFailure::DocumentReplaced,
+                )) if waits < MAX_SETTLING_LOOKS
+                    && state
+                        .navigation_discovery
+                        .as_ref()
+                        .is_some_and(AgentNavigationDiscovery::is_site_session) =>
+                {
+                    waits += 1;
+                    let wake = Instant::now() + Duration::from_millis(500);
+                    if wake >= state.native.deadline {
+                        return Err(AgentWorkFailure::Deadline);
+                    }
+                    tokio::select! {
+                        biased;
+                        event = state.native.next_event(worker, browser) => {
+                            state.native.retain(event?)?;
+                            return Err(AgentWorkFailure::Mailbox);
+                        }
+                        () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+                    }
+                    state.refresh_account(worker, browser)?;
+                }
+                result => break result?,
+            }
+        };
         let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
         let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
         let (_, transition) = session

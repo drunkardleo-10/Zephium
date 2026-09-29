@@ -2632,6 +2632,20 @@ impl AgentWorkController {
             observation =
                 Self::fit_model_observation(Box::pin(Self::observe(state, worker, browser)).await?)?;
         }
+        // A cookie banner on a page worked for the person is refused by Rust
+        // before any model sees the page.
+        if state.actions_before_extraction
+            && state
+                .navigation_discovery
+                .as_ref()
+                .is_some_and(AgentNavigationDiscovery::is_site_session)
+        {
+            if let Some(target) = state.task.consent_dismissal(&observation) {
+                let look = observation.clone();
+                observation =
+                    Box::pin(Self::dismiss_consent(state, worker, browser, look, target)).await?;
+            }
+        }
         let mut captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?
@@ -3250,6 +3264,104 @@ impl AgentWorkController {
                 ),
             )
             .await?;
+        }
+    }
+
+    /// Clicks a consent banner's refusal as a read. A page that refuses the
+    /// click or does not change keeps the model's ordinary first look.
+    async fn dismiss_consent(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        look: SemanticObservation,
+        target: SemanticReferenceId,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        let press = SemanticActionProposal::try_new(
+            SemanticActionIntent::Click { target },
+            SemanticEffectClass::Read,
+            SemanticWaitCondition::MutationQuiet(
+                SemanticMutationQuietPeriod::try_new(100)
+                    .map_err(|_| AgentWorkFailure::Contract)?,
+            ),
+            SemanticVerification::PageChanged,
+            SemanticSettleBudget::try_new(MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS)
+                .map_err(|_| AgentWorkFailure::Contract)?,
+        )
+        .map_err(|_| AgentWorkFailure::Contract)?;
+        match Box::pin(Self::code_owned_read(state, worker, browser, &look, press)).await? {
+            Some(after) => Self::fit_model_observation(after),
+            None => {
+                state.refresh_account(worker, browser)?;
+                Self::fit_model_observation(Box::pin(Self::observe(state, worker, browser)).await?)
+            }
+        }
+    }
+
+    /// One read step Rust chose on `observation`, assessed by the task like
+    /// any other: the page after it, or None when it was refused or failed
+    /// without effect. Any other failure ends the page as before.
+    async fn code_owned_read(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+        observation: &SemanticObservation,
+        recipe: SemanticActionProposal,
+    ) -> Result<Option<SemanticObservation>, AgentWorkFailure> {
+        let frames = observation
+            .frames()
+            .iter()
+            .map(|snapshot| snapshot.frame().clone())
+            .collect::<Vec<_>>();
+        // The task assesses only the look it last evaluated.
+        if state.task_progress(observation)? == AgentWorkTaskProgress::Complete {
+            return Ok(None);
+        }
+        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let account = session.account;
+        session
+            .policy
+            .admit_owned_observation(observation, account)
+            .map_err(|_| AgentWorkFailure::Contract)?;
+        let batch =
+            SemanticActionBatchId::new(session.next_action).ok_or(AgentWorkFailure::Contract)?;
+        let Ok(proposal) =
+            crate::AgentBrowserActionProposal::bind_code_owned(recipe, observation, &frames, batch)
+        else {
+            return Ok(None);
+        };
+        let assessment = match state.task.assess_observed(proposal.action(), observation) {
+            Ok(assessment) => assessment,
+            Err(AgentWorkFailure::ActionDenied | AgentWorkFailure::EffectRequired(_)) => {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
+        state
+            .journal_mut()?
+            .emit(AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Act))?;
+        match Self::execute_prepared_action(state, worker, browser, proposal, assessment, observation)
+            .await
+        {
+            Ok((current, _, transition)) => {
+                let _ = state.follow.take();
+                if let Some(batch) = transition.batch_result() {
+                    state.task.accept_verified_action(batch, &current)?;
+                }
+                Ok(Some(current))
+            }
+            Err(AgentWorkFailure::Browser(error)) => {
+                let _ = state.follow.take();
+                let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+                let _ = session.take_rejected_refusal();
+                if !session
+                    .close_failed_owned_read()
+                    .map_err(AgentWorkFailure::Browser)?
+                {
+                    return Err(AgentWorkFailure::Browser(error));
+                }
+                Ok(None)
+            }
+            Err(error) => Err(error),
         }
     }
 

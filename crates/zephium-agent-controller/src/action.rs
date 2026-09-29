@@ -216,6 +216,30 @@ impl AgentBrowserActionProposal {
         let (batch, baseline) = selection
             .bind_action(recipe, observation, frames, batch)
             .map_err(|_| AgentBrowserActionError::State)?;
+        Self::bind_owned(batch, baseline, observation)
+    }
+
+    /// A step Rust chose on the exact observation it read it from (a
+    /// consent banner's refusal), with no model or decision in between. It
+    /// still needs the task's own assessment before any dispatch.
+    pub(crate) fn bind_code_owned(
+        recipe: SemanticActionProposal,
+        observation: &SemanticObservation,
+        frames: &[SemanticFrameJoin],
+        batch: SemanticActionBatchId,
+    ) -> Result<Self, AgentBrowserActionError> {
+        let (baseline, _) = SemanticObservationAcknowledgement::whole_page_scope(observation)
+            .ok_or(AgentBrowserActionError::State)?;
+        let batch = SemanticActionBatch::bind(batch, observation, frames, vec![recipe])
+            .map_err(|_| AgentBrowserActionError::State)?;
+        Self::bind_owned(batch, baseline, observation)
+    }
+
+    fn bind_owned(
+        batch: SemanticActionBatch,
+        baseline: SemanticObservationAcknowledgement,
+        observation: &SemanticObservation,
+    ) -> Result<Self, AgentBrowserActionError> {
         let bound = batch
             .actions()
             .first()
@@ -561,6 +585,73 @@ impl AgentBrowserAction {
             }
         }
     }
+    /// An action the page refused before it acted (its target covered or
+    /// out of view): nothing was pressed or typed, so a read or a draft keeps
+    /// its continuation and the model hears why.
+    pub(crate) fn into_covered_refusal(
+        self,
+    ) -> Result<(SemanticActionBatchResult, AgentProviderActionRefusal), Box<Self>> {
+        let effect = self.proposal.action.effect();
+        if !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+            || !matches!(
+                effect,
+                SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
+            )
+            || self.proposal.continuation.is_none()
+            || self.failed.as_ref().is_none_or(|failed| {
+                self.receipt != Some(failed.receipt())
+                    || failed.failure() != SemanticActionFailure::TargetOccluded
+            })
+        {
+            return Err(Box::new(self));
+        }
+        let mut this = self;
+        let failed = this.failed.take().expect("checked original failed owner");
+        match this.proposal.batch.fail(&this.proposal.action, failed) {
+            Ok(terminal) => Ok((
+                terminal,
+                AgentProviderActionRefusal::unissued(
+                    this.proposal
+                        .continuation
+                        .take()
+                        .expect("checked provider continuation"),
+                    SemanticActionBindingError::TargetCovered,
+                    this.proposal.refusal_context,
+                ),
+            )),
+            Err(refusal) => {
+                let (batch, failed, _) = refusal.into_parts();
+                this.proposal.batch = batch;
+                this.failed = Some(failed);
+                Err(Box::new(this))
+            }
+        }
+    }
+
+    /// A failed code-owned read (no model continuation) closes its batch so
+    /// the page goes on to the model's own first look.
+    pub(crate) fn into_failed_owned_read(self) -> Result<SemanticActionBatchResult, Box<Self>> {
+        if !self.finished
+            || self.native.is_some()
+            || self.pending.is_some()
+            || self.terminal.is_some()
+            || self.journal_failed
+            || self.proposal.action.effect() != SemanticEffectClass::Read
+            || self.proposal.continuation.is_some()
+            || self
+                .failed
+                .as_ref()
+                .is_none_or(|failed| self.receipt != Some(failed.receipt()))
+        {
+            return Err(Box::new(self));
+        }
+        self.into_failed_batch()
+    }
+
     fn into_rejected_batch_keeping(self) -> Result<Box<Self>, Box<Self>> {
         if !self.finished
             || self.native.is_some()

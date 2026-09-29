@@ -3475,7 +3475,8 @@ impl AgentBrowserSession {
         &mut self,
         native: zephium_agentic::SemanticActionNativeSettlement,
     ) -> Result<Option<zephium_agentic::SemanticSettleInstant>, AgentBrowserProviderError> {
-        self.action
+        let result = self
+            .action
             .as_mut()
             .ok_or(AgentBrowserProviderError::ActionPending)?
             .begin_settlement(
@@ -3483,8 +3484,91 @@ impl AgentBrowserSession {
                 native,
                 &mut self.action_executions,
                 &mut self.action_settlements,
-            )
-            .map_err(AgentBrowserProviderError::Action)
+            );
+        match result {
+            Err(
+                error @ crate::AgentBrowserActionError::Failed(
+                    zephium_agentic::SemanticActionFailure::TargetOccluded,
+                ),
+            ) => {
+                if let Some(refusal) = self.covered_refusal()? {
+                    self.rejected_refusal = Some(refusal);
+                    return Err(AgentBrowserProviderError::ActionRejected(error));
+                }
+                Err(AgentBrowserProviderError::Action(error))
+            }
+            result => result.map_err(AgentBrowserProviderError::Action),
+        }
+    }
+
+    /// Closes a failed code-owned read so the next action may start. False
+    /// when the action is not one; the caller then fails as before.
+    pub(crate) fn close_failed_owned_read(&mut self) -> Result<bool, AgentBrowserProviderError> {
+        if self.action_executions.status().pending() != 0
+            || self.action_settlements.status().pending() != 0
+            || self.action_terminal.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(action) = self.action.take() else {
+            // Rejected at dispatch: its batch is already journaled.
+            self.failure = None;
+            return Ok(true);
+        };
+        let terminal = match action.into_failed_owned_read() {
+            Ok(terminal) => terminal,
+            Err(action) => {
+                self.action = Some(*action);
+                return Ok(false);
+            }
+        };
+        self.action_terminal = Some(terminal);
+        if !self.journal.as_mut().is_some_and(|journal| {
+            journal
+                .action_unverified(self.action_terminal.as_ref().expect("retained terminal"))
+                .is_ok()
+        }) {
+            self.failure = Some(AgentBrowserProviderError::Journal);
+            return Err(AgentBrowserProviderError::Journal);
+        }
+        self.action_terminal.take();
+        self.failure = None;
+        Ok(true)
+    }
+
+    /// A covered or out-of-view target: the model hears it and chooses again.
+    fn covered_refusal(
+        &mut self,
+    ) -> Result<Option<zephium_agentic::AgentProviderActionRefusal>, AgentBrowserProviderError>
+    {
+        if self.action_executions.status().pending() != 0
+            || self.action_settlements.status().pending() != 0
+            || self.action_terminal.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(action) = self.action.take() else {
+            return Ok(None);
+        };
+        let (terminal, refusal) = match action.into_covered_refusal() {
+            Ok(parts) => parts,
+            Err(action) => {
+                self.action = Some(*action);
+                return Ok(None);
+            }
+        };
+        self.action_terminal = Some(terminal);
+        let recorded = self.journal.as_mut().is_some_and(|journal| {
+            journal
+                .action_unverified(self.action_terminal.as_ref().expect("retained terminal"))
+                .is_ok()
+        });
+        if !recorded {
+            self.failure = Some(AgentBrowserProviderError::Journal);
+            return Err(AgentBrowserProviderError::Journal);
+        }
+        self.action_terminal.take();
+        Ok(Some(refusal))
     }
 
     /// Advances only the retained coordinator's exact scheduled clock wake.

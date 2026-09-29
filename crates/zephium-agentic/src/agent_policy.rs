@@ -1328,6 +1328,24 @@ impl AgentRunPolicy {
         self.leases[0].consumed = consumed;
     }
 
+    /// Rust chose a read step on this observation from a closed list (a
+    /// cookie banner's refusal) with no model call: the observation taints
+    /// the run as a model's reading would, so later data-flow decisions still
+    /// count it. Taint only grows; nothing else is granted.
+    pub fn admit_owned_observation(
+        &mut self,
+        observation: &SemanticObservation,
+        account: AgentContextAccountBinding,
+    ) -> Result<(), AgentPolicyError> {
+        if self.sealed {
+            return Err(AgentPolicyError::Sealed);
+        }
+        for candidate in observation_taints(observation, account)? {
+            merge_taint(&mut self.taints, candidate);
+        }
+        Ok(())
+    }
+
     /// Reserves exact observation input before any model transport receives bytes.
     pub fn prepare_observation_input(
         &mut self,

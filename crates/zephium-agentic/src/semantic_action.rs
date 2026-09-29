@@ -2334,6 +2334,10 @@ pub enum SemanticActionBindingError {
     /// its outcome was not observed.
     #[error("semantic action outcome was not observed")]
     Unverified,
+    /// The page did not act: the target was covered by another element or
+    /// outside the visible area, so nothing was pressed or typed.
+    #[error("semantic action target was covered or out of view")]
+    TargetCovered,
 }
 
 /// Typed structural refusal before backend visibility/occlusion revalidation.

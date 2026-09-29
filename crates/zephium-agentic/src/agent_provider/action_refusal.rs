@@ -310,6 +310,10 @@ impl AgentProviderActionRefusal {
                 "outcome_not_observed",
                 "The action ran, but the page no longer showed its target afterwards, so its outcome was not verified: a dismissed notice or a control that left the page. The observation you hold is stale. Request snapshot(initial) to see the page as it is now, then continue from that; do not repeat this action.",
             ),
+            SemanticActionBindingError::TargetCovered => (
+                "target_covered",
+                "Nothing executed. The target was covered by another element (a banner, a sticky header, a dialog or a popover) or lay outside the visible area. Scroll it into view with scroll amount into_view, or close what covers it (a dialog's close or a banner's reject control), then act on the fresh refs. Do not repeat the proposal against this observation.",
+            ),
             _ => return Err(AgentProviderContinuationError::ToolKind),
         };
         let executed = self.error == SemanticActionBindingError::Unverified;

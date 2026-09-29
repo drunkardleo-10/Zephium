@@ -337,6 +337,9 @@ pub(crate) fn classify(
     let commits = commit_words(&text);
     match kind {
         SemanticActionKind::Scroll => SiteEffect::Read,
+        SemanticActionKind::Click if super::consent::banner_choice(node, snapshot).is_some() => {
+            SiteEffect::Read
+        }
         SemanticActionKind::Click => {
             let dismiss = names_any(&text, &DISMISS_WORDS) && commits.is_none();
             if matches!(node.role(), SemanticRole::Tab)
@@ -922,7 +925,7 @@ fn credential(node: &SemanticNode) -> bool {
 
 impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
     fn consent_dismissal(&self, observation: &SemanticObservation) -> Option<SemanticReferenceId> {
-        read_interactions::ReadingInteractionPolicy.consent_dismissal(observation)
+        super::consent::dismissal(observation)
     }
 
     fn whole_first_look(&self) -> bool {
@@ -1002,6 +1005,26 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             return Err(AgentWorkFailure::ActionDenied);
         }
         let declared = action.effect();
+        // A banner choice is a read: refused optional cookies, a notice
+        // closed or its settings opened. Accepting is refused while the same
+        // banner offers a refusal.
+        if action.kind() == SemanticActionKind::Click {
+            if let Some(choice) = super::consent::banner_choice(node, snapshot) {
+                if choice == super::consent::Choice::Accept
+                    && super::consent::offers_refusal(node, snapshot)
+                {
+                    return Err(AgentWorkFailure::ActionDenied);
+                }
+                if declared != SemanticEffectClass::Read {
+                    return Err(AgentWorkFailure::EffectRequired(SemanticEffectClass::Read));
+                }
+                return Ok(AgentEffectAssessment::new(
+                    action,
+                    action.frame().origin().clone(),
+                    declared,
+                ));
+            }
+        }
         let accept = || {
             Ok(AgentEffectAssessment::new(
                 action,
@@ -1458,6 +1481,48 @@ mod tests {
         assert_eq!(
             policy.human_wall(&after),
             Some(AgentBrowserHumanReason::Verification)
+        );
+    }
+
+    #[test]
+    fn a_cookie_banner_choice_is_a_read_and_never_held() {
+        let banner = page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"group","fc":true}),
+            json!({"k":3,"p":1,"r":"paragraph","t":"We use cookies to personalise content.","fc":true}),
+            json!({"k":4,"p":1,"r":"button","n":"Reject All","o":1,"ak":1,"fc":true,
+                "b":{"x":1,"y":1,"w":100,"h":30}}),
+            json!({"k":5,"p":1,"r":"button","n":"Accept All","o":1,"ak":1,"fc":true,
+                "b":{"x":120,"y":1,"w":100,"h":30}}),
+        ]);
+        assert_eq!(
+            effect(&banner, 4, SemanticActionKind::Click),
+            SiteEffect::Read
+        );
+        let gate = Arc::new(SiteGate::new("lego.com".into(), false, false));
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        assert!(policy
+            .assess(&click(&banner, 4, SemanticEffectClass::Read), &banner)
+            .is_ok());
+        // Declared as a message, it is asked for as the read it is.
+        assert!(matches!(
+            policy.assess(
+                &click(&banner, 4, SemanticEffectClass::Communication),
+                &banner
+            ),
+            Err(AgentWorkFailure::EffectRequired(SemanticEffectClass::Read))
+        ));
+        assert!(matches!(
+            policy.assess(&click(&banner, 5, SemanticEffectClass::Read), &banner),
+            Err(AgentWorkFailure::ActionDenied)
+        ));
+        assert!(gate.pending().is_none() && !gate.held_back());
+        assert_eq!(
+            policy.consent_dismissal(&banner),
+            Some(banner.frames()[0].nodes()[3].reference())
         );
     }
 

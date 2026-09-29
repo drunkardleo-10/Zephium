@@ -338,7 +338,15 @@ impl AgentRunPolicy {
                         .any(|lease| lease.binding.node() == node.id())
                     && node.navigation_discovery().is_some_and(|scope| {
                         scope.departure() == binding.requested_document()
-                            && scope.origin() == binding.frame().origin()
+                            && (scope.origin() == binding.frame().origin()
+                                // A site session may settle on another host
+                                // of its site (consent, locale).
+                                || (scope.is_site_session()
+                                    && scope.admits_origin(binding.frame().origin())
+                                    && crate::SemanticOrigin::parse(
+                                        binding.document().as_url().as_str(),
+                                    )
+                                    .is_ok_and(|origin| &origin == binding.frame().origin())))
                     })
             })
         {
