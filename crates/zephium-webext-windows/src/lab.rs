@@ -298,9 +298,12 @@ fn make_view(
             if adopt_new_windows
                 && features.user_initiated
                 && children.borrow().len() < 4
-                && url
-                    .parse::<wry::http::Uri>()
-                    .is_ok_and(|url| matches!(url.scheme_str(), Some("http" | "https")))
+                && url.parse::<wry::http::Uri>().is_ok_and(|url| {
+                    matches!(
+                        url.scheme_str(),
+                        Some("http" | "https" | "chrome-extension")
+                    )
+                })
             {
                 let created = (|| -> Result<(WebView, Host)> {
                     let host = Host::new()?;
@@ -505,7 +508,9 @@ pub fn run() -> Result<()> {
         udf.display()
     );
     let adopt_new_windows = steps.iter().any(|step| step["adopt_new_windows"] == true);
-    let allow_native_windows = steps.iter().any(|step| step["allow_native_windows"] == true);
+    let allow_native_windows = steps
+        .iter()
+        .any(|step| step["allow_native_windows"] == true);
     let first = make_view(
         &host,
         &udf,

@@ -53,6 +53,11 @@
     }
   }
   window.__zephiumRefresh = id => { if (Number.isInteger(id)) { windowId = id; void refresh(); } };
+  window.__zephiumClick = tabId => {
+    if (!Number.isInteger(tabId)) return;
+    chrome.runtime.sendMessage({__zephiumActionClick: true, tabId})
+      .then(() => refresh(), () => refresh());
+  };
   chrome.runtime.onMessage.addListener((message, sender) => {
     if (sender.id === chrome.runtime.id && message?.__zephiumActionChanged === true) void refresh();
   });
