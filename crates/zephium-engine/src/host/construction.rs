@@ -29,7 +29,6 @@ use wry::{DownloadPolicy, WebViewBuilder};
 use crate::navigation_epoch::{NavigationEpochTracker, NavigationTransition};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
-use zephium_core::navigation as navigation_policy;
 use zephium_core::ports::engine::{EngineEvent, Partition, RunAt, UserScript, World};
 
 #[cfg(target_os = "macos")]
@@ -139,7 +138,15 @@ impl EngineHost {
                 .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
             return;
         }
-        if !navigation_policy::is_allowed_str(url) {
+        let event_permit = EventPermit::bound(&event_token);
+        #[cfg(target_os = "windows")]
+        let event_permit = event_permit.with_extensions(
+            self.windows_extensions
+                .navigation_grants(partition.profile()),
+        );
+        // Restored and explicitly opened tabs need the same live profile grant
+        // as native child adoption, before either fresh or spare construction.
+        if !event_permit.allows_navigation(url) {
             eprintln!("security: rejected invalid native view target");
             self.sink
                 .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
@@ -231,7 +238,7 @@ impl EngineHost {
             partition,
             url,
             bounds,
-            EventPermit::bound(&event_token),
+            event_permit,
             NativeViewPurpose::Tab,
         ) {
             if !event_token.load(Ordering::Acquire)
