@@ -751,9 +751,13 @@ fn remote_image_target(
     reference: &zephium_core::work::environment::WorkEnvironmentReference,
 ) -> bool {
     use zephium_core::work::environment::WorkEnvironmentReference;
+    // A lead's picks object is one artifact element whose items each name
+    // their own pictures; each admitted picture relates to that element.
     matches!(
         reference,
-        WorkEnvironmentReference::Subject { .. } | WorkEnvironmentReference::Link { .. }
+        WorkEnvironmentReference::Subject { .. }
+            | WorkEnvironmentReference::Link { .. }
+            | WorkEnvironmentReference::Artifact { .. }
     )
 }
 
@@ -761,7 +765,7 @@ fn remote_image_target(
 mod date_tests {
     #[cfg(feature = "work-product")]
     #[test]
-    fn remote_thumbnails_accept_subjects_and_links_only() {
+    fn remote_thumbnails_accept_subjects_links_and_placed_objects_only() {
         use zephium_core::work::environment::WorkEnvironmentReference;
         assert!(super::remote_image_target(
             &WorkEnvironmentReference::Link {
@@ -775,6 +779,13 @@ mod date_tests {
                 execution: 2.into(),
                 artifact: 3.into(),
                 index: 0,
+            }
+        ));
+        assert!(super::remote_image_target(
+            &WorkEnvironmentReference::Artifact {
+                objective: 1.into(),
+                execution: 2.into(),
+                artifact: 3.into(),
             }
         ));
         assert!(!super::remote_image_target(
