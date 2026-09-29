@@ -1,6 +1,6 @@
 ---
 name: today-from-my-messages
-description: What the person needs to do today, from their own Slack, Gmail and other inboxes.
+description: What the person needs to do today, as one to-do list from their own Slack, Gmail and other inboxes. To work through one email inbox with replies drafted, use inbox-triage.
 tools: [day_sources, list_tasks, start_part, create, finish]
 ---
 # Today from my messages

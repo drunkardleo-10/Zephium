@@ -63,6 +63,20 @@ const BUILTIN: &[&str] = &[
     include_str!("../../skills/fix-a-bug/SKILL.md"),
     include_str!("../../skills/job-search/SKILL.md"),
     include_str!("../../skills/learning-path/SKILL.md"),
+    include_str!("../../skills/explain-code/SKILL.md"),
+    include_str!("../../skills/map-a-project/SKILL.md"),
+    include_str!("../../skills/review-a-change/SKILL.md"),
+    include_str!("../../skills/ui-teardown/SKILL.md"),
+    include_str!("../../skills/moodboard/SKILL.md"),
+    include_str!("../../skills/competitor-landscape/SKILL.md"),
+    include_str!("../../skills/campaign-plan/SKILL.md"),
+    include_str!("../../skills/weekly-status/SKILL.md"),
+    include_str!("../../skills/exam-prep/SKILL.md"),
+    include_str!("../../skills/inbox-triage/SKILL.md"),
+    include_str!("../../skills/meeting-prep/SKILL.md"),
+    include_str!("../../skills/market-map/SKILL.md"),
+    include_str!("../../skills/pricing-research/SKILL.md"),
+    include_str!("../../skills/investor-list/SKILL.md"),
 ];
 
 pub fn builtins() -> Vec<Skill> {

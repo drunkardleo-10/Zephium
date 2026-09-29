@@ -1,6 +1,6 @@
 ---
 name: learning-path
-description: Build a study plan for a subject from the best free material: courses, books, lectures and exercises, week by week.
+description: Build a study plan for a subject from the best free material: courses, books, lectures and exercises, week by week. For an exam on a date, use exam-prep.
 tools: [start_part, web_search, create, finish]
 ---
 # Learning path
