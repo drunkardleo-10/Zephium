@@ -6,7 +6,8 @@ import { DIAGRAM } from "./diagram-metrics";
  * order, and within a tier each part one row past the furthest part of its
  * tier that flows into it. A row holds at most `across` parts; a wider one
  * wraps. A leaf that would take the tier's last row alone, fed by one part
- * that also flows elsewhere, stands beside that part instead (`beside`).
+ * that also flows elsewhere, stands beside that part instead (`beside`),
+ * unless a line has to pass that part's row.
  */
 export type DiagramRows = {
   rows: string[][];
@@ -22,7 +23,11 @@ export type DiagramRows = {
   forward: Map<number, boolean>;
 };
 
-export function diagramRows(shape: DiagramShape, across: number = DIAGRAM.across): DiagramRows {
+export function diagramRows(
+  shape: DiagramShape,
+  across: number = DIAGRAM.across,
+  apart: ReadonlySet<number> = new Set(),
+): DiagramRows {
   const order = new Map(shape.parts.map((part, index) => [part.id, index]));
   const lanes = [...new Set(shape.parts.map((part) => part.lane))].sort((a, b) => a - b);
   const laneOf = new Map(shape.parts.map((part) => [part.id, part.lane]));
@@ -45,7 +50,7 @@ export function diagramRows(shape: DiagramShape, across: number = DIAGRAM.across
     const first = rows.length;
     const byRank: string[][] = [];
     for (const id of ids) (byRank[ranks.get(id)!] ??= []).push(id);
-    const set = besides(byRank, into, out, across);
+    const set = apart.has(lane) ? null : besides(byRank, into, out, across);
     if (set) {
       byRank.pop();
       for (const [parent, sides] of set) beside.set(parent, sides);
@@ -70,6 +75,21 @@ export function diagramRows(shape: DiagramShape, across: number = DIAGRAM.across
       rowOf.get(flow.from)! < rowOf.get(flow.to)! || lateral(flow.from, flow.to),
     ]),
   );
+  // A part with a leaf beside it leaves its row no gap: where a line has to pass that row,
+  // the leaf keeps a row of its own instead, so the line passes between parts.
+  const crossed = new Set(
+    [...beside.keys()]
+      .filter((parent) =>
+        shape.flows.some((flow) => {
+          const [from, to] = [rowOf.get(flow.from)!, rowOf.get(flow.to)!];
+          const at = rowOf.get(parent)!;
+          return Math.min(from, to) < at && Math.max(from, to) > at;
+        }),
+      )
+      .map((parent) => laneOf.get(parent)!),
+  );
+  if ([...crossed].some((lane) => !apart.has(lane)))
+    return diagramRows(shape, across, new Set([...apart, ...crossed]));
   return { rows, rowOf, beside, tiers, tierStart, forward };
 }
 

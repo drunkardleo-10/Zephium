@@ -128,7 +128,10 @@ export function elkGraph(
       const above = list.includes(at - 1)
         ? passOf(tree, at - 1)
         : unit(plan.trees[tree]!.roots[0]!);
-      key.set(passOf(tree, at), (key.get(above) ?? 1) + 0.001 * (tree + 1));
+      // Through the inner gap nearest its source: never past the row's first or last part.
+      const inner = row.length > 1 ? [0.5 / row.length, 1 - 0.5 / row.length] : [-1, 2];
+      const near = Math.min(inner[1]! - 0.01, Math.max(inner[0]! + 0.01, key.get(above) ?? 1));
+      key.set(passOf(tree, at), near + 0.001 * (tree + 1));
       units.push({
         key: key.get(passOf(tree, at))!,
         node: {
@@ -187,7 +190,7 @@ function fromElk(
   out: ElkNode,
   rows: DiagramRows,
   way: DiagramWay,
-): { layout: DiagramLayout; even: boolean } {
+): { layout: DiagramLayout; even: boolean; wraps: number } {
   const { across, along } = extent(way);
   const unit = unitOf(shape);
   const sized = blocks(shape, rows, way);
@@ -383,6 +386,21 @@ function fromElk(
     ...Object.values(at).map((p) => p.y + size.h),
     ...Object.values(flows).flatMap((entry) => entry.points.map((point) => point.y)),
   ];
+  // Trunks that pass a row of several parts outside them, around its end, instead of
+  // through a gap between them.
+  let wraps = 0;
+  plan.trees.forEach((tree, index) => {
+    for (const at of passes(tree, rows)) {
+      const ids = rows.rows[at]!;
+      if (ids.length < 2) continue;
+      const lo = Math.min(...ids.map((id) => placed.get(unit(id))?.x ?? 0));
+      const hi = Math.max(
+        ...ids.map((id) => (placed.get(unit(id))?.x ?? 0) + sized.get(id)!.width),
+      );
+      const x = trunk(index, at);
+      if (x < lo || x > hi) wraps += 1;
+    }
+  });
   // Rows that stand over each other: straightened trunks may drag a chain of rows aside.
   const centres = rows.rows.map((ids) => {
     const starts = ids.map((id) => u.get(id)!);
@@ -406,6 +424,7 @@ function fromElk(
       settled: true,
     },
     even: Math.max(...centres) - Math.min(...centres) <= span * 0.3,
+    wraps,
   };
 }
 
@@ -569,26 +588,91 @@ function inkOf(layout: DiagramLayout): number {
   return length + turns.size * 40 + crossings.size * 240;
 }
 
+/**
+ * The graph again, each row in the order the first pass found for its parts,
+ * with every trunk's crossing node moved into the inner gap nearest the
+ * column of the part it comes from (beside a row's only part where it has no
+ * gap): a trunk crosses a row between its parts, never around its end. Laid
+ * out with that order kept.
+ */
+function throughGaps(
+  graph: ElkNode,
+  first: ElkNode,
+  shape: DiagramShape,
+  rows: DiagramRows,
+): ElkNode {
+  const placed = new Map((first.children ?? []).map((child) => [child.id, child]));
+  const left = (id: string) => placed.get(id)?.x ?? 0;
+  const right = (id: string) => left(id) + (placed.get(id)?.width ?? 0);
+  const portOf = (id: string) =>
+    left(id) + (graph.children!.find((child) => child.id === id)?.ports?.[0]?.x ?? 0);
+  const unit = unitOf(shape);
+  const plan = planOf(shape, rows);
+  const children: ElkNode[] = [];
+  rows.rows.forEach((ids, at) => {
+    const own = new Set(ids.map(unit));
+    const units = graph.children!.filter(
+      (child) => own.has(child.id) || (child.id.startsWith("t") && child.id.endsWith(`r${at}`)),
+    );
+    const parts = units
+      .filter((child) => !child.id.startsWith("t"))
+      .sort((a, b) => left(a.id) - left(b.id));
+    const trunks = units
+      .filter((child) => child.id.startsWith("t"))
+      .map((child) => {
+        const tree = plan.trees[Number(/^t(\d+)r/u.exec(child.id)![1])]!;
+        const want = portOf(unit(tree.roots[0]!));
+        let gap = 0;
+        if (parts.length > 1) {
+          let best = Infinity;
+          for (let index = 1; index < parts.length; index += 1) {
+            const middle = (right(parts[index - 1]!.id) + left(parts[index]!.id)) / 2;
+            if (Math.abs(middle - want) < best) [best, gap] = [Math.abs(middle - want), index];
+          }
+        } else if (parts.length === 1) gap = want < portOf(parts[0]!.id) ? 0 : 1;
+        return { child, gap, want };
+      })
+      .sort((a, b) => a.gap - b.gap || a.want - b.want);
+    const order: ElkNode[] = [];
+    parts.forEach((part, index) => {
+      for (const trunk of trunks) if (trunk.gap === index) order.push(trunk.child);
+      order.push(part);
+    });
+    for (const trunk of trunks) if (trunk.gap >= parts.length) order.push(trunk.child);
+    order.forEach((child, column) => children.push({ ...child, x: column * 400 }));
+  });
+  return {
+    ...graph,
+    children,
+    layoutOptions: {
+      ...graph.layoutOptions,
+      "elk.layered.crossingMinimization.strategy": "INTERACTIVE",
+    },
+  };
+}
+
 async function laidOut(shape: DiagramShape, way: DiagramWay): Promise<DiagramLayout> {
   let best: DiagramLayout | null = null;
   // Fewest turns first; where that spreads the picture too wide or drags rows aside, rows
-  // centred on each other, then fewer parts to a row. Each is laid out with the parts'
-  // own order held and free, and the one with less ink kept.
+  // centred on each other, then fewer parts to a row. The engine orders the parts, then
+  // each trunk is set through its row's nearest gap; the engine's own order is kept only
+  // where it already passes every row between its parts and draws less ink.
   for (const [across, placement] of TRIES[way]) {
     const rows = diagramRows(shape, across);
-    let chosen: { layout: DiagramLayout; even: boolean; ink: number } | null = null;
-    for (const held of [false, true]) {
-      const graph = elkGraph(shape, rows, way);
-      graph.layoutOptions = {
-        ...graph.layoutOptions,
-        "elk.layered.nodePlacement.strategy": placement,
-        "elk.layered.crossingMinimization.forceNodeModelOrder": String(held),
-      };
-      const found = fromElk(shape, await run(graph), rows, way);
-      const ink = inkOf(found.layout);
-      if (!chosen || ink < chosen.ink) chosen = { ...found, ink };
-    }
-    const { layout, even } = chosen!;
+    const graph = elkGraph(shape, rows, way);
+    graph.layoutOptions = {
+      ...graph.layoutOptions,
+      "elk.layered.nodePlacement.strategy": placement,
+    };
+    // The engine writes its answer into the graph it is given: the second pass starts fresh.
+    const first = await run(graph);
+    const again = elkGraph(shape, rows, way);
+    again.layoutOptions = graph.layoutOptions;
+    const found = [
+      fromElk(shape, first, rows, way),
+      fromElk(shape, await run(throughGaps(again, first, shape, rows)), rows, way),
+    ].filter((entry, index) => index === 1 || !entry.wraps);
+    const { layout, even } = found.sort((a, b) => inkOf(a.layout) - inkOf(b.layout))[0]!;
     if ((way === "right" || fits(layout)) && (placement === "SIMPLE" || even)) return layout;
     if (!best || layout.bounds.width < best.bounds.width) best = layout;
   }

@@ -128,6 +128,40 @@ test("flows into one part join before it", async () => {
   expect(uploads.at(-2)!.x).toBe(artifacts.at(-2)!.x);
 });
 
+test("a trunk crosses a row between its parts, never around the row's end", async () => {
+  const shape = diagramShape({
+    kind: "diagram",
+    layers: [
+      { id: "top", name: "Top" },
+      { id: "mid", name: "Middle" },
+      { id: "end", name: "End" },
+    ],
+    nodes: [
+      { id: "source", name: "Source", kind: "service", layer: "top" },
+      ...["b", "c", "d", "e"].map((id) => ({ id, name: id, kind: "service", layer: "mid" })),
+      { id: "far", name: "Far", kind: "store", layer: "end" },
+    ],
+    edges: [
+      ...["b", "c", "d", "e"].map((to) => ({ from: "source", to })),
+      { from: "source", to: "far" },
+      { from: "e", to: "far" },
+    ],
+  });
+  const layout = await engineLayout(shape, "down");
+  const row = ["b", "c", "d", "e"].map((id) => layout.at[id]!.x);
+  const top = layout.at.b!.y;
+  const across = segments(layout.flows[4]!.points)
+    .map(([a, b]) => ({
+      x: a.x,
+      lo: Math.min(a.y, b.y),
+      hi: Math.max(a.y, b.y),
+      flat: a.x !== b.x,
+    }))
+    .find((run) => !run.flat && run.lo < top && run.hi > top + H)!;
+  expect(across.x).toBeGreaterThan(Math.min(...row) + W);
+  expect(across.x).toBeLessThan(Math.max(...row));
+});
+
 test("a pair of opposite flows is one line with a head at each end", async () => {
   const layout = await engineLayout(diagramShape(SAAS), "down");
   const crud = layout.flows[5]!;

@@ -145,6 +145,29 @@ test("a leaf that would take its tier's last row alone stands beside the part fe
   expect(rows.beside.get("api")).toEqual({ after: "auth", before: "billing" });
   expect(rows.rowOf.get("auth")).toBe(1);
   expect([...rows.forward.values()]).toEqual([true, true, true, true, true]);
+  // A line that has to pass the API's row keeps the leaves in a row of their own.
+  const passed = diagramShape({
+    kind: "diagram",
+    nodes: [
+      ...shape.parts.map((part) =>
+        node(part.id, ["edge", "app", "app", "app", "data", "data"][shape.parts.indexOf(part)]),
+      ),
+    ],
+    edges: [...shape.flows.map((flow) => edge(flow.from, flow.to)), edge("web", "db")],
+    layers: [
+      { id: "edge", name: "Edge" },
+      { id: "app", name: "Application" },
+      { id: "data", name: "Data" },
+    ],
+  });
+  expect(diagramRows(passed).beside.size).toBe(0);
+  expect(diagramRows(passed).rows).toEqual([
+    ["web"],
+    ["api"],
+    ["auth", "billing"],
+    ["db"],
+    ["backup"],
+  ]);
 });
 
 test("one air: a tree's own branches run above the run trees share into the same ports", () => {
