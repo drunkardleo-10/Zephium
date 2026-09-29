@@ -148,10 +148,42 @@ pub fn site_name(site: &str) -> String {
         .map_or_else(|| site.to_owned(), |(_, name, _)| (*name).to_owned())
 }
 
+/// Daily apps opened at their bare address start on the view a person reads
+/// them from: Calendar's day, Gmail's inbox, GitHub's notifications.
+const APP_VIEWS: &[(&str, &[&str], &str)] = &[
+    (
+        "calendar.google.com",
+        &[
+            "/",
+            "/calendar",
+            "/calendar/",
+            "/calendar/r",
+            "/calendar/u/0/r",
+        ],
+        "https://calendar.google.com/calendar/u/0/r/day",
+    ),
+    (
+        "mail.google.com",
+        &["/", "/mail", "/mail/"],
+        "https://mail.google.com/mail/u/0/",
+    ),
+    ("github.com", &["/"], "https://github.com/notifications"),
+];
+
 /// A bare site's own start page for a page task, when the vendor has one.
 pub fn entry_url(url: &str) -> Option<&'static str> {
     let parsed = url::Url::parse(url).ok()?;
-    if parsed.path() != "/" || parsed.query().is_some() {
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return None;
+    }
+    let host = parsed.host_str()?.trim_start_matches("www.");
+    if let Some((_, _, view)) = APP_VIEWS
+        .iter()
+        .find(|(known, paths, _)| *known == host && paths.contains(&parsed.path()))
+    {
+        return Some(view);
+    }
+    if parsed.path() != "/" {
         return None;
     }
     let site = site_of(url)?;
@@ -575,6 +607,23 @@ mod tests {
             Some("https://app.slack.com/client")
         );
         assert_eq!(entry_url("https://slack.com/archives"), None);
+        assert_eq!(
+            entry_url("https://calendar.google.com/"),
+            Some("https://calendar.google.com/calendar/u/0/r/day")
+        );
+        assert_eq!(
+            entry_url("https://mail.google.com"),
+            Some("https://mail.google.com/mail/u/0/")
+        );
+        assert_eq!(
+            entry_url("https://www.github.com/"),
+            Some("https://github.com/notifications")
+        );
+        assert_eq!(entry_url("https://github.com/sveltejs/svelte"), None);
+        assert_eq!(
+            entry_url("https://calendar.google.com/calendar/u/0/r/week"),
+            None
+        );
         assert!(is_sensitive("chase.com") && !is_sensitive("slack.com"));
     }
 }

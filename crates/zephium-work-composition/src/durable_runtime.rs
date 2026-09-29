@@ -1,5 +1,6 @@
 //! Narrow browser executor for a live durable Work attempt. It compiles only
 //! explicit Public reading scope and uses the original retained native owner.
+mod apps;
 mod collection;
 mod findings;
 pub use collection::WorkBrowseCollectionSchema;
@@ -2348,6 +2349,15 @@ fn compile_step(
         schema
             .append_browsing_fields(&mut objective)
             .map_err(|error| refused(&settings, "fields", error))?;
+    }
+    // A daily app's own reading note, when the objective has room for it.
+    if let (true, WorkStepKindV1::Read { url, .. }) = (task, &request.step) {
+        if let Some(note) = zephium_app::work_sites::host_of(url).and_then(|host| apps::note(&host))
+        {
+            if objective.len() + note.len() <= zephium_core::work::MAX_WORK_TEXT_BYTES {
+                objective.push_str(note);
+            }
+        }
     }
     if objective.len() > zephium_core::work::MAX_WORK_TEXT_BYTES {
         return Err(refused(&settings, "capacity", WorkError::Capacity));
