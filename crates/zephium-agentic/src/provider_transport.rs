@@ -271,15 +271,28 @@ pub const MACOS_TYPESAFE_KEYCHAIN_SERVICE: &str = "app.zephium.agent-provider.ty
 pub const MACOS_TYPESAFE_KEYCHAIN_ACCOUNT: &str = "development";
 
 /// Loads TypeSafe BYOK into the same provider-bound zeroizing owner as OpenAI.
+/// Parallel page reads load it at the same moment, and a read whose load
+/// failed ran on the paid emulation for its whole life: loads take turns,
+/// and an inaccessible Keychain is asked once more before falling back.
 #[cfg(target_os = "macos")]
 pub fn load_macos_development_typesafe_credential(
 ) -> Result<AgentProviderCredential<DecisionCredentialProvider>, MacosAgentProviderCredentialError>
 {
-    load_keychain_login_credential(
-        DecisionCredentialProvider::TypeSafe,
-        MACOS_TYPESAFE_KEYCHAIN_SERVICE,
-        MACOS_TYPESAFE_KEYCHAIN_ACCOUNT,
-    )
+    static LOADS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = LOADS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let load = || {
+        load_keychain_login_credential(
+            DecisionCredentialProvider::TypeSafe,
+            MACOS_TYPESAFE_KEYCHAIN_SERVICE,
+            MACOS_TYPESAFE_KEYCHAIN_ACCOUNT,
+        )
+    };
+    match load() {
+        Err(MacosAgentProviderCredentialError::Inaccessible) => load(),
+        loaded => loaded,
+    }
 }
 
 #[cfg(target_os = "macos")]
