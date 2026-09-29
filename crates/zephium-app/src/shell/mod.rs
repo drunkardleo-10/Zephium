@@ -1251,15 +1251,6 @@ impl Shell {
             }
             return;
         }
-        // A failed group takes no page: waiting would never end.
-        if self
-            .retained_page_runtime
-            .as_ref()
-            .is_some_and(|group| group.is_failed())
-        {
-            work.refuse();
-            return;
-        }
         let seated = self
             .retained_work
             .as_ref()
@@ -1275,6 +1266,9 @@ impl Shell {
                 .retained_page_runtime
                 .as_ref()
                 .is_some_and(|group| group.is_failed() || group.is_sealed());
+        // A failed or sealed group takes no new page; one of the same run
+        // waits for the group to retire and a fresh one to start, within the
+        // page's own bounded wait.
         if !seated {
             let joins = work.joins_group(
                 &self.retained_pages,

@@ -312,7 +312,7 @@ impl AgentProviderActionRefusal {
             ),
             SemanticActionBindingError::TargetCovered => (
                 "target_covered",
-                "Nothing executed. The target was covered by another element (a banner, a sticky header, a dialog or a popover) or lay outside the visible area. Scroll it into view with scroll amount into_view, or close what covers it (a dialog's close or a banner's reject control), then act on the fresh refs. Do not repeat the proposal against this observation.",
+                "Nothing executed. The target was covered by another element (a banner, a sticky header, a dialog or a popover) even after it was brought into view. The page has been looked at again: request snapshot(initial) first, then close what covers it (a dialog's close or a banner's reject control) or choose another control, using the fresh refs. Do not repeat the proposal against this observation.",
             ),
             _ => return Err(AgentProviderContinuationError::ToolKind),
         };
