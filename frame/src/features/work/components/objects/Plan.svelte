@@ -1,6 +1,6 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
-  import type { Detail, ObjectActions, PlanView } from "../../lib/board/types";
+  import type { ObjectActions, PlanView } from "../../lib/board/types";
   import MakeTasks from "../board/MakeTasks.svelte";
   import Mark, { hasMark } from "./Mark.svelte";
   import Title from "./Title.svelte";
@@ -14,11 +14,7 @@
     Tick02Icon,
   } from "./icons";
   /** Steps in time along one spine: when, what, what it costs, and the pick it stands on. */
-  let {
-    object,
-    detail,
-    actions = {},
-  }: { object: PlanView; detail: Detail; actions?: ObjectActions } = $props();
+  let { object, actions = {} }: { object: PlanView; actions?: ObjectActions } = $props();
   const GLYPH = {
     travel: AirplaneTakeOff01Icon,
     stay: BedDoubleIcon,
@@ -27,40 +23,38 @@
     milestone: Flag02Icon,
     note: Note01Icon,
   } as const;
-  const full = $derived(detail === "full");
-  const priced = $derived(full && object.steps.some((step) => step.cost));
+  const priced = $derived(object.steps.some((step) => step.cost));
   /** A step names its day only where the day changes. */
   const dated = $derived(
     object.steps.map((step, index) =>
       index > 0 && step.when === object.steps[index - 1]?.when ? "" : (step.when ?? ""),
     ),
   );
-  const glyph = (size: number) => (detail === "full" ? size : size * 2);
 </script>
 
-<section class="plan {detail}" class:priced aria-label={object.title}>
-  {#if object.title}<Title text={object.title} {detail} />{/if}
-  <ol class="steps">
-    {#each object.steps as step, index (index)}
-      <li class="step {step.kind}" class:done={step.done} class:first={!!dated[index]}>
-        <span class="when">{detail === "tile" ? "" : dated[index]}</span>
-        <span class="node">
-          {#if object.checkable && full && actions.check}<button
-              type="button"
-              class="glyph check nodrag nopan"
-              aria-pressed={!!step.done}
-              aria-label={step.title}
-              onclick={() => actions.check?.(object.id, index, !step.done)}
-              ><Icon icon={step.done ? Tick02Icon : GLYPH[step.kind]} size={glyph(14)} /></button
-            >{:else}<span class="glyph"
-              ><Icon icon={step.done ? Tick02Icon : GLYPH[step.kind]} size={glyph(14)} /></span
-            >{/if}
-        </span>
-        {#if detail !== "tile"}
+<section class="plan" class:priced aria-label={object.title}>
+  {#if object.title}<Title text={object.title} />{/if}
+  <div class="grid">
+    <ol class="steps">
+      {#each object.steps as step, index (index)}
+        <li class="step {step.kind}" class:done={step.done} class:first={!!dated[index]}>
+          <span class="when">{dated[index]}</span>
+          <span class="node">
+            {#if object.checkable && actions.check}<button
+                type="button"
+                class="glyph check nodrag nopan"
+                aria-pressed={!!step.done}
+                aria-label={step.title}
+                onclick={() => actions.check?.(object.id, index, !step.done)}
+                ><Icon icon={step.done ? Tick02Icon : GLYPH[step.kind]} size={14} /></button
+              >{:else}<span class="glyph"
+                ><Icon icon={step.done ? Tick02Icon : GLYPH[step.kind]} size={14} /></span
+              >{/if}
+          </span>
           <div class="what">
             <div class="head">
               <h4>{step.title}</h4>
-              {#if step.pick && full}
+              {#if step.pick}
                 {#if step.pick.picture}<img
                     class="thumb"
                     src={step.pick.picture.src}
@@ -76,7 +70,7 @@
                   >{/if}
               {/if}
             </div>
-            {#if full && (step.detail || step.place)}
+            {#if step.detail || step.place}
               <p class="detail">
                 {#if step.place}<span class="place">{step.place}{step.detail ? " · " : ""}</span
                   >{/if}{#if step.detail}{step.detail}{/if}
@@ -84,21 +78,22 @@
             {/if}
           </div>
           {#if priced}<span class="cost">{step.cost ?? ""}</span>{/if}
-        {/if}
-      </li>
-    {/each}
-  </ol>
-  {#if object.total?.value.trim() && detail !== "tile"}
-    <p class="total" class:loose={!priced}>
-      <span class="label">{object.total.label}</span><span class="value">{object.total.value}</span>
-    </p>
-  {/if}
-  {#if object.checkable && full}<footer><MakeTasks id={object.id} /></footer>{/if}
+        </li>
+      {/each}
+    </ol>
+    {#if object.total?.value.trim()}
+      <p class="total" class:loose={!priced}>
+        <span class="label">{object.total.label}</span><span class="value"
+          >{object.total.value}</span
+        >
+      </p>
+    {/if}
+    {#if object.checkable}<footer><MakeTasks id={object.id} /></footer>{/if}
+  </div>
 </section>
 
 <style>
   .plan {
-    --when: 92px;
     --node: 28px;
 
     display: flex;
@@ -108,48 +103,35 @@
     color: var(--color-text);
   }
 
+  /* One grid for every step: the date column is as wide as its longest label. */
+  .grid {
+    display: grid;
+    grid-template-columns: fit-content(200px) var(--node) minmax(0, 1fr);
+    column-gap: 14px;
+  }
+
+  .priced .grid {
+    grid-template-columns: fit-content(200px) var(--node) minmax(0, 1fr) auto;
+  }
+
   .steps {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
     margin: 0;
     padding: 0;
     list-style: none;
   }
 
   .step {
-    position: relative;
     display: grid;
-    grid-template-columns: var(--when) var(--node) minmax(0, 1fr);
-    column-gap: 14px;
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
     padding-block-end: 18px;
-  }
-
-  .priced .step {
-    grid-template-columns: var(--when) var(--node) minmax(0, 1fr) auto;
-  }
-
-  /* The spine: one hairline from each node down to the next. */
-  .step:not(:last-child)::before {
-    position: absolute;
-    inset-block: calc(var(--node) + 4px) 4px;
-    inset-inline-start: calc(var(--when) + 14px + var(--node) / 2 - 0.5px);
-    inline-size: 1px;
-    background: var(--color-border-strong);
-    content: "";
   }
 
   .step.first:not(:first-child) {
     padding-block-start: 10px;
-  }
-
-  .step.first:not(:first-child)::after {
-    position: absolute;
-    inset-block-start: 0;
-    inset-inline-start: calc(var(--when) + 14px + var(--node) / 2 - 0.5px);
-    inline-size: 1px;
-    block-size: 10px;
-    background: var(--color-border-strong);
-    content: "";
   }
 
   .when {
@@ -158,16 +140,39 @@
     font-size: var(--text-caption);
     font-weight: 600;
     letter-spacing: 0.06em;
+    line-height: 15px;
     text-transform: uppercase;
-    white-space: nowrap;
+    text-wrap: balance;
   }
 
   .node {
+    position: relative;
     display: flex;
     justify-content: center;
   }
 
+  /* The spine: one hairline from each node down to the next, through the air between. */
+  .step:not(:last-child) .node::before {
+    position: absolute;
+    inset-block: calc(var(--node) + 4px) -14px;
+    inset-inline-start: calc(50% - 0.5px);
+    inline-size: 1px;
+    background: var(--color-border-strong);
+    content: "";
+  }
+
+  .step.first:not(:first-child) .node::after {
+    position: absolute;
+    inset-block-start: -10px;
+    inset-inline-start: calc(50% - 0.5px);
+    inline-size: 1px;
+    block-size: 10px;
+    background: var(--color-border-strong);
+    content: "";
+  }
+
   .glyph {
+    position: relative;
     display: grid;
     place-items: center;
     inline-size: var(--node);
@@ -264,11 +269,11 @@
 
   .total {
     display: flex;
+    grid-column: 3 / -1;
     align-items: baseline;
     justify-content: space-between;
     gap: 16px;
     margin: 0;
-    margin-inline-start: calc(var(--when) + var(--node) + 28px);
     padding-block-start: 14px;
     border-block-start: 1px solid var(--color-border-strong);
   }
@@ -295,68 +300,7 @@
   }
 
   footer {
-    margin-inline-start: calc(var(--when) + var(--node) + 28px);
-  }
-
-  .overview {
-    --when: 200px;
-    --node: 56px;
-
-    gap: 28px;
-  }
-
-  .overview .step {
-    column-gap: 24px;
-    padding-block-end: 28px;
-  }
-
-  .overview .step:not(:last-child)::before,
-  .overview .step.first:not(:first-child)::after {
-    inset-inline-start: calc(var(--when) + 24px + var(--node) / 2 - 1px);
-    inline-size: 2px;
-  }
-
-  .overview .when,
-  .overview .total .label {
-    padding-block-start: 14px;
-    font-size: var(--text-overview-label);
-  }
-
-  .overview h4 {
-    padding-block-start: 8px;
-    font-size: var(--text-overview-title);
-    line-height: 1.25;
-  }
-
-  .overview .total {
-    margin-inline-start: calc(var(--when) + var(--node) + 48px);
-    border-block-start-width: 2px;
-  }
-
-  .overview .total .value {
-    font-size: var(--text-overview-figure);
-  }
-
-  .tile {
-    --when: 0px;
-    --node: 44px;
-
-    gap: 28px;
-  }
-
-  .tile .step {
-    grid-template-columns: var(--node);
-    column-gap: 0;
-    padding-block-end: 20px;
-  }
-
-  .tile .when {
-    display: none;
-  }
-
-  .tile .step:not(:last-child)::before,
-  .tile .step.first:not(:first-child)::after {
-    inset-inline-start: calc(var(--node) / 2 - 1.5px);
-    inline-size: 3px;
+    grid-column: 3 / -1;
+    padding-block-start: 16px;
   }
 </style>

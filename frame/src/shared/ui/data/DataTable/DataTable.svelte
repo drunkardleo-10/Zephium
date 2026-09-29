@@ -242,11 +242,13 @@
     background: transparent;
   }
 
+  /* A word is never broken: a column is at least as wide as its longest word. */
   .plain th,
   .plain td {
     min-inline-size: 0;
     padding: 11px 12px;
     vertical-align: middle;
+    overflow-wrap: break-word;
   }
 
   .plain thead {

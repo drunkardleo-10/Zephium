@@ -83,71 +83,65 @@ export function host(url: string): string {
   }
 }
 
-/** The room a column takes when read from afar, at the overview's type size. */
-const FAR: Partial<Record<SheetColumn["kind"], number>> = {
-  money: 150,
-  number: 120,
-  percent: 110,
-  duration: 130,
-  date: 160,
-  yes_no: 76,
-  rating: 140,
-  tag: 190,
-  link: 220,
+/** The room a typed column takes at reading size, padding included. */
+const ROOM: Partial<Record<SheetColumn["kind"], number>> = {
+  money: 104,
+  number: 88,
+  percent: 80,
+  duration: 96,
+  date: 120,
+  yes_no: 72,
+  rating: 104,
+  tag: 128,
+  link: 160,
 };
-/** Kinds that say the most in the least room, first. */
+/** Kinds that say the most in the least room, first; text follows, shortest first. */
 const TELLING: SheetColumn["kind"][] = [
   "money",
   "yes_no",
   "rating",
-  "tag",
   "number",
   "percent",
   "duration",
+  "tag",
   "date",
   "entity",
+  "link",
 ];
-/** An overview character at 22 px, and the widest a subject may stand before it wraps. */
-const CHAR = 11;
-const SUBJECT = 200;
-const GAP = 24;
+/** A character of body text, a cell's padding, the widest a text column grows before it wraps. */
+const CHAR = 7;
+const PAD = 24;
+const MEASURE = 240;
 
 /**
- * The columns a sheet keeps from afar, in their own order: the typed ones that
- * say most first, then short text; a column of sentences gives way. They fit
- * the room beside the subject column.
+ * The columns a sheet shows in the width it has, in their own order: its
+ * subject always, then the typed columns that say most in least room, then
+ * text, shortest first. What does not fit waits behind "more columns".
  */
-export function farColumns(sheet: Pick<SheetView, "columns" | "rows">, width: number): number[] {
+export function fitColumns(sheet: Pick<SheetView, "columns" | "rows">, width: number): number[] {
   const longest = (index: number) =>
-    Math.max(0, ...sheet.rows.map((row) => (row.cells[index] ?? "").trim().length));
-  const average = (index: number) =>
-    sheet.rows.reduce((sum, row) => sum + (row.cells[index] ?? "").trim().length, 0) /
-    Math.max(1, sheet.rows.length);
+    Math.max(
+      sheet.columns[index]?.label.length ?? 0,
+      ...sheet.rows.map((row) => (row.cells[index] ?? "").trim().length),
+    );
   const room = (index: number) => {
-    const column = sheet.columns[index]!;
-    const fixed = FAR[column.kind];
-    if (fixed) return fixed;
-    // Short text may wrap to two lines from afar; its label still wants its own line.
-    const words = Math.max(column.label.length, Math.ceil(longest(index) * 0.6));
-    return Math.min(260, words * CHAR + (column.kind === "entity" ? 40 : 0));
+    const fixed = ROOM[sheet.columns[index]!.kind];
+    if (fixed) return Math.max(fixed, (sheet.columns[index]!.label.length + 2) * CHAR);
+    // Text wraps: it needs its longest word and a fair measure, not its whole length.
+    return Math.min(MEASURE, Math.max(96, Math.ceil(longest(index) * 0.55) * CHAR)) + PAD;
   };
-  const short = (index: number) =>
-    sheet.columns[index]!.kind !== "text" || (average(index) <= 32 && longest(index) <= 48);
+  const rank = (index: number) => {
+    const kind = sheet.columns[index]!.kind;
+    return TELLING.includes(kind) ? TELLING.indexOf(kind) : TELLING.length + longest(index) / 100;
+  };
   const candidates = sheet.columns
-    .map((column, index) => ({ column, index }))
-    .filter(({ index }) => index > 0 && short(index))
-    .sort((a, b) => {
-      const rank = (kind: SheetColumn["kind"]) =>
-        TELLING.includes(kind) ? TELLING.indexOf(kind) : TELLING.length;
-      return rank(a.column.kind) - rank(b.column.kind) || a.index - b.index;
-    });
-  let left =
-    width -
-    Math.min(SUBJECT, Math.max(sheet.columns[0]?.label.length ?? 0, longest(0)) * CHAR + 40) -
-    56;
+    .map((_, index) => index)
+    .slice(1)
+    .sort((a, b) => rank(a) - rank(b) || a - b);
+  let left = width - Math.min(220, longest(0) * CHAR + 40);
   const kept: number[] = [];
-  for (const { index } of candidates) {
-    const need = room(index) + GAP;
+  for (const index of candidates) {
+    const need = room(index);
     if (need > left) continue;
     kept.push(index);
     left -= need;

@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import { inline } from "../components/objects/inline";
 import { blocks, noteBlocks } from "../components/objects/markdown";
-import { bests, cellOrder, farColumns, figure, rating, yesNo } from "../components/objects/sheet";
+import { bests, cellOrder, fitColumns, figure, rating, yesNo } from "../components/objects/sheet";
 import { size } from "../components/objects/size-text";
 import type { SheetColumn } from "../lib/board/types";
 
@@ -57,7 +57,7 @@ test("a file's size reads as the system writes it", () => {
   expect(size(18_400_000)).toBe("18 MB");
 });
 
-test("from afar a sheet keeps its subject and the short columns that fit, never a column of sentences", () => {
+test("a sheet keeps its subject and the columns that say most in the width it has", () => {
   const costs = {
     columns: [
       { label: "Cost category", kind: "text" as const },
@@ -69,27 +69,31 @@ test("from afar a sheet keeps its subject and the short columns that fit, never 
       ["Queue, workers and background compute", "$100–1,000", "$1,000–15,000"],
     ].map((cells) => ({ cells })),
   };
-  expect(farColumns(costs, 488)).toEqual([1]);
-  expect(farColumns(costs, 720)).toEqual([1, 2]);
+  expect(fitColumns(costs, 360)).toEqual([1]);
+  expect(fitColumns(costs, 560)).toEqual([1, 2]);
   const stack = {
     columns: [
       { label: "Layer", kind: "text" as const },
       { label: "Technology", kind: "text" as const },
       { label: "Why", kind: "text" as const },
+      { label: "Managed", kind: "yes_no" as const },
     ],
     rows: [
       [
         "Web client",
         "Next.js + TypeScript",
         "Fast product iteration, typed UI and server-rendered pages.",
+        "yes",
       ],
       [
         "API",
         "TypeScript service (Fastify or NestJS)",
         "Stateless endpoints, validation, tenant authorization and billing hooks.",
+        "no",
       ],
     ].map((cells) => ({ cells })),
   };
-  expect(farColumns(stack, 544)).toEqual([1]);
-  expect(farColumns(stack, 2000)).toEqual([1]);
+  // The check first, then the shorter text; the sentences give way until there is room.
+  expect(fitColumns(stack, 420)).toEqual([1, 3]);
+  expect(fitColumns(stack, 900)).toEqual([1, 2, 3]);
 });

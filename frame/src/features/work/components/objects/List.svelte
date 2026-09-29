@@ -1,28 +1,17 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
-  import type { Detail, ListView, ObjectActions } from "../../lib/board/types";
+  import type { ListView, ObjectActions } from "../../lib/board/types";
   import MakeTasks from "../board/MakeTasks.svelte";
-  import Mark, { hasMark } from "./Mark.svelte";
+  import Mark from "./Mark.svelte";
   import Title from "./Title.svelte";
   import { ArrowUpRight01Icon, Tick02Icon } from "./icons";
   /**
    * Things to do, answer or read, each with where it came from: the app's mark,
    * who and when, the words themselves in a quieter voice, and the way back.
    */
-  let {
-    object,
-    detail,
-    actions = {},
-  }: { object: ListView; detail: Detail; actions?: ObjectActions } = $props();
-  const full = $derived(detail === "full");
+  let { object, actions = {} }: { object: ListView; actions?: ObjectActions } = $props();
   const todo = $derived(object.style === "todo");
-  const shown = $derived(detail === "tile" ? [] : object.items);
-  const marks = $derived(
-    [...new Set(object.items.flatMap((item) => (item.from?.host ? [item.from.host] : [])))].filter(
-      (host) => hasMark(host),
-    ),
-  );
   const open = (url: string) => (event: MouseEvent) => {
     if (!actions.link) return;
     event.preventDefault();
@@ -30,13 +19,13 @@
   };
 </script>
 
-<section class="list {detail}" aria-label={object.title}>
-  {#if object.title}<Title text={object.title} {detail} />{/if}
+<section class="list" aria-label={object.title}>
+  {#if object.title}<Title text={object.title} />{/if}
   <ul class="items">
-    {#each shown as item, index (index)}
-      <li class:done={item.done} class:high={item.priority === "high"}>
+    {#each object.items as item, index (index)}
+      <li class:done={item.done}>
         {#if todo}
-          {#if full && actions.check}<button
+          {#if actions.check}<button
               type="button"
               class="box nodrag nopan"
               aria-pressed={!!item.done}
@@ -44,31 +33,24 @@
               onclick={() => actions.check?.(object.id, index, !item.done)}
               >{#if item.done}<Icon icon={Tick02Icon} size={12} />{/if}</button
             >{:else}<span class="box" aria-hidden="true"
-              >{#if item.done}<Icon
-                  icon={Tick02Icon}
-                  size={detail === "full" ? 12 : 24}
-                />{/if}</span
+              >{#if item.done}<Icon icon={Tick02Icon} size={12} />{/if}</span
             >{/if}
         {:else}<span class="lead" aria-hidden="true"></span>{/if}
         <div class="body">
           <div class="line">
-            <h4>
-              {#if item.priority === "high"}<span class="flag" title={m.work_list_high()}
-                ></span>{/if}{item.title}
-            </h4>
-            {#if item.due}<span class="due">{item.due}</span>{/if}
+            <h4>{item.title}</h4>
+            {#if item.priority === "high" || item.due}<span class="when">
+                {#if item.priority === "high"}<span class="priority">{m.work_list_high()}</span
+                  >{/if}{#if item.due}<span class="due">{item.due}</span>{/if}
+              </span>{/if}
           </div>
-          {#if full && item.detail}<p class="detail">{item.detail}</p>{/if}
+          {#if item.detail}<p class="detail">{item.detail}</p>{/if}
           {#if item.from}
             {@const from = item.from}
             <div class="from">
-              {#if from.host}<Mark address={from.host} size={full ? 14 : 28} />{/if}
-              <span class="who"
-                >{[from.who, full ? from.app : null, full ? from.when : null]
-                  .filter(Boolean)
-                  .join(" · ")}</span
-              >
-              {#if from.url && full}<a
+              {#if from.host}<Mark address={from.host} size={14} />{/if}
+              <span class="who">{[from.who, from.app, from.when].filter(Boolean).join(" · ")}</span>
+              {#if from.url}<a
                   class="back nodrag"
                   href={from.url}
                   onclick={open(from.url)}
@@ -76,18 +58,13 @@
                   ><Icon icon={ArrowUpRight01Icon} size={13} /></a
                 >{/if}
             </div>
-            {#if from.quote && full}<blockquote>{from.quote}</blockquote>{/if}
+            {#if from.quote}<blockquote>{from.quote}</blockquote>{/if}
           {/if}
         </div>
       </li>
     {/each}
   </ul>
-  {#if detail === "tile" && marks.length}
-    <div class="marks">
-      {#each marks as host (host)}<Mark address={host} size={56} />{/each}
-    </div>
-  {/if}
-  {#if todo && full}<footer><MakeTasks id={object.id} /></footer>{/if}
+  {#if todo}<footer><MakeTasks id={object.id} /></footer>{/if}
 </section>
 
 <style>
@@ -178,25 +155,31 @@
     color: var(--color-muted);
   }
 
-  .flag {
-    display: inline-block;
-    inline-size: 7px;
-    block-size: 7px;
-    margin-inline-end: 8px;
+  .when {
+    display: inline-flex;
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: flex-end;
+    gap: 4px 8px;
+    max-inline-size: 45%;
+  }
+
+  .priority {
+    padding: 1px 7px;
     border-radius: var(--radius-capsule);
-    background: var(--color-danger);
-    vertical-align: 0.12em;
+    background: var(--color-fill-strong);
+    color: var(--color-text);
+    font-size: var(--text-caption);
+    font-weight: 600;
+    line-height: 16px;
   }
 
   .due {
-    flex: none;
     color: var(--color-muted);
     font-size: var(--text-label);
     font-variant-numeric: tabular-nums;
-  }
-
-  .high .due {
-    color: var(--color-danger);
+    text-align: end;
   }
 
   .detail {
@@ -247,50 +230,5 @@
 
   footer {
     padding-inline-start: 34px;
-  }
-
-  .overview {
-    gap: 24px;
-  }
-
-  .overview li {
-    grid-template-columns: 40px minmax(0, 1fr);
-    column-gap: 24px;
-    padding-block: 22px;
-    border-block-start-width: 2px;
-  }
-
-  .overview .box {
-    inline-size: 36px;
-    block-size: 36px;
-    box-shadow: inset 0 0 0 3px var(--color-border-strong);
-  }
-
-  .overview .lead {
-    inline-size: 12px;
-    block-size: 12px;
-    margin-block-start: 14px;
-  }
-
-  .overview h4 {
-    font-size: var(--text-overview-title);
-    line-height: 1.25;
-  }
-
-  .overview .flag {
-    inline-size: 14px;
-    block-size: 14px;
-    margin-inline-end: 14px;
-  }
-
-  .overview .due,
-  .overview .from {
-    gap: 12px;
-    font-size: var(--text-overview-label);
-  }
-
-  .marks {
-    display: flex;
-    gap: 20px;
   }
 </style>

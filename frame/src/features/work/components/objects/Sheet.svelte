@@ -5,8 +5,8 @@
     type TableSort,
   } from "$shared/ui/data/DataTable";
   import * as m from "$shared/i18n/messages";
-  import type { Detail, ObjectActions, SheetView } from "../../lib/board/types";
-  import { bests, cellOrder, farColumns, figure, host, numeric, rating, yesNo } from "./sheet";
+  import type { ObjectActions, SheetView } from "../../lib/board/types";
+  import { bests, cellOrder, figure, fitColumns, host, numeric, rating, yesNo } from "./sheet";
   import { vendorHost } from "../../lib/vendors";
   import Title from "./Title.svelte";
   import Mark, { hasMark } from "./Mark.svelte";
@@ -14,31 +14,42 @@
   import Dots from "./Dots.svelte";
   let {
     object,
-    detail,
     actions = {},
     rows: shown = 8,
     centre = false,
   }: {
     object: SheetView;
-    detail: Detail;
     actions?: ObjectActions;
     /** Rows the canvas shows before the rest are read in the centre. */
     rows?: number;
-    /** Opened in the centre: every row, every word. */
+    /** Opened in the centre: every row, every column. */
     centre?: boolean;
   } = $props();
   const first = $derived(object.columns[0]);
-  const rest = $derived(object.columns.slice(1));
   const best = $derived(bests(object));
+  let width = $state(0);
+  /** Every column once the person asks for them; they scroll inside the sheet. */
+  let wide = $state(false);
+  /** The columns that carry most in the width the sheet stands at. */
+  const fitted = $derived(
+    width ? fitColumns(object, width - 44) : object.columns.map((_, index) => index).slice(1),
+  );
+  const kept = $derived(centre || wide ? object.columns.map((_, index) => index).slice(1) : fitted);
+  const hidden = $derived(object.columns.length - 1 - fitted.length);
   const columns = $derived<TableColumn[]>(
-    rest.map((column, index) => ({
-      key: String(index + 1),
-      label:
-        column.unit && column.kind !== "money" ? `${column.label} (${column.unit})` : column.label,
-      numeric: numeric(column),
-      centered: column.kind === "yes_no" || column.kind === "rating",
-      sortable: object.rows.length > 2 && column.kind !== "link",
-    })),
+    kept.map((at) => {
+      const column = object.columns[at]!;
+      return {
+        key: String(at),
+        label:
+          column.unit && column.kind !== "money"
+            ? `${column.label} (${column.unit})`
+            : column.label,
+        numeric: numeric(column),
+        centered: column.kind === "yes_no" || column.kind === "rating",
+        sortable: object.rows.length > 2 && column.kind !== "link",
+      };
+    }),
   );
   const rows = $derived<TableRow[]>(
     object.rows.map((row, index) => ({
@@ -62,9 +73,6 @@
     range: (from: number, to: number, total: number) =>
       m.work_table_range({ first: from, last: to, total }),
   });
-  let width = $state(0);
-  /** At a distance a sheet is its subjects and the short columns that decide between them. */
-  const far = $derived(detail === "overview" ? farColumns(object, width || 720) : []);
   /** The row's own logo, else a known product its name is. */
   function logo(index: number): string | null {
     const row = object.rows[index];
@@ -74,7 +82,22 @@
     const known = vendorHost(undefined, row?.cells[0] ?? "");
     return known && hasMark(known) ? known : null;
   }
-  const limit = $derived(centre ? object.rows.length : detail === "full" ? shown : 5);
+  const limit = $derived(centre ? object.rows.length : shown);
+  /** Where the columns run on past the sheet's edge, each side. */
+  let more = $state({ before: false, after: false });
+  let table = $state<HTMLElement>();
+  function measure(scroller: Element | null | undefined) {
+    if (!(scroller instanceof HTMLElement)) return;
+    const end = scroller.scrollWidth - scroller.clientWidth;
+    more = { before: scroller.scrollLeft > 1, after: end - scroller.scrollLeft > 1 };
+  }
+  $effect(() => {
+    void kept;
+    void width;
+    const scroller = table?.querySelector(".table-scroll");
+    const frame = requestAnimationFrame(() => measure(scroller));
+    return () => cancelAnimationFrame(frame);
+  });
 </script>
 
 {#snippet subject(index: number, size: number)}
@@ -94,7 +117,7 @@
   {@const column = object.columns[at]!}
   {@const text = object.rows[index]?.cells[at] ?? ""}
   {@const marked = best[at]?.has(String(index))}
-  {#if column.kind === "yes_no"}<YesNo value={yesNo(text)} size={detail === "full" ? 16 : 28} />
+  {#if column.kind === "yes_no"}<YesNo value={yesNo(text)} size={16} />
   {:else if column.kind === "rating"}
     {@const score = rating(text)}
     {#if score}<Dots
@@ -105,9 +128,7 @@
   {:else if column.kind === "entity"}
     {@const known = vendorHost(undefined, text)}
     <span class="subject"
-      >{#if known}<Mark address={known} size={detail === "full" ? 16 : 28} />{/if}<span class="name"
-        >{text}</span
-      ></span
+      >{#if known}<Mark address={known} size={16} />{/if}<span class="name">{text}</span></span
     >
   {:else if column.kind === "tag"}{#if text.trim()}<span class="tag">{text}</span>{/if}
   {:else if column.kind === "link"}
@@ -120,17 +141,20 @@
         actions.link(text);
       }}><Mark address={text} size={14} /><span>{host(text)}</span></a
     >
-  {:else if numeric(column)}<span class="figure" class:best={marked}
-      >{figure(column, text)}{#if column.kind === "number" && column.unit && detail !== "full"}<span
-          class="unit">{column.unit}</span
-        >{/if}</span
-    >
+  {:else if numeric(column)}<span class="figure" class:best={marked}>{figure(column, text)}</span>
   {:else}<span class="text">{text}</span>{/if}
 {/snippet}
 
-<section class="sheet {detail}" class:centre aria-label={object.title} bind:clientWidth={width}>
-  {#if object.title}<Title text={object.title} {detail} />{/if}
-  {#if detail === "full"}
+<section class="sheet" class:centre aria-label={object.title} bind:clientWidth={width}>
+  {#if object.title}<Title text={object.title} />{/if}
+  <div
+    class="nodrag table"
+    class:before={more.before}
+    class:after={more.after}
+    class:nowheel={more.before || more.after}
+    bind:this={table}
+    onscrollcapture={(event) => measure(event.target as Element)}
+  >
     <DataTable
       caption={object.title ?? ""}
       showCaption={false}
@@ -149,53 +173,30 @@
       {/snippet}
       {#snippet cell(row, column)}{@render value(Number(row.key), Number(column.key))}{/snippet}
     </DataTable>
-    {#if object.rows.length > limit || object.note}
-      <footer>
-        {#if object.note}<p class="note">{object.note}</p>{/if}
+  </div>
+  {#if object.rows.length > limit || object.note || (hidden > 0 && !centre)}
+    <footer>
+      {#if object.note}<p class="note">{object.note}</p>{/if}
+      <span class="more">
+        {#if hidden > 0 && !centre}<button
+            type="button"
+            class="all nodrag nopan"
+            aria-expanded={wide}
+            onclick={() => (wide = !wide)}
+            >{wide
+              ? m.work_sheet_fewer_columns()
+              : hidden === 1
+                ? m.work_sheet_more_column()
+                : m.work_sheet_more_columns({ count: hidden })}</button
+          >{/if}
         {#if object.rows.length > limit}<button
             type="button"
             class="all nodrag nopan"
             onclick={() => actions.open?.(object.id)}
             >{m.work_object_show_all({ count: object.rows.length })}</button
           >{/if}
-      </footer>
-    {/if}
-  {:else if detail === "overview"}
-    <div
-      class="far"
-      role="table"
-      aria-label={object.title}
-      style:grid-template-columns={`minmax(0, auto) ${far.map(() => "auto").join(" ")}`}
-    >
-      <div class="head" role="row">
-        <span role="columnheader">{first?.label ?? ""}</span>
-        {#each far as at (at)}<span
-            role="columnheader"
-            class:end={numeric(object.columns[at]!)}
-            class:centered={object.columns[at]!.kind === "yes_no" ||
-              object.columns[at]!.kind === "rating"}>{object.columns[at]!.label}</span
-          >{/each}
-      </div>
-      {#each object.rows.slice(0, limit) as row, index (index)}
-        <div class="line" role="row">
-          <span class="subject" role="rowheader"
-            >{@render subject(index, 28)}<span class="name">{row.cells[0]}</span></span
-          >
-          {#each far as at (at)}<span
-              role="cell"
-              class:end={numeric(object.columns[at]!)}
-              class:centered={object.columns[at]!.kind === "yes_no" ||
-                object.columns[at]!.kind === "rating"}>{@render value(index, at)}</span
-            >{/each}
-        </div>
-      {/each}
-    </div>
-  {:else}
-    <div class="marks">
-      {#each object.rows.slice(0, 6) as row, index (index)}
-        {#if row.entity?.picture || logo(index)}{@render subject(index, 56)}{/if}
-      {/each}
-    </div>
+      </span>
+    </footer>
   {/if}
 </section>
 
@@ -214,26 +215,16 @@
     font-size: var(--text-body);
   }
 
-  .sheet.overview {
-    gap: 22px;
-    padding: 28px;
-  }
-
-  .sheet.tile {
-    gap: 24px;
-    padding: 32px;
-  }
-
   .subject {
     display: inline-flex;
     align-items: center;
     gap: 10px;
-    min-inline-size: 0;
   }
 
+  /* A name wraps between its words, never inside one. */
   .name {
-    min-inline-size: 0;
-    overflow-wrap: anywhere;
+    overflow-wrap: normal;
+    text-wrap: pretty;
   }
 
   .picture {
@@ -243,20 +234,29 @@
   }
 
   .text {
-    display: -webkit-box;
-    min-inline-size: 16ch;
-    overflow: hidden;
+    display: block;
+    min-inline-size: 12ch;
+    max-inline-size: 34ch;
     color: var(--color-label-secondary);
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
+    overflow-wrap: break-word;
     text-wrap: pretty;
   }
 
-  .centre .text {
-    display: inline;
-    -webkit-line-clamp: none;
-    line-clamp: none;
+  /* Columns that run on past the edge fade into it; the subject column stays. */
+  .table.after :global(.table-scroll) {
+    mask-image: linear-gradient(to left, transparent, black 48px);
+  }
+
+  .table.before :global(tbody th),
+  .table.before :global(thead th:first-child) {
+    box-shadow: 1px 0 0 var(--color-border);
+  }
+
+  .table :global(thead th:first-child) {
+    position: sticky;
+    inset-inline-start: 0;
+    z-index: 1;
+    background: var(--color-surface);
   }
 
   .figure {
@@ -271,11 +271,6 @@
     background: var(--color-fill-active);
     color: var(--color-text);
     font-weight: 650;
-  }
-
-  .unit {
-    margin-inline-start: 0.25em;
-    color: var(--color-muted);
   }
 
   .tag {
@@ -309,6 +304,13 @@
     gap: 16px;
   }
 
+  .more {
+    display: flex;
+    flex: none;
+    gap: 16px;
+    margin-inline-start: auto;
+  }
+
   .note {
     margin: 0;
     color: var(--color-faint);
@@ -317,7 +319,6 @@
 
   .all {
     flex: none;
-    margin-inline-start: auto;
     padding: 0;
     border: 0;
     background: none;
@@ -330,80 +331,5 @@
 
   .all:hover {
     color: var(--color-text);
-  }
-
-  /* From afar: the subject and its telling columns, set to read at half size. */
-  .far {
-    display: grid;
-    column-gap: 24px;
-    font-size: var(--text-overview-label);
-  }
-
-  .far .head,
-  .far .line {
-    display: contents;
-  }
-
-  .far .head span {
-    padding-block-end: 12px;
-    color: var(--color-muted);
-    white-space: nowrap;
-  }
-
-  .far .line > * {
-    display: flex;
-    align-items: center;
-    min-block-size: 64px;
-    border-block-start: 2px solid var(--color-border);
-  }
-
-  .far .end {
-    justify-content: flex-end;
-    text-align: end;
-  }
-
-  .far .centered {
-    justify-content: center;
-    text-align: center;
-  }
-
-  .far .name {
-    max-inline-size: 200px;
-    font-weight: 600;
-  }
-
-  .far .text {
-    min-inline-size: 0;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-  }
-
-  .far :global(.dots) {
-    gap: 5px;
-  }
-
-  .far :global(.dot) {
-    inline-size: 13px;
-    block-size: 13px;
-  }
-
-  .far .figure.best {
-    padding: 2px 14px;
-    margin-inline-end: 0;
-  }
-
-  .far .tag {
-    padding: 3px 14px;
-    font-size: var(--text-overview-label);
-  }
-
-  .marks {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 20px;
-  }
-
-  .marks .picture {
-    border-radius: var(--radius-row);
   }
 </style>
