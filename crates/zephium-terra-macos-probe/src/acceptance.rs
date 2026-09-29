@@ -323,16 +323,51 @@ impl zephium_core::work::model::WorkModelClient for Scripted {
                 _ => None,
             })
             .unwrap_or_default();
+        let starts: Vec<&str> = self.start.split(' ').filter(|s| !s.is_empty()).collect();
+        // A helper's brief names its part: "Site 2" browses the second start.
+        let part = request
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                WorkModelMessage::User(parts) => parts.iter().find_map(|part| match part {
+                    WorkModelPart::Text(text) => text
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Part: Site "))
+                        .and_then(|rest| rest.split(' ').next()?.parse::<usize>().ok()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .unwrap_or(1);
+        let start = starts.get(part - 1).copied().unwrap_or(self.start);
+        if lead && !answered {
+            let calls = (1..=starts.len())
+                .map(|index| {
+                    WorkModelPart::ToolCall(WorkModelToolCall {
+                        id: format!("part-{index}"),
+                        name: "start_part".into(),
+                        arguments: serde_json::json!({"title": format!("Site {index}"),
+                            "helper": "browser", "goal": goal.chars().take(200).collect::<String>(),
+                            "brief": goal}),
+                    })
+                })
+                .collect();
+            return Box::pin(async move {
+                Ok(WorkModelOutcome {
+                    stop: WorkModelStop::ToolUse,
+                    usage: WorkModelUsage {
+                        cost_micros: Some(0),
+                        ..WorkModelUsage::default()
+                    },
+                    assistant: calls,
+                })
+            });
+        }
         let (name, arguments) = match (lead, answered) {
-            (true, false) => (
-                "start_part",
-                serde_json::json!({"title": "Site", "helper": "browser",
-                    "goal": goal.chars().take(200).collect::<String>(), "brief": goal}),
-            ),
-            (true, true) => ("finish", serde_json::json!({"say": "Checked the page."})),
+            (true, _) => ("finish", serde_json::json!({"say": "Checked the page."})),
             (false, false) => (
                 "browse",
-                serde_json::json!({"start": self.start, "goal": goal, "records": {
+                serde_json::json!({"start": start, "goal": goal, "records": {
                     "title": "Results", "max_items": 8, "columns": [
                         {"name": "price", "value": {"kind": "text"}, "required": false, "extraction": "verbatim"},
                         {"name": "rating", "value": {"kind": "text"}, "required": false, "extraction": "verbatim"},

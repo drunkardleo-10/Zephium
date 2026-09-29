@@ -190,7 +190,11 @@ pub(super) fn run_site(
     let (Some(start), Some(goal)) = (start.to_str(), goal.to_str()) else {
         return Err(super::ProbeFailure::Authority);
     };
-    if !start.starts_with("https://") || start.len() > 512 || goal.is_empty() || goal.len() > 600 {
+    if !start.split(' ').all(|start| start.starts_with("https://"))
+        || start.len() > 1024
+        || goal.is_empty()
+        || goal.len() > 600
+    {
         return Err(super::ProbeFailure::Authority);
     }
     let scenario = super::acceptance::site_scenario(start, goal);
