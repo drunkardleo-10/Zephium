@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 import { boardLayout, BOARD, type LayoutBlock } from "../lib/board/layout";
 import { boardOf } from "../lib/board/adapter";
 import { runTrail } from "../lib/board/trail";
-import { DIAGRAM, diagramLayout } from "../lib/diagram";
+import { DIAGRAM, layoutDiagram } from "../lib/diagram";
 import { environmentStages } from "../lib/project-environment-board";
 import { siteKey } from "../lib/run/site";
 import { viewPlacements } from "../lib/project-environment";
@@ -309,19 +309,19 @@ describe("the process column", () => {
 });
 
 describe("the architecture diagram", () => {
-  test("thirteen parts stand in five tiers, one column each, at full size within a 1600 board", () => {
+  test("thirteen parts stand in five tiers read top to bottom, at full size within a 1120 result", async () => {
     const made = board(saasScene());
     const diagram = made.blocks.find((block) => block.kind === "diagram");
     if (diagram?.kind !== "diagram") throw new Error("diagram");
-    const layout = diagramLayout(diagram.diagram);
-    const xs = new Map<string, Set<number>>();
-    for (const node of diagram.diagram.nodes) {
-      const set = xs.get(node.layer ?? "") ?? new Set<number>();
-      set.add(layout.at[node.id]!.x);
-      xs.set(node.layer ?? "", set);
-    }
-    expect([...xs.values()].map((set) => set.size)).toEqual([1, 1, 1, 1, 1]);
-    expect(layout.bounds.width + 2 * 20).toBeLessThanOrEqual(1600);
+    const layout = await layoutDiagram(diagram.diagram);
+    const order = diagram.diagram.layers.map((layer) => layer.id);
+    const tier = (id: string) =>
+      order.indexOf(diagram.diagram.nodes.find((node) => node.id === id)!.layer ?? "");
+    // Every part of a tier stands above every part of the tiers after it.
+    for (const [a, at] of Object.entries(layout.at))
+      for (const [b, bt] of Object.entries(layout.at))
+        if (tier(a) < tier(b)) expect(at.y + DIAGRAM.node.height).toBeLessThan(bt.y);
+    expect(layout.bounds.width).toBeLessThanOrEqual(1120);
     const { width: W, height: H } = DIAGRAM.node;
     const parts = Object.values(layout.at);
     for (const [index, a] of parts.entries())

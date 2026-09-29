@@ -24,8 +24,11 @@ test("a stated vendor counts when the part names it; a note names only when the 
   expect(vendorHost("aws.amazon.com", "Queue", "SQS with a dead-letter queue")).toBe(
     "aws.amazon.com",
   );
-  // Run on a platform is not made by it.
-  expect(vendorHost("aws.amazon.com", "API service", "FastAPI; tenant checks")).toBeNull();
+  // Run on a platform is not made by it; built with a framework its note names, it is.
+  expect(vendorHost("aws.amazon.com", "API service", "Tenant checks")).toBeNull();
+  expect(vendorHost("aws.amazon.com", "API service", "FastAPI; tenant checks")).toBe(
+    "fastapi.tiangolo.com",
+  );
   expect(vendorHost("PlanetScale.com", "MySQL")).toBe("mysql.com");
   expect(vendorHost(undefined, "Primary database", "Postgres 16 with replicas")).toBe(
     "postgresql.org",
@@ -46,4 +49,16 @@ test("plain words find nothing", () => {
   expect(vendorHost(undefined, "Event handler", "react to changes")).toBeNull();
   // A part of a word is not the word.
   expect(vendorHost(undefined, "Rusty pipeline", "Gocardless")).toBeNull();
+});
+
+test("languages, frameworks and runtimes a system is built from find their hosts", () => {
+  expect(vendorHost(undefined, "Python API")).toBe("python.org");
+  expect(vendorHost("temporal.io", "Temporal")).toBe("temporal.io");
+  expect(vendorHost(undefined, "Celery workers")).toBe("celeryq.dev");
+  expect(vendorHost(undefined, "Kubernetes")).toBe("kubernetes.io");
+  expect(vendorHost(undefined, "RabbitMQ")).toBe("rabbitmq.com");
+  expect(vendorHost(undefined, "Node")).toBe("nodejs.org");
+  // A plain word counts only as a part's whole name.
+  expect(vendorHost(undefined, "Node pool")).toBeNull();
+  expect(vendorHost("temporal.io", "Job Orchestrator", "Durable workflows and retries")).toBeNull();
 });

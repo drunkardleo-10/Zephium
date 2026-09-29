@@ -301,8 +301,8 @@
   },
   "lazy:features/work/components/parts/ComputerPart.svelte": {
     "js": 123500,
-    "css": 7900,
-    "description": "Measured 119078 JS and 7393 CSS bytes: a computer part's own view (changed files, the command that matters with its tests, what it read), loaded only when a run has one. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 121991 JS and 7393 CSS."
+    "css": 8400,
+    "description": "Measured 119078 JS and 7393 CSS bytes: a computer part's own view (changed files, the command that matters with its tests, what it read), loaded only when a run has one. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 121991 JS and 7393 CSS. Round two lists every command with its time and outcome (tests, the first failure, a failed command's error): 120830 JS and 7903 CSS."
   },
   "lazy:features/work/components/parts/ConnectionPart.svelte": {
     "js": 117000,
@@ -340,9 +340,9 @@
     "description": "One kind's renderer, fetched the first time the canvas shows one: the list with each item's source and Make tasks. Measured 164228 JS and 8588 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches."
   },
   "lazy:features/work/components/objects/Diagram.svelte": {
-    "js": 185500,
+    "js": 232000,
     "css": 10200,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: the diagram object over the board's diagram and its tier layout. Measured 180423 JS and 9713 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 183264 JS and 9548 CSS."
+    "description": "One kind's renderer, fetched the first time the canvas shows one: the diagram object over the board's diagram and its tier layout. Measured 180423 JS and 9713 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 183264 JS and 9548 CSS. Round two lays diagrams out top to bottom with trunks, junctions and placed names, and gives every part a role glyph (about forty Hugeicons): 225972 JS and 9008 CSS."
   },
   "lazy:features/work/components/objects/Code.svelte": {
     "js": 163500,
@@ -388,6 +388,11 @@
     "js": 87000,
     "css": 5700,
     "description": "One kind's renderer, fetched the first time the canvas shows one: a folder as a small stack. Measured 85954 JS and 5345 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches."
+  },
+  "lazy:features/work/components/objects/Project.svelte": {
+    "js": 167000,
+    "css": 8600,
+    "description": "One kind's renderer, fetched the first time the canvas shows one: a folder read as a project (stack marks, the tree with its two glyphs, scripts, git state). Measured 163102 JS and 8125 CSS, most of it the shared Work graph every object chunk reaches."
   },
   "lazy:features/work/components/bar/ModelPicker.svelte": {
     "js": 286500,

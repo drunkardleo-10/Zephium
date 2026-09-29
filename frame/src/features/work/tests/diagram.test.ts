@@ -4,17 +4,27 @@ import {
   DIAGRAM,
   PLATE,
   arrowHead,
-  diagramColumns,
   diagramLayout,
   diagramShape,
-  elbow,
   flowPath,
   midpoint,
   partAlong,
   plateHeight,
   plateWidth,
-  primaryFlows,
 } from "../lib/diagram";
+import { roleGlyph } from "../lib/diagram-icons";
+import { gutterOf } from "../lib/diagram-metrics";
+import { diagramRows } from "../lib/diagram-rows";
+import { placePlates } from "../lib/diagram-labels";
+import ApiGatewayIcon from "@hugeicons/core-free-icons/ApiGatewayIcon";
+import BucketIcon from "@hugeicons/core-free-icons/BucketIcon";
+import CpuIcon from "@hugeicons/core-free-icons/CpuIcon";
+import CreditCardIcon from "@hugeicons/core-free-icons/CreditCardIcon";
+import CubeIcon from "@hugeicons/core-free-icons/CubeIcon";
+import DatabaseIcon from "@hugeicons/core-free-icons/DatabaseIcon";
+import Queue01Icon from "@hugeicons/core-free-icons/Queue01Icon";
+import SmartPhone01Icon from "@hugeicons/core-free-icons/SmartPhone01Icon";
+import WorkflowSquare03Icon from "@hugeicons/core-free-icons/WorkflowSquare03Icon";
 
 type Diagram = Extract<ArtifactContent, { kind: "diagram" }>;
 const node = (id: string, layer?: string) => ({
@@ -23,9 +33,14 @@ const node = (id: string, layer?: string) => ({
   kind: "service",
   ...(layer ? { layer } : {}),
 });
-const edge = (from: string, to: string) => ({ from, to });
+const edge = (from: string, to: string, label?: string) => ({
+  from,
+  to,
+  ...(label ? { label } : {}),
+});
+const { width: W, height: H } = DIAGRAM.node;
 
-test("without layers, parts stand by their longest path from the sources", () => {
+test("without tiers, parts stand a row below the furthest part that flows into them", () => {
   const diagram: Diagram = {
     kind: "diagram",
     nodes: ["db", "api", "web", "cache", "queue", "worker"].map((id) => node(id)),
@@ -39,32 +54,29 @@ test("without layers, parts stand by their longest path from the sources", () =>
     ],
     layers: [],
   };
-  // The database is reached last through the worker, so it stands furthest right.
-  expect(diagramColumns(diagram)).toEqual([
-    { nodes: ["web"] },
-    { nodes: ["api"] },
-    { nodes: ["cache", "queue"] },
-    { nodes: ["worker"] },
-    { nodes: ["db"] },
+  expect(diagramRows(diagramShape(diagram)).rows).toEqual([
+    ["web"],
+    ["api"],
+    ["cache", "queue"],
+    ["worker"],
+    ["db"],
   ]);
 });
 
-test("a cycle is cut where it closes, and a part with no edges stands with the sources", () => {
-  const diagram: Diagram = {
+test("a cycle is cut where it closes and its closing flow is drawn back up", () => {
+  const shape = diagramShape({
     kind: "diagram",
     nodes: [node("a"), node("b"), node("c"), node("lone")],
     edges: [edge("a", "b"), edge("b", "c"), edge("c", "a")],
     layers: [],
-  };
-  expect(diagramColumns(diagram)).toEqual([
-    { nodes: ["a", "lone"] },
-    { nodes: ["b"] },
-    { nodes: ["c"] },
-  ]);
+  });
+  const rows = diagramRows(shape);
+  expect(rows.rows).toEqual([["a", "lone"], ["b"], ["c"]]);
+  expect([...rows.forward.values()]).toEqual([true, true, false]);
 });
 
-test("stated layers are the columns, in their order, with unlayered parts last, one column each", () => {
-  const diagram: Diagram = {
+test("tiers stand in their stated order, each its own rows, unlayered parts last", () => {
+  const shape = diagramShape({
     kind: "diagram",
     nodes: [
       node("db", "data"),
@@ -73,168 +85,116 @@ test("stated layers are the columns, in their order, with unlayered parts last, 
       node("jobs", "app"),
       node("mail"),
     ],
-    edges: [edge("web", "api"), edge("api", "db"), edge("api", "mail"), edge("jobs", "db")],
+    edges: [edge("web", "api"), edge("api", "db"), edge("api", "jobs"), edge("jobs", "db")],
     layers: [
       { id: "edge", name: "Edge" },
       { id: "app", name: "Application" },
       { id: "data", name: "Data" },
       { id: "empty", name: "Unused" },
     ],
-  };
-  expect(diagramColumns(diagram)).toEqual([
-    { layer: "Edge", nodes: ["web"] },
-    { layer: "Application", nodes: ["api", "jobs"] },
-    { layer: "Data", nodes: ["db"] },
-    { nodes: ["mail"] },
+  });
+  const rows = diagramRows(shape);
+  expect(rows.rows).toEqual([["web"], ["api"], ["jobs"], ["db"], ["mail"]]);
+  expect(rows.tiers).toEqual([
+    { lane: 0, first: 0, last: 0 },
+    { lane: 1, first: 1, last: 2 },
+    { lane: 2, first: 3, last: 3 },
+    { lane: 3, first: 4, last: 4 },
   ]);
-  const layout = diagramLayout(diagram);
-  const x = (id: string) => layout.at[id]!.x;
-  expect(layout.settled).toBe(true);
-  expect(x("api")).toBe(x("jobs"));
-  expect(x("web") + DIAGRAM.node.width).toBeLessThan(x("api"));
-  expect(x("api") + DIAGRAM.node.width).toBeLessThan(x("db"));
-  expect(x("db") + DIAGRAM.node.width).toBeLessThan(x("mail"));
-  // Under the band that names the tiers.
-  expect(Math.min(...Object.values(layout.at).map((at) => at.y))).toBe(DIAGRAM.layer);
-  expect(layout.layers.map((layer) => layer.name)).toEqual(["Edge", "Application", "Data"]);
+  expect([...rows.tierStart]).toEqual([1, 3, 4]);
 });
 
-test("within a column parts stack in the order the edges name them, 12 px apart", () => {
-  const diagram: Diagram = {
-    kind: "diagram",
-    nodes: [node("s3"), node("pg"), node("app")],
-    edges: [edge("app", "pg"), edge("app", "s3")],
-    layers: [],
-  };
-  const layout = diagramLayout(diagram);
-  const { width: w, height: h } = DIAGRAM.node;
-  expect(layout.at).toEqual({
-    app: { x: 0, y: 0 },
-    pg: { x: w + 32, y: 0 },
-    s3: { x: w + 32, y: h + 12 },
-  });
-  expect(layout.height).toBe(2 * h + 12);
-});
-
-test("a gap is 32 px plus the widest plate named in it, so every flow's name has room", () => {
-  const named = (from: string, to: string, label: string) => ({ from, to, label });
-  const diagram: Diagram = {
-    kind: "diagram",
-    nodes: [node("web"), node("api"), node("db"), node("cache")],
-    edges: [
-      named("web", "api", "HTTPS"),
-      named("api", "db", "authenticated requests"),
-      named("api", "cache", "reads"),
-    ],
-    layers: [],
-  };
-  expect(plateWidth("HTTPS")).toBe(Math.ceil(5 * PLATE.char + PLATE.pad));
-  expect(plateWidth("x".repeat(80))).toBe(PLATE.max);
-  const layout = diagramLayout(diagram);
-  const first = 32 + plateWidth("HTTPS");
-  const second = 32 + plateWidth("authenticated requests");
-  const { width: w, height: h } = DIAGRAM.node;
-  expect(layout.at.api!.x).toBe(w + first);
-  expect(layout.at.db!.x).toBe(w + first + w + second);
-  expect(layout.width).toBe(3 * w + first + second);
-  expect(layout.settled).toBe(false);
-  // Each flow is an elbow from its source's right edge to its target's left, its plate on it.
-  const flow = layout.flows[1]!;
-  expect(flow.points[0]).toEqual({ x: layout.at.api!.x + w, y: h / 2 });
-  expect(flow.points.at(-1)).toEqual({ x: layout.at.db!.x, y: h / 2 });
-  expect(flow.plate).toEqual({ x: layout.at.api!.x + w + second / 2, y: h / 2 });
-});
-
-const { width: W, height: H } = DIAGRAM.node;
-
-test("a named flow between neighbours in a tier opens room for its name and runs straight down", () => {
-  const layout = diagramLayout({
-    kind: "diagram",
-    nodes: [node("api", "app"), node("jobs", "app"), node("mail", "app")],
-    edges: [{ from: "api", to: "jobs", label: "queues work" }, edge("jobs", "mail")],
-    layers: [{ id: "app", name: "Application" }],
-  });
-  const opened = PLATE.height + PLATE.air * 2;
-  expect(layout.at.jobs!.y - (layout.at.api!.y + H)).toBe(opened);
-  expect(layout.at.mail!.x).toBe(layout.at.api!.x);
-  const flow = layout.flows[0]!;
-  expect(flow.points).toEqual([
-    { x: W / 2, y: layout.at.api!.y + H },
-    { x: W / 2, y: layout.at.jobs!.y },
-  ]);
-  expect(flow.plate).toEqual({ x: W / 2, y: layout.at.api!.y + H + opened / 2 });
-});
-
-test("a flow past a neighbour in one tier goes out beside it and back, its name clear of the parts", () => {
-  const layout = diagramLayout({
-    kind: "diagram",
-    nodes: [node("a", "app"), node("b", "app"), node("c", "app")],
-    edges: [edge("a", "b"), edge("b", "c"), { from: "a", to: "c", label: "audits" }],
-    layers: [{ id: "app", name: "Application" }],
-  });
-  const [start, out, back, end] = layout.flows[2]!.points;
-  expect(start).toEqual({ x: W, y: layout.at.a!.y + H / 2 });
-  expect(out!.x).toBe(back!.x);
-  expect(out!.x).toBeGreaterThan(W);
-  expect(end).toEqual({ x: W, y: layout.at.c!.y + H / 2 });
-  expect(layout.flows[2]!.plate!.x - plateWidth("audits") / 2).toBeGreaterThan(W);
-  expect(layout.width).toBeGreaterThanOrEqual(layout.flows[2]!.plate!.x + plateWidth("audits") / 2);
-});
-
-test("a long flow name takes two lines, and the row it runs down grows to hold them", () => {
-  const long = "writes the session record and refreshes the cache";
-  expect(plateHeight("HTTPS")).toBe(PLATE.height);
-  expect(plateWidth(long)).toBe(PLATE.max);
-  expect(plateHeight(long)).toBe(PLATE.height + PLATE.line);
-  const stacked = diagramLayout({
-    kind: "diagram",
-    nodes: [node("api", "app"), node("db", "app")],
-    edges: [{ from: "api", to: "db", label: long }],
-    layers: [{ id: "app", name: "Application" }],
-  });
-  expect(stacked.at.db!.y - stacked.at.api!.y - H).toBe(plateHeight(long) + PLATE.air * 2);
-});
-
-test("a flow is primary when it is named and the first out of its source or into its target", () => {
+test("a row wider than five parts wraps into balanced rows", () => {
   const shape = diagramShape({
     kind: "diagram",
-    nodes: [node("web"), node("api"), node("db"), node("cache")],
-    edges: [
-      { from: "web", to: "api", label: "HTTPS" },
-      { from: "api", to: "db", label: "SQL" },
-      { from: "api", to: "cache", label: "reads" },
-      { from: "web", to: "db", label: "direct" },
-      { from: "web", to: "cache" },
-      { from: "cache", to: "cache", label: "self" },
-    ],
+    nodes: [node("hub"), ...["a", "b", "c", "d", "e", "f", "g"].map((id) => node(id))],
+    edges: ["a", "b", "c", "d", "e", "f", "g"].map((id) => edge("hub", id)),
     layers: [],
   });
-  // `reads` is api's second flow out but cache's first flow in; `direct` is neither first.
-  expect([...primaryFlows(shape)]).toEqual([0, 1, 2]);
-  expect(shape.flows.map((flow) => flow.index)).toEqual([0, 1, 2, 3, 4]);
+  expect(diagramRows(shape).rows).toEqual([["hub"], ["a", "b", "c", "d"], ["e", "f", "g"]]);
 });
 
-test("an elbow crosses the gap between two boxes, or runs down when they share columns", () => {
-  const box = (x: number, y: number) => ({ x, y, width: 100, height: 40 });
-  expect(elbow(box(0, 0), box(200, 100))).toEqual([
-    { x: 100, y: 20 },
-    { x: 150, y: 20 },
-    { x: 150, y: 120 },
-    { x: 200, y: 120 },
+test("the rows' layout stands at once: tiers named beside their first row, rows centred", () => {
+  const layout = diagramLayout({
+    kind: "diagram",
+    nodes: [node("web", "edge"), node("api", "app"), node("db", "app")],
+    edges: [edge("web", "api", "HTTPS"), edge("api", "db")],
+    layers: [
+      { id: "edge", name: "Edge" },
+      { id: "app", name: "Application" },
+    ],
+  });
+  expect(layout.settled).toBe(false);
+  const left = gutterOf(["Edge", "Application"]);
+  expect(layout.gutter).toBe(left);
+  expect(layout.at.web).toEqual({ x: left, y: 0 });
+  expect(layout.at.api).toEqual({ x: left, y: H + DIAGRAM.row + DIAGRAM.tier });
+  expect(layout.tiers.map((tier) => [tier.name, tier.y])).toEqual([
+    ["Edge", 0],
+    ["Application", H + DIAGRAM.row + DIAGRAM.tier],
   ]);
-  expect(elbow(box(0, 0), box(20, 100))).toEqual([
-    { x: 50, y: 40 },
-    { x: 50, y: 70 },
-    { x: 70, y: 70 },
-    { x: 70, y: 100 },
+  // A flow runs straight down from its source's bottom to its target's top, its name on it.
+  const https = layout.flows[0]!;
+  expect(https.points).toEqual([
+    { x: left + W / 2, y: H },
+    { x: left + W / 2, y: layout.at.api!.y },
   ]);
-  expect(
-    midpoint([
-      { x: 0, y: 0 },
-      { x: 10, y: 0 },
-      { x: 10, y: 10 },
-    ]),
-  ).toEqual({ x: 10, y: 0 });
+  expect(https.resting).toBe(true);
+  expect(https.plate!.x).toBe(left + W / 2);
+});
+
+test("a tier column is as wide as its longest word needs", () => {
+  expect(gutterOf([])).toBe(0);
+  expect(gutterOf(["Edge"])).toBe(DIAGRAM.gutter);
+  expect(gutterOf(["Browser coordination"])).toBeGreaterThan(DIAGRAM.gutter);
+  expect(gutterOf(["Supercalifragilisticexpialidocious"])).toBe(168);
+});
+
+test("names stand on runs a flow has to itself, and a name siblings share reads once", () => {
+  const shape = diagramShape({
+    kind: "diagram",
+    nodes: [node("web"), node("app"), node("cdn")],
+    edges: [edge("web", "cdn", "Requests"), edge("app", "cdn", "Requests")],
+    layers: [],
+  });
+  const layout = diagramLayout({
+    kind: "diagram",
+    nodes: [node("web"), node("app"), node("cdn")],
+    edges: [edge("web", "cdn", "Requests"), edge("app", "cdn", "Requests")],
+    layers: [],
+  });
+  const plates = placePlates(shape, layout);
+  expect(plates.get(0)!.resting).toBe(true);
+  // Both into one part under one name: each reads it, at one place or the other, clear of parts.
+  for (const plate of plates.values())
+    for (const at of Object.values(layout.at))
+      expect(
+        plate.at.x + plateWidth("Requests") / 2 <= at.x ||
+          plate.at.x - plateWidth("Requests") / 2 >= at.x + W ||
+          plate.at.y + PLATE.height / 2 <= at.y ||
+          plate.at.y - PLATE.height / 2 >= at.y + H,
+      ).toBe(true);
+});
+
+test("a flow's name is sized for its words, two lines past the widest plate", () => {
+  expect(plateWidth("HTTPS")).toBe(Math.ceil(5 * PLATE.char + PLATE.pad));
+  expect(plateWidth("x".repeat(80))).toBe(PLATE.max);
+  expect(plateHeight("HTTPS")).toBe(PLATE.height);
+  expect(plateHeight("x".repeat(80))).toBe(PLATE.height + PLATE.line);
+});
+
+test("a part without a product's mark shows its role, by its name before its kind", () => {
+  const glyph = (name: string, kind = "service", note?: string) =>
+    roleGlyph({ name, kind, ...(note ? { note } : {}) });
+  expect(glyph("Model Gateway", "gateway")).toBe(ApiGatewayIcon);
+  expect(glyph("Job Orchestrator")).toBe(WorkflowSquare03Icon);
+  expect(glyph("Task Queue")).toBe(Queue01Icon);
+  expect(glyph("AI Workers", "worker")).toBe(CpuIcon);
+  expect(glyph("Billing + Webhooks")).toBe(CreditCardIcon);
+  expect(glyph("Object Storage", "storage")).toBe(BucketIcon);
+  expect(glyph("Mobile Client", "client")).toBe(SmartPhone01Icon);
+  expect(glyph("Primary", "store")).toBe(DatabaseIcon);
+  expect(glyph("Thing", "other")).toBe(CubeIcon);
 });
 
 test("a flow's line turns its corners on 8 px arcs and stops short for its arrowhead", () => {
@@ -244,7 +204,6 @@ test("a flow's line turns its corners on 8 px arcs and stops short for its arrow
     { x: 40, y: 40 },
   ];
   expect(flowPath(line, 5)).toBe("M 0,0 L 32,0 Q 40,0 40,8 L 40,35");
-  // A short segment takes a smaller corner.
   expect(
     flowPath([
       { x: 0, y: 0 },
@@ -253,6 +212,13 @@ test("a flow's line turns its corners on 8 px arcs and stops short for its arrow
     ]),
   ).toBe("M 0,0 L 3,0 Q 6,0 6,3 L 6,20");
   expect(arrowHead(line, 5)).toBe("M 40,40 L 36.5,35 L 43.5,35 Z");
+  expect(
+    midpoint([
+      { x: 0, y: 0 },
+      { x: 10, y: 0 },
+      { x: 10, y: 10 },
+    ]),
+  ).toEqual({ x: 10, y: 0 });
 });
 
 test("arrows walk along flows", () => {
