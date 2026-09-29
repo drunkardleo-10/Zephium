@@ -1189,7 +1189,43 @@ fn note_reason(note: Option<&str>, search: bool) -> Option<WorkPartReasonV1> {
         | "The browser was not ready for this page"
         | "The browsing profile was not available"
         | "Too many pages were already open" => return None,
+        // "state.gov asks for a human check; its page was skipped", and a
+        // page left waiting on the person: "Airbnb needs you to continue".
+        _ if note.contains("human check") || note.ends_with("needs you to continue") => {
+            R::BlockedByCheck
+        }
         _ if search => return None,
         _ => R::CouldntRead,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_step_says_why_in_closed_words() {
+        use WorkPartReasonV1 as R;
+        let reason = |note: &str| note_reason(Some(note), false);
+        assert_eq!(
+            reason("The page showed nothing usable for the request"),
+            Some(R::CouldntRead)
+        );
+        assert_eq!(reason(SIGN_IN_NOTE), Some(R::SignedOut));
+        assert_eq!(
+            reason("state.gov asks for a human check; its page was skipped"),
+            Some(R::BlockedByCheck)
+        );
+        assert_eq!(
+            reason("Airbnb needs you to continue"),
+            Some(R::BlockedByCheck)
+        );
+        assert_eq!(reason("The page took too long"), Some(R::NoAnswer));
+        assert_eq!(reason("The browser was not ready for this page"), None);
+        assert_eq!(note_reason(Some("The search could not be run"), true), None);
+        assert_eq!(
+            note_reason(Some("The search gave no usable sources"), true),
+            Some(R::NotFound)
+        );
+    }
 }
