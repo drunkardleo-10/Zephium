@@ -879,9 +879,7 @@
   /* stylelint-disable-next-line selector-class-pattern */
   .work-canvas :global(.svelte-flow__node-agent) {
     pointer-events: none;
-    transition:
-      transform var(--motion-slow) var(--ease-spring),
-      opacity var(--motion-slow) var(--ease-exit);
+    transition: opacity var(--motion-slow) var(--ease-exit);
   }
 
   /* stylelint-disable-next-line selector-class-pattern */

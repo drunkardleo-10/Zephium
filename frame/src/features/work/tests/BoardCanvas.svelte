@@ -22,13 +22,17 @@
   import { exchangeOf } from "../components/asks/asks";
   import type { PartAsk } from "../lib/run/parts";
   import type { BoardScene } from "./board-fixtures";
+  import type { NoteSummary } from "$shared/ipc/bindings";
   let {
     scene,
     viewport,
     asked = [],
     asks,
+    notes = [],
   }: {
     scene: BoardScene;
+    /** The person's notes the scene's resources may be. */
+    notes?: NoteSummary[];
     /** Questions waiting on the person, by part. */
     asks?: (objective: string) => readonly PartAsk[];
     /** Without one, the canvas opens as a work with no saved camera: on its newest run. */
@@ -58,7 +62,7 @@
   const dress = $derived(requestDress(stages));
   const items = $derived([
     ...[
-      ...environmentItems(scene.snapshot, [], [], scene.objectives, scene.media).filter(
+      ...environmentItems(scene.snapshot, [], notes, scene.objectives, scene.media).filter(
         (item) => !folders.has(item.id),
       ),
       ...requests.items,
@@ -107,16 +111,15 @@
         own.positions,
         {
           ...Object.fromEntries(
-            environmentItems(scene.snapshot, [], [], scene.objectives, scene.media).map((item) => [
-              item.id,
-              defaultSize(item),
-            ]),
+            environmentItems(scene.snapshot, [], notes, scene.objectives, scene.media).map(
+              (item) => [item.id, defaultSize(item)],
+            ),
           ),
           ...own.sizes,
         },
         stages,
-        environmentItems(scene.snapshot, [], [], scene.objectives, scene.media).flatMap((item) =>
-          item.type === "objective" || folders.has(item.id) ? [] : [item.id],
+        environmentItems(scene.snapshot, [], notes, scene.objectives, scene.media).flatMap(
+          (item) => (item.type === "objective" || folders.has(item.id) ? [] : [item.id]),
         ),
       ),
       ...requests.positions,

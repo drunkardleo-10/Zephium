@@ -292,14 +292,9 @@
     text-wrap: pretty;
   }
 
-  /* At work, the row says what it does now, in the text's own colour, two lines at most. */
+  /* At work, the row says what it does now, in the text's own colour, whole: never cut with dots. */
   .working .summary {
-    display: -webkit-box;
-    overflow: hidden;
     color: var(--color-text);
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
     overflow-wrap: anywhere;
   }
 

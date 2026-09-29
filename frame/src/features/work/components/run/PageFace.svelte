@@ -1,6 +1,7 @@
 <script lang="ts">
   import { getContext } from "svelte";
   import HostGlyph from "../cards/HostGlyph.svelte";
+  import { Orb } from "$shared/ui/presence";
   import { canvasFar } from "../../lib/canvas-context";
   import { thumbnail } from "../../lib/frame-thumbs";
 
@@ -74,7 +75,14 @@
 
 <span class="window" class:live>
   <span class="bar">
-    <span class="mark"><HostGlyph {host} {url} size={14} loading={live} initial={false} /></span>
+    <span class="mark"
+      >{#if live}<Orb kind="reading" size={14} />{:else}<HostGlyph
+          {host}
+          {url}
+          size={14}
+          initial={false}
+        />{/if}</span
+    >
     <span class="host">{site}</span>
     <span class="heading">{heading}</span>
     {#if live}{#key frame}<span class="arrived" aria-hidden="true"></span>{/key}{/if}

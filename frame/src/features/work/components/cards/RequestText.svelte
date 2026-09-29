@@ -12,6 +12,7 @@
     Search01Icon,
   } from "../../lib/icons";
   import Remembered from "../asks/Remembered.svelte";
+  import { Character } from "$shared/ui/presence";
   import * as m from "$shared/i18n/messages";
 
   let {
@@ -37,7 +38,7 @@
     void item.turns;
     const cut = (node: Element) => node.scrollHeight > node.clientHeight + 1;
     const measure = () =>
-      (clipped = cut(element) || [...(body?.querySelectorAll("dd") ?? [])].some(cut));
+      (clipped = cut(element) || [...(body?.querySelectorAll(".asked, .said") ?? [])].some(cut));
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(element);
@@ -113,24 +114,23 @@
             <Icon icon={LOCAL[line.kind]} size={13} /><span>{line.text}</span>
           </li>{/each}
       </ul>{/if}
-    {#if exchange.length}<!-- The run's questions and the person's answers: a conversation, read down. -->
-      <dl class="exchange" class:open={item.expanded}>
+    {#if exchange.length}<!-- The run's questions and the person's answers: a small conversation, read down. -->
+      <ol class="exchange" class:open={item.expanded}>
         {#each exchange as turn, index (index)}
-          {#if turn.kind === "ask"}<div class="turn">
-              <dt>{m.work_turn_agent()}</dt>
-              <dd class="asked">{turn.question}</dd>
-            </div>
-            <div class="turn">
-              <dt>{m.work_request_you()}</dt>
-              <dd class="said" class:pending={!turn.answer}>
-                {turn.answer ?? m.work_turn_waiting()}
-              </dd>
-            </div>{:else}<div class="turn">
-              <dt>{m.work_request_you()}</dt>
-              <dd class="said">{turn.text}</dd>
-            </div>{/if}
+          {#if turn.kind === "ask"}<li class="turn">
+              <span class="speaker" aria-hidden="true"
+                ><Character kind="lead" mood={turn.answer ? "done" : "waiting"} size={20} /></span
+              >
+              <p class="asked"><span class="who">{m.work_turn_agent()}</span>{turn.question}</p>
+              <p class="said" class:pending={!turn.answer}>
+                <span class="who">{m.work_request_you()}</span>{turn.answer ??
+                  m.work_turn_waiting()}
+              </p>
+            </li>{:else}<li class="turn steer">
+              <p class="said"><span class="who">{m.work_request_you()}</span>{turn.text}</p>
+            </li>{/if}
         {/each}
-      </dl>{/if}
+      </ol>{/if}
   </div>
   {#if item.remember}<div class="remembered">
       <Remembered {...item.remember} />
@@ -250,31 +250,52 @@
     white-space: nowrap;
   }
 
-  /* A speaker column and their words, like the lines of a play: no bubbles, no cards. */
+  /*
+   * A calm turn of conversation under the words: the agent's mark and its
+   * question in the quiet voice, the person's answer beneath it on a soft
+   * ground, joined by a hairline elbow. No cards, no bubbles with tails.
+   */
   .exchange {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    margin: 12px 0 0;
-    padding: 10px 0 0;
-    border-block-start: 1px solid var(--color-border);
+    gap: 12px;
+    margin: 14px 0 0;
+    padding: 0;
+    list-style: none;
   }
 
   .turn {
+    position: relative;
     display: grid;
-    grid-template-columns: 44px minmax(0, 1fr);
-    align-items: baseline;
+    grid-template-columns: 26px minmax(0, 1fr);
+    row-gap: 6px;
   }
 
-  dt {
-    color: var(--color-faint);
-    font-size: var(--text-caption);
-    font-weight: 600;
-    letter-spacing: 0.01em;
-    line-height: 18px;
+  .turn.steer {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  dd {
+  .speaker {
+    display: grid;
+    place-items: center;
+    block-size: 18px;
+    margin-inline-start: -2px;
+  }
+
+  /* The hairline from the question down into the answer. */
+  .turn:not(.steer)::before {
+    position: absolute;
+    inset-block: 24px 11px;
+    inset-inline-start: 9px;
+    inline-size: 10px;
+    border-block-end: 1px solid var(--color-border-strong);
+    border-inline-start: 1px solid var(--color-border-strong);
+    border-end-start-radius: var(--radius-inset);
+    content: "";
+  }
+
+  .asked,
+  .said {
     display: -webkit-box;
     margin: 0;
     overflow: hidden;
@@ -287,24 +308,45 @@
     text-wrap: pretty;
   }
 
-  .exchange.open dd {
-    display: block;
-    -webkit-line-clamp: unset;
-    line-clamp: unset;
-  }
-
   .asked {
     color: var(--color-muted);
   }
 
   .said {
+    grid-column: 2;
+    justify-self: start;
+    padding: 5px 10px;
+    border-radius: var(--radius-row);
+    background: var(--color-fill);
     color: var(--color-text);
     font-weight: 500;
   }
 
+  .steer .said {
+    grid-column: 1;
+  }
+
+  .exchange.open .asked,
+  .exchange.open .said {
+    display: block;
+    -webkit-line-clamp: unset;
+    line-clamp: unset;
+  }
+
   .said.pending {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--color-border);
     color: var(--color-faint);
     font-weight: 400;
+  }
+
+  .who {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
   .more:focus-visible {

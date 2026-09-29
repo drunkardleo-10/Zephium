@@ -102,6 +102,7 @@
   import { openOver, type PaneRect } from "../lib/pane-geometry";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
   import { CanvasPlacing } from "../lib/workspace/placing.svelte";
+  import { freeSpot } from "../lib/free-space";
   import { PictureQueue } from "../lib/workspace/pictures.svelte";
   import { environmentResults, type ResultReference } from "../lib/project-environment-results";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
@@ -690,18 +691,17 @@
     observer.observe(element);
     return () => observer.disconnect();
   });
+  function placingCentre() {
+    const bounds = cardBounds;
+    return bounds
+      ? (canvasRef?.flowPosition(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2) ??
+          null)
+      : null;
+  }
   const placing = new CanvasPlacing({
     session: () => session,
     busy: () => busy,
-    centre: () => {
-      const bounds = cardBounds;
-      return bounds
-        ? (canvasRef?.flowPosition(
-            bounds.left + bounds.width / 2,
-            bounds.top + bounds.height / 2,
-          ) ?? null)
-        : null;
-    },
+    centre: placingCentre,
     at: (x, y) => canvasRef?.flowPosition(x, y) ?? null,
     file: (path) => {
       const draft = session.composer.trimEnd();
@@ -958,7 +958,8 @@
             {
               id: item.id,
               title: item.part.title,
-              now: item.part.summary ?? "",
+              now: item.part.now ?? item.part.summary ?? "",
+              helper: item.part.helper,
               ...(item.part.host ? { host: item.part.host } : {}),
             },
           ]
@@ -1422,6 +1423,8 @@
   let liftSource = $state.raw<EvidenceReference | null>(null);
   const loadResult = () => import("./WorkResultInspector.svelte");
   const loadFile = () => import("./WorkFileInspector.svelte");
+  /** A new work's first screen, fetched only when a work is empty. */
+  const loadStart = () => import("./start/WorkStart.svelte");
   const loadCentre = () => import("./objects/ObjectCentre.svelte");
   const loadModels = () => import("./bar/ModelPicker.svelte");
   const loadSubject = () => import("./WorkSubjectInspector.svelte");
@@ -1638,9 +1641,51 @@
     const id = current.note?.id;
     if (!id || !(await current.flush()) || environment !== session.snapshot?.id) return;
     const reference = { kind: "resource" as const, resource: id };
-    if (!(await placing.place(reference, "link", null))) return;
+    if (!(await placing.place(reference, "note", clearSpot(null, NOTE_SIZE)))) return;
     const element = session.snapshot ? elementFor(session.snapshot, reference) : undefined;
     if (element) lift(element.id);
+  }
+  const NOTE_SIZE = { width: 360, height: 304 } as const;
+  /** What stands on the canvas now, one thing left out: the runs and every placed item. */
+  function taken(except: string | null) {
+    const view = canvasView;
+    const rects = stages.map((stage) => stage.lane.box);
+    if (!view) return rects;
+    for (const item of items) {
+      if (item.id === except || item.type === "agent") continue;
+      const at = view.positions[item.id];
+      if (!at) continue;
+      rects.push({ ...at, ...(view.sizes[item.id] ?? defaultSize(item)) });
+    }
+    return rects;
+  }
+  /** The centre of the nearest free room to the view's middle, or to where a thing already stands. */
+  function clearSpot(except: string | null, size: { width: number; height: number }) {
+    const view = canvasView;
+    const at = except ? view?.positions[except] : null;
+    const want = at ? { x: at.x + size.width / 2, y: at.y + size.height / 2 } : placingCentre();
+    return want ? freeSpot(want, size, taken(except)) : null;
+  }
+  /** A note put down after writing it lands clear of everything else, near where it was, and stays. */
+  function settleNote(id: string) {
+    const current = session.snapshot;
+    const place = current?.view.placements.find((entry) => entry.element === id);
+    const element = current?.elements.find((entry) => entry.id === id);
+    if (!current || !place || element?.reference.kind !== "resource") return;
+    const item = items.find((entry) => entry.id === id);
+    if (item?.type !== "note") return;
+    const size = { width: place.width, height: place.height };
+    const spot = clearSpot(id, size);
+    if (!spot) return;
+    const x = Math.round(spot.x - size.width / 2);
+    const y = Math.round(spot.y - size.height / 2);
+    if (x === place.x && y === place.y) return;
+    session.checkpoint({
+      ...current.view,
+      placements: current.view.placements.map((entry) =>
+        entry.element === id ? { ...entry, x, y } : entry,
+      ),
+    });
   }
   /** The bar's keys: V and H pick the pointer, N and A open their panels, / goes to the ask. */
   function toolKeys(event: KeyboardEvent) {
@@ -1660,7 +1705,7 @@
   /** One of the person's own notes, placed on the canvas as it is. */
   async function placeNote(id: string) {
     const reference = { kind: "resource" as const, resource: id };
-    if (await placing.place(reference, "link", null)) panel = null;
+    if (await placing.place(reference, "note", clearSpot(null, NOTE_SIZE))) panel = null;
   }
   /** The work this canvas is already talking to, if its request card is here. */
   const runningObjective = $derived(
@@ -2198,9 +2243,20 @@
               onviewchange={checkpoint}
             />{/snippet}</LazyView
         >
-        {#if snapshot.elements.length === 0}<div class="welcome">
-            <p>{aiEnabled ? m.work_env_manual_hint() : m.work_env_ai_off_hint()}</p>
-          </div>{/if}
+        {#if snapshot.elements.length === 0}{#if aiEnabled}<LazyView
+              loader={loadStart}
+              loadingLabel=""
+              failureLabel={m.surface_render_failed()}
+              retryLabel={m.surface_retry()}
+              >{#snippet children(Start)}<Start
+                  bind:value={session.composer}
+                  field={composerElement}
+                  works={session.works}
+                  profile={session.profile}
+                  disabled={busy || objectivePending}
+                  inset={composerHeight}
+                />{/snippet}</LazyView
+            >{:else}<div class="welcome"><p>{m.work_env_ai_off_hint()}</p></div>{/if}{/if}
       {/key}{:else}<div class="welcome">
         <p>{session.loading ? m.surface_loading() : m.work_env_preparing()}</p>
       </div>{/if}
@@ -2244,7 +2300,9 @@
       preferred={liftSize(liftedItem)}
       title={lifted.proposal ? m.work_line_review() : (liftedItem?.title ?? "")}
       onclose={() => {
+        const closing = lifted?.id;
         lifted = null;
+        if (closing) settleNote(closing);
         liftSource = null;
         liftFile = null;
         liftRecord = null;
