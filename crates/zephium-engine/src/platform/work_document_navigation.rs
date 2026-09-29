@@ -981,6 +981,23 @@ impl WorkDocumentNavigation {
         let ticket = self.finalization_ticket().ok_or(())?;
         self.finalize_after_quiet_period(ticket, sample)?.ok_or(())
     }
+    /// A site-session page that committed its document but never reported
+    /// its load finished (a page that keeps loading in a hidden view) is
+    /// taken as loaded once its navigation's time is up; the ordinary quiet
+    /// period and location sample still decide when it is ready.
+    pub(crate) fn accept_committed_load(&self) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            && state.phase == Phase::Committed
+            && state.native_id.is_some()
+        {
+            state.phase = Phase::Finalizing;
+            return true;
+        }
+        false
+    }
     pub(crate) fn refuse(&self) {
         if let Ok(mut state) = self.0.lock() {
             state.phase = Phase::Refused;

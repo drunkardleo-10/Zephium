@@ -6,6 +6,8 @@ use crate::agent_context_port::WorkNavigationTask;
 use zephium_agentic::ContextOperationJoin;
 
 const NAVIGATION_BUDGET: Duration = Duration::from_secs(30);
+/// Time a committed page that never finished loading has to settle.
+const COMMITTED_SETTLE: Duration = Duration::from_secs(15);
 
 pub(super) struct WorkNavigation {
     task: WorkNavigationTask,
@@ -174,6 +176,34 @@ impl WorkNativeResource {
                 crate::WorkSuccessorNavigationFailure::ResourceUnavailable,
             );
             Some(Err(ContextPortFailure::NativeRefused))
+        } else if Instant::now() >= host_deadline
+            && stage == WorkNavigationStage::Navigating
+            && self
+                .view
+                .as_ref()
+                .and_then(|view| view.work_navigation())
+                .is_some_and(|gate| gate.accept_committed_load())
+        {
+            // Its document is committed; the quiet period decides the rest,
+            // within one more bounded wait.
+            let guard = self.guard.clone();
+            let timer = crate::platform::imp::schedule_content_policy_timeout(
+                COMMITTED_SETTLE,
+                move || {
+                    let rejected = guard.clone();
+                    if !crate::host::try_with_agent_context_terminal(move |host| {
+                        host.progress_work_resource(&guard)
+                    }) {
+                        rejected.fail();
+                    }
+                },
+            );
+            if let Some(navigation) = self.navigation.as_mut() {
+                navigation.deadline = Instant::now() + COMMITTED_SETTLE;
+                navigation.timer = timer;
+            }
+            self.progress_navigation(erased);
+            return;
         } else if Instant::now() >= host_deadline {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             self.record_successor_navigation_failure(
