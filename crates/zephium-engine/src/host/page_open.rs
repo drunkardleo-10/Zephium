@@ -344,6 +344,9 @@ fn windows_menu_item_allowed(name: &str) -> bool {
             | "openLinkInNewTab"
             | "openImageInNewWindow"
             | "openImageInNewTab"
+            // WebView2 owns the installed extension's submenu and dispatch.
+            // Keep it intact after the same foreground/document checks above.
+            | "extension"
     )
 }
 #[cfg(test)]
@@ -353,12 +356,14 @@ mod tests {
     fn native_windows_context_menu_keeps_file_actions_but_denies_unbrokered_surfaces() {
         assert!(windows_menu_item_allowed("saveImageAs"));
         assert!(windows_menu_item_allowed("copyLinkLocation"));
+        assert!(windows_menu_item_allowed("extension"));
         for name in [
             "print",
             "savePageAs",
             "inspectElement",
             "share",
             "unknownFutureCommand",
+            "custom",
         ] {
             assert!(!windows_menu_item_allowed(name));
         }
