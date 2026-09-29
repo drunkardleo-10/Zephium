@@ -8,6 +8,9 @@
   import Star from "./Star.svelte";
   import PlayMark from "./PlayMark.svelte";
   import { youtubeId } from "../../lib/link-media";
+  import { thumbnail } from "../../lib/frame-thumbs";
+  import { getContext } from "svelte";
+  import { canvasFar } from "../../lib/canvas-context";
   /**
    * One thing to choose: its own picture first, else its mark beside its name,
    * else its words alone. Facts are typed, the price is the loudest figure.
@@ -51,6 +54,9 @@
   );
   /** The address that would not load; a new picture gets its own chance. */
   let broken = $state<string | null>(null);
+  /** Seen from far, a smaller copy of the photo is enough. */
+  const scale = getContext<{ readonly far: boolean } | undefined>(canvasFar);
+  const photoWidth = $derived(scale?.far ? 240 : 640);
   const failed = $derived(!!pick.picture && broken === pick.picture.src);
   const picture = $derived(pick.picture && !failed ? pick.picture : null);
   const logo = $derived(!picture && pick.logo && hasMark(pick.logo) ? pick.logo : null);
@@ -94,16 +100,15 @@
 >
   {#if picture}
     <div class="photo" class:video>
-      <img
-        src={picture.src}
-        alt=""
-        decoding="async"
-        loading="lazy"
-        draggable="false"
-        width={picture.width}
-        height={picture.height}
-        onerror={() => (broken = pick.picture?.src ?? null)}
-      />
+      <!-- The photo at the size its card shows it: the full-size picture isn't kept. -->
+      <canvas
+        data-picture={picture.src}
+        use:thumbnail={{
+          url: picture.src,
+          width: photoWidth,
+          onmissing: () => (broken = pick.picture?.src ?? null),
+        }}
+      ></canvas>
       {#if video}<span class="play" aria-hidden="true"
           ><PlayMark size={tube ? 52 : 44} youtube={tube} /></span
         >{#if pick.duration}<span class="length">{pick.duration}</span>{/if}{/if}
@@ -234,7 +239,7 @@
     aspect-ratio: 16 / 9;
   }
 
-  .photo img {
+  .photo canvas {
     display: block;
     inline-size: 100%;
     block-size: 100%;

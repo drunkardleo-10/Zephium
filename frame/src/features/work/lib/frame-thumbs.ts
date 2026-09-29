@@ -1,8 +1,8 @@
 /**
- * Small copies of page frames for a canvas seen from far away. A frame is
- * decoded once at full size, drawn down to a thumbnail, and let go; what the
- * canvas keeps is the thumbnail, so a whole day of pages surveyed at 25%
- * holds a few megabytes, not one decoded page per window.
+ * Small copies of page frames and photos, at the size the canvas shows them.
+ * A picture is decoded once at full size, drawn down, and let go; what the
+ * canvas keeps is the copy, so a whole day of pages and photos holds a few
+ * megabytes, not one full decoded picture per card.
  */
 const KEEP = 200;
 const kept = new Map<string, Promise<ImageBitmap | null>>();
@@ -48,13 +48,19 @@ function frameThumbnail(url: string, width: number): Promise<ImageBitmap | null>
   return made;
 }
 
-/** Draws a frame's thumbnail into a canvas, and the next one when the frame changes. */
-export function thumbnail(canvas: HTMLCanvasElement, frame: { url: string; width: number }) {
+type Thumb = { url: string; width: number; onmissing?: () => void };
+/**
+ * Draws a picture's small copy into a canvas, and the next one when the
+ * picture changes; one that won't load says so.
+ */
+export function thumbnail(canvas: HTMLCanvasElement, frame: Thumb) {
   let current = frame.url;
   let width = frame.width;
-  const draw = ({ url, width }: { url: string; width: number }) =>
+  let missing = frame.onmissing;
+  const draw = ({ url, width }: Thumb) =>
     void frameThumbnail(url, width).then((bitmap) => {
-      if (!bitmap || current !== url) return;
+      if (current !== url) return;
+      if (!bitmap) return missing?.();
       try {
         canvas.width = bitmap.width;
         canvas.height = bitmap.height;
@@ -65,7 +71,8 @@ export function thumbnail(canvas: HTMLCanvasElement, frame: { url: string; width
     });
   draw(frame);
   return {
-    update(next: { url: string; width: number }) {
+    update(next: Thumb) {
+      missing = next.onmissing;
       if (next.url === current && next.width === width) return;
       current = next.url;
       width = next.width;

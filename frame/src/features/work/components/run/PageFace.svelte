@@ -150,7 +150,7 @@
   }
 
   @keyframes arrived {
-    from {
+    0% {
       scale: 0 1;
       opacity: 1;
     }
@@ -160,7 +160,7 @@
       opacity: 1;
     }
 
-    to {
+    100% {
       scale: 1 1;
       opacity: 0;
     }

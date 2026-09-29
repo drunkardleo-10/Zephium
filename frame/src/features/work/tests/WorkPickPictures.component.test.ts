@@ -11,6 +11,12 @@ import type {
 import WorkEnvironmentWorkspace from "../components/WorkEnvironmentWorkspace.svelte";
 
 const native = vi.hoisted(() => ({ call: vi.fn(), admit: vi.fn(), resource: vi.fn() }));
+// Admitted pictures resolve to a real one-pixel image here, each naming its digest.
+vi.mock("$domain/resources", async (original) => ({
+  ...(await original<typeof import("$domain/resources")>()),
+  mediaUrl: (_profile: string, digest: string) =>
+    `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${digest}`,
+}));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
@@ -217,9 +223,12 @@ test("each pick with photo candidates is admitted its own photo, and draws it", 
   expect(native.admit.mock.calls.every((call) => call[2] === "picks")).toBe(true);
   // The photos are the picks' own: none stands as a card of its own.
   await expect
-    .poll(() => screen.container.querySelectorAll(`img[src*="${digest(tried.at(-1)!)}"]`).length, {
-      timeout: 10_000,
-    })
+    .poll(
+      () => screen.container.querySelectorAll(`[data-picture*="${digest(tried.at(-1)!)}"]`).length,
+      {
+        timeout: 10_000,
+      },
+    )
     .toBeGreaterThan(0);
   expect(screen.container.querySelectorAll("[data-card-id^='media-']")).toHaveLength(0);
   await screen.unmount();
